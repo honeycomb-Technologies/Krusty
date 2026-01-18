@@ -9,7 +9,70 @@ use tokio::process::Command;
 use crate::tools::registry::Tool;
 use crate::tools::{parse_params, ToolContext, ToolResult};
 
+/// Maximum allowed pattern length to prevent resource exhaustion
+const MAX_PATTERN_LENGTH: usize = 1000;
+
 pub struct GrepTool;
+
+/// Validates a regex pattern for potential ReDoS vulnerabilities.
+///
+/// While ripgrep uses a DFA-based engine that is immune to catastrophic backtracking,
+/// we still validate patterns to:
+/// 1. Fail fast with clear error messages
+/// 2. Prevent extremely long patterns from consuming memory during compilation
+/// 3. Maintain defense in depth
+fn validate_pattern(pattern: &str) -> Result<(), String> {
+    // Check pattern length
+    if pattern.len() > MAX_PATTERN_LENGTH {
+        return Err(format!(
+            "Pattern too long ({} chars, max {}). Consider breaking into smaller searches.",
+            pattern.len(),
+            MAX_PATTERN_LENGTH
+        ));
+    }
+
+    // Detect nested quantifiers that could indicate problematic patterns.
+    // Look for: [+*] followed by ) followed by optional ? then [+*]
+    // This catches patterns like (a+)+, (a*)+, (a+)*, (a+)+?, etc.
+    let bytes = pattern.as_bytes();
+    let len = bytes.len();
+
+    for i in 0..len.saturating_sub(2) {
+        let a = bytes[i];
+        let b = bytes[i + 1];
+
+        // Check for quantifier followed by closing paren
+        if matches!(a, b'+' | b'*') && b == b')' {
+            // Check what follows the closing paren
+            let next_idx = i + 2;
+            if next_idx < len {
+                let c = bytes[next_idx];
+                // Direct quantifier after paren: +)+ or +)*
+                if matches!(c, b'+' | b'*') {
+                    return Err(format!(
+                        "Potentially dangerous pattern: nested quantifiers near position {}. \
+                         Patterns like (a+)+ or (a*)* can cause performance issues in some contexts.",
+                        i
+                    ));
+                }
+                // Non-greedy then quantifier: +)?+ or +)?*
+                if c == b'?' {
+                    if let Some(&d) = bytes.get(next_idx + 1) {
+                        if matches!(d, b'+' | b'*') {
+                            return Err(format!(
+                                "Potentially dangerous pattern: nested quantifiers near position {}. \
+                                 Patterns like (a+)+? can cause performance issues in some contexts.",
+                                i
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
 
 #[derive(Deserialize)]
 struct Params {
@@ -88,6 +151,11 @@ impl Tool for GrepTool {
             Ok(p) => p,
             Err(e) => return e,
         };
+
+        // Validate pattern for ReDoS vulnerabilities
+        if let Err(e) = validate_pattern(&params.pattern) {
+            return ToolResult::error(e);
+        }
 
         let output_mode = params.output_mode.as_deref().unwrap_or("content");
         let head_limit = params.head_limit.unwrap_or(100);
@@ -240,4 +308,50 @@ fn parse_rg_json(stdout: &str, output_mode: &str, head_limit: usize) -> ToolResu
     };
 
     ToolResult::success(output.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_pattern_accepts_normal_patterns() {
+        assert!(validate_pattern("hello").is_ok());
+        assert!(validate_pattern("foo.*bar").is_ok());
+        assert!(validate_pattern(r"\d+").is_ok());
+        assert!(validate_pattern("[a-z]+").is_ok());
+        assert!(validate_pattern("(foo)+").is_ok());
+        assert!(validate_pattern("(bar)*").is_ok());
+        assert!(validate_pattern("a+b+c+").is_ok());
+    }
+
+    #[test]
+    fn test_validate_pattern_rejects_nested_quantifiers() {
+        assert!(validate_pattern("(a+)+").is_err());
+        assert!(validate_pattern("(a*)*").is_err());
+        assert!(validate_pattern("(a+)*").is_err());
+        assert!(validate_pattern("(a*)+").is_err());
+        assert!(validate_pattern("(a+)+?").is_err());
+        assert!(validate_pattern("([a-z]+)+").is_err());
+    }
+
+    #[test]
+    fn test_validate_pattern_rejects_long_patterns() {
+        let pattern_999 = "a".repeat(999);
+        assert!(validate_pattern(&pattern_999).is_ok());
+        let pattern_1001 = "a".repeat(1001);
+        assert!(validate_pattern(&pattern_1001).is_err());
+    }
+
+    #[test]
+    fn test_validate_pattern_error_messages() {
+        let result = validate_pattern("(a+)+");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("nested quantifiers"));
+
+        let long_pattern = "x".repeat(1500);
+        let result = validate_pattern(&long_pattern);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("1500 chars"));
+    }
 }

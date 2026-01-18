@@ -61,7 +61,7 @@ pub async fn fetch_models(api_key: &str) -> Result<Vec<ModelMetadata>> {
     let response = client
         .get(OPENROUTER_MODELS_URL)
         .header("Authorization", format!("Bearer {}", api_key))
-        .header("HTTP-Referer", "https://github.com/anthropics/claude-code")
+        .header("HTTP-Referer", "https://github.com/BurgessTG/Krusty")
         .send()
         .await?;
 

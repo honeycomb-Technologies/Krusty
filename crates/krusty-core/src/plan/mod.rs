@@ -1,6 +1,6 @@
 //! Plan system for multi-phase task planning
 //!
-//! Provides a file-based planning system similar to Claude Code:
+//! Provides a file-based planning system:
 //! - Plans stored as markdown in ~/.krusty/plans/
 //! - Phases → Tasks structure with checkboxes
 //! - Plan mode restricts editing tools until approved

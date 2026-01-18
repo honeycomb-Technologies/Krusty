@@ -56,29 +56,34 @@ impl SseStreamProcessor {
     ) -> anyhow::Result<()> {
         self.bytes_received += bytes.len();
         let text = String::from_utf8_lossy(&bytes);
-        let combined = format!("{}{}", self.partial_line, text);
+
+        // Combine with any partial line from previous chunk
+        // Use push_str to avoid format!() allocation when partial_line is empty
+        let combined = if self.partial_line.is_empty() {
+            text.into_owned()
+        } else {
+            let mut combined = std::mem::take(&mut self.partial_line);
+            combined.push_str(&text);
+            combined
+        };
+
         debug!(
             "SSE chunk received: {} bytes (total: {} bytes)",
             bytes.len(),
             self.bytes_received
         );
-        let lines: Vec<&str> = combined.lines().collect();
 
-        // Handle partial lines
-        if !combined.ends_with('\n') && !lines.is_empty() {
-            self.partial_line = lines.last().unwrap_or(&"").to_string();
-        } else {
-            self.partial_line.clear();
-        }
+        let has_trailing_newline = combined.ends_with('\n');
+        let mut lines_iter = combined.lines().peekable();
 
-        // Process complete lines
-        let lines_to_process = if self.partial_line.is_empty() {
-            lines.len()
-        } else {
-            lines.len() - 1
-        };
+        // Process lines - use peekable to detect last line without collecting
+        while let Some(line) = lines_iter.next() {
+            // If this is the last line and there's no trailing newline, it's partial
+            if lines_iter.peek().is_none() && !has_trailing_newline {
+                self.partial_line = line.to_string();
+                break;
+            }
 
-        for line in lines.iter().take(lines_to_process) {
             // Skip empty lines and SSE comments
             if line.is_empty() || line.starts_with(':') {
                 continue;
@@ -541,5 +546,302 @@ impl ToolCallAccumulator {
                     .unwrap_or_else(|_| serde_json::json!({"raw": self.arguments.clone()}))
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // parse_finish_reason tests
+    #[test]
+    fn test_parse_finish_reason_stop() {
+        assert!(matches!(parse_finish_reason("stop"), FinishReason::Stop));
+    }
+
+    #[test]
+    fn test_parse_finish_reason_end_turn() {
+        assert!(matches!(parse_finish_reason("end_turn"), FinishReason::Stop));
+    }
+
+    #[test]
+    fn test_parse_finish_reason_max_tokens() {
+        assert!(matches!(parse_finish_reason("max_tokens"), FinishReason::Length));
+    }
+
+    #[test]
+    fn test_parse_finish_reason_tool_use() {
+        assert!(matches!(parse_finish_reason("tool_use"), FinishReason::ToolCalls));
+    }
+
+    #[test]
+    fn test_parse_finish_reason_unknown() {
+        match parse_finish_reason("something_else") {
+            FinishReason::Other(s) => assert_eq!(s, "something_else"),
+            _ => panic!("Expected FinishReason::Other"),
+        }
+    }
+
+    // ToolCallAccumulator tests
+    #[test]
+    fn test_tool_call_accumulator_new() {
+        let acc = ToolCallAccumulator::new("id_123".to_string(), "my_tool".to_string());
+        assert_eq!(acc.id, "id_123");
+        assert_eq!(acc.name, "my_tool");
+        assert!(acc.arguments.is_empty());
+        assert!(!acc.is_complete);
+    }
+
+    #[test]
+    fn test_tool_call_accumulator_add_arguments() {
+        let mut acc = ToolCallAccumulator::new("id".to_string(), "tool".to_string());
+        acc.add_arguments("{\"key\":");
+        acc.add_arguments("\"value\"}");
+        assert_eq!(acc.arguments, "{\"key\":\"value\"}");
+    }
+
+    #[test]
+    fn test_tool_call_accumulator_try_complete_incomplete_json() {
+        let mut acc = ToolCallAccumulator::new("id".to_string(), "tool".to_string());
+        acc.add_arguments("{\"incomplete\":");
+        assert!(acc.try_complete().is_none());
+        assert!(!acc.is_complete);
+    }
+
+    #[test]
+    fn test_tool_call_accumulator_try_complete_valid_json() {
+        let mut acc = ToolCallAccumulator::new("id_1".to_string(), "read".to_string());
+        acc.add_arguments("{\"path\": \"/tmp/test.txt\"}");
+        let result = acc.try_complete();
+        assert!(result.is_some());
+        let tool_call = result.unwrap();
+        assert_eq!(tool_call.id, "id_1");
+        assert_eq!(tool_call.name, "read");
+        assert!(acc.is_complete);
+    }
+
+    #[test]
+    fn test_tool_call_accumulator_force_complete_valid_json() {
+        let mut acc = ToolCallAccumulator::new("id".to_string(), "tool".to_string());
+        acc.add_arguments("{\"a\": 1}");
+        let result = acc.force_complete();
+        assert_eq!(result.arguments["a"], 1);
+        assert!(acc.is_complete);
+    }
+
+    #[test]
+    fn test_tool_call_accumulator_force_complete_invalid_json() {
+        let mut acc = ToolCallAccumulator::new("id".to_string(), "tool".to_string());
+        acc.add_arguments("not valid json");
+        let result = acc.force_complete();
+        assert_eq!(result.arguments["raw"], "not valid json");
+    }
+
+    #[test]
+    fn test_tool_call_accumulator_force_complete_empty() {
+        let mut acc = ToolCallAccumulator::new("id".to_string(), "tool".to_string());
+        let result = acc.force_complete();
+        assert_eq!(result.arguments, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_tool_call_accumulator_try_complete_empty_returns_none() {
+        let mut acc = ToolCallAccumulator::new("id".to_string(), "tool".to_string());
+        assert!(acc.try_complete().is_none());
+    }
+
+    // ServerToolAccumulator tests
+    #[test]
+    fn test_server_tool_accumulator_new() {
+        let acc = ServerToolAccumulator::new("st_123".to_string(), "web_search".to_string());
+        assert_eq!(acc.id, "st_123");
+        assert_eq!(acc.name, "web_search");
+        assert!(acc.input_json.is_empty());
+        assert!(!acc.is_complete);
+    }
+
+    #[test]
+    fn test_server_tool_accumulator_add_input() {
+        let mut acc = ServerToolAccumulator::new("id".to_string(), "web_search".to_string());
+        acc.add_input("{\"query\":");
+        acc.add_input("\"rust async\"}");
+        assert_eq!(acc.input_json, "{\"query\":\"rust async\"}");
+    }
+
+    #[test]
+    fn test_server_tool_accumulator_complete_valid_json() {
+        let mut acc = ServerToolAccumulator::new("id".to_string(), "web_search".to_string());
+        acc.add_input("{\"query\": \"test\"}");
+        let result = acc.complete();
+        assert_eq!(result["query"], "test");
+        assert!(acc.is_complete);
+    }
+
+    #[test]
+    fn test_server_tool_accumulator_complete_invalid_json() {
+        let mut acc = ServerToolAccumulator::new("id".to_string(), "tool".to_string());
+        acc.add_input("malformed {json");
+        let result = acc.complete();
+        assert_eq!(result["raw"], "malformed {json");
+    }
+
+    #[test]
+    fn test_server_tool_accumulator_complete_empty() {
+        let mut acc = ServerToolAccumulator::new("id".to_string(), "tool".to_string());
+        let result = acc.complete();
+        assert_eq!(result, serde_json::json!({}));
+    }
+
+    // ThinkingAccumulator tests
+    #[test]
+    fn test_thinking_accumulator_new() {
+        let acc = ThinkingAccumulator::new();
+        assert!(acc.thinking.is_empty());
+        assert!(acc.signature.is_empty());
+        assert!(!acc.is_complete);
+    }
+
+    #[test]
+    fn test_thinking_accumulator_default() {
+        let acc = ThinkingAccumulator::default();
+        assert!(acc.thinking.is_empty());
+    }
+
+    #[test]
+    fn test_thinking_accumulator_add_thinking() {
+        let mut acc = ThinkingAccumulator::new();
+        acc.add_thinking("Let me think about ");
+        acc.add_thinking("this problem...");
+        assert_eq!(acc.thinking, "Let me think about this problem...");
+    }
+
+    #[test]
+    fn test_thinking_accumulator_add_signature() {
+        let mut acc = ThinkingAccumulator::new();
+        acc.add_signature("sig_part1");
+        acc.add_signature("_part2");
+        assert_eq!(acc.signature, "sig_part1_part2");
+    }
+
+    #[test]
+    fn test_thinking_accumulator_complete() {
+        let mut acc = ThinkingAccumulator::new();
+        acc.add_thinking("My analysis is...");
+        acc.add_signature("abcdef123");
+        let (thinking, signature) = acc.complete();
+        assert_eq!(thinking, "My analysis is...");
+        assert_eq!(signature, "abcdef123");
+        assert!(acc.is_complete);
+    }
+
+    // SseStreamProcessor tests
+    #[tokio::test]
+    async fn test_sse_processor_done_marker() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<StreamPart>();
+        let (buffer_tx, _buffer_rx) = mpsc::unbounded_channel::<String>();
+        let mut processor = SseStreamProcessor::new(tx, buffer_tx);
+
+        struct MockParser;
+        #[async_trait::async_trait]
+        impl SseParser for MockParser {
+            async fn parse_event(&self, _json: &Value) -> anyhow::Result<SseEvent> {
+                Ok(SseEvent::Skip)
+            }
+        }
+
+        processor.process_sse_data("[DONE]", &MockParser).await.unwrap();
+        let part = rx.recv().await.unwrap();
+        assert!(matches!(part, StreamPart::Finish { reason: FinishReason::Stop }));
+    }
+
+    #[tokio::test]
+    async fn test_sse_processor_text_delta() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<StreamPart>();
+        let (buffer_tx, mut buffer_rx) = mpsc::unbounded_channel::<String>();
+        let mut processor = SseStreamProcessor::new(tx, buffer_tx);
+
+        struct TextDeltaParser;
+        #[async_trait::async_trait]
+        impl SseParser for TextDeltaParser {
+            async fn parse_event(&self, _json: &Value) -> anyhow::Result<SseEvent> {
+                // Send more than 64 chars to trigger immediate buffer flush
+                Ok(SseEvent::TextDelta(
+                    "This is a longer text that exceeds the buffer chunk size of 64 characters to ensure immediate flushing.".to_string()
+                ))
+            }
+        }
+
+        processor.process_sse_data("{}", &TextDeltaParser).await.unwrap();
+        let text = buffer_rx.recv().await.unwrap();
+        assert!(!text.is_empty());
+        processor.finish().await;
+        drop(processor);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_sse_processor_tool_call_start() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<StreamPart>();
+        let (buffer_tx, _buffer_rx) = mpsc::unbounded_channel::<String>();
+        let mut processor = SseStreamProcessor::new(tx, buffer_tx);
+
+        struct ToolStartParser;
+        #[async_trait::async_trait]
+        impl SseParser for ToolStartParser {
+            async fn parse_event(&self, _json: &Value) -> anyhow::Result<SseEvent> {
+                Ok(SseEvent::ToolCallStart {
+                    id: "tool_123".to_string(),
+                    name: "read".to_string(),
+                })
+            }
+        }
+
+        processor.process_sse_data("{}", &ToolStartParser).await.unwrap();
+        let part = rx.recv().await.unwrap();
+        match part {
+            StreamPart::ToolCallStart { id, name } => {
+                assert_eq!(id, "tool_123");
+                assert_eq!(name, "read");
+            }
+            _ => panic!("Expected ToolCallStart"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sse_processor_skip_empty_json() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<StreamPart>();
+        let (buffer_tx, _buffer_rx) = mpsc::unbounded_channel::<String>();
+        let mut processor = SseStreamProcessor::new(tx, buffer_tx);
+
+        struct SkipParser;
+        #[async_trait::async_trait]
+        impl SseParser for SkipParser {
+            async fn parse_event(&self, _json: &Value) -> anyhow::Result<SseEvent> {
+                Ok(SseEvent::Skip)
+            }
+        }
+
+        processor.process_sse_data("", &SkipParser).await.unwrap();
+        processor.process_sse_data("   ", &SkipParser).await.unwrap();
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_sse_processor_thinking_events() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<StreamPart>();
+        let (buffer_tx, _buffer_rx) = mpsc::unbounded_channel::<String>();
+        let mut processor = SseStreamProcessor::new(tx, buffer_tx);
+
+        struct ThinkingStartParser;
+        #[async_trait::async_trait]
+        impl SseParser for ThinkingStartParser {
+            async fn parse_event(&self, _json: &Value) -> anyhow::Result<SseEvent> {
+                Ok(SseEvent::ThinkingStart { index: 0 })
+            }
+        }
+
+        processor.process_sse_data("{}", &ThinkingStartParser).await.unwrap();
+        let part = rx.recv().await.unwrap();
+        assert!(matches!(part, StreamPart::ThinkingStart { index: 0 }));
     }
 }

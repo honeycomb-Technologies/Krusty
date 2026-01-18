@@ -19,8 +19,8 @@ impl App {
     ///
     /// Spawns an async task that:
     /// 1. Reads key file contents based on activity ranking
-    /// 2. Reads CLAUDE.md/KRAB.md for project context
-    /// 3. Sends full conversation + context to Sonnet 4.5 with extended thinking
+    /// 2. Reads project instruction files for context
+    /// 3. Sends full conversation + context for extended thinking
     /// 4. Returns structured summary for user review
     pub fn start_pinch_summarization(&mut self) {
         // Move popup to summarizing state
@@ -39,7 +39,7 @@ impl App {
         // Read key file contents (top 10 by importance)
         let file_contents = self.read_key_file_contents(&ranked_files);
 
-        // Read project context (CLAUDE.md or KRAB.md)
+        // Read project context from instruction files
         let project_context = self.read_project_context();
 
         // Clone conversation for the async task
@@ -107,31 +107,21 @@ impl App {
             .collect()
     }
 
-    /// Read project context file (KRAB.md, CLAUDE.md, AGENTS.md, etc.)
+    /// Read project context from instruction files
     fn read_project_context(&self) -> Option<String> {
-        // Support all common AI coding assistant instruction files
-        // Priority: Krusty native > AGENTS.md standard > tool-specific
+        // Support common AI coding assistant instruction file formats
         const PROJECT_FILES: &[&str] = &[
-            // Krusty native
             "KRAB.md",
             "krab.md",
-            // Unified standard (40k+ repos)
             "AGENTS.md",
             "agents.md",
-            // Claude Code
             "CLAUDE.md",
             "claude.md",
-            // Cursor
             ".cursorrules",
-            // Windsurf
             ".windsurfrules",
-            // Cline
             ".clinerules",
-            // GitHub Copilot
             ".github/copilot-instructions.md",
-            // Google Jules
             "JULES.md",
-            // Gemini
             "gemini.md",
         ];
         for filename in PROJECT_FILES {
@@ -246,10 +236,10 @@ impl App {
         // Build pinch context with FULL context for continuation
         let ranked_files = self.get_ranked_files_for_summarization();
 
-        // Read project context (CLAUDE.md) - CRITICAL for continuation!
+        // Read project context - CRITICAL for continuation!
         let project_context = self.read_project_context();
 
-        // Read top 5 key file contents so Claude doesn't start blind
+        // Read top 5 key file contents for context
         let key_file_contents = self
             .read_key_file_contents(&ranked_files)
             .into_iter()

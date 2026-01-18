@@ -27,7 +27,8 @@ impl StreamBuffer {
     /// Create a new StreamBuffer with default settings
     pub fn new(tx: mpsc::UnboundedSender<String>) -> Self {
         Self {
-            buffer: String::new(),
+            // Pre-allocate 256 bytes to reduce reallocations during streaming
+            buffer: String::with_capacity(256),
             tx,
             chunk_size: 64, // Send 64 characters at a time for smooth streaming
             flush_interval: Duration::from_millis(16), // Flush every 16ms (~60fps)

@@ -307,7 +307,7 @@ impl App {
         // Track how many System messages we've inserted
         let mut system_insert_count = 0;
 
-        // Inject project context FIRST (KRAB.md/CLAUDE.md - foundational codebase rules)
+        // Inject project context FIRST (foundational codebase rules from instruction files)
         if !project_context.is_empty() {
             conversation.insert(
                 system_insert_count,
@@ -1453,34 +1453,24 @@ Workflow: Do the work → Call task_complete → Continue."#,
         context
     }
 
-    /// Build project context from KRAB.md, CLAUDE.md, AGENTS.md, etc.
+    /// Build project context from instruction files.
     ///
     /// Reads project-specific instructions from the working directory.
     /// These files provide context about the codebase, conventions, and guidelines.
     pub fn build_project_context(&self) -> String {
-        // Support all common AI coding assistant instruction files
-        // Priority: Krusty native > AGENTS.md standard > tool-specific
+        // Support common AI coding assistant instruction file formats
         const PROJECT_FILES: &[&str] = &[
-            // Krusty native
             "KRAB.md",
             "krab.md",
-            // Unified standard (40k+ repos)
             "AGENTS.md",
             "agents.md",
-            // Claude Code
             "CLAUDE.md",
             "claude.md",
-            // Cursor
             ".cursorrules",
-            // Windsurf
             ".windsurfrules",
-            // Cline
             ".clinerules",
-            // GitHub Copilot
             ".github/copilot-instructions.md",
-            // Google Jules
             "JULES.md",
-            // Gemini
             "gemini.md",
         ];
         for filename in PROJECT_FILES {
