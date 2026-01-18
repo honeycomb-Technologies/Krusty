@@ -1,7 +1,6 @@
 //! Auto-update handlers
 //!
 //! Background update checking and building.
-//! NOTE: Currently disabled - update infrastructure incomplete.
 
 use crate::tui::app::App;
 use crate::tui::components::Toast;
@@ -10,24 +9,25 @@ use krusty_core::updater::UpdateStatus;
 impl App {
     /// Check for persisted update on startup
     pub fn check_persisted_update(&mut self) {
-        // Update infrastructure incomplete
+        // TODO: Check if there's a pending update binary to apply
     }
 
     /// Start background update check
     pub fn start_update_check(&mut self) {
-        // Don't start if already checking or no repo path
-        if self.channels.update_status.is_some() || self.update_repo_path.is_none() {
+        // Don't start if already checking
+        if self.channels.update_status.is_some() {
             return;
         }
 
         // Don't check if we already have an update ready
         if matches!(self.update_status, Some(UpdateStatus::Ready { .. })) {
-            self.show_toast(Toast::info("Update already ready - restart to apply"));
+            self.show_toast(Toast::info("Update ready - restart to apply"));
             return;
         }
 
-        // TODO: Re-enable when update infrastructure is complete
-        self.show_toast(Toast::info("Update checking not yet available"));
+        // TODO: Spawn background task to check for updates
+        // For now, just show a message
+        self.show_toast(Toast::info("Update checking not yet wired up"));
     }
 
     /// Poll update status channel and show toasts
@@ -54,15 +54,18 @@ impl App {
                 }
                 UpdateStatus::Available(info) => {
                     self.show_toast(Toast::info(format!(
-                        "Update available: {} commits behind",
-                        info.commits_behind
+                        "Update available: v{}",
+                        info.new_version
                     )));
                 }
-                UpdateStatus::Building { progress } => {
-                    tracing::debug!("Update build progress: {}", progress);
+                UpdateStatus::Downloading { progress } => {
+                    tracing::debug!("Update progress: {}", progress);
                 }
-                UpdateStatus::Ready { new_binary: _ } => {
-                    self.show_toast(Toast::success("Update ready! Restart to apply.").persistent());
+                UpdateStatus::Ready { version, .. } => {
+                    self.show_toast(
+                        Toast::success(format!("Updated to v{} - restart to apply", version))
+                            .persistent(),
+                    );
                     clear_channel = true;
                 }
                 UpdateStatus::Error(e) => {
