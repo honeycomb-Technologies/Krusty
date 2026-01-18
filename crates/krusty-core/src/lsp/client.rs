@@ -11,7 +11,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, RwLock};
@@ -65,6 +65,8 @@ pub struct LspClient {
     next_id: AtomicI64,
     pending_requests: Arc<RwLock<HashMap<i64, tokio::sync::oneshot::Sender<Result<Value>>>>>,
     diagnostics: Arc<DiagnosticsCache>,
+    /// Health status - set to false when receive loop encounters an error
+    healthy: Arc<AtomicBool>,
     /// Keep child handle alive so process doesn't terminate
     _child: Child,
 }
@@ -97,6 +99,7 @@ impl LspClient {
             next_id: AtomicI64::new(1),
             pending_requests: Arc::new(RwLock::new(HashMap::new())),
             diagnostics,
+            healthy: Arc::new(AtomicBool::new(true)),
             _child: child,
         };
 
@@ -200,7 +203,8 @@ impl LspClient {
                         }
                     }
                     Err(e) => {
-                        error!("LSP receive error: {}", e);
+                        error!("LSP {} receive error: {}", client.name, e);
+                        client.healthy.store(false, Ordering::SeqCst);
                         break;
                     }
                 }
@@ -208,6 +212,16 @@ impl LspClient {
         });
 
         rx
+    }
+
+    /// Check if the LSP server is healthy (receive loop still running)
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::SeqCst)
+    }
+
+    /// Get the server name
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     async fn handle_message(

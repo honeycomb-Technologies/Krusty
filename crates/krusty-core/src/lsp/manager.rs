@@ -6,12 +6,19 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, warn};
 
 use super::builtin::BuiltinLsp;
 use super::client::LspClient;
 use super::diagnostics::DiagnosticsCache;
+
+/// Time to wait for LSP diagnostics after file changes (milliseconds)
+///
+/// LSP servers typically respond within 100-200ms for syntax errors.
+/// Some servers (like TypeScript) may take longer for complex analysis.
+pub const DIAGNOSTICS_WAIT_MS: u64 = 150;
 
 /// Entry in the server registry with priority
 #[derive(Debug, Clone)]
@@ -296,8 +303,7 @@ impl LspManager {
 
         if wait_for_diagnostics {
             // Wait a short time for diagnostics to be processed
-            // LSP servers typically respond within 100-200ms for syntax errors
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            tokio::time::sleep(Duration::from_millis(DIAGNOSTICS_WAIT_MS)).await;
         }
 
         Ok(None)
@@ -431,6 +437,52 @@ impl LspManager {
                 }
             }
         }
+    }
+
+    /// Check the health status of all running LSP servers
+    ///
+    /// Returns a map of server_id -> is_healthy for all registered clients.
+    pub async fn health_check(&self) -> HashMap<String, bool> {
+        let clients = self.clients.read().await;
+        let mut status = HashMap::new();
+
+        for (name, client) in clients.iter() {
+            let healthy = client.is_healthy();
+            if !healthy {
+                warn!("LSP server {} is unhealthy", name);
+            }
+            status.insert(name.clone(), healthy);
+        }
+
+        status
+    }
+
+    /// Restart an unhealthy LSP server
+    ///
+    /// Stops the existing server (if any) and spawns a fresh instance.
+    /// Returns Ok(Some(client)) if restart succeeded, Ok(None) if no config exists.
+    pub async fn restart_server(&self, server_id: &str) -> Result<Option<Arc<LspClient>>> {
+        info!("Restarting LSP server: {}", server_id);
+
+        // Remove existing client (this will drop it and kill the process)
+        {
+            let mut clients = self.clients.write().await;
+            if let Some(old_client) = clients.remove(server_id) {
+                info!(
+                    "Removed old LSP client {} (was healthy: {})",
+                    server_id,
+                    old_client.is_healthy()
+                );
+            }
+        }
+
+        // Spawn a new instance
+        self.spawn_server(server_id).await
+    }
+
+    /// Get list of currently running LSP server names
+    pub async fn running_servers(&self) -> Vec<String> {
+        self.clients.read().await.keys().cloned().collect()
     }
 }
 

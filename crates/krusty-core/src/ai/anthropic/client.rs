@@ -10,7 +10,8 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::ai::parsers::{AnthropicParser, OpenAIParser};
+use crate::ai::parsers::{AnthropicParser, GoogleParser, OpenAIParser};
+use crate::ai::reasoning::ReasoningConfig;
 use crate::ai::sse::{create_streaming_channels, spawn_buffer_processor, SseStreamProcessor};
 use crate::ai::streaming::StreamPart;
 use crate::ai::transform::build_provider_params;
@@ -132,7 +133,11 @@ impl AnthropicConfig {
                     ApiFormat::Anthropic => format!("{}/messages", base_without_endpoint),
                     ApiFormat::OpenAI => format!("{}/chat/completions", base_without_endpoint),
                     ApiFormat::OpenAIResponses => format!("{}/responses", base_without_endpoint),
-                    ApiFormat::Google => format!("{}/models/{}", base_without_endpoint, self.model),
+                    // Google Gemini API uses :streamGenerateContent for streaming
+                    ApiFormat::Google => format!(
+                        "{}/models/{}:streamGenerateContent",
+                        base_without_endpoint, self.model
+                    ),
                 };
             }
             base.clone()
@@ -159,11 +164,16 @@ impl AnthropicConfig {
         )
     }
 
+    /// Check if this config uses Google/Gemini format
+    pub fn uses_google_format(&self) -> bool {
+        matches!(self.api_format, ApiFormat::Google)
+    }
+
     /// Check if this provider uses Anthropic-compatible API
     /// All our providers (Anthropic, OpenRouter, Z.ai, MiniMax, Kimi) use Anthropic Messages API
-    /// Exception: OpenCode Zen routes some models to OpenAI format
+    /// Exception: OpenCode Zen routes some models to OpenAI or Google format
     pub fn uses_anthropic_api(&self) -> bool {
-        !self.uses_openai_format()
+        !self.uses_openai_format() && !self.uses_google_format()
     }
 }
 
@@ -825,10 +835,16 @@ impl AnthropicClient {
             self.config.api_format
         );
 
-        // Route to OpenAI format handler for non-Anthropic models
+        // Route to appropriate format handler based on API format
         if self.config.uses_openai_format() {
             return self
                 .call_streaming_openai(messages, options, call_start)
+                .await;
+        }
+
+        if self.config.uses_google_format() {
+            return self
+                .call_streaming_google(messages, options, call_start)
                 .await;
         }
 
@@ -868,25 +884,13 @@ impl AnthropicClient {
         }
 
         // Determine max_tokens based on reasoning format
-        // Anthropic thinking requires max_tokens > budget_tokens
-        let max_tokens = match options.reasoning_format {
-            Some(ReasoningFormat::Anthropic) => {
-                // Anthropic: use 64k to allow room for 32k thinking budget
-                64000
-            }
-            Some(ReasoningFormat::OpenAI | ReasoningFormat::DeepSeek) => {
-                // OpenAI/DeepSeek: reasoning doesn't reduce output quota
-                options.max_tokens.unwrap_or(self.config.max_tokens)
-            }
-            None => {
-                // Legacy support: if thinking is set without format, assume Anthropic
-                if options.thinking.is_some() {
-                    64000
-                } else {
-                    options.max_tokens.unwrap_or(self.config.max_tokens)
-                }
-            }
-        };
+        let fallback_tokens = options.max_tokens.unwrap_or(self.config.max_tokens) as u32;
+        let legacy_thinking = options.thinking.is_some();
+        let max_tokens = ReasoningConfig::max_tokens_for_format(
+            options.reasoning_format,
+            fallback_tokens,
+            legacy_thinking,
+        );
 
         // Build request body
         let mut body = serde_json::json!({
@@ -1019,60 +1023,64 @@ impl AnthropicClient {
             body["tools"] = Value::Array(all_tools);
         }
 
-        // Add reasoning/thinking config based on format
-        // Universal reasoning: all formats use MAX effort (no half-measures)
-        match options.reasoning_format {
-            Some(ReasoningFormat::Anthropic) => {
-                // Anthropic Claude: thinking.budget_tokens (max: 32000)
-                let budget = options
-                    .thinking
-                    .as_ref()
-                    .map(|t| t.budget_tokens)
-                    .unwrap_or(32000);
-                body["thinking"] = serde_json::json!({
-                    "type": "enabled",
-                    "budget_tokens": budget
-                });
-                debug!("Anthropic thinking enabled with budget: {}", budget);
+        // Add reasoning/thinking config using centralized ReasoningConfig
+        let reasoning_enabled = options.reasoning_format.is_some() || options.thinking.is_some();
+        let budget_tokens = options.thinking.as_ref().map(|t| t.budget_tokens);
 
-                // Opus 4.5 supports effort parameter - always use high
-                if self.config.model.contains("opus-4-5") {
-                    body["output_config"] = serde_json::json!({
-                        "effort": "high"
-                    });
-                    debug!("Using high effort for Opus 4.5");
-                }
-            }
-            Some(ReasoningFormat::OpenAI) => {
-                // OpenAI o1/o3/GPT-5: reasoning_effort = "high" (max effort)
-                body["reasoning_effort"] = serde_json::json!("high");
-                debug!("OpenAI reasoning enabled with high effort");
-            }
-            Some(ReasoningFormat::DeepSeek) => {
-                // DeepSeek R1: reasoning.enabled = true
-                body["reasoning"] = serde_json::json!({
-                    "enabled": true
-                });
-                debug!("DeepSeek reasoning enabled");
-            }
-            None => {
-                // Legacy support: if thinking is set without format, assume Anthropic
-                if let Some(thinking) = &options.thinking {
-                    body["thinking"] = serde_json::json!({
-                        "type": "enabled",
-                        "budget_tokens": thinking.budget_tokens
-                    });
+        if let Some(reasoning_config) =
+            ReasoningConfig::build(options.reasoning_format, reasoning_enabled, budget_tokens, None)
+        {
+            match options.reasoning_format {
+                Some(ReasoningFormat::Anthropic) => {
+                    body["thinking"] = reasoning_config;
                     debug!(
-                        "Legacy thinking enabled with budget: {}",
-                        thinking.budget_tokens
+                        "Anthropic thinking enabled with budget: {}",
+                        budget_tokens.unwrap_or(32000)
                     );
-
-                    if self.config.model.contains("opus-4-5") {
-                        body["output_config"] = serde_json::json!({
-                            "effort": "high"
-                        });
-                    }
                 }
+                Some(ReasoningFormat::OpenAI) => {
+                    // OpenAI: merge reasoning_effort at root
+                    if let Some(obj) = reasoning_config.as_object() {
+                        for (k, v) in obj {
+                            body[k] = v.clone();
+                        }
+                    }
+                    debug!("OpenAI reasoning enabled with high effort");
+                }
+                Some(ReasoningFormat::DeepSeek) => {
+                    // DeepSeek: merge reasoning at root
+                    if let Some(obj) = reasoning_config.as_object() {
+                        for (k, v) in obj {
+                            body[k] = v.clone();
+                        }
+                    }
+                    debug!("DeepSeek reasoning enabled");
+                }
+                None => {}
+            }
+
+            // Opus 4.5 effort config
+            if let Some(effort_config) =
+                ReasoningConfig::build_opus_effort(&self.config.model, reasoning_enabled)
+            {
+                body["output_config"] = effort_config;
+                debug!("Using high effort for Opus 4.5");
+            }
+        } else if let Some(thinking) = &options.thinking {
+            // Legacy support: if thinking is set without format, assume Anthropic
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": thinking.budget_tokens
+            });
+            debug!(
+                "Legacy thinking enabled with budget: {}",
+                thinking.budget_tokens
+            );
+
+            if let Some(effort_config) =
+                ReasoningConfig::build_opus_effort(&self.config.model, true)
+            {
+                body["output_config"] = effort_config;
             }
         }
 
@@ -1389,5 +1397,229 @@ impl AnthropicClient {
         });
 
         Ok(rx)
+    }
+
+    /// Call the API with streaming response using Google/Gemini format
+    ///
+    /// Used for OpenCode Zen Gemini models that need Google AI API format
+    async fn call_streaming_google(
+        &self,
+        messages: Vec<ModelMessage>,
+        options: &CallOptions,
+        call_start: Instant,
+    ) -> Result<mpsc::UnboundedReceiver<StreamPart>> {
+        info!("Using Google/Gemini format for {}", self.config.model);
+
+        let api_key = self.get_api_key();
+
+        // Convert messages to Google contents format
+        let contents = self.convert_messages_google(&messages);
+
+        // Extract system prompt
+        let system: String = messages
+            .iter()
+            .filter(|m| m.role == Role::System)
+            .filter_map(|m| {
+                m.content.iter().find_map(|c| match c {
+                    Content::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        // Build system instruction
+        let system_instruction = if !system.is_empty() {
+            Some(format!("{}\n\n{}", KRUSTY_SYSTEM_PROMPT, system))
+        } else if let Some(custom) = &options.system_prompt {
+            Some(custom.clone())
+        } else {
+            Some(KRUSTY_SYSTEM_PROMPT.to_string())
+        };
+
+        let max_tokens = options.max_tokens.unwrap_or(self.config.max_tokens);
+
+        // Build request body
+        let mut body = serde_json::json!({
+            "contents": contents,
+            "generationConfig": {
+                "maxOutputTokens": max_tokens,
+            }
+        });
+
+        // Add system instruction
+        if let Some(sys) = system_instruction {
+            body["systemInstruction"] = serde_json::json!({
+                "parts": [{"text": sys}]
+            });
+        }
+
+        // Add temperature if specified
+        if let Some(temp) = options.temperature {
+            body["generationConfig"]["temperature"] = serde_json::json!(temp);
+        }
+
+        // Add tools in Google format
+        if let Some(tools) = &options.tools {
+            let google_tools = self.convert_tools_google(tools);
+            if !google_tools.is_empty() {
+                body["tools"] = serde_json::json!([{
+                    "functionDeclarations": google_tools
+                }]);
+            }
+        }
+
+        debug!("Google request to: {}", self.config.api_url());
+
+        // Build request with appropriate headers
+        let mut request = self.http.post(self.config.api_url());
+
+        // Add auth header (OpenCode Zen uses x-api-key)
+        request = request.header("x-api-key", api_key);
+        request = request.header("content-type", "application/json");
+
+        // Send request
+        info!("Sending Google format request...");
+        let response = request.json(&body).send().await?;
+        let request_duration = call_start.elapsed();
+
+        let status = response.status();
+        info!("API response: {} in {:?}", status, request_duration);
+
+        if !status.is_success() {
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            error!("API error response: {} - {}", status, error_text);
+            return Err(anyhow::anyhow!("API error: {} - {}", status, error_text));
+        }
+
+        // Set up streaming channels
+        let (tx, rx, buffer_tx, buffer_rx) = create_streaming_channels();
+        spawn_buffer_processor(buffer_rx, tx.clone());
+
+        let mut processor = SseStreamProcessor::new(tx, buffer_tx);
+        let parser = GoogleParser::new();
+
+        // Spawn task to process the stream
+        info!("Starting Google stream processing task");
+        let stream = response.bytes_stream();
+        tokio::spawn(async move {
+            tokio::pin!(stream);
+            let mut chunk_count = 0;
+            while let Some(chunk) = stream.next().await {
+                chunk_count += 1;
+                match chunk {
+                    Ok(bytes) => {
+                        if let Err(e) = processor.process_chunk(bytes, &parser).await {
+                            warn!("Error processing Google chunk #{}: {}", chunk_count, e);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Google stream read error at chunk #{}: {}", chunk_count, e);
+                        break;
+                    }
+                }
+            }
+            info!("Google stream ended after {} chunks", chunk_count);
+            processor.finish().await;
+        });
+
+        Ok(rx)
+    }
+
+    /// Convert messages to Google contents format
+    fn convert_messages_google(&self, messages: &[ModelMessage]) -> Vec<Value> {
+        messages
+            .iter()
+            .filter(|m| m.role != Role::System) // System handled separately
+            .map(|m| {
+                let role = match m.role {
+                    Role::User | Role::Tool => "user", // Tool results are user role in Google format
+                    Role::Assistant => "model",
+                    Role::System => "user", // Should be filtered out
+                };
+
+                let parts: Vec<Value> = m
+                    .content
+                    .iter()
+                    .filter_map(|c| match c {
+                        Content::Text { text } => Some(serde_json::json!({"text": text})),
+                        Content::Image { image, .. } => {
+                            // Google expects inline_data for images
+                            let mime = image.media_type.as_deref().unwrap_or("image/png");
+                            image
+                                .base64
+                                .as_ref()
+                                .map(|data| {
+                                    serde_json::json!({
+                                        "inline_data": {
+                                            "mime_type": mime,
+                                            "data": data
+                                        }
+                                    })
+                                })
+                                .or_else(|| {
+                                    // Google also supports file_data with URI
+                                    image.url.as_ref().map(|url| {
+                                        serde_json::json!({
+                                            "file_data": {
+                                                "file_uri": url,
+                                                "mime_type": mime
+                                            }
+                                        })
+                                    })
+                                })
+                        }
+                        Content::ToolUse { name, input, .. } => {
+                            // Function call in assistant message
+                            Some(serde_json::json!({
+                                "functionCall": {
+                                    "name": name,
+                                    "args": input
+                                }
+                            }))
+                        }
+                        Content::ToolResult {
+                            tool_use_id,
+                            output,
+                            ..
+                        } => {
+                            // Function response in user message
+                            Some(serde_json::json!({
+                                "functionResponse": {
+                                    "name": tool_use_id,
+                                    "response": {
+                                        "content": output
+                                    }
+                                }
+                            }))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+
+                serde_json::json!({
+                    "role": role,
+                    "parts": parts
+                })
+            })
+            .collect()
+    }
+
+    /// Convert tools to Google function declarations format
+    fn convert_tools_google(&self, tools: &[AiTool]) -> Vec<Value> {
+        tools
+            .iter()
+            .map(|tool| {
+                serde_json::json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.input_schema
+                })
+            })
+            .collect()
     }
 }
