@@ -10,6 +10,7 @@ use ratatui::{
     style::{Color, Style},
 };
 use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthChar;
 
 use crate::tui::themes::Theme;
 use crate::tui::utils::truncate_ellipsis;
@@ -120,6 +121,11 @@ impl ToastQueue {
 
     /// Add a toast to the queue
     pub fn push(&mut self, toast: Toast) {
+        // Don't add duplicate messages (prevents spamming same toast)
+        if self.toasts.iter().any(|t| t.message == toast.message) {
+            return;
+        }
+
         // Remove oldest if at capacity
         while self.toasts.len() >= MAX_VISIBLE_TOASTS {
             self.toasts.remove(0);
@@ -227,7 +233,8 @@ fn render_toast(buf: &mut Buffer, area: Rect, toast: &Toast, theme: &Theme) {
         if let Some(cell) = buf.cell_mut((cx, content_y)) {
             cell.set_char(ch).set_fg(color).set_bg(theme.bg_color);
         }
-        cx += 1;
+        // Account for character width (some icons are wide)
+        cx += UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
     }
     cx += 1; // Space after icon
 
@@ -242,7 +249,8 @@ fn render_toast(buf: &mut Buffer, area: Rect, toast: &Toast, theme: &Theme) {
                     .set_fg(theme.text_color)
                     .set_bg(theme.bg_color);
             }
-            cx += 1;
+            // Account for character width
+            cx += UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
         }
     }
 }

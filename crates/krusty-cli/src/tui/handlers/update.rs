@@ -1,28 +1,24 @@
 //! Auto-update handlers
 //!
 //! Background update checking and downloading from GitHub releases.
+//! Updates are downloaded but NOT applied while running - user must restart.
 
 use crate::tui::app::App;
 use crate::tui::components::Toast;
-use krusty_core::updater::{apply_update, check_for_updates, download_update, UpdateStatus};
+use krusty_core::updater::{
+    check_for_updates, cleanup_pending_update, download_update, has_pending_update, UpdateStatus,
+    VERSION,
+};
 use tokio::sync::mpsc;
 
 impl App {
-    /// Check for persisted update on startup (binary ready to apply)
-    pub fn check_persisted_update(&mut self) {
-        let temp_binary = std::env::temp_dir().join("krusty-update");
-        if temp_binary.exists() {
-            // There's a pending update - try to apply it
-            match apply_update(&temp_binary) {
-                Ok(()) => {
-                    let _ = std::fs::remove_file(&temp_binary);
-                    self.show_toast(Toast::success("Update applied! Restart to use new version.").persistent());
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to apply persisted update: {}", e);
-                    let _ = std::fs::remove_file(&temp_binary);
-                }
-            }
+    /// Check if there's a pending update that was downloaded previously.
+    /// Called early in startup - just shows notification, doesn't apply.
+    pub fn check_pending_update(&mut self) {
+        if has_pending_update() {
+            self.show_toast(
+                Toast::success("Update ready - restart krusty to apply").persistent(),
+            );
         }
     }
 
@@ -34,9 +30,8 @@ impl App {
         }
 
         // Don't check if we already have an update ready
-        if matches!(self.update_status, Some(UpdateStatus::Ready { .. })) {
-            self.show_toast(Toast::info("Update ready - restart to apply"));
-            return;
+        if has_pending_update() {
+            return; // Already handled by check_pending_update
         }
 
         // Create channel for status updates
@@ -49,16 +44,23 @@ impl App {
 
             match check_for_updates().await {
                 Ok(Some(info)) => {
-                    let _ = tx.send(UpdateStatus::Available(info.clone()));
+                    // Only notify and download if actually newer
+                    if info.new_version != VERSION {
+                        let _ = tx.send(UpdateStatus::Available(info.clone()));
 
-                    // Auto-download the update
-                    match download_update(&info, tx.clone()).await {
-                        Ok(_) => {
-                            // Ready status already sent by download_update
+                        // Auto-download the update (but don't apply)
+                        match download_update(&info, tx.clone()).await {
+                            Ok(()) => {
+                                // Ready status already sent by download_update
+                            }
+                            Err(e) => {
+                                let _ = tx.send(UpdateStatus::Error(e.to_string()));
+                            }
                         }
-                        Err(e) => {
-                            let _ = tx.send(UpdateStatus::Error(e.to_string()));
-                        }
+                    } else {
+                        // Same version - clean up any stale pending update
+                        cleanup_pending_update();
+                        let _ = tx.send(UpdateStatus::UpToDate);
                     }
                 }
                 Ok(None) => {
@@ -66,31 +68,7 @@ impl App {
                 }
                 Err(e) => {
                     tracing::debug!("Update check failed: {}", e);
-                    // Don't show error toast for network issues - silent fail
-                }
-            }
-        });
-    }
-
-    /// Manually trigger update download (if update is available)
-    pub fn download_available_update(&mut self) {
-        let info = match &self.update_status {
-            Some(UpdateStatus::Available(info)) => info.clone(),
-            _ => {
-                self.show_toast(Toast::info("No update available"));
-                return;
-            }
-        };
-
-        // Create channel for status updates
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.channels.update_status = Some(rx);
-
-        tokio::spawn(async move {
-            match download_update(&info, tx.clone()).await {
-                Ok(_) => {}
-                Err(e) => {
-                    let _ = tx.send(UpdateStatus::Error(e.to_string()));
+                    // Silent fail on network errors - don't spam user
                 }
             }
         });
@@ -116,36 +94,33 @@ impl App {
                     // Silent - don't spam user
                 }
                 UpdateStatus::UpToDate => {
-                    // Silent on startup - only show if manually triggered
+                    // Silent on startup - clean up any stale state
                     self.update_status = None;
                     clear_channel = true;
                 }
                 UpdateStatus::Available(info) => {
+                    // Only show if not already showing a toast for this
                     self.show_toast(Toast::info(format!(
-                        "Update available: v{}",
+                        "Downloading v{}...",
                         info.new_version
                     )));
                 }
-                UpdateStatus::Downloading { progress } => {
-                    tracing::debug!("Update progress: {}", progress);
+                UpdateStatus::Downloading { progress: _ } => {
+                    // Silent - don't spam user with progress
                 }
-                UpdateStatus::Ready { version, new_binary } => {
-                    // Auto-apply the update
-                    match apply_update(new_binary) {
-                        Ok(()) => {
-                            self.show_toast(
-                                Toast::success(format!("Updated to v{} - restart to apply", version))
-                                    .persistent(),
-                            );
-                        }
-                        Err(e) => {
-                            self.show_toast(Toast::info(format!("Update ready but failed to apply: {}", e)));
-                        }
-                    }
+                UpdateStatus::Ready { version } => {
+                    // Update is downloaded and ready - user needs to restart
+                    self.show_toast(
+                        Toast::success(format!("v{} ready - restart to update", version))
+                            .persistent(),
+                    );
                     clear_channel = true;
                 }
                 UpdateStatus::Error(e) => {
-                    self.show_toast(Toast::info(format!("Update failed: {}", e)));
+                    // Only show error for non-network issues
+                    if !e.contains("timeout") && !e.contains("connection") {
+                        tracing::warn!("Update check failed: {}", e);
+                    }
                     self.update_status = None;
                     clear_channel = true;
                 }

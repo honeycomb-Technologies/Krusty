@@ -1605,8 +1605,8 @@ impl App {
     pub async fn run(&mut self) -> Result<()> {
         let _ = self.try_load_auth().await;
 
-        // Check for persisted update from previous session
-        self.check_persisted_update();
+        // Check for pending update from previous session
+        self.check_pending_update();
 
         // Check for updates in background
         self.start_update_check();
