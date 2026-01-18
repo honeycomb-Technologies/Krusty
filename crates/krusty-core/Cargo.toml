@@ -27,8 +27,8 @@ futures = "0.3"
 tokio-stream = "0.1"
 tokio-util = "0.7"
 
-# HTTP
-reqwest = { version = "0.12", features = ["json", "stream"] }
+# HTTP (rustls for cross-platform TLS without OpenSSL)
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
 # Image processing (for tool screenshots)
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -93,8 +93,8 @@ moka = { version = "0.12", features = ["sync"] }
 # File System
 ignore = "0.4"
 
-# Version Control
-git2 = "0.19"
+# Version Control (vendored for cross-compilation)
+git2 = { version = "0.19", features = ["vendored-libgit2", "vendored-openssl"] }
 
 [dev-dependencies]
 tempfile = "3.14"
