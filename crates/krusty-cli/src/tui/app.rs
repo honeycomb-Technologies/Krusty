@@ -370,8 +370,8 @@ impl App {
                     .map(|m| {
                         let mut meta = ModelMetadata::new(&m.id, &m.display_name, provider.id)
                             .with_context(m.context_window, m.max_output);
-                        if m.reasoning.is_some() {
-                            meta = meta.with_thinking();
+                        if let Some(format) = m.reasoning {
+                            meta = meta.with_thinking(format);
                         }
                         meta
                     })

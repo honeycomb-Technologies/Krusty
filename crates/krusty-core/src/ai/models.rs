@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::providers::ProviderId;
+use super::providers::{ProviderId, ReasoningFormat};
 
 /// API format for model requests
 ///
@@ -42,8 +42,10 @@ pub struct ModelMetadata {
     pub max_output: usize,
 
     // Capabilities
-    /// Supports extended thinking/reasoning
+    /// Supports extended thinking/reasoning (legacy boolean)
     pub supports_thinking: bool,
+    /// Reasoning/thinking format (None = not supported, Some = supported with specific format)
+    pub reasoning_format: Option<ReasoningFormat>,
     /// Supports function/tool calling
     pub supports_tools: bool,
     /// Supports image input (vision)
@@ -77,6 +79,7 @@ impl ModelMetadata {
             context_window: 128_000,
             max_output: 4096,
             supports_thinking: false,
+            reasoning_format: None,
             supports_tools: true,
             supports_vision: false,
             input_price: None,
@@ -94,9 +97,10 @@ impl ModelMetadata {
         self
     }
 
-    /// Builder: enable thinking support
-    pub fn with_thinking(mut self) -> Self {
+    /// Builder: enable thinking support with specified format
+    pub fn with_thinking(mut self, format: ReasoningFormat) -> Self {
         self.supports_thinking = true;
+        self.reasoning_format = Some(format);
         self
     }
 

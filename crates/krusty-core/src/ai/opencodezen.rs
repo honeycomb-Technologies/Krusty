@@ -15,7 +15,7 @@ use serde::Deserialize;
 use tracing::{debug, error, info};
 
 use super::models::{ApiFormat, ModelMetadata};
-use super::providers::ProviderId;
+use super::providers::{ProviderId, ReasoningFormat};
 
 const OPENCODEZEN_MODELS_URL: &str = "https://opencode.ai/zen/v1/models";
 
@@ -103,7 +103,7 @@ fn parse_model(raw: OpenCodeZenModel) -> ModelMetadata {
 
     // Determine capabilities and specs based on model ID
     // Values from OpenCode Zen docs and model specs
-    let (context_window, max_output, supports_thinking) = get_model_specs(id);
+    let (context_window, max_output, supports_thinking, reasoning_format) = get_model_specs(id);
 
     // Generate display name from ID
     let display_name = generate_display_name(id);
@@ -121,6 +121,7 @@ fn parse_model(raw: OpenCodeZenModel) -> ModelMetadata {
         context_window,
         max_output,
         supports_thinking,
+        reasoning_format,
         supports_tools: true, // All OpenCode Zen models support tools
         supports_vision: false,
         input_price: None,
@@ -132,73 +133,76 @@ fn parse_model(raw: OpenCodeZenModel) -> ModelMetadata {
 }
 
 /// Get model specifications based on model ID
-fn get_model_specs(id: &str) -> (usize, usize, bool) {
+/// Returns: (context_window, max_output, supports_thinking, reasoning_format)
+fn get_model_specs(id: &str) -> (usize, usize, bool, Option<ReasoningFormat>) {
     match id {
-        // Claude Opus models - thinking enabled
-        "claude-opus-4-5" => (200_000, 16_384, true),
-        "claude-opus-4-1" => (200_000, 16_384, true),
+        // Claude Opus models - thinking enabled with Anthropic format
+        "claude-opus-4-5" => (200_000, 16_384, true, Some(ReasoningFormat::Anthropic)),
+        "claude-opus-4-1" => (200_000, 16_384, true, Some(ReasoningFormat::Anthropic)),
 
         // Claude Sonnet models
-        "claude-sonnet-4-5" => (200_000, 16_384, true), // Sonnet 4.5 has thinking
-        "claude-sonnet-4" => (200_000, 16_384, false),
+        "claude-sonnet-4-5" => (200_000, 16_384, true, Some(ReasoningFormat::Anthropic)),
+        "claude-sonnet-4" => (200_000, 16_384, false, None),
 
         // Claude Haiku models
-        "claude-haiku-4-5" => (200_000, 16_384, false),
-        "claude-3-5-haiku" => (200_000, 16_384, false),
+        "claude-haiku-4-5" => (200_000, 16_384, false, None),
+        "claude-3-5-haiku" => (200_000, 16_384, false, None),
 
-        // GPT-5 models
-        "gpt-5.2" => (200_000, 32_768, false),
-        "gpt-5.1" | "gpt-5.1-codex" | "gpt-5.1-codex-max" => (200_000, 32_768, false),
-        "gpt-5.1-codex-mini" => (200_000, 16_384, false),
-        "gpt-5" | "gpt-5-codex" => (200_000, 32_768, false),
-        "gpt-5-nano" => (128_000, 16_384, false),
+        // GPT-5 models - no reasoning support via Zen currently
+        "gpt-5.2" => (200_000, 32_768, false, None),
+        "gpt-5.1" | "gpt-5.1-codex" | "gpt-5.1-codex-max" => (200_000, 32_768, false, None),
+        "gpt-5.1-codex-mini" => (200_000, 16_384, false, None),
+        "gpt-5" | "gpt-5-codex" => (200_000, 32_768, false, None),
+        "gpt-5-nano" => (128_000, 16_384, false, None),
 
         // Gemini models
-        "gemini-3-pro" => (1_000_000, 65_536, false),
-        "gemini-3-flash" => (1_000_000, 65_536, false),
+        "gemini-3-pro" => (1_000_000, 65_536, false, None),
+        "gemini-3-flash" => (1_000_000, 65_536, false, None),
 
         // MiniMax - uses Anthropic format, supports interleaved thinking
-        "minimax-m2.1-free" => (200_000, 64_000, true),
+        "minimax-m2.1-free" => (200_000, 64_000, true, Some(ReasoningFormat::Anthropic)),
 
-        // GLM models
-        "glm-4.6" => (128_000, 16_384, false),
-        "glm-4.7-free" => (128_000, 16_384, false),
+        // GLM models - use chat_template_args (handled separately via transform)
+        "glm-4.6" => (128_000, 16_384, false, None),
+        "glm-4.7-free" => (128_000, 16_384, false, None),
 
         // Kimi models
-        "kimi-k2" => (256_000, 16_384, false),
-        "kimi-k2-thinking" => (256_000, 16_384, true),
+        "kimi-k2" => (256_000, 16_384, false, None),
+        "kimi-k2-thinking" => (256_000, 16_384, true, Some(ReasoningFormat::Anthropic)),
 
         // Qwen
-        "qwen3-coder" => (128_000, 32_768, false),
+        "qwen3-coder" => (128_000, 32_768, false, None),
 
         // Grok
-        "grok-code" => (128_000, 16_384, false),
+        "grok-code" => (128_000, 16_384, false, None),
 
         // Big Pickle (stealth model)
-        "big-pickle" => (128_000, 16_384, false),
+        "big-pickle" => (128_000, 16_384, false, None),
 
         // Fallback for unknown models
         _ => {
             // Try to infer from prefix
             let id_lower = id.to_lowercase();
-            if id_lower.starts_with("claude-opus") {
-                (200_000, 16_384, true)
+            if id_lower.starts_with("claude-opus") || id_lower.starts_with("claude-sonnet-4-5") {
+                (200_000, 16_384, true, Some(ReasoningFormat::Anthropic))
             } else if id_lower.starts_with("claude") {
-                (200_000, 16_384, false)
+                (200_000, 16_384, false, None)
             } else if id_lower.starts_with("gpt-5") {
-                (200_000, 32_768, false)
+                (200_000, 32_768, false, None)
             } else if id_lower.starts_with("gemini") {
-                (1_000_000, 65_536, false)
+                (1_000_000, 65_536, false, None)
             } else if id_lower.starts_with("minimax") {
-                (200_000, 64_000, true)
+                (200_000, 64_000, true, Some(ReasoningFormat::Anthropic))
+            } else if id_lower.starts_with("kimi") && id_lower.contains("thinking") {
+                (256_000, 16_384, true, Some(ReasoningFormat::Anthropic))
             } else if id_lower.starts_with("kimi") {
-                (256_000, 16_384, id_lower.contains("thinking"))
+                (256_000, 16_384, false, None)
             } else if id_lower.starts_with("glm") {
-                (128_000, 16_384, false)
+                (128_000, 16_384, false, None)
             } else if id_lower.starts_with("qwen") {
-                (128_000, 32_768, false)
+                (128_000, 32_768, false, None)
             } else {
-                (128_000, 16_384, false)
+                (128_000, 16_384, false, None)
             }
         }
     }

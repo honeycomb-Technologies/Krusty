@@ -8,7 +8,7 @@ use serde::Deserialize;
 use tracing::{debug, error, info};
 
 use super::models::ModelMetadata;
-use super::providers::ProviderId;
+use super::providers::{ProviderId, ReasoningFormat};
 
 const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 
@@ -137,11 +137,18 @@ fn parse_model(raw: OpenRouterModel) -> ModelMetadata {
         .and_then(|t| t.max_completion_tokens)
         .unwrap_or(4096);
 
-    // Detect capabilities
+    // Detect reasoning capabilities and determine format based on model ID
     let supports_thinking = raw
         .supported_parameters
         .iter()
         .any(|p| p == "reasoning" || p == "include_reasoning" || p == "reasoning_effort");
+
+    // Determine reasoning format based on model provider/type
+    let reasoning_format = if supports_thinking {
+        Some(determine_reasoning_format(&raw.id))
+    } else {
+        None
+    };
 
     let supports_tools = raw
         .supported_parameters
@@ -184,6 +191,7 @@ fn parse_model(raw: OpenRouterModel) -> ModelMetadata {
         context_window,
         max_output,
         supports_thinking,
+        reasoning_format,
         supports_tools,
         supports_vision,
         input_price,
@@ -192,6 +200,36 @@ fn parse_model(raw: OpenRouterModel) -> ModelMetadata {
         is_free,
         api_format: super::models::ApiFormat::Anthropic, // OpenRouter uses Anthropic skin
     }
+}
+
+/// Determine the correct reasoning format based on model ID
+fn determine_reasoning_format(model_id: &str) -> ReasoningFormat {
+    let id_lower = model_id.to_lowercase();
+
+    // Anthropic Claude models use Anthropic format
+    if id_lower.starts_with("anthropic/") {
+        return ReasoningFormat::Anthropic;
+    }
+
+    // OpenAI o-series and GPT-5 models use OpenAI format
+    if id_lower.starts_with("openai/")
+        && (id_lower.contains("o1")
+            || id_lower.contains("o3")
+            || id_lower.contains("o4")
+            || id_lower.contains("gpt-5"))
+    {
+        return ReasoningFormat::OpenAI;
+    }
+
+    // DeepSeek R1 and reasoning models use DeepSeek format
+    if id_lower.starts_with("deepseek/")
+        && (id_lower.contains("-r1") || id_lower.contains("reasoner"))
+    {
+        return ReasoningFormat::DeepSeek;
+    }
+
+    // Default to Anthropic format for other models with reasoning support
+    ReasoningFormat::Anthropic
 }
 
 #[cfg(test)]

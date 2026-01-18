@@ -1288,14 +1288,20 @@ impl AnthropicClient {
         }
 
         // Add provider-specific parameters based on model
-        let provider_params = build_provider_params(&self.config.model, self.config.provider_id);
+        // Pass thinking status to enable/disable chat_template_args for GLM/Kimi models
+        let thinking_enabled = options.reasoning_format.is_some() || options.thinking.is_some();
+        let provider_params =
+            build_provider_params(&self.config.model, self.config.provider_id, thinking_enabled);
 
-        if let Some(temp) = provider_params.temperature {
-            body["temperature"] = Value::Number(serde_json::Number::from(temp as i32));
-            debug!(
-                "Setting temperature: {} for model {}",
-                temp, self.config.model
-            );
+        // Temperature incompatible with reasoning - skip provider temperature if thinking enabled
+        if !thinking_enabled {
+            if let Some(temp) = provider_params.temperature {
+                body["temperature"] = Value::Number(serde_json::Number::from(temp as i32));
+                debug!(
+                    "Setting temperature: {} for model {}",
+                    temp, self.config.model
+                );
+            }
         }
 
         if let Some(top_p) = provider_params.top_p {

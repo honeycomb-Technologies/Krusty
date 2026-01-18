@@ -124,12 +124,11 @@ pub fn supports_reasoning_effort(model_id: &str) -> bool {
 
 /// Get chat template args for thinking models
 ///
-/// For GLM/Kimi models, delegates to glm module with reasoning mode (default: ON)
-pub fn chat_template_args_for_model(model_id: &str) -> Option<Value> {
+/// For GLM/Kimi models, delegates to glm module with the user's reasoning preference
+pub fn chat_template_args_for_model(model_id: &str, thinking_enabled: bool) -> Option<Value> {
     // GLM/Kimi models: use glm module for thinking-specific handling
     if glm::is_openai_compatible_model(model_id) {
-        // Default: enable thinking (like OpenCode)
-        return glm::get_chat_template_args(model_id, glm::ReasoningMode::On);
+        return glm::get_chat_template_args(model_id, glm::ReasoningMode::from(thinking_enabled));
     }
 
     None
@@ -139,7 +138,11 @@ pub fn chat_template_args_for_model(model_id: &str) -> Option<Value> {
 ///
 /// Note: For OpenCode Zen, we skip model-specific params since Zen handles
 /// translation internally. Adding params like chat_template_args breaks requests.
-pub fn build_provider_params(model_id: &str, provider_id: ProviderId) -> ProviderSpecificParams {
+pub fn build_provider_params(
+    model_id: &str,
+    provider_id: ProviderId,
+    thinking_enabled: bool,
+) -> ProviderSpecificParams {
     // OpenCode Zen handles model-specific params internally - don't add them
     // Adding chat_template_args etc. breaks requests to Zen's routing layer
     if provider_id == ProviderId::OpenCodeZen {
@@ -150,7 +153,7 @@ pub fn build_provider_params(model_id: &str, provider_id: ProviderId) -> Provide
         temperature: temperature_for_model(model_id),
         top_p: top_p_for_model(model_id),
         top_k: top_k_for_model(model_id),
-        chat_template_args: chat_template_args_for_model(model_id),
+        chat_template_args: chat_template_args_for_model(model_id, thinking_enabled),
     }
 }
 
@@ -364,23 +367,31 @@ mod tests {
 
     #[test]
     fn test_chat_template_args_for_model() {
-        // GLM-4.6: returns chat_template_args (always ON)
-        let args = chat_template_args_for_model("glm-4.6");
+        // GLM-4.6 with thinking enabled: returns chat_template_args
+        let args = chat_template_args_for_model("glm-4.6", true);
         assert!(args.is_some());
         let binding = args.unwrap();
         let obj = binding.as_object().unwrap();
         assert_eq!(obj.get("enableThinking").unwrap().as_bool(), Some(true));
 
-        // Kimi K2 thinking: returns chat_template_args
-        let args = chat_template_args_for_model("kimi-k2-thinking");
+        // GLM-4.6 with thinking disabled: returns None
+        let args = chat_template_args_for_model("glm-4.6", false);
+        assert!(args.is_none());
+
+        // Kimi K2 thinking with thinking enabled: returns chat_template_args
+        let args = chat_template_args_for_model("kimi-k2-thinking", true);
         assert!(args.is_some());
 
-        // MiniMax M2: doesn't use chat_template_args
-        let args = chat_template_args_for_model("minimax-m2.1");
+        // Kimi K2 with thinking disabled: returns None
+        let args = chat_template_args_for_model("kimi-k2-thinking", false);
+        assert!(args.is_none());
+
+        // MiniMax M2: doesn't use chat_template_args (even with thinking enabled)
+        let args = chat_template_args_for_model("minimax-m2.1", true);
         assert!(args.is_none());
 
         // Non-OpenAI-compatible model
-        let args = chat_template_args_for_model("claude-sonnet-4");
+        let args = chat_template_args_for_model("claude-sonnet-4", true);
         assert!(args.is_none());
     }
 }
