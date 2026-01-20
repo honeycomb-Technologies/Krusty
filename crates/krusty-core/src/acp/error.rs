@@ -53,6 +53,14 @@ pub enum AcpError {
     #[error("ai error: {0}")]
     AiError(String),
 
+    /// AI client error (alias for backwards compatibility)
+    #[error("ai client error: {0}")]
+    AiClientError(String),
+
+    /// Not authenticated (need to call authenticate first)
+    #[error("not authenticated: {0}")]
+    NotAuthenticated(String),
+
     /// Capability not supported
     #[error("capability not supported: {0}")]
     CapabilityNotSupported(String),
@@ -66,6 +74,7 @@ impl AcpError {
             AcpError::SessionExists(_) => -32001,
             AcpError::AuthenticationRequired => -32000,
             AcpError::AuthenticationFailed(_) => -32000,
+            AcpError::NotAuthenticated(_) => -32000,
             AcpError::InvalidRequest(_) => -32600,
             AcpError::ProtocolError(_) => -32600,
             AcpError::InternalError(_) => -32603,
@@ -74,6 +83,7 @@ impl AcpError {
             AcpError::Cancelled => -32001,
             AcpError::ToolError(_) => -32603,
             AcpError::AiError(_) => -32603,
+            AcpError::AiClientError(_) => -32603,
             AcpError::CapabilityNotSupported(_) => -32601,
         }
     }

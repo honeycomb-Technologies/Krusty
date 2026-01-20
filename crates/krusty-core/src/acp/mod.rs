@@ -31,6 +31,7 @@
 
 mod agent;
 mod error;
+mod processor;
 mod server;
 mod session;
 mod tools;

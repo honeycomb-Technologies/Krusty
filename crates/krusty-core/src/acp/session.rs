@@ -101,6 +101,55 @@ impl SessionState {
     pub async fn clear_messages(&self) {
         self.messages.write().await.clear();
     }
+
+    /// Get conversation history (alias for get_messages)
+    pub async fn history(&self) -> Vec<ModelMessage> {
+        self.get_messages().await
+    }
+
+    /// Add a user message to the conversation
+    pub async fn add_user_message(&self, text: String) {
+        use crate::ai::types::{Content, Role};
+        self.add_message(ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text { text }],
+        })
+        .await;
+    }
+
+    /// Add an assistant message to the conversation
+    pub async fn add_assistant_message(&self, text: String) {
+        use crate::ai::types::{Content, Role};
+        self.add_message(ModelMessage {
+            role: Role::Assistant,
+            content: vec![Content::Text { text }],
+        })
+        .await;
+    }
+
+    /// Add a tool call to the conversation history
+    pub async fn add_tool_call(&self, id: String, name: String, input: serde_json::Value) {
+        use crate::ai::types::{Content, Role};
+        self.add_message(ModelMessage {
+            role: Role::Assistant,
+            content: vec![Content::ToolUse { id, name, input }],
+        })
+        .await;
+    }
+
+    /// Add a tool result to the conversation history
+    pub async fn add_tool_result(&self, tool_use_id: &str, output: String, is_error: bool) {
+        use crate::ai::types::{Content, Role};
+        self.add_message(ModelMessage {
+            role: Role::Tool,
+            content: vec![Content::ToolResult {
+                tool_use_id: tool_use_id.to_string(),
+                output: serde_json::Value::String(output),
+                is_error: if is_error { Some(true) } else { None },
+            }],
+        })
+        .await;
+    }
 }
 
 /// Manager for all ACP sessions
