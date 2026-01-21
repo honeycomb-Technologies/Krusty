@@ -85,6 +85,7 @@ impl ThemeRegistry {
     }
 
     /// Get the number of registered themes
+    #[allow(dead_code)]
     pub fn count(&self) -> usize {
         self.themes.len()
     }

@@ -255,7 +255,7 @@ pub struct App {
 
 impl App {
     /// Create new app, optionally with CLI theme override
-    pub async fn new(cli_theme: Option<&str>) -> Self {
+    pub async fn new() -> Self {
         let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let lsp_manager = Arc::new(LspManager::new(working_dir.clone()));
 
@@ -298,8 +298,8 @@ impl App {
         register_all_tools(&tool_registry, Some(lsp_manager.clone())).await;
         let cached_ai_tools = tool_registry.get_ai_tools().await;
 
-        // Initialize preferences (load theme)
-        let (preferences, saved_theme) = match Database::new(&db_path) {
+        // Initialize preferences and load saved theme
+        let (preferences, theme_name) = match Database::new(&db_path) {
             Ok(db) => {
                 let prefs = Preferences::new(db);
                 let theme = prefs.get_theme();
@@ -311,8 +311,6 @@ impl App {
             }
         };
 
-        // CLI theme overrides saved preference (if not default)
-        let theme_name = cli_theme.unwrap_or(&saved_theme).to_string();
         let theme = THEME_REGISTRY.get_or_default(&theme_name);
 
         // Initialize session manager (separate connection)

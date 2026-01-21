@@ -16,4 +16,3 @@ pub mod utils;
 
 // Re-exports
 pub use app::App;
-pub use themes::THEME_REGISTRY;
