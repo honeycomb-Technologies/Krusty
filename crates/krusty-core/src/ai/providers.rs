@@ -26,8 +26,8 @@ impl ProviderId {
     pub fn all() -> &'static [ProviderId] {
         &[
             ProviderId::Anthropic,   // Default provider, always first
-            ProviderId::MiniMax,     // 1 model
-            ProviderId::Kimi,        // 1 model
+            ProviderId::MiniMax,     // 3 models
+            ProviderId::Kimi,        // 2 models
             ProviderId::ZAi,         // 2 models
             ProviderId::OpenCodeZen, // 11 models
             ProviderId::OpenRouter,  // 100+ dynamic models, always last
@@ -493,14 +493,18 @@ static BUILTIN_PROVIDERS: LazyLock<Vec<ProviderConfig>> = LazyLock::new(|| {
             dynamic_models: false,
             pricing_hint: None,
         },
-        // Kimi/Moonshot - K2 model (Anthropic-compatible API)
+        // Kimi/Moonshot - K2 models (Anthropic-compatible API)
         ProviderConfig {
             id: ProviderId::Kimi,
             name: "Kimi".to_string(),
-            description: "K2 model (256K context)".to_string(),
-            base_url: "https://api.moonshot.cn/anthropic/v1/messages".to_string(),
-            auth_header: AuthHeader::XApiKey,
-            models: vec![ModelInfo::new("kimi-k2", "Kimi K2", 256_000, 16_384)],
+            description: "K2 models (256K context, agentic)".to_string(),
+            base_url: "https://api.moonshot.ai/anthropic/v1/messages".to_string(),
+            auth_header: AuthHeader::XApiKey, // Anthropic-compatible endpoint uses x-api-key
+            models: vec![
+                ModelInfo::new("kimi-k2", "Kimi K2", 256_000, 16_384),
+                ModelInfo::new("kimi-k2-thinking", "Kimi K2 Thinking", 256_000, 16_384)
+                    .with_anthropic_thinking(),
+            ],
             supports_tools: true,
             dynamic_models: false,
             pricing_hint: None,

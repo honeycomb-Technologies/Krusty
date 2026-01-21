@@ -1001,12 +1001,17 @@ impl App {
         let provider = get_provider(self.active_provider)
             .unwrap_or_else(|| get_provider(ProviderId::Anthropic).unwrap());
 
-        // Get API format from model metadata (for OpenCode Zen multi-format routing)
-        let api_format = self
-            .model_registry
-            .try_get_model(&self.current_model)
-            .map(|m| m.api_format)
-            .unwrap_or(ApiFormat::Anthropic);
+        // Determine API format based on provider
+        // Only OpenCode Zen needs model-specific format routing (Anthropic/OpenAI/Google)
+        // All other providers use Anthropic-compatible format
+        let api_format = if self.active_provider == ProviderId::OpenCodeZen {
+            self.model_registry
+                .try_get_model(&self.current_model)
+                .map(|m| m.api_format)
+                .unwrap_or(ApiFormat::Anthropic)
+        } else {
+            ApiFormat::Anthropic
+        };
 
         crate::ai::client::AiClientConfig {
             model: self.current_model.clone(),

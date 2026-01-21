@@ -22,6 +22,8 @@ use super::bridge::NotificationBridge;
 use super::error::AcpError;
 use super::processor::PromptProcessor;
 use super::session::{SessionManager, SessionState};
+use crate::ai::opencodezen;
+use crate::ai::openrouter;
 use crate::ai::providers::{get_provider, ProviderId};
 use crate::storage::credentials::CredentialStore;
 use crate::tools::ToolRegistry;
@@ -54,7 +56,8 @@ pub struct KrustyAgent {
     /// Current model configuration (provider + model)
     current_model: RwLock<Option<ModelConfig>>,
     /// Available model configurations from all providers
-    available_models: RwLock<Vec<(String, ProviderId, String, String)>>, // (model_id, provider, actual_model_id, api_key)
+    /// (model_id, provider, actual_model_id, api_key, display_name)
+    available_models: RwLock<Vec<(String, ProviderId, String, String, String)>>,
     /// Working directory (reserved for future use)
     #[allow(dead_code)]
     cwd: PathBuf,
@@ -95,7 +98,8 @@ impl KrustyAgent {
     }
 
     /// Detect all available models from configured providers
-    pub async fn detect_available_models(&self) -> Vec<(String, ProviderId, String, String)> {
+    /// Returns: Vec<(model_id, provider, actual_model_id, api_key, display_name)>
+    pub async fn detect_available_models(&self) -> Vec<(String, ProviderId, String, String, String)> {
         let mut models = Vec::new();
 
         // Load credential store
@@ -119,18 +123,79 @@ impl KrustyAgent {
             }
 
             if let Some(api_key) = store.get(&provider) {
-                // Get provider config for models
-                if let Some(provider_config) = get_provider(provider) {
-                    // Add each model from this provider
-                    for model_info in &provider_config.models {
-                        let model_id = format!("{}:{}", provider.storage_key(), model_info.id);
-                        models.push((
-                            model_id,
-                            provider,
-                            model_info.id.clone(),
-                            api_key.clone(),
-                        ));
-                        debug!("Added model: {} from {:?}", model_info.display_name, provider);
+                match provider {
+                    // Dynamic providers - fetch models from API
+                    ProviderId::OpenRouter => {
+                        info!("Fetching models from OpenRouter...");
+                        match openrouter::fetch_models(&api_key).await {
+                            Ok(fetched) => {
+                                for model in fetched {
+                                    let model_id = format!("{}:{}", provider.storage_key(), model.id);
+                                    models.push((
+                                        model_id,
+                                        provider,
+                                        model.id.clone(),
+                                        api_key.clone(),
+                                        model.display_name.clone(),
+                                    ));
+                                }
+                                info!("Added {} models from OpenRouter", models.iter().filter(|(_, p, _, _, _)| *p == ProviderId::OpenRouter).count());
+                            }
+                            Err(e) => {
+                                warn!("Failed to fetch OpenRouter models: {}", e);
+                                // Fallback to static models if available
+                                if let Some(provider_config) = get_provider(provider) {
+                                    for model_info in &provider_config.models {
+                                        let model_id = format!("{}:{}", provider.storage_key(), model_info.id);
+                                        models.push((model_id, provider, model_info.id.clone(), api_key.clone(), model_info.display_name.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ProviderId::OpenCodeZen => {
+                        info!("Fetching models from OpenCode Zen...");
+                        match opencodezen::fetch_models(&api_key).await {
+                            Ok(fetched) => {
+                                for model in fetched {
+                                    let model_id = format!("{}:{}", provider.storage_key(), model.id);
+                                    models.push((
+                                        model_id,
+                                        provider,
+                                        model.id.clone(),
+                                        api_key.clone(),
+                                        model.display_name.clone(),
+                                    ));
+                                }
+                                info!("Added {} models from OpenCode Zen", models.iter().filter(|(_, p, _, _, _)| *p == ProviderId::OpenCodeZen).count());
+                            }
+                            Err(e) => {
+                                warn!("Failed to fetch OpenCode Zen models: {}", e);
+                                // Fallback to static models
+                                if let Some(provider_config) = get_provider(provider) {
+                                    for model_info in &provider_config.models {
+                                        let model_id = format!("{}:{}", provider.storage_key(), model_info.id);
+                                        models.push((model_id, provider, model_info.id.clone(), api_key.clone(), model_info.display_name.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Static providers - use hardcoded models
+                    _ => {
+                        if let Some(provider_config) = get_provider(provider) {
+                            for model_info in &provider_config.models {
+                                let model_id = format!("{}:{}", provider.storage_key(), model_info.id);
+                                models.push((
+                                    model_id,
+                                    provider,
+                                    model_info.id.clone(),
+                                    api_key.clone(),
+                                    model_info.display_name.clone(),
+                                ));
+                                debug!("Added model: {} from {:?}", model_info.display_name, provider);
+                            }
+                        }
                     }
                 }
             }
@@ -147,10 +212,10 @@ impl KrustyAgent {
         // Find the model in available models
         let model_config = available
             .iter()
-            .find(|(id, _, _, _)| id == model_id)
+            .find(|(id, _, _, _, _)| id == model_id)
             .ok_or_else(|| AcpError::ProtocolError(format!("Model not found: {}", model_id)))?;
 
-        let (_, provider, actual_model_id, api_key) = model_config.clone();
+        let (_, provider, actual_model_id, api_key, _display_name) = model_config.clone();
 
         info!("Switching to model: {} (provider: {:?})", actual_model_id, provider);
 
@@ -328,24 +393,18 @@ impl Agent for KrustyAgent {
 
         // Set up available models if any are detected
         if !detected_models.is_empty() {
-            // Store models for later use
+            // Store models for later use (for set_model lookups)
             {
                 let mut available = self.available_models.write().await;
-                *available = detected_models.iter().map(|(id, p, m, k)| (id.clone(), *p, m.clone(), k.clone())).collect();
+                *available = detected_models.clone();
             }
 
             // Convert to ACP ModelInfo format with provider categories
             // Group by provider for better UI organization
             let model_infos: Vec<AcpModelInfo> = detected_models
                 .iter()
-                .map(|(model_id, provider, actual_model, _)| {
-                    // Get display name from provider config if available
-                    let display_name = get_provider(*provider)
-                        .and_then(|pc| pc.models.iter().find(|m| m.id == *actual_model))
-                        .map(|m| m.display_name.clone())
-                        .unwrap_or_else(|| actual_model.clone());
-
-                    // Format: [Provider] Model Name
+                .map(|(model_id, provider, _actual_model, _api_key, display_name)| {
+                    // Format: [Provider] Display Name
                     let name = format!("[{}] {}", provider, display_name);
                     AcpModelInfo::new(ModelId::new(model_id.clone()), name)
                 })
@@ -355,7 +414,7 @@ impl Agent for KrustyAgent {
             let current_model_id = detected_models[0].0.clone();
 
             // Initialize the processor with the first model
-            let (_, provider, actual_model, api_key) = &detected_models[0];
+            let (_, provider, actual_model, api_key, _) = &detected_models[0];
             self.processor.write().await.init_ai_client(
                 api_key.clone(),
                 *provider,
