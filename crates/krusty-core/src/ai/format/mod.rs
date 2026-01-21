@@ -24,7 +24,11 @@ pub trait FormatHandler: Send + Sync {
     /// The provider_id parameter allows provider-specific handling:
     /// - MiniMax: Preserve ALL thinking blocks (per their docs)
     /// - Anthropic: Only preserve last thinking with pending tools (signature validation)
-    fn convert_messages(&self, messages: &[ModelMessage], provider_id: Option<ProviderId>) -> Vec<Value>;
+    fn convert_messages(
+        &self,
+        messages: &[ModelMessage],
+        provider_id: Option<ProviderId>,
+    ) -> Vec<Value>;
 
     /// Convert tools to API-specific format
     fn convert_tools(&self, tools: &[AiTool]) -> Vec<Value>;
@@ -65,9 +69,7 @@ impl<'a> Default for RequestOptions<'a> {
 }
 
 /// Select the appropriate format handler based on API format
-pub fn get_format_handler(
-    format: crate::ai::models::ApiFormat,
-) -> Box<dyn FormatHandler> {
+pub fn get_format_handler(format: crate::ai::models::ApiFormat) -> Box<dyn FormatHandler> {
     use crate::ai::models::ApiFormat;
     match format {
         ApiFormat::Anthropic => Box::new(anthropic::AnthropicFormat::new()),

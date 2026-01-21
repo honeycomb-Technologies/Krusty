@@ -126,7 +126,9 @@ impl AuthPopup {
     /// Mark API key as successfully saved
     pub fn set_api_key_complete(&mut self) {
         if let AuthState::ApiKeyInput { provider, .. } = &self.state {
-            self.state = AuthState::Complete { provider: *provider };
+            self.state = AuthState::Complete {
+                provider: *provider,
+            };
         }
     }
 

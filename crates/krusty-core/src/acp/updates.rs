@@ -106,10 +106,7 @@ mod tests {
 
     #[test]
     fn test_plan_conversion() {
-        let items = vec![
-            ("Task 1".to_string(), true),
-            ("Task 2".to_string(), false),
-        ];
+        let items = vec![("Task 1".to_string(), true), ("Task 2".to_string(), false)];
 
         let entries = plan_items_to_entries(&items);
 

@@ -72,7 +72,10 @@ pub async fn check_for_updates() -> Result<Option<UpdateInfo>> {
 
 /// Check for updates via GitHub releases API
 async fn check_for_updates_release() -> Result<Option<UpdateInfo>> {
-    let url = format!("https://api.github.com/repos/{}/releases/latest", GITHUB_REPO);
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        GITHUB_REPO
+    );
     debug!("Fetching: {}", url);
 
     let client = reqwest::Client::builder()
@@ -458,7 +461,12 @@ fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<()> {
 
     // Extract archive to temp directory
     let output = Command::new("tar")
-        .args(["xzf", archive.to_str().unwrap(), "-C", extract_dir.to_str().unwrap()])
+        .args([
+            "xzf",
+            archive.to_str().unwrap(),
+            "-C",
+            extract_dir.to_str().unwrap(),
+        ])
         .output()?;
 
     if !output.status.success() {
@@ -473,7 +481,10 @@ fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<()> {
         let entries: Vec<_> = std::fs::read_dir(&extract_dir)?
             .filter_map(|e| e.ok())
             .collect();
-        debug!("Extracted contents: {:?}", entries.iter().map(|e| e.path()).collect::<Vec<_>>());
+        debug!(
+            "Extracted contents: {:?}",
+            entries.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
         return Err(anyhow!("Binary 'krusty' not found in archive"));
     }
 

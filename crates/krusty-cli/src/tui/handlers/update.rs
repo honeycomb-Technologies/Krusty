@@ -103,10 +103,7 @@ impl App {
                 }
                 UpdateStatus::Available(info) => {
                     // Only show if not already showing a toast for this
-                    self.show_toast(Toast::info(format!(
-                        "Downloading v{}...",
-                        info.new_version
-                    )));
+                    self.show_toast(Toast::info(format!("Downloading v{}...", info.new_version)));
                 }
                 UpdateStatus::Downloading { progress: _ } => {
                     // Silent - don't spam user with progress

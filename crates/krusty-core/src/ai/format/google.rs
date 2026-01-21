@@ -30,7 +30,11 @@ impl Default for GoogleFormat {
 impl FormatHandler for GoogleFormat {
     /// Convert messages to Google contents format
     /// Note: provider_id is unused for Google format (no thinking block handling needed)
-    fn convert_messages(&self, messages: &[ModelMessage], _provider_id: Option<ProviderId>) -> Vec<Value> {
+    fn convert_messages(
+        &self,
+        messages: &[ModelMessage],
+        _provider_id: Option<ProviderId>,
+    ) -> Vec<Value> {
         messages
             .iter()
             .filter(|m| m.role != Role::System) // System handled separately

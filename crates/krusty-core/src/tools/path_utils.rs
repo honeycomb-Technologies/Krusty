@@ -17,9 +17,9 @@ pub fn validate_path(
         working_dir.join(path)
     };
 
-    let canonical = resolved.canonicalize().map_err(|e| {
-        ToolResult::error(format!("Cannot resolve path '{}': {}", path, e))
-    })?;
+    let canonical = resolved
+        .canonicalize()
+        .map_err(|e| ToolResult::error(format!("Cannot resolve path '{}': {}", path, e)))?;
 
     if let Some(sandbox) = sandbox_root {
         if !canonical.starts_with(sandbox) {

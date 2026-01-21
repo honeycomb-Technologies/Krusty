@@ -304,7 +304,12 @@ pub async fn generate_summary(
             provider
         );
         client
-            .call_simple(model, SUMMARIZATION_SYSTEM_PROMPT, &prompt, SUMMARIZATION_MAX_TOKENS)
+            .call_simple(
+                model,
+                SUMMARIZATION_SYSTEM_PROMPT,
+                &prompt,
+                SUMMARIZATION_MAX_TOKENS,
+            )
             .await?
     };
 

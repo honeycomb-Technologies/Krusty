@@ -8,7 +8,9 @@ use std::time::Instant;
 use tracing::{error, info};
 
 use super::core::AiClient;
-use crate::ai::format::response::{extract_text_from_content, normalize_google_response, normalize_openai_response};
+use crate::ai::format::response::{
+    extract_text_from_content, normalize_google_response, normalize_openai_response,
+};
 
 impl AiClient {
     /// Call the API with tools (non-streaming, for sub-agents)
@@ -135,7 +137,8 @@ impl AiClient {
                                 }
                                 Some("tool_use") => {
                                     let id = item.get("id").and_then(|i| i.as_str()).unwrap_or("");
-                                    let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                                    let name =
+                                        item.get("name").and_then(|n| n.as_str()).unwrap_or("");
                                     let input = item.get("input").cloned().unwrap_or(Value::Null);
                                     tool_calls.push(serde_json::json!({
                                         "id": id,
@@ -177,10 +180,7 @@ impl AiClient {
                                 .get("tool_use_id")
                                 .and_then(|i| i.as_str())
                                 .unwrap_or("");
-                            let output = item
-                                .get("content")
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("");
+                            let output = item.get("content").and_then(|c| c.as_str()).unwrap_or("");
                             openai_messages.push(serde_json::json!({
                                 "role": "tool",
                                 "tool_call_id": tool_use_id,
@@ -310,10 +310,7 @@ impl AiClient {
                                 .get("tool_use_id")
                                 .and_then(|i| i.as_str())
                                 .unwrap_or("");
-                            let output = item
-                                .get("content")
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("");
+                            let output = item.get("content").and_then(|c| c.as_str()).unwrap_or("");
                             parts.push(serde_json::json!({
                                 "functionResponse": {
                                     "name": tool_use_id,

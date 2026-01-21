@@ -561,17 +561,26 @@ mod tests {
 
     #[test]
     fn test_parse_finish_reason_end_turn() {
-        assert!(matches!(parse_finish_reason("end_turn"), FinishReason::Stop));
+        assert!(matches!(
+            parse_finish_reason("end_turn"),
+            FinishReason::Stop
+        ));
     }
 
     #[test]
     fn test_parse_finish_reason_max_tokens() {
-        assert!(matches!(parse_finish_reason("max_tokens"), FinishReason::Length));
+        assert!(matches!(
+            parse_finish_reason("max_tokens"),
+            FinishReason::Length
+        ));
     }
 
     #[test]
     fn test_parse_finish_reason_tool_use() {
-        assert!(matches!(parse_finish_reason("tool_use"), FinishReason::ToolCalls));
+        assert!(matches!(
+            parse_finish_reason("tool_use"),
+            FinishReason::ToolCalls
+        ));
     }
 
     #[test]
@@ -749,9 +758,17 @@ mod tests {
             }
         }
 
-        processor.process_sse_data("[DONE]", &MockParser).await.unwrap();
+        processor
+            .process_sse_data("[DONE]", &MockParser)
+            .await
+            .unwrap();
         let part = rx.recv().await.unwrap();
-        assert!(matches!(part, StreamPart::Finish { reason: FinishReason::Stop }));
+        assert!(matches!(
+            part,
+            StreamPart::Finish {
+                reason: FinishReason::Stop
+            }
+        ));
     }
 
     #[tokio::test]
@@ -771,7 +788,10 @@ mod tests {
             }
         }
 
-        processor.process_sse_data("{}", &TextDeltaParser).await.unwrap();
+        processor
+            .process_sse_data("{}", &TextDeltaParser)
+            .await
+            .unwrap();
         let text = buffer_rx.recv().await.unwrap();
         assert!(!text.is_empty());
         processor.finish().await;
@@ -796,7 +816,10 @@ mod tests {
             }
         }
 
-        processor.process_sse_data("{}", &ToolStartParser).await.unwrap();
+        processor
+            .process_sse_data("{}", &ToolStartParser)
+            .await
+            .unwrap();
         let part = rx.recv().await.unwrap();
         match part {
             StreamPart::ToolCallStart { id, name } => {
@@ -822,7 +845,10 @@ mod tests {
         }
 
         processor.process_sse_data("", &SkipParser).await.unwrap();
-        processor.process_sse_data("   ", &SkipParser).await.unwrap();
+        processor
+            .process_sse_data("   ", &SkipParser)
+            .await
+            .unwrap();
         assert!(rx.try_recv().is_err());
     }
 
@@ -840,7 +866,10 @@ mod tests {
             }
         }
 
-        processor.process_sse_data("{}", &ThinkingStartParser).await.unwrap();
+        processor
+            .process_sse_data("{}", &ThinkingStartParser)
+            .await
+            .unwrap();
         let part = rx.recv().await.unwrap();
         assert!(matches!(part, StreamPart::ThinkingStart { index: 0 }));
     }

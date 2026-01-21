@@ -11,9 +11,9 @@ use agent_client_protocol::{
     ExtResponse, Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest,
     LoadSessionResponse, McpCapabilities, ModelId, ModelInfo as AcpModelInfo, NewSessionRequest,
     NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse, Result as AcpResult,
-    SessionCapabilities, SessionId, SessionMode, SessionModeState,
-    SessionModelState, SessionNotification, SetSessionModeRequest, SetSessionModeResponse,
-    SetSessionModelRequest, SetSessionModelResponse,
+    SessionCapabilities, SessionId, SessionMode, SessionModeState, SessionModelState,
+    SessionNotification, SetSessionModeRequest, SetSessionModeResponse, SetSessionModelRequest,
+    SetSessionModelResponse,
 };
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
@@ -99,7 +99,9 @@ impl KrustyAgent {
 
     /// Detect all available models from configured providers
     /// Returns: Vec<(model_id, provider, actual_model_id, api_key, display_name)>
-    pub async fn detect_available_models(&self) -> Vec<(String, ProviderId, String, String, String)> {
+    pub async fn detect_available_models(
+        &self,
+    ) -> Vec<(String, ProviderId, String, String, String)> {
         let mut models = Vec::new();
 
         // Load credential store
@@ -112,7 +114,8 @@ impl KrustyAgent {
         };
 
         // Get configured providers as a set for quick lookup
-        let configured: std::collections::HashSet<_> = store.configured_providers().into_iter().collect();
+        let configured: std::collections::HashSet<_> =
+            store.configured_providers().into_iter().collect();
         info!("Found {} configured providers", configured.len());
 
         // Iterate in the canonical order: Anthropic first, OpenRouter last
@@ -130,7 +133,8 @@ impl KrustyAgent {
                         match openrouter::fetch_models(&api_key).await {
                             Ok(fetched) => {
                                 for model in fetched {
-                                    let model_id = format!("{}:{}", provider.storage_key(), model.id);
+                                    let model_id =
+                                        format!("{}:{}", provider.storage_key(), model.id);
                                     models.push((
                                         model_id,
                                         provider,
@@ -139,15 +143,28 @@ impl KrustyAgent {
                                         model.display_name.clone(),
                                     ));
                                 }
-                                info!("Added {} models from OpenRouter", models.iter().filter(|(_, p, _, _, _)| *p == ProviderId::OpenRouter).count());
+                                info!(
+                                    "Added {} models from OpenRouter",
+                                    models
+                                        .iter()
+                                        .filter(|(_, p, _, _, _)| *p == ProviderId::OpenRouter)
+                                        .count()
+                                );
                             }
                             Err(e) => {
                                 warn!("Failed to fetch OpenRouter models: {}", e);
                                 // Fallback to static models if available
                                 if let Some(provider_config) = get_provider(provider) {
                                     for model_info in &provider_config.models {
-                                        let model_id = format!("{}:{}", provider.storage_key(), model_info.id);
-                                        models.push((model_id, provider, model_info.id.clone(), api_key.clone(), model_info.display_name.clone()));
+                                        let model_id =
+                                            format!("{}:{}", provider.storage_key(), model_info.id);
+                                        models.push((
+                                            model_id,
+                                            provider,
+                                            model_info.id.clone(),
+                                            api_key.clone(),
+                                            model_info.display_name.clone(),
+                                        ));
                                     }
                                 }
                             }
@@ -158,7 +175,8 @@ impl KrustyAgent {
                         match opencodezen::fetch_models(&api_key).await {
                             Ok(fetched) => {
                                 for model in fetched {
-                                    let model_id = format!("{}:{}", provider.storage_key(), model.id);
+                                    let model_id =
+                                        format!("{}:{}", provider.storage_key(), model.id);
                                     models.push((
                                         model_id,
                                         provider,
@@ -167,15 +185,28 @@ impl KrustyAgent {
                                         model.display_name.clone(),
                                     ));
                                 }
-                                info!("Added {} models from OpenCode Zen", models.iter().filter(|(_, p, _, _, _)| *p == ProviderId::OpenCodeZen).count());
+                                info!(
+                                    "Added {} models from OpenCode Zen",
+                                    models
+                                        .iter()
+                                        .filter(|(_, p, _, _, _)| *p == ProviderId::OpenCodeZen)
+                                        .count()
+                                );
                             }
                             Err(e) => {
                                 warn!("Failed to fetch OpenCode Zen models: {}", e);
                                 // Fallback to static models
                                 if let Some(provider_config) = get_provider(provider) {
                                     for model_info in &provider_config.models {
-                                        let model_id = format!("{}:{}", provider.storage_key(), model_info.id);
-                                        models.push((model_id, provider, model_info.id.clone(), api_key.clone(), model_info.display_name.clone()));
+                                        let model_id =
+                                            format!("{}:{}", provider.storage_key(), model_info.id);
+                                        models.push((
+                                            model_id,
+                                            provider,
+                                            model_info.id.clone(),
+                                            api_key.clone(),
+                                            model_info.display_name.clone(),
+                                        ));
                                     }
                                 }
                             }
@@ -185,7 +216,8 @@ impl KrustyAgent {
                     _ => {
                         if let Some(provider_config) = get_provider(provider) {
                             for model_info in &provider_config.models {
-                                let model_id = format!("{}:{}", provider.storage_key(), model_info.id);
+                                let model_id =
+                                    format!("{}:{}", provider.storage_key(), model_info.id);
                                 models.push((
                                     model_id,
                                     provider,
@@ -193,7 +225,10 @@ impl KrustyAgent {
                                     api_key.clone(),
                                     model_info.display_name.clone(),
                                 ));
-                                debug!("Added model: {} from {:?}", model_info.display_name, provider);
+                                debug!(
+                                    "Added model: {} from {:?}",
+                                    model_info.display_name, provider
+                                );
                             }
                         }
                     }
@@ -217,7 +252,10 @@ impl KrustyAgent {
 
         let (_, provider, actual_model_id, api_key, _display_name) = model_config.clone();
 
-        info!("Switching to model: {} (provider: {:?})", actual_model_id, provider);
+        info!(
+            "Switching to model: {} (provider: {:?})",
+            actual_model_id, provider
+        );
 
         // Update current model
         *self.current_model.write().await = Some(ModelConfig {
@@ -226,16 +264,21 @@ impl KrustyAgent {
         });
 
         // Reinitialize the processor with the new model
-        self.processor.write().await.init_ai_client(api_key, provider, Some(actual_model_id));
+        self.processor
+            .write()
+            .await
+            .init_ai_client(api_key, provider, Some(actual_model_id));
 
         Ok(())
     }
 
     /// Get the current model ID
     pub async fn current_model_id(&self) -> Option<String> {
-        self.current_model.read().await.as_ref().map(|m| {
-            format!("{}:{}", m.provider.storage_key(), m.model_id)
-        })
+        self.current_model
+            .read()
+            .await
+            .as_ref()
+            .map(|m| format!("{}:{}", m.provider.storage_key(), m.model_id))
     }
 
     /// Set the notification channel sender
@@ -245,12 +288,23 @@ impl KrustyAgent {
 
     /// Initialize the AI client with an API key
     pub async fn init_ai_client(&self, api_key: String, provider: ProviderId) {
-        self.processor.write().await.init_ai_client(api_key, provider, None);
+        self.processor
+            .write()
+            .await
+            .init_ai_client(api_key, provider, None);
     }
 
     /// Initialize the AI client with an API key and optional model override
-    pub async fn init_ai_client_with_model(&self, api_key: String, provider: ProviderId, model: Option<String>) {
-        self.processor.write().await.init_ai_client(api_key, provider, model);
+    pub async fn init_ai_client_with_model(
+        &self,
+        api_key: String,
+        provider: ProviderId,
+        model: Option<String>,
+    ) {
+        self.processor
+            .write()
+            .await
+            .init_ai_client(api_key, provider, model);
     }
 
     /// Get agent capabilities to advertise
@@ -403,11 +457,13 @@ impl Agent for KrustyAgent {
             // Group by provider for better UI organization
             let model_infos: Vec<AcpModelInfo> = detected_models
                 .iter()
-                .map(|(model_id, provider, _actual_model, _api_key, display_name)| {
-                    // Format: [Provider] Display Name
-                    let name = format!("[{}] {}", provider, display_name);
-                    AcpModelInfo::new(ModelId::new(model_id.clone()), name)
-                })
+                .map(
+                    |(model_id, provider, _actual_model, _api_key, display_name)| {
+                        // Format: [Provider] Display Name
+                        let name = format!("[{}] {}", provider, display_name);
+                        AcpModelInfo::new(ModelId::new(model_id.clone()), name)
+                    },
+                )
                 .collect();
 
             // Set the first model as current
@@ -427,13 +483,13 @@ impl Agent for KrustyAgent {
                 model_id: actual_model.clone(),
             });
 
-            let model_state = SessionModelState::new(
-                ModelId::new(current_model_id),
-                model_infos,
-            );
+            let model_state = SessionModelState::new(ModelId::new(current_model_id), model_infos);
             response = response.models(model_state);
 
-            info!("Session created with {} available models", detected_models.len());
+            info!(
+                "Session created with {} available models",
+                detected_models.len()
+            );
         } else {
             warn!("No models detected - configure API keys to enable AI features");
         }
@@ -571,12 +627,10 @@ impl Agent for KrustyAgent {
 
         // Switch to the requested model
         let model_id_str = request.model_id.to_string();
-        self.set_model(&model_id_str)
-            .await
-            .map_err(|e| {
-                error!("Failed to set model: {}", e);
-                AcpSchemaError::invalid_params()
-            })?;
+        self.set_model(&model_id_str).await.map_err(|e| {
+            error!("Failed to set model: {}", e);
+            AcpSchemaError::invalid_params()
+        })?;
 
         info!("Model switched to: {}", model_id_str);
         Ok(SetSessionModelResponse::new())

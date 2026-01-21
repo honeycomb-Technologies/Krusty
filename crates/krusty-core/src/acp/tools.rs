@@ -149,8 +149,10 @@ pub async fn get_terminal_output_via_client<C: Client>(
 ) -> Result<(String, bool), AcpError> {
     debug!("Getting terminal output: {}", terminal_id);
 
-    let request =
-        TerminalOutputRequest::new(session_id.clone(), TerminalId::from(terminal_id.to_string()));
+    let request = TerminalOutputRequest::new(
+        session_id.clone(),
+        TerminalId::from(terminal_id.to_string()),
+    );
 
     let response = client
         .terminal_output(request)
@@ -170,8 +172,10 @@ pub async fn release_terminal_via_client<C: Client>(
 ) -> Result<(), AcpError> {
     debug!("Releasing terminal: {}", terminal_id);
 
-    let request =
-        ReleaseTerminalRequest::new(session_id.clone(), TerminalId::from(terminal_id.to_string()));
+    let request = ReleaseTerminalRequest::new(
+        session_id.clone(),
+        TerminalId::from(terminal_id.to_string()),
+    );
 
     client
         .release_terminal(request)

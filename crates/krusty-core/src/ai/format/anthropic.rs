@@ -40,7 +40,11 @@ impl FormatHandler for AnthropicFormat {
     /// THINKING BLOCKS: Provider-specific handling:
     /// - MiniMax: Preserve ALL thinking blocks (per their docs), no signature field needed
     /// - Anthropic: Only preserve last thinking with pending tools (signature validation)
-    fn convert_messages(&self, messages: &[ModelMessage], provider_id: Option<ProviderId>) -> Vec<Value> {
+    fn convert_messages(
+        &self,
+        messages: &[ModelMessage],
+        provider_id: Option<ProviderId>,
+    ) -> Vec<Value> {
         let mut result: Vec<Value> = Vec::new();
         let mut last_role: Option<&str> = None;
 
@@ -112,7 +116,8 @@ impl FormatHandler for AnthropicFormat {
             }
 
             // Determine if this message should include thinking blocks
-            let include_thinking = preserve_all_thinking || last_assistant_with_tools_idx == Some(i);
+            let include_thinking =
+                preserve_all_thinking || last_assistant_with_tools_idx == Some(i);
 
             let content: Vec<Value> = msg
                 .content
@@ -189,7 +194,11 @@ impl FormatHandler for AnthropicFormat {
 /// * `include_thinking` - Whether to include thinking blocks
 /// * `include_signature` - Whether to include signature field in thinking blocks
 ///   (Anthropic requires signature, MiniMax doesn't need it)
-fn convert_content(content: &Content, include_thinking: bool, include_signature: bool) -> Option<Value> {
+fn convert_content(
+    content: &Content,
+    include_thinking: bool,
+    include_signature: bool,
+) -> Option<Value> {
     match content {
         Content::Text { text } => Some(serde_json::json!({
             "type": "text",
@@ -264,7 +273,10 @@ fn convert_content(content: &Content, include_thinking: bool, include_signature:
         // Provider-specific thinking block handling:
         // - Anthropic: Include signature (required for validation)
         // - MiniMax: No signature field (matches their API format)
-        Content::Thinking { thinking, signature } => {
+        Content::Thinking {
+            thinking,
+            signature,
+        } => {
             if include_thinking {
                 if include_signature {
                     Some(serde_json::json!({

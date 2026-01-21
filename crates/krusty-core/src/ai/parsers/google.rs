@@ -100,7 +100,8 @@ impl SseParser for GoogleParser {
                                     // Store accumulator
                                     let mut accumulators = self.tool_accumulators.lock().unwrap();
                                     let index = accumulators.len();
-                                    let mut acc = ToolCallAccumulator::new(id.clone(), name.clone());
+                                    let mut acc =
+                                        ToolCallAccumulator::new(id.clone(), name.clone());
                                     acc.add_arguments(&args);
                                     accumulators.insert(index, acc);
 

@@ -37,7 +37,11 @@ impl FormatHandler for OpenAIFormat {
     ///
     /// OpenAI format is simpler: role + content (string or array of content parts)
     /// Note: provider_id is unused for OpenAI format (no thinking block handling needed)
-    fn convert_messages(&self, messages: &[ModelMessage], _provider_id: Option<ProviderId>) -> Vec<Value> {
+    fn convert_messages(
+        &self,
+        messages: &[ModelMessage],
+        _provider_id: Option<ProviderId>,
+    ) -> Vec<Value> {
         let mut result: Vec<Value> = Vec::new();
 
         for msg in messages.iter().filter(|m| m.role != Role::System) {

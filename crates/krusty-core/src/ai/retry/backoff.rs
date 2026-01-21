@@ -188,14 +188,8 @@ mod tests {
 
     #[test]
     fn test_parse_retry_after_seconds() {
-        assert_eq!(
-            parse_retry_after("120"),
-            Some(Duration::from_secs(120))
-        );
-        assert_eq!(
-            parse_retry_after("0"),
-            Some(Duration::from_secs(0))
-        );
+        assert_eq!(parse_retry_after("120"), Some(Duration::from_secs(120)));
+        assert_eq!(parse_retry_after("0"), Some(Duration::from_secs(0)));
     }
 
     #[test]

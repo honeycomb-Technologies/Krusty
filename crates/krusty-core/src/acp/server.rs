@@ -72,7 +72,9 @@ impl AcpServer {
                 config.provider,
                 config.model.as_deref().unwrap_or("default")
             );
-            self.agent.init_ai_client_with_model(config.api_key, config.provider, config.model).await;
+            self.agent
+                .init_ai_client_with_model(config.api_key, config.provider, config.model)
+                .await;
         } else {
             warn!(
                 "No API key found in environment. Set one of:\n\
@@ -108,12 +110,8 @@ impl AcpServer {
                 };
 
                 // Create connection with our agent
-                let (connection, io_task) = AgentSideConnection::new(
-                    self.agent,
-                    stdout,
-                    stdin,
-                    spawn_fn,
-                );
+                let (connection, io_task) =
+                    AgentSideConnection::new(self.agent, stdout, stdin, spawn_fn);
 
                 info!("ACP connection established, waiting for requests...");
 
@@ -192,7 +190,11 @@ fn detect_api_key_from_env() -> Option<AcpEnvConfig> {
                 .or_else(|| get_provider_api_key(provider));
 
             if let Some(api_key) = api_key {
-                return Some(AcpEnvConfig { api_key, provider, model });
+                return Some(AcpEnvConfig {
+                    api_key,
+                    provider,
+                    model,
+                });
             }
         }
     }
@@ -212,7 +214,11 @@ fn detect_api_key_from_env() -> Option<AcpEnvConfig> {
     for (provider, env_var) in providers_and_vars {
         if let Ok(key) = std::env::var(env_var) {
             if !key.is_empty() {
-                return Some(AcpEnvConfig { api_key: key, provider, model });
+                return Some(AcpEnvConfig {
+                    api_key: key,
+                    provider,
+                    model,
+                });
             }
         }
     }
@@ -241,7 +247,10 @@ fn detect_from_credential_store(model: Option<String>) -> Option<AcpEnvConfig> {
 
     // Try active provider first
     if let Some(api_key) = store.get(&active_provider) {
-        info!("Using active provider {:?} from credential store", active_provider);
+        info!(
+            "Using active provider {:?} from credential store",
+            active_provider
+        );
         return Some(AcpEnvConfig {
             api_key: api_key.clone(),
             provider: active_provider,
@@ -253,7 +262,10 @@ fn detect_from_credential_store(model: Option<String>) -> Option<AcpEnvConfig> {
     let configured = store.configured_providers();
     if let Some(provider) = configured.first() {
         if let Some(api_key) = store.get(provider) {
-            info!("Using first configured provider {:?} from credential store", provider);
+            info!(
+                "Using first configured provider {:?} from credential store",
+                provider
+            );
             return Some(AcpEnvConfig {
                 api_key: api_key.clone(),
                 provider: *provider,

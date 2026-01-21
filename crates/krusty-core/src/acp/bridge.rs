@@ -5,8 +5,9 @@
 //! to the connection.
 
 use agent_client_protocol::{
-    Client, Error as AcpError, PermissionOptionId, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, Result as AcpResult, SelectedPermissionOutcome, SessionNotification,
+    Client, Error as AcpError, PermissionOptionId, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, Result as AcpResult,
+    SelectedPermissionOutcome, SessionNotification,
 };
 use tokio::sync::mpsc;
 use tracing::warn;
@@ -66,7 +67,10 @@ impl Client for NotificationBridge {
 /// Returns (bridge, receiver) tuple:
 /// - bridge: implements Client, used by PromptProcessor
 /// - receiver: receives notifications to forward to real connection
-pub fn create_notification_channel() -> (NotificationBridge, mpsc::UnboundedReceiver<SessionNotification>) {
+pub fn create_notification_channel() -> (
+    NotificationBridge,
+    mpsc::UnboundedReceiver<SessionNotification>,
+) {
     let (tx, rx) = mpsc::unbounded_channel();
     (NotificationBridge::new(tx), rx)
 }
@@ -74,7 +78,9 @@ pub fn create_notification_channel() -> (NotificationBridge, mpsc::UnboundedRece
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::{SessionId, SessionUpdate, ContentChunk, ContentBlock, TextContent};
+    use agent_client_protocol::{
+        ContentBlock, ContentChunk, SessionId, SessionUpdate, TextContent,
+    };
 
     #[tokio::test]
     async fn test_bridge_sends_notifications() {
@@ -82,11 +88,15 @@ mod tests {
 
         let session_id = SessionId::from("test-session");
         let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new("Hello")));
-        let notification = SessionNotification::new(session_id, SessionUpdate::AgentMessageChunk(chunk));
+        let notification =
+            SessionNotification::new(session_id, SessionUpdate::AgentMessageChunk(chunk));
 
         bridge.session_notification(notification).await.unwrap();
 
         let received = rx.recv().await.unwrap();
-        assert!(matches!(received.update, SessionUpdate::AgentMessageChunk(_)));
+        assert!(matches!(
+            received.update,
+            SessionUpdate::AgentMessageChunk(_)
+        ));
     }
 }

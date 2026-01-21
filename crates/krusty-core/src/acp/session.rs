@@ -39,14 +39,9 @@ pub struct SessionState {
 
 impl SessionState {
     /// Create a new session state
-    pub fn new(
-        id: SessionId,
-        cwd: Option<PathBuf>,
-        mcp_servers: Option<Vec<McpServer>>,
-    ) -> Self {
-        let working_dir = cwd.unwrap_or_else(|| {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
-        });
+    pub fn new(id: SessionId, cwd: Option<PathBuf>, mcp_servers: Option<Vec<McpServer>>) -> Self {
+        let working_dir =
+            cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
 
         debug!("Creating session {} with cwd: {:?}", id, working_dir);
 

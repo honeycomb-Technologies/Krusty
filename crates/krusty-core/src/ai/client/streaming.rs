@@ -67,7 +67,8 @@ impl AiClient {
         call_start: Instant,
     ) -> Result<mpsc::UnboundedReceiver<StreamPart>> {
         let format_handler = AnthropicFormat::new();
-        let anthropic_messages = format_handler.convert_messages(&messages, Some(self.provider_id()));
+        let anthropic_messages =
+            format_handler.convert_messages(&messages, Some(self.provider_id()));
 
         // Extract any system messages from conversation (e.g., pinch context)
         let injected_context: String = messages
@@ -272,12 +273,14 @@ impl AiClient {
         let max_tokens = options.max_tokens.unwrap_or(self.config().max_tokens);
 
         // Responses API uses "input", Chat Completions uses "messages"
-        let (messages_key, max_tokens_key) =
-            if matches!(self.config().api_format, crate::ai::models::ApiFormat::OpenAIResponses) {
-                ("input", "max_output_tokens")
-            } else {
-                ("messages", "max_tokens")
-            };
+        let (messages_key, max_tokens_key) = if matches!(
+            self.config().api_format,
+            crate::ai::models::ApiFormat::OpenAIResponses
+        ) {
+            ("input", "max_output_tokens")
+        } else {
+            ("messages", "max_tokens")
+        };
 
         let mut body = serde_json::json!({
             "model": self.config().model,
@@ -540,12 +543,20 @@ impl AiClient {
     }
 
     /// Add reasoning/thinking config to the request body
-    fn add_reasoning_config(&self, body: &mut Value, options: &CallOptions, reasoning_enabled: bool) {
+    fn add_reasoning_config(
+        &self,
+        body: &mut Value,
+        options: &CallOptions,
+        reasoning_enabled: bool,
+    ) {
         let budget_tokens = options.thinking.as_ref().map(|t| t.budget_tokens);
 
-        if let Some(reasoning_config) =
-            ReasoningConfig::build(options.reasoning_format, reasoning_enabled, budget_tokens, None)
-        {
+        if let Some(reasoning_config) = ReasoningConfig::build(
+            options.reasoning_format,
+            reasoning_enabled,
+            budget_tokens,
+            None,
+        ) {
             match options.reasoning_format {
                 Some(ReasoningFormat::Anthropic) => {
                     body["thinking"] = reasoning_config;

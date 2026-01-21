@@ -27,7 +27,8 @@ use crate::tools::{ToolContext, ToolRegistry, ToolResult};
 use super::error::AcpError;
 use super::session::SessionState;
 use super::tools::{
-    create_tool_call_complete, create_tool_call_failed, create_tool_call_start, text_to_tool_content,
+    create_tool_call_complete, create_tool_call_failed, create_tool_call_start,
+    text_to_tool_content,
 };
 
 /// Prompt processor that connects ACP to Krusty's AI and tools
@@ -51,7 +52,12 @@ impl PromptProcessor {
     }
 
     /// Initialize the AI client with an API key and optional model override
-    pub fn init_ai_client(&mut self, api_key: String, provider: ProviderId, model_override: Option<String>) {
+    pub fn init_ai_client(
+        &mut self,
+        api_key: String,
+        provider: ProviderId,
+        model_override: Option<String>,
+    ) {
         // Get provider configuration from the registry
         let provider_config = get_provider(provider);
 
@@ -74,7 +80,10 @@ impl PromptProcessor {
         };
 
         self.ai_client = Some(AiClient::new(config, api_key));
-        info!("AI client initialized: provider={:?}, model={}", provider, model);
+        info!(
+            "AI client initialized: provider={:?}, model={}",
+            provider, model
+        );
     }
 
     /// Process a prompt and stream results via the connection
@@ -91,7 +100,8 @@ impl PromptProcessor {
         })?;
 
         // Convert ACP content to Krusty messages
-        let messages = self.convert_prompt_to_messages(&session.id, prompt, &session.history().await);
+        let messages =
+            self.convert_prompt_to_messages(&session.id, prompt, &session.history().await);
 
         // Get tool definitions for the AI
         let tool_defs = self.tools.get_ai_tools().await;
@@ -133,8 +143,10 @@ impl PromptProcessor {
                     accumulated_text.push_str(&delta);
                     // Stream text chunk to client
                     let chunk = ContentChunk::new(AcpContent::Text(TextContent::new(&delta)));
-                    let notification =
-                        SessionNotification::new(session.id.clone(), SessionUpdate::AgentMessageChunk(chunk));
+                    let notification = SessionNotification::new(
+                        session.id.clone(),
+                        SessionUpdate::AgentMessageChunk(chunk),
+                    );
                     if let Err(e) = connection.session_notification(notification).await {
                         warn!("Failed to send text chunk: {}", e);
                     }
@@ -143,8 +155,10 @@ impl PromptProcessor {
                 StreamPart::ThinkingDelta { thinking, .. } => {
                     // Stream thinking as thought chunk
                     let chunk = ContentChunk::new(AcpContent::Text(TextContent::new(&thinking)));
-                    let notification =
-                        SessionNotification::new(session.id.clone(), SessionUpdate::AgentThoughtChunk(chunk));
+                    let notification = SessionNotification::new(
+                        session.id.clone(),
+                        SessionUpdate::AgentThoughtChunk(chunk),
+                    );
                     if let Err(e) = connection.session_notification(notification).await {
                         warn!("Failed to send thought chunk: {}", e);
                     }
@@ -154,8 +168,10 @@ impl PromptProcessor {
                     debug!("Tool call starting: {} ({})", name, id);
                     // Send initial tool call notification
                     let tool_call = ToolCall::new(ToolCallId::from(id.clone()), name.clone());
-                    let notification =
-                        SessionNotification::new(session.id.clone(), SessionUpdate::ToolCall(tool_call));
+                    let notification = SessionNotification::new(
+                        session.id.clone(),
+                        SessionUpdate::ToolCall(tool_call),
+                    );
                     if let Err(e) = connection.session_notification(notification).await {
                         warn!("Failed to send tool call start: {}", e);
                     }
@@ -248,9 +264,12 @@ impl PromptProcessor {
             info!("Executing tool: {} ({})", tool_call.name, tool_call.id);
 
             // Send tool call start update
-            let start_update = create_tool_call_start(&tool_call.id, &tool_call.name, tool_call.arguments.clone());
-            let notification =
-                SessionNotification::new(session.id.clone(), SessionUpdate::ToolCallUpdate(start_update));
+            let start_update =
+                create_tool_call_start(&tool_call.id, &tool_call.name, tool_call.arguments.clone());
+            let notification = SessionNotification::new(
+                session.id.clone(),
+                SessionUpdate::ToolCallUpdate(start_update),
+            );
             if let Err(e) = connection.session_notification(notification).await {
                 warn!("Failed to send tool start: {}", e);
             }
@@ -287,7 +306,8 @@ impl PromptProcessor {
                 }
             };
 
-            let notification = SessionNotification::new(session.id.clone(), SessionUpdate::ToolCallUpdate(update));
+            let notification =
+                SessionNotification::new(session.id.clone(), SessionUpdate::ToolCallUpdate(update));
             if let Err(e) = connection.session_notification(notification).await {
                 warn!("Failed to send tool result: {}", e);
             }
@@ -302,7 +322,9 @@ impl PromptProcessor {
                 .await;
 
             if let Some(output) = output_for_history {
-                session.add_tool_result(&tool_call.id, output, is_error_for_history).await;
+                session
+                    .add_tool_result(&tool_call.id, output, is_error_for_history)
+                    .await;
             }
         }
 
@@ -321,7 +343,6 @@ fn convert_finish_reason(reason: FinishReason) -> StopReason {
         FinishReason::Other(_) => StopReason::EndTurn,
     }
 }
-
 
 #[cfg(test)]
 mod tests {

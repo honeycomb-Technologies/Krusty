@@ -136,7 +136,10 @@ impl AiClient {
         match self.config.auth_header {
             AuthHeader::Bearer => {
                 request = request.header("authorization", format!("Bearer {}", self.api_key));
-                info!("Using Bearer authentication for {}", self.config.provider_id);
+                info!(
+                    "Using Bearer authentication for {}",
+                    self.config.provider_id
+                );
             }
             AuthHeader::XApiKey => {
                 request = request.header("x-api-key", &self.api_key);
