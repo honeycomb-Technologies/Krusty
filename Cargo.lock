@@ -970,6 +970,7 @@ checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
 dependencies = [
  "bitflags 2.10.0",
  "crossterm_winapi",
+ "futures-core",
  "mio",
  "parking_lot",
  "rustix 0.38.44",
@@ -2401,7 +2402,7 @@ dependencies = [
 
 [[package]]
 name = "krusty"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2471,7 +2472,7 @@ dependencies = [
 
 [[package]]
 name = "krusty-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",

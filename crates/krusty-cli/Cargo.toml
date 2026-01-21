@@ -37,7 +37,7 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 # Terminal UI
 ratatui = "0.29"
 ratatui-image = "4"
-crossterm = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
 unicode-width = "0.2"
 textwrap = "0.16"
 arboard = "3"

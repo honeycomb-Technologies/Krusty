@@ -6,12 +6,14 @@
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, EventStream, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use futures::StreamExt;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{
     io,
@@ -1704,6 +1706,10 @@ impl App {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> Result<()> {
+        // Use async event stream to avoid blocking the runtime
+        // This fixes the issue where the app freezes when mouse leaves terminal
+        let mut event_stream = EventStream::new();
+
         loop {
             if let Some(area) = self.layout.input_area {
                 self.input.set_width(area.width);
@@ -1839,24 +1845,35 @@ impl App {
                 Duration::from_millis(16) // 60fps normal
             };
 
-            if event::poll(poll_timeout)? {
-                match event::read()? {
-                    Event::Key(key) => {
-                        self.handle_key(key.code, key.modifiers);
-                        self.needs_redraw = true;
+            // Async event handling - doesn't block the runtime when no events
+            // This allows async tasks to progress even when mouse is outside terminal
+            tokio::select! {
+                biased; // Prefer events over timeout when both are ready
+
+                maybe_event = event_stream.next() => {
+                    if let Some(Ok(event)) = maybe_event {
+                        match event {
+                            Event::Key(key) => {
+                                self.handle_key(key.code, key.modifiers);
+                                self.needs_redraw = true;
+                            }
+                            Event::Mouse(mouse) => {
+                                self.handle_mouse_event(mouse);
+                                self.needs_redraw = true;
+                            }
+                            Event::Paste(text) => {
+                                self.handle_paste(text);
+                                self.needs_redraw = true;
+                            }
+                            Event::Resize(_, _) => {
+                                self.needs_redraw = true;
+                            }
+                            _ => {}
+                        }
                     }
-                    Event::Mouse(mouse) => {
-                        self.handle_mouse_event(mouse);
-                        self.needs_redraw = true;
-                    }
-                    Event::Paste(text) => {
-                        self.handle_paste(text);
-                        self.needs_redraw = true;
-                    }
-                    Event::Resize(_, _) => {
-                        self.needs_redraw = true;
-                    }
-                    _ => {}
+                }
+                _ = tokio::time::sleep(poll_timeout) => {
+                    // Timeout - continue loop for regular updates (animations, polling, etc.)
                 }
             }
 
