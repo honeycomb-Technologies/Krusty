@@ -39,25 +39,6 @@ Download prebuilt binaries from [Releases](https://github.com/BurgessTG/Krusty/r
 - macOS (Intel, Apple Silicon)
 - Windows (x86_64)
 
-## Usage
-
-```bash
-krusty [OPTIONS] [COMMAND]
-
-Options:
-  -d, --directory <DIR>  Working directory (defaults to current)
-  -t, --theme <THEME>    Theme name (default: krusty)
-  --acp                  Run as ACP server for IDE integration
-
-Commands:
-  chat                   Start interactive TUI chat (default)
-  themes                 List all available themes
-  lsp <ACTION>          Language server management (list, install, remove, status)
-  auth                   Show authentication provider links
-```
-
-Default model: `claude-opus-4-5-20251101` (200K context, 16K output)
-
 ## Supported Providers
 
 Krusty supports multiple AI providers. Add API keys via `/auth` in the TUI.
@@ -157,12 +138,6 @@ Toggle between structured planning and execution modes with `Ctrl+B`:
 
 Plans are stored as markdown in `~/.krusty/plans/` and can be managed with `/plan`.
 
-### Extended Thinking
-Toggle extended thinking with `Tab` for deeper reasoning on complex tasks. Supports:
-- Anthropic models (32K token budget)
-- OpenAI-compatible models (reasoning_effort: high)
-- DeepSeek models (reasoning.enabled)
-
 ### Terminal Integration
 Open an interactive terminal session with `/terminal` (or `/term`, `/shell`) for direct shell access within the TUI.
 
@@ -177,13 +152,6 @@ All conversations are saved locally in SQLite. Resume any session with `/load` (
 
 ### Themes
 31 built-in themes including krusty (default), tokyo_night, dracula, catppuccin_mocha, gruvbox_dark, nord, one_dark, solarized_dark, synthwave_84, monokai, rosepine, and more. Switch with `/theme` or:
-
-```bash
-krusty -t dracula
-krusty -t tokyo_night
-krusty -t gruvbox_dark
-krusty themes  # List all
-```
 
 ### Auto-Updates
 Krusty checks for updates and can self-update.
@@ -207,7 +175,7 @@ Data stored in `~/.krusty/`:
 
 ### Project Configuration
 
-Add a `KRUSTY.md`, `KRAB.md`, or `CLAUDE.md` file to your project root for project-specific instructions that are automatically included in context. Generate one with `/init`.
+Add a `KRAB.md`, or `CLAUDE.md` file to your project root for project-specific instructions that are automatically included in context. Generate one with `/init`.
 
 Project-level skills in `.krusty/skills/` override global skills.
 
