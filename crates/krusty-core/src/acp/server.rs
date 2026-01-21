@@ -15,6 +15,8 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{error, info, warn};
 
 use super::agent::KrustyAgent;
+use crate::ai::providers::ProviderId;
+use crate::storage::credentials::{ActiveProviderStore, CredentialStore};
 use crate::tools::ToolRegistry;
 
 /// ACP Server configuration
@@ -62,6 +64,27 @@ impl AcpServer {
     /// All logging should go to stderr.
     pub async fn run(self) -> Result<()> {
         info!("Starting Krusty ACP server");
+
+        // Auto-initialize AI client from environment variables
+        if let Some(config) = detect_api_key_from_env() {
+            info!(
+                "Auto-initializing AI client: provider={:?}, model={:?}",
+                config.provider,
+                config.model.as_deref().unwrap_or("default")
+            );
+            self.agent.init_ai_client_with_model(config.api_key, config.provider, config.model).await;
+        } else {
+            warn!(
+                "No API key found in environment. Set one of:\n\
+                 - KRUSTY_PROVIDER + KRUSTY_API_KEY (+ optional KRUSTY_MODEL)\n\
+                 - ANTHROPIC_API_KEY\n\
+                 - OPENROUTER_API_KEY\n\
+                 - OPENCODEZEN_API_KEY\n\
+                 - ZAI_API_KEY\n\
+                 - MINIMAX_API_KEY\n\
+                 - KIMI_API_KEY"
+            );
+        }
 
         // Create the agent-side connection
         // Note: ACP connections are not Send, so we need LocalSet
@@ -125,6 +148,134 @@ impl Default for AcpServer {
     fn default() -> Self {
         Self::new().expect("Failed to create default ACP server")
     }
+}
+
+/// Configuration detected from environment variables
+#[derive(Debug, Clone)]
+pub struct AcpEnvConfig {
+    pub api_key: String,
+    pub provider: ProviderId,
+    pub model: Option<String>,
+}
+
+/// Detect API key and provider configuration
+///
+/// Checks in order:
+/// 1. Environment variables (KRUSTY_PROVIDER + KRUSTY_API_KEY)
+/// 2. Provider-specific env vars (ANTHROPIC_API_KEY, OPENROUTER_API_KEY, etc.)
+/// 3. Krusty's stored credentials (~/.krusty/tokens/credentials.json)
+///
+/// Environment variable options:
+/// - KRUSTY_PROVIDER: anthropic, openrouter, opencodezen, zai, minimax, kimi
+/// - KRUSTY_MODEL: Override the default model for the provider
+/// - KRUSTY_API_KEY: Generic API key (used with KRUSTY_PROVIDER)
+fn detect_api_key_from_env() -> Option<AcpEnvConfig> {
+    let model = std::env::var("KRUSTY_MODEL").ok().filter(|s| !s.is_empty());
+
+    // Check for explicit provider configuration first
+    if let Ok(provider_str) = std::env::var("KRUSTY_PROVIDER") {
+        let provider = match provider_str.to_lowercase().as_str() {
+            "anthropic" => Some(ProviderId::Anthropic),
+            "openrouter" => Some(ProviderId::OpenRouter),
+            "opencodezen" | "opencode" => Some(ProviderId::OpenCodeZen),
+            "zai" | "z.ai" => Some(ProviderId::ZAi),
+            "minimax" => Some(ProviderId::MiniMax),
+            "kimi" => Some(ProviderId::Kimi),
+            _ => None,
+        };
+
+        if let Some(provider) = provider {
+            // Look for KRUSTY_API_KEY or provider-specific key
+            let api_key = std::env::var("KRUSTY_API_KEY")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(|| get_provider_api_key(provider));
+
+            if let Some(api_key) = api_key {
+                return Some(AcpEnvConfig { api_key, provider, model });
+            }
+        }
+    }
+
+    // Fall back to checking provider-specific environment variables
+    let providers_and_vars = [
+        (ProviderId::Anthropic, "ANTHROPIC_API_KEY"),
+        (ProviderId::OpenRouter, "OPENROUTER_API_KEY"),
+        (ProviderId::OpenCodeZen, "OPENCODEZEN_API_KEY"),
+        (ProviderId::ZAi, "ZAI_API_KEY"),
+        (ProviderId::MiniMax, "MINIMAX_API_KEY"),
+        (ProviderId::Kimi, "KIMI_API_KEY"),
+        // OpenAI key maps to OpenRouter (which supports OpenAI models)
+        (ProviderId::OpenRouter, "OPENAI_API_KEY"),
+    ];
+
+    for (provider, env_var) in providers_and_vars {
+        if let Ok(key) = std::env::var(env_var) {
+            if !key.is_empty() {
+                return Some(AcpEnvConfig { api_key: key, provider, model });
+            }
+        }
+    }
+
+    // Fall back to Krusty's stored credentials
+    if let Some(config) = detect_from_credential_store(model) {
+        return Some(config);
+    }
+
+    None
+}
+
+/// Detect API key from Krusty's credential store
+fn detect_from_credential_store(model: Option<String>) -> Option<AcpEnvConfig> {
+    // Load stored credentials
+    let store = match CredentialStore::load() {
+        Ok(store) => store,
+        Err(e) => {
+            warn!("Failed to load credential store: {}", e);
+            return None;
+        }
+    };
+
+    // Get the active provider, or find the first configured one
+    let active_provider = ActiveProviderStore::load();
+
+    // Try active provider first
+    if let Some(api_key) = store.get(&active_provider) {
+        info!("Using active provider {:?} from credential store", active_provider);
+        return Some(AcpEnvConfig {
+            api_key: api_key.clone(),
+            provider: active_provider,
+            model,
+        });
+    }
+
+    // Fall back to first configured provider
+    let configured = store.configured_providers();
+    if let Some(provider) = configured.first() {
+        if let Some(api_key) = store.get(provider) {
+            info!("Using first configured provider {:?} from credential store", provider);
+            return Some(AcpEnvConfig {
+                api_key: api_key.clone(),
+                provider: *provider,
+                model,
+            });
+        }
+    }
+
+    None
+}
+
+/// Get API key for a specific provider from environment
+fn get_provider_api_key(provider: ProviderId) -> Option<String> {
+    let env_var = match provider {
+        ProviderId::Anthropic => "ANTHROPIC_API_KEY",
+        ProviderId::OpenRouter => "OPENROUTER_API_KEY",
+        ProviderId::OpenCodeZen => "OPENCODEZEN_API_KEY",
+        ProviderId::ZAi => "ZAI_API_KEY",
+        ProviderId::MiniMax => "MINIMAX_API_KEY",
+        ProviderId::Kimi => "KIMI_API_KEY",
+    };
+    std::env::var(env_var).ok().filter(|s| !s.is_empty())
 }
 
 /// Check if we should run in ACP mode

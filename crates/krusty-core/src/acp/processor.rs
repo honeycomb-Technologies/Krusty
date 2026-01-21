@@ -19,7 +19,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::ai::client::{AiClient, AiClientConfig, CallOptions};
 use crate::ai::models::ApiFormat;
-use crate::ai::providers::{AuthHeader, ProviderId};
+use crate::ai::providers::{get_provider, AuthHeader, ProviderId};
 use crate::ai::streaming::StreamPart;
 use crate::ai::types::{AiToolCall, Content, FinishReason, ModelMessage, Role};
 use crate::tools::{ToolContext, ToolRegistry, ToolResult};
@@ -50,19 +50,31 @@ impl PromptProcessor {
         }
     }
 
-    /// Initialize the AI client with an API key
-    pub fn init_ai_client(&mut self, api_key: String, provider: ProviderId) {
+    /// Initialize the AI client with an API key and optional model override
+    pub fn init_ai_client(&mut self, api_key: String, provider: ProviderId, model_override: Option<String>) {
+        // Get provider configuration from the registry
+        let provider_config = get_provider(provider);
+
+        let (model, base_url, auth_header) = if let Some(pc) = provider_config {
+            let model = model_override.unwrap_or_else(|| pc.default_model().to_string());
+            (model, Some(pc.base_url.clone()), pc.auth_header)
+        } else {
+            // Fallback for unknown providers
+            let model = model_override.unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+            (model, None, AuthHeader::XApiKey)
+        };
+
         let config = AiClientConfig {
-            model: default_model_for_provider(provider),
+            model: model.clone(),
             max_tokens: 8192,
-            base_url: base_url_for_provider(provider),
-            auth_header: auth_header_for_provider(provider),
+            base_url,
+            auth_header,
             provider_id: provider,
-            api_format: api_format_for_provider(provider),
+            api_format: ApiFormat::Anthropic, // All supported providers use Anthropic-compatible API
         };
 
         self.ai_client = Some(AiClient::new(config, api_key));
-        info!("AI client initialized for provider {:?}", provider);
+        info!("AI client initialized: provider={:?}, model={}", provider, model);
     }
 
     /// Process a prompt and stream results via the connection
@@ -310,45 +322,6 @@ fn convert_finish_reason(reason: FinishReason) -> StopReason {
     }
 }
 
-/// Get default model for a provider
-fn default_model_for_provider(provider: ProviderId) -> String {
-    match provider {
-        ProviderId::Anthropic => "claude-sonnet-4-20250514".to_string(),
-        ProviderId::OpenRouter => "anthropic/claude-sonnet-4".to_string(),
-        ProviderId::OpenCodeZen => "claude-sonnet-4-20250514".to_string(),
-        _ => "claude-sonnet-4-20250514".to_string(),
-    }
-}
-
-/// Get base URL for a provider
-fn base_url_for_provider(provider: ProviderId) -> Option<String> {
-    match provider {
-        ProviderId::Anthropic => None, // Uses default
-        ProviderId::OpenRouter => Some("https://openrouter.ai/api/v1/messages".to_string()),
-        ProviderId::OpenCodeZen => Some("https://api.opencode.ai/v1/messages".to_string()),
-        _ => None,
-    }
-}
-
-/// Get auth header type for a provider
-fn auth_header_for_provider(provider: ProviderId) -> AuthHeader {
-    match provider {
-        ProviderId::Anthropic => AuthHeader::XApiKey,
-        ProviderId::OpenRouter => AuthHeader::Bearer,
-        ProviderId::OpenCodeZen => AuthHeader::Bearer,
-        _ => AuthHeader::XApiKey,
-    }
-}
-
-/// Get API format for a provider
-fn api_format_for_provider(provider: ProviderId) -> ApiFormat {
-    match provider {
-        ProviderId::Anthropic => ApiFormat::Anthropic,
-        ProviderId::OpenRouter => ApiFormat::Anthropic,
-        ProviderId::OpenCodeZen => ApiFormat::Anthropic,
-        _ => ApiFormat::Anthropic,
-    }
-}
 
 #[cfg(test)]
 mod tests {

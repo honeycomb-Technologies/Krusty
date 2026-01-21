@@ -83,7 +83,12 @@ impl KrustyAgent {
 
     /// Initialize the AI client with an API key
     pub async fn init_ai_client(&self, api_key: String, provider: ProviderId) {
-        self.processor.write().await.init_ai_client(api_key, provider);
+        self.processor.write().await.init_ai_client(api_key, provider, None);
+    }
+
+    /// Initialize the AI client with an API key and optional model override
+    pub async fn init_ai_client_with_model(&self, api_key: String, provider: ProviderId, model: Option<String>) {
+        self.processor.write().await.init_ai_client(api_key, provider, model);
     }
 
     /// Get agent capabilities to advertise
