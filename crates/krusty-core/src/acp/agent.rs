@@ -9,9 +9,11 @@ use agent_client_protocol::{
     Agent, AgentCapabilities, AuthenticateRequest, AuthenticateResponse, CancelNotification,
     ClientCapabilities, ContentBlock, Error as AcpSchemaError, ExtNotification, ExtRequest,
     ExtResponse, Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest,
-    LoadSessionResponse, McpCapabilities, NewSessionRequest, NewSessionResponse,
-    PromptCapabilities, PromptRequest, PromptResponse, Result as AcpResult, SessionCapabilities,
-    SessionId, SessionNotification, SetSessionModeRequest, SetSessionModeResponse,
+    LoadSessionResponse, McpCapabilities, ModelId, ModelInfo as AcpModelInfo, NewSessionRequest,
+    NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse, Result as AcpResult,
+    SessionCapabilities, SessionId, SessionMode, SessionModeState,
+    SessionModelState, SessionNotification, SetSessionModeRequest, SetSessionModeResponse,
+    SetSessionModelRequest, SetSessionModelResponse,
 };
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
@@ -20,12 +22,21 @@ use super::bridge::NotificationBridge;
 use super::error::AcpError;
 use super::processor::PromptProcessor;
 use super::session::{SessionManager, SessionState};
-use crate::ai::providers::ProviderId;
+use crate::ai::providers::{get_provider, ProviderId};
+use crate::storage::credentials::CredentialStore;
 use crate::tools::ToolRegistry;
 
 /// ACP protocol version supported by this agent (10 is current)
 #[allow(dead_code)]
 pub const PROTOCOL_VERSION_NUM: u16 = 10;
+
+/// Current model configuration
+#[derive(Debug, Clone)]
+pub struct ModelConfig {
+    pub provider: ProviderId,
+    pub model_id: String,
+    pub api_key: String,
+}
 
 /// Krusty's ACP Agent implementation
 pub struct KrustyAgent {
@@ -41,6 +52,10 @@ pub struct KrustyAgent {
     processor: RwLock<PromptProcessor>,
     /// Channel for sending notifications to the connection
     notification_tx: RwLock<Option<mpsc::UnboundedSender<SessionNotification>>>,
+    /// Current model configuration (provider + model)
+    current_model: RwLock<Option<ModelConfig>>,
+    /// Available model configurations from all providers
+    available_models: RwLock<Vec<(String, ProviderId, String, String)>>, // (model_id, provider, actual_model_id, api_key)
     /// Working directory (reserved for future use)
     #[allow(dead_code)]
     cwd: PathBuf,
@@ -58,6 +73,8 @@ impl KrustyAgent {
             api_key: RwLock::new(None),
             processor: RwLock::new(PromptProcessor::new(tools, cwd.clone())),
             notification_tx: RwLock::new(None),
+            current_model: RwLock::new(None),
+            available_models: RwLock::new(Vec::new()),
             cwd,
         }
     }
@@ -72,8 +89,96 @@ impl KrustyAgent {
             api_key: RwLock::new(None),
             processor: RwLock::new(PromptProcessor::new(tools, cwd.clone())),
             notification_tx: RwLock::new(None),
+            current_model: RwLock::new(None),
+            available_models: RwLock::new(Vec::new()),
             cwd,
         }
+    }
+
+    /// Detect all available models from configured providers
+    pub async fn detect_available_models(&self) -> Vec<(String, ProviderId, String, String)> {
+        let mut models = Vec::new();
+
+        // Load credential store
+        let store = match CredentialStore::load() {
+            Ok(store) => store,
+            Err(e) => {
+                warn!("Failed to load credential store: {}", e);
+                return models;
+            }
+        };
+
+        // Get all configured providers
+        let configured = store.configured_providers();
+        info!("Found {} configured providers", configured.len());
+
+        for provider in configured {
+            if let Some(api_key) = store.get(&provider) {
+                // Get provider config for models
+                if let Some(provider_config) = get_provider(provider) {
+                    // Add each model from this provider
+                    for model_info in &provider_config.models {
+                        let model_id = format!("{}:{}", provider.storage_key(), model_info.id);
+                        models.push((
+                            model_id,
+                            provider,
+                            model_info.id.clone(),
+                            api_key.clone(),
+                        ));
+                        info!("Added model: {} from {:?}", model_info.display_name, provider);
+                    }
+
+                    // If provider has no static models but is dynamic (like OpenRouter), add a default
+                    if provider_config.models.is_empty() && provider_config.dynamic_models {
+                        let default_model = provider_config.default_model();
+                        let model_id = format!("{}:{}", provider.storage_key(), default_model);
+                        models.push((
+                            model_id,
+                            provider,
+                            default_model.to_string(),
+                            api_key.clone(),
+                        ));
+                        info!("Added dynamic provider {:?} with default model {}", provider, default_model);
+                    }
+                }
+            }
+        }
+
+        models
+    }
+
+    /// Set the current model and reinitialize the processor
+    pub async fn set_model(&self, model_id: &str) -> Result<(), AcpError> {
+        let available = self.available_models.read().await;
+
+        // Find the model in available models
+        let model_config = available
+            .iter()
+            .find(|(id, _, _, _)| id == model_id)
+            .ok_or_else(|| AcpError::ProtocolError(format!("Model not found: {}", model_id)))?;
+
+        let (_, provider, actual_model_id, api_key) = model_config.clone();
+
+        info!("Switching to model: {} (provider: {:?})", actual_model_id, provider);
+
+        // Update current model
+        *self.current_model.write().await = Some(ModelConfig {
+            provider,
+            model_id: actual_model_id.clone(),
+            api_key: api_key.clone(),
+        });
+
+        // Reinitialize the processor with the new model
+        self.processor.write().await.init_ai_client(api_key, provider, Some(actual_model_id));
+
+        Ok(())
+    }
+
+    /// Get the current model ID
+    pub async fn current_model_id(&self) -> Option<String> {
+        self.current_model.read().await.as_ref().map(|m| {
+            format!("{}:{}", m.provider.storage_key(), m.model_id)
+        })
     }
 
     /// Set the notification channel sender
@@ -215,7 +320,67 @@ impl Agent for KrustyAgent {
             },
         );
 
-        Ok(NewSessionResponse::new(session.id.clone()))
+        // Detect available models from all configured providers
+        let detected_models = self.detect_available_models().await;
+
+        // Build the response with model and mode state
+        let mut response = NewSessionResponse::new(session.id.clone());
+
+        // Set up available modes (plan and code)
+        let available_modes = vec![
+            SessionMode::new("code", "Code").description("Write and edit code directly"),
+            SessionMode::new("plan", "Plan").description("Plan changes before implementing"),
+        ];
+        let mode_state = SessionModeState::new("code", available_modes);
+        response = response.modes(mode_state);
+
+        // Set up available models if any are detected
+        if !detected_models.is_empty() {
+            // Store models for later use
+            {
+                let mut available = self.available_models.write().await;
+                *available = detected_models.iter().map(|(id, p, m, k)| (id.clone(), *p, m.clone(), k.clone())).collect();
+            }
+
+            // Convert to ACP ModelInfo format
+            let model_infos: Vec<AcpModelInfo> = detected_models
+                .iter()
+                .map(|(model_id, provider, actual_model, _)| {
+                    let name = format!("{} ({})", actual_model, provider.storage_key());
+                    AcpModelInfo::new(ModelId::new(model_id.clone()), name)
+                })
+                .collect();
+
+            // Set the first model as current
+            let current_model_id = detected_models[0].0.clone();
+
+            // Initialize the processor with the first model
+            let (_, provider, actual_model, api_key) = &detected_models[0];
+            self.processor.write().await.init_ai_client(
+                api_key.clone(),
+                *provider,
+                Some(actual_model.clone()),
+            );
+
+            // Store current model config
+            *self.current_model.write().await = Some(ModelConfig {
+                provider: *provider,
+                model_id: actual_model.clone(),
+                api_key: api_key.clone(),
+            });
+
+            let model_state = SessionModelState::new(
+                ModelId::new(current_model_id),
+                model_infos,
+            );
+            response = response.models(model_state);
+
+            info!("Session created with {} available models", detected_models.len());
+        } else {
+            warn!("No models detected - configure API keys to enable AI features");
+        }
+
+        Ok(response)
     }
 
     /// Handle load session request
@@ -328,6 +493,35 @@ impl Agent for KrustyAgent {
         debug!("ACP ext_notification: {}", notification.method);
         // Ignore unknown notifications
         Ok(())
+    }
+
+    /// Handle set session model request
+    async fn set_session_model(
+        &self,
+        request: SetSessionModelRequest,
+    ) -> AcpResult<SetSessionModelResponse> {
+        info!(
+            "ACP set_session_model: session={}, model={:?}",
+            request.session_id, request.model_id
+        );
+
+        // Verify session exists
+        let _session = self
+            .sessions
+            .get_session(&request.session_id)
+            .map_err(|_e| AcpSchemaError::invalid_params())?;
+
+        // Switch to the requested model
+        let model_id_str = request.model_id.to_string();
+        self.set_model(&model_id_str)
+            .await
+            .map_err(|e| {
+                error!("Failed to set model: {}", e);
+                AcpSchemaError::invalid_params()
+            })?;
+
+        info!("Model switched to: {}", model_id_str);
+        Ok(SetSessionModelResponse::new())
     }
 }
 

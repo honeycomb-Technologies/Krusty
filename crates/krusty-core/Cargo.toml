@@ -1,6 +1,6 @@
 [package]
 name = "krusty-core"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Core library for Krusty - AI, storage, tools, LSP, and extensions"
 
@@ -95,7 +95,7 @@ moka = { version = "0.12", features = ["sync"] }
 ignore = "0.4"
 
 # Agent Client Protocol (ACP)
-agent-client-protocol = "0.9"
+agent-client-protocol = { version = "0.9", features = ["unstable_session_model"] }
 
 # Version Control (vendored for cross-compilation)
 git2 = { version = "0.19", features = ["vendored-libgit2", "vendored-openssl"] }
