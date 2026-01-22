@@ -8,6 +8,17 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::LazyLock;
 
+use crate::ai::models::ApiFormat;
+use crate::auth::OpenAIAuthType;
+
+/// ChatGPT backend API for OAuth users (Responses API)
+/// This endpoint is required for tokens obtained via ChatGPT OAuth flow.
+pub const CHATGPT_RESPONSES_API: &str = "https://chatgpt.com/backend-api/codex/v1/responses";
+
+/// Standard OpenAI API for API key users (Chat Completions)
+/// This endpoint is used when authenticating with an API key.
+pub const OPENAI_CHAT_API: &str = "https://api.openai.com/v1/chat/completions";
+
 /// Unique identifier for each supported provider
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -191,6 +202,28 @@ impl ProviderConfig {
             return true;
         }
         self.models.iter().any(|m| m.id == model_id)
+    }
+
+    /// Get the API base URL for OpenAI based on auth type
+    ///
+    /// - ChatGPT OAuth tokens require the Responses API at chatgpt.com
+    /// - API keys use the standard Chat Completions API at api.openai.com
+    pub fn openai_url_for_auth(auth_type: OpenAIAuthType) -> &'static str {
+        match auth_type {
+            OpenAIAuthType::ChatGptOAuth => CHATGPT_RESPONSES_API,
+            OpenAIAuthType::ApiKey | OpenAIAuthType::None => OPENAI_CHAT_API,
+        }
+    }
+
+    /// Get the API format for OpenAI based on auth type
+    ///
+    /// - ChatGPT OAuth requires OpenAI Responses format
+    /// - API keys use standard OpenAI chat/completions format
+    pub fn openai_format_for_auth(auth_type: OpenAIAuthType) -> ApiFormat {
+        match auth_type {
+            OpenAIAuthType::ChatGptOAuth => ApiFormat::OpenAIResponses,
+            OpenAIAuthType::ApiKey | OpenAIAuthType::None => ApiFormat::OpenAI,
+        }
     }
 }
 

@@ -106,6 +106,41 @@ impl AiClientConfig {
     pub fn uses_anthropic_api(&self) -> bool {
         !self.uses_openai_format() && !self.uses_google_format()
     }
+
+    /// Create config for OpenAI with automatic auth type detection
+    ///
+    /// Detects whether OAuth token or API key is being used and routes to
+    /// the correct endpoint:
+    /// - OAuth (ChatGPT): chatgpt.com/backend-api/codex/v1/responses (Responses API)
+    /// - API Key: api.openai.com/v1/chat/completions (Chat Completions API)
+    pub fn for_openai_with_auth_detection(
+        model: &str,
+        credentials: &crate::storage::CredentialStore,
+    ) -> Self {
+        use crate::ai::providers::{AuthHeader, ProviderConfig, ProviderId};
+        use crate::auth::detect_openai_auth_type;
+
+        let auth_type = detect_openai_auth_type(credentials);
+        let base_url = ProviderConfig::openai_url_for_auth(auth_type);
+        let api_format = ProviderConfig::openai_format_for_auth(auth_type);
+
+        tracing::info!(
+            "OpenAI auth detection: {:?} -> {} (format: {:?})",
+            auth_type,
+            base_url,
+            api_format
+        );
+
+        Self {
+            model: model.to_string(),
+            max_tokens: constants::ai::MAX_OUTPUT_TOKENS,
+            base_url: Some(base_url.to_string()),
+            auth_header: AuthHeader::Bearer,
+            provider_id: ProviderId::OpenAI,
+            api_format,
+            custom_headers: HashMap::new(),
+        }
+    }
 }
 
 use crate::ai::providers::ReasoningFormat;

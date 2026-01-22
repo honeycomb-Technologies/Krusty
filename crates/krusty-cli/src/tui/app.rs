@@ -998,10 +998,19 @@ impl App {
         }
     }
 
-    /// Create AnthropicConfig for the current active provider
+    /// Create AiClientConfig for the current active provider
     pub fn create_client_config(&self) -> crate::ai::client::AiClientConfig {
         use crate::ai::models::ApiFormat;
         use crate::ai::providers::get_provider;
+
+        // OpenAI requires special handling to detect OAuth vs API key
+        // and route to the correct endpoint (ChatGPT Responses API vs OpenAI Chat Completions)
+        if self.active_provider == ProviderId::OpenAI {
+            return crate::ai::client::AiClientConfig::for_openai_with_auth_detection(
+                &self.current_model,
+                &self.credential_store,
+            );
+        }
 
         let provider = get_provider(self.active_provider)
             .unwrap_or_else(|| get_provider(ProviderId::Anthropic).unwrap());
@@ -1113,7 +1122,10 @@ impl App {
             let config = self.create_client_config();
             self.ai_client = Some(AiClient::with_api_key(config, key.clone()));
             self.api_key = Some(key);
-            tracing::info!("Switched to provider {} (loaded existing auth)", provider_id);
+            tracing::info!(
+                "Switched to provider {} (loaded existing auth)",
+                provider_id
+            );
         } else {
             // No stored credentials - user will need to authenticate
             self.ai_client = None;
