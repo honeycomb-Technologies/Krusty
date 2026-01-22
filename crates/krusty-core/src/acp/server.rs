@@ -67,7 +67,10 @@ impl AcpServer {
 
         // Register all built-in tools (Read, Write, Edit, Bash, Grep, etc.)
         register_all_tools(self.agent.tools(), None).await;
-        info!("Registered {} tools", self.agent.tools().get_ai_tools().await.len());
+        info!(
+            "Registered {} tools",
+            self.agent.tools().get_ai_tools().await.len()
+        );
 
         // Auto-initialize AI client from environment variables
         if let Some(config) = detect_api_key_from_env() {

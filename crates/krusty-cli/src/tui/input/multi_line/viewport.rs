@@ -25,15 +25,16 @@ impl MultiLineInput {
             }
 
             // Account for newline - only if there's actually a newline character (not soft wrap)
-            if line_idx < lines.len() - 1 && byte_pos < self.content.len() {
-                if self.content.as_bytes().get(byte_pos) == Some(&b'\n') {
-                    if byte_pos == self.cursor_position {
-                        self.cursor_visual = (line_idx, line.len());
-                        found = true;
-                        break;
-                    }
-                    byte_pos += 1;
+            if line_idx < lines.len() - 1
+                && byte_pos < self.content.len()
+                && self.content.as_bytes().get(byte_pos) == Some(&b'\n')
+            {
+                if byte_pos == self.cursor_position {
+                    self.cursor_visual = (line_idx, line.len());
+                    found = true;
+                    break;
                 }
+                byte_pos += 1;
             }
         }
 

@@ -325,7 +325,7 @@ fn get_fallback_model(provider: ProviderId) -> &'static str {
         ProviderId::OpenCodeZen => "minimax-m2.1-free",         // Free tier model
         ProviderId::ZAi => "glm-4.5-flash",                     // Fast GLM model
         ProviderId::MiniMax => "MiniMax-M2.1",                  // MiniMax default
-        ProviderId::Kimi => "kimi-k2",                          // Kimi default
+        ProviderId::Kimi => "kimi-k2-0905-preview",             // Kimi default
     }
 }
 

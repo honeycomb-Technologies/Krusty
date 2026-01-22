@@ -167,7 +167,9 @@ fn get_model_specs(id: &str) -> (usize, usize, bool, Option<ReasoningFormat>) {
         "glm-4.7-free" => (128_000, 16_384, false, None),
 
         // Kimi models
-        "kimi-k2" => (256_000, 16_384, false, None),
+        "kimi-k2" | "kimi-k2-0905-preview" | "kimi-k2-0711-preview" => {
+            (256_000, 16_384, false, None)
+        }
         "kimi-k2-thinking" => (256_000, 16_384, true, Some(ReasoningFormat::Anthropic)),
 
         // Qwen
@@ -233,7 +235,9 @@ fn generate_display_name(id: &str) -> String {
         "gpt-5" => return "GPT-5".to_string(),
         "gpt-5-codex" => return "GPT-5 Codex".to_string(),
         "grok-code" => return "Grok Code (Free)".to_string(),
-        "kimi-k2" => return "Kimi K2".to_string(),
+        "kimi-k2" | "kimi-k2-0905-preview" | "kimi-k2-0711-preview" => {
+            return "Kimi K2".to_string()
+        }
         "kimi-k2-thinking" => return "Kimi K2 Thinking".to_string(),
         "qwen3-coder" => return "Qwen3 Coder 480B".to_string(),
         "gemini-3-pro" => return "Gemini 3 Pro".to_string(),

@@ -13,7 +13,7 @@ fn get_title_model(provider: ProviderId) -> &'static str {
         ProviderId::OpenCodeZen => "minimax-m2.1-free", // Free model that works
         ProviderId::ZAi => "glm-4.5-flash",
         ProviderId::MiniMax => "MiniMax-M2.1",
-        ProviderId::Kimi => "kimi-k2",
+        ProviderId::Kimi => "kimi-k2-0905-preview",
     }
 }
 

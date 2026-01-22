@@ -7,6 +7,3 @@ use std::sync::LazyLock;
 /// Matches: [path/to/file.png], [image.jpg], [document.pdf], etc.
 pub static FILE_REF_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[([^\]]+\.(png|jpe?g|gif|webp|pdf))\]").unwrap());
-
-/// Supported file extensions for file references
-pub const SUPPORTED_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "pdf"];
