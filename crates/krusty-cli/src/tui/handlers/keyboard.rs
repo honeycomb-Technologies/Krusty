@@ -431,9 +431,10 @@ impl App {
 
         // Find the last @ and replace from there
         if let Some(at_pos) = content.rfind('@') {
-            // Build new content: everything before @ + @path + space
+            // Build new content: everything before @ + [path] + space
+            // Use brackets so the path is recognized by image_parser and click detection
             let before = &content[..at_pos];
-            let new_content = format!("{}@{} ", before, path);
+            let new_content = format!("{}[{}] ", before, path);
 
             self.input.clear();
             self.input.insert_text(&new_content);

@@ -30,6 +30,9 @@ impl MultiLineInput {
             vec![]
         };
 
+        // Pre-compute byte offsets for each line
+        let line_byte_offsets = self.compute_line_byte_offsets(&lines);
+
         let visible_lines: Vec<Line> = lines
             .iter()
             .skip(self.viewport_offset)
@@ -37,6 +40,7 @@ impl MultiLineInput {
             .enumerate()
             .map(|(idx, line)| {
                 let global_line_idx = self.viewport_offset + idx;
+                let line_byte_start = line_byte_offsets.get(global_line_idx).copied().unwrap_or(0);
                 let mut spans = vec![Span::raw(" ")]; // Left padding
 
                 // Check if this line has selection
@@ -56,6 +60,7 @@ impl MultiLineInput {
                         link_color,
                         &file_ref_ranges,
                         hover_range,
+                        line_byte_start,
                     );
                 } else if let Some((sel_start, sel_end)) = line_selection {
                     // Line has selection but no cursor
@@ -79,6 +84,7 @@ impl MultiLineInput {
                                 lc,
                                 &file_ref_ranges,
                                 hover_range,
+                                line_byte_start,
                             );
                         } else {
                             spans.push(Span::styled(
@@ -107,9 +113,31 @@ impl MultiLineInput {
             )
             .style(Style::default().bg(bg_color).fg(accent_color))
     }
+
+    /// Compute the byte offset of each wrapped line's start in the original content
+    fn compute_line_byte_offsets(&self, lines: &[String]) -> Vec<usize> {
+        let mut offsets = Vec::with_capacity(lines.len());
+        let mut byte_pos = 0;
+
+        for (idx, line) in lines.iter().enumerate() {
+            offsets.push(byte_pos);
+            byte_pos += line.len();
+
+            // Check for hard newline after this line (not soft wrap)
+            if idx < lines.len() - 1
+                && byte_pos < self.content.len()
+                && self.content.as_bytes().get(byte_pos) == Some(&b'\n')
+            {
+                byte_pos += 1;
+            }
+        }
+
+        offsets
+    }
 }
 
 /// Render a line with file reference highlighting
+/// `line_byte_start` is the byte offset of this line's start in the original content
 fn render_line_with_file_refs(
     spans: &mut Vec<Span<'static>>,
     line: &str,
@@ -117,6 +145,7 @@ fn render_line_with_file_refs(
     link_color: Color,
     file_ref_ranges: &[(usize, usize)],
     hover_range: Option<(usize, usize)>,
+    line_byte_start: usize,
 ) {
     let base_style = Style::default().fg(accent_color);
     let link_style = Style::default()
@@ -128,22 +157,43 @@ fn render_line_with_file_refs(
         .bg(link_color)
         .add_modifier(Modifier::BOLD);
 
-    // Simple approach: check if line contains any file ref pattern
-    // and style the bracketed part differently
     if file_ref_ranges.is_empty() {
         spans.push(Span::styled(line.to_string(), base_style));
         return;
     }
 
-    // Find bracket patterns in the line
+    let line_byte_end = line_byte_start + line.len();
+
+    // Find which global file_ref_ranges overlap with this line
+    let mut highlight_ranges: Vec<(usize, usize, bool)> = Vec::new();
+    for &(ref_start, ref_end) in file_ref_ranges {
+        // Check if this file ref overlaps with current line
+        if ref_end > line_byte_start && ref_start < line_byte_end {
+            // Calculate the overlap within this line (as byte offsets within line)
+            let local_start = ref_start.saturating_sub(line_byte_start);
+            let local_end = (ref_end - line_byte_start).min(line.len());
+
+            let is_hovered = hover_range.is_some_and(|(hs, he)| hs == ref_start && he == ref_end);
+            highlight_ranges.push((local_start, local_end, is_hovered));
+        }
+    }
+
+    if highlight_ranges.is_empty() {
+        spans.push(Span::styled(line.to_string(), base_style));
+        return;
+    }
+
+    // Sort by start position
+    highlight_ranges.sort_by_key(|(s, _, _)| *s);
+
+    // Render with highlights
     let mut last_end = 0;
-    for (start, end) in find_bracket_ranges(line) {
-        // Add text before bracket
+    for (start, end, is_hovered) in highlight_ranges {
+        // Add text before highlight
         if start > last_end {
             spans.push(Span::styled(line[last_end..start].to_string(), base_style));
         }
-        // Add bracketed text with link style
-        let is_hovered = hover_range.is_some_and(|(hs, he)| start == hs && end == he);
+        // Add highlighted text
         let style = if is_hovered { hover_style } else { link_style };
         spans.push(Span::styled(line[start..end].to_string(), style));
         last_end = end;
@@ -152,16 +202,6 @@ fn render_line_with_file_refs(
     if last_end < line.len() {
         spans.push(Span::styled(line[last_end..].to_string(), base_style));
     }
-}
-
-/// Find bracket ranges in a line that look like file paths
-fn find_bracket_ranges(line: &str) -> Vec<(usize, usize)> {
-    use super::patterns::FILE_REF_PATTERN;
-
-    FILE_REF_PATTERN
-        .find_iter(line)
-        .map(|m| (m.start(), m.end()))
-        .collect()
 }
 
 /// Get selection bounds for a specific line, returns (start_col, end_col) if selected
@@ -195,6 +235,7 @@ fn get_line_selection(
 }
 
 /// Render a line with cursor, optional selection, AND file reference styling
+/// `line_byte_start` is the byte offset of this line's start in the original content
 #[allow(clippy::too_many_arguments)]
 fn render_line_with_cursor_and_file_refs(
     spans: &mut Vec<Span<'static>>,
@@ -205,8 +246,9 @@ fn render_line_with_cursor_and_file_refs(
     sel_bg: Color,
     sel_fg: Color,
     link_color: Option<Color>,
-    _file_ref_ranges: &[(usize, usize)], // Global ranges, we use find_bracket_ranges on line instead
+    file_ref_ranges: &[(usize, usize)],
     hover_range: Option<(usize, usize)>,
+    line_byte_start: usize,
 ) {
     let base_style = Style::default().fg(accent_color);
     let sel_style = Style::default()
@@ -227,14 +269,29 @@ fn render_line_with_cursor_and_file_refs(
         (base_style, base_style)
     };
 
-    // Find bracket ranges in this line for file ref detection
-    let bracket_ranges = find_bracket_ranges(line);
+    let line_byte_end = line_byte_start + line.len();
+
+    // Find which global file_ref_ranges overlap with this line and convert to local byte ranges
+    let local_highlight_ranges: Vec<(usize, usize, bool)> = file_ref_ranges
+        .iter()
+        .filter_map(|&(ref_start, ref_end)| {
+            if ref_end > line_byte_start && ref_start < line_byte_end {
+                let local_start = ref_start.saturating_sub(line_byte_start);
+                let local_end = (ref_end - line_byte_start).min(line.len());
+                let is_hovered =
+                    hover_range.is_some_and(|(hs, he)| hs == ref_start && he == ref_end);
+                Some((local_start, local_end, is_hovered))
+            } else {
+                None
+            }
+        })
+        .collect();
 
     let chars: Vec<char> = line.chars().collect();
     let len = chars.len();
     let cursor_col = cursor_col.min(len);
 
-    // Build a byte-to-char mapping for bracket range lookup
+    // Build a byte-to-char mapping for range lookup
     let mut byte_to_char: Vec<usize> = Vec::with_capacity(line.len() + 1);
     for (char_idx, ch) in chars.iter().enumerate() {
         for _ in 0..ch.len_utf8() {
@@ -243,13 +300,13 @@ fn render_line_with_cursor_and_file_refs(
     }
     byte_to_char.push(len); // End sentinel
 
-    // Convert bracket byte ranges to char ranges
-    let char_bracket_ranges: Vec<(usize, usize)> = bracket_ranges
+    // Convert byte ranges to char ranges
+    let char_highlight_ranges: Vec<(usize, usize, bool)> = local_highlight_ranges
         .iter()
-        .filter_map(|(start, end)| {
+        .filter_map(|(start, end, is_hovered)| {
             let start_char = byte_to_char.get(*start).copied()?;
             let end_char = byte_to_char.get((*end).min(line.len())).copied()?;
-            Some((start_char, end_char))
+            Some((start_char, end_char, *is_hovered))
         })
         .collect();
 
@@ -271,15 +328,12 @@ fn render_line_with_cursor_and_file_refs(
             // Selection takes priority
             sel_style
         } else if link_color.is_some() {
-            // Check if in a file ref bracket range
-            let in_bracket = char_bracket_ranges.iter().any(|(s, e)| i >= *s && i < *e);
-            if in_bracket {
-                // Check if this bracket is hovered (need to match against global file_ref_ranges)
-                let is_hovered = hover_range.is_some()
-                    && char_bracket_ranges
-                        .iter()
-                        .any(|(s, e)| i >= *s && i < *e && hover_range == Some((*s, *e)));
-                if is_hovered {
+            // Check if in a file ref highlight range
+            let highlight_info = char_highlight_ranges
+                .iter()
+                .find(|(s, e, _)| i >= *s && i < *e);
+            if let Some((_, _, is_hovered)) = highlight_info {
+                if *is_hovered {
                     hover_style
                 } else {
                     link_style

@@ -25,47 +25,6 @@ const T_RIGHT: char = '├';
 const T_LEFT: char = '┤';
 const CROSS: char = '┼';
 
-/// Convert markdown elements to styled lines
-pub fn render_elements(
-    elements: &[MarkdownElement],
-    width: usize,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-
-    for element in elements {
-        match element {
-            MarkdownElement::Paragraph(content) => {
-                render_paragraph(&mut lines, content, width, theme);
-            }
-            MarkdownElement::Heading { level, content } => {
-                render_heading(&mut lines, *level, content, width, theme);
-            }
-            MarkdownElement::CodeBlock { lang, code } => {
-                render_code_block(&mut lines, lang.as_deref(), code, width, theme);
-            }
-            MarkdownElement::BlockQuote(nested) => {
-                render_blockquote(&mut lines, nested, width, theme);
-            }
-            MarkdownElement::List {
-                ordered,
-                start,
-                items,
-            } => {
-                render_list(&mut lines, *ordered, *start, items, width, theme, 0);
-            }
-            MarkdownElement::Table { headers, rows, .. } => {
-                render_table(&mut lines, headers, rows, width, theme);
-            }
-            MarkdownElement::ThematicBreak => {
-                render_thematic_break(&mut lines, width, theme);
-            }
-        }
-    }
-
-    lines
-}
-
 /// Convert markdown elements to styled lines with link tracking
 pub fn render_elements_with_links(
     elements: &[MarkdownElement],
@@ -120,9 +79,11 @@ pub fn render_elements_with_links(
                 start,
                 items,
             } => {
-                render_list(&mut lines, *ordered, *start, items, width, theme, 0);
-                // Note: List items could have links but we skip tracking for now
-                // to keep complexity manageable
+                let base_line = lines.len();
+                let (list_lines, list_links) =
+                    render_list_with_links(*ordered, *start, items, width, theme, 0, base_line);
+                lines.extend(list_lines);
+                all_links.extend(list_links);
             }
             MarkdownElement::Table { headers, rows, .. } => {
                 render_table(&mut lines, headers, rows, width, theme);
@@ -135,18 +96,6 @@ pub fn render_elements_with_links(
     }
 
     RenderedMarkdown::with_links(lines, all_links)
-}
-
-fn render_paragraph(
-    lines: &mut Vec<Line<'static>>,
-    content: &[InlineContent],
-    width: usize,
-    theme: &Theme,
-) {
-    let spans = render_inline(content, theme);
-    let wrapped = wrap_spans(spans, width);
-    lines.extend(wrapped);
-    lines.push(Line::from("")); // blank line after paragraph
 }
 
 fn render_paragraph_with_links(
@@ -203,37 +152,6 @@ fn render_heading_with_links(
 
     let lines = vec![Line::from(""), Line::from(spans)];
     (lines, links)
-}
-
-fn render_heading(
-    lines: &mut Vec<Line<'static>>,
-    level: u8,
-    content: &[InlineContent],
-    _width: usize,
-    theme: &Theme,
-) {
-    let mut spans = render_inline(content, theme);
-
-    // Apply heading styles - simple bold text with different colors
-    let style = match level {
-        1 => Style::default()
-            .fg(theme.accent_color)
-            .add_modifier(Modifier::BOLD),
-        2 => Style::default()
-            .fg(theme.title_color)
-            .add_modifier(Modifier::BOLD),
-        _ => Style::default()
-            .fg(theme.text_color)
-            .add_modifier(Modifier::BOLD),
-    };
-
-    // Restyle all spans
-    for span in &mut spans {
-        span.style = span.style.patch(style);
-    }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(spans));
 }
 
 fn render_code_block(
@@ -354,31 +272,19 @@ fn render_code_block(
     lines.push(Line::from("")); // blank after code block
 }
 
-fn render_blockquote(
-    lines: &mut Vec<Line<'static>>,
-    nested: &[MarkdownElement],
-    width: usize,
-    theme: &Theme,
-) {
-    let bar_style = Style::default().fg(theme.dim_color);
-    let inner_lines = render_elements(nested, width.saturating_sub(2), theme);
-
-    for line in inner_lines {
-        let mut new_spans = vec![Span::styled("│ ", bar_style)];
-        new_spans.extend(line.spans);
-        lines.push(Line::from(new_spans));
-    }
-}
-
-fn render_list(
-    lines: &mut Vec<Line<'static>>,
+/// Render list with link tracking
+fn render_list_with_links(
     ordered: bool,
     start: Option<u64>,
     items: &[ListItem],
     width: usize,
     theme: &Theme,
     depth: usize,
-) {
+    base_line: usize,
+) -> (Vec<Line<'static>>, Vec<LinkSpan>) {
+    let mut lines = Vec::new();
+    let mut all_links = Vec::new();
+
     let bullets = ['•', '◦', '▪', '▫'];
     let bullet = bullets[depth % bullets.len()];
     let indent = "  ".repeat(depth);
@@ -395,11 +301,14 @@ fn render_list(
             format!("{}{} ", indent, bullet)
         };
 
-        // Render item content
-        let mut inner_lines =
-            render_elements(&item.content, width.saturating_sub(marker.width()), theme);
+        let marker_width = marker.width();
+
+        // Render item content with link tracking
+        let inner =
+            render_elements_with_links(&item.content, width.saturating_sub(marker_width), theme);
 
         // Strip trailing empty lines (paragraphs add blank lines we don't want in lists)
+        let mut inner_lines = inner.lines;
         while inner_lines
             .last()
             .map(|l| l.spans.is_empty())
@@ -414,21 +323,32 @@ fn render_list(
             continue;
         }
 
+        let item_base_line = base_line + lines.len();
+
         for (j, line) in inner_lines.iter().enumerate() {
             if j == 0 {
                 let mut spans = vec![Span::styled(marker.clone(), bullet_style)];
                 spans.extend(line.spans.clone());
                 lines.push(Line::from(spans));
             } else {
-                let prefix = " ".repeat(marker.width());
+                let prefix = " ".repeat(marker_width);
                 let mut spans = vec![Span::raw(prefix)];
                 spans.extend(line.spans.clone());
                 lines.push(Line::from(spans));
             }
         }
+
+        // Adjust link positions: add marker_width to columns and adjust line numbers
+        for mut link in inner.links {
+            link.line += item_base_line;
+            link.start_col += marker_width;
+            link.end_col += marker_width;
+            all_links.push(link);
+        }
     }
 
     lines.push(Line::from("")); // blank after list
+    (lines, all_links)
 }
 
 fn render_table(
@@ -583,141 +503,6 @@ fn render_table(
 fn render_thematic_break(lines: &mut Vec<Line<'static>>, _width: usize, _theme: &Theme) {
     // Just add a blank line instead of a horizontal rule
     lines.push(Line::from(""));
-}
-
-fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Line<'static>> {
-    if width == 0 {
-        return vec![Line::from(spans)];
-    }
-
-    let mut result = Vec::new();
-    let mut current_line: Vec<Span<'static>> = Vec::new();
-    let mut current_width = 0;
-
-    for span in spans {
-        let span_width = span.content.width();
-
-        if current_width + span_width <= width {
-            // Span fits on current line
-            current_line.push(span);
-            current_width += span_width;
-        } else if span_width <= width {
-            // Span fits on a new line - move whole span to next line
-            if !current_line.is_empty() {
-                result.push(Line::from(current_line));
-                current_line = Vec::new();
-            }
-            current_line.push(span);
-            current_width = span_width;
-        } else {
-            // Span is too wide - break at word boundaries, then characters if needed
-            let style = span.style;
-            let text = span.content.to_string();
-
-            // Split into words (preserving spaces)
-            let mut words: Vec<&str> = Vec::new();
-            let mut last_end = 0;
-            for (i, c) in text.char_indices() {
-                if c.is_whitespace() {
-                    if i > last_end {
-                        words.push(&text[last_end..i]);
-                    }
-                    words.push(&text[i..i + c.len_utf8()]);
-                    last_end = i + c.len_utf8();
-                }
-            }
-            if last_end < text.len() {
-                words.push(&text[last_end..]);
-            }
-
-            for word in words {
-                let word_width = word.width();
-
-                if word_width == 0 {
-                    continue;
-                }
-
-                // If word fits on current line, add it
-                if current_width + word_width <= width {
-                    current_line.push(Span::styled(word.to_string(), style));
-                    current_width += word_width;
-                }
-                // If word fits on a new line, wrap first
-                else if word_width <= width {
-                    if !current_line.is_empty() {
-                        result.push(Line::from(current_line));
-                        current_line = Vec::new();
-                    }
-                    current_line.push(Span::styled(word.to_string(), style));
-                    current_width = word_width;
-                }
-                // Word is longer than line width - split without hyphens
-                else {
-                    // Flush current line first
-                    if !current_line.is_empty() {
-                        result.push(Line::from(current_line));
-                        current_line = Vec::new();
-                        current_width = 0;
-                    }
-
-                    // Break word at character boundaries
-                    let mut remaining = word;
-                    while !remaining.is_empty() {
-                        let available = width.saturating_sub(current_width);
-                        if available == 0 {
-                            if !current_line.is_empty() {
-                                result.push(Line::from(current_line));
-                                current_line = Vec::new();
-                            }
-                            current_width = 0;
-                            continue;
-                        }
-
-                        // Find how many characters fit
-                        let mut fit_len = 0;
-                        let mut fit_width = 0;
-                        for c in remaining.chars() {
-                            let cw = c.width().unwrap_or(0);
-                            if fit_width + cw > available {
-                                break;
-                            }
-                            fit_len += c.len_utf8();
-                            fit_width += cw;
-                        }
-
-                        // Force at least one character
-                        if fit_len == 0 && !remaining.is_empty() {
-                            let c = remaining.chars().next().unwrap();
-                            fit_len = c.len_utf8();
-                            let _ = c.width(); // Width is tracked in loop below
-                        }
-
-                        let chunk = &remaining[..fit_len];
-                        remaining = &remaining[fit_len..];
-                        current_line.push(Span::styled(chunk.to_string(), style));
-                        current_width += fit_width;
-
-                        // Wrap if more remaining
-                        if !remaining.is_empty() {
-                            result.push(Line::from(current_line));
-                            current_line = Vec::new();
-                            current_width = 0;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if !current_line.is_empty() {
-        result.push(Line::from(current_line));
-    }
-
-    if result.is_empty() {
-        result.push(Line::from(""));
-    }
-
-    result
 }
 
 /// Wrap spans and track link positions through wrapping
