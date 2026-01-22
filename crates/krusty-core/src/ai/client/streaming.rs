@@ -241,13 +241,27 @@ impl AiClient {
         options: &CallOptions,
         call_start: Instant,
     ) -> Result<mpsc::UnboundedReceiver<StreamPart>> {
-        info!(
-            "Using OpenAI chat/completions format for {}",
-            self.config().model
-        );
+        // Check if we're using ChatGPT Codex API (OAuth) vs standard OpenAI API
+        let is_chatgpt_codex = self
+            .config()
+            .base_url
+            .as_ref()
+            .map(|url| url.contains("chatgpt.com"))
+            .unwrap_or(false);
+
+        if is_chatgpt_codex {
+            info!(
+                "Using ChatGPT Codex format for {} (OAuth)",
+                self.config().model
+            );
+        } else {
+            info!(
+                "Using OpenAI chat/completions format for {}",
+                self.config().model
+            );
+        }
 
         let format_handler = OpenAIFormat::new(self.config().api_format);
-        let openai_messages = format_handler.convert_messages(&messages, Some(self.provider_id()));
 
         // Extract system prompt
         let system: String = messages
@@ -272,50 +286,68 @@ impl AiClient {
 
         let max_tokens = options.max_tokens.unwrap_or(self.config().max_tokens);
 
-        // Responses API uses "input", Chat Completions uses "messages"
-        let (messages_key, max_tokens_key) = if matches!(
-            self.config().api_format,
-            crate::ai::models::ApiFormat::OpenAIResponses
-        ) {
-            ("input", "max_output_tokens")
+        // Build request body based on API type
+        let body = if is_chatgpt_codex {
+            // ChatGPT Codex API format (different from standard Responses API)
+            self.build_chatgpt_codex_body(
+                &messages,
+                &system_prompt,
+                max_tokens,
+                options,
+                &format_handler,
+            )
         } else {
-            ("messages", "max_tokens")
+            // Standard OpenAI format (Chat Completions or Responses API)
+            let openai_messages =
+                format_handler.convert_messages(&messages, Some(self.provider_id()));
+
+            // Responses API uses "input", Chat Completions uses "messages"
+            let (messages_key, max_tokens_key) = if matches!(
+                self.config().api_format,
+                crate::ai::models::ApiFormat::OpenAIResponses
+            ) {
+                ("input", "max_output_tokens")
+            } else {
+                ("messages", "max_tokens")
+            };
+
+            let mut body = serde_json::json!({
+                "model": self.config().model,
+                "stream": true,
+            });
+            body[max_tokens_key] = serde_json::json!(max_tokens);
+            body[messages_key] = serde_json::json!(openai_messages);
+
+            // Add system message at the start
+            if let Some(sys) = system_prompt {
+                if let Some(msgs) = body.get_mut(messages_key).and_then(|m| m.as_array_mut()) {
+                    msgs.insert(
+                        0,
+                        serde_json::json!({
+                            "role": "system",
+                            "content": sys
+                        }),
+                    );
+                }
+            }
+
+            // Add temperature
+            if options.thinking.is_none() {
+                if let Some(temp) = options.temperature {
+                    body["temperature"] = serde_json::json!(temp);
+                }
+            }
+
+            // Add tools
+            if let Some(tools) = &options.tools {
+                let openai_tools = format_handler.convert_tools(tools);
+                if !openai_tools.is_empty() {
+                    body["tools"] = serde_json::json!(openai_tools);
+                }
+            }
+
+            body
         };
-
-        let mut body = serde_json::json!({
-            "model": self.config().model,
-            "stream": true,
-        });
-        body[max_tokens_key] = serde_json::json!(max_tokens);
-        body[messages_key] = serde_json::json!(openai_messages);
-
-        // Add system message at the start
-        if let Some(sys) = system_prompt {
-            if let Some(msgs) = body.get_mut(messages_key).and_then(|m| m.as_array_mut()) {
-                msgs.insert(
-                    0,
-                    serde_json::json!({
-                        "role": "system",
-                        "content": sys
-                    }),
-                );
-            }
-        }
-
-        // Add temperature
-        if options.thinking.is_none() {
-            if let Some(temp) = options.temperature {
-                body["temperature"] = serde_json::json!(temp);
-            }
-        }
-
-        // Add tools
-        if let Some(tools) = &options.tools {
-            let openai_tools = format_handler.convert_tools(tools);
-            if !openai_tools.is_empty() {
-                body["tools"] = serde_json::json!(openai_tools);
-            }
-        }
 
         debug!("OpenAI request to: {}", self.config().api_url());
 
@@ -695,5 +727,159 @@ impl AiClient {
         }
 
         beta_headers
+    }
+
+    /// Build request body for ChatGPT Codex API
+    ///
+    /// ChatGPT Codex has a different format than standard OpenAI APIs:
+    /// - Uses "instructions" field for system prompt (required)
+    /// - Uses "developer" role instead of "system"
+    /// - Message content is array of {"type": "input_text", "text": "..."}
+    fn build_chatgpt_codex_body(
+        &self,
+        messages: &[ModelMessage],
+        system_prompt: &Option<String>,
+        max_tokens: usize,
+        options: &CallOptions,
+        format_handler: &OpenAIFormat,
+    ) -> Value {
+        // Convert messages to Codex format
+        let mut input_messages: Vec<Value> = Vec::new();
+
+        for msg in messages.iter().filter(|m| m.role != Role::System) {
+            let role = match msg.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                Role::Tool => "tool",
+                Role::System => continue, // Handled via instructions
+            };
+
+            // Check for tool results
+            let has_tool_results = msg
+                .content
+                .iter()
+                .any(|c| matches!(c, Content::ToolResult { .. }));
+
+            if has_tool_results {
+                for content in &msg.content {
+                    if let Content::ToolResult {
+                        tool_use_id,
+                        output,
+                        ..
+                    } = content
+                    {
+                        let output_str = match output {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        input_messages.push(serde_json::json!({
+                            "role": "tool",
+                            "tool_call_id": tool_use_id,
+                            "content": output_str
+                        }));
+                    }
+                }
+                continue;
+            }
+
+            // Check for tool calls
+            let has_tool_use = msg
+                .content
+                .iter()
+                .any(|c| matches!(c, Content::ToolUse { .. }));
+
+            if has_tool_use && role == "assistant" {
+                let mut tool_calls = Vec::new();
+                let mut text_content = String::new();
+
+                for content in &msg.content {
+                    match content {
+                        Content::Text { text } => text_content.push_str(text),
+                        Content::ToolUse { id, name, input } => {
+                            tool_calls.push(serde_json::json!({
+                                "id": id,
+                                "type": "function",
+                                "function": {
+                                    "name": name,
+                                    "arguments": input.to_string()
+                                }
+                            }));
+                        }
+                        _ => {}
+                    }
+                }
+
+                let mut msg_obj = serde_json::json!({
+                    "role": "assistant",
+                    "tool_calls": tool_calls
+                });
+                if !text_content.is_empty() {
+                    msg_obj["content"] = serde_json::json!([{
+                        "type": "output_text",
+                        "text": text_content
+                    }]);
+                }
+                input_messages.push(msg_obj);
+                continue;
+            }
+
+            // Regular message - extract text
+            let text: String = msg
+                .content
+                .iter()
+                .filter_map(|c| match c {
+                    Content::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            if !text.is_empty() {
+                // Codex format: content as array of typed objects
+                input_messages.push(serde_json::json!({
+                    "role": role,
+                    "content": [{
+                        "type": "input_text",
+                        "text": text
+                    }]
+                }));
+            }
+        }
+
+        // Build Codex request body
+        let mut body = serde_json::json!({
+            "model": self.config().model,
+            "stream": true,
+            "max_output_tokens": max_tokens,
+            "input": input_messages,
+            "tools": [],
+            "reasoning": {
+                "summary": "auto"
+            }
+        });
+
+        // Instructions field is REQUIRED for Codex API
+        if let Some(instructions) = system_prompt {
+            body["instructions"] = serde_json::json!(instructions);
+        } else {
+            body["instructions"] = serde_json::json!(KRUSTY_SYSTEM_PROMPT);
+        }
+
+        // Add tools if provided
+        if let Some(tools) = &options.tools {
+            let codex_tools = format_handler.convert_tools(tools);
+            if !codex_tools.is_empty() {
+                body["tools"] = serde_json::json!(codex_tools);
+                body["tool_choice"] = serde_json::json!("auto");
+            }
+        }
+
+        debug!(
+            "ChatGPT Codex request body: {} messages, {} tools",
+            input_messages.len(),
+            options.tools.as_ref().map(|t| t.len()).unwrap_or(0)
+        );
+
+        body
     }
 }

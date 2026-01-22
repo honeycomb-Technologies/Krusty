@@ -13,7 +13,8 @@ use crate::auth::OpenAIAuthType;
 
 /// ChatGPT backend API for OAuth users (Responses API)
 /// This endpoint is required for tokens obtained via ChatGPT OAuth flow.
-pub const CHATGPT_RESPONSES_API: &str = "https://chatgpt.com/backend-api/codex/v1/responses";
+/// Note: ChatGPT's Codex API does NOT use /v1/ prefix unlike the standard OpenAI API.
+pub const CHATGPT_RESPONSES_API: &str = "https://chatgpt.com/backend-api/codex/responses";
 
 /// Standard OpenAI API for API key users (Chat Completions)
 /// This endpoint is used when authenticating with an API key.
