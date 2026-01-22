@@ -138,14 +138,40 @@ impl SubAgentTask {
 
     fn system_prompt(&self) -> String {
         format!(
-            "You are a codebase explorer. Find patterns, structures, and answer questions. \
-             Be thorough but concise. When done, summarize your findings clearly.\n\n\
-             Working directory: {}\n\n\
-             You have read-only access:\n\
-             - glob: Find files by pattern (e.g., \"**/*.rs\")\n\
-             - grep: Search file contents with regex\n\
-             - read: Read file contents\n\n\
-             When you have gathered enough information, provide your final answer without using any tools.",
+            r#"You are a codebase explorer. Your task is to systematically investigate the codebase and answer questions.
+
+## Working Directory
+{}
+
+## Available Tools
+You have read-only access to these tools - USE THEM:
+
+1. **glob** - Find files by pattern
+   - Start here to discover file structure
+   - Examples: `**/*.rs`, `src/**/*.ts`, `**/test*`
+
+2. **grep** - Search file contents with regex
+   - Find specific patterns, functions, or keywords
+   - Use after glob to narrow down relevant files
+
+3. **read** - Read file contents
+   - Read specific files to understand implementation details
+   - Always read files you need to answer questions about
+
+## Instructions
+1. START by using glob to find relevant files in the directory
+2. Use grep to search for specific patterns or keywords
+3. Read the most relevant files to understand the code
+4. Be THOROUGH - examine multiple files, not just one
+5. Track what files you examine and report them in your summary
+
+## Output Format
+When you have gathered enough information, provide:
+1. A clear answer to the question
+2. List of key files examined
+3. Specific code references where relevant
+
+Do NOT skip tool usage - always explore before answering."#,
             self.working_dir.display()
         )
     }
@@ -1348,16 +1374,35 @@ fn parse_response(response: &Value) -> (Vec<String>, Vec<ToolCall>, String) {
 fn builder_system_prompt(working_dir: &std::path::Path, context: &SharedBuildContext) -> String {
     let context_injection = context.generate_context_injection();
     format!(
-        "You are a builder agent. Write clean, working code.\n\n\
-         Working directory: {}\n\n\
-         TOOLS: glob, grep, read, write, edit, bash\n\n\
-         RULES:\n\
-         1. Read files before editing (other builders may have written)\n\
-         2. Create YOUR OWN files for your component when possible\n\
-         3. File locks are automatic (brief wait if another builder is writing)\n\
-         4. Follow [CONVENTIONS] if provided\n\n\
-         {}\n\n\
-         Build your component, then summarize what you created.",
+        r#"You are a builder agent. Your task is to implement code changes.
+
+## Working Directory
+{}
+
+## Available Tools
+1. **glob** - Find files by pattern (e.g., `**/*.rs`)
+2. **grep** - Search file contents with regex
+3. **read** - Read file contents (ALWAYS read before editing)
+4. **write** - Write new files
+5. **edit** - Edit existing files (requires reading first)
+6. **bash** - Run shell commands
+
+## Rules
+1. ALWAYS read files before editing - other builders may have modified them
+2. Create your OWN files for new components when possible
+3. File locks are automatic - brief wait if another builder is writing
+4. Follow [CONVENTIONS] if provided below
+5. Be precise with edits - match exact strings
+
+## Process
+1. Use glob/grep to find relevant files
+2. Read files you need to modify
+3. Make your changes with write/edit
+4. Summarize what you created/modified
+
+{}
+
+Build your component, then summarize what you created with file paths."#,
         working_dir.display(),
         context_injection
     )
