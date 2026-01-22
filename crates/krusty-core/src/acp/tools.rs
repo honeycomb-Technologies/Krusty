@@ -6,11 +6,11 @@
 use agent_client_protocol::{
     Client, Content, ContentBlock, CreateTerminalRequest, Diff, ReadTextFileRequest,
     ReleaseTerminalRequest, SessionId, TerminalId, TerminalOutputRequest, TextContent,
-    ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
-    WriteTextFileRequest,
+    ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
+    ToolCallUpdateFields, ToolKind, WriteTextFileRequest,
 };
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
 use super::error::AcpError;
@@ -28,12 +28,163 @@ pub fn should_delegate_to_client(tool_name: &str) -> bool {
     CLIENT_DELEGATED_TOOLS.contains(&tool_name)
 }
 
+/// Map tool name to ACP ToolKind for proper UI categorization
+pub fn tool_name_to_kind(tool_name: &str) -> ToolKind {
+    match tool_name {
+        // Read operations
+        "read" | "Read" | "cat" => ToolKind::Read,
+        // Edit operations
+        "edit" | "Edit" | "write" | "Write" | "patch" => ToolKind::Edit,
+        // Search operations
+        "grep" | "Grep" | "glob" | "Glob" | "find" | "search" | "ripgrep" => ToolKind::Search,
+        // Execute operations
+        "bash" | "Bash" | "shell" | "exec" | "run" | "terminal" => ToolKind::Execute,
+        // Fetch operations
+        "web_fetch" | "WebFetch" | "fetch" | "curl" | "http" | "web_search" | "WebSearch" => {
+            ToolKind::Fetch
+        }
+        // Think operations
+        "think" | "reason" | "plan" => ToolKind::Think,
+        // Delete operations
+        "delete" | "remove" | "rm" => ToolKind::Delete,
+        // Move operations
+        "move" | "mv" | "rename" => ToolKind::Move,
+        // Default
+        _ => ToolKind::Other,
+    }
+}
+
+/// Extract file locations from tool input for "follow-along" feature
+pub fn extract_locations(tool_name: &str, input: &Value) -> Vec<ToolCallLocation> {
+    let mut locations = Vec::new();
+
+    // Extract path from common field names
+    let path_fields = ["path", "file_path", "file", "filename"];
+    for field in path_fields {
+        if let Some(path_str) = input.get(field).and_then(|v| v.as_str()) {
+            let mut loc = ToolCallLocation::new(PathBuf::from(path_str));
+            // Try to extract line number if present
+            if let Some(line) = input.get("line").and_then(|v| v.as_u64()) {
+                loc = loc.line(line as u32);
+            } else if let Some(line) = input.get("start_line").and_then(|v| v.as_u64()) {
+                loc = loc.line(line as u32);
+            }
+            locations.push(loc);
+            break;
+        }
+    }
+
+    // For grep/glob, extract the search path
+    if matches!(tool_name, "grep" | "Grep" | "glob" | "Glob") {
+        if let Some(path_str) = input.get("directory").and_then(|v| v.as_str()) {
+            locations.push(ToolCallLocation::new(PathBuf::from(path_str)));
+        }
+    }
+
+    locations
+}
+
+/// Create a human-readable title for a tool call
+pub fn create_tool_title(tool_name: &str, input: &Value) -> String {
+    match tool_name {
+        "read" | "Read" => {
+            if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
+                let filename = Path::new(path)
+                    .file_name()
+                    .map(|s| s.to_string_lossy())
+                    .unwrap_or_else(|| path.into());
+                format!("Reading {}", filename)
+            } else {
+                "Reading file".to_string()
+            }
+        }
+        "edit" | "Edit" => {
+            if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
+                let filename = Path::new(path)
+                    .file_name()
+                    .map(|s| s.to_string_lossy())
+                    .unwrap_or_else(|| path.into());
+                format!("Editing {}", filename)
+            } else {
+                "Editing file".to_string()
+            }
+        }
+        "write" | "Write" => {
+            if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
+                let filename = Path::new(path)
+                    .file_name()
+                    .map(|s| s.to_string_lossy())
+                    .unwrap_or_else(|| path.into());
+                format!("Writing {}", filename)
+            } else {
+                "Writing file".to_string()
+            }
+        }
+        "bash" | "Bash" => {
+            if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
+                // Truncate long commands
+                let display = if cmd.len() > 50 {
+                    format!("{}...", &cmd[..47])
+                } else {
+                    cmd.to_string()
+                };
+                format!("Running: {}", display)
+            } else {
+                "Running command".to_string()
+            }
+        }
+        "grep" | "Grep" => {
+            if let Some(pattern) = input.get("pattern").and_then(|v| v.as_str()) {
+                format!("Searching for: {}", pattern)
+            } else {
+                "Searching".to_string()
+            }
+        }
+        "glob" | "Glob" => {
+            if let Some(pattern) = input.get("pattern").and_then(|v| v.as_str()) {
+                format!("Finding files: {}", pattern)
+            } else {
+                "Finding files".to_string()
+            }
+        }
+        "web_fetch" | "WebFetch" => {
+            if let Some(url) = input.get("url").and_then(|v| v.as_str()) {
+                let display = if url.len() > 40 {
+                    format!("{}...", &url[..37])
+                } else {
+                    url.to_string()
+                };
+                format!("Fetching: {}", display)
+            } else {
+                "Fetching URL".to_string()
+            }
+        }
+        "web_search" | "WebSearch" => {
+            if let Some(query) = input.get("query").and_then(|v| v.as_str()) {
+                format!("Searching web: {}", query)
+            } else {
+                "Searching web".to_string()
+            }
+        }
+        _ => format!("Running {}", tool_name),
+    }
+}
+
 /// Create an ACP tool call update for a starting tool
-pub fn create_tool_call_start(id: &str, _tool_name: &str, input: Value) -> ToolCallUpdate {
+pub fn create_tool_call_start(id: &str, tool_name: &str, input: Value) -> ToolCallUpdate {
+    let kind = tool_name_to_kind(tool_name);
+    let locations = extract_locations(tool_name, &input);
+    let title = create_tool_title(tool_name, &input);
+
     let mut fields = ToolCallUpdateFields::new();
     fields.status = Some(ToolCallStatus::InProgress);
+    fields.kind = Some(kind);
+    fields.title = Some(title);
     fields.raw_input = Some(input);
-    // Note: tool_name is part of ToolCall (initial creation), not ToolCallUpdate
+    if !locations.is_empty() {
+        fields.locations = Some(locations);
+    }
+
     ToolCallUpdate::new(ToolCallId::from(id.to_string()), fields)
 }
 

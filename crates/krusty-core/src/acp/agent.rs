@@ -6,13 +6,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_client_protocol::{
-    Agent, AgentCapabilities, AuthenticateRequest, AuthenticateResponse, CancelNotification,
-    ClientCapabilities, ContentBlock, Error as AcpSchemaError, ExtNotification, ExtRequest,
-    ExtResponse, Implementation, InitializeRequest, InitializeResponse, LoadSessionRequest,
-    LoadSessionResponse, McpCapabilities, ModelId, ModelInfo as AcpModelInfo, NewSessionRequest,
-    NewSessionResponse, PromptCapabilities, PromptRequest, PromptResponse, Result as AcpResult,
-    SessionCapabilities, SessionId, SessionMode, SessionModeState, SessionModelState,
-    SessionNotification, SetSessionModeRequest, SetSessionModeResponse, SetSessionModelRequest,
+    Agent, AgentCapabilities, AuthenticateRequest, AuthenticateResponse, AvailableCommand,
+    AvailableCommandsUpdate, CancelNotification, ClientCapabilities, ContentBlock,
+    Error as AcpSchemaError, ExtNotification, ExtRequest, ExtResponse, Implementation,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
+    McpCapabilities, ModelId, ModelInfo as AcpModelInfo, NewSessionRequest, NewSessionResponse,
+    PromptCapabilities, PromptRequest, PromptResponse, Result as AcpResult, SessionCapabilities,
+    SessionId, SessionMode, SessionModeState, SessionModelState, SessionNotification,
+    SessionUpdate, SetSessionModeRequest, SetSessionModeResponse, SetSessionModelRequest,
     SetSessionModelResponse,
 };
 use tokio::sync::{mpsc, RwLock};
@@ -360,6 +361,38 @@ impl KrustyAgent {
     pub async fn get_api_key(&self) -> Option<String> {
         self.api_key.read().await.clone()
     }
+
+    /// Get available slash commands
+    pub fn get_available_commands(&self) -> Vec<AvailableCommand> {
+        vec![
+            AvailableCommand::new("compact", "Summarize the conversation to reduce context"),
+            AvailableCommand::new("clear", "Clear the conversation history"),
+            AvailableCommand::new("help", "Show available commands and usage"),
+            AvailableCommand::new("model", "Show or change the current AI model"),
+            AvailableCommand::new("mode", "Switch between code and plan modes"),
+        ]
+    }
+
+    /// Send available commands notification to the client
+    pub async fn send_available_commands(&self, session_id: &SessionId) {
+        let notification_tx = self.notification_tx.read().await;
+        if let Some(tx) = notification_tx.as_ref() {
+            let commands = self.get_available_commands();
+            let update = AvailableCommandsUpdate::new(commands);
+            let notification = SessionNotification::new(
+                session_id.clone(),
+                SessionUpdate::AvailableCommandsUpdate(update),
+            );
+            if let Err(e) = tx.send(notification) {
+                warn!("Failed to send available commands: {}", e);
+            } else {
+                info!(
+                    "Sent {} available commands",
+                    self.get_available_commands().len()
+                );
+            }
+        }
+    }
 }
 
 impl Default for KrustyAgent {
@@ -493,6 +526,9 @@ impl Agent for KrustyAgent {
         } else {
             warn!("No models detected - configure API keys to enable AI features");
         }
+
+        // Send available slash commands
+        self.send_available_commands(&session.id).await;
 
         Ok(response)
     }

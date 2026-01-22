@@ -90,7 +90,11 @@ impl SseStreamProcessor {
             }
 
             // Process SSE event line
-            if let Some(data) = line.strip_prefix("data: ") {
+            // Handle both "data: " (standard) and "data:" (Kimi) formats
+            let data = line
+                .strip_prefix("data: ")
+                .or_else(|| line.strip_prefix("data:"));
+            if let Some(data) = data {
                 self.process_sse_data(data, parser).await?;
             }
         }

@@ -136,8 +136,8 @@ impl MultiLineInput {
         x: u16,
         y: u16,
     ) -> Option<(usize, usize, std::path::PathBuf)> {
-        // Convert click to byte position
-        let content_x = x.saturating_sub(1) as usize;
+        // Convert click to content coordinates (subtract border/padding)
+        let content_x = x.saturating_sub(2) as usize;
         let content_y = y.saturating_sub(1) as usize;
         let clicked_line = self.viewport_offset + content_y;
 
@@ -146,18 +146,36 @@ impl MultiLineInput {
             return None;
         }
 
-        // Calculate byte offset for this line in original content
-        let mut byte_offset = 0usize;
-        let mut current_line = 0usize;
+        // Calculate byte offset within the clicked line using visual width
+        let line_content = &lines[clicked_line];
+        let mut byte_in_line = 0;
+        let mut visual_width = 0;
 
-        for ch in self.content.chars() {
-            if current_line == clicked_line {
+        for ch in line_content.chars() {
+            let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+            if visual_width >= content_x {
                 break;
             }
-            byte_offset += ch.len_utf8();
-            // Simplified: just count newlines for now
-            if ch == '\n' {
-                current_line += 1;
+            byte_in_line += ch.len_utf8();
+            visual_width += ch_width;
+        }
+
+        // Convert line + byte_in_line to absolute byte position using the same
+        // logic as handle_click_impl (accounts for soft wraps AND hard newlines)
+        let mut absolute_byte_pos = 0;
+        for (idx, line) in lines.iter().enumerate() {
+            if idx < clicked_line {
+                absolute_byte_pos += line.len();
+                // Check for hard newline after this line (not soft wrap)
+                if absolute_byte_pos < self.content.len()
+                    && self.content.as_bytes().get(absolute_byte_pos) == Some(&b'\n')
+                {
+                    absolute_byte_pos += 1;
+                }
+            } else {
+                // On the clicked line, add the byte offset within the line
+                absolute_byte_pos += byte_in_line;
+                break;
             }
         }
 
@@ -166,12 +184,11 @@ impl MultiLineInput {
             let m = caps.get(0)?;
             let path_str = caps.get(1)?.as_str();
 
-            // Check if click is within this match
             let start = m.start();
             let end = m.end();
 
-            // Simple check: if the match is on the same line region
-            if start <= byte_offset + content_x && byte_offset + content_x < end {
+            // Check if the clicked byte position falls within this file reference
+            if absolute_byte_pos >= start && absolute_byte_pos < end {
                 let path = std::path::PathBuf::from(path_str);
                 if path.exists() {
                     return Some((start, end, path));

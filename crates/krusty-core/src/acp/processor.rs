@@ -28,7 +28,7 @@ use super::error::AcpError;
 use super::session::SessionState;
 use super::tools::{
     create_tool_call_complete, create_tool_call_failed, create_tool_call_start,
-    text_to_tool_content,
+    text_to_tool_content, tool_name_to_kind,
 };
 
 /// Prompt processor that connects ACP to Krusty's AI and tools
@@ -209,8 +209,11 @@ impl PromptProcessor {
 
                     StreamPart::ToolCallStart { id, name } => {
                         debug!("Tool call starting: {} ({})", name, id);
-                        // Send initial tool call notification
-                        let tool_call = ToolCall::new(ToolCallId::from(id.clone()), name.clone());
+                        // Send initial tool call notification with proper kind
+                        let kind = tool_name_to_kind(&name);
+                        let title = format!("Running {}", name);
+                        let tool_call =
+                            ToolCall::new(ToolCallId::from(id.clone()), title).kind(kind);
                         let notification = SessionNotification::new(
                             session.id.clone(),
                             SessionUpdate::ToolCall(tool_call),
