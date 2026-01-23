@@ -23,12 +23,9 @@ use std::{
 };
 use tokio::sync::RwLock;
 
-use crate::agent::{
-    AgentCancellation, AgentConfig, AgentEventBus, AgentState, UserHookManager, UserPostToolHook,
-    UserPreToolHook,
-};
+use crate::agent::{AgentCancellation, AgentConfig, AgentEventBus, AgentState, UserHookManager};
 use crate::ai::client::AiClient;
-use crate::ai::models::{create_model_registry, SharedModelRegistry};
+use crate::ai::models::SharedModelRegistry;
 use crate::ai::providers::ProviderId;
 use crate::ai::types::{AiTool, AiToolCall, Content, ModelMessage};
 use crate::extensions::WasmHost;
@@ -36,8 +33,8 @@ use crate::lsp::LspManager;
 use crate::paths;
 use crate::plan::{PlanFile, PlanManager};
 use crate::process::ProcessRegistry;
-use crate::storage::{CredentialStore, Database, Preferences, SessionManager};
-use crate::tools::{register_all_tools, register_build_tool, register_explore_tool, ToolRegistry};
+use crate::storage::{CredentialStore, Preferences, SessionManager};
+use crate::tools::{register_build_tool, register_explore_tool, ToolRegistry};
 use crate::tui::animation::MenuAnimator;
 use crate::tui::input::{AutocompletePopup, MultiLineInput};
 use crate::tui::markdown::MarkdownCache;
@@ -256,243 +253,19 @@ pub struct App {
 }
 
 impl App {
-    /// Create new app, optionally with CLI theme override
+    /// Create new app instance
     pub async fn new() -> Self {
         let working_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let lsp_manager = Arc::new(LspManager::new(working_dir.clone()));
 
-        // Initialize process registry
-        let process_registry = Arc::new(ProcessRegistry::new());
-
-        // Initialize WASM extension host
-        let extensions_dir = paths::extensions_dir();
-        let http_client = reqwest::Client::new();
-        let wasm_host = Some(WasmHost::new(http_client, extensions_dir.clone()));
-        tracing::info!("WASM extension host initialized at {:?}", extensions_dir);
-
-        // Initialize database path (used by multiple components)
-        let db_path = paths::config_dir().join("krusty.db");
-
-        // Initialize user hook manager (load from database)
-        let user_hook_manager = Arc::new(RwLock::new(UserHookManager::new()));
-        if let Ok(db) = Database::new(&db_path) {
-            let hook_count = {
-                let mut mgr = user_hook_manager.write().await;
-                if let Err(e) = mgr.load(&db) {
-                    tracing::warn!("Failed to load user hooks: {}", e);
-                }
-                mgr.hooks().len()
-            };
-            if hook_count > 0 {
-                tracing::info!("Loaded {} user hooks", hook_count);
-            }
-        }
-
-        // Initialize tool registry with safety hooks
-        let mut tool_registry = ToolRegistry::new();
-        tool_registry.add_pre_hook(Arc::new(crate::agent::SafetyHook::new()));
-        tool_registry.add_pre_hook(Arc::new(crate::agent::PlanModeHook::new()));
-        tool_registry.add_post_hook(Arc::new(crate::agent::LoggingHook::new()));
-        // Add user-configurable hooks (after built-in hooks)
-        tool_registry.add_pre_hook(Arc::new(UserPreToolHook::new(user_hook_manager.clone())));
-        tool_registry.add_post_hook(Arc::new(UserPostToolHook::new(user_hook_manager.clone())));
-        let tool_registry = Arc::new(tool_registry);
-        register_all_tools(&tool_registry, Some(lsp_manager.clone())).await;
-        let cached_ai_tools = tool_registry.get_ai_tools().await;
-
-        // Initialize preferences and load saved theme
-        let (preferences, theme_name) = match Database::new(&db_path) {
-            Ok(db) => {
-                let prefs = Preferences::new(db);
-                let theme = prefs.get_theme();
-                (Some(prefs), theme)
-            }
-            Err(e) => {
-                tracing::warn!("Failed to initialize preferences: {}", e);
-                (None, "krusty".to_string())
-            }
-        };
-
-        let theme = THEME_REGISTRY.get_or_default(&theme_name);
-
-        // Initialize session manager (separate connection)
-        let session_manager = match Database::new(&db_path) {
-            Ok(db) => {
-                tracing::info!("Session database initialized at {:?}", db_path);
-                Some(SessionManager::new(db))
-            }
-            Err(e) => {
-                tracing::warn!("Failed to initialize session database: {}", e);
-                None
-            }
-        };
-
-        // Initialize plan manager with database path
-        let plan_manager = PlanManager::new(db_path).expect("Failed to create plan manager");
-
-        // Migrate legacy file-based plans to database (one-time migration)
-        match plan_manager.migrate_legacy_plans() {
-            Ok((migrated, skipped)) if migrated > 0 => {
-                tracing::info!(
-                    "Migrated {} legacy plans to database ({} skipped)",
-                    migrated,
-                    skipped
-                );
-            }
-            Ok(_) => {} // No plans to migrate
-            Err(e) => {
-                tracing::warn!("Failed to migrate legacy plans: {}", e);
-            }
-        }
-
-        // Initialize credential store and active provider
-        let credential_store = CredentialStore::load().unwrap_or_else(|e| {
-            tracing::warn!("Failed to load credential store: {}", e);
-            CredentialStore::default()
-        });
-        let active_provider = crate::storage::credentials::ActiveProviderStore::load();
-
-        // Initialize model registry with static models from builtin providers
-        let model_registry = create_model_registry();
-        {
-            use crate::ai::models::ModelMetadata;
-            use crate::ai::providers::builtin_providers;
-
-            // Load static models from all builtin providers
-            for provider in builtin_providers() {
-                if provider.models.is_empty() {
-                    continue; // Skip dynamic providers (e.g., OpenRouter)
-                }
-                let models: Vec<ModelMetadata> = provider
-                    .models
-                    .iter()
-                    .map(|m| {
-                        let mut meta = ModelMetadata::new(&m.id, &m.display_name, provider.id)
-                            .with_context(m.context_window, m.max_output);
-                        if let Some(format) = m.reasoning {
-                            meta = meta.with_thinking(format);
-                        }
-                        meta
-                    })
-                    .collect();
-                // Use block_on for sync context (this is during App initialization)
-                futures::executor::block_on(model_registry.set_models(provider.id, models));
-            }
-            tracing::info!("Model registry initialized with static models");
-
-            // Load cached OpenRouter models from preferences
-            if let Some(ref prefs) = preferences {
-                if let Some(cached_models) = prefs.get_cached_openrouter_models() {
-                    futures::executor::block_on(model_registry.set_models(
-                        crate::ai::providers::ProviderId::OpenRouter,
-                        cached_models.clone(),
-                    ));
-                    tracing::info!(
-                        "Loaded {} cached OpenRouter models from preferences",
-                        cached_models.len()
-                    );
-                }
-            }
-
-            // Load cached OpenCode Zen models from preferences
-            if let Some(ref prefs) = preferences {
-                if let Some(cached_models) = prefs.get_cached_opencodezen_models() {
-                    futures::executor::block_on(model_registry.set_models(
-                        crate::ai::providers::ProviderId::OpenCodeZen,
-                        cached_models.clone(),
-                    ));
-                    tracing::info!(
-                        "Loaded {} cached OpenCode Zen models from preferences",
-                        cached_models.len()
-                    );
-                }
-            }
-
-            // Load recent models from preferences
-            if let Some(ref prefs) = preferences {
-                let recent_ids = prefs.get_recent_models();
-                if !recent_ids.is_empty() {
-                    futures::executor::block_on(model_registry.set_recent_ids(recent_ids.clone()));
-                    tracing::info!("Loaded {} recent models from preferences", recent_ids.len());
-                }
-            }
-        }
-
-        // Load current model from preferences
-        let current_model = preferences
-            .as_ref()
-            .map(|p| p.get_current_model())
-            .unwrap_or_else(|| "claude-opus-4-5-20251101".to_string());
-
-        // Initialize skills manager with global skills dir and project-local dir
-        let global_skills_dir = paths::config_dir().join("skills");
-        let project_skills_dir = Some(working_dir.join(".krusty").join("skills"));
-        let skills_manager = Arc::new(RwLock::new(SkillsManager::new(
-            global_skills_dir,
-            project_skills_dir,
-        )));
-
-        // Initialize MCP manager and load config
-        let mcp_manager = Arc::new(krusty_core::mcp::McpManager::new(working_dir.clone()));
-        let (mcp_status_tx, mcp_status_rx) = tokio::sync::mpsc::unbounded_channel();
-        if let Err(e) = mcp_manager.load_config().await {
-            tracing::warn!("Failed to load MCP config: {}", e);
-        } else {
-            // Connect to configured servers in background
-            if mcp_manager.has_servers().await {
-                let mcp = mcp_manager.clone();
-                let registry = tool_registry.clone();
-                let status_tx = mcp_status_tx.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = mcp.connect_all().await {
-                        tracing::warn!("MCP server connection errors: {}", e);
-                    }
-                    // Register MCP tools with the tool registry
-                    krusty_core::mcp::tool::register_mcp_tools(mcp.clone(), &registry).await;
-
-                    // Notify main thread to refresh AI tools
-                    let tool_count = mcp.get_all_tools().await.len();
-                    if tool_count > 0 {
-                        let _ = status_tx.send(crate::tui::utils::McpStatusUpdate {
-                            success: true,
-                            message: format!("MCP initialized ({} tools)", tool_count),
-                        });
-                    }
-                });
-            }
-        }
-
-        // Create OAuth status channel
-        let (oauth_status_tx, oauth_status_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let mut channels = AsyncChannels::new();
-        channels.mcp_status = Some(mcp_status_rx);
-        channels.oauth_status = Some(oauth_status_rx);
-
-        let services = AppServices {
-            plan_manager,
-            session_manager,
-            preferences,
-            credential_store,
-            model_registry,
-            tool_registry,
-            cached_ai_tools,
-            user_hook_manager,
-            lsp_manager,
-            lsp_skip_list: std::collections::HashSet::new(),
-            pending_lsp_install: None,
-            wasm_host,
-            skills_manager,
-            mcp_manager,
-            mcp_status_tx,
-            oauth_status_tx,
-        };
+        // Initialize all services via builder
+        let (services, channels, process_registry, current_model, theme, theme_name, active_provider) =
+            crate::tui::app_builder::init_services(&working_dir).await;
 
         Self {
             view: View::StartMenu,
             pending_view_change: None,
-            theme: Arc::new(theme.clone()),
-            theme_name: theme_name.to_string(),
+            theme,
+            theme_name,
             popup: Popup::None,
             work_mode: WorkMode::Build,
             active_plan: None,

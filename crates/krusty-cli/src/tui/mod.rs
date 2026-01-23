@@ -2,6 +2,7 @@
 
 pub mod animation;
 pub mod app;
+mod app_builder;
 pub mod blocks;
 pub mod components;
 pub mod graphics;
