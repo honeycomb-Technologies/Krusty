@@ -73,11 +73,6 @@ impl PromptQuestion {
         self.options.push(option);
         self
     }
-
-    pub fn multi_select(mut self, enabled: bool) -> Self {
-        self.multi_select = enabled;
-        self
-    }
 }
 
 /// User's answer to a question
