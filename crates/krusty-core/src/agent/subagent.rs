@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::agent::build_context::SharedBuildContext;
+use crate::agent::build_context::{BuilderInterface, SharedBuildContext};
 use crate::agent::cache::SharedExploreCache;
 use crate::agent::AgentCancellation;
 use crate::ai::client::AiClient;
@@ -773,6 +773,31 @@ impl BuilderTools {
                 description: self.bash.description().to_string(),
                 input_schema: self.bash.parameters_schema(),
             },
+            AiTool {
+                name: "register_interface".to_string(),
+                description: "Register your component's interface so other builders can use it. \
+                             Call this after creating your module to advertise its exports."
+                    .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path to the file containing the interface"
+                        },
+                        "exports": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of exported function/class/type names"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Brief description of what this interface provides"
+                        }
+                    },
+                    "required": ["file_path", "exports", "description"]
+                }),
+            },
         ]
     }
 
@@ -870,212 +895,263 @@ impl BuilderTools {
                 Some(result)
             }
             "bash" => Some(self.bash.execute(params, ctx).await),
+            "register_interface" => {
+                // Register an interface for other builders to see
+                let file_path = params
+                    .get("file_path")
+                    .and_then(|v| v.as_str())
+                    .map(PathBuf::from)
+                    .unwrap_or_default();
+                let exports: Vec<String> = params
+                    .get("exports")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let description = params
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let interface = BuilderInterface {
+                    builder_id: self.builder_id.clone(),
+                    file_path: file_path.clone(),
+                    exports: exports.clone(),
+                    description,
+                };
+
+                self.context.register_interface(interface);
+
+                Some(ToolResult {
+                    output: format!(
+                        "Registered interface: {} exports from {}",
+                        exports.len(),
+                        file_path.display()
+                    ),
+                    is_error: false,
+                })
+            }
             _ => None,
         }
     }
 }
 
-/// Execute a sub-agent with agentic tool loop
-async fn execute_subagent_with_tools(
-    client: &AiClient,
-    task: SubAgentTask,
-    model: &str,
-    cancellation: CancellationToken,
-    cache: Arc<SharedExploreCache>,
-) -> SubAgentResult {
-    let start = Instant::now();
-    let task_id = task.id.clone();
+// =============================================================================
+// Unified Agent Loop
+// =============================================================================
 
-    debug!(task_id = %task_id, model = %model, "Starting sub-agent");
+/// Configuration trait for agent behavior - abstracts explorer vs builder differences
+#[async_trait::async_trait]
+trait AgentConfig: Send + Sync {
+    /// Get system prompt (can be static or dynamic per turn)
+    fn system_prompt(&self, turn: usize) -> String;
 
-    let tools = SubAgentTools::new(cache);
-    let ai_tools = tools.get_ai_tools();
-    let system_prompt = task.system_prompt();
+    /// Tool timeout in seconds
+    fn timeout_secs(&self) -> u64;
 
-    let ctx = ToolContext {
-        working_dir: task.working_dir.clone(),
-        sandbox_root: None,
-        user_id: None,
-        lsp_manager: None,
-        process_registry: None,
-        skills_manager: None,
-        mcp_manager: None,
-        timeout: Some(Duration::from_secs(30)),
-        output_tx: None,
-        tool_use_id: None,
-        plan_mode: false,
-        explore_progress_tx: None,
-        build_progress_tx: None,
-        missing_lsp_tx: None,
-        current_model: None,
-    };
+    /// Max tokens for API calls
+    fn max_tokens(&self) -> usize;
 
-    // Build initial message
-    let mut messages: Vec<ModelMessage> = vec![ModelMessage {
-        role: Role::User,
-        content: vec![Content::Text {
-            text: task.prompt.clone(),
-        }],
-    }];
+    /// Get tool definitions for AI
+    fn get_ai_tools(&self) -> Vec<AiTool>;
 
-    let mut files_examined: Vec<String> = vec![];
-    let mut turns = 0;
-    let mut final_output = String::new();
+    /// Execute a tool call
+    async fn execute_tool(
+        &self,
+        name: &str,
+        params: Value,
+        ctx: &ToolContext,
+    ) -> Option<ToolResult>;
 
-    // Agentic loop - runs until agent naturally completes or is cancelled
-    loop {
-        if cancellation.is_cancelled() {
-            info!(task_id = %task_id, "SubAgent cancelled");
-            return SubAgentResult {
-                task_id,
-                success: false,
-                output: String::new(),
-                files_examined,
-                duration_ms: start.elapsed().as_millis() as u64,
-                turns_used: turns,
-                error: Some("Cancelled".to_string()),
-            };
-        }
-
-        turns += 1;
-        info!(task_id = %task_id, turn = turns, "SubAgent making API call");
-
-        // Make API call
-        let response = match call_subagent_api(
-            client,
-            model,
-            &system_prompt,
-            &messages,
-            &ai_tools,
-            task.model.max_tokens(),
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return SubAgentResult {
-                    task_id,
-                    success: false,
-                    output: String::new(),
-                    files_examined,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    turns_used: turns,
-                    error: Some(e.to_string()),
+    /// Format action description for progress reporting
+    fn format_action(&self, tool_name: &str, params: &Value) -> String {
+        match tool_name {
+            "read" => {
+                let path = params
+                    .get("file_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let short_path = path.rsplit('/').next().unwrap_or(path);
+                format!("read {}", short_path)
+            }
+            "glob" => {
+                let pattern = params
+                    .get("pattern")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("*");
+                format!("glob {}", pattern)
+            }
+            "grep" => {
+                let pattern = params
+                    .get("pattern")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let short = if pattern.len() > 12 {
+                    &pattern[..12]
+                } else {
+                    pattern
                 };
+                format!("grep {}", short)
             }
-        };
-
-        // Parse response
-        let (text_parts, tool_calls, stop_reason) = parse_response(&response);
-        info!(
-            task_id = %task_id,
-            turn = turns,
-            text_parts = text_parts.len(),
-            tool_calls = tool_calls.len(),
-            stop_reason = %stop_reason,
-            "SubAgent parsed API response"
-        );
-
-        // Collect any text output
-        if !text_parts.is_empty() {
-            final_output = text_parts.join("\n");
-        }
-
-        // If no tool calls or stop_reason is end_turn, we're done
-        if tool_calls.is_empty() || stop_reason == "end_turn" {
-            info!(task_id = %task_id, turns = turns, output_len = final_output.len(), "Sub-agent completed successfully");
-            return SubAgentResult {
-                task_id,
-                success: true,
-                output: final_output,
-                files_examined,
-                duration_ms: start.elapsed().as_millis() as u64,
-                turns_used: turns,
-                error: None,
-            };
-        }
-
-        // Add assistant message with tool calls
-        let mut assistant_content: Vec<Content> = text_parts
-            .iter()
-            .map(|t| Content::Text { text: t.clone() })
-            .collect();
-
-        for tc in &tool_calls {
-            assistant_content.push(Content::ToolUse {
-                id: tc.id.clone(),
-                name: tc.name.clone(),
-                input: tc.input.clone(),
-            });
-        }
-
-        messages.push(ModelMessage {
-            role: Role::Assistant,
-            content: assistant_content,
-        });
-
-        // Execute tools and collect results
-        info!(task_id = %task_id, tool_count = tool_calls.len(), "SubAgent executing tools");
-        let mut tool_results: Vec<Content> = vec![];
-
-        for tc in &tool_calls {
-            debug!(task_id = %task_id, tool = %tc.name, "SubAgent executing tool");
-
-            // Track files examined
-            if tc.name == "read" {
-                if let Some(path) = tc.input.get("file_path").and_then(|v| v.as_str()) {
-                    files_examined.push(path.to_string());
-                }
+            "write" | "edit" => {
+                let path = params
+                    .get("file_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let short_path = path.rsplit('/').next().unwrap_or(path);
+                format!("{} {}", tool_name, short_path)
             }
-
-            let result = tools.execute(&tc.name, tc.input.clone(), &ctx).await;
-
-            let (output, is_error) = match result {
-                Some(r) => (r.output, r.is_error),
-                None => (format!("Unknown tool: {}", tc.name), true),
-            };
-
-            tool_results.push(Content::ToolResult {
-                tool_use_id: tc.id.clone(),
-                output: Value::String(output.clone()),
-                is_error: Some(is_error),
-            });
-
-            debug!(
-                task_id = %task_id,
-                tool = %tc.name,
-                output_len = output.len(),
-                is_error = is_error,
-                "SubAgent tool completed"
-            );
+            "bash" => {
+                let cmd = params
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let short = if cmd.len() > 15 { &cmd[..15] } else { cmd };
+                format!("bash {}", short)
+            }
+            _ => tool_name.to_string(),
         }
+    }
 
-        info!(task_id = %task_id, "SubAgent tools executed, continuing loop");
+    /// Update progress with agent-specific metadata (e.g., line counts for builders)
+    fn update_progress(&self, progress: &mut AgentProgress);
 
-        // Add user message with tool results
-        messages.push(ModelMessage {
-            role: Role::User,
-            content: tool_results,
-        });
+    /// Cleanup on exit (e.g., release locks for builders)
+    fn cleanup(&self);
+
+    /// Check if a file was read (for tracking files examined)
+    fn is_read_tool(&self, name: &str) -> bool {
+        name == "read"
     }
 }
 
-/// Execute a sub-agent with progress reporting
-async fn execute_subagent_with_progress(
-    client: &AiClient,
+/// Explorer configuration - read-only, cached
+struct ExplorerConfig {
     task: SubAgentTask,
+    tools: SubAgentTools,
+}
+
+impl ExplorerConfig {
+    fn new(task: SubAgentTask, cache: Arc<SharedExploreCache>) -> Self {
+        Self {
+            task,
+            tools: SubAgentTools::new(cache),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentConfig for ExplorerConfig {
+    fn system_prompt(&self, _turn: usize) -> String {
+        self.task.system_prompt()
+    }
+
+    fn timeout_secs(&self) -> u64 {
+        30
+    }
+
+    fn max_tokens(&self) -> usize {
+        self.task.model.max_tokens()
+    }
+
+    fn get_ai_tools(&self) -> Vec<AiTool> {
+        self.tools.get_ai_tools()
+    }
+
+    async fn execute_tool(
+        &self,
+        name: &str,
+        params: Value,
+        ctx: &ToolContext,
+    ) -> Option<ToolResult> {
+        self.tools.execute(name, params, ctx).await
+    }
+
+    fn update_progress(&self, _progress: &mut AgentProgress) {
+        // Explorer doesn't track lines
+    }
+
+    fn cleanup(&self) {
+        // Explorer has no locks to release
+    }
+}
+
+/// Builder configuration - read-write, coordinated
+struct BuilderConfig {
+    task: SubAgentTask,
+    tools: BuilderTools,
+    context: Arc<SharedBuildContext>,
+}
+
+impl BuilderConfig {
+    fn new(task: SubAgentTask, context: Arc<SharedBuildContext>) -> Self {
+        let task_id = task.id.clone();
+        Self {
+            task,
+            tools: BuilderTools::new(context.clone(), task_id),
+            context,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentConfig for BuilderConfig {
+    fn system_prompt(&self, _turn: usize) -> String {
+        // Dynamic - refreshed each turn to include latest context
+        builder_system_prompt(&self.task.working_dir, &self.context)
+    }
+
+    fn timeout_secs(&self) -> u64 {
+        120 // Builders get more time
+    }
+
+    fn max_tokens(&self) -> usize {
+        self.task.model.max_tokens()
+    }
+
+    fn get_ai_tools(&self) -> Vec<AiTool> {
+        self.tools.get_ai_tools()
+    }
+
+    async fn execute_tool(
+        &self,
+        name: &str,
+        params: Value,
+        ctx: &ToolContext,
+    ) -> Option<ToolResult> {
+        self.tools.execute(name, params, ctx).await
+    }
+
+    fn update_progress(&self, progress: &mut AgentProgress) {
+        let (lines_added, lines_removed) = self.context.get_line_diff();
+        progress.lines_added = lines_added;
+        progress.lines_removed = lines_removed;
+    }
+
+    fn cleanup(&self) {
+        self.context.release_all_locks(&self.task.id);
+    }
+}
+
+/// Unified agentic loop - replaces separate explorer/builder implementations
+async fn execute_agent_loop<C: AgentConfig>(
+    client: &AiClient,
+    task: &SubAgentTask,
     model: &str,
     cancellation: CancellationToken,
-    cache: Arc<SharedExploreCache>,
-    progress_tx: mpsc::UnboundedSender<AgentProgress>,
+    config: &C,
+    progress_tx: Option<mpsc::UnboundedSender<AgentProgress>>,
 ) -> SubAgentResult {
     let start = Instant::now();
     let task_id = task.id.clone();
     let task_name = task.name.clone();
+    let plan_task_id = task.plan_task_id.clone();
 
-    let tools = SubAgentTools::new(cache);
-    let ai_tools = tools.get_ai_tools();
-    let system_prompt = task.system_prompt();
+    let ai_tools = config.get_ai_tools();
 
     let ctx = ToolContext {
         working_dir: task.working_dir.clone(),
@@ -1085,7 +1161,7 @@ async fn execute_subagent_with_progress(
         process_registry: None,
         skills_manager: None,
         mcp_manager: None,
-        timeout: Some(Duration::from_secs(30)),
+        timeout: Some(Duration::from_secs(config.timeout_secs())),
         output_tx: None,
         tool_use_id: None,
         plan_mode: false,
@@ -1109,28 +1185,47 @@ async fn execute_subagent_with_progress(
     let mut final_output = String::new();
     let mut last_action = "starting...".to_string();
 
+    // Helper to send progress
+    let send_progress = |status: AgentProgressStatus,
+                         action: &str,
+                         tool_count: usize,
+                         tokens: usize,
+                         config: &C| {
+        if let Some(ref tx) = progress_tx {
+            let is_complete = status == AgentProgressStatus::Complete;
+            let mut progress = AgentProgress {
+                task_id: task_id.clone(),
+                name: task_name.clone(),
+                status,
+                tool_count,
+                tokens,
+                current_action: Some(action.to_string()),
+                completed_plan_task: if is_complete {
+                    plan_task_id.clone()
+                } else {
+                    None
+                },
+                ..Default::default()
+            };
+            config.update_progress(&mut progress);
+            let _ = tx.send(progress);
+        }
+    };
+
     // Send initial progress
-    let _ = progress_tx.send(AgentProgress {
-        task_id: task_id.clone(),
-        name: task_name.clone(),
-        status: AgentProgressStatus::Running,
-        tool_count: 0,
-        tokens: 0,
-        current_action: Some(last_action.clone()),
-        ..Default::default()
-    });
+    send_progress(AgentProgressStatus::Running, &last_action, 0, 0, config);
 
     loop {
         if cancellation.is_cancelled() {
-            let _ = progress_tx.send(AgentProgress {
-                task_id: task_id.clone(),
-                name: task_name.clone(),
-                status: AgentProgressStatus::Failed,
-                tool_count: total_tool_calls,
-                tokens: estimated_tokens,
-                current_action: Some("cancelled".to_string()),
-                ..Default::default()
-            });
+            info!(task_id = %task_id, "Agent cancelled");
+            send_progress(
+                AgentProgressStatus::Failed,
+                "cancelled",
+                total_tool_calls,
+                estimated_tokens,
+                config,
+            );
+            config.cleanup();
             return SubAgentResult {
                 task_id,
                 success: false,
@@ -1144,21 +1239,21 @@ async fn execute_subagent_with_progress(
 
         turns += 1;
 
-        // Send progress: making API call (show last action or "thinking...")
+        // Get system prompt (may be dynamic for builders)
+        let system_prompt = config.system_prompt(turns);
+
         let thinking_action = if total_tool_calls > 0 {
             format!("{}...", last_action)
         } else {
             "thinking...".to_string()
         };
-        let _ = progress_tx.send(AgentProgress {
-            task_id: task_id.clone(),
-            name: task_name.clone(),
-            status: AgentProgressStatus::Running,
-            tool_count: total_tool_calls,
-            tokens: estimated_tokens,
-            current_action: Some(thinking_action),
-            ..Default::default()
-        });
+        send_progress(
+            AgentProgressStatus::Running,
+            &thinking_action,
+            total_tool_calls,
+            estimated_tokens,
+            config,
+        );
 
         let response = match call_subagent_api(
             client,
@@ -1166,21 +1261,20 @@ async fn execute_subagent_with_progress(
             &system_prompt,
             &messages,
             &ai_tools,
-            task.model.max_tokens(),
+            config.max_tokens(),
         )
         .await
         {
             Ok(r) => r,
             Err(e) => {
-                let _ = progress_tx.send(AgentProgress {
-                    task_id: task_id.clone(),
-                    name: task_name.clone(),
-                    status: AgentProgressStatus::Failed,
-                    tool_count: total_tool_calls,
-                    tokens: estimated_tokens,
-                    current_action: Some("error".to_string()),
-                    ..Default::default()
-                });
+                send_progress(
+                    AgentProgressStatus::Failed,
+                    "error",
+                    total_tool_calls,
+                    estimated_tokens,
+                    config,
+                );
+                config.cleanup();
                 return SubAgentResult {
                     task_id,
                     success: false,
@@ -1210,16 +1304,15 @@ async fn execute_subagent_with_progress(
         }
 
         if tool_calls.is_empty() || stop_reason == "end_turn" {
-            // Send completion progress
-            let _ = progress_tx.send(AgentProgress {
-                task_id: task_id.clone(),
-                name: task_name.clone(),
-                status: AgentProgressStatus::Complete,
-                tool_count: total_tool_calls,
-                tokens: estimated_tokens,
-                current_action: Some("complete".to_string()),
-                ..Default::default()
-            });
+            info!(task_id = %task_id, turns = turns, output_len = final_output.len(), "Agent completed successfully");
+            send_progress(
+                AgentProgressStatus::Complete,
+                "complete",
+                total_tool_calls,
+                estimated_tokens,
+                config,
+            );
+            config.cleanup();
             return SubAgentResult {
                 task_id,
                 success: true,
@@ -1256,54 +1349,23 @@ async fn execute_subagent_with_progress(
         for tc in &tool_calls {
             total_tool_calls += 1;
 
-            // Build action description
-            last_action = match tc.name.as_str() {
-                "read" => {
-                    let path = tc
-                        .input
-                        .get("file_path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let short_path = path.rsplit('/').next().unwrap_or(path);
+            // Track files examined
+            if config.is_read_tool(&tc.name) {
+                if let Some(path) = tc.input.get("file_path").and_then(|v| v.as_str()) {
                     files_examined.push(path.to_string());
-                    format!("read {}", short_path)
                 }
-                "glob" => {
-                    let pattern = tc
-                        .input
-                        .get("pattern")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("*");
-                    format!("glob {}", pattern)
-                }
-                "grep" => {
-                    let pattern = tc
-                        .input
-                        .get("pattern")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let short = if pattern.len() > 12 {
-                        &pattern[..12]
-                    } else {
-                        pattern
-                    };
-                    format!("grep {}", short)
-                }
-                _ => tc.name.clone(),
-            };
+            }
 
-            // Send progress with current action
-            let _ = progress_tx.send(AgentProgress {
-                task_id: task_id.clone(),
-                name: task_name.clone(),
-                status: AgentProgressStatus::Running,
-                tool_count: total_tool_calls,
-                tokens: estimated_tokens,
-                current_action: Some(last_action.clone()),
-                ..Default::default()
-            });
+            last_action = config.format_action(&tc.name, &tc.input);
+            send_progress(
+                AgentProgressStatus::Running,
+                &last_action,
+                total_tool_calls,
+                estimated_tokens,
+                config,
+            );
 
-            let result = tools.execute(&tc.name, tc.input.clone(), &ctx).await;
+            let result = config.execute_tool(&tc.name, tc.input.clone(), &ctx).await;
 
             let (output, is_error) = match result {
                 Some(r) => (r.output, r.is_error),
@@ -1322,6 +1384,40 @@ async fn execute_subagent_with_progress(
             content: tool_results,
         });
     }
+}
+
+/// Execute a sub-agent with agentic tool loop (no progress reporting)
+async fn execute_subagent_with_tools(
+    client: &AiClient,
+    task: SubAgentTask,
+    model: &str,
+    cancellation: CancellationToken,
+    cache: Arc<SharedExploreCache>,
+) -> SubAgentResult {
+    debug!(task_id = %task.id, model = %model, "Starting sub-agent");
+    let config = ExplorerConfig::new(task.clone(), cache);
+    execute_agent_loop(client, &task, model, cancellation, &config, None).await
+}
+
+/// Execute a sub-agent with progress reporting
+async fn execute_subagent_with_progress(
+    client: &AiClient,
+    task: SubAgentTask,
+    model: &str,
+    cancellation: CancellationToken,
+    cache: Arc<SharedExploreCache>,
+    progress_tx: mpsc::UnboundedSender<AgentProgress>,
+) -> SubAgentResult {
+    let config = ExplorerConfig::new(task.clone(), cache);
+    execute_agent_loop(
+        client,
+        &task,
+        model,
+        cancellation,
+        &config,
+        Some(progress_tx),
+    )
+    .await
 }
 
 #[derive(Debug)]
@@ -1513,303 +1609,14 @@ async fn execute_builder_with_progress(
     context: Arc<SharedBuildContext>,
     progress_tx: mpsc::UnboundedSender<AgentProgress>,
 ) -> SubAgentResult {
-    let start = Instant::now();
-    let task_id = task.id.clone();
-    let task_name = task.name.clone();
-    let plan_task_id = task.plan_task_id.clone();
-
-    let tools = BuilderTools::new(context.clone(), task_id.clone());
-    let ai_tools = tools.get_ai_tools();
-
-    let ctx = ToolContext {
-        working_dir: task.working_dir.clone(),
-        sandbox_root: None,
-        user_id: None,
-        lsp_manager: None,
-        process_registry: None,
-        skills_manager: None,
-        mcp_manager: None,
-        timeout: Some(Duration::from_secs(120)), // Builders get more time
-        output_tx: None,
-        tool_use_id: None,
-        plan_mode: false,
-        explore_progress_tx: None,
-        build_progress_tx: None,
-        missing_lsp_tx: None,
-        current_model: None,
-    };
-
-    let mut messages: Vec<ModelMessage> = vec![ModelMessage {
-        role: Role::User,
-        content: vec![Content::Text {
-            text: task.prompt.clone(),
-        }],
-    }];
-
-    let mut files_examined: Vec<String> = vec![];
-    let mut turns = 0;
-    let mut total_tool_calls = 0;
-    let mut estimated_tokens: usize = 0;
-    let mut final_output = String::new();
-    let mut last_action = "starting...".to_string();
-
-    // Send initial progress
-    let _ = progress_tx.send(AgentProgress {
-        task_id: task_id.clone(),
-        name: task_name.clone(),
-        status: AgentProgressStatus::Running,
-        tool_count: 0,
-        tokens: 0,
-        current_action: Some(last_action.clone()),
-        ..Default::default()
-    });
-
-    loop {
-        if cancellation.is_cancelled() {
-            let (lines_added, lines_removed) = context.get_line_diff();
-            let _ = progress_tx.send(AgentProgress {
-                task_id: task_id.clone(),
-                name: task_name.clone(),
-                status: AgentProgressStatus::Failed,
-                tool_count: total_tool_calls,
-                tokens: estimated_tokens,
-                current_action: Some("cancelled".to_string()),
-                lines_added,
-                lines_removed,
-                completed_plan_task: None,
-            });
-            // Release any locks this builder held
-            context.release_all_locks(&task_id);
-            return SubAgentResult {
-                task_id,
-                success: false,
-                output: String::new(),
-                files_examined,
-                duration_ms: start.elapsed().as_millis() as u64,
-                turns_used: turns,
-                error: Some("Cancelled".to_string()),
-            };
-        }
-
-        turns += 1;
-
-        // Re-inject context each turn so builders see updates from other builders
-        let dynamic_system = builder_system_prompt(&task.working_dir, &context);
-
-        let thinking_action = if total_tool_calls > 0 {
-            format!("{}...", last_action)
-        } else {
-            "thinking...".to_string()
-        };
-        let (lines_added, lines_removed) = context.get_line_diff();
-        let _ = progress_tx.send(AgentProgress {
-            task_id: task_id.clone(),
-            name: task_name.clone(),
-            status: AgentProgressStatus::Running,
-            tool_count: total_tool_calls,
-            tokens: estimated_tokens,
-            current_action: Some(thinking_action),
-            lines_added,
-            lines_removed,
-            completed_plan_task: None,
-        });
-
-        let response = match call_subagent_api(
-            client,
-            model,
-            &dynamic_system,
-            &messages,
-            &ai_tools,
-            task.model.max_tokens(),
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                let (lines_added, lines_removed) = context.get_line_diff();
-                let _ = progress_tx.send(AgentProgress {
-                    task_id: task_id.clone(),
-                    name: task_name.clone(),
-                    status: AgentProgressStatus::Failed,
-                    tool_count: total_tool_calls,
-                    tokens: estimated_tokens,
-                    current_action: Some("error".to_string()),
-                    lines_added,
-                    lines_removed,
-                    completed_plan_task: None,
-                });
-                context.release_all_locks(&task_id);
-                return SubAgentResult {
-                    task_id,
-                    success: false,
-                    output: String::new(),
-                    files_examined,
-                    duration_ms: start.elapsed().as_millis() as u64,
-                    turns_used: turns,
-                    error: Some(e.to_string()),
-                };
-            }
-        };
-
-        // Estimate tokens from response
-        if let Some(usage) = response.get("usage") {
-            if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
-                estimated_tokens += input as usize;
-            }
-            if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
-                estimated_tokens += output as usize;
-            }
-        }
-
-        let (text_parts, tool_calls, stop_reason) = parse_response(&response);
-
-        if !text_parts.is_empty() {
-            final_output = text_parts.join("\n");
-        }
-
-        if tool_calls.is_empty() || stop_reason == "end_turn" {
-            let (lines_added, lines_removed) = context.get_line_diff();
-            let _ = progress_tx.send(AgentProgress {
-                task_id: task_id.clone(),
-                name: task_name.clone(),
-                status: AgentProgressStatus::Complete,
-                tool_count: total_tool_calls,
-                tokens: estimated_tokens,
-                current_action: Some("complete".to_string()),
-                lines_added,
-                lines_removed,
-                completed_plan_task: plan_task_id.clone(),
-            });
-            context.release_all_locks(&task_id);
-            return SubAgentResult {
-                task_id,
-                success: true,
-                output: final_output,
-                files_examined,
-                duration_ms: start.elapsed().as_millis() as u64,
-                turns_used: turns,
-                error: None,
-            };
-        }
-
-        // Add assistant message
-        let mut assistant_content: Vec<Content> = text_parts
-            .iter()
-            .map(|t| Content::Text { text: t.clone() })
-            .collect();
-
-        for tc in &tool_calls {
-            assistant_content.push(Content::ToolUse {
-                id: tc.id.clone(),
-                name: tc.name.clone(),
-                input: tc.input.clone(),
-            });
-        }
-
-        messages.push(ModelMessage {
-            role: Role::Assistant,
-            content: assistant_content,
-        });
-
-        // Execute tools
-        let mut tool_results: Vec<Content> = vec![];
-
-        for tc in &tool_calls {
-            total_tool_calls += 1;
-
-            // Build action description
-            last_action = match tc.name.as_str() {
-                "read" => {
-                    let path = tc
-                        .input
-                        .get("file_path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let short_path = path.rsplit('/').next().unwrap_or(path);
-                    files_examined.push(path.to_string());
-                    format!("read {}", short_path)
-                }
-                "write" => {
-                    let path = tc
-                        .input
-                        .get("file_path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let short_path = path.rsplit('/').next().unwrap_or(path);
-                    format!("write {}", short_path)
-                }
-                "edit" => {
-                    let path = tc
-                        .input
-                        .get("file_path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let short_path = path.rsplit('/').next().unwrap_or(path);
-                    format!("edit {}", short_path)
-                }
-                "glob" => {
-                    let pattern = tc
-                        .input
-                        .get("pattern")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("*");
-                    format!("glob {}", pattern)
-                }
-                "grep" => {
-                    let pattern = tc
-                        .input
-                        .get("pattern")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let short = if pattern.len() > 12 {
-                        &pattern[..12]
-                    } else {
-                        pattern
-                    };
-                    format!("grep {}", short)
-                }
-                "bash" => {
-                    let cmd = tc
-                        .input
-                        .get("command")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let short = if cmd.len() > 15 { &cmd[..15] } else { cmd };
-                    format!("bash {}", short)
-                }
-                _ => tc.name.clone(),
-            };
-
-            let (lines_added, lines_removed) = context.get_line_diff();
-            let _ = progress_tx.send(AgentProgress {
-                task_id: task_id.clone(),
-                name: task_name.clone(),
-                status: AgentProgressStatus::Running,
-                tool_count: total_tool_calls,
-                tokens: estimated_tokens,
-                current_action: Some(last_action.clone()),
-                lines_added,
-                lines_removed,
-                completed_plan_task: None,
-            });
-
-            let result = tools.execute(&tc.name, tc.input.clone(), &ctx).await;
-
-            let (output, is_error) = match result {
-                Some(r) => (r.output, r.is_error),
-                None => (format!("Unknown tool: {}", tc.name), true),
-            };
-
-            tool_results.push(Content::ToolResult {
-                tool_use_id: tc.id.clone(),
-                output: Value::String(output),
-                is_error: Some(is_error),
-            });
-        }
-
-        messages.push(ModelMessage {
-            role: Role::User,
-            content: tool_results,
-        });
-    }
+    let config = BuilderConfig::new(task.clone(), context);
+    execute_agent_loop(
+        client,
+        &task,
+        model,
+        cancellation,
+        &config,
+        Some(progress_tx),
+    )
+    .await
 }

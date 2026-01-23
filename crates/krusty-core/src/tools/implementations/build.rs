@@ -268,14 +268,18 @@ impl Tool for BuildTool {
 
         // Add lock wait time info if significant
         if stats.total_lock_wait_ms > 0 {
-            summary.push_str(&format!(", {:.1}s total wait", stats.total_lock_wait_ms as f64 / 1000.0));
+            summary.push_str(&format!(
+                ", {:.1}s total wait",
+                stats.total_lock_wait_ms as f64 / 1000.0
+            ));
         }
 
         // Report high contention files
         if !stats.high_contention_files.is_empty() {
             summary.push_str("\n**High Contention Files**:");
             for (path, duration) in &stats.high_contention_files {
-                let filename = path.file_name()
+                let filename = path
+                    .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| path.display().to_string());
                 summary.push_str(&format!(" {} ({:.1}s)", filename, duration.as_secs_f64()));
