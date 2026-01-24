@@ -16,8 +16,7 @@ use crate::agent::{AgentEvent, InterruptReason};
 use crate::ai::client::CallOptions;
 use crate::ai::streaming::StreamPart;
 use crate::ai::types::{
-    Content, ContextManagement, ModelMessage, Role, ThinkingConfig, WebFetchConfig,
-    WebSearchConfig,
+    Content, ContextManagement, ModelMessage, Role, ThinkingConfig, WebFetchConfig, WebSearchConfig,
 };
 use crate::tools::{load_from_clipboard_rgba, load_from_path, load_from_url};
 use crate::tui::app::{App, View};
@@ -29,10 +28,7 @@ const MAX_FILES_PER_MESSAGE: usize = 20;
 /// Check if file count exceeds the maximum
 fn check_file_limit(count: usize) -> anyhow::Result<()> {
     if count > MAX_FILES_PER_MESSAGE {
-        anyhow::bail!(
-            "Too many files (max {} per message)",
-            MAX_FILES_PER_MESSAGE
-        );
+        anyhow::bail!("Too many files (max {} per message)", MAX_FILES_PER_MESSAGE);
     }
     Ok(())
 }

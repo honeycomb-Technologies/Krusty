@@ -51,7 +51,12 @@ impl App {
     }
 
     /// Handle API key input
-    fn handle_api_key_input(&mut self, code: KeyCode, modifiers: KeyModifiers, provider: ProviderId) {
+    fn handle_api_key_input(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        provider: ProviderId,
+    ) {
         match code {
             KeyCode::Esc => self.popups.auth.go_back(),
             KeyCode::Backspace if self.popups.auth.get_api_key().is_none_or(str::is_empty) => {
@@ -78,10 +83,8 @@ impl App {
                             self.switch_provider(provider);
                         }
                         self.set_api_key(key);
-                        self.messages.push((
-                            "system".to_string(),
-                            format!("{} API key saved!", provider),
-                        ));
+                        self.messages
+                            .push(("system".to_string(), format!("{} API key saved!", provider)));
                         self.popups.auth.set_api_key_complete();
 
                         if provider == ProviderId::OpenRouter {

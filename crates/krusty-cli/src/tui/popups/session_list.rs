@@ -16,6 +16,7 @@ use super::common::{
     center_content, center_rect, popup_block, popup_title, render_popup_background,
     scroll_indicator, PopupSize,
 };
+use super::scroll::ScrollState;
 use crate::tui::themes::Theme;
 
 /// Session metadata for display
@@ -28,8 +29,8 @@ pub struct SessionInfo {
 
 /// Session list popup state
 pub struct SessionListPopup {
-    pub selected_index: usize,
-    pub scroll_offset: usize,
+    /// Scroll state for navigation
+    scroll: ScrollState,
     pub sessions: Vec<SessionInfo>,
     /// Current working directory (for title display)
     current_dir: Option<String>,
@@ -44,8 +45,7 @@ impl Default for SessionListPopup {
 impl SessionListPopup {
     pub fn new() -> Self {
         Self {
-            selected_index: 0,
-            scroll_offset: 0,
+            scroll: ScrollState::new(0),
             sessions: Vec::new(),
             current_dir: None,
         }
@@ -58,63 +58,38 @@ impl SessionListPopup {
 
     /// Set sessions for current directory
     pub fn set_sessions(&mut self, sessions: Vec<SessionInfo>) {
+        let count = sessions.len();
         self.sessions = sessions;
-        self.selected_index = 0;
-        self.scroll_offset = 0;
+        self.scroll = ScrollState::new(count);
     }
 
     pub fn next(&mut self) {
-        if self.selected_index < self.sessions.len().saturating_sub(1) {
-            self.selected_index += 1;
-            self.ensure_visible();
-        }
+        self.scroll.next();
     }
 
     pub fn prev(&mut self) {
-        if self.selected_index > 0 {
-            self.selected_index -= 1;
-            self.ensure_visible();
-        }
-    }
-
-    fn ensure_visible(&mut self) {
-        self.ensure_visible_with_height(8);
-    }
-
-    fn ensure_visible_with_height(&mut self, visible_height: usize) {
-        if self.selected_index < self.scroll_offset {
-            self.scroll_offset = self.selected_index;
-        } else if self.selected_index >= self.scroll_offset + visible_height {
-            self.scroll_offset = self.selected_index - visible_height + 1;
-        }
+        self.scroll.prev();
     }
 
     /// Get selected session
     pub fn get_selected_session(&self) -> Option<&SessionInfo> {
-        self.sessions.get(self.selected_index)
+        self.sessions.get(self.scroll.selected)
     }
 
     pub fn delete_selected(&mut self) -> Option<SessionInfo> {
-        if self.sessions.is_empty() {
+        if self.sessions.is_empty() || self.scroll.selected >= self.sessions.len() {
             return None;
         }
 
-        if self.selected_index >= self.sessions.len() {
-            return None;
-        }
-
-        let session = self.sessions.remove(self.selected_index);
+        let session = self.sessions.remove(self.scroll.selected);
         tracing::info!(session_id = %session.id, title = %session.title, "Removed session from list");
 
-        // Adjust selection
-        if self.selected_index >= self.sessions.len() && self.selected_index > 0 {
-            self.selected_index = self.sessions.len().saturating_sub(1);
-        }
-        self.ensure_visible();
+        // Update scroll state with new count
+        self.scroll.set_total(self.sessions.len());
         Some(session)
     }
 
-    pub fn render(&self, f: &mut Frame, theme: &Theme) {
+    pub fn render(&mut self, f: &mut Frame, theme: &Theme) {
         let (w, h) = PopupSize::Medium.dimensions();
         let area = center_rect(w, h, f.area());
         render_popup_background(f, area, theme);
@@ -133,6 +108,7 @@ impl SessionListPopup {
             .split(inner);
 
         let visible_height = (chunks[1].height as usize).saturating_sub(2);
+        self.scroll.set_visible_height(visible_height);
 
         // Title with directory context
         let title_text = if let Some(ref dir) = self.current_dir {
@@ -162,15 +138,15 @@ impl SessionListPopup {
             )));
         } else {
             // Scroll up indicator
-            if self.scroll_offset > 0 {
-                lines.push(scroll_indicator("up", self.scroll_offset, theme));
+            let items_above = self.scroll.items_above();
+            if items_above > 0 {
+                lines.push(scroll_indicator("up", items_above, theme));
             }
 
             // Render visible sessions
-            let visible_end = (self.scroll_offset + visible_height).min(self.sessions.len());
-            for session_idx in self.scroll_offset..visible_end {
+            for session_idx in self.scroll.visible_range() {
                 let session = &self.sessions[session_idx];
-                let is_selected = session_idx == self.selected_index;
+                let is_selected = self.scroll.is_selected(session_idx);
 
                 let style = if is_selected {
                     Style::default()
@@ -192,9 +168,9 @@ impl SessionListPopup {
             }
 
             // Scroll down indicator
-            let remaining = self.sessions.len().saturating_sub(visible_end);
-            if remaining > 0 {
-                lines.push(scroll_indicator("down", remaining, theme));
+            let items_below = self.scroll.items_below();
+            if items_below > 0 {
+                lines.push(scroll_indicator("down", items_below, theme));
             }
         }
 

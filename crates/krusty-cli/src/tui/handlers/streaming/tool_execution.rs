@@ -181,7 +181,10 @@ impl App {
         for q in questions_array {
             let question = q.get("question").and_then(|v| v.as_str()).unwrap_or("");
             let header = q.get("header").and_then(|v| v.as_str()).unwrap_or("Q");
-            let multi_select = q.get("multiSelect").and_then(|v| v.as_bool()).unwrap_or(false);
+            let multi_select = q
+                .get("multiSelect")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
             let mut options: Vec<PromptOption> = Vec::new();
             if let Some(opts) = q.get("options").and_then(|v| v.as_array()) {
@@ -221,7 +224,8 @@ impl App {
             }
         }
 
-        self.decision_prompt.show_ask_user(prompt_questions, tool_call.id);
+        self.decision_prompt
+            .show_ask_user(prompt_questions, tool_call.id);
     }
 
     /// Spawn tool execution as a background task for non-blocking streaming

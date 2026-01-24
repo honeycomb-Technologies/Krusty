@@ -18,6 +18,7 @@ pub mod mcp_browser;
 pub mod model_select;
 pub mod pinch;
 pub mod process_list;
+pub mod scroll;
 pub mod session_list;
 pub mod skills_browser;
 pub mod theme_select;
