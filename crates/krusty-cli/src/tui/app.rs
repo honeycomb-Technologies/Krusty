@@ -40,7 +40,7 @@ use crate::tui::input::{AutocompletePopup, MultiLineInput};
 use crate::tui::markdown::MarkdownCache;
 use crate::tui::polling::{
     poll_background_processes, poll_bash_output, poll_build_progress, poll_explore_progress,
-    poll_mcp_status, poll_oauth_status, PollAction, PollResult,
+    poll_init_exploration, poll_mcp_status, poll_oauth_status, PollAction, PollResult,
 };
 use crate::tui::state::PopupState;
 use crate::tui::state::{
@@ -1028,139 +1028,6 @@ impl App {
         self.blocks.poll_terminals();
     }
 
-    /// Poll /init exploration progress and result
-    fn poll_init_exploration(&mut self) {
-        use crate::tui::handlers::commands::generate_krab_from_exploration;
-
-        // Poll progress channel - route to ExploreBlock
-        if let Some(mut rx) = self.channels.init_progress.take() {
-            loop {
-                match rx.try_recv() {
-                    Ok(progress) => {
-                        // Find the init ExploreBlock and update it
-                        if let Some(ref explore_id) = self.init_explore_id {
-                            for block in self.blocks.explore.iter_mut() {
-                                if block.tool_use_id() == Some(explore_id.as_str()) {
-                                    block.update_progress(progress.clone());
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                        self.channels.init_progress = Some(rx);
-                        break;
-                    }
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Poll result channel for completion
-        if let Some(mut rx) = self.channels.init_exploration.take() {
-            match rx.try_recv() {
-                Ok(result) => {
-                    // Complete the ExploreBlock
-                    if let Some(ref explore_id) = self.init_explore_id {
-                        for block in self.blocks.explore.iter_mut() {
-                            if block.tool_use_id() == Some(explore_id.as_str()) {
-                                block.complete(String::new());
-                                break;
-                            }
-                        }
-                    }
-                    self.init_explore_id = None;
-
-                    if result.success {
-                        // Generate KRAB.md from exploration results
-                        let project_name = self
-                            .working_dir
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| "Project".to_string());
-                        let languages = self.detect_project_languages();
-
-                        let krab_path = self.working_dir.join("KRAB.md");
-                        let is_regenerate = krab_path.exists();
-
-                        // Try to preserve user's "Notes for AI" section if regenerating
-                        let preserved_notes = if is_regenerate {
-                            std::fs::read_to_string(&krab_path)
-                                .ok()
-                                .and_then(|content| {
-                                    content.find("## Notes for AI").map(|pos| {
-                                        let notes_section = &content[pos..];
-                                        notes_section
-                                            .lines()
-                                            .skip(1)
-                                            .skip_while(|l| l.starts_with("<!--") || l.is_empty())
-                                            .collect::<Vec<_>>()
-                                            .join("\n")
-                                    })
-                                })
-                                .filter(|s| !s.trim().is_empty())
-                        } else {
-                            None
-                        };
-
-                        let mut content =
-                            generate_krab_from_exploration(&project_name, &languages, &result);
-
-                        if let Some(notes) = preserved_notes {
-                            content.push_str(&notes);
-                            content.push('\n');
-                        }
-
-                        match std::fs::write(&krab_path, &content) {
-                            Ok(_) => {
-                                let action = if is_regenerate {
-                                    "Regenerated"
-                                } else {
-                                    "Created"
-                                };
-                                // Add as assistant message (natural conversation flow)
-                                self.messages.push((
-                                    "assistant".to_string(),
-                                    format!(
-                                        "{} **KRAB.md** ({} bytes) from codebase analysis.\n\n\
-                                        This file is now auto-injected into every AI conversation. \
-                                        Edit it to customize how I understand your project.",
-                                        action,
-                                        content.len()
-                                    ),
-                                ));
-                            }
-                            Err(e) => {
-                                self.messages.push((
-                                    "assistant".to_string(),
-                                    format!("Failed to write KRAB.md: {}", e),
-                                ));
-                            }
-                        }
-                    } else {
-                        let error = result.error.unwrap_or_else(|| "Unknown error".to_string());
-                        self.messages.push((
-                            "assistant".to_string(),
-                            format!("Exploration failed: {}", error),
-                        ));
-                    }
-                }
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                    self.channels.init_exploration = Some(rx);
-                }
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    self.init_explore_id = None;
-                    self.messages.push((
-                        "assistant".to_string(),
-                        "Exploration was cancelled.".to_string(),
-                    ));
-                }
-            }
-        }
-    }
-
     /// Process actions returned from polling operations
     fn process_poll_actions(&mut self, result: PollResult) {
         // Add messages
@@ -1464,7 +1331,23 @@ impl App {
             self.poll_build_progress();
 
             // Poll /init exploration progress and result
-            self.poll_init_exploration();
+            // Only detect languages if we have a pending exploration result
+            let languages = if self.channels.init_exploration.is_some() {
+                self.detect_project_languages()
+            } else {
+                Vec::new()
+            };
+            let init_result = poll_init_exploration(
+                &mut self.channels,
+                &mut self.blocks.explore,
+                &mut self.init_explore_id,
+                &self.working_dir,
+                &languages,
+            );
+            if init_result.needs_redraw {
+                self.needs_redraw = true;
+            }
+            self.process_poll_actions(init_result);
 
             // Poll MCP status updates from background tasks
             let mcp_result = poll_mcp_status(&mut self.channels, &mut self.popups.mcp);

@@ -102,13 +102,15 @@ pub fn poll_build_progress(
 }
 
 /// Poll /init exploration progress and result
-#[allow(dead_code)]
+///
+/// Takes languages directly to avoid callback borrow conflicts.
+/// Caller should call detect_project_languages() before if needed.
 pub fn poll_init_exploration(
     channels: &mut AsyncChannels,
     explore_blocks: &mut [ExploreBlock],
     init_explore_id: &mut Option<String>,
     working_dir: &Path,
-    detect_languages: impl Fn() -> Vec<String>,
+    languages: &[String],
 ) -> PollResult {
     let mut result = PollResult::new();
 
@@ -162,7 +164,6 @@ pub fn poll_init_exploration(
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "Project".to_string());
-                    let languages = detect_languages();
 
                     let krab_path = working_dir.join("KRAB.md");
                     let is_regenerate = krab_path.exists();
@@ -189,7 +190,7 @@ pub fn poll_init_exploration(
 
                     let mut content = generate_krab_from_exploration(
                         &project_name,
-                        &languages,
+                        languages,
                         &exploration_result,
                     );
 
