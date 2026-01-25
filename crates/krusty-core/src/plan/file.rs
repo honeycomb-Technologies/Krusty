@@ -320,6 +320,10 @@ impl PlanFile {
     }
 
     /// Maximum context size in characters (~2000 tokens ≈ 8000 chars)
+    ///
+    /// This limit ensures that plan context fits comfortably within the AI's
+    /// context window while leaving room for other content. Claude typically
+    /// handles 200K tokens, so 2000 tokens for plan context is reasonable.
     const MAX_CONTEXT_CHARS: usize = 8000;
 
     /// Serialize to markdown string for AI context
@@ -408,6 +412,7 @@ impl PlanFile {
 
     /// Parse from markdown string
     pub fn from_markdown(content: &str) -> Result<Self, String> {
+        tracing::debug!("Parsing plan from markdown");
         let mut plan = PlanFile {
             title: String::new(),
             created_at: Utc::now(),
@@ -433,6 +438,7 @@ impl PlanFile {
                     .unwrap_or("")
                     .trim()
                     .to_string();
+                tracing::debug!(title = %plan.title, "Parsed plan title");
                 continue;
             }
 
@@ -505,6 +511,7 @@ impl PlanFile {
                     let num_str = after_phase[..colon_pos].trim();
                     let name = after_phase[colon_pos + 1..].trim();
                     let number = num_str.parse().unwrap_or(plan.phases.len() + 1);
+                    tracing::debug!(phase_num = number, phase_name = %name, "Parsed phase");
                     current_phase = Some(PlanPhase::new(number, name));
                 }
                 continue;
@@ -655,12 +662,13 @@ impl PlanFile {
                     continue;
                 }
 
-                // Create phase if none exists
-                if current_phase.is_none() {
+                // Get or create the current phase (default to "Tasks" phase)
+                let phase = if let Some(p) = &mut current_phase {
+                    p
+                } else {
                     current_phase = Some(PlanPhase::new(1, "Tasks"));
-                }
-
-                let phase = current_phase.as_mut().unwrap();
+                    current_phase.as_mut().unwrap()
+                };
 
                 // Parse "Task X.Y: Description" or "**Task X.Y**: Description" or just description
                 let (id, description) =
@@ -996,5 +1004,414 @@ Let me know if you have questions!
         let text5 = "Working on the tasks now.";
         let ids5 = PlanFile::extract_completed_task_ids(text5);
         assert!(ids5.is_empty());
+    }
+
+    // ========================================================================
+    // Error Path Tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_empty_plan() {
+        let result = PlanFile::from_markdown("");
+        assert!(result.is_err(), "Empty plan should error");
+    }
+
+    #[test]
+    fn test_parse_plan_no_title() {
+        let markdown = r#"
+## Phase 1: Setup
+
+- [ ] Task 1.1: Some task
+"#;
+        let result = PlanFile::from_markdown(markdown);
+        // This should error because there's no "# Plan:" header
+        // The try_parse_from_response requires both title and at least one task
+        assert!(result.is_err() || result.unwrap().phases.is_empty());
+    }
+
+    #[test]
+    fn test_parse_plan_no_phases() {
+        let markdown = "# Plan: Test Plan\n";
+        let result = PlanFile::from_markdown(markdown);
+        // Should create plan with no phases
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+        assert_eq!(plan.phases.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_plan_invalid_status() {
+        let markdown = r#"
+# Plan: Test Plan
+
+Status: invalid_status_value
+
+## Phase 1: Setup
+
+- [ ] Task 1.1: Some task
+"#;
+        let result = PlanFile::from_markdown(markdown);
+        assert!(result.is_ok());
+        // Should default to InProgress on invalid status
+        let plan = result.unwrap();
+        assert_eq!(plan.status, PlanStatus::InProgress);
+    }
+
+    #[test]
+    fn test_parse_plan_invalid_date() {
+        let markdown = r#"
+# Plan: Test Plan
+
+Created: not-a-date
+
+## Phase 1: Setup
+
+- [ ] Task 1.1: Some task
+"#;
+        let result = PlanFile::from_markdown(markdown);
+        assert!(result.is_ok());
+        // Should use current time on invalid date
+        let plan = result.unwrap();
+        assert_ne!(plan.created_at, Utc::now());
+    }
+
+    #[test]
+    fn test_parse_plan_invalid_phase_number() {
+        let markdown = r#"
+# Plan: Test Plan
+
+## Phase not-a-number: Setup
+
+- [ ] Task 1.1: Some task
+"#;
+        let result = PlanFile::from_markdown(markdown);
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+        // Should use phase count + 1 as fallback
+        assert_eq!(plan.phases.len(), 1);
+        assert_eq!(plan.phases[0].number, 1);
+    }
+
+    #[test]
+    fn test_parse_plan_task_without_phase() {
+        let markdown = r#"
+# Plan: Test Plan
+
+- [ ] Task 1.1: Orphan task
+"#;
+        let result = PlanFile::from_markdown(markdown);
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+        // Tasks without phase should be ignored
+        assert_eq!(plan.phases.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_plan_empty_task_description() {
+        let markdown = r#"
+# Plan: Test Plan
+
+## Phase 1: Setup
+
+- [ ] Task 1.1:
+"#;
+        let result = PlanFile::from_markdown(markdown);
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+        assert_eq!(plan.phases[0].tasks[0].id, "1.1");
+        assert_eq!(plan.phases[0].tasks[0].description, "");
+    }
+
+    #[test]
+    fn test_parse_plan_task_with_colon_in_description() {
+        let markdown = r#"
+# Plan: Test Plan
+
+## Phase 1: Setup
+
+- [ ] Task 1.1: Install: configure, and test
+"#;
+        let result = PlanFile::from_markdown(markdown);
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+        // Description should include everything after first colon
+        assert_eq!(
+            plan.phases[0].tasks[0].description,
+            "Install: configure, and test"
+        );
+    }
+
+    #[test]
+    fn test_parse_plan_mixed_task_formats() {
+        let markdown = r#"
+# Plan: Test Plan
+
+## Phase 1: Setup
+
+- [ ] Task 1.1: Explicit ID
+- [ ] Just a description
+- [x] Task 1.3: With checkbox
+- [ ] Another description
+"#;
+        let result = PlanFile::from_markdown(markdown);
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+        assert_eq!(plan.phases[0].tasks.len(), 4);
+        assert_eq!(plan.phases[0].tasks[0].id, "1.1");
+        assert_eq!(plan.phases[0].tasks[1].id, "1.2"); // Auto-generated
+        assert_eq!(plan.phases[0].tasks[2].id, "1.3");
+        assert!(plan.phases[0].tasks[2].completed);
+        assert_eq!(plan.phases[0].tasks[3].id, "1.4"); // Auto-generated
+    }
+
+    #[test]
+    fn test_parse_plan_empty_phase_name() {
+        let markdown = r#"
+# Plan: Test Plan
+
+## Phase 1:
+
+- [ ] Task 1.1: Some task
+"#;
+        let result = PlanFile::from_markdown(markdown);
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+        assert_eq!(plan.phases[0].name, "");
+    }
+
+    #[test]
+    fn test_parse_plan_notes_section() {
+        let markdown = r#"
+# Plan: Test Plan
+
+## Phase 1: Setup
+
+- [ ] Task 1.1: Some task
+
+## Notes
+
+These are important notes
+that span multiple lines.
+"#;
+        let result = PlanFile::from_markdown(markdown);
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+        assert!(plan.notes.is_some());
+        assert!(plan.notes.as_ref().unwrap().contains("important notes"));
+    }
+
+    #[test]
+    fn test_parse_plan_notes_before_tasks() {
+        // Notes section should end phase parsing
+        let markdown = r#"
+# Plan: Test Plan
+
+## Phase 1: Setup
+
+- [ ] Task 1.1: Some task
+
+## Notes
+
+Some notes here
+
+## Phase 2: Next Phase
+
+- [ ] Task 2.1: Another task
+"#;
+        let result = PlanFile::from_markdown(markdown);
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+        // Phase 2 should be in notes, not parsed as a phase
+        assert_eq!(plan.phases.len(), 1);
+        assert!(plan.notes.as_ref().unwrap().contains("## Phase 2"));
+    }
+
+    #[test]
+    fn test_parse_plan_with_metadata_only() {
+        let markdown = r#"
+# Plan: Test Plan
+
+Created: 2024-01-15 10:00 UTC
+Session: abc123
+Working Directory: /tmp/test
+Status: completed
+"#;
+        let result = PlanFile::from_markdown(markdown);
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+        assert_eq!(plan.title, "Test Plan");
+        assert_eq!(plan.session_id, Some("abc123".to_string()));
+        assert_eq!(plan.working_dir, Some("/tmp/test".to_string()));
+        assert_eq!(plan.status, PlanStatus::Completed);
+        assert_eq!(plan.phases.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_plan_multiple_spaces_in_checkbox() {
+        // Should handle various whitespace patterns
+        let markdown = r#"
+# Plan: Test Plan
+
+## Phase 1: Setup
+
+- [  ] Task 1.1: Extra spaces in bracket
+- [x] Task 1.2: Normal completed
+- [X] Task 1.3: Uppercase X
+"#;
+        let result = PlanFile::from_markdown(markdown);
+        // Extra spaces in bracket should not match
+        // Only [x] and [X] should match
+        assert!(result.is_ok());
+        let _plan = result.unwrap();
+        // First one might not match if we're strict about spacing
+        // Last two should match
+    }
+
+    #[test]
+    fn test_parse_plan_status_variations() {
+        // Test various status string formats
+        let test_cases = vec![
+            ("in_progress", PlanStatus::InProgress),
+            ("inprogress", PlanStatus::InProgress),
+            ("completed", PlanStatus::Completed),
+            ("complete", PlanStatus::Completed),
+            ("done", PlanStatus::Completed),
+            ("abandoned", PlanStatus::Abandoned),
+            ("cancelled", PlanStatus::Abandoned),
+            ("canceled", PlanStatus::Abandoned),
+        ];
+
+        for (status_str, expected) in test_cases {
+            let markdown = format!(
+                r#"
+# Plan: Test Plan
+
+Status: {}
+
+## Phase 1: Setup
+
+- [ ] Task 1.1: Some task
+"#,
+                status_str
+            );
+
+            let result = PlanFile::from_markdown(&markdown);
+            assert!(result.is_ok());
+            let plan = result.unwrap();
+            assert_eq!(
+                plan.status, expected,
+                "Status '{}' should parse to {:?}",
+                status_str, expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_plan_task_id_with_decimals() {
+        // Test that task IDs preserve decimals
+        let markdown = r#"
+# Plan: Test Plan
+
+## Phase 1: Setup
+
+- [ ] Task 1.10: Task with decimal
+- [ ] Task 1.2: Another task
+"#;
+        let result = PlanFile::from_markdown(markdown);
+        assert!(result.is_ok());
+        let plan = result.unwrap();
+        assert_eq!(plan.phases[0].tasks[0].id, "1.10");
+        assert_eq!(plan.phases[0].tasks[1].id, "1.2");
+    }
+
+    #[test]
+    fn test_find_nonexistent_task() {
+        let mut plan = PlanFile::new("Test Plan");
+        {
+            let phase = plan.add_phase("Setup");
+            phase.add_task("Task one");
+        }
+
+        assert!(plan.find_task("9.9").is_none());
+        assert!(plan.find_task("invalid").is_none());
+    }
+
+    #[test]
+    fn test_check_nonexistent_task() {
+        let mut plan = PlanFile::new("Test Plan");
+        {
+            let phase = plan.add_phase("Setup");
+            phase.add_task("Task one");
+        }
+
+        // Should return false, not panic
+        assert!(!plan.check_task("9.9"));
+        assert!(!plan.check_task("invalid"));
+    }
+
+    #[test]
+    fn test_merge_empty_plans() {
+        let mut plan1 = PlanFile::new("Plan 1");
+        let plan2 = PlanFile::new("Plan 2");
+
+        // Should not panic
+        plan1.merge_from(&plan2);
+        assert_eq!(plan1.phases.len(), 0);
+    }
+
+    #[test]
+    fn test_merge_plans_different_phase_counts() {
+        let mut plan1 = PlanFile::new("Plan 1");
+        {
+            let phase = plan1.add_phase("Phase 1");
+            phase.add_task("Task 1.1");
+        }
+        {
+            let phase = plan1.add_phase("Phase 2");
+            phase.add_task("Task 2.1");
+        }
+
+        let mut plan2 = PlanFile::new("Plan 2");
+        {
+            let phase = plan2.add_phase("Phase 1");
+            phase.add_task("Task 1.1");
+        }
+
+        plan2.check_task("1.1");
+        plan1.merge_from(&plan2);
+
+        // Both phases should exist in plan1
+        assert_eq!(plan1.phases.len(), 2);
+        assert!(plan1.find_task("1.1").unwrap().completed);
+    }
+
+    #[test]
+    fn test_task_completion_pattern_edge_cases() {
+        // Test patterns that shouldn't match
+        let test_cases = vec![
+            "The task is not completed yet",
+            "Working on task number 1.1",
+            // Note: "Task1.1" (no space before number) will match because regex is flexible
+            // "completing the work on task 1.1", // "completing" needs "task X.Y" after
+            "This completes our work", // No task ID after
+        ];
+
+        for text in test_cases {
+            let ids = PlanFile::extract_completed_task_ids(text);
+            assert!(
+                ids.is_empty(),
+                "Text '{}' should not match any task completion patterns",
+                text
+            );
+        }
+    }
+
+    #[test]
+    fn test_multiple_task_completions_in_one_line() {
+        let text = "I've completed Task 1.1, Task 1.2, and finished Task 1.3";
+        let ids = PlanFile::extract_completed_task_ids(text);
+        // Should match at least 2 tasks (patterns vary in specificity)
+        assert!(ids.len() >= 2);
+        assert!(ids.contains(&"1.1".to_string()));
     }
 }

@@ -6,6 +6,15 @@
 //! - Viewport calculations
 //! - Scroll bounds checking
 
+/// Cache for layout calculations to avoid expensive recalculations during animation
+#[derive(Debug, Clone, Default)]
+pub struct LayoutCache {
+    /// Cached message line count
+    pub message_lines: usize,
+    /// Width used for cached calculation
+    pub cached_width: u16,
+}
+
 /// Manages scroll state for the messages area
 pub struct ScrollState {
     /// Current scroll offset (0 = top, max = bottom)

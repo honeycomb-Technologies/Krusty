@@ -530,8 +530,9 @@ pub(crate) async fn call_subagent_api(
         })
         .collect();
 
-    // Use retry with exponential backoff for transient errors
-    let config = RetryConfig::default(); // 5 retries, 1s-32s backoff
+    // Use aggressive retry for sub-agents (8 retries, 2s-60s backoff)
+    // This handles rate limiting better, especially for providers with lower limits
+    let config = RetryConfig::aggressive();
 
     let result = with_retry(&config, || async {
         client

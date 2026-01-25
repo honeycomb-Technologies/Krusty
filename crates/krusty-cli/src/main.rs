@@ -61,7 +61,9 @@ async fn main() -> Result<()> {
 
     // Initialize logging to file (not stdout/stderr which would mess up TUI)
     let log_dir = paths::logs_dir();
-    std::fs::create_dir_all(&log_dir).ok();
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        eprintln!("Failed to create log directory: {}", e);
+    }
 
     // Create null device path based on platform
     #[cfg(unix)]
@@ -69,8 +71,27 @@ async fn main() -> Result<()> {
     #[cfg(windows)]
     let null_device = "NUL";
 
-    let log_file = std::fs::File::create(log_dir.join("krusty.log"))
-        .unwrap_or_else(|_| std::fs::File::create(null_device).unwrap());
+    // Try to create log file, fall back to null device if that fails
+    let log_file = match std::fs::File::create(log_dir.join("krusty.log")) {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!(
+                "Failed to create log file: {}, falling back to null device",
+                e
+            );
+            match std::fs::File::create(null_device) {
+                Ok(file) => file,
+                Err(e) => {
+                    eprintln!(
+                        "Failed to create null device {}: {}, logging disabled",
+                        null_device, e
+                    );
+                    // Return a dummy writer that discards output
+                    return Err(e.into());
+                }
+            }
+        }
+    };
 
     tracing_subscriber::fmt()
         .with_env_filter(

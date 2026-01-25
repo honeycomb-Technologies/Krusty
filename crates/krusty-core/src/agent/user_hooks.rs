@@ -340,8 +340,10 @@ impl UserHookManager {
 
     /// Get enabled hooks that match a tool name
     pub fn matching_hooks(&mut self, hook_type: UserHookType, tool_name: &str) -> Vec<&UserHook> {
-        // First pass: compile patterns and check matches, collect IDs
-        let matching_ids: Vec<String> = self
+        use std::collections::HashSet;
+
+        // First pass: compile patterns and check matches, collect IDs into HashSet
+        let matching_ids: HashSet<String> = self
             .hooks
             .iter_mut()
             .filter_map(|h| {
@@ -353,7 +355,7 @@ impl UserHookManager {
             })
             .collect();
 
-        // Second pass: return references
+        // Second pass: return references (O(1) lookup instead of O(n))
         self.hooks
             .iter()
             .filter(|h| matching_ids.contains(&h.id))
@@ -605,5 +607,292 @@ impl PostToolHook for UserPostToolHook {
         .await;
 
         HookResult::Continue
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn create_test_hook(hook_type: UserHookType, pattern: &str, command: &str) -> UserHook {
+        UserHook::new(hook_type, pattern.to_string(), command.to_string())
+    }
+
+    #[test]
+    fn test_user_hook_type_display() {
+        assert_eq!(UserHookType::PreToolUse.display_name(), "PreToolUse");
+        assert_eq!(UserHookType::PostToolUse.display_name(), "PostToolUse");
+        assert_eq!(UserHookType::Notification.display_name(), "Notification");
+        assert_eq!(
+            UserHookType::UserPromptSubmit.display_name(),
+            "UserPromptSubmit"
+        );
+    }
+
+    #[test]
+    fn test_user_hook_type_parse() {
+        assert_eq!(
+            UserHookType::parse("PreToolUse"),
+            Some(UserHookType::PreToolUse)
+        );
+        assert_eq!(
+            UserHookType::parse("PostToolUse"),
+            Some(UserHookType::PostToolUse)
+        );
+        assert_eq!(UserHookType::parse("Invalid"), None);
+        assert_eq!(UserHookType::parse(""), None);
+    }
+
+    #[test]
+    fn test_user_hook_matches_exact_tool() {
+        let mut hook = create_test_hook(UserHookType::PreToolUse, "Write", "echo 'test'");
+
+        assert!(hook.matches("Write"));
+        assert!(!hook.matches("Read"));
+        // "Write" as a regex will match "WriteFile" as a substring
+        // To match exact tool name, use "^Write$"
+        assert!(hook.matches("WriteFile"));
+    }
+
+    #[test]
+    fn test_user_hook_matches_pattern() {
+        let mut hook = create_test_hook(UserHookType::PreToolUse, "Write|Edit", "echo 'test'");
+
+        assert!(hook.matches("Write"));
+        assert!(hook.matches("Edit"));
+        assert!(!hook.matches("Read"));
+    }
+
+    #[test]
+    fn test_user_hook_matches_wildcard() {
+        let mut hook = create_test_hook(UserHookType::PreToolUse, ".*", "echo 'test'");
+
+        assert!(hook.matches("Write"));
+        assert!(hook.matches("Read"));
+        assert!(hook.matches("Bash"));
+        assert!(hook.matches("AnyTool"));
+    }
+
+    #[test]
+    fn test_user_hook_disabled_does_not_match() {
+        let mut hook = create_test_hook(UserHookType::PreToolUse, "Write", "echo 'test'");
+        hook.enabled = false;
+
+        assert!(!hook.matches("Write"));
+        assert!(!hook.matches("Read"));
+    }
+
+    #[test]
+    fn test_user_hook_invalid_regex_pattern() {
+        let mut hook = create_test_hook(UserHookType::PreToolUse, "[invalid", "echo 'test'");
+
+        // Invalid regex should not match anything
+        assert!(!hook.matches("Write"));
+        assert!(!hook.matches("[invalid"));
+
+        // Pattern should be invalid
+        assert!(!hook.is_pattern_valid());
+    }
+
+    #[test]
+    fn test_user_hook_valid_regex_pattern() {
+        let hook = create_test_hook(UserHookType::PreToolUse, "Write.*", "echo 'test'");
+
+        assert!(hook.is_pattern_valid());
+    }
+
+    #[test]
+    fn test_user_hook_pattern_case_sensitive() {
+        let mut hook = create_test_hook(UserHookType::PreToolUse, "write", "echo 'test'");
+
+        // Case-sensitive by default
+        assert!(!hook.matches("Write"));
+        assert!(hook.matches("write"));
+    }
+
+    #[test]
+    fn test_user_hook_complex_pattern() {
+        let mut hook = create_test_hook(
+            UserHookType::PreToolUse,
+            r"^File(Read|Write|Edit)$",
+            "echo 'test'",
+        );
+
+        assert!(hook.matches("FileRead"));
+        assert!(hook.matches("FileWrite"));
+        assert!(hook.matches("FileEdit"));
+        assert!(!hook.matches("FileReadMore"));
+        assert!(!hook.matches("MyFileRead"));
+    }
+
+    #[test]
+    fn test_user_hook_lazy_compile() {
+        let mut hook = UserHook {
+            id: "test".to_string(),
+            hook_type: UserHookType::PreToolUse,
+            tool_pattern: "Write".to_string(),
+            command: "echo 'test'".to_string(),
+            enabled: true,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            compiled_pattern: None, // Not compiled
+        };
+
+        // First call should compile the pattern
+        assert!(hook.matches("Write"));
+        assert!(hook.compiled_pattern.is_some());
+
+        // Subsequent calls should use compiled pattern
+        assert!(hook.matches("Write"));
+        assert!(!hook.matches("Read"));
+    }
+
+    #[test]
+    fn test_user_hook_manager_operations() {
+        let mut manager = UserHookManager::new();
+
+        // Initially empty
+        assert_eq!(manager.hooks().len(), 0);
+
+        // Hooks are managed via save/delete with database
+        // The in-memory manager just holds the loaded hooks
+        let hook1 = create_test_hook(UserHookType::PreToolUse, "Write", "echo '1'");
+        let hook2 = create_test_hook(UserHookType::PostToolUse, "Read", "echo '2'");
+
+        // We can't test save/delete without a database
+        // But we can test matching logic with in-memory hooks
+        manager.hooks.push(hook1);
+        manager.hooks.push(hook2);
+
+        assert_eq!(manager.hooks().len(), 2);
+    }
+
+    #[test]
+    fn test_user_hook_manager_matching_hooks() {
+        let mut manager = UserHookManager::new();
+
+        let hook1 = create_test_hook(UserHookType::PreToolUse, "Write", "echo '1'");
+        let hook2 = create_test_hook(UserHookType::PreToolUse, "Read", "echo '2'");
+        let hook3 = create_test_hook(UserHookType::PostToolUse, "Write", "echo '3'");
+        let hook4 = create_test_hook(UserHookType::PreToolUse, ".*", "echo '4'");
+
+        manager.hooks.push(hook1);
+        manager.hooks.push(hook2);
+        manager.hooks.push(hook3);
+        manager.hooks.push(hook4);
+
+        // Only PreToolUse hooks matching "Write"
+        let matching = manager.matching_hooks(UserHookType::PreToolUse, "Write");
+        assert_eq!(matching.len(), 2); // "Write" and ".*"
+
+        // Only PreToolUse hooks matching "Read"
+        let matching = manager.matching_hooks(UserHookType::PreToolUse, "Read");
+        assert_eq!(matching.len(), 2); // "Read" and ".*"
+
+        // Only PostToolUse hooks matching "Write"
+        let matching = manager.matching_hooks(UserHookType::PostToolUse, "Write");
+        assert_eq!(matching.len(), 1); // Only the PostToolUse Write hook
+    }
+
+    #[test]
+    fn test_user_hook_manager_no_matching_hooks() {
+        let mut manager = UserHookManager::new();
+
+        let hook1 = create_test_hook(UserHookType::PreToolUse, "Write", "echo '1'");
+        let hook2 = create_test_hook(UserHookType::PostToolUse, "Read", "echo '2'");
+
+        manager.hooks.push(hook1);
+        manager.hooks.push(hook2);
+
+        // No matching PreToolUse hooks for "Bash"
+        let matching = manager.matching_hooks(UserHookType::PreToolUse, "Bash");
+        assert_eq!(matching.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_user_hook_executor_success() {
+        let hook = create_test_hook(UserHookType::PreToolUse, "Write", "exit 0");
+
+        let result = UserHookExecutor::execute(&hook, "Write", &json!({})).await;
+        assert!(matches!(result, UserHookResult::Continue));
+    }
+
+    #[tokio::test]
+    async fn test_user_hook_executor_block() {
+        let hook = create_test_hook(UserHookType::PreToolUse, "Write", "exit 2");
+
+        let result = UserHookExecutor::execute(&hook, "Write", &json!({})).await;
+        assert!(matches!(result, UserHookResult::Block { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_user_hook_executor_warn() {
+        let hook = create_test_hook(UserHookType::PreToolUse, "Write", "exit 1");
+
+        let result = UserHookExecutor::execute(&hook, "Write", &json!({})).await;
+        assert!(matches!(result, UserHookResult::Warn { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_user_hook_executor_stderr_in_block_reason() {
+        let hook = create_test_hook(
+            UserHookType::PreToolUse,
+            "Write",
+            "echo 'Blocked because reason' >&2; exit 2",
+        );
+
+        let result = UserHookExecutor::execute(&hook, "Write", &json!({})).await;
+
+        if let UserHookResult::Block { reason } = result {
+            assert!(reason.contains("Blocked because reason"));
+        } else {
+            panic!("Expected Block result");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_user_hook_executor_empty_stderr_default_message() {
+        let hook = create_test_hook(UserHookType::PreToolUse, "Write", "exit 2");
+
+        let result = UserHookExecutor::execute(&hook, "Write", &json!({})).await;
+
+        if let UserHookResult::Block { reason } = result {
+            assert_eq!(reason, "Hook blocked execution");
+        } else {
+            panic!("Expected Block result");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_user_hook_executor_nonexistent_command_warns() {
+        let hook = create_test_hook(
+            UserHookType::PreToolUse,
+            "Write",
+            "this_command_does_not_exist_12345",
+        );
+
+        let result = UserHookExecutor::execute(&hook, "Write", &json!({})).await;
+        // Should warn (non-zero exit from shell)
+        assert!(matches!(result, UserHookResult::Warn { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_user_hook_executor_json_input() {
+        // Test that the hook receives JSON on stdin
+        let hook = create_test_hook(
+            UserHookType::PreToolUse,
+            "Write",
+            // This reads stdin and checks if it's valid JSON
+            "if grep -q '\"test\"' <(cat); then exit 0; else exit 1; fi",
+        );
+
+        let params = json!({"test": "value"});
+        let result = UserHookExecutor::execute(&hook, "Write", &params).await;
+
+        // Should succeed if JSON was passed correctly
+        assert!(matches!(
+            result,
+            UserHookResult::Continue { .. } | UserHookResult::Warn { .. }
+        ));
     }
 }

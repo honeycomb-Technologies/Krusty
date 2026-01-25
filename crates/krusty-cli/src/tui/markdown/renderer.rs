@@ -121,12 +121,12 @@ fn render_paragraph_with_links(
 fn render_heading_with_links(
     level: u8,
     content: &[InlineContent],
-    _width: usize,
+    width: usize,
     theme: &Theme,
     base_line: usize,
 ) -> (Vec<Line<'static>>, Vec<LinkSpan>) {
     // Get spans and link positions
-    let (mut spans, mut links) = render_inline_with_links(content, theme, 0);
+    let (mut spans, links) = render_inline_with_links(content, theme, 0);
 
     // Apply heading styles
     let style = match level {
@@ -145,13 +145,14 @@ fn render_heading_with_links(
         span.style = span.style.patch(style);
     }
 
-    // Adjust link line numbers (blank line before heading, then heading)
-    for link in &mut links {
-        link.line = base_line + 1; // +1 for the blank line before heading
-    }
+    // Wrap heading content to prevent overflow (base_line + 1 for blank line before)
+    let (wrapped_lines, wrapped_links) = wrap_spans_with_links(spans, width, &links, base_line + 1);
 
-    let lines = vec![Line::from(""), Line::from(spans)];
-    (lines, links)
+    // Prepend blank line before heading
+    let mut lines = vec![Line::from("")];
+    lines.extend(wrapped_lines);
+
+    (lines, wrapped_links)
 }
 
 fn render_code_block(
@@ -454,20 +455,53 @@ fn render_table(
 
             // Calculate actual content width
             let content_width: usize = cell_spans.iter().map(|s| s.content.width()).sum();
-            let padding = col_width.saturating_sub(content_width);
 
             // Space before content
             line_spans.push(Span::raw(" "));
-            // Content
-            for mut span in cell_spans {
-                span.style = span.style.patch(style);
-                line_spans.push(span);
+
+            // Truncate content if wider than column
+            if content_width > *col_width {
+                let mut remaining_width = *col_width;
+                for mut span in cell_spans {
+                    let span_width = span.content.width();
+                    if remaining_width == 0 {
+                        break;
+                    }
+                    if span_width <= remaining_width {
+                        span.style = span.style.patch(style);
+                        line_spans.push(span);
+                        remaining_width -= span_width;
+                    } else {
+                        // Truncate this span
+                        let mut truncated = String::new();
+                        let mut w = 0;
+                        for c in span.content.chars() {
+                            let cw = c.width().unwrap_or(0);
+                            if w + cw > remaining_width {
+                                break;
+                            }
+                            truncated.push(c);
+                            w += cw;
+                        }
+                        line_spans.push(Span::styled(truncated, span.style.patch(style)));
+                        remaining_width = 0;
+                    }
+                }
+                // No padding, just border
+                line_spans.push(Span::styled(format!(" {}", VERTICAL), border_style));
+            } else {
+                let padding = col_width.saturating_sub(content_width);
+                // Content
+                for mut span in cell_spans {
+                    span.style = span.style.patch(style);
+                    line_spans.push(span);
+                }
+                // Padding after content + space + border
+                line_spans.push(Span::styled(
+                    format!("{} {}", " ".repeat(padding), VERTICAL),
+                    border_style,
+                ));
             }
-            // Padding after content + space + border
-            line_spans.push(Span::styled(
-                format!("{} {}", " ".repeat(padding), VERTICAL),
-                border_style,
-            ));
         }
 
         Line::from(line_spans)

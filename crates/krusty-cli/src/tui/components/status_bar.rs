@@ -9,6 +9,7 @@ use ratatui::{
 };
 use std::path::Path;
 use std::time::Duration;
+use unicode_width::UnicodeWidthStr;
 
 use crate::tui::themes::Theme;
 
@@ -39,7 +40,7 @@ pub fn render_status_bar(
     ];
 
     // Calculate left width: space + cwd + " │ " + model
-    let mut left_width: u16 = 1 + cwd_display.len() as u16 + 3 + model_short.len() as u16;
+    let mut left_width: u16 = 1 + cwd_display.width() as u16 + 3 + model_short.width() as u16;
 
     // Add context indicator if available (fixed width to prevent flashing)
     if let Some((used, max)) = context_tokens {
@@ -79,7 +80,7 @@ pub fn render_status_bar(
             })
             .unwrap_or_default();
         let proc_text = format!("● {}{}", running_processes, elapsed_str);
-        left_width += 3 + proc_text.len() as u16; // " │ " + text
+        left_width += 3 + proc_text.width() as u16; // " │ " + text
 
         left_spans.push(Span::styled(" │ ", Style::default().fg(theme.dim_color)));
         left_spans.push(Span::styled(
@@ -176,15 +177,21 @@ fn shorten_path(path: &Path, max_len: usize) -> String {
         path_str.to_string()
     };
 
-    // Truncate if too long (char-boundary safe)
-    if display.len() > max_len {
-        let target = display.len().saturating_sub(max_len - 3);
-        let start = display
-            .char_indices()
-            .find(|(i, _)| *i >= target)
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        format!("...{}", &display[start..])
+    // Truncate if too long (width-based for proper display)
+    if display.width() > max_len {
+        // Find a byte position where remaining width fits in max_len - 3
+        let target_width = max_len.saturating_sub(3);
+        let mut current_width = 0;
+        let mut start_byte = 0;
+        for (i, c) in display.char_indices() {
+            let char_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            if display.width() - current_width <= target_width {
+                start_byte = i;
+                break;
+            }
+            current_width += char_width;
+        }
+        format!("...{}", &display[start_byte..])
     } else {
         display
     }

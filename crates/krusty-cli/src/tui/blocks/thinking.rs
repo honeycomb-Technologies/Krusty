@@ -10,6 +10,7 @@ use ratatui::{
     style::{Modifier, Style},
 };
 use std::time::{Duration, Instant};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{BlockEvent, ClipContext, EventResult, StreamBlock, WidthScrollable};
 use crate::tui::components::scrollbars::render_scrollbar;
@@ -146,7 +147,11 @@ impl ThinkingBlock {
     /// Calculate actual rendered box width for hit testing
     pub fn box_width(&mut self, available_width: u16) -> u16 {
         let lines = self.get_lines(available_width);
-        let longest_line = lines.iter().map(|l| l.chars().count()).max().unwrap_or(20);
+        let longest_line = lines
+            .iter()
+            .map(|l| UnicodeWidthStr::width(l.as_str()))
+            .max()
+            .unwrap_or(20);
         let box_inner_width = longest_line.max(20);
         ((box_inner_width + 4) as u16).min(available_width)
     }
@@ -436,7 +441,11 @@ impl ThinkingBlock {
         let needs_scrollbar = total_lines > MAX_VISIBLE_LINES;
 
         // Find longest line for box sizing
-        let longest_line = lines.iter().map(|l| l.chars().count()).max().unwrap_or(20);
+        let longest_line = lines
+            .iter()
+            .map(|l| UnicodeWidthStr::width(l.as_str()))
+            .max()
+            .unwrap_or(20);
         let box_inner_width = longest_line.max(20);
         let box_width = (box_inner_width + 4) as u16;
         let box_width = box_width.min(area.width);
@@ -456,7 +465,7 @@ impl ThinkingBlock {
         // Only render if top is not clipped
         if clip_top == 0 {
             let header_text = " ▼ Thinking ";
-            let header_len = header_text.chars().count();
+            let header_len = UnicodeWidthStr::width(header_text);
 
             if let Some(cell) = buf.cell_mut((area.x, render_y)) {
                 cell.set_char('╭');
@@ -552,14 +561,24 @@ impl ThinkingBlock {
 
             // Content
             if let Some(line) = lines.get(line_idx) {
-                for (i, ch) in line.chars().enumerate() {
-                    let x = area.x + 2 + i as u16;
-                    if x < content_end_x {
-                        if let Some(cell) = buf.cell_mut((x, y)) {
-                            cell.set_char(ch);
+                let mut x = area.x + 2;
+                for ch in line.chars() {
+                    let char_width = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+                    if x + char_width > content_end_x {
+                        break;
+                    }
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        cell.set_char(ch);
+                        cell.set_style(content_style);
+                    }
+                    // For wide chars (width=2), fill the next cell with space to occupy width
+                    if char_width == 2 {
+                        if let Some(cell) = buf.cell_mut((x + 1, y)) {
+                            cell.set_char(' ');
                             cell.set_style(content_style);
                         }
                     }
+                    x += char_width;
                 }
             }
 

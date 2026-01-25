@@ -8,6 +8,7 @@ use ratatui::{
     Frame,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
+use unicode_width::UnicodeWidthStr;
 
 use crate::tui::app::WorkMode;
 use crate::tui::themes::Theme;
@@ -130,7 +131,7 @@ pub fn render_toolbar(
         f.render_widget(title_widget, chunks[1]);
 
         // Calculate clickable area (approximate center position)
-        let title_len = title_text.len().min(chunks[1].width as usize) as u16;
+        let title_len = title_text.width().min(chunks[1].width as usize) as u16;
         let title_start_x = chunks[1].x + (chunks[1].width.saturating_sub(title_len)) / 2;
         Some(Rect::new(title_start_x, chunks[1].y, title_len, 1))
     } else {

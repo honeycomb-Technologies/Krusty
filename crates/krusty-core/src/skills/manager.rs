@@ -24,6 +24,21 @@ pub struct SkillsManager {
 
 impl SkillsManager {
     /// Create a new SkillsManager
+    ///
+    /// # Arguments
+    /// * `global_dir` - Path to global skills directory (~/.krusty/skills/)
+    /// * `project_dir` - Optional path to project-specific skills (.krusty/skills/)
+    ///
+    /// # Example
+    /// ```no_run
+    /// use krusty_core::skills::SkillsManager;
+    /// use std::path::PathBuf;
+    ///
+    /// let manager = SkillsManager::new(
+    ///     PathBuf::from("~/.krusty/skills"),
+    ///     Some(PathBuf::from("/project/.krusty/skills"))
+    /// );
+    /// ```
     pub fn new(global_dir: PathBuf, project_dir: Option<PathBuf>) -> Self {
         Self {
             global_dir,
@@ -83,6 +98,19 @@ impl SkillsManager {
     }
 
     /// List all available skills (metadata only)
+    ///
+    /// Returns sorted list of skill metadata from both global and project directories.
+    /// Project skills override global skills with the same name.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use krusty_core::skills::SkillsManager;
+    /// # let mut manager = SkillsManager::with_defaults(".".as_ref());
+    /// let skills = manager.list_skills();
+    /// for skill in skills {
+    ///     println!("{}: {}", skill.name, skill.description);
+    /// }
+    /// ```
     pub fn list_skills(&mut self) -> Vec<SkillInfo> {
         self.ensure_cache();
         let mut skills: Vec<SkillInfo> = self.cache.values().map(|s| s.to_info()).collect();
@@ -91,6 +119,18 @@ impl SkillsManager {
     }
 
     /// Get a skill by name
+    ///
+    /// Returns reference to cached skill if it exists.
+    /// Project skills take precedence over global skills.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use krusty_core::skills::SkillsManager;
+    /// # let mut manager = SkillsManager::with_defaults(".".as_ref());
+    /// if let Some(skill) = manager.get_skill("rust") {
+    ///     println!("Found rust skill: {}", skill.description);
+    /// }
+    /// ```
     pub fn get_skill(&mut self, name: &str) -> Option<&Skill> {
         self.ensure_cache();
         self.cache.get(name)

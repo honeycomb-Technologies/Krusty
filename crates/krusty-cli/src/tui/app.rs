@@ -143,6 +143,8 @@ pub struct App {
 
     // Token tracking
     pub context_tokens_used: usize,
+    /// Flag to trigger auto-pinch after current response completes
+    pub pending_auto_pinch: bool,
 
     // AI client
     pub ai_client: Option<AiClient>,
@@ -263,6 +265,7 @@ impl App {
             scroll_system: ScrollSystem::new(),
             current_model,
             context_tokens_used: 0,
+            pending_auto_pinch: false,
             ai_client: None,
             api_key: None,
             active_provider,
@@ -346,6 +349,91 @@ impl App {
 
         // Ultimate fallback to default constant
         crate::constants::ai::CONTEXT_WINDOW_TOKENS
+    }
+
+    /// Context usage threshold for auto-pinch (80%)
+    const AUTO_PINCH_THRESHOLD: f32 = 0.80;
+
+    /// Check if context usage warrants auto-pinch and set the pending flag
+    ///
+    /// Called after AI response completes. If context is at threshold,
+    /// sets `pending_auto_pinch` which triggers the pinch popup when idle.
+    pub fn check_auto_pinch(&mut self) {
+        // Don't trigger if already pending or no session
+        if self.pending_auto_pinch || self.current_session_id.is_none() {
+            return;
+        }
+
+        let max_tokens = self.max_context_tokens();
+        if max_tokens == 0 {
+            return;
+        }
+
+        let usage_ratio = self.context_tokens_used as f32 / max_tokens as f32;
+
+        if usage_ratio >= Self::AUTO_PINCH_THRESHOLD {
+            tracing::info!(
+                "Context at {:.0}% ({}/{}) - will trigger auto-pinch after idle",
+                usage_ratio * 100.0,
+                self.context_tokens_used,
+                max_tokens
+            );
+            self.pending_auto_pinch = true;
+        }
+    }
+
+    /// Trigger auto-pinch if pending and conditions are right
+    ///
+    /// Called from main loop when not streaming/executing tools.
+    /// Opens the pinch popup with an explanatory message.
+    pub fn trigger_pending_auto_pinch(&mut self) {
+        if !self.pending_auto_pinch {
+            return;
+        }
+
+        // Don't trigger if still busy
+        if self.chat.is_streaming || self.chat.is_executing_tools {
+            return;
+        }
+
+        // Don't trigger if already in a popup
+        if self.ui.popup != crate::tui::app::Popup::None {
+            return;
+        }
+
+        // Don't trigger if no session
+        if self.current_session_id.is_none() {
+            self.pending_auto_pinch = false;
+            return;
+        }
+
+        self.pending_auto_pinch = false;
+
+        // Calculate usage percent
+        let max_tokens = self.max_context_tokens();
+        let usage_percent = if max_tokens > 0 {
+            ((self.context_tokens_used as f64 / max_tokens as f64) * 100.0) as u8
+        } else {
+            0
+        };
+
+        // Show system message explaining why
+        self.chat.messages.push((
+            "system".to_string(),
+            format!(
+                "Context is at {}% capacity ({} / {} tokens). Starting pinch to continue conversation with fresh context...",
+                usage_percent,
+                self.context_tokens_used,
+                max_tokens
+            ),
+        ));
+
+        // Get top files for pinch context (same as manual /pinch command)
+        let top_files = self.get_top_files_preview(5);
+
+        // Open pinch popup (same as manual trigger)
+        self.popups.pinch.start(usage_percent, top_files);
+        self.ui.popup = crate::tui::app::Popup::Pinch;
     }
 
     /// Show a toast notification
@@ -732,6 +820,10 @@ impl App {
             if self.tick_blocks() {
                 self.needs_redraw = true;
             }
+
+            // Check if we should trigger auto-pinch (context at threshold)
+            // Only triggers when idle (not streaming, not executing tools)
+            self.trigger_pending_auto_pinch();
 
             // Process continuous edge scrolling during selection
             if self.scroll_system.edge_scroll.direction.is_some() {

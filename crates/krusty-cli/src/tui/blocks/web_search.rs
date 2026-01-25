@@ -11,6 +11,7 @@ use ratatui::{
     style::{Modifier, Style},
 };
 use std::time::{Duration, Instant};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{BlockEvent, ClipContext, EventResult, SimpleScrollable, StreamBlock};
 use crate::ai::types::WebSearchResult;
@@ -123,10 +124,10 @@ impl WebSearchBlock {
         let longest_line = self
             .results
             .iter()
-            .flat_map(|r| [r.title.chars().count(), r.url.chars().count() + 2])
+            .flat_map(|r| [r.title.width(), r.url.width() + 2])
             .max()
             .unwrap_or(MIN_BOX_WIDTH);
-        let header_text_len = "Search ".len() + self.query.len().min(30) + 15;
+        let header_text_len = "Search ".len() + self.query.width().min(30) + 15;
         let box_inner_width = longest_line
             .max(header_text_len)
             .clamp(MIN_BOX_WIDTH, MAX_CONTENT_WIDTH);
@@ -163,19 +164,25 @@ impl WebSearchBlock {
             )
         };
 
+        let text_char_count = text.chars().count();
+        let mut x = area.x;
         for (i, ch) in text.chars().enumerate() {
-            let x = area.x + i as u16;
             if x >= area.x + area.width {
                 break;
             }
+            let char_width = ch.width().unwrap_or(0);
+            if char_width == 0 {
+                continue;
+            }
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_char(ch);
-                if i == 0 || (self.streaming && i == text.chars().count() - 1) {
+                if i == 0 || (self.streaming && i == text_char_count - 1) {
                     cell.set_fg(theme.accent_color);
                 } else {
                     cell.set_style(text_style);
                 }
             }
+            x += char_width as u16;
         }
     }
 
@@ -215,7 +222,7 @@ impl WebSearchBlock {
         let longest_line = self
             .results
             .iter()
-            .flat_map(|r| [r.title.chars().count(), r.url.chars().count() + 2])
+            .flat_map(|r| [r.title.width(), r.url.width() + 2])
             .max()
             .unwrap_or(MIN_BOX_WIDTH);
 
@@ -224,7 +231,7 @@ impl WebSearchBlock {
             query_display,
             self.results.len()
         );
-        let header_width = header_text.chars().count();
+        let header_width = header_text.width();
 
         let box_inner_width = longest_line
             .max(header_width)
@@ -261,17 +268,22 @@ impl WebSearchBlock {
 
             let mut x = area.x + 2;
             for ch in header.chars() {
-                if x < content_end_x {
-                    if let Some(cell) = buf.cell_mut((x, render_y)) {
-                        cell.set_char(ch);
-                        if ch == '▼' {
-                            cell.set_fg(theme.accent_color);
-                        } else {
-                            cell.set_style(header_style);
-                        }
-                    }
-                    x += 1;
+                if x >= content_end_x {
+                    break;
                 }
+                let char_width = ch.width().unwrap_or(0);
+                if char_width == 0 {
+                    continue;
+                }
+                if let Some(cell) = buf.cell_mut((x, render_y)) {
+                    cell.set_char(ch);
+                    if ch == '▼' {
+                        cell.set_fg(theme.accent_color);
+                    } else {
+                        cell.set_style(header_style);
+                    }
+                }
+                x += char_width as u16;
             }
 
             for fx in x..content_end_x {
@@ -333,21 +345,37 @@ impl WebSearchBlock {
                     (result.title.clone(), Style::default().fg(theme.text_color))
                 };
 
-                let display = if text.len() > content_width {
-                    format!("{}...", &text[..content_width.saturating_sub(3)])
+                let display = if text.width() > content_width {
+                    let mut truncated = String::new();
+                    let mut w = 0;
+                    for ch in text.chars() {
+                        let cw = ch.width().unwrap_or(0);
+                        if w + cw + 3 > content_width {
+                            break;
+                        }
+                        truncated.push(ch);
+                        w += cw;
+                    }
+                    truncated.push_str("...");
+                    truncated
                 } else {
                     text
                 };
 
                 let mut cx = area.x + 2;
                 for ch in display.chars() {
-                    if cx < content_end_x {
-                        if let Some(cell) = buf.cell_mut((cx, y)) {
-                            cell.set_char(ch);
-                            cell.set_style(style);
-                        }
-                        cx += 1;
+                    if cx >= content_end_x {
+                        break;
                     }
+                    let char_width = ch.width().unwrap_or(0);
+                    if char_width == 0 {
+                        continue;
+                    }
+                    if let Some(cell) = buf.cell_mut((cx, y)) {
+                        cell.set_char(ch);
+                        cell.set_style(style);
+                    }
+                    cx += char_width as u16;
                 }
             }
 

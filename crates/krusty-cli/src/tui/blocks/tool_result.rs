@@ -11,6 +11,7 @@ use ratatui::{
     style::{Modifier, Style},
 };
 use std::time::{Duration, Instant};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{BlockEvent, ClipContext, EventResult, SimpleScrollable, StreamBlock};
 use crate::tui::components::scrollbars::render_scrollbar;
@@ -182,10 +183,12 @@ impl ToolResultBlock {
         let longest_line = self
             .results
             .iter()
-            .map(|l| l.chars().count())
+            .map(|l| UnicodeWidthStr::width(l.as_str()))
             .max()
             .unwrap_or(MIN_BOX_WIDTH);
-        let header_text_len = self.tool_name.len() + self.pattern.len().min(30) + 15;
+        let header_text_len = UnicodeWidthStr::width(self.tool_name.as_str())
+            + UnicodeWidthStr::width(self.pattern.as_str()).min(30)
+            + 15;
         let box_inner_width = longest_line
             .max(header_text_len)
             .clamp(MIN_BOX_WIDTH, MAX_CONTENT_WIDTH);
@@ -221,19 +224,22 @@ impl ToolResultBlock {
             )
         };
 
+        let text_len = UnicodeWidthStr::width(text.as_str());
+        let mut x = area.x;
         for (i, ch) in text.chars().enumerate() {
-            let x = area.x + i as u16;
             if x >= area.x + area.width {
                 break;
             }
+            let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_char(ch);
-                if i == 0 || (self.streaming && i == text.chars().count() - 1) {
+                if i == 0 || (self.streaming && x + char_width as u16 >= area.x + text_len as u16) {
                     cell.set_fg(theme.accent_color);
                 } else {
                     cell.set_style(text_style);
                 }
             }
+            x += char_width as u16;
         }
     }
 
@@ -272,7 +278,7 @@ impl ToolResultBlock {
         let longest_line = self
             .results
             .iter()
-            .map(|l| l.chars().count())
+            .map(|l| UnicodeWidthStr::width(l.as_str()))
             .max()
             .unwrap_or(MIN_BOX_WIDTH);
 
@@ -281,7 +287,7 @@ impl ToolResultBlock {
             " ▼ {} ({}) {} results ",
             self.tool_name, pat_display, self.count
         );
-        let header_width = header_text.chars().count();
+        let header_width = UnicodeWidthStr::width(header_text.as_str());
 
         let box_inner_width = longest_line
             .max(header_width)
@@ -318,17 +324,19 @@ impl ToolResultBlock {
 
             let mut x = area.x + 2;
             for ch in header.chars() {
-                if x < content_end_x {
-                    if let Some(cell) = buf.cell_mut((x, render_y)) {
-                        cell.set_char(ch);
-                        if ch == '▼' {
-                            cell.set_fg(theme.accent_color);
-                        } else {
-                            cell.set_style(header_style);
-                        }
-                    }
-                    x += 1;
+                if x >= content_end_x {
+                    break;
                 }
+                let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if let Some(cell) = buf.cell_mut((x, render_y)) {
+                    cell.set_char(ch);
+                    if ch == '▼' {
+                        cell.set_fg(theme.accent_color);
+                    } else {
+                        cell.set_style(header_style);
+                    }
+                }
+                x += char_width as u16;
             }
 
             for fx in x..content_end_x {
@@ -382,21 +390,33 @@ impl ToolResultBlock {
 
             // Content
             if let Some(result) = self.results.get(line_idx) {
-                let display = if result.len() > content_width {
-                    format!("{}...", &result[..content_width.saturating_sub(3)])
+                let display = if UnicodeWidthStr::width(result.as_str()) > content_width {
+                    let mut truncated = String::new();
+                    let mut width = 0;
+                    for ch in result.chars() {
+                        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                        if width + ch_width + 3 > content_width {
+                            break;
+                        }
+                        truncated.push(ch);
+                        width += ch_width;
+                    }
+                    format!("{}...", truncated)
                 } else {
                     result.clone()
                 };
 
                 let mut cx = area.x + 2;
                 for ch in display.chars() {
-                    if cx < content_end_x {
-                        if let Some(cell) = buf.cell_mut((cx, y)) {
-                            cell.set_char(ch);
-                            cell.set_fg(theme.text_color);
-                        }
-                        cx += 1;
+                    if cx >= content_end_x {
+                        break;
                     }
+                    let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                    if let Some(cell) = buf.cell_mut((cx, y)) {
+                        cell.set_char(ch);
+                        cell.set_fg(theme.text_color);
+                    }
+                    cx += char_width as u16;
                 }
             }
 

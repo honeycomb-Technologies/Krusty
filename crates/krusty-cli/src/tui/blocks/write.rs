@@ -13,6 +13,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
 };
 use std::time::{Duration, Instant};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{BlockEvent, ClipContext, EventResult, StreamBlock, WidthScrollable};
 use crate::tui::components::scrollbars::render_scrollbar;
@@ -250,12 +251,23 @@ impl WriteBlock {
         for line in &self.content {
             if line.is_empty() {
                 result.push(String::new());
-            } else if line.chars().count() <= max_width {
+            } else if UnicodeWidthStr::width(line.as_str()) <= max_width {
                 result.push(line.clone());
             } else {
-                let chars: Vec<char> = line.chars().collect();
-                for chunk in chars.chunks(max_width) {
-                    result.push(chunk.iter().collect());
+                let mut current_line = String::new();
+                let mut current_width = 0;
+                for ch in line.chars() {
+                    let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                    if current_width + ch_width > max_width {
+                        result.push(current_line);
+                        current_line = String::new();
+                        current_width = 0;
+                    }
+                    current_line.push(ch);
+                    current_width += ch_width;
+                }
+                if !current_line.is_empty() {
+                    result.push(current_line);
                 }
             }
         }
@@ -284,7 +296,7 @@ impl WriteBlock {
     fn calc_box_width(&self, wrapped_lines: &[String], area_width: u16) -> u16 {
         let longest_line = wrapped_lines
             .iter()
-            .map(|l| l.chars().count())
+            .map(|l| UnicodeWidthStr::width(l.as_str()))
             .max()
             .unwrap_or(MIN_BOX_WIDTH);
 
@@ -292,7 +304,7 @@ impl WriteBlock {
         let anim = self.get_anim_frame();
         let status = format!(" Wrote {} ({} lines)", self.short_path(), self.total_lines);
         let header_text = format!(" ▼ {}{} ", anim, status);
-        let header_width = header_text.chars().count();
+        let header_width = UnicodeWidthStr::width(header_text.as_str());
 
         // Box inner = max(content + line_nums, header, min_width), capped at max
         let box_inner_width = (longest_line + 7)
@@ -337,7 +349,7 @@ impl WriteBlock {
                     cell.set_char(ch);
                     cell.set_fg(anim_color);
                 }
-                x += 1;
+                x += UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
             }
         }
 
@@ -360,7 +372,7 @@ impl WriteBlock {
                     cell.set_char(ch);
                     cell.set_style(text_style);
                 }
-                x += 1;
+                x += UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
             }
         }
 
@@ -414,7 +426,7 @@ impl WriteBlock {
         let anim = self.get_anim_frame();
         let status = format!(" Wrote {} ({} lines)", self.short_path(), self.total_lines);
         let header_text = format!(" ▼ {}{} ", anim, status);
-        let anim_len = anim.chars().count();
+        let anim_len = UnicodeWidthStr::width(anim);
 
         // Position borders relative to fitted box (not area.width)
         let content_end_x = if needs_scrollbar {
@@ -442,7 +454,9 @@ impl WriteBlock {
 
             // Render header content (already built above): " ▼ Writing... Wrote file.rs (N lines) "
             let mut x = area.x + 2;
-            for (char_idx, ch) in header_text.chars().enumerate() {
+            let mut width_so_far = 0usize;
+            for ch in header_text.chars() {
+                let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
                 if x < content_end_x {
                     if let Some(cell) = buf.cell_mut((x, y)) {
                         cell.set_char(ch);
@@ -450,15 +464,16 @@ impl WriteBlock {
                             cell.set_fg(theme.accent_color);
                         } else if ch == '✓' || ch == '▌' {
                             cell.set_fg(anim_color);
-                        } else if char_idx >= 3 && char_idx < 3 + anim_len {
+                        } else if width_so_far >= 3 && width_so_far < 3 + anim_len {
                             // Animation text (after " ▼ ")
                             cell.set_fg(anim_color);
                         } else {
                             cell.set_style(header_style);
                         }
                     }
-                    x += 1;
+                    x += ch_width as u16;
                 }
+                width_so_far += ch_width;
             }
 
             // Fill with dashes
@@ -523,8 +538,8 @@ impl WriteBlock {
             // Content
             let content_start_x = area.x + 7;
             if let Some(line) = wrapped_lines.get(line_idx) {
-                for (i, ch) in line.chars().enumerate() {
-                    let x = content_start_x + i as u16;
+                let mut x = content_start_x;
+                for ch in line.chars() {
                     if x >= content_end_x {
                         break;
                     }
@@ -532,6 +547,7 @@ impl WriteBlock {
                         cell.set_char(ch);
                         cell.set_fg(content_color);
                     }
+                    x += UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
                 }
             }
 

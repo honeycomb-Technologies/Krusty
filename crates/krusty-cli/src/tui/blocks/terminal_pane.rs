@@ -16,6 +16,7 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{BlockEvent, ClipContext, EventResult, StreamBlock};
 use crate::tui::components::scrollbars::render_scrollbar;
@@ -458,25 +459,30 @@ impl TerminalPane {
         let prefix = format!("▶ $ {}", title_display);
 
         // Draw prefix
-        for (i, ch) in prefix.chars().enumerate() {
-            let x = area.x + i as u16;
+        let mut x = area.x;
+        for ch in prefix.chars() {
+            let char_width = ch.width().unwrap_or(0) as u16;
             if x < area.x + area.width {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(ch);
-                    if i == 0 || ch == '$' {
+                    if ch == '▶' || ch == '$' {
                         cell.set_fg(theme.accent_color);
                     } else {
                         cell.set_fg(text_color);
                     }
                 }
             }
+            x += char_width;
         }
+        let prefix_end_x = x;
 
         // Status and duration on right
         let suffix = format!(" {} {}", status, duration);
-        let suffix_start = (area.x + area.width).saturating_sub(suffix.len() as u16);
-        for (i, ch) in suffix.chars().enumerate() {
-            let x = suffix_start + i as u16;
+        let suffix_width = suffix.width() as u16;
+        let suffix_start = (area.x + area.width).saturating_sub(suffix_width);
+        let mut x = suffix_start;
+        for ch in suffix.chars() {
+            let char_width = ch.width().unwrap_or(0) as u16;
             if x >= area.x && x < area.x + area.width {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(ch);
@@ -487,10 +493,11 @@ impl TerminalPane {
                     }
                 }
             }
+            x += char_width;
         }
 
         // Fill middle with dots
-        let dots_start = area.x + prefix.len() as u16 + 1;
+        let dots_start = prefix_end_x + 1;
         let dots_end = suffix_start.saturating_sub(1);
         for x in dots_start..dots_end {
             if let Some(cell) = buf.cell_mut((x, y)) {
@@ -530,11 +537,13 @@ impl TerminalPane {
 
         let header = format!(" {} {} $ {} ", focus_indicator, status, self.title);
         let status_suffix = format!(" {} {} {}", duration, pin_btn, close_btn);
+        let status_suffix_width = status_suffix.width() as u16;
 
         // Draw header text
         let mut x = area.x + 1;
         for ch in header.chars() {
-            if x < content_end_x.saturating_sub(status_suffix.len() as u16) {
+            let char_width = ch.width().unwrap_or(0) as u16;
+            if x < content_end_x.saturating_sub(status_suffix_width) {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(ch);
                     if ch == '●' || ch == '✓' || ch == '✗' {
@@ -551,12 +560,12 @@ impl TerminalPane {
                         cell.set_fg(text_color);
                     }
                 }
-                x += 1;
+                x += char_width;
             }
         }
 
         // Fill with horizontal line
-        let status_start = content_end_x.saturating_sub(status_suffix.len() as u16);
+        let status_start = content_end_x.saturating_sub(status_suffix_width);
         while x < status_start {
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_char('━');
@@ -566,34 +575,21 @@ impl TerminalPane {
         }
 
         // Duration, pin button, and close button
-        // Track position for button coloring
-        let close_btn_start = status_suffix.len() - 3; // "[x]" is last 3 chars
-        let pin_btn_start = close_btn_start - 4; // " [^]" or " [_]" before close
-        for (char_idx, ch) in status_suffix.chars().enumerate() {
+        // Color based on character content rather than position
+        for ch in status_suffix.chars() {
+            let char_width = ch.width().unwrap_or(0) as u16;
             if x < content_end_x {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(ch);
-                    if char_idx >= close_btn_start {
-                        // Close button - red
-                        if ch == 'x' {
-                            cell.set_fg(theme.error_color);
-                        } else {
-                            cell.set_fg(theme.dim_color);
-                        }
-                    } else if char_idx >= pin_btn_start && char_idx < close_btn_start {
-                        // Pin button
-                        if ch == '^' {
-                            cell.set_fg(theme.accent_color); // Pinned
-                        } else if ch == '_' {
-                            cell.set_fg(theme.dim_color); // Not pinned
-                        } else {
-                            cell.set_fg(theme.dim_color);
-                        }
+                    if ch == 'x' {
+                        cell.set_fg(theme.error_color);
+                    } else if ch == '^' {
+                        cell.set_fg(theme.accent_color);
                     } else {
                         cell.set_fg(theme.dim_color);
                     }
                 }
-                x += 1;
+                x += char_width;
             }
         }
 
@@ -681,8 +677,8 @@ impl TerminalPane {
                 }
             }
 
-            // Right border
-            if let Some(cell) = buf.cell_mut((area.x + area.width - 1, screen_y)) {
+            // Right border - use content_end_x to respect scrollbar gap
+            if let Some(cell) = buf.cell_mut((content_end_x, screen_y)) {
                 cell.set_char('┃');
                 cell.set_fg(border_color);
             }

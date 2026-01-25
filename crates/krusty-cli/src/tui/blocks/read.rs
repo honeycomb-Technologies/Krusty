@@ -14,6 +14,8 @@ use ratatui::{
 };
 use std::time::{Duration, Instant};
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 use super::{BlockEvent, ClipContext, EventResult, StreamBlock, WidthScrollable};
 use crate::tui::components::scrollbars::render_scrollbar;
 use crate::tui::themes::Theme;
@@ -160,7 +162,7 @@ impl ReadBlock {
         }
     }
 
-    /// Wrap content lines to fit width (character-based, UTF-8 safe)
+    /// Wrap content lines to fit width (width-based, handles wide characters)
     fn wrap_content(&self, max_width: usize) -> Vec<String> {
         if max_width == 0 {
             return vec![];
@@ -170,13 +172,24 @@ impl ReadBlock {
         for line in &self.content {
             if line.is_empty() {
                 result.push(String::new());
-            } else if line.chars().count() <= max_width {
+            } else if UnicodeWidthStr::width(line.as_str()) <= max_width {
                 result.push(line.clone());
             } else {
-                // Use char-based chunking for proper UTF-8 handling
-                let chars: Vec<char> = line.chars().collect();
-                for chunk in chars.chunks(max_width) {
-                    result.push(chunk.iter().collect());
+                // Use width-based chunking for proper display width handling
+                let mut chunk = String::new();
+                let mut chunk_width = 0usize;
+                for ch in line.chars() {
+                    let char_width = UnicodeWidthChar::width(ch).unwrap_or(1);
+                    if chunk_width + char_width > max_width && !chunk.is_empty() {
+                        result.push(chunk);
+                        chunk = String::new();
+                        chunk_width = 0;
+                    }
+                    chunk.push(ch);
+                    chunk_width += char_width;
+                }
+                if !chunk.is_empty() {
+                    result.push(chunk);
                 }
             }
         }
@@ -211,7 +224,7 @@ impl ReadBlock {
     fn calc_box_width(&self, wrapped_lines: &[String], area_width: u16) -> u16 {
         let longest_line = wrapped_lines
             .iter()
-            .map(|l| l.chars().count())
+            .map(|l| UnicodeWidthStr::width(l.as_str()))
             .max()
             .unwrap_or(MIN_BOX_WIDTH);
 
@@ -227,7 +240,7 @@ impl ReadBlock {
             format!("Read {} ({} lines)", self.short_path(), self.total_lines)
         };
         let header_text = format!(" ▼ {} {} ", eyes, status);
-        let header_width = header_text.chars().count();
+        let header_width = UnicodeWidthStr::width(header_text.as_str());
 
         // Box inner = max(content + line_nums, header, min_width), capped at max
         let box_inner_width = (longest_line + 7)
@@ -398,7 +411,7 @@ impl ReadBlock {
                             cell.set_style(header_style);
                         }
                     }
-                    x += 1;
+                    x += UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
                 }
             }
 
@@ -466,8 +479,8 @@ impl ReadBlock {
             let content_start_x = area.x + 7;
 
             if let Some(line) = wrapped_lines.get(line_idx) {
-                for (i, ch) in line.chars().enumerate() {
-                    let x = content_start_x + i as u16;
+                let mut x = content_start_x;
+                for ch in line.chars() {
                     if x >= content_end_x {
                         break;
                     }
@@ -475,6 +488,7 @@ impl ReadBlock {
                         cell.set_char(ch);
                         cell.set_fg(content_color);
                     }
+                    x += UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
                 }
             }
 

@@ -26,8 +26,17 @@ pub fn create_client_config(
         return AiClientConfig::for_openai_with_auth_detection(model, credential_store);
     }
 
-    let provider_config =
-        get_provider(provider).unwrap_or_else(|| get_provider(ProviderId::Anthropic).unwrap());
+    let provider_config = match get_provider(provider) {
+        Some(config) => config,
+        None => {
+            tracing::warn!(
+                "Provider {:?} not found, falling back to Anthropic",
+                provider
+            );
+            get_provider(ProviderId::Anthropic)
+                .expect("Anthropic provider must always be available")
+        }
+    };
 
     // Determine API format based on provider
     // - OpenCode Zen: model-specific format routing (Anthropic/OpenAI/Google)

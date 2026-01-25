@@ -823,6 +823,9 @@ impl App {
             );
         }
         self.save_session_token_count();
+
+        // Check if we should trigger auto-pinch (after AI finishes)
+        self.check_auto_pinch();
     }
 
     /// Handle context edited event

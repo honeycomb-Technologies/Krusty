@@ -308,14 +308,28 @@ impl App {
                     tracing::warn!("Failed to save pinch message: {}", e);
                 }
 
-                // If direction provided (non-empty), save it as user message (becomes first prompt)
+                // Carry over active plan to new session
+                if let Some(ref plan) = self.active_plan {
+                    if let Err(e) = self
+                        .services
+                        .plan_manager
+                        .save_plan_for_session(&new_id, plan)
+                    {
+                        tracing::warn!("Failed to carry over plan to new session: {}", e);
+                    } else {
+                        tracing::info!("Carried over plan '{}' to pinched session", plan.title);
+                    }
+                }
+
+                // If direction provided, save it as user message
+                // Auto-continue always (pinch implies continuation)
                 let has_direction = direction
                     .as_ref()
                     .map(|d| !d.trim().is_empty())
                     .unwrap_or(false);
-                let auto_continue = has_direction;
-                if let Some(dir) = &direction {
-                    if !dir.trim().is_empty() {
+
+                if has_direction {
+                    if let Some(dir) = &direction {
                         // Save as JSON content array to match normal message format
                         let content_json =
                             serde_json::to_string(&vec![crate::ai::types::Content::Text {
@@ -327,7 +341,21 @@ impl App {
                             tracing::warn!("Failed to save direction as user message: {}", e);
                         }
                     }
+                } else {
+                    // No direction - save a default "Continue" prompt
+                    let content_json =
+                        serde_json::to_string(&vec![crate::ai::types::Content::Text {
+                            text: "Continue.".to_string(),
+                        }])
+                        .unwrap_or_else(|_| "[\"Continue.\"]".to_string());
+
+                    if let Err(e) = sm.save_message(&new_id, "user", &content_json) {
+                        tracing::warn!("Failed to save default continue message: {}", e);
+                    }
                 }
+
+                // Always auto-continue after pinch (user explicitly chose to continue)
+                let auto_continue = true;
 
                 // Spawn async AI title generation
                 self.spawn_pinch_title_generation(new_id.clone(), parent_title, summary, direction);

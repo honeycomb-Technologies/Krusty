@@ -433,3 +433,102 @@ impl ToolRegistry {
         Some(result)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    fn create_test_context() -> ToolContext {
+        ToolContext {
+            working_dir: PathBuf::from("/tmp"),
+            sandbox_root: None,
+            user_id: None,
+            lsp_manager: None,
+            process_registry: None,
+            skills_manager: None,
+            mcp_manager: None,
+            timeout: None,
+            output_tx: None,
+            tool_use_id: None,
+            plan_mode: false,
+            explore_progress_tx: None,
+            build_progress_tx: None,
+            missing_lsp_tx: None,
+            current_model: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_registry_nonexistent_tool() {
+        let registry = ToolRegistry::new();
+        let ctx = create_test_context();
+
+        let result = registry.execute("nonexistent_tool", json!({}), &ctx).await;
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_tool_context_defaults() {
+        let ctx = ToolContext::default();
+
+        assert!(ctx.lsp_manager.is_none());
+        assert!(ctx.process_registry.is_none());
+        assert!(ctx.timeout.is_none());
+        assert!(!ctx.plan_mode);
+        assert_eq!(
+            ctx.working_dir,
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_result_success() {
+        let result = ToolResult::success("Test output");
+        assert!(!result.is_error);
+        assert_eq!(result.output, "Test output");
+    }
+
+    #[tokio::test]
+    async fn test_tool_result_error() {
+        let result = ToolResult::error("Test error");
+        assert!(result.is_error);
+        assert!(result.output.contains("error"));
+        assert!(result.output.contains("Test error"));
+    }
+
+    #[tokio::test]
+    async fn test_parse_params_success() {
+        #[derive(serde::Deserialize)]
+        struct TestParams {
+            name: String,
+            count: i32,
+        }
+
+        let params = json!({"name": "test", "count": 42});
+        let result: Result<TestParams, ToolResult> = parse_params(params);
+
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert_eq!(parsed.name, "test");
+        assert_eq!(parsed.count, 42);
+    }
+
+    #[tokio::test]
+    async fn test_parse_params_invalid_json() {
+        #[derive(serde::Deserialize, Debug)]
+        struct TestParams {
+            name: String,
+        }
+
+        let params = json!({"name": 123}); // Wrong type
+        let result: Result<TestParams, ToolResult> = parse_params(params);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.is_error);
+        assert!(err.output.contains("Invalid parameters"));
+    }
+}

@@ -11,6 +11,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Widget},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::themes::Theme;
 
@@ -490,9 +491,12 @@ impl DecisionPrompt {
             ));
 
             let hint_y = inner.y + inner.height - 1;
-            // Center the hint
-            let hint_x = inner.x + (inner.width.saturating_sub(hint.len() as u16)) / 2;
-            render_line(buf, hint_x, hint_y, inner.width, &hint_line);
+            // Center the hint using unicode display width
+            let hint_width = UnicodeWidthStr::width(hint) as u16;
+            let hint_x = inner.x + (inner.width.saturating_sub(hint_width)) / 2;
+            // Clamp render width to prevent overflow
+            let render_width = inner.width.saturating_sub(hint_x.saturating_sub(inner.x));
+            render_line(buf, hint_x, hint_y, render_width, &hint_line);
         }
     }
 }
@@ -503,12 +507,28 @@ fn render_line(buf: &mut Buffer, x: u16, y: u16, width: u16, line: &Line) {
     ratatui::widgets::Paragraph::new(line.clone()).render(area, buf);
 }
 
-/// Truncate string to fit width
+/// Truncate string to fit display width (unicode-aware)
 fn truncate(s: &str, max_width: usize) -> String {
-    if s.len() <= max_width {
+    let current_width = UnicodeWidthStr::width(s);
+    if current_width <= max_width {
         s.to_string()
     } else if max_width > 1 {
-        format!("{}…", &s[..max_width - 1])
+        // Truncate by display width, not bytes
+        let target_width = max_width.saturating_sub(1); // Leave room for ellipsis
+        let mut width = 0;
+        let truncated: String = s
+            .chars()
+            .take_while(|c| {
+                let char_width = UnicodeWidthChar::width(*c).unwrap_or(0);
+                if width + char_width <= target_width {
+                    width += char_width;
+                    true
+                } else {
+                    false
+                }
+            })
+            .collect();
+        format!("{}…", truncated)
     } else {
         String::new()
     }

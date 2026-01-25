@@ -64,6 +64,16 @@ impl CredentialStore {
     }
 
     /// Save credentials to a specific path
+    ///
+    /// On Unix systems, sets file permissions to 0600 (user read/write only).
+    /// On Windows, logs a warning that credentials may be accessible to other users.
+    ///
+    /// # Security
+    /// - Unix: Sets restrictive 0600 permissions (owner read/write only)
+    /// - Windows: No granular permission control, logs warning
+    ///
+    /// # Errors
+    /// Returns error if directory creation or file write fails.
     pub fn save_to_path(&self, path: &std::path::Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -71,16 +81,28 @@ impl CredentialStore {
         let contents = serde_json::to_string_pretty(self)?;
         fs::write(path, contents)?;
 
-        // Set restrictive permissions on Unix
+        // Set restrictive permissions on Unix (user read/write only)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             if let Ok(metadata) = fs::metadata(path) {
                 let mut permissions = metadata.permissions();
                 permissions.set_mode(0o600);
-                let _ = fs::set_permissions(path, permissions);
+                fs::set_permissions(path, permissions)
+                    .map_err(|e| anyhow::anyhow!("Failed to set secure file permissions: {}", e))?;
+                tracing::debug!("Set 0o600 permissions on credentials file");
+            } else {
+                tracing::warn!("Could not get metadata for credentials file, permissions not set");
             }
         }
+
+        #[cfg(windows)]
+        {
+            tracing::warn!(
+                "Windows: File permissions not set - credentials may be accessible to other users"
+            );
+        }
+
         Ok(())
     }
 

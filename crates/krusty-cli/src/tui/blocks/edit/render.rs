@@ -56,8 +56,10 @@ impl EditBlock {
             let header = format!("─ {} Edit {} ", symbol, self.short_path());
 
             let mut x = area.x + 1;
+            let max_header_x = content_end_x - 4;
             for ch in header.chars() {
-                if x >= content_end_x - 4 {
+                let char_width = ch.width().unwrap_or(0);
+                if x + char_width as u16 > max_header_x {
                     break;
                 }
                 if let Some(cell) = buf.cell_mut((x, render_y)) {
@@ -70,7 +72,7 @@ impl EditBlock {
                         cell.set_fg(theme.text_color);
                     }
                 }
-                x += 1;
+                x += char_width as u16;
             }
 
             let toggle_start = content_end_x - 4;
@@ -308,8 +310,10 @@ impl EditBlock {
             let header = format!("─ {} Edit {} ", symbol, self.short_path());
 
             let mut x = area.x + 1;
+            let max_header_x = content_end_x - 4;
             for ch in header.chars() {
-                if x >= content_end_x - 4 {
+                let char_width = ch.width().unwrap_or(0);
+                if x + char_width as u16 > max_header_x {
                     break;
                 }
                 if let Some(cell) = buf.cell_mut((x, render_y)) {
@@ -322,7 +326,7 @@ impl EditBlock {
                         cell.set_fg(theme.text_color);
                     }
                 }
-                x += 1;
+                x += char_width as u16;
             }
 
             let toggle_start = content_end_x - 4;

@@ -5,6 +5,7 @@
 use crossterm::event::{Event, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{buffer::Buffer, layout::Rect};
 use std::time::Instant;
+use unicode_width::UnicodeWidthChar;
 
 use super::{DiffLine, DiffMode, CONTEXT_LINES, MAX_VISIBLE_LINES, SYMBOL_TOGGLE_INTERVAL};
 use crate::tui::blocks::{BlockEvent, ClipContext, EventResult, StreamBlock};
@@ -469,8 +470,10 @@ impl StreamBlock for EditBlock {
             let symbol = self.get_symbol();
             let text = format!("{} Editing {}", symbol, self.short_path());
             let mut x = area.x;
+            let max_x = area.x + area.width;
             for ch in text.chars() {
-                if x >= area.x + area.width {
+                let char_width = ch.width().unwrap_or(0);
+                if x + char_width as u16 > max_x {
                     break;
                 }
                 if let Some(cell) = buf.cell_mut((x, area.y)) {
@@ -481,7 +484,7 @@ impl StreamBlock for EditBlock {
                         cell.set_fg(theme.text_color);
                     }
                 }
-                x += 1;
+                x += char_width as u16;
             }
             return;
         }

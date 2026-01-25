@@ -20,7 +20,17 @@ pub fn render_scrollbar(
     thumb_color: Color,
     track_color: Color,
 ) {
-    // Don't render if no scrolling needed
+    // Always clear the scrollbar area first to prevent stale glyphs
+    // This is critical: without clearing, old █/░ chars remain when scrollbar disappears
+    for y in 0..area.height as usize {
+        let screen_y = area.y + y as u16;
+        if let Some(cell) = buf.cell_mut((area.x, screen_y)) {
+            cell.set_char(' ');
+            cell.set_fg(Color::Reset);
+        }
+    }
+
+    // Don't render track/thumb if no scrolling needed
     if total <= visible || area.height == 0 {
         return;
     }

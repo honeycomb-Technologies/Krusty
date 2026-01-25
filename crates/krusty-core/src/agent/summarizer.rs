@@ -16,9 +16,17 @@ use crate::storage::RankedFile;
 const ANTHROPIC_SUMMARIZATION_MODEL: &str = "claude-sonnet-4-5-20250929";
 
 /// Extended thinking budget for thorough analysis (Anthropic only)
+///
+/// 32K tokens allows the model to deeply analyze the conversation context
+/// and produce high-quality summaries. Extended thinking is more effective
+/// than simple prompts for complex reasoning tasks.
 const THINKING_BUDGET: u32 = 32000;
 
 /// Max tokens for non-thinking summarization calls
+///
+/// 4000 tokens is sufficient for summary output on non-Anthropic providers
+/// that don't support extended thinking. The output is structured JSON,
+/// so it doesn't need to be verbose.
 const SUMMARIZATION_MAX_TOKENS: usize = 4000;
 
 /// System prompt for summarization

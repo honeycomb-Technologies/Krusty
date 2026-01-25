@@ -122,16 +122,11 @@ impl SharedBuildContext {
 
     /// Release all locks held by an agent (cleanup)
     pub fn release_all_locks(&self, agent_id: &str) {
-        let to_release: Vec<PathBuf> = self
-            .file_locks
-            .iter()
-            .filter(|r| *r.value() == agent_id)
-            .map(|r| r.key().clone())
-            .collect();
-
-        for path in to_release {
-            self.file_locks.remove(&path);
-        }
+        // Use retain() for single-pass O(n) operation instead of collect + iterate
+        self.file_locks.retain(|_path, owner| {
+            // Keep the entry if it's NOT held by the agent being released
+            owner != agent_id
+        });
     }
 
     // =========================================================================
@@ -316,5 +311,346 @@ impl std::fmt::Display for BuildContextStats {
             )?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_acquire_lock_success() {
+        let ctx = SharedBuildContext::new();
+        let path = PathBuf::from("/test/file.rs");
+        let agent_id = "agent-1".to_string();
+
+        let result = ctx.acquire_lock(path.clone(), agent_id.clone(), "testing".to_string());
+        assert!(result.is_ok(), "Should acquire lock successfully");
+
+        // Lock should be held
+        let holder = ctx.file_locks.get(&path);
+        assert!(holder.is_some());
+        assert_eq!(*holder.unwrap().value(), agent_id);
+    }
+
+    #[test]
+    fn test_acquire_lock_already_held_by_same_agent() {
+        let ctx = SharedBuildContext::new();
+        let path = PathBuf::from("/test/file.rs");
+        let agent_id = "agent-1".to_string();
+
+        // First acquisition
+        let result1 = ctx.acquire_lock(path.clone(), agent_id.clone(), "first".to_string());
+        assert!(result1.is_ok());
+
+        // Second acquisition by same agent should succeed
+        let result2 = ctx.acquire_lock(path.clone(), agent_id.clone(), "second".to_string());
+        assert!(
+            result2.is_ok(),
+            "Re-acquisition by same agent should succeed"
+        );
+    }
+
+    #[test]
+    fn test_acquire_lock_contention() {
+        let ctx = SharedBuildContext::new();
+        let path = PathBuf::from("/test/file.rs");
+        let agent1 = "agent-1".to_string();
+        let agent2 = "agent-2".to_string();
+
+        // Agent 1 acquires lock
+        let result1 = ctx.acquire_lock(path.clone(), agent1.clone(), "first".to_string());
+        assert!(result1.is_ok());
+
+        // Agent 2 should fail to acquire
+        let result2 = ctx.acquire_lock(path.clone(), agent2.clone(), "contention".to_string());
+        assert!(
+            result2.is_err(),
+            "Agent 2 should fail to acquire lock held by agent 1"
+        );
+
+        let err = result2.unwrap_err();
+        assert_eq!(err, agent1, "Error should return holder ID");
+
+        // Check contention counter
+        assert_eq!(ctx.lock_contentions.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_release_lock() {
+        let ctx = SharedBuildContext::new();
+        let path = PathBuf::from("/test/file.rs");
+        let agent_id = "agent-1".to_string();
+
+        // Acquire lock
+        ctx.acquire_lock(path.clone(), agent_id.clone(), "testing".to_string())
+            .unwrap();
+
+        // Release lock
+        ctx.release_lock(&path, &agent_id);
+
+        // Lock should be gone
+        let holder = ctx.file_locks.get(&path);
+        assert!(holder.is_none(), "Lock should be released");
+    }
+
+    #[test]
+    fn test_release_lock_by_non_holder() {
+        let ctx = SharedBuildContext::new();
+        let path = PathBuf::from("/test/file.rs");
+        let agent1 = "agent-1".to_string();
+        let agent2 = "agent-2".to_string();
+
+        // Agent 1 acquires lock
+        ctx.acquire_lock(path.clone(), agent1.clone(), "first".to_string())
+            .unwrap();
+
+        // Agent 2 tries to release (should be ignored)
+        ctx.release_lock(&path, &agent2);
+
+        // Lock should still be held by agent 1
+        let holder = ctx.file_locks.get(&path);
+        assert!(holder.is_some());
+        assert_eq!(*holder.unwrap().value(), agent1);
+    }
+
+    #[test]
+    fn test_release_all_locks_single_agent() {
+        let ctx = SharedBuildContext::new();
+        let agent1 = "agent-1".to_string();
+        let agent2 = "agent-2".to_string();
+
+        let file1 = PathBuf::from("/test/file1.rs");
+        let file2 = PathBuf::from("/test/file2.rs");
+        let file3 = PathBuf::from("/test/file3.rs");
+
+        // Agent 1 holds 2 locks
+        ctx.acquire_lock(file1.clone(), agent1.clone(), "1".to_string())
+            .unwrap();
+        ctx.acquire_lock(file2.clone(), agent1.clone(), "2".to_string())
+            .unwrap();
+
+        // Agent 2 holds 1 lock
+        ctx.acquire_lock(file3.clone(), agent2.clone(), "3".to_string())
+            .unwrap();
+
+        // Release all agent 1 locks
+        ctx.release_all_locks(&agent1);
+
+        // Agent 1's locks should be released
+        assert!(ctx.file_locks.get(&file1).is_none());
+        assert!(ctx.file_locks.get(&file2).is_none());
+
+        // Agent 2's lock should remain
+        assert!(ctx.file_locks.get(&file3).is_some());
+        assert_eq!(*ctx.file_locks.get(&file3).unwrap().value(), agent2);
+    }
+
+    #[test]
+    fn test_release_all_locks_empty() {
+        let ctx = SharedBuildContext::new();
+        let agent = "agent-1".to_string();
+
+        // Should not panic or error
+        ctx.release_all_locks(&agent);
+
+        assert_eq!(ctx.file_locks.len(), 0);
+    }
+
+    #[test]
+    fn test_lock_stats_tracking() {
+        let ctx = SharedBuildContext::new();
+        let path = PathBuf::from("/test/file.rs");
+        let agent = "agent-1".to_string();
+
+        ctx.acquire_lock(path.clone(), agent.clone(), "test".to_string())
+            .unwrap();
+
+        assert_eq!(ctx.locks_acquired.load(Ordering::Relaxed), 1);
+        assert_eq!(ctx.lock_contentions.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_modified_files_tracking() {
+        let ctx = SharedBuildContext::new();
+        let file1 = PathBuf::from("/test/file1.rs");
+        let file2 = PathBuf::from("/test/file2.rs");
+        let agent1 = "agent-1".to_string();
+        let agent2 = "agent-2".to_string();
+
+        ctx.record_modification(file1.clone(), agent1.clone());
+        ctx.record_modification(file2.clone(), agent2.clone());
+
+        assert_eq!(ctx.modified_files.len(), 2);
+
+        // Check file1
+        let entry = ctx.modified_files.get(&file1).unwrap();
+        assert_eq!(*entry.value(), agent1);
+
+        // Check file2
+        let entry = ctx.modified_files.get(&file2).unwrap();
+        assert_eq!(*entry.value(), agent2);
+    }
+
+    #[test]
+    fn test_line_diff_tracking() {
+        let ctx = SharedBuildContext::new();
+
+        ctx.record_line_changes(10, 5);
+        ctx.record_line_changes(3, 7);
+
+        let (added, removed) = ctx.get_line_diff();
+        assert_eq!(added, 13);
+        assert_eq!(removed, 12);
+    }
+
+    #[test]
+    fn test_conventions_management() {
+        let ctx = SharedBuildContext::new();
+
+        let conventions = vec![
+            "Use anyhow for errors".to_string(),
+            "Add tracing logs".to_string(),
+        ];
+
+        ctx.set_conventions(conventions.clone());
+        let retrieved = ctx.get_conventions();
+
+        assert_eq!(retrieved, conventions);
+    }
+
+    #[test]
+    fn test_interface_registry() {
+        let ctx = SharedBuildContext::new();
+
+        let interface = BuilderInterface {
+            builder_id: "builder-1".to_string(),
+            file_path: PathBuf::from("/test/interface.rs"),
+            exports: vec!["MyInterface".to_string(), "helper".to_string()],
+            description: "Test interface".to_string(),
+        };
+
+        ctx.register_interface(interface.clone());
+
+        // Get all interfaces
+        let all = ctx.get_interfaces();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].builder_id, "builder-1");
+
+        // Get by builder ID
+        let retrieved = ctx.get_interface("builder-1");
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().exports.len(), 2);
+    }
+
+    #[test]
+    fn test_lock_contention_tracking() {
+        let ctx = SharedBuildContext::new();
+        let path = PathBuf::from("/test/file.rs");
+
+        // Record some wait times
+        ctx.record_lock_wait(path.clone(), Duration::from_millis(100));
+        ctx.record_lock_wait(path.clone(), Duration::from_millis(200));
+        ctx.record_lock_wait(path.clone(), Duration::from_millis(300));
+
+        // Total wait time
+        let total = ctx.total_lock_wait();
+        assert_eq!(total, Duration::from_millis(600));
+
+        // High contention files (total > 1s)
+        let high = ctx.high_contention_files();
+        assert_eq!(
+            high.len(),
+            0,
+            "Total wait 600ms should not be high contention"
+        );
+
+        // Add more waits to exceed threshold
+        ctx.record_lock_wait(path.clone(), Duration::from_millis(500));
+        let high = ctx.high_contention_files();
+        assert_eq!(high.len(), 1, "Total wait 1100ms should be high contention");
+        assert_eq!(high[0].1, Duration::from_millis(1100));
+    }
+
+    #[test]
+    fn test_context_injection_generation() {
+        let ctx = SharedBuildContext::new();
+
+        // Set conventions
+        ctx.set_conventions(vec!["Use anyhow".to_string()]);
+
+        // Acquire a lock
+        let path = PathBuf::from("/test/file.rs");
+        ctx.acquire_lock(path.clone(), "agent-1".to_string(), "test".to_string())
+            .unwrap();
+
+        // Register interface
+        ctx.register_interface(BuilderInterface {
+            builder_id: "builder-1".to_string(),
+            file_path: PathBuf::from("/test/interface.rs"),
+            exports: vec!["MyInterface".to_string()],
+            description: "Test interface".to_string(),
+        });
+
+        let injection = ctx.generate_context_injection();
+
+        assert!(injection.contains("[CONVENTIONS]"));
+        assert!(injection.contains("Use anyhow"));
+        assert!(injection.contains("[FILES IN PROGRESS]"));
+        assert!(injection.contains("/test/file.rs"));
+        assert!(injection.contains("[AVAILABLE INTERFACES]"));
+    }
+
+    #[test]
+    fn test_concurrent_lock_access() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let ctx = Arc::new(SharedBuildContext::new());
+        let path = Arc::new(PathBuf::from("/test/file.rs"));
+        let mut handles = vec![];
+
+        // Spawn multiple threads trying to acquire the same lock
+        for i in 0..10 {
+            let ctx_clone = Arc::clone(&ctx);
+            let path_clone = Arc::clone(&path);
+            let agent_id = format!("agent-{}", i);
+
+            handles.push(thread::spawn(move || {
+                let _ = ctx_clone.acquire_lock(
+                    path_clone.as_path().to_path_buf(),
+                    agent_id,
+                    "test".to_string(),
+                );
+            }));
+        }
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Only one lock should exist
+        assert_eq!(ctx.file_locks.len(), 1);
+    }
+
+    #[test]
+    fn test_stats_display() {
+        let ctx = SharedBuildContext::new();
+        let file = PathBuf::from("/test/file.rs");
+
+        ctx.record_line_changes(100, 50);
+        ctx.record_modification(file, "agent-1".to_string());
+
+        let stats = ctx.stats();
+        assert_eq!(stats.files_modified, 1);
+        assert_eq!(stats.lines_added, 100);
+        assert_eq!(stats.lines_removed, 50);
+
+        let display = format!("{}", stats);
+        assert!(display.contains("+100"));
+        assert!(display.contains("-50"));
+        assert!(display.contains("1 files"));
     }
 }

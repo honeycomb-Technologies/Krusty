@@ -119,7 +119,9 @@ impl App {
             return;
         };
 
-        sm.update_token_count(session_id, self.context_tokens_used);
+        if let Err(e) = sm.update_token_count(session_id, self.context_tokens_used) {
+            tracing::warn!("Failed to update token count: {}", e);
+        }
     }
 
     /// Save a message to the current session
@@ -349,7 +351,10 @@ impl App {
 
         let states = self.block_ui.export();
         for (block_id, collapsed, scroll_offset) in states {
-            sm.save_block_ui_state(session_id, &block_id, collapsed, scroll_offset);
+            if let Err(e) = sm.save_block_ui_state(session_id, &block_id, collapsed, scroll_offset)
+            {
+                tracing::warn!("Failed to save block UI state for {}: {}", block_id, e);
+            }
         }
         tracing::debug!("Saved block UI states for session {}", session_id);
     }
@@ -673,6 +678,12 @@ impl App {
                                 block.set_collapsed(true);
                                 self.block_ui.set_collapsed(id, true);
                                 self.blocks.tool_result.push(block);
+                            }
+
+                            // Silent tools - don't create any visual element
+                            "task_complete" | "enter_plan_mode" | "todowrite" => {
+                                // These tools are intentionally silent and should not
+                                // create any UI blocks when rebuilding from conversation
                             }
 
                             _ => {

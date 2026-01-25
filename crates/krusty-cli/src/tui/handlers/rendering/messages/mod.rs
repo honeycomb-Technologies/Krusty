@@ -26,12 +26,12 @@ use selection::{
     apply_selection_to_line, apply_selection_to_rendered_line, style_user_line_with_file_refs,
 };
 
-/// Left margin padding for chat content
-const LEFT_PADDING: u16 = 2;
-
 /// Symbol prefixes for message types (with trailing space)
 const USER_SYMBOL: &str = "⤷ "; // Curved down-right arrow
 const ASSISTANT_SYMBOL: &str = "⬡ "; // Hollow hexagon
+/// Display width of message symbols (symbol char + space)
+/// Used to reduce wrap width so prepending symbol doesn't cause overflow
+pub const SYMBOL_WIDTH: usize = 2;
 
 /// Simple content hash for cache keying
 fn hash_content(s: &str) -> u64 {
@@ -65,11 +65,22 @@ impl App {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
-        // Padding: LEFT_PADDING on left for margin, 4 chars on right for scrollbar
+        // Leave 4 chars padding for scrollbar on right side
         // IMPORTANT: Both wrap_width and content_width must use same padding to prevent overflow
-        let total_padding = LEFT_PADDING + 4;
-        let wrap_width = inner.width.saturating_sub(total_padding) as usize;
-        let content_width = inner.width.saturating_sub(total_padding); // Must match wrap_width to prevent block overflow
+        let scrollbar_gap: u16 = 4;
+        let content_width = inner.width.saturating_sub(scrollbar_gap);
+        // wrap_width accounts for the symbol prefix that gets prepended to first lines
+        // This prevents text from overflowing when symbol is added
+        let wrap_width = (content_width as usize).saturating_sub(SYMBOL_WIDTH);
+
+        // Create a content rect that excludes the scrollbar gap
+        // This prevents text from rendering into the scrollbar area
+        let content_rect = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: content_width,
+            height: inner.height,
+        };
 
         // Get selection range if selecting in messages area
         let selection = if self.scroll_system.selection.area == SelectionArea::Messages {
@@ -553,30 +564,41 @@ impl App {
             line_idx += 1;
         }
 
-        // Render text content with left padding offset
-        // Clamp scroll offset to u16::MAX to prevent overflow (supports ~65k lines of paragraph text)
-        let clamped_scroll = self.scroll_system.scroll.offset.min(u16::MAX as usize) as u16;
-        let content_area = Rect {
-            x: inner.x + LEFT_PADDING,
+        // Clear the entire messages viewport (including scrollbar gap) before rendering
+        // This is critical: ratatui widgets don't clear cells they don't touch
+        clear_area(f.buffer_mut(), inner, self.ui.theme.bg_color);
+
+        // Render text content into content_rect (NOT inner) to prevent overflow into scrollbar gap
+        // Use a unified effective_scroll for ALL rendering operations to prevent drift
+        // Clamp to u16::MAX since Paragraph::scroll uses u16 (supports ~65k lines)
+        let effective_scroll = self.scroll_system.scroll.offset.min(u16::MAX as usize);
+        let effective_scroll_u16 = effective_scroll as u16;
+        f.render_widget(
+            Paragraph::new(lines).scroll((effective_scroll_u16, 0)),
+            content_rect, // Render only into content area, not scrollbar gap
+        );
+
+        // Clear the scrollbar gap after Paragraph to catch any overflow/bleed
+        // This is a safety net against any content that might escape content_rect bounds
+        let scrollbar_clear_rect = Rect {
+            x: inner.x + content_width,
             y: inner.y,
-            width: inner.width.saturating_sub(LEFT_PADDING),
+            width: scrollbar_gap,
             height: inner.height,
         };
-        f.render_widget(
-            Paragraph::new(lines).scroll((clamped_scroll, 0)),
-            content_area,
-        );
+        clear_area(f.buffer_mut(), scrollbar_clear_rect, self.ui.theme.bg_color);
 
         // Apply OSC 8 hyperlinks to the buffer after Paragraph rendering
         // This wraps each link cell's symbol with escape sequences
+        // Use content_rect (not inner) to match the Paragraph render area
         for (msg_idx, base_line) in &message_line_offsets {
             if let Some(Some(rendered)) = rendered_markdown.get(*msg_idx) {
                 if !rendered.links.is_empty() {
                     apply_hyperlinks(
                         f.buffer_mut(),
-                        content_area,
+                        content_rect, // Match Paragraph render area
                         &rendered.links,
-                        self.scroll_system.scroll.offset,
+                        effective_scroll,
                         *base_line,
                     );
 
@@ -585,10 +607,10 @@ impl App {
                         if hovered.msg_idx == *msg_idx {
                             apply_link_hover_style(
                                 f.buffer_mut(),
-                                content_area,
+                                content_rect, // Match Paragraph render area
                                 &rendered.links,
                                 Some(hovered),
-                                self.scroll_system.scroll.offset,
+                                effective_scroll,
                                 *base_line,
                                 self.ui.theme.link_color,
                             );
@@ -599,8 +621,8 @@ impl App {
         }
 
         // Overlay each block at its position
-        // Use usize for all position math to avoid overflow, convert to u16 only for screen coords
-        let scroll = self.scroll_system.scroll.offset;
+        // Use effective_scroll for consistent coordinate math with Paragraph rendering
+        let scroll = effective_scroll;
         let inner_height = inner.height as usize;
 
         self.render_block_overlays(
@@ -620,6 +642,16 @@ impl App {
             &explore_positions,
             &build_positions,
         );
+
+        // Final scrollbar gap clear after all block overlays
+        // This catches any content that might have bled into the scrollbar area from blocks
+        let scrollbar_clear_rect = Rect {
+            x: inner.x + content_width,
+            y: inner.y,
+            width: scrollbar_gap,
+            height: inner.height,
+        };
+        clear_area(f.buffer_mut(), scrollbar_clear_rect, self.ui.theme.bg_color);
 
         // Resize terminal PTYs to match render width (debounced)
         // Note: tick() is called in the event loop before render, not here
@@ -665,14 +697,17 @@ impl App {
                     inner.y
                 };
 
-                let clip_top = scroll.saturating_sub(block_y) as u16;
+                // Compute clip values in usize first, then clamp to height before converting to u16
+                // This prevents truncation bugs when scroll offsets are large
+                let clip_top_usize = scroll.saturating_sub(block_y);
+                let clip_top = (clip_top_usize.min(height as usize)) as u16;
                 let available_height = inner.height.saturating_sub(screen_y - inner.y);
                 let visible_height = height.saturating_sub(clip_top).min(available_height);
                 let clip_bottom = height.saturating_sub(clip_top + visible_height);
 
                 if visible_height > 0 {
                     let block_area = Rect {
-                        x: inner.x + LEFT_PADDING,
+                        x: inner.x,
                         y: screen_y,
                         width: content_width,
                         height: visible_height,
@@ -689,7 +724,7 @@ impl App {
 
                     // Clear full inner.width to remove Paragraph bleed in scrollbar gap
                     let clear_rect = Rect {
-                        x: inner.x + LEFT_PADDING,
+                        x: inner.x,
                         y: screen_y,
                         width: inner.width,
                         height: visible_height,

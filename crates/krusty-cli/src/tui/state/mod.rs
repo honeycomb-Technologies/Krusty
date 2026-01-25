@@ -21,7 +21,7 @@ pub use hover::{HoverState, HoveredLink};
 pub use indices::BlockIndices;
 pub use layout::LayoutState;
 pub use popups::PopupState;
-pub use scroll::ScrollState;
+pub use scroll::{LayoutCache, ScrollState};
 pub use scroll_system::ScrollSystem;
 pub use selection::{
     BlockScrollbarDrag, DragTarget, EdgeScrollDirection, EdgeScrollState, ScrollbarDrag,

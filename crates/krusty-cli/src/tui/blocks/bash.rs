@@ -12,6 +12,7 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 use std::time::{Duration, Instant};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{BlockEvent, ClipContext, EventResult, StreamBlock};
 use crate::tui::components::scrollbars::render_scrollbar;
@@ -171,6 +172,8 @@ impl BashBlock {
 
     /// Mark command as complete
     pub fn complete(&mut self, exit_code: i32) {
+        // Flush any pending output before marking complete
+        self.flush_pending();
         self.streaming = false;
         self.exit_code = Some(exit_code);
         self.duration = Some(self.start_time.elapsed());
@@ -356,13 +359,24 @@ impl BashBlock {
         for line in self.output.lines() {
             if line.is_empty() {
                 result.push(String::new());
-            } else if line.len() <= max_width {
+            } else if UnicodeWidthStr::width(line) <= max_width {
                 result.push(line.to_string());
             } else {
-                // Hard wrap long lines
-                let chars: Vec<char> = line.chars().collect();
-                for chunk in chars.chunks(max_width) {
-                    result.push(chunk.iter().collect());
+                // Hard wrap long lines using unicode width
+                let mut current_line = String::new();
+                let mut current_width = 0usize;
+                for ch in line.chars() {
+                    let char_width = UnicodeWidthChar::width(ch).unwrap_or(1);
+                    if current_width + char_width > max_width {
+                        result.push(current_line);
+                        current_line = String::new();
+                        current_width = 0;
+                    }
+                    current_line.push(ch);
+                    current_width += char_width;
+                }
+                if !current_line.is_empty() {
+                    result.push(current_line);
                 }
             }
         }
@@ -379,38 +393,52 @@ impl BashBlock {
         let border_color = theme.accent_color;
         let text_color = theme.text_color;
 
-        // Truncate command if needed
+        // Truncate command if needed - use only first line for multi-line commands
+        let first_line = self.command.lines().next().unwrap_or(&self.command);
         let max_cmd_len = area.width.saturating_sub(20) as usize;
-        let cmd_display = if self.command.len() > max_cmd_len {
-            format!("{}...", &self.command[..max_cmd_len.saturating_sub(3)])
+        let cmd_display = if first_line.len() > max_cmd_len {
+            format!("{}...", &first_line[..max_cmd_len.saturating_sub(3)])
+        } else if self.command.contains('\n') {
+            format!("{}...", first_line)
         } else {
             self.command.clone()
         };
 
         let prefix = format!("▶ $ {}", cmd_display);
+        let prefix_width = UnicodeWidthStr::width(prefix.as_str()) as u16;
 
         // Draw prefix
-        for (i, ch) in prefix.chars().enumerate() {
-            let x = area.x + i as u16;
-            if x < area.x + area.width {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_char(ch);
-                    if i == 0 || ch == '$' {
-                        cell.set_fg(theme.accent_color);
-                    } else {
-                        cell.set_fg(text_color);
-                    }
+        let mut x = area.x;
+        for ch in prefix.chars() {
+            let char_width = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+            if x + char_width > area.x + area.width {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_char(ch);
+                if ch == '▶' || ch == '$' {
+                    cell.set_fg(theme.accent_color);
+                } else {
+                    cell.set_fg(text_color);
                 }
             }
+            if char_width == 2 {
+                if let Some(cell) = buf.cell_mut((x + 1, y)) {
+                    cell.set_char(' ');
+                }
+            }
+            x += char_width;
         }
 
         // Draw status and duration on right
         let suffix = format!(" {} {}", status, duration);
-        let suffix_start = area.x + area.width - suffix.len() as u16;
-        for (i, ch) in suffix.chars().enumerate() {
-            let x = suffix_start + i as u16;
-            if x >= area.x && x < area.x + area.width {
-                if let Some(cell) = buf.cell_mut((x, y)) {
+        let suffix_width = UnicodeWidthStr::width(suffix.as_str()) as u16;
+        let suffix_start = area.x + area.width - suffix_width;
+        let mut sx = suffix_start;
+        for ch in suffix.chars() {
+            let char_width = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+            if sx >= area.x && sx + char_width <= area.x + area.width {
+                if let Some(cell) = buf.cell_mut((sx, y)) {
                     cell.set_char(ch);
                     if ch == '✓' || ch == '✗' || ch == '●' {
                         cell.set_fg(status_color);
@@ -418,11 +446,17 @@ impl BashBlock {
                         cell.set_fg(text_color);
                     }
                 }
+                if char_width == 2 {
+                    if let Some(cell) = buf.cell_mut((sx + 1, y)) {
+                        cell.set_char(' ');
+                    }
+                }
             }
+            sx += char_width;
         }
 
         // Fill middle with dots
-        let dots_start = area.x + prefix.len() as u16 + 1;
+        let dots_start = area.x + prefix_width + 1;
         let dots_end = suffix_start.saturating_sub(1);
         for x in dots_start..dots_end {
             if let Some(cell) = buf.cell_mut((x, y)) {
@@ -526,14 +560,22 @@ impl BashBlock {
 
             // Content
             if let Some(line) = lines.get(line_idx) {
-                for (i, ch) in line.chars().enumerate() {
-                    let x = area.x + 2 + i as u16;
-                    if x < content_end_x {
-                        if let Some(cell) = buf.cell_mut((x, y)) {
-                            cell.set_char(ch);
-                            cell.set_fg(content_color);
+                let mut x = area.x + 2;
+                for ch in line.chars() {
+                    let char_width = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+                    if x + char_width > content_end_x {
+                        break;
+                    }
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        cell.set_char(ch);
+                        cell.set_fg(content_color);
+                    }
+                    if char_width == 2 {
+                        if let Some(cell) = buf.cell_mut((x + 1, y)) {
+                            cell.set_char(' ');
                         }
                     }
+                    x += char_width;
                 }
 
                 // Cursor at end of last visible line while streaming
@@ -541,7 +583,7 @@ impl BashBlock {
                     && line_idx == lines.len().saturating_sub(1)
                     && self.cursor_visible
                 {
-                    let cursor_x = area.x + 2 + line.len() as u16;
+                    let cursor_x = area.x + 2 + UnicodeWidthStr::width(line.as_str()) as u16;
                     if cursor_x < content_end_x {
                         if let Some(cell) = buf.cell_mut((cursor_x, y)) {
                             cell.set_char('█');
@@ -630,12 +672,28 @@ impl BashBlock {
         let (status, status_color) = self.status_indicator(theme);
         let duration = self.duration_string();
         let status_suffix = format!(" {} {} ", status, duration);
-        let status_len = status_suffix.chars().count() as u16;
+        let status_width = UnicodeWidthStr::width(status_suffix.as_str()) as u16;
 
         // " ▼ $ command " - reserve space for status
-        let max_cmd_len = (width as usize).saturating_sub(12 + status_len as usize);
-        let cmd_display = if self.command.len() > max_cmd_len {
-            format!("{}...", &self.command[..max_cmd_len.saturating_sub(3)])
+        // Use only the first line of the command to prevent multi-line heredocs from bleeding
+        let first_line = self.command.lines().next().unwrap_or(&self.command);
+        let max_cmd_width = (width as usize).saturating_sub(12 + status_width as usize);
+        let cmd_display = if UnicodeWidthStr::width(first_line) > max_cmd_width {
+            // Truncate by unicode width
+            let mut truncated = String::new();
+            let mut w = 0usize;
+            for ch in first_line.chars() {
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(1);
+                if w + cw + 3 > max_cmd_width {
+                    break;
+                }
+                truncated.push(ch);
+                w += cw;
+            }
+            format!("{}...", truncated)
+        } else if self.command.contains('\n') {
+            // Multi-line command - show first line with indicator
+            format!("{}...", first_line)
         } else {
             self.command.clone()
         };
@@ -644,21 +702,28 @@ impl BashBlock {
 
         let mut cx = x + 1;
         for ch in header.chars() {
-            if cx < content_end_x.saturating_sub(status_len) {
-                if let Some(cell) = buf.cell_mut((cx, y)) {
-                    cell.set_char(ch);
-                    if ch == '▼' || ch == '$' {
-                        cell.set_fg(theme.accent_color);
-                    } else {
-                        cell.set_fg(text_color);
-                    }
-                }
-                cx += 1;
+            let char_width = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+            if cx + char_width > content_end_x.saturating_sub(status_width) {
+                break;
             }
+            if let Some(cell) = buf.cell_mut((cx, y)) {
+                cell.set_char(ch);
+                if ch == '▼' || ch == '$' {
+                    cell.set_fg(theme.accent_color);
+                } else {
+                    cell.set_fg(text_color);
+                }
+            }
+            if char_width == 2 {
+                if let Some(cell) = buf.cell_mut((cx + 1, y)) {
+                    cell.set_char(' ');
+                }
+            }
+            cx += char_width;
         }
 
         // Fill with ━ (heavy horizontal) up to status
-        let status_start = content_end_x.saturating_sub(status_len);
+        let status_start = content_end_x.saturating_sub(status_width);
         while cx < status_start {
             if let Some(cell) = buf.cell_mut((cx, y)) {
                 cell.set_char('━');
@@ -669,17 +734,24 @@ impl BashBlock {
 
         // Draw status indicator (● running, ✓ success, ✗ error) and duration
         for ch in status_suffix.chars() {
-            if cx < content_end_x {
-                if let Some(cell) = buf.cell_mut((cx, y)) {
-                    cell.set_char(ch);
-                    if ch == '●' || ch == '✓' || ch == '✗' {
-                        cell.set_fg(status_color);
-                    } else {
-                        cell.set_fg(theme.dim_color);
-                    }
-                }
-                cx += 1;
+            let char_width = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+            if cx + char_width > content_end_x {
+                break;
             }
+            if let Some(cell) = buf.cell_mut((cx, y)) {
+                cell.set_char(ch);
+                if ch == '●' || ch == '✓' || ch == '✗' {
+                    cell.set_fg(status_color);
+                } else {
+                    cell.set_fg(theme.dim_color);
+                }
+            }
+            if char_width == 2 {
+                if let Some(cell) = buf.cell_mut((cx + 1, y)) {
+                    cell.set_char(' ');
+                }
+            }
+            cx += char_width;
         }
 
         // Fill gap at scrollbar column
@@ -770,13 +842,20 @@ impl BashBlock {
         };
 
         for ch in pct_text.chars() {
-            if px < right_x {
-                if let Some(cell) = buf.cell_mut((px, bar_y)) {
-                    cell.set_char(ch);
-                    cell.set_fg(theme.dim_color);
-                }
-                px += 1;
+            let char_width = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+            if px + char_width > right_x {
+                break;
             }
+            if let Some(cell) = buf.cell_mut((px, bar_y)) {
+                cell.set_char(ch);
+                cell.set_fg(theme.dim_color);
+            }
+            if char_width == 2 {
+                if let Some(cell) = buf.cell_mut((px + 1, bar_y)) {
+                    cell.set_char(' ');
+                }
+            }
+            px += char_width;
         }
 
         // Right border (heavy vertical)

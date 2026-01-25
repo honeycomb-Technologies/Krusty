@@ -137,6 +137,11 @@ impl PlanSidebarState {
         self.current_width
     }
 
+    /// Check if animation is currently in progress
+    pub fn is_animating(&self) -> bool {
+        self.current_width != self.target_width
+    }
+
     /// Scroll up by one line
     pub fn scroll_up(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
@@ -337,10 +342,12 @@ pub fn render_plan_sidebar(
     let end = (start + visible_height).min(state.cached_lines.len());
     let mut y = inner.y;
     let content_x = inner.x + PAD_X;
-    let content_width = wrap_width as u16;
+    // Use explicit area boundary to prevent any possibility of overflow
+    // The right boundary is inner.x + content_area_width (excludes scrollbar column)
+    let area_max_x = inner.x + content_area_width;
 
     for line in &state.cached_lines[start..end] {
-        render_line(buf, content_x, y, content_width, line);
+        render_line(buf, content_x, y, area_max_x, line);
         y += 1;
     }
 
@@ -365,9 +372,9 @@ pub fn render_plan_sidebar(
 }
 
 /// Render a line directly to the buffer without cloning
-fn render_line(buf: &mut Buffer, x: u16, y: u16, width: u16, line: &Line) {
+/// Uses explicit max_x boundary to prevent any overflow outside the intended area
+fn render_line(buf: &mut Buffer, x: u16, y: u16, max_x: u16, line: &Line) {
     let mut cx = x;
-    let max_x = x + width;
 
     for span in &line.spans {
         for ch in span.content.chars() {

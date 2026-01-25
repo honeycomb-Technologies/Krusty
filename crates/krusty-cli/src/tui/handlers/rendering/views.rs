@@ -414,11 +414,13 @@ impl App {
         let prompt_height = self.decision_prompt.calculate_height();
 
         // Check if we have a pinned terminal (height() is O(1) - just returns constant)
+        // Use the same width for height calculation as we use for rendering to prevent mismatch
+        let pinned_render_width = area.width.saturating_sub(2); // Must match pinned_area.width below
         let pinned_height = self
             .blocks
             .pinned_terminal
             .and_then(|idx| self.blocks.terminal.get(idx))
-            .map(|tp| tp.height(area.width.saturating_sub(4), &self.ui.theme))
+            .map(|tp| tp.height(pinned_render_width, &self.ui.theme))
             .unwrap_or(0);
 
         // Layout: toolbar, pinned (0 if none), messages, prompt (0 if none), input, status
@@ -475,7 +477,21 @@ impl App {
 
         // Calculate scroll position BEFORE rendering (fixes 1-frame lag on streaming)
         self.scroll_system.layout.messages_area = Some(messages_chunk);
-        let msg_total_lines = self.calculate_message_lines(messages_chunk.width);
+
+        // Debounce expensive line calculation during sidebar animation
+        // Only recalculate when NOT animating or when width changed significantly
+        let msg_total_lines = if self.plan_sidebar.is_animating()
+            && self.scroll_system.layout_cache.message_lines > 0
+        {
+            // During animation: use cached value
+            self.scroll_system.layout_cache.message_lines
+        } else {
+            // Animation complete or no animation: recalculate and cache
+            let lines = self.calculate_message_lines(messages_chunk.width);
+            self.scroll_system.layout_cache.message_lines = lines;
+            self.scroll_system.layout_cache.cached_width = messages_chunk.width;
+            lines
+        };
         let msg_visible_height = messages_chunk.height.saturating_sub(2);
 
         // Update max scroll, clamp offset, and handle auto-scroll

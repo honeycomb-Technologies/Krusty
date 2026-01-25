@@ -133,7 +133,9 @@ impl App {
 
         // Ctrl+B to toggle work mode (BUILD/PLAN)
         if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('b') {
+            let old_mode = self.ui.work_mode;
             self.ui.work_mode = self.ui.work_mode.toggle();
+            tracing::info!(from = ?old_mode, to = ?self.ui.work_mode, "Work mode toggled via Ctrl+B");
             return;
         }
 

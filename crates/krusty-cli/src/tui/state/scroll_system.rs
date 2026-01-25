@@ -2,7 +2,7 @@
 //!
 //! Groups all scroll, layout, selection, and hover state into one struct.
 
-use super::{EdgeScrollState, HoverState, LayoutState, ScrollState, SelectionState};
+use super::{EdgeScrollState, HoverState, LayoutCache, LayoutState, ScrollState, SelectionState};
 
 /// Scroll and layout system state
 ///
@@ -19,6 +19,8 @@ pub struct ScrollSystem {
     pub hover: HoverState,
     /// Edge scrolling during selection
     pub edge_scroll: EdgeScrollState,
+    /// Layout calculation cache (avoids recalc during animation)
+    pub layout_cache: LayoutCache,
 }
 
 impl ScrollSystem {
@@ -29,6 +31,7 @@ impl ScrollSystem {
             selection: SelectionState::default(),
             hover: HoverState::default(),
             edge_scroll: EdgeScrollState::default(),
+            layout_cache: LayoutCache::default(),
         }
     }
 }

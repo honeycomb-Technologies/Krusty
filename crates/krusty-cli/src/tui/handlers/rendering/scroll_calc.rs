@@ -11,6 +11,8 @@ use crate::tui::blocks::{BlockType, StreamBlock};
 use crate::tui::state::BlockIndices;
 use crate::tui::utils::count_wrapped_lines;
 
+use super::messages::SYMBOL_WIDTH;
+
 impl App {
     /// Calculate total lines in messages for scrollbar
     /// Uses the same wrapping logic as render_messages for accurate counting
@@ -23,9 +25,11 @@ impl App {
         // where inner.width = area.width - 2 (from block.inner), so total = width - 6
         let inner_width = width.saturating_sub(6) as usize;
         let content_width = width.saturating_sub(6); // Must match inner_width for blocks
+                                                     // wrap_width accounts for symbol prefix (same as render_messages)
+        let wrap_width = inner_width.saturating_sub(SYMBOL_WIDTH);
 
         // Pre-render markdown to cache (same as render_messages) to ensure consistent line counts
-        self.markdown_cache.check_width(inner_width);
+        self.markdown_cache.check_width(wrap_width);
 
         for (role, content) in &self.chat.messages {
             if let Some((block_type, idx)) = indices.get_and_increment(role) {
@@ -99,7 +103,7 @@ impl App {
                 let rendered = self.markdown_cache.get_or_render_with_links(
                     content,
                     content_hash,
-                    inner_width,
+                    wrap_width,
                     &self.ui.theme,
                 );
                 total += rendered.lines.len() + 1; // +1 for blank after
@@ -110,7 +114,7 @@ impl App {
                     if line.is_empty() {
                         total += 1;
                     } else {
-                        total += count_wrapped_lines(line, inner_width);
+                        total += count_wrapped_lines(line, wrap_width);
                     }
                 }
                 total += 1; // Blank line after

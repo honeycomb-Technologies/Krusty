@@ -449,7 +449,7 @@ impl App {
     }
 
     /// Get top N files by activity for preview
-    fn get_top_files_preview(&self, n: usize) -> Vec<(String, f64)> {
+    pub(crate) fn get_top_files_preview(&self, n: usize) -> Vec<(String, f64)> {
         // Get file activity from database if we have a session
         if let (Some(sm), Some(session_id)) =
             (&self.services.session_manager, &self.current_session_id)

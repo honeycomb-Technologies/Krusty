@@ -11,6 +11,7 @@ use ratatui::{
 };
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{ClipContext, EventResult, StreamBlock};
 use crate::agent::subagent::{AgentProgress, AgentProgressStatus};
@@ -468,7 +469,7 @@ impl ExploreBlock {
 
             // Spinner
             buf.set_string(x, y, icon.to_string(), icon_style);
-            x += 2;
+            x += icon.width().unwrap_or(1) as u16 + 1;
 
             // Name
             buf.set_string(x, y, &name_padded, line_style);
@@ -552,7 +553,7 @@ impl ExploreBlock {
         // Completion count
         let completion = format!(" {}/{} ✓ ", self.cached_completed, self.agents.len());
         buf.set_string(x, area.y, &completion, dim_style);
-        x += completion.chars().count() as u16;
+        x += completion.width() as u16;
 
         // Divider
         buf.set_string(x, area.y, "│", border_style);
@@ -561,7 +562,7 @@ impl ExploreBlock {
         // Tools count
         let tools_str = format!(" {} tools ", self.cached_total_tools);
         buf.set_string(x, area.y, &tools_str, dim_style);
-        x += tools_str.len() as u16;
+        x += tools_str.width() as u16;
 
         // Divider
         buf.set_string(x, area.y, "│", border_style);
@@ -570,7 +571,7 @@ impl ExploreBlock {
         // Time (cached formatted string)
         let time_str = format!(" {} ", self.cached_total_time_str);
         buf.set_string(x, area.y, &time_str, dim_style);
-        x += time_str.len() as u16;
+        x += time_str.width() as u16;
 
         // Divider
         buf.set_string(x, area.y, "│", border_style);

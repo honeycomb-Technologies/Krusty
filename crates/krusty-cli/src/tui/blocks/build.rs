@@ -14,6 +14,7 @@ use ratatui::{
 };
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthStr;
 
 use super::{ClipContext, EventResult, StreamBlock};
 use crate::agent::subagent::{AgentProgress, AgentProgressStatus};
@@ -506,28 +507,28 @@ impl BuildBlock {
 
         let completion = format!(" {}/{} ✓ ", self.cached_completed, self.builders.len());
         buf.set_string(x, area.y, &completion, dim_style);
-        x += completion.chars().count() as u16;
+        x += completion.width() as u16;
 
         buf.set_string(x, area.y, "│", border_style);
         x += 1;
 
         let tools_str = format!(" {} tools ", self.cached_total_tools);
         buf.set_string(x, area.y, &tools_str, dim_style);
-        x += tools_str.len() as u16;
+        x += tools_str.width() as u16;
 
         buf.set_string(x, area.y, "│", border_style);
         x += 1;
 
         let time_str = format!(" {} ", self.cached_total_time_str);
         buf.set_string(x, area.y, &time_str, dim_style);
-        x += time_str.len() as u16;
+        x += time_str.width() as u16;
 
         buf.set_string(x, area.y, "│", border_style);
         x += 1;
 
         let tokens_str = format!(" {} ", self.cached_total_tokens_str);
         buf.set_string(x, area.y, &tokens_str, dim_style);
-        x += tokens_str.len() as u16;
+        x += tokens_str.width() as u16;
 
         // Show line diff stats
         if self.lines_added > 0 || self.lines_removed > 0 {
@@ -541,7 +542,7 @@ impl BuildBlock {
             x += 2;
             let add_str = format!("{} ", self.lines_added);
             buf.set_string(x, area.y, &add_str, add_style);
-            x += add_str.len() as u16;
+            x += add_str.width() as u16;
 
             buf.set_string(x, area.y, "-", del_style);
             x += 1;

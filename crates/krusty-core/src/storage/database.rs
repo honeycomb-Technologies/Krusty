@@ -41,15 +41,19 @@ impl Database {
     }
 
     /// Get the current schema version from database
-    fn get_schema_version(&self) -> i32 {
+    pub(crate) fn get_schema_version(&self) -> i32 {
         // Create version table if it doesn't exist
-        let _ = self.conn.execute(
+        if let Err(e) = self.conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY,
                 applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )",
             [],
-        );
+        ) {
+            tracing::warn!("Failed to create schema_version table: {}", e);
+            // Table creation failed, assume version 0
+            return 0;
+        }
 
         self.conn
             .query_row(
@@ -70,7 +74,7 @@ impl Database {
     }
 
     /// Run database migrations incrementally
-    fn run_migrations(&self) -> Result<()> {
+    pub(crate) fn run_migrations(&self) -> Result<()> {
         let current_version = self.get_schema_version();
         info!(
             "Database schema version: {} (target: {})",

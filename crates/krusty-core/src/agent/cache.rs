@@ -53,8 +53,10 @@ impl SharedExploreCache {
     pub fn get_file(&self, path: &PathBuf) -> Option<CachedFile> {
         if let Some(cached) = self.files.get(path) {
             self.file_hits.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(path = %path.display(), "Cache HIT");
             Some(cached.clone())
         } else {
+            tracing::debug!(path = %path.display(), "Cache MISS");
             None
         }
     }
@@ -62,6 +64,7 @@ impl SharedExploreCache {
     /// Store file content in cache
     pub fn put_file(&self, path: PathBuf, content: String) {
         self.file_misses.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(path = %path.display(), size = content.len(), "Cache PUT");
         self.files.insert(path, CachedFile { content });
     }
 
@@ -74,8 +77,10 @@ impl SharedExploreCache {
         let key = (pattern.to_string(), base_dir.to_path_buf());
         if let Some(cached) = self.globs.get(&key) {
             self.glob_hits.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(pattern, base_dir = %base_dir.display(), count = cached.len(), "Glob cache HIT");
             Some(cached.clone())
         } else {
+            tracing::debug!(pattern, base_dir = %base_dir.display(), "Glob cache MISS");
             None
         }
     }
@@ -83,6 +88,7 @@ impl SharedExploreCache {
     /// Store glob results in cache
     pub fn put_glob(&self, pattern: String, base_dir: PathBuf, results: Vec<PathBuf>) {
         self.glob_misses.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(pattern, base_dir = %base_dir.display(), count = results.len(), "Glob cache PUT");
         self.globs.insert((pattern, base_dir), results);
     }
 
