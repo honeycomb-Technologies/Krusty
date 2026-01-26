@@ -4,11 +4,13 @@
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::agent::dual_mind::{DialogueResult, Observation};
 use crate::agent::subagent::AgentProgress;
 use crate::ai::types::{AiToolCall, Content};
 use crate::tools::{ToolContext, ToolOutputChunk};
 use crate::tui::app::App;
 use crate::tui::components::{PromptOption, PromptQuestion};
+use crate::tui::utils::{DualMindPhase, DualMindUpdate};
 
 impl App {
     /// Handle enter_plan_mode tool calls to switch modes
@@ -57,46 +59,64 @@ impl App {
     }
 
     /// Handle task_complete tool calls to update plan immediately
-    /// Supports both single task_id and batch task_ids array
+    /// ENFORCES: Task must be InProgress (started) before it can be completed
+    /// ENFORCES: Only ONE task per call (no batch completion)
+    /// ENFORCES: Result parameter required
     pub(super) fn handle_task_complete_tools(&mut self, tool_calls: Vec<AiToolCall>) {
+        use crate::plan::TaskStatus;
         let mut results = Vec::new();
 
         for tool_call in tool_calls {
             tracing::info!("Handling task_complete tool call: {}", tool_call.id);
 
-            // Collect task IDs - support both single task_id and batch task_ids
-            let mut task_ids: Vec<String> = Vec::new();
-
-            if let Some(id) = tool_call.arguments.get("task_id").and_then(|v| v.as_str()) {
-                if !id.is_empty() {
-                    task_ids.push(id.to_string());
-                }
-            }
-
-            if let Some(ids) = tool_call
+            // Extract required result parameter
+            let result_text = tool_call
                 .arguments
-                .get("task_ids")
-                .and_then(|v| v.as_array())
-            {
-                for id in ids {
-                    if let Some(s) = id.as_str() {
-                        if !s.is_empty() {
-                            task_ids.push(s.to_string());
-                        }
-                    }
-                }
-            }
+                .get("result")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
 
-            if task_ids.is_empty() {
+            if result_text.is_empty() {
                 results.push(Content::ToolResult {
                     tool_use_id: tool_call.id.clone(),
                     output: serde_json::Value::String(
-                        "Error: task_id or task_ids required".to_string(),
+                        "Error: 'result' parameter is required. Describe what you accomplished for this specific task.".to_string(),
                     ),
                     is_error: Some(true),
                 });
                 continue;
             }
+
+            // HARD CONSTRAINT: Only single task_id allowed (no batch)
+            let task_id = tool_call.arguments.get("task_id").and_then(|v| v.as_str());
+            let task_ids = tool_call
+                .arguments
+                .get("task_ids")
+                .and_then(|v| v.as_array());
+
+            if task_ids.is_some() {
+                results.push(Content::ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    output: serde_json::Value::String(
+                        "Error: Batch completion (task_ids) is not allowed. Complete ONE task at a time with task_id. This ensures focused, quality work.".to_string(),
+                    ),
+                    is_error: Some(true),
+                });
+                continue;
+            }
+
+            let Some(task_id) = task_id.filter(|s| !s.is_empty()) else {
+                results.push(Content::ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    output: serde_json::Value::String(
+                        "Error: task_id required. Specify which task you're completing."
+                            .to_string(),
+                    ),
+                    is_error: Some(true),
+                });
+                continue;
+            };
 
             let Some(plan) = &mut self.active_plan else {
                 results.push(Content::ToolResult {
@@ -109,52 +129,272 @@ impl App {
                 continue;
             };
 
-            let mut completed_ids = Vec::new();
-            let mut not_found = Vec::new();
-
-            for task_id in &task_ids {
-                if plan.check_task(task_id) {
-                    completed_ids.push(task_id.clone());
-                } else {
-                    not_found.push(task_id.clone());
+            // HARD CONSTRAINT: Task must be InProgress to complete
+            let task_status = plan.find_task(task_id).map(|t| t.status);
+            match task_status {
+                None => {
+                    results.push(Content::ToolResult {
+                        tool_use_id: tool_call.id.clone(),
+                        output: serde_json::Value::String(format!(
+                            "Error: Task '{}' not found in plan.",
+                            task_id
+                        )),
+                        is_error: Some(true),
+                    });
+                    continue;
+                }
+                Some(TaskStatus::Completed) => {
+                    results.push(Content::ToolResult {
+                        tool_use_id: tool_call.id.clone(),
+                        output: serde_json::Value::String(format!(
+                            "Error: Task '{}' is already completed.",
+                            task_id
+                        )),
+                        is_error: Some(true),
+                    });
+                    continue;
+                }
+                Some(TaskStatus::Blocked) => {
+                    results.push(Content::ToolResult {
+                        tool_use_id: tool_call.id.clone(),
+                        output: serde_json::Value::String(format!(
+                            "Error: Task '{}' is blocked. Complete its dependencies first, then use task_start.",
+                            task_id
+                        )),
+                        is_error: Some(true),
+                    });
+                    continue;
+                }
+                Some(TaskStatus::Pending) => {
+                    results.push(Content::ToolResult {
+                        tool_use_id: tool_call.id.clone(),
+                        output: serde_json::Value::String(format!(
+                            "Error: Task '{}' was not started. Use task_start(\"{}\") first, do the work, then complete it.",
+                            task_id, task_id
+                        )),
+                        is_error: Some(true),
+                    });
+                    continue;
+                }
+                Some(TaskStatus::InProgress) => {
+                    // Good - task is in progress, can be completed
                 }
             }
 
-            if !completed_ids.is_empty() {
-                if let Err(e) = self.services.plan_manager.save_plan(plan) {
-                    tracing::error!("Failed to save plan after task completion: {}", e);
-                }
+            // Complete the task
+            if let Err(e) = plan.complete_task(task_id, &result_text) {
+                results.push(Content::ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    output: serde_json::Value::String(format!("Error: {}", e)),
+                    is_error: Some(true),
+                });
+                continue;
+            }
+
+            if let Err(e) = self.services.plan_manager.save_plan(plan) {
+                tracing::error!("Failed to save plan after task completion: {}", e);
             }
 
             let (completed, total) = plan.progress();
-
-            let msg = if not_found.is_empty() {
-                format!(
-                    "Marked {} task(s) complete. Progress: {}/{}",
-                    completed_ids.len(),
-                    completed,
-                    total
-                )
-            } else {
-                format!(
-                    "Marked {} task(s) complete, {} not found. Progress: {}/{}",
-                    completed_ids.len(),
-                    not_found.len(),
-                    completed,
-                    total
-                )
-            };
+            let msg = format!(
+                "Completed task {}. Progress: {}/{}",
+                task_id, completed, total
+            );
             tracing::info!("{}", msg);
 
             results.push(Content::ToolResult {
                 tool_use_id: tool_call.id.clone(),
                 output: serde_json::Value::String(msg),
-                is_error: if not_found.is_empty() {
-                    None
-                } else {
-                    Some(false)
-                },
+                is_error: None,
             });
+        }
+
+        if !results.is_empty() {
+            self.pending_tool_results.extend(results);
+        }
+    }
+
+    /// Handle task_start tool calls to mark tasks as in-progress
+    pub(super) fn handle_task_start_tools(&mut self, tool_calls: Vec<AiToolCall>) {
+        let mut results = Vec::new();
+
+        for tool_call in tool_calls {
+            tracing::info!("Handling task_start tool call: {}", tool_call.id);
+
+            let Some(task_id) = tool_call.arguments.get("task_id").and_then(|v| v.as_str()) else {
+                results.push(Content::ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    output: serde_json::Value::String("Error: task_id required".to_string()),
+                    is_error: Some(true),
+                });
+                continue;
+            };
+
+            let Some(plan) = &mut self.active_plan else {
+                results.push(Content::ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    output: serde_json::Value::String(
+                        "Error: No active plan. Create a plan first.".to_string(),
+                    ),
+                    is_error: Some(true),
+                });
+                continue;
+            };
+
+            match plan.start_task(task_id) {
+                Ok(()) => {
+                    if let Err(e) = self.services.plan_manager.save_plan(plan) {
+                        tracing::error!("Failed to save plan after task start: {}", e);
+                    }
+                    results.push(Content::ToolResult {
+                        tool_use_id: tool_call.id.clone(),
+                        output: serde_json::Value::String(format!(
+                            "Started task {}. Status: in_progress",
+                            task_id
+                        )),
+                        is_error: None,
+                    });
+                }
+                Err(e) => {
+                    results.push(Content::ToolResult {
+                        tool_use_id: tool_call.id.clone(),
+                        output: serde_json::Value::String(format!("Error: {}", e)),
+                        is_error: Some(true),
+                    });
+                }
+            }
+        }
+
+        if !results.is_empty() {
+            self.pending_tool_results.extend(results);
+        }
+    }
+
+    /// Handle add_subtask tool calls to create subtasks
+    pub(super) fn handle_add_subtask_tools(&mut self, tool_calls: Vec<AiToolCall>) {
+        let mut results = Vec::new();
+
+        for tool_call in tool_calls {
+            tracing::info!("Handling add_subtask tool call: {}", tool_call.id);
+
+            let parent_id = tool_call
+                .arguments
+                .get("parent_id")
+                .and_then(|v| v.as_str());
+            let description = tool_call
+                .arguments
+                .get("description")
+                .and_then(|v| v.as_str());
+            let context = tool_call.arguments.get("context").and_then(|v| v.as_str());
+
+            let (Some(parent_id), Some(description)) = (parent_id, description) else {
+                results.push(Content::ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    output: serde_json::Value::String(
+                        "Error: parent_id and description required".to_string(),
+                    ),
+                    is_error: Some(true),
+                });
+                continue;
+            };
+
+            let Some(plan) = &mut self.active_plan else {
+                results.push(Content::ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    output: serde_json::Value::String(
+                        "Error: No active plan. Create a plan first.".to_string(),
+                    ),
+                    is_error: Some(true),
+                });
+                continue;
+            };
+
+            match plan.add_subtask(parent_id, description, context) {
+                Ok(subtask_id) => {
+                    if let Err(e) = self.services.plan_manager.save_plan(plan) {
+                        tracing::error!("Failed to save plan after adding subtask: {}", e);
+                    }
+                    results.push(Content::ToolResult {
+                        tool_use_id: tool_call.id.clone(),
+                        output: serde_json::Value::String(format!(
+                            "Created subtask {} under {}",
+                            subtask_id, parent_id
+                        )),
+                        is_error: None,
+                    });
+                }
+                Err(e) => {
+                    results.push(Content::ToolResult {
+                        tool_use_id: tool_call.id.clone(),
+                        output: serde_json::Value::String(format!("Error: {}", e)),
+                        is_error: Some(true),
+                    });
+                }
+            }
+        }
+
+        if !results.is_empty() {
+            self.pending_tool_results.extend(results);
+        }
+    }
+
+    /// Handle set_dependency tool calls to create task dependencies
+    pub(super) fn handle_set_dependency_tools(&mut self, tool_calls: Vec<AiToolCall>) {
+        let mut results = Vec::new();
+
+        for tool_call in tool_calls {
+            tracing::info!("Handling set_dependency tool call: {}", tool_call.id);
+
+            let task_id = tool_call.arguments.get("task_id").and_then(|v| v.as_str());
+            let blocked_by = tool_call
+                .arguments
+                .get("blocked_by")
+                .and_then(|v| v.as_str());
+
+            let (Some(task_id), Some(blocked_by)) = (task_id, blocked_by) else {
+                results.push(Content::ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    output: serde_json::Value::String(
+                        "Error: task_id and blocked_by required".to_string(),
+                    ),
+                    is_error: Some(true),
+                });
+                continue;
+            };
+
+            let Some(plan) = &mut self.active_plan else {
+                results.push(Content::ToolResult {
+                    tool_use_id: tool_call.id.clone(),
+                    output: serde_json::Value::String(
+                        "Error: No active plan. Create a plan first.".to_string(),
+                    ),
+                    is_error: Some(true),
+                });
+                continue;
+            };
+
+            match plan.add_dependency(task_id, blocked_by) {
+                Ok(()) => {
+                    if let Err(e) = self.services.plan_manager.save_plan(plan) {
+                        tracing::error!("Failed to save plan after adding dependency: {}", e);
+                    }
+                    results.push(Content::ToolResult {
+                        tool_use_id: tool_call.id.clone(),
+                        output: serde_json::Value::String(format!(
+                            "Task {} is now blocked by {}",
+                            task_id, blocked_by
+                        )),
+                        is_error: None,
+                    });
+                }
+                Err(e) => {
+                    results.push(Content::ToolResult {
+                        tool_use_id: tool_call.id.clone(),
+                        output: serde_json::Value::String(format!("Error: {}", e)),
+                        is_error: Some(true),
+                    });
+                }
+            }
         }
 
         if !results.is_empty() {
@@ -261,6 +501,35 @@ impl App {
             self.handle_task_complete_tools(task_complete_tools);
         }
 
+        // Intercept task_start tool
+        let (task_start_tools, tool_calls): (Vec<_>, Vec<_>) =
+            tool_calls.into_iter().partition(|t| t.name == "task_start");
+
+        let has_task_start = !task_start_tools.is_empty();
+        if has_task_start {
+            self.handle_task_start_tools(task_start_tools);
+        }
+
+        // Intercept add_subtask tool
+        let (add_subtask_tools, tool_calls): (Vec<_>, Vec<_>) = tool_calls
+            .into_iter()
+            .partition(|t| t.name == "add_subtask");
+
+        let has_add_subtask = !add_subtask_tools.is_empty();
+        if has_add_subtask {
+            self.handle_add_subtask_tools(add_subtask_tools);
+        }
+
+        // Intercept set_dependency tool
+        let (set_dependency_tools, tool_calls): (Vec<_>, Vec<_>) = tool_calls
+            .into_iter()
+            .partition(|t| t.name == "set_dependency");
+
+        let has_set_dependency = !set_dependency_tools.is_empty();
+        if has_set_dependency {
+            self.handle_set_dependency_tools(set_dependency_tools);
+        }
+
         // Intercept enter_plan_mode tool
         let (plan_mode_tools, tool_calls): (Vec<_>, Vec<_>) = tool_calls
             .into_iter()
@@ -271,13 +540,19 @@ impl App {
             self.handle_enter_plan_mode_tools(plan_mode_tools);
         }
 
+        let has_plan_tools = has_task_complete
+            || has_task_start
+            || has_add_subtask
+            || has_set_dependency
+            || has_plan_mode;
+
         if tool_calls.is_empty() {
             if has_ask_user {
                 self.stop_streaming();
                 return;
             }
 
-            if has_task_complete || has_plan_mode {
+            if has_plan_tools {
                 let results = std::mem::take(&mut self.pending_tool_results);
                 if !results.is_empty() {
                     self.stop_streaming();
@@ -344,6 +619,15 @@ impl App {
             mpsc::unbounded_channel::<crate::lsp::manager::MissingLspInfo>();
         self.channels.missing_lsp = Some(missing_lsp_rx);
 
+        // Create dual-mind dialogue channel if dual-mind is active
+        let dual_mind_tx = if self.dual_mind.is_some() {
+            let (tx, rx) = mpsc::unbounded_channel::<DualMindUpdate>();
+            self.channels.dual_mind = Some(rx);
+            Some(tx)
+        } else {
+            None
+        };
+
         // Create result channel
         let (result_tx, result_rx) = oneshot::channel();
         self.channels.tool_results = Some(result_rx);
@@ -361,6 +645,8 @@ impl App {
         let cancel_token = self.cancellation.child_token();
         let plan_mode = self.ui.work_mode == crate::tui::app::WorkMode::Plan;
         let current_model = self.current_model.clone();
+        let dual_mind = self.dual_mind.clone();
+        let dual_mind_tx = dual_mind_tx;
 
         tokio::spawn(async move {
             let mut tool_results: Vec<Content> = Vec::new();
@@ -372,6 +658,54 @@ impl App {
                 }
 
                 let tool_name = tool_call.name.clone();
+
+                // Pre-review: Little Claw questions the intent before execution
+                if let Some(ref dm) = dual_mind {
+                    let intent = format!(
+                        "About to execute {} tool: {}",
+                        tool_name,
+                        serde_json::to_string_pretty(&tool_call.arguments).unwrap_or_default()
+                    );
+                    let (review_result, dialogue) = {
+                        let mut dm_guard = dm.write().await;
+                        let result = dm_guard.pre_review(&intent).await;
+                        let dialogue = dm_guard.format_dialogue();
+                        (result, dialogue)
+                    };
+
+                    // Send dialogue update to UI
+                    if let Some(ref tx) = dual_mind_tx {
+                        if !dialogue.is_empty() {
+                            let _ = tx.send(DualMindUpdate {
+                                dialogue: dialogue.clone(),
+                                phase: DualMindPhase::PreReview,
+                                enhancement: None,
+                            });
+                        }
+                    }
+
+                    match review_result {
+                        DialogueResult::NeedsEnhancement { critique, .. } => {
+                            tracing::info!(
+                                "Little Claw raised concern before {}: {}",
+                                tool_name,
+                                critique
+                            );
+                            // Send enhancement for UI display
+                            if let Some(ref tx) = dual_mind_tx {
+                                let _ = tx.send(DualMindUpdate {
+                                    dialogue: String::new(),
+                                    phase: DualMindPhase::PreReview,
+                                    enhancement: Some(critique),
+                                });
+                            }
+                        }
+                        DialogueResult::Consensus { .. } | DialogueResult::Refined { .. } => {
+                            tracing::debug!("Little Claw approved {} execution", tool_name);
+                        }
+                        _ => {}
+                    }
+                }
                 let working_dir =
                     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
@@ -417,9 +751,75 @@ impl App {
                 };
 
                 if let Some(result) = result {
+                    // Sync observation to Little Claw (so it knows what happened)
+                    if let Some(ref dm) = dual_mind {
+                        let summary = if result.is_error {
+                            format!("Error: {}", &result.output)
+                        } else if result.output.len() > 500 {
+                            format!("{}...[truncated]", &result.output[..500])
+                        } else {
+                            result.output.clone()
+                        };
+                        let observation =
+                            Observation::tool_result(&tool_name, &summary, !result.is_error);
+                        let dm_guard = dm.read().await;
+                        dm_guard.little_claw().observe(observation).await;
+                    }
+
+                    // Post-review: Little Claw validates the output
+                    let final_output = if let Some(ref dm) = dual_mind {
+                        if !result.is_error {
+                            let (review_result, dialogue) = {
+                                let mut dm_guard = dm.write().await;
+                                let result = dm_guard.post_review(&result.output).await;
+                                let dialogue = dm_guard.format_dialogue();
+                                (result, dialogue)
+                            };
+
+                            // Send dialogue update to UI
+                            if let Some(ref tx) = dual_mind_tx {
+                                if !dialogue.is_empty() {
+                                    let _ = tx.send(DualMindUpdate {
+                                        dialogue,
+                                        phase: DualMindPhase::PostReview,
+                                        enhancement: None,
+                                    });
+                                }
+                            }
+
+                            match review_result {
+                                DialogueResult::NeedsEnhancement { critique, .. } => {
+                                    tracing::info!(
+                                        "Little Claw found issue with {} output: {}",
+                                        tool_name,
+                                        critique
+                                    );
+                                    // Send enhancement for UI and inject into output
+                                    if let Some(ref tx) = dual_mind_tx {
+                                        let _ = tx.send(DualMindUpdate {
+                                            dialogue: String::new(),
+                                            phase: DualMindPhase::PostReview,
+                                            enhancement: Some(critique.clone()),
+                                        });
+                                    }
+                                    // Append critique to output so Big Claw sees it
+                                    format!(
+                                        "{}\n\n[Little Claw Review]: {}",
+                                        result.output, critique
+                                    )
+                                }
+                                _ => result.output,
+                            }
+                        } else {
+                            result.output
+                        }
+                    } else {
+                        result.output
+                    };
+
                     tool_results.push(Content::ToolResult {
                         tool_use_id: tool_call.id.clone(),
-                        output: serde_json::Value::String(result.output),
+                        output: serde_json::Value::String(final_output),
                         is_error: if result.is_error { Some(true) } else { None },
                     });
                 } else {

@@ -12,9 +12,13 @@
 //! - build: Spawn parallel Opus builder agents (The Kraken)
 //! - skill: Invoke skills for specialized instructions
 //! - ask_user: Interactive user prompts (handled by UI)
-//! - task_complete: Mark plan tasks as complete (handled by UI)
+//! - task_complete: Mark plan tasks as complete with result (handled by UI)
+//! - task_start: Mark task as in-progress (handled by UI)
+//! - add_subtask: Create subtasks for task breakdown (handled by UI)
+//! - set_dependency: Create task dependencies (handled by UI)
 //! - enter_plan_mode: Switch to plan mode (handled by UI)
 
+pub mod add_subtask;
 pub mod ask_user;
 pub mod bash;
 pub mod build;
@@ -25,10 +29,13 @@ pub mod grep;
 pub mod plan_mode;
 pub mod processes;
 pub mod read;
+pub mod set_dependency;
 pub mod skill;
 pub mod task_complete;
+pub mod task_start;
 pub mod write;
 
+pub use add_subtask::AddSubtaskTool;
 pub use ask_user::AskUserQuestionTool;
 pub use bash::BashTool;
 pub use build::BuildTool;
@@ -39,8 +46,10 @@ pub use grep::GrepTool;
 pub use plan_mode::EnterPlanModeTool;
 pub use processes::ProcessesTool;
 pub use read::ReadTool;
+pub use set_dependency::SetDependencyTool;
 pub use skill::SkillTool;
 pub use task_complete::TaskCompleteTool;
+pub use task_start::TaskStartTool;
 pub use write::WriteTool;
 
 use crate::agent::AgentCancellation;
@@ -61,6 +70,9 @@ pub async fn register_all_tools(registry: &ToolRegistry, _lsp_manager: Option<Ar
     registry.register(Arc::new(SkillTool)).await;
     registry.register(Arc::new(AskUserQuestionTool)).await;
     registry.register(Arc::new(TaskCompleteTool)).await;
+    registry.register(Arc::new(TaskStartTool)).await;
+    registry.register(Arc::new(AddSubtaskTool)).await;
+    registry.register(Arc::new(SetDependencyTool)).await;
     registry.register(Arc::new(EnterPlanModeTool)).await;
 }
 

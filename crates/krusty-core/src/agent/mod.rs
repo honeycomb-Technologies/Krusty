@@ -29,6 +29,7 @@ pub mod build_context;
 pub mod cache;
 pub mod cancellation;
 pub mod constants;
+pub mod dual_mind;
 pub mod event_bus;
 pub mod events;
 pub mod hooks;
@@ -49,4 +50,10 @@ pub use summarizer::{generate_summary, SummarizationResult};
 pub use user_hooks::{
     UserHook, UserHookExecutor, UserHookManager, UserHookResult, UserHookType, UserPostToolHook,
     UserPreToolHook,
+};
+
+// Dual-mind system (Big Claw / Little Claw)
+pub use dual_mind::{
+    ClawRole, DialogueManager, DialogueResult, DialogueTurn, DualMind, DualMindBuilder,
+    DualMindConfig, LittleClaw, Observation, Speaker,
 };

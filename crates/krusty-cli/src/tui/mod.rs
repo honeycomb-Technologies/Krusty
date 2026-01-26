@@ -11,6 +11,7 @@ pub mod graphics;
 pub mod handlers;
 pub mod input;
 pub mod markdown;
+pub mod plugins;
 pub mod polling;
 pub mod popups;
 pub mod render_model;

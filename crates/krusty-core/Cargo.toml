@@ -1,6 +1,6 @@
 [package]
 name = "krusty-core"
-version = "0.2.10"
+version = "0.3.0"
 edition = "2021"
 description = "Core library for Krusty - AI, storage, tools, LSP, and extensions"
 

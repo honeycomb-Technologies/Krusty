@@ -37,6 +37,43 @@ impl App {
                 }
                 true
             }
+            Some(DragTarget::PluginWindow) => {
+                if let Some(area) = self.scroll_system.layout.plugin_window_area {
+                    let visible_height = area.height.saturating_sub(2) as usize;
+                    // Jump to position based on y
+                    let relative_y = y.saturating_sub(area.y) as f32;
+                    let height = area.height as f32;
+                    let max_offset = self
+                        .plugin_window
+                        .total_lines
+                        .saturating_sub(visible_height);
+                    let new_offset = ((relative_y / height) * max_offset as f32).round() as usize;
+                    self.plugin_window.scroll_offset = new_offset.min(max_offset);
+                }
+                true
+            }
+            Some(DragTarget::PluginDivider {
+                start_y,
+                start_position,
+            }) => {
+                // Calculate new divider position based on drag
+                // Use combined height of plan + divider + plugin for accurate 1:1 drag feel
+                let total_height = match (
+                    self.scroll_system.layout.plan_sidebar_area,
+                    self.scroll_system.layout.plugin_window_area,
+                ) {
+                    (Some(plan), Some(plugin)) => plan.height + 1 + plugin.height, // +1 for divider
+                    (Some(plan), None) => plan.height,
+                    (None, Some(plugin)) => plugin.height,
+                    (None, None) => 1, // Avoid division by zero
+                };
+
+                let delta_y = y as i16 - start_y as i16;
+                let position_delta = delta_y as f32 / total_height as f32;
+                self.plugin_window.divider_position =
+                    (start_position + position_delta).clamp(0.2, 0.8);
+                true
+            }
             Some(DragTarget::Block(drag)) => {
                 if let Some(offset) = drag.calculate_offset(y) {
                     match drag.block_type {

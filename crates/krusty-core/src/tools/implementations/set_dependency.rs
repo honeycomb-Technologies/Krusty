@@ -1,25 +1,23 @@
-//! Task Complete tool - Mark a single plan task as complete
+//! Set Dependency tool - Create a dependency between tasks
 //!
 //! This tool is intercepted by the UI and handled specially.
-//! ENFORCES: Task must be InProgress (use task_start first)
-//! ENFORCES: One task at a time (no batch completion)
-//! ENFORCES: Result parameter required
+//! It establishes that one task must complete before another can start.
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::tools::registry::{Tool, ToolContext, ToolResult};
 
-pub struct TaskCompleteTool;
+pub struct SetDependencyTool;
 
 #[async_trait]
-impl Tool for TaskCompleteTool {
+impl Tool for SetDependencyTool {
     fn name(&self) -> &str {
-        "task_complete"
+        "set_dependency"
     }
 
     fn description(&self) -> &str {
-        "Complete ONE task that you have started with task_start. The task MUST be in-progress. Provide a specific result describing what you accomplished for THIS task."
+        "Set a dependency between tasks. The task specified by task_id will be blocked until blocked_by task completes. Prevents circular dependencies."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -28,14 +26,14 @@ impl Tool for TaskCompleteTool {
             "properties": {
                 "task_id": {
                     "type": "string",
-                    "description": "The task ID to complete (must have been started with task_start)"
+                    "description": "ID of the task that will be blocked (e.g., '2.1')"
                 },
-                "result": {
+                "blocked_by": {
                     "type": "string",
-                    "description": "REQUIRED: Specific summary of what was accomplished for THIS task"
+                    "description": "ID of the task that must complete first (e.g., '1.1')"
                 }
             },
-            "required": ["task_id", "result"],
+            "required": ["task_id", "blocked_by"],
             "additionalProperties": false
         })
     }
@@ -43,7 +41,7 @@ impl Tool for TaskCompleteTool {
     async fn execute(&self, _params: Value, _ctx: &ToolContext) -> ToolResult {
         // This tool is handled specially by the UI - this code shouldn't run
         ToolResult {
-            output: json!({ "note": "Task completion handled by UI" }).to_string(),
+            output: json!({ "note": "Dependency setting handled by UI" }).to_string(),
             is_error: false,
         }
     }

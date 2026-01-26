@@ -68,17 +68,23 @@ When creating a plan, use this EXACT format (the system will auto-detect and sav
 ## Phase 1: [Phase Name]
 
 - [ ] Task description here
+  > Context: Implementation details or notes
 - [ ] Another task
+  - [ ] Subtask for complex items
 
 ## Phase 2: [Phase Name]
 
 - [ ] Task description
+  > Blocked-By: 1.1, 1.2
 ```
 
 Key formatting rules:
 - Title line: `# Plan: Your Title Here`
 - Phase headers: `## Phase N: Phase Name`
-- Tasks: `- [ ] Description` (unchecked) or `- [x] Description` (completed)
+- Tasks: `- [ ] Description` (pending), `- [x] Description` (completed), `- [>] Description` (in-progress), `- [~] Description` (blocked)
+- Context: `> Context: details` - optional implementation notes
+- Dependencies: `> Blocked-By: task_ids` - tasks that must complete first
+- Subtasks: Indent 2 spaces for subtasks under a parent task
 
 After exploring the codebase, output your plan in this format. The user can exit plan mode with Ctrl+B to begin implementation."#.to_string();
         };
@@ -87,10 +93,17 @@ After exploring the codebase, output your plan in this format. The user can exit
         let (completed, total) = plan.progress();
         let markdown = plan.to_context();
 
+        // Get ready and blocked tasks for visibility
+        let ready_tasks = plan.get_ready_tasks();
+        let blocked_tasks = plan.get_blocked_tasks();
+
+        let ready_count = ready_tasks.len();
+        let blocked_count = blocked_tasks.len();
+
         format!(
             r#"[PLAN MODE ACTIVE - Plan: "{}"]
 
-Progress: {}/{} tasks completed
+Progress: {}/{} tasks completed | {} ready | {} blocked
 
 In plan mode:
 - You can READ files, search code, and explore the codebase
@@ -109,6 +122,8 @@ The user can exit plan mode with Ctrl+B when ready to implement."#,
             sanitize_plan_title(&plan.title),
             completed,
             total,
+            ready_count,
+            blocked_count,
             markdown
         )
     }
@@ -122,10 +137,46 @@ The user can exit plan mode with Ctrl+B when ready to implement."#,
         let (completed, total) = plan.progress();
         let markdown = plan.to_context();
 
+        // Get ready and blocked tasks
+        let ready_tasks = plan.get_ready_tasks();
+        let blocked_tasks = plan.get_blocked_tasks();
+
+        let ready_list = if ready_tasks.is_empty() {
+            "  (none)".to_string()
+        } else {
+            ready_tasks
+                .iter()
+                .map(|t| format!("  - Task {}: {}", t.id, t.description))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let blocked_list = if blocked_tasks.is_empty() {
+            "  (none)".to_string()
+        } else {
+            blocked_tasks
+                .iter()
+                .map(|t| {
+                    let blockers = t.blocked_by.join(", ");
+                    format!(
+                        "  - Task {}: {} (waiting on: {})",
+                        t.id, t.description, blockers
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
         format!(
             r#"[ACTIVE PLAN - "{}"]
 
 Progress: {}/{} tasks completed
+
+## Ready to Work (no blockers)
+{}
+
+## Blocked Tasks (waiting on dependencies)
+{}
 
 ## Current Plan
 
@@ -133,17 +184,41 @@ Progress: {}/{} tasks completed
 
 ---
 
-## Task Management
+## CRITICAL: Task Workflow Protocol
 
-Mark tasks complete silently - the plan sidebar updates automatically. NO announcements needed.
+You MUST follow this disciplined workflow. Do NOT batch-complete tasks or skip steps.
 
-- Single: `task_complete(task_id: "1.1")`
-- Batch: `task_complete(task_ids: ["1.1", "1.2", "2.1"])`
+### For EACH task (one at a time):
 
-Workflow: Do the work → Call task_complete → Continue."#,
+1. **PICK ONE** ready task from the list above
+2. **START IT**: `task_start(task_id: "X.X")` - marks as in-progress
+3. **DO THE WORK** for that specific task only
+4. **COMPLETE IT**: `task_complete(task_id: "X.X", result: "specific accomplishment")`
+5. **THEN** move to the next task
+
+### Rules:
+- Work on ONE task at a time - no parallel task completion
+- Always `task_start` BEFORE doing work (shows user what you're working on)
+- Always `task_complete` with a SPECIFIC result for THAT task (not generic)
+- If a task is complex, use `add_subtask` to break it down BEFORE starting
+- Check the "Ready to Work" list - only work on unblocked tasks
+
+### Tools:
+- `task_start(task_id)` - REQUIRED before starting work (will fail if task is blocked)
+- `task_complete(task_id, result)` - REQUIRED: task must be in-progress, result must be specific to that task
+- `add_subtask(parent_id, description, context)` - break down complex tasks before starting
+- `set_dependency(task_id, blocked_by)` - establish task ordering
+
+### What will FAIL:
+- `task_complete` without `task_start` first → Error
+- `task_complete` on a blocked task → Error
+- `task_complete` with batch task_ids → Error (one at a time only)
+- `task_start` on a blocked task → Error"#,
             sanitize_plan_title(&plan.title),
             completed,
             total,
+            ready_list,
+            blocked_list,
             markdown
         )
     }

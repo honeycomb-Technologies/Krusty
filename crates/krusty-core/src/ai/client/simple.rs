@@ -70,13 +70,25 @@ impl AiClient {
         let json: Value = response.json().await?;
 
         // Extract text from Anthropic response
+        // MiniMax and other providers may return thinking blocks before text blocks,
+        // so we need to iterate through all blocks to find text content
         let text = json
             .get("content")
             .and_then(|c| c.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|block| block.get("text"))
-            .and_then(|t| t.as_str())
-            .unwrap_or("")
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|block| {
+                        // Only extract from text blocks, skip thinking blocks
+                        if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                            block.get("text").and_then(|t| t.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default()
             .trim()
             .to_string();
 

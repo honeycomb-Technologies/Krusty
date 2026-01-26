@@ -13,8 +13,8 @@ use ratatui::{
 use crate::tui::app::App;
 use crate::tui::blocks::StreamBlock;
 use crate::tui::components::{
-    render_input_scrollbar, render_messages_scrollbar, render_plan_sidebar, render_status_bar,
-    render_toolbar, MIN_TERMINAL_WIDTH,
+    render_input_scrollbar, render_messages_scrollbar, render_plan_sidebar, render_plugin_window,
+    render_status_bar, render_toolbar, MIN_TERMINAL_WIDTH,
 };
 use crate::tui::state::SelectionArea;
 
@@ -387,8 +387,21 @@ impl App {
         let full_area = f.area();
 
         // Check if sidebar should be shown (has width and terminal is wide enough)
+        // Sidebar is shown if either plan or plugin window is visible
         let sidebar_width = if full_area.width >= MIN_TERMINAL_WIDTH {
-            self.plan_sidebar.width()
+            let plan_width = self.plan_sidebar.width();
+            let plugin_visible = self.plugin_window.visible;
+
+            if plan_width > 0 || plugin_visible {
+                // Use plan sidebar width as the standard, or fallback to constant if only plugin
+                if plan_width > 0 {
+                    plan_width
+                } else {
+                    crate::tui::components::plan_sidebar::SIDEBAR_WIDTH
+                }
+            } else {
+                0
+            }
         } else {
             0
         };
@@ -630,20 +643,152 @@ impl App {
             self.running_process_elapsed,
         );
 
-        // Render plan sidebar if visible and we have an active plan
-        if let (Some(sidebar_rect), Some(plan)) = (sidebar_area, self.active_plan.clone()) {
-            self.scroll_system.layout.plan_sidebar_area = Some(sidebar_rect);
-            let result = render_plan_sidebar(
-                f.buffer_mut(),
-                sidebar_rect,
-                &plan,
-                &self.ui.theme,
-                &mut self.plan_sidebar,
-            );
-            self.scroll_system.layout.plan_sidebar_scrollbar_area = result.scrollbar_area;
+        // Render sidebar content (plan and/or plugin window)
+        if let Some(sidebar_rect) = sidebar_area {
+            // Determine what should be shown in the sidebar
+            let plan_visible = self.active_plan.is_some() && self.plan_sidebar.width() > 0;
+            let plugin_visible = self.plugin_window.visible && self.plugin_window.height() > 0;
+
+            if plan_visible && plugin_visible {
+                // Both visible - split the sidebar
+                let divider_position = self.plugin_window.divider_position;
+                let plan_height = ((sidebar_rect.height as f32) * divider_position).round() as u16;
+                let plugin_height = sidebar_rect.height.saturating_sub(plan_height + 1); // 1 for divider
+
+                // Plan area (top)
+                let plan_rect = Rect {
+                    x: sidebar_rect.x,
+                    y: sidebar_rect.y,
+                    width: sidebar_rect.width,
+                    height: plan_height,
+                };
+
+                // Divider area (1 line between plan and plugin)
+                let divider_rect = Rect {
+                    x: sidebar_rect.x,
+                    y: sidebar_rect.y + plan_height,
+                    width: sidebar_rect.width,
+                    height: 1,
+                };
+
+                // Plugin area (bottom)
+                let plugin_rect = Rect {
+                    x: sidebar_rect.x,
+                    y: sidebar_rect.y + plan_height + 1,
+                    width: sidebar_rect.width,
+                    height: plugin_height,
+                };
+
+                // Render plan
+                if let Some(plan) = self.active_plan.clone() {
+                    self.scroll_system.layout.plan_sidebar_area = Some(plan_rect);
+                    let result = render_plan_sidebar(
+                        f.buffer_mut(),
+                        plan_rect,
+                        &plan,
+                        &self.ui.theme,
+                        &mut self.plan_sidebar,
+                    );
+                    self.scroll_system.layout.plan_sidebar_scrollbar_area = result.scrollbar_area;
+                }
+
+                // Render divider (draggable)
+                self.scroll_system.layout.plugin_divider_area = Some(divider_rect);
+                let divider_hovered = self.scroll_system.layout.plugin_divider_hovered;
+                render_divider(
+                    f.buffer_mut(),
+                    divider_rect,
+                    &self.ui.theme,
+                    divider_hovered,
+                );
+
+                // Render plugin window
+                self.scroll_system.layout.plugin_window_area = Some(plugin_rect);
+                let result = render_plugin_window(
+                    f.buffer_mut(),
+                    plugin_rect,
+                    &self.ui.theme,
+                    &mut self.plugin_window,
+                );
+                self.scroll_system.layout.plugin_window_scrollbar_area = result.scrollbar_area;
+            } else if plan_visible {
+                // Only plan visible
+                self.scroll_system.layout.plan_sidebar_area = Some(sidebar_rect);
+                if let Some(plan) = self.active_plan.clone() {
+                    let result = render_plan_sidebar(
+                        f.buffer_mut(),
+                        sidebar_rect,
+                        &plan,
+                        &self.ui.theme,
+                        &mut self.plan_sidebar,
+                    );
+                    self.scroll_system.layout.plan_sidebar_scrollbar_area = result.scrollbar_area;
+                }
+                self.scroll_system.layout.plugin_window_area = None;
+                self.scroll_system.layout.plugin_window_scrollbar_area = None;
+                self.scroll_system.layout.plugin_divider_area = None;
+            } else if plugin_visible {
+                // Only plugin visible
+                self.scroll_system.layout.plugin_window_area = Some(sidebar_rect);
+                let result = render_plugin_window(
+                    f.buffer_mut(),
+                    sidebar_rect,
+                    &self.ui.theme,
+                    &mut self.plugin_window,
+                );
+                self.scroll_system.layout.plugin_window_scrollbar_area = result.scrollbar_area;
+                self.scroll_system.layout.plan_sidebar_area = None;
+                self.scroll_system.layout.plan_sidebar_scrollbar_area = None;
+                self.scroll_system.layout.plugin_divider_area = None;
+            } else {
+                // Nothing visible in sidebar
+                self.scroll_system.layout.plan_sidebar_area = None;
+                self.scroll_system.layout.plan_sidebar_scrollbar_area = None;
+                self.scroll_system.layout.plugin_window_area = None;
+                self.scroll_system.layout.plugin_window_scrollbar_area = None;
+                self.scroll_system.layout.plugin_divider_area = None;
+            }
         } else {
             self.scroll_system.layout.plan_sidebar_area = None;
             self.scroll_system.layout.plan_sidebar_scrollbar_area = None;
+            self.scroll_system.layout.plugin_window_area = None;
+            self.scroll_system.layout.plugin_window_scrollbar_area = None;
+            self.scroll_system.layout.plugin_divider_area = None;
+        }
+    }
+}
+
+/// Render the draggable divider between plan and plugin windows
+fn render_divider(
+    buf: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    theme: &crate::tui::themes::Theme,
+    hovered: bool,
+) {
+    use ratatui::style::Style;
+
+    // Use different style when hovered to indicate interactivity
+    let color = if hovered {
+        theme.accent_color
+    } else {
+        theme.border_color
+    };
+
+    // Draw horizontal line with drag handles
+    let divider_char = '─';
+    let handle_char = if hovered { '━' } else { '┄' }; // Bold when hovered
+    let style = Style::default().fg(color);
+
+    for x in area.x..area.x + area.width {
+        if let Some(cell) = buf.cell_mut((x, area.y)) {
+            // Use handle chars in the middle to indicate draggability
+            let is_handle_zone = x > area.x + 2 && x < area.x + area.width - 3;
+            cell.set_char(if is_handle_zone {
+                handle_char
+            } else {
+                divider_char
+            });
+            cell.set_style(style);
         }
     }
 }

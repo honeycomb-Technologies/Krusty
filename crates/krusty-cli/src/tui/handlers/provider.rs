@@ -5,7 +5,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use tokio::sync::RwLock;
 
+use crate::agent::dual_mind::{DualMind, DualMindConfig};
 use crate::ai::client::AiClient;
 use crate::ai::providers::ProviderId;
 use crate::tools::{register_build_tool, register_explore_tool};
@@ -23,6 +25,7 @@ impl App {
             let config = self.create_client_config();
             self.ai_client = Some(AiClient::with_api_key(config, key.clone()));
             self.api_key = Some(key);
+            self.init_dual_mind();
             self.register_explore_tool_if_client().await;
             return Ok(());
         }
@@ -86,6 +89,7 @@ impl App {
         let config = self.create_client_config();
         self.ai_client = Some(AiClient::with_api_key(config, key.clone()));
         self.api_key = Some(key.clone());
+        self.init_dual_mind();
 
         // Save to credential store (unified storage for all providers)
         self.services
@@ -138,6 +142,7 @@ impl App {
             let config = self.create_client_config();
             self.ai_client = Some(AiClient::with_api_key(config, key.clone()));
             self.api_key = Some(key);
+            self.init_dual_mind();
             tracing::info!(
                 "Switched to provider {} (loaded existing auth)",
                 provider_id
@@ -146,6 +151,7 @@ impl App {
             // No stored credentials - user will need to authenticate
             self.ai_client = None;
             self.api_key = None;
+            self.dual_mind = None;
             tracing::info!(
                 "Switched to provider {} (requires authentication)",
                 provider_id
@@ -162,5 +168,31 @@ impl App {
     /// Check if authenticated
     pub fn is_authenticated(&self) -> bool {
         self.ai_client.is_some()
+    }
+
+    /// Initialize dual-mind system when AI client is available
+    fn init_dual_mind(&mut self) {
+        let Some(client) = self.create_ai_client() else {
+            self.dual_mind = None;
+            return;
+        };
+
+        let client = Arc::new(client);
+        let config = DualMindConfig {
+            enabled: true,
+            review_all: false, // Only review significant actions
+            max_discussion_depth: 3,
+        };
+
+        let dual_mind = DualMind::with_tools(
+            client,
+            self.cancellation.clone(),
+            config,
+            self.services.tool_registry.clone(),
+            self.working_dir.clone(),
+        );
+
+        self.dual_mind = Some(Arc::new(RwLock::new(dual_mind)));
+        tracing::info!("Dual-mind system initialized (Big Claw / Little Claw)");
     }
 }

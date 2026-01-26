@@ -23,7 +23,10 @@ use std::{
 };
 use tokio::sync::RwLock;
 
-use crate::agent::{AgentCancellation, AgentConfig, AgentEventBus, AgentState, UserHookManager};
+use crate::agent::{
+    dual_mind::DualMind, AgentCancellation, AgentConfig, AgentEventBus, AgentState,
+    UserHookManager,
+};
 use crate::ai::client::AiClient;
 use crate::ai::models::SharedModelRegistry;
 use crate::ai::providers::ProviderId;
@@ -127,6 +130,7 @@ pub struct App {
     pub services: AppServices,
 
     pub plan_sidebar: crate::tui::components::PlanSidebarState,
+    pub plugin_window: crate::tui::components::PluginWindowState,
     pub decision_prompt: crate::tui::components::DecisionPrompt,
     pub should_quit: bool,
     pub input: MultiLineInput,
@@ -149,6 +153,9 @@ pub struct App {
     // AI client
     pub ai_client: Option<AiClient>,
     pub api_key: Option<String>,
+
+    // Dual-mind quality control (Big Claw / Little Claw)
+    pub dual_mind: Option<Arc<RwLock<DualMind>>>,
 
     // Multi-provider support
     pub active_provider: ProviderId,
@@ -256,6 +263,7 @@ impl App {
             active_plan: None,
             services,
             plan_sidebar: crate::tui::components::PlanSidebarState::default(),
+            plugin_window: crate::tui::components::PluginWindowState::default(),
             decision_prompt: crate::tui::components::DecisionPrompt::default(),
             should_quit: false,
             input: MultiLineInput::new(5),
@@ -268,6 +276,7 @@ impl App {
             pending_auto_pinch: false,
             ai_client: None,
             api_key: None,
+            dual_mind: None,
             active_provider,
             process_registry,
             running_process_count: 0,
@@ -616,12 +625,20 @@ impl App {
             EnableMouseCapture,
             EnableBracketedPaste,
             // Enable Kitty keyboard protocol for better key detection
-            // Only use DISAMBIGUATE_ESCAPE_CODES - REPORT_ALL_KEYS_AS_ESCAPE_CODES
-            // breaks Shift+key for special characters (e.g., Shift+1 becomes '1'+SHIFT, not '!')
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            // - DISAMBIGUATE_ESCAPE_CODES: Better escape sequence handling
+            // - REPORT_EVENT_TYPES: Enables key release detection (needed for games)
+            // Note: REPORT_ALL_KEYS_AS_ESCAPE_CODES breaks Shift+key for special chars
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            )
         )?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
+
+        // Initialize Kitty graphics support for plugin window
+        self.plugin_window.detect_graphics_support();
+        self.plugin_window.update_cell_size();
 
         let result = self.main_loop(&mut terminal).await;
 
@@ -644,7 +661,7 @@ impl App {
     fn process_event(&mut self, event: Event) {
         match event {
             Event::Key(key) => {
-                self.handle_key(key.code, key.modifiers);
+                self.handle_key(key);
                 self.needs_redraw = true;
             }
             Event::Mouse(mouse) => {
@@ -656,6 +673,8 @@ impl App {
                 self.needs_redraw = true;
             }
             Event::Resize(_, _) => {
+                // Update cell size for Kitty graphics on resize
+                self.plugin_window.update_cell_size();
                 self.needs_redraw = true;
             }
             _ => {}
@@ -760,6 +779,13 @@ impl App {
             // Poll build progress channel for builder updates
             self.poll_build_progress();
 
+            // Poll dual-mind dialogue for Big Claw / Little Claw updates
+            let dual_mind_result = self.poll_dual_mind();
+            if dual_mind_result.needs_redraw {
+                self.needs_redraw = true;
+            }
+            self.process_poll_actions(dual_mind_result);
+
             // Poll /init exploration progress and result
             // Only detect languages if we have a pending exploration result
             let languages = if self.channels.init_exploration.is_some() {
@@ -839,6 +865,8 @@ impl App {
             // Only render if something changed
             if self.needs_redraw {
                 terminal.draw(|f| self.ui(f))?;
+                // Flush any pending Kitty graphics after buffer is rendered
+                self.plugin_window.flush_pending_graphics();
                 self.needs_redraw = false;
             }
 

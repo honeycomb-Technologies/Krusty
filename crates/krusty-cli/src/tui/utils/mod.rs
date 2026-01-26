@@ -10,8 +10,8 @@ mod title;
 mod worktree;
 
 pub use channels::{
-    AsyncChannels, DeviceCodeInfo, InitExplorationResult, McpStatusUpdate, OAuthStatusUpdate,
-    SummarizationUpdate, TitleUpdate,
+    AsyncChannels, DeviceCodeInfo, DualMindPhase, DualMindUpdate, InitExplorationResult,
+    McpStatusUpdate, OAuthStatusUpdate, SummarizationUpdate, TitleUpdate,
 };
 pub use languages::language_to_extensions;
 pub use syntax::highlight_code;

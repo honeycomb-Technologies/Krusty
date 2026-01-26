@@ -1,6 +1,6 @@
 [package]
 name = "krusty"
-version = "0.2.10"
+version = "0.3.0"
 edition = "2021"
 description = "The most elegant coding CLI to ever exist"
 default-run = "krusty"
@@ -109,8 +109,15 @@ xz2 = "0.1"
 
 # Concurrency
 dashmap = "6.1"
+
+# System
+libc = "0.2"
+libloading = "0.8"
 parking_lot = "0.12"
 moka = { version = "0.12", features = ["sync"] }
+
+# Gamepad support
+gilrs = "0.11"
 
 # File System
 ignore = "0.4"

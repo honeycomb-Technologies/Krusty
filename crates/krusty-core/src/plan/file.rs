@@ -109,6 +109,42 @@ pub enum PlanStatus {
     Abandoned,
 }
 
+/// Task status (individual task within a plan)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    #[default]
+    Pending,
+    InProgress,
+    Completed,
+    Blocked,
+}
+
+impl std::fmt::Display for TaskStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TaskStatus::Pending => write!(f, "pending"),
+            TaskStatus::InProgress => write!(f, "in_progress"),
+            TaskStatus::Completed => write!(f, "completed"),
+            TaskStatus::Blocked => write!(f, "blocked"),
+        }
+    }
+}
+
+impl std::str::FromStr for TaskStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "pending" => Ok(TaskStatus::Pending),
+            "in_progress" | "inprogress" => Ok(TaskStatus::InProgress),
+            "completed" | "complete" | "done" => Ok(TaskStatus::Completed),
+            "blocked" => Ok(TaskStatus::Blocked),
+            _ => Err(format!("Unknown task status: {}", s)),
+        }
+    }
+}
+
 impl std::fmt::Display for PlanStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -135,28 +171,145 @@ impl std::str::FromStr for PlanStatus {
 /// A single task within a phase
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanTask {
-    /// Task ID like "1.1", "2.3"
+    /// Task ID like "1.1", "2.3", or "1.1.1" for subtasks
     pub id: String,
+    /// Parent task ID for subtasks (None = top-level task)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
     /// Task description
     pub description: String,
-    /// Whether the task is complete
+    /// Implementation details/context
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    /// Completion summary (required when completing)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    /// Whether the task is complete (kept for backward compatibility)
     pub completed: bool,
+    /// Task status (richer than just completed bool)
+    #[serde(default)]
+    pub status: TaskStatus,
+    /// Task IDs that must complete before this task can start
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<String>,
+    /// Task IDs that are waiting on this task
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<String>,
+    /// Child task IDs (for hierarchy)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<String>,
+    /// Priority (1 = highest)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u8>,
+    /// When the task was created
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    /// When the task was completed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 impl PlanTask {
-    #[cfg(test)]
     pub fn new(id: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
             id: id.into(),
+            parent_id: None,
             description: description.into(),
+            context: None,
+            result: None,
             completed: false,
+            status: TaskStatus::Pending,
+            blocked_by: Vec::new(),
+            blocks: Vec::new(),
+            children: Vec::new(),
+            priority: None,
+            created_at: Some(Utc::now()),
+            completed_at: None,
         }
+    }
+
+    /// Create a subtask with parent reference
+    pub fn new_subtask(
+        id: impl Into<String>,
+        parent_id: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            parent_id: Some(parent_id.into()),
+            description: description.into(),
+            context: None,
+            result: None,
+            completed: false,
+            status: TaskStatus::Pending,
+            blocked_by: Vec::new(),
+            blocks: Vec::new(),
+            children: Vec::new(),
+            priority: None,
+            created_at: Some(Utc::now()),
+            completed_at: None,
+        }
+    }
+
+    /// Check if this task is a subtask (has parent)
+    pub fn is_subtask(&self) -> bool {
+        self.parent_id.is_some()
+    }
+
+    /// Get the depth level (0 for top-level, 1+ for subtasks)
+    pub fn depth(&self) -> usize {
+        self.id.matches('.').count().saturating_sub(1)
     }
 
     /// Format as markdown checkbox line
     pub fn to_markdown(&self) -> String {
-        let checkbox = if self.completed { "[x]" } else { "[ ]" };
-        format!("- {} Task {}: {}", checkbox, self.id, self.description)
+        self.to_markdown_with_depth(0)
+    }
+
+    /// Format as markdown with indentation for subtasks
+    pub fn to_markdown_with_depth(&self, depth: usize) -> String {
+        let indent = "  ".repeat(depth);
+        let checkbox = match self.status {
+            TaskStatus::Completed => "[x]",
+            TaskStatus::InProgress => "[>]",
+            TaskStatus::Blocked => "[~]",
+            TaskStatus::Pending => "[ ]",
+        };
+
+        let mut lines = vec![format!(
+            "{}- {} Task {}: {}",
+            indent, checkbox, self.id, self.description
+        )];
+
+        // Add context line if present
+        if let Some(ref ctx) = self.context {
+            lines.push(format!("{}  > Context: {}", indent, ctx));
+        }
+
+        // Add blocked-by line if present
+        if !self.blocked_by.is_empty() {
+            lines.push(format!(
+                "{}  > Blocked-By: {}",
+                indent,
+                self.blocked_by.join(", ")
+            ));
+        }
+
+        // Add result line if completed
+        if let Some(ref result) = self.result {
+            if let Some(ts) = self.completed_at {
+                lines.push(format!(
+                    "{}  > Result [{}]: {}",
+                    indent,
+                    ts.format("%Y-%m-%d %H:%M"),
+                    result
+                ));
+            } else {
+                lines.push(format!("{}  > Result: {}", indent, result));
+            }
+        }
+
+        lines.join("\n")
     }
 }
 
@@ -191,12 +344,19 @@ impl PlanPhase {
 
     /// Count completed tasks
     pub fn completed_count(&self) -> usize {
-        self.tasks.iter().filter(|t| t.completed).count()
+        self.tasks
+            .iter()
+            .filter(|t| t.completed || t.status == TaskStatus::Completed)
+            .count()
     }
 
     /// Check if all tasks are complete
     pub fn is_complete(&self) -> bool {
-        !self.tasks.is_empty() && self.tasks.iter().all(|t| t.completed)
+        !self.tasks.is_empty()
+            && self
+                .tasks
+                .iter()
+                .all(|t| t.completed || t.status == TaskStatus::Completed)
     }
 
     /// Format as markdown
@@ -205,8 +365,33 @@ impl PlanPhase {
             format!("## Phase {}: {}", self.number, self.name),
             String::new(),
         ];
-        for task in &self.tasks {
-            lines.push(task.to_markdown());
+
+        // Separate top-level tasks and subtasks
+        let top_level: Vec<_> = self
+            .tasks
+            .iter()
+            .filter(|t| t.parent_id.is_none())
+            .collect();
+
+        for task in top_level {
+            lines.push(task.to_markdown_with_depth(0));
+            // Add subtasks indented
+            for subtask in self
+                .tasks
+                .iter()
+                .filter(|t| t.parent_id.as_ref().map(|p| p == &task.id).unwrap_or(false))
+            {
+                lines.push(subtask.to_markdown_with_depth(1));
+                // Handle sub-subtasks (depth 2)
+                for subsubtask in self.tasks.iter().filter(|t| {
+                    t.parent_id
+                        .as_ref()
+                        .map(|p| p == &subtask.id)
+                        .unwrap_or(false)
+                }) {
+                    lines.push(subsubtask.to_markdown_with_depth(2));
+                }
+            }
         }
         lines.join("\n")
     }
@@ -292,15 +477,233 @@ impl PlanFile {
         None
     }
 
-    /// Mark a task as complete
+    /// Mark a task as complete (simple boolean, for backward compatibility)
     pub fn check_task(&mut self, task_id: &str) -> bool {
         if let Some(task) = self.find_task_mut(task_id) {
             task.completed = true;
+            task.status = TaskStatus::Completed;
+            task.completed_at = Some(Utc::now());
+            self.update_blocked_status();
             self.update_status();
             true
         } else {
             false
         }
+    }
+
+    /// Complete a task with a required result summary
+    pub fn complete_task(&mut self, task_id: &str, result: &str) -> Result<(), String> {
+        let task = self
+            .find_task_mut(task_id)
+            .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+        task.completed = true;
+        task.status = TaskStatus::Completed;
+        task.result = Some(result.to_string());
+        task.completed_at = Some(Utc::now());
+
+        // Update blocked status of dependent tasks
+        self.update_blocked_status();
+        self.update_status();
+        Ok(())
+    }
+
+    /// Start working on a task (marks as InProgress)
+    pub fn start_task(&mut self, task_id: &str) -> Result<(), String> {
+        // First check if task is blocked
+        if self.is_task_blocked(task_id) {
+            return Err(format!(
+                "Task {} is blocked by incomplete dependencies",
+                task_id
+            ));
+        }
+
+        let task = self
+            .find_task_mut(task_id)
+            .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+        task.status = TaskStatus::InProgress;
+        Ok(())
+    }
+
+    /// Check if a task is blocked by incomplete dependencies
+    pub fn is_task_blocked(&self, task_id: &str) -> bool {
+        let Some(task) = self.find_task(task_id) else {
+            return false;
+        };
+
+        task.blocked_by
+            .iter()
+            .any(|blocker_id| !self.is_task_completed(blocker_id))
+    }
+
+    /// Check if a task is completed
+    fn is_task_completed(&self, task_id: &str) -> bool {
+        self.find_task(task_id)
+            .map(|t| t.status == TaskStatus::Completed || t.completed)
+            .unwrap_or(false)
+    }
+
+    /// Update blocked status of all tasks based on dependencies
+    fn update_blocked_status(&mut self) {
+        // Collect task IDs and their blocked_by lists
+        let task_deps: Vec<(String, Vec<String>)> = self
+            .phases
+            .iter()
+            .flat_map(|p| &p.tasks)
+            .map(|t| (t.id.clone(), t.blocked_by.clone()))
+            .collect();
+
+        // Check which tasks should be blocked
+        let blocked_tasks: Vec<String> = task_deps
+            .iter()
+            .filter(|(_, blocked_by)| {
+                !blocked_by.is_empty()
+                    && blocked_by
+                        .iter()
+                        .any(|blocker| !self.is_task_completed(blocker))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        // Update task statuses
+        for phase in &mut self.phases {
+            for task in &mut phase.tasks {
+                if task.status == TaskStatus::Completed {
+                    continue; // Don't change completed tasks
+                }
+                if blocked_tasks.contains(&task.id) {
+                    task.status = TaskStatus::Blocked;
+                } else if task.status == TaskStatus::Blocked {
+                    // Unblock - revert to pending (unless in progress)
+                    task.status = TaskStatus::Pending;
+                }
+            }
+        }
+    }
+
+    /// Get tasks that are ready to work on (no unresolved blockers)
+    pub fn get_ready_tasks(&self) -> Vec<&PlanTask> {
+        self.phases
+            .iter()
+            .flat_map(|p| &p.tasks)
+            .filter(|t| {
+                t.status != TaskStatus::Completed
+                    && t.status != TaskStatus::Blocked
+                    && !self.is_task_blocked(&t.id)
+            })
+            .collect()
+    }
+
+    /// Get tasks that are blocked by incomplete dependencies
+    pub fn get_blocked_tasks(&self) -> Vec<&PlanTask> {
+        self.phases
+            .iter()
+            .flat_map(|p| &p.tasks)
+            .filter(|t| t.status == TaskStatus::Blocked || self.is_task_blocked(&t.id))
+            .collect()
+    }
+
+    /// Get all subtasks of a task
+    pub fn get_subtasks(&self, parent_id: &str) -> Vec<&PlanTask> {
+        self.phases
+            .iter()
+            .flat_map(|p| &p.tasks)
+            .filter(|t| t.parent_id.as_deref() == Some(parent_id))
+            .collect()
+    }
+
+    /// Add a subtask to an existing task
+    pub fn add_subtask(
+        &mut self,
+        parent_id: &str,
+        description: &str,
+        context: Option<&str>,
+    ) -> Result<String, String> {
+        // Find the parent task to determine the phase
+        let phase_number = self
+            .phases
+            .iter()
+            .find(|p| p.tasks.iter().any(|t| t.id == parent_id))
+            .map(|p| p.number)
+            .ok_or_else(|| format!("Parent task {} not found", parent_id))?;
+
+        // Count existing subtasks to generate ID
+        let existing_subtasks = self.get_subtasks(parent_id).len();
+        let subtask_id = format!("{}.{}", parent_id, existing_subtasks + 1);
+
+        // Create the subtask
+        let mut subtask = PlanTask::new_subtask(subtask_id.clone(), parent_id, description);
+        subtask.context = context.map(|s| s.to_string());
+
+        // Add to parent's children list
+        if let Some(parent) = self.find_task_mut(parent_id) {
+            parent.children.push(subtask_id.clone());
+        }
+
+        // Add to the appropriate phase
+        if let Some(phase) = self.phases.iter_mut().find(|p| p.number == phase_number) {
+            phase.tasks.push(subtask);
+        }
+
+        Ok(subtask_id)
+    }
+
+    /// Add a dependency between tasks (task_id is blocked by blocked_by_id)
+    pub fn add_dependency(&mut self, task_id: &str, blocked_by_id: &str) -> Result<(), String> {
+        // Verify both tasks exist
+        if self.find_task(task_id).is_none() {
+            return Err(format!("Task {} not found", task_id));
+        }
+        if self.find_task(blocked_by_id).is_none() {
+            return Err(format!("Blocker task {} not found", blocked_by_id));
+        }
+
+        // Check for circular dependency
+        if self.would_create_cycle(task_id, blocked_by_id) {
+            return Err(format!(
+                "Adding dependency would create cycle: {} -> {}",
+                task_id, blocked_by_id
+            ));
+        }
+
+        // Add to blocked_by list
+        if let Some(task) = self.find_task_mut(task_id) {
+            if !task.blocked_by.contains(&blocked_by_id.to_string()) {
+                task.blocked_by.push(blocked_by_id.to_string());
+            }
+        }
+
+        // Add to blocks list of the blocker
+        if let Some(blocker) = self.find_task_mut(blocked_by_id) {
+            if !blocker.blocks.contains(&task_id.to_string()) {
+                blocker.blocks.push(task_id.to_string());
+            }
+        }
+
+        // Update blocked status
+        self.update_blocked_status();
+        Ok(())
+    }
+
+    /// Check if adding a dependency would create a cycle
+    fn would_create_cycle(&self, task_id: &str, blocked_by_id: &str) -> bool {
+        // If blocked_by_id is already (transitively) blocked by task_id, adding this would create a cycle
+        let mut visited = std::collections::HashSet::new();
+        let mut stack = vec![blocked_by_id.to_string()];
+
+        while let Some(current) = stack.pop() {
+            if current == task_id {
+                return true;
+            }
+            if visited.insert(current.clone()) {
+                if let Some(task) = self.find_task(&current) {
+                    stack.extend(task.blocked_by.clone());
+                }
+            }
+        }
+
+        false
     }
 
     /// Update status based on task completion
@@ -542,17 +945,76 @@ impl PlanFile {
                 continue;
             }
 
-            // Parse task checkboxes
+            // Parse task metadata lines (> Context:, > Result:, > Blocked-By:)
+            if trimmed.starts_with("> ") || trimmed.starts_with(">") {
+                if let Some(ref mut phase) = current_phase {
+                    if let Some(last_task) = phase.tasks.last_mut() {
+                        let meta = trimmed
+                            .strip_prefix("> ")
+                            .unwrap_or(trimmed.strip_prefix(">").unwrap_or(""))
+                            .trim();
+                        if let Some(ctx) = meta.strip_prefix("Context:") {
+                            last_task.context = Some(ctx.trim().to_string());
+                        } else if let Some(result_with_ts) = meta.strip_prefix("Result") {
+                            // Handle "Result [timestamp]: text" or "Result: text"
+                            let result_text = if result_with_ts.starts_with(" [") {
+                                if let Some(bracket_end) = result_with_ts.find("]:") {
+                                    result_with_ts[bracket_end + 2..].trim()
+                                } else {
+                                    result_with_ts
+                                        .strip_prefix(":")
+                                        .unwrap_or(result_with_ts)
+                                        .trim()
+                                }
+                            } else {
+                                result_with_ts
+                                    .strip_prefix(":")
+                                    .unwrap_or(result_with_ts)
+                                    .trim()
+                            };
+                            last_task.result = Some(result_text.to_string());
+                        } else if let Some(blocked) = meta.strip_prefix("Blocked-By:") {
+                            last_task.blocked_by = blocked
+                                .split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Parse task checkboxes (with indentation detection for subtasks)
+            // Supported formats: [ ], [x], [X], [>] (in_progress), [~] (blocked)
+            let indent_level = line.len() - line.trim_start().len();
+            let is_subtask = indent_level >= 2;
+
             if trimmed.starts_with("- [ ]")
                 || trimmed.starts_with("- [x]")
                 || trimmed.starts_with("- [X]")
+                || trimmed.starts_with("- [>]")
+                || trimmed.starts_with("- [~]")
             {
                 if let Some(ref mut phase) = current_phase {
-                    let completed = trimmed.starts_with("- [x]") || trimmed.starts_with("- [X]");
+                    // Determine status from checkbox
+                    let (status, completed) =
+                        if trimmed.starts_with("- [x]") || trimmed.starts_with("- [X]") {
+                            (TaskStatus::Completed, true)
+                        } else if trimmed.starts_with("- [>]") {
+                            (TaskStatus::InProgress, false)
+                        } else if trimmed.starts_with("- [~]") {
+                            (TaskStatus::Blocked, false)
+                        } else {
+                            (TaskStatus::Pending, false)
+                        };
+
                     let task_text = trimmed
                         .strip_prefix("- [ ]")
                         .or_else(|| trimmed.strip_prefix("- [x]"))
                         .or_else(|| trimmed.strip_prefix("- [X]"))
+                        .or_else(|| trimmed.strip_prefix("- [>]"))
+                        .or_else(|| trimmed.strip_prefix("- [~]"))
                         .unwrap_or("")
                         .trim();
 
@@ -564,21 +1026,35 @@ impl PlanFile {
                             let desc = after_task[colon_pos + 1..].trim().to_string();
                             (id, desc)
                         } else {
-                            // Generate ID
                             let id = format!("{}.{}", phase.number, phase.tasks.len() + 1);
                             (id, after_task.to_string())
                         }
                     } else {
-                        // No "Task X.Y:" prefix, generate ID
                         let id = format!("{}.{}", phase.number, phase.tasks.len() + 1);
                         (id, task_text.to_string())
                     };
 
-                    phase.tasks.push(PlanTask {
-                        id,
-                        description,
-                        completed,
-                    });
+                    // Determine parent_id for subtasks based on ID structure
+                    let parent_id = if is_subtask {
+                        // For subtasks like "1.1.1", parent is "1.1"
+                        id.rfind('.').map(|pos| id[..pos].to_string())
+                    } else {
+                        None
+                    };
+
+                    let mut task = PlanTask::new(id.clone(), description);
+                    task.parent_id = parent_id.clone();
+                    task.completed = completed;
+                    task.status = status;
+
+                    // If this is a subtask, add to parent's children
+                    if let Some(ref pid) = parent_id {
+                        if let Some(parent_task) = phase.tasks.iter_mut().find(|t| t.id == *pid) {
+                            parent_task.children.push(id);
+                        }
+                    }
+
+                    phase.tasks.push(task);
                 }
             }
         }
@@ -671,16 +1147,54 @@ impl PlanFile {
                 continue;
             }
 
-            // Parse task checkboxes: "- [ ] Description" or "- [x] Description"
+            // Parse task metadata lines
+            if trimmed.starts_with("> ") || trimmed.starts_with(">") {
+                if let Some(ref mut phase) = current_phase {
+                    if let Some(last_task) = phase.tasks.last_mut() {
+                        let meta = trimmed
+                            .strip_prefix("> ")
+                            .unwrap_or(trimmed.strip_prefix(">").unwrap_or(""))
+                            .trim();
+                        if let Some(ctx) = meta.strip_prefix("Context:") {
+                            last_task.context = Some(ctx.trim().to_string());
+                        } else if let Some(result_text) = meta.strip_prefix("Result:") {
+                            last_task.result = Some(result_text.trim().to_string());
+                        } else if let Some(blocked) = meta.strip_prefix("Blocked-By:") {
+                            last_task.blocked_by = blocked
+                                .split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Parse task checkboxes: "- [ ] Description", "- [x] Description", "- [>] Description", "- [~] Description"
             if trimmed.starts_with("- [ ]")
                 || trimmed.starts_with("- [x]")
                 || trimmed.starts_with("- [X]")
+                || trimmed.starts_with("- [>]")
+                || trimmed.starts_with("- [~]")
             {
-                let completed = trimmed.starts_with("- [x]") || trimmed.starts_with("- [X]");
+                let (status, completed) =
+                    if trimmed.starts_with("- [x]") || trimmed.starts_with("- [X]") {
+                        (TaskStatus::Completed, true)
+                    } else if trimmed.starts_with("- [>]") {
+                        (TaskStatus::InProgress, false)
+                    } else if trimmed.starts_with("- [~]") {
+                        (TaskStatus::Blocked, false)
+                    } else {
+                        (TaskStatus::Pending, false)
+                    };
+
                 let task_text = trimmed
                     .strip_prefix("- [ ]")
                     .or_else(|| trimmed.strip_prefix("- [x]"))
                     .or_else(|| trimmed.strip_prefix("- [X]"))
+                    .or_else(|| trimmed.strip_prefix("- [>]"))
+                    .or_else(|| trimmed.strip_prefix("- [~]"))
                     .unwrap_or("")
                     .trim();
 
@@ -700,11 +1214,10 @@ impl PlanFile {
                 let (id, description) =
                     Self::parse_task_text(task_text, phase.number, phase.tasks.len() + 1);
 
-                phase.tasks.push(PlanTask {
-                    id,
-                    description,
-                    completed,
-                });
+                let mut task = PlanTask::new(id, description);
+                task.completed = completed;
+                task.status = status;
+                phase.tasks.push(task);
                 found_any_structure = true;
             }
         }
@@ -822,12 +1335,35 @@ impl PlanFile {
                         existing.tasks.iter_mut().find(|t| t.id == other_task.id)
                     {
                         // Update completion status (prefer completed)
-                        if other_task.completed {
+                        if other_task.completed || other_task.status == TaskStatus::Completed {
                             existing_task.completed = true;
+                            existing_task.status = TaskStatus::Completed;
+                            if existing_task.completed_at.is_none() {
+                                existing_task.completed_at = other_task.completed_at;
+                            }
                         }
                         // Update description if changed
                         if !other_task.description.is_empty() {
                             existing_task.description = other_task.description.clone();
+                        }
+                        // Merge context if provided
+                        if other_task.context.is_some() {
+                            existing_task.context = other_task.context.clone();
+                        }
+                        // Merge result if provided
+                        if other_task.result.is_some() {
+                            existing_task.result = other_task.result.clone();
+                        }
+                        // Merge dependencies
+                        for dep in &other_task.blocked_by {
+                            if !existing_task.blocked_by.contains(dep) {
+                                existing_task.blocked_by.push(dep.clone());
+                            }
+                        }
+                        for dep in &other_task.blocks {
+                            if !existing_task.blocks.contains(dep) {
+                                existing_task.blocks.push(dep.clone());
+                            }
                         }
                     } else {
                         // Add new task

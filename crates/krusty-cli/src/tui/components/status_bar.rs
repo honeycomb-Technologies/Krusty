@@ -116,7 +116,7 @@ fn build_commands_for_width<'a>(width: usize, theme: &'a Theme) -> Vec<Span<'a>>
     let commands: [(&str, &str, usize); 5] = [
         (" ^Q ", "quit ", 10), // highest priority
         (" Esc ", "stop ", 11),
-        (" ^P ", "procs ", 11),
+        (" ^B ", "procs ", 11),
         (" Shift+↵ ", "newline ", 18),
         (" Tab ", "thinking ", 15), // lowest priority
     ];

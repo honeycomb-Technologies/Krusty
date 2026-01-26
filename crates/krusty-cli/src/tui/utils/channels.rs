@@ -60,6 +60,23 @@ pub struct OAuthStatusUpdate {
     pub token: Option<krusty_core::auth::OAuthTokenData>,
 }
 
+/// Dual-mind dialogue update from tool execution
+pub struct DualMindUpdate {
+    /// The dialogue content (formatted for display)
+    pub dialogue: String,
+    /// Whether this is a pre-review or post-review
+    pub phase: DualMindPhase,
+    /// Enhancement critique if issues were found
+    pub enhancement: Option<String>,
+}
+
+/// Phase of dual-mind review
+#[derive(Debug, Clone, Copy)]
+pub enum DualMindPhase {
+    PreReview,
+    PostReview,
+}
+
 /// Device code information for OAuth device flow
 pub struct DeviceCodeInfo {
     pub user_code: String,
@@ -105,6 +122,8 @@ pub struct AsyncChannels {
     pub update_status: Option<mpsc::UnboundedReceiver<krusty_core::updater::UpdateStatus>>,
     /// OAuth authentication status updates
     pub oauth_status: Option<mpsc::UnboundedReceiver<OAuthStatusUpdate>>,
+    /// Dual-mind dialogue updates from tool execution
+    pub dual_mind: Option<mpsc::UnboundedReceiver<DualMindUpdate>>,
 }
 
 impl AsyncChannels {

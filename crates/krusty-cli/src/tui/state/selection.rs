@@ -83,6 +83,10 @@ pub enum DragTarget {
     Messages(ScrollbarDrag),
     /// Plan sidebar scrollbar
     PlanSidebar,
+    /// Plugin window scrollbar
+    PluginWindow,
+    /// Plugin/plan divider (for resizing)
+    PluginDivider { start_y: u16, start_position: f32 },
     /// Block scrollbar (consolidated for all block types)
     Block(BlockScrollbarDrag),
 }

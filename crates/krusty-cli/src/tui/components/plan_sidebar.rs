@@ -21,7 +21,7 @@ pub struct PlanSidebarRenderResult {
 }
 
 use super::scrollbars::render_scrollbar;
-use crate::plan::PlanFile;
+use crate::plan::{PlanFile, PlanTask, TaskStatus};
 use crate::tui::themes::Theme;
 
 /// Sidebar width when fully expanded
@@ -35,9 +35,6 @@ const PAD_X: u16 = 2;
 
 /// Number of blank lines between phases
 const PHASE_GAP_LINES: usize = 2;
-
-/// Indentation for wrapped task continuation lines (aligns with description start)
-const TASK_CONTINUATION_INDENT: &str = "    ";
 
 /// Plan sidebar state with content caching
 #[derive(Debug, Clone, Default)]
@@ -264,10 +261,6 @@ pub fn render_plan_sidebar(
         // Blank line after separator
         state.cached_lines.push(Line::from(""));
 
-        // Task prefix width: "  " + checkbox + " " = 4 columns
-        let task_prefix_width = 4usize;
-        let task_wrap_width = wrap_width.saturating_sub(task_prefix_width).max(10);
-
         for (i, phase) in plan.phases.iter().enumerate() {
             // Phase header (wrapped)
             let phase_title = format!("Phase {}: {}", phase.number, phase.name);
@@ -281,37 +274,39 @@ pub fn render_plan_sidebar(
                     .push(Line::from(Span::styled(wrapped_line, header_style)));
             }
 
-            // Tasks
-            for task in &phase.tasks {
-                let checkbox = if task.completed { "✓" } else { "○" };
-                let checkbox_color = if task.completed {
-                    theme.success_color
-                } else {
-                    theme.dim_color
-                };
-                let task_style = if task.completed {
-                    Style::default().fg(theme.dim_color)
-                } else {
-                    Style::default().fg(theme.text_color)
-                };
+            // Separate top-level tasks and subtasks
+            let top_level: Vec<_> = phase
+                .tasks
+                .iter()
+                .filter(|t| t.parent_id.is_none())
+                .collect();
 
-                let wrapped_desc = wrap_text(&task.description, task_wrap_width);
+            for task in top_level {
+                // Render the task
+                render_task_to_lines(task, 0, wrap_width, theme, &mut state.cached_lines);
 
-                for (line_idx, desc_line) in wrapped_desc.into_iter().enumerate() {
-                    if line_idx == 0 {
-                        // First line: checkbox prefix
-                        state.cached_lines.push(Line::from(vec![
-                            Span::raw("  "),
-                            Span::styled(checkbox, Style::default().fg(checkbox_color)),
-                            Span::raw(" "),
-                            Span::styled(desc_line, task_style),
-                        ]));
-                    } else {
-                        // Continuation lines: indented to align with description
-                        state.cached_lines.push(Line::from(vec![
-                            Span::raw(TASK_CONTINUATION_INDENT),
-                            Span::styled(desc_line, task_style),
-                        ]));
+                // Render subtasks (depth 1)
+                for subtask in phase
+                    .tasks
+                    .iter()
+                    .filter(|t| t.parent_id.as_ref().map(|p| p == &task.id).unwrap_or(false))
+                {
+                    render_task_to_lines(subtask, 1, wrap_width, theme, &mut state.cached_lines);
+
+                    // Render sub-subtasks (depth 2)
+                    for subsubtask in phase.tasks.iter().filter(|t| {
+                        t.parent_id
+                            .as_ref()
+                            .map(|p| p == &subtask.id)
+                            .unwrap_or(false)
+                    }) {
+                        render_task_to_lines(
+                            subsubtask,
+                            2,
+                            wrap_width,
+                            theme,
+                            &mut state.cached_lines,
+                        );
                     }
                 }
             }
@@ -406,11 +401,122 @@ fn hash_plan(plan: &PlanFile) -> u64 {
         phase.name.hash(&mut hasher);
         phase.tasks.len().hash(&mut hasher);
         for task in &phase.tasks {
+            task.id.hash(&mut hasher);
             task.description.hash(&mut hasher);
             task.completed.hash(&mut hasher);
+            // Hash new fields for cache invalidation
+            std::mem::discriminant(&task.status).hash(&mut hasher);
+            task.parent_id.hash(&mut hasher);
+            task.context.hash(&mut hasher);
+            task.result.hash(&mut hasher);
+            task.blocked_by.len().hash(&mut hasher);
+            task.children.len().hash(&mut hasher);
         }
     }
     hasher.finish()
+}
+
+/// Render a single task to cached lines with proper indentation and status indicators
+fn render_task_to_lines(
+    task: &PlanTask,
+    depth: usize,
+    wrap_width: usize,
+    theme: &Theme,
+    lines: &mut Vec<Line<'static>>,
+) {
+    // Indentation: 2 spaces per depth level
+    let indent = "  ".repeat(depth);
+    let indent_width = depth * 2;
+
+    // Status indicators:
+    // ○ Pending, ◐ InProgress, ✓ Completed, ⊘ Blocked
+    let (indicator, indicator_color) = match task.status {
+        TaskStatus::Completed => ("✓", theme.success_color),
+        TaskStatus::InProgress => ("◐", theme.accent_color),
+        TaskStatus::Blocked => ("⊘", theme.error_color),
+        TaskStatus::Pending => ("○", theme.dim_color),
+    };
+
+    // Task text style based on status
+    let task_style = match task.status {
+        TaskStatus::Completed => Style::default().fg(theme.dim_color),
+        TaskStatus::Blocked => Style::default().fg(theme.dim_color),
+        TaskStatus::InProgress => Style::default()
+            .fg(theme.text_color)
+            .add_modifier(Modifier::BOLD),
+        TaskStatus::Pending => Style::default().fg(theme.text_color),
+    };
+
+    // Calculate available width for task description
+    // Format: "{indent}{indicator} {description}"
+    let prefix_width = indent_width + 2; // indicator + space
+    let task_wrap_width = wrap_width.saturating_sub(prefix_width).max(10);
+
+    let wrapped_desc = wrap_text(&task.description, task_wrap_width);
+
+    for (line_idx, desc_line) in wrapped_desc.into_iter().enumerate() {
+        if line_idx == 0 {
+            // First line: indent + indicator + description
+            lines.push(Line::from(vec![
+                Span::raw(indent.clone()),
+                Span::styled(indicator, Style::default().fg(indicator_color)),
+                Span::raw(" "),
+                Span::styled(desc_line, task_style),
+            ]));
+        } else {
+            // Continuation lines: indented to align with description
+            let continuation_indent = "  ".repeat(depth) + "  "; // +2 for indicator alignment
+            lines.push(Line::from(vec![
+                Span::raw(continuation_indent),
+                Span::styled(desc_line, task_style),
+            ]));
+        }
+    }
+
+    // Show context preview if present (dimmed, one line)
+    if let Some(ref ctx) = task.context {
+        let context_indent = "  ".repeat(depth + 1);
+        let context_width = wrap_width.saturating_sub(indent_width + 2).max(10);
+        let preview = if ctx.len() > context_width {
+            format!("{}...", &ctx[..context_width.saturating_sub(3)])
+        } else {
+            ctx.clone()
+        };
+        lines.push(Line::from(vec![
+            Span::raw(context_indent),
+            Span::styled(preview, Style::default().fg(theme.dim_color)),
+        ]));
+    }
+
+    // Show blocked-by info if present (dimmed)
+    if !task.blocked_by.is_empty() && task.status == TaskStatus::Blocked {
+        let blocked_indent = "  ".repeat(depth + 1);
+        let blocked_text = format!("blocked by: {}", task.blocked_by.join(", "));
+        lines.push(Line::from(vec![
+            Span::raw(blocked_indent),
+            Span::styled(blocked_text, Style::default().fg(theme.error_color)),
+        ]));
+    }
+
+    // Show result if completed (dimmed, one line)
+    if let Some(ref result) = task.result {
+        if task.status == TaskStatus::Completed {
+            let result_indent = "  ".repeat(depth + 1);
+            let result_width = wrap_width.saturating_sub(indent_width + 2).max(10);
+            let preview = if result.len() > result_width {
+                format!("{}...", &result[..result_width.saturating_sub(3)])
+            } else {
+                result.clone()
+            };
+            lines.push(Line::from(vec![
+                Span::raw(result_indent),
+                Span::styled(
+                    format!("→ {}", preview),
+                    Style::default().fg(theme.success_color),
+                ),
+            ]));
+        }
+    }
 }
 
 /// Word-wrap text to fit within max_width display columns

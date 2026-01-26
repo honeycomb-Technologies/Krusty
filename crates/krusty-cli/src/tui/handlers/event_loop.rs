@@ -4,7 +4,8 @@
 
 use crate::tui::app::{App, View};
 use crate::tui::polling::{
-    poll_bash_output, poll_build_progress, poll_explore_progress, PollAction, PollResult,
+    poll_bash_output, poll_build_progress, poll_dual_mind, poll_explore_progress, PollAction,
+    PollResult,
 };
 
 impl App {
@@ -31,6 +32,11 @@ impl App {
             &mut self.active_plan,
             &self.services.plan_manager,
         )
+    }
+
+    /// Poll dual-mind dialogue channel for Big Claw / Little Claw updates
+    pub(crate) fn poll_dual_mind(&mut self) -> PollResult {
+        poll_dual_mind(&mut self.channels)
     }
 
     /// Poll terminal panes for PTY output and update cursor animations
@@ -71,6 +77,7 @@ impl App {
         let blocks = self.blocks.tick_all();
         self.popups.pinch.tick();
         let sidebar = self.plan_sidebar.tick();
+        let plugin_window = self.plugin_window.tick();
 
         if self.plan_sidebar.should_clear_plan() {
             self.active_plan = None;
@@ -83,6 +90,6 @@ impl App {
             PinchStage::Summarizing { .. } | PinchStage::Creating
         );
 
-        blocks || sidebar || pinch_active || self.ui.view == View::StartMenu
+        blocks || sidebar || plugin_window || pinch_active || self.ui.view == View::StartMenu
     }
 }

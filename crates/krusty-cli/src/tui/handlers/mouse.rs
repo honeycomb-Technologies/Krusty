@@ -107,6 +107,40 @@ impl App {
             }
         }
 
+        // Check if over plugin window
+        if let Some(area) = self.scroll_system.layout.plugin_window_area {
+            if area.contains(Position::new(x, y)) {
+                // First, pass scroll event to the active plugin (for volume control, etc.)
+                if let Some(plugin) = self.plugin_window.active_plugin_mut() {
+                    let mouse_event_kind = match direction {
+                        ScrollDirection::Up => MouseEventKind::ScrollUp,
+                        ScrollDirection::Down => MouseEventKind::ScrollDown,
+                    };
+                    let event = crossterm::event::Event::Mouse(MouseEvent {
+                        kind: mouse_event_kind,
+                        column: x,
+                        row: y,
+                        modifiers: crossterm::event::KeyModifiers::NONE,
+                    });
+                    use crate::tui::plugins::PluginEventResult;
+                    if matches!(
+                        plugin.handle_event(&event, area),
+                        PluginEventResult::Consumed
+                    ) {
+                        return;
+                    }
+                }
+
+                // Default scroll behavior if plugin didn't handle it
+                let visible_height = area.height.saturating_sub(2) as usize;
+                match direction {
+                    ScrollDirection::Up => self.plugin_window.scroll_up(),
+                    ScrollDirection::Down => self.plugin_window.scroll_down(visible_height),
+                }
+                return;
+            }
+        }
+
         // Check if over pinned terminal at top
         if let (Some(pinned_idx), Some(pinned_area)) = (
             self.blocks.pinned_terminal,
@@ -227,6 +261,69 @@ impl App {
                 self.scroll_system.layout.dragging_scrollbar = Some(DragTarget::PlanSidebar);
                 return;
             }
+        }
+
+        // Check plugin divider click (for resize dragging)
+        if let Some(area) = self.scroll_system.layout.plugin_divider_area {
+            if area.contains(Position::new(x, y)) {
+                self.scroll_system.layout.dragging_scrollbar = Some(DragTarget::PluginDivider {
+                    start_y: y,
+                    start_position: self.plugin_window.divider_position,
+                });
+                return;
+            }
+        }
+
+        // Check plugin window scrollbar click
+        if let Some(area) = self.scroll_system.layout.plugin_window_scrollbar_area {
+            if area.contains(Position::new(x, y)) {
+                self.scroll_system.layout.dragging_scrollbar = Some(DragTarget::PluginWindow);
+                return;
+            }
+        }
+
+        // Check plugin window click (for plugin switcher or content interaction)
+        if let Some(area) = self.scroll_system.layout.plugin_window_area {
+            if area.contains(Position::new(x, y)) {
+                // Focus the plugin window on click
+                self.plugin_window.focus();
+
+                // Check if clicking on switcher area (bottom line)
+                let switcher_y = area.y + area.height - 2;
+                if y == switcher_y {
+                    // Check if clicking left arrow (prev) or right arrow (next)
+                    let center_x = area.x + area.width / 2;
+                    if x < center_x {
+                        self.plugin_window.prev_plugin();
+                    } else {
+                        self.plugin_window.next_plugin();
+                    }
+                    // Save active plugin to preferences
+                    if let (Some(prefs), Some(id)) = (
+                        &self.services.preferences,
+                        &self.plugin_window.active_plugin_id,
+                    ) {
+                        let _ = prefs.set_active_plugin(id);
+                    }
+                    return;
+                }
+
+                // Pass event to plugin if it handles clicks
+                if let Some(plugin) = self.plugin_window.active_plugin_mut() {
+                    use crate::tui::plugins::PluginEventResult;
+                    let event = crossterm::event::Event::Mouse(mouse);
+                    match plugin.handle_event(&event, area) {
+                        PluginEventResult::Consumed => return,
+                        PluginEventResult::Ignored => {}
+                    }
+                }
+                return;
+            }
+        }
+
+        // Clicking elsewhere unfocuses plugin window
+        if self.plugin_window.focused {
+            self.plugin_window.unfocus();
         }
 
         // Check block clicks
@@ -748,6 +845,14 @@ impl App {
     fn update_hover_state(&mut self, x: u16, y: u16) {
         // Always update mouse position (cheap)
         self.scroll_system.hover.mouse_pos = Some((x, y));
+
+        // Check if hovering over plugin divider (cheap check, no throttle needed)
+        self.scroll_system.layout.plugin_divider_hovered =
+            if let Some(area) = self.scroll_system.layout.plugin_divider_area {
+                area.contains(Position::new(x, y))
+            } else {
+                false
+            };
 
         // Throttle expensive detection operations
         if !self.scroll_system.hover.should_detect() {

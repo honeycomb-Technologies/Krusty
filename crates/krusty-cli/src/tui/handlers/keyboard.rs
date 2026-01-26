@@ -2,7 +2,7 @@
 //!
 //! Main keyboard input handling. Popup-specific key handlers are in popup_keys.rs.
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::agent::{AgentEvent, InterruptReason};
 use crate::tui::app::{App, Popup, View};
@@ -11,20 +11,67 @@ use crate::tui::utils::TitleAction;
 
 impl App {
     /// Main keyboard event dispatcher
-    pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        // Handle title editing mode first
+    pub fn handle_key(&mut self, key_event: KeyEvent) {
+        let code = key_event.code;
+        let modifiers = key_event.modifiers;
+        let is_press =
+            key_event.kind == KeyEventKind::Press || key_event.kind == KeyEventKind::Repeat;
+
+        // Handle title editing mode first (ignore Release events)
         if self.title_editor.is_editing {
-            match self.title_editor.handle_key(code, modifiers) {
-                TitleAction::Save => self.save_title_edit(),
-                TitleAction::Cancel => self.cancel_title_edit(),
-                TitleAction::Continue => {}
+            if is_press {
+                match self.title_editor.handle_key(code, modifiers) {
+                    TitleAction::Save => self.save_title_edit(),
+                    TitleAction::Cancel => self.cancel_title_edit(),
+                    TitleAction::Continue => {}
+                }
             }
             return;
         }
 
-        // Handle popups first
+        // Handle popups first (ignore Release events)
         if self.ui.popup != Popup::None {
-            self.handle_popup_key(code, modifiers);
+            if is_press {
+                self.handle_popup_key(code, modifiers);
+            }
+            return;
+        }
+
+        // Handle plugin window focus - route keys to plugin
+        if self.plugin_window.focused {
+            // Delete unfocuses the plugin window (Esc is used by plugin menus)
+            if code == KeyCode::Delete {
+                self.plugin_window.unfocus();
+                return;
+            }
+            // Ctrl+Q still quits
+            if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('q') {
+                self.should_quit = true;
+                return;
+            }
+            // Ctrl+P toggles plugin window visibility
+            if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('p') {
+                // Load preferred plugin from preferences on first open
+                let preferred = self
+                    .services
+                    .preferences
+                    .as_ref()
+                    .and_then(|p| p.get_active_plugin());
+                self.plugin_window.toggle(preferred.as_deref());
+                return;
+            }
+            // Forward all other keys to the plugin (pass full event for key release detection)
+            let area = self.plugin_window.last_area;
+            if let Some(plugin) = self.plugin_window.active_plugin_mut() {
+                use crate::tui::plugins::PluginEventResult;
+                let event = crossterm::event::Event::Key(key_event);
+                if let Some(area) = area {
+                    match plugin.handle_event(&event, area) {
+                        PluginEventResult::Consumed => return,
+                        PluginEventResult::Ignored => {}
+                    }
+                }
+            }
             return;
         }
 
@@ -42,9 +89,13 @@ impl App {
             }
             // Forward all other keys to the terminal
             if let Some(tp) = self.blocks.terminal.get_mut(idx) {
-                let key_event = crossterm::event::KeyEvent::new(code, modifiers);
                 let _ = tp.handle_key(key_event);
             }
+            return;
+        }
+
+        // For regular input handling, ignore Release events (only plugins/terminals need them)
+        if !is_press {
             return;
         }
 
@@ -131,11 +182,10 @@ impl App {
             return;
         }
 
-        // Ctrl+B to toggle work mode (BUILD/PLAN)
+        // Ctrl+B to open process list
         if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('b') {
-            let old_mode = self.ui.work_mode;
-            self.ui.work_mode = self.ui.work_mode.toggle();
-            tracing::info!(from = ?old_mode, to = ?self.ui.work_mode, "Work mode toggled via Ctrl+B");
+            self.refresh_process_popup();
+            self.ui.popup = Popup::ProcessList;
             return;
         }
 
@@ -147,10 +197,22 @@ impl App {
             return;
         }
 
-        // Ctrl+P to open process list
+        // Ctrl+P to toggle plugin window
         if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('p') {
-            self.refresh_process_popup();
-            self.ui.popup = Popup::ProcessList;
+            let preferred = self
+                .services
+                .preferences
+                .as_ref()
+                .and_then(|p| p.get_active_plugin());
+            self.plugin_window.toggle(preferred.as_deref());
+            return;
+        }
+
+        // Ctrl+G to toggle work mode (BUILD/PLAN)
+        if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('g') {
+            let old_mode = self.ui.work_mode;
+            self.ui.work_mode = self.ui.work_mode.toggle();
+            tracing::info!(from = ?old_mode, to = ?self.ui.work_mode, "Work mode toggled via Ctrl+G");
             return;
         }
 

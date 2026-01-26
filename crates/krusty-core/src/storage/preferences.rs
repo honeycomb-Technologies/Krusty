@@ -147,4 +147,14 @@ impl Preferences {
 
         cached_at == 0 || (unix_timestamp() - cached_at) > 86400
     }
+
+    /// Get active plugin ID
+    pub fn get_active_plugin(&self) -> Option<String> {
+        self.get("active_plugin")
+    }
+
+    /// Save active plugin ID
+    pub fn set_active_plugin(&self, plugin_id: &str) -> Result<()> {
+        self.set("active_plugin", plugin_id)
+    }
 }

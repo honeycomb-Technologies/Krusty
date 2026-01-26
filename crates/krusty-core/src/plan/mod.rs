@@ -16,5 +16,5 @@
 mod file;
 mod manager;
 
-pub use file::{PlanFile, PlanStatus};
+pub use file::{PlanFile, PlanPhase, PlanStatus, PlanTask, TaskStatus};
 pub use manager::PlanManager;

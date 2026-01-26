@@ -25,6 +25,14 @@ pub struct LayoutState {
     pub plan_sidebar_area: Option<Rect>,
     /// Plan sidebar scrollbar track area
     pub plan_sidebar_scrollbar_area: Option<Rect>,
+    /// Plugin window area
+    pub plugin_window_area: Option<Rect>,
+    /// Plugin window scrollbar track area
+    pub plugin_window_scrollbar_area: Option<Rect>,
+    /// Plugin/plan divider area (for drag resizing)
+    pub plugin_divider_area: Option<Rect>,
+    /// Whether mouse is hovering over the plugin divider
+    pub plugin_divider_hovered: bool,
     /// Decision prompt area (when visible)
     pub prompt_area: Option<Rect>,
     /// Currently dragging scrollbar (if any)
