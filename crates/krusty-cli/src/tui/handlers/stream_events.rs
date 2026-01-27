@@ -338,7 +338,10 @@ impl App {
                 | "explore"
                 | "build"
                 | "AskUserQuestion"
+                | "task_start"         // Silent - updates plan sidebar
                 | "task_complete"      // Silent - updates plan sidebar
+                | "add_subtask"        // Silent - updates plan sidebar
+                | "set_dependency"     // Silent - updates plan sidebar
                 | "enter_plan_mode" // Silent - updates status bar
         ) {
             self.chat
@@ -970,6 +973,11 @@ impl App {
 
     /// Check and execute pending tools when ready
     pub fn check_and_execute_tools(&mut self) {
+        // Don't execute tools while decision prompt is visible (waiting for user input)
+        if self.decision_prompt.visible {
+            return;
+        }
+
         if self.streaming.is_ready_for_tools() && self.channels.tool_results.is_none() {
             // Build and save assistant message BEFORE executing tools
             if let Some(assistant_msg) = self.streaming.build_assistant_message() {

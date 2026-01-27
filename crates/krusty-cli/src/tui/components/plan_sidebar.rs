@@ -477,11 +477,7 @@ fn render_task_to_lines(
     if let Some(ref ctx) = task.context {
         let context_indent = "  ".repeat(depth + 1);
         let context_width = wrap_width.saturating_sub(indent_width + 2).max(10);
-        let preview = if ctx.len() > context_width {
-            format!("{}...", &ctx[..context_width.saturating_sub(3)])
-        } else {
-            ctx.clone()
-        };
+        let preview = truncate_to_width(ctx, context_width);
         lines.push(Line::from(vec![
             Span::raw(context_indent),
             Span::styled(preview, Style::default().fg(theme.dim_color)),
@@ -502,12 +498,9 @@ fn render_task_to_lines(
     if let Some(ref result) = task.result {
         if task.status == TaskStatus::Completed {
             let result_indent = "  ".repeat(depth + 1);
-            let result_width = wrap_width.saturating_sub(indent_width + 2).max(10);
-            let preview = if result.len() > result_width {
-                format!("{}...", &result[..result_width.saturating_sub(3)])
-            } else {
-                result.clone()
-            };
+            // Account for "→ " prefix (3 display columns)
+            let result_width = wrap_width.saturating_sub(indent_width + 2 + 3).max(10);
+            let preview = truncate_to_width(result, result_width);
             lines.push(Line::from(vec![
                 Span::raw(result_indent),
                 Span::styled(
@@ -517,6 +510,36 @@ fn render_task_to_lines(
             ]));
         }
     }
+}
+
+/// Truncate a string to fit within a maximum display width, adding "..." if truncated
+/// Uses unicode width for proper handling of wide characters
+fn truncate_to_width(s: &str, max_width: usize) -> String {
+    if max_width < 4 {
+        return s.chars().take(max_width).collect();
+    }
+
+    let s_width = s.width();
+    if s_width <= max_width {
+        return s.to_string();
+    }
+
+    // Need to truncate - reserve 3 chars for "..."
+    let target_width = max_width.saturating_sub(3);
+    let mut result = String::new();
+    let mut width = 0;
+
+    for c in s.chars() {
+        let char_width = c.width().unwrap_or(1);
+        if width + char_width > target_width {
+            break;
+        }
+        result.push(c);
+        width += char_width;
+    }
+
+    result.push_str("...");
+    result
 }
 
 /// Word-wrap text to fit within max_width display columns
