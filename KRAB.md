@@ -1,6 +1,6 @@
 # Krusty
 
-Terminal-based AI coding assistant with Claude API and Zed's WASM extension system.
+Terminal-based AI coding assistant with multi-provider AI support and Zed's WASM extension system.
 
 ## Tech Stack
 
@@ -21,7 +21,7 @@ Terminal-based AI coding assistant with Claude API and Zed's WASM extension syst
 ## KEY MODULES IN KRUSTY-CORE
 
 - **agent**: Event bus, state tracking, hooks system, sub-agents, build context coordination (Octopod swarm)
-- **ai**: Anthropic Claude API client with streaming, SSE parsing, title generation, OpenRouter support
+- **ai**: Multi-provider AI client with streaming, SSE parsing, title generation, OpenRouter support
 - **auth**: (deprecated - API keys now stored in storage/credentials)
 - **extensions**: Zed-compatible WASM extension host (wasmtime), manifest parsing, GitHub integration
 - **lsp**: Language server protocol client with JSON-RPC transport, diagnostics, and downloader for Zed extensions
@@ -46,7 +46,7 @@ Terminal-based AI coding assistant with Claude API and Zed's WASM extension syst
 
 5. **Builder Swarm (Octopod)** - `SharedBuildContext` coordinates concurrent Opus agents with file locks, conventions, and diff tracking
 
-6. **Sub-agent Pool** - Lightweight parallel agents (Haiku/Sonnet) for codebase exploration with limited tool access
+6. **Sub-agent Pool** - Lightweight parallel agents for codebase exploration with limited tool access
 
 7. **Cache Pattern** - `SharedExploreCache` and moka caches for expensive operations
 
@@ -73,7 +73,7 @@ Terminal-based AI coding assistant with Claude API and Zed's WASM extension syst
 - `crates/krusty-core/src/lib.rs` - Core library exposing agent, AI, auth, storage, tools, extensions modules
 - `crates/krusty-core/src/tools/registry.rs` - Tool registry managing execution, hooks, timeouts, and context
 - `crates/krusty-core/src/agent/mod.rs` - Agent system with event bus, state tracking, hooks, and sub-agents
-- `crates/krusty-core/src/ai/anthropic/client.rs` - Anthropic Claude API client with streaming and tool execution
+- `crates/krusty-core/src/ai/client/core.rs` - AI API client with streaming and tool execution
 - `crates/krusty-core/src/storage/database.rs` - SQLite database wrapper with versioned migrations and schema management
 - `crates/krusty-core/src/extensions/mod.rs` - Zed-compatible WASM extension system for language servers
 - `crates/krusty-core/src/lsp/manager.rs` - LSP manager coordinating multiple language servers and diagnostics
@@ -105,7 +105,7 @@ Terminal-based AI coding assistant with Claude API and Zed's WASM extension syst
 
 **Naming Conventions:**
 - Module naming: lowercase snake_case (`tools`, `extensions`, `lsp`)
-- Struct naming: PascalCase (`SkillsManager`, `PlanManager`, `ToolRegistry`, `AnthropicClient`)
+- Struct naming: PascalCase (`SkillsManager`, `PlanManager`, `ToolRegistry`, `AiClient`)
 - Function naming: snake_case (`parse_frontmatter`, `build_tree`, `create_session`)
 - Enum naming: PascalCase variants (`SkillSource::Global`)
 - Tool implementation files: Named after tool function (bash.rs, read.rs, write.rs, glob.rs, grep.rs, explore.rs, edit.rs)
