@@ -18,13 +18,11 @@ pub mod brick_breaker;
 pub mod gamepad;
 pub mod kitty_graphics;
 pub mod libretro;
-pub mod pew_pew;
 pub mod retroarch;
 
 pub use brick_breaker::BrickBreakerPlugin;
 pub use gamepad::GamepadHandler;
 pub use kitty_graphics::{KittyGraphics, PluginFrame};
-pub use pew_pew::PewPewPlugin;
 pub use retroarch::RetroArchPlugin;
 
 /// Result of plugin event handling
@@ -104,7 +102,6 @@ pub fn builtin_plugins() -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(RetroArchPlugin::new()),
         Box::new(BrickBreakerPlugin::new()),
-        Box::new(PewPewPlugin::new()),
     ]
 }
 
@@ -113,7 +110,6 @@ pub fn get_plugin_by_id(id: &str) -> Option<Box<dyn Plugin>> {
     match id {
         "retroarch" => Some(Box::new(RetroArchPlugin::new())),
         "brick_breaker" => Some(Box::new(BrickBreakerPlugin::new())),
-        "pew_pew" => Some(Box::new(PewPewPlugin::new())),
         _ => None,
     }
 }

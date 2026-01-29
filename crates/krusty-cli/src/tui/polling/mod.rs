@@ -46,6 +46,13 @@ pub enum PollAction {
     RefreshAiTools,
     /// Switch to a provider (after OAuth success)
     SwitchProvider(ProviderId),
+    /// Store /init exploration results as codebase insights
+    StoreInitInsights {
+        architecture: String,
+        conventions: String,
+        key_files: String,
+        build_system: String,
+    },
 }
 
 impl PollResult {

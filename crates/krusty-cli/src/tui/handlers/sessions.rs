@@ -7,7 +7,7 @@ use anyhow::Result;
 use crate::ai::client::AiClient;
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::storage::SessionManager;
-use crate::tui::app::App;
+use crate::tui::app::{App, WorkMode};
 use crate::tui::blocks::{
     BashBlock, EditBlock, ReadBlock, ThinkingBlock, ToolResultBlock, WriteBlock,
 };
@@ -207,7 +207,14 @@ impl App {
                     completed,
                     total
                 );
+                // Resume in Build mode if work has started, Plan mode otherwise
+                let resume_mode = if completed > 0 || plan.has_in_progress_tasks() {
+                    WorkMode::Build
+                } else {
+                    WorkMode::Plan
+                };
                 self.set_plan(plan);
+                self.ui.work_mode = resume_mode;
                 if !self.plan_sidebar.visible {
                     self.plan_sidebar.toggle();
                 }

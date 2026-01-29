@@ -369,10 +369,13 @@ impl App {
         self.plan_sidebar.reset();
     }
 
-    /// Set the active plan and sync UI state
+    /// Set the active plan without changing work mode
+    ///
+    /// Callers are responsible for setting the appropriate WorkMode:
+    /// - New plan from AI: set WorkMode::Plan
+    /// - Session resume: choose based on plan progress
     pub fn set_plan(&mut self, plan: PlanFile) {
         self.active_plan = Some(plan);
-        self.ui.work_mode = WorkMode::Plan;
     }
 
     /// Context usage threshold for auto-pinch (80%)

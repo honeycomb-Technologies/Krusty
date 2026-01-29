@@ -9,7 +9,7 @@ use crate::tui::blocks::{BuildBlock, ExploreBlock, StreamBlock};
 use crate::tui::handlers::commands::generate_krab_from_exploration;
 use crate::tui::utils::AsyncChannels;
 
-use super::PollResult;
+use super::{PollAction, PollResult};
 
 /// Poll explore progress channel and update ExploreBlock with agent progress
 pub fn poll_explore_progress(
@@ -217,6 +217,14 @@ pub fn poll_init_exploration(
                                     content.len()
                                 ),
                             );
+
+                            // Store exploration results as insights
+                            result = result.with_action(PollAction::StoreInitInsights {
+                                architecture: exploration_result.architecture.clone(),
+                                conventions: exploration_result.conventions.clone(),
+                                key_files: exploration_result.key_files.clone(),
+                                build_system: exploration_result.build_system,
+                            });
                         }
                         Err(e) => {
                             result = result.with_message(

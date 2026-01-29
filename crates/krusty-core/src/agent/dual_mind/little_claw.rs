@@ -247,6 +247,8 @@ impl LittleClaw {
             - Does it match the stated intent?\n\
             - Is the code elegant and idiomatic?\n\
             - Any obvious issues or inconsistencies?\n\n\
+            If you notice reusable patterns or conventions, state them as general rules \
+            (e.g., \"This codebase consistently uses X pattern for Y\").\n\n\
             If you need to verify against existing patterns, use Read or Grep.\n\
             If good, say \"Approved.\"\n\
             If issues found, briefly state what needs enhancement.\n\
@@ -684,6 +686,21 @@ pub fn extract_insight_patterns(text: &str) -> Vec<String> {
         "should always",
         "make sure to",
         "remember to",
+        // Pattern/approach markers
+        "the correct approach",
+        "the existing pattern",
+        "follows the pattern",
+        "matches the existing",
+        "consistent with",
+        // Quality markers
+        "should use",
+        "prefer",
+        "the idiomatic way",
+        "rust convention",
+        // Structure markers
+        "this file handles",
+        "this module is responsible",
+        "the entry point",
     ];
 
     // Split into sentences and check each

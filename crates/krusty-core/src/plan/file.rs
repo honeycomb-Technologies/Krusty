@@ -732,6 +732,14 @@ impl PlanFile {
         !self.phases.is_empty() && self.phases.iter().all(|p| p.is_complete())
     }
 
+    /// Check if any tasks are currently in progress
+    pub fn has_in_progress_tasks(&self) -> bool {
+        self.phases
+            .iter()
+            .flat_map(|p| &p.tasks)
+            .any(|t| t.status == TaskStatus::InProgress)
+    }
+
     /// Get progress as fraction (completed / total)
     pub fn progress(&self) -> (usize, usize) {
         (self.completed_tasks(), self.total_tasks())

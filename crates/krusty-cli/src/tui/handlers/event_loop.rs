@@ -8,6 +8,35 @@ use crate::tui::polling::{
     PollResult,
 };
 
+/// Split exploration text into individual insight paragraphs
+fn split_into_insights(text: &str) -> Vec<String> {
+    let mut insights = Vec::new();
+
+    // Split by double newlines (paragraphs) first, then by bullet points
+    for section in text.split("\n\n") {
+        let trimmed = section.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // If section contains bullet points, split them
+        if trimmed.contains("\n- ") || trimmed.starts_with("- ") {
+            for bullet in trimmed.split("\n- ") {
+                let bullet = bullet.trim().trim_start_matches("- ").trim();
+                if bullet.len() >= 30 {
+                    insights.push(bullet.to_string());
+                }
+            }
+        } else if trimmed.len() >= 30 {
+            insights.push(trimmed.to_string());
+        }
+    }
+
+    // Cap per section to avoid noise
+    insights.truncate(10);
+    insights
+}
+
 impl App {
     /// Poll bash output channel and update BashBlock with streaming output
     pub(crate) fn poll_bash_output(&mut self) -> PollResult {
@@ -114,7 +143,90 @@ impl App {
                 PollAction::SwitchProvider(provider) => {
                     self.switch_provider(provider);
                 }
+                PollAction::StoreInitInsights {
+                    architecture,
+                    conventions,
+                    key_files,
+                    build_system,
+                } => {
+                    self.store_init_insights(
+                        &architecture,
+                        &conventions,
+                        &key_files,
+                        &build_system,
+                    );
+                }
             }
+        }
+    }
+
+    /// Store /init exploration results as codebase insights
+    fn store_init_insights(
+        &self,
+        architecture: &str,
+        conventions: &str,
+        key_files: &str,
+        build_system: &str,
+    ) {
+        let Some(sm) = &self.services.session_manager else {
+            return;
+        };
+
+        let conn = sm.db().conn();
+        let working_dir_str = self.working_dir.to_string_lossy().to_string();
+
+        let codebase =
+            match krusty_core::index::CodebaseStore::new(conn).get_by_path(&working_dir_str) {
+                Ok(Some(c)) => c,
+                Ok(None) => {
+                    tracing::debug!("No codebase entry found for /init insights");
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to look up codebase for /init insights");
+                    return;
+                }
+            };
+
+        let insight_store = krusty_core::index::InsightStore::new(conn);
+        let session_id = self.current_session_id.as_deref();
+        let mut stored = 0;
+
+        for (content, _label) in [
+            (architecture, "architecture"),
+            (conventions, "conventions"),
+            (key_files, "key_files"),
+            (build_system, "build_system"),
+        ] {
+            if content.is_empty() {
+                continue;
+            }
+
+            for paragraph in split_into_insights(content) {
+                match insight_store.has_similar(&codebase.id, &paragraph) {
+                    Ok(false) => {
+                        let insight = krusty_core::index::insights::create_insight(
+                            &codebase.id,
+                            &paragraph,
+                            session_id,
+                            0.85,
+                        );
+                        if let Err(e) = insight_store.create(&insight) {
+                            tracing::warn!(error = %e, "Failed to save /init insight");
+                        } else {
+                            stored += 1;
+                        }
+                    }
+                    Ok(true) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to check for duplicate /init insight");
+                    }
+                }
+            }
+        }
+
+        if stored > 0 {
+            tracing::info!(count = stored, "Stored /init exploration insights");
         }
     }
 

@@ -554,6 +554,7 @@ impl App {
                         let task_count = new_plan.total_tasks();
 
                         self.set_plan(new_plan);
+                        self.ui.work_mode = WorkMode::Plan;
                         if !self.plan_sidebar.visible {
                             self.plan_sidebar.toggle();
                         }
