@@ -828,9 +828,23 @@ fn clean_ai_output(text: &str) -> String {
 
     let mut lines: Vec<&str> = text.lines().collect();
 
-    // Remove lines that start with filler or are h2 headers (template already provides those)
+    // Strip entire noise sections (header + content until next header or double blank)
+    const NOISE_SECTIONS: &[&str] = &["### Files Examined", "### Sources"];
+    let mut in_noise_section = false;
     lines.retain(|line| {
         let trimmed = line.trim();
+        if NOISE_SECTIONS.iter().any(|s| trimmed.starts_with(s)) {
+            in_noise_section = true;
+            return false;
+        }
+        if in_noise_section {
+            // End noise section at next header or empty line
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                in_noise_section = false;
+            } else {
+                return false;
+            }
+        }
         if trimmed.starts_with("## ") {
             return false;
         }

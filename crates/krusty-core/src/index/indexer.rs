@@ -237,7 +237,8 @@ impl Indexer {
         let total_symbols = all_symbols.len();
         info!(symbols = total_symbols, "Extracted symbols");
 
-        // Phase 3: Generate embeddings (optional)
+        // Phase 3: Generate embeddings (optional, chunked for progress)
+        const EMBED_CHUNK_SIZE: usize = 64;
         let embeddings: Vec<Option<Vec<f32>>> = if let Some(ref engine) = self.embeddings {
             send_progress(IndexProgress {
                 phase: IndexPhase::Embedding,
@@ -251,21 +252,33 @@ impl Indexer {
                 .map(|(_, sym)| self.symbol_to_embedding_text(sym))
                 .collect();
 
-            match engine.embed_batch(texts).await {
-                Ok(embs) => {
-                    send_progress(IndexProgress {
-                        phase: IndexPhase::Embedding,
-                        current: total_symbols,
-                        total: total_symbols,
-                        current_file: None,
-                    });
-                    embs.into_iter().map(Some).collect()
+            let mut all_embeddings: Vec<Option<Vec<f32>>> = Vec::with_capacity(texts.len());
+            let mut failed = false;
+
+            for chunk in texts.chunks(EMBED_CHUNK_SIZE) {
+                if failed {
+                    all_embeddings.extend(std::iter::repeat_with(|| None).take(chunk.len()));
+                    continue;
                 }
-                Err(e) => {
-                    warn!(error = %e, "Failed to generate embeddings, continuing without");
-                    vec![None; total_symbols]
+                match engine.embed_batch(chunk.to_vec()).await {
+                    Ok(embs) => {
+                        all_embeddings.extend(embs.into_iter().map(Some));
+                        send_progress(IndexProgress {
+                            phase: IndexPhase::Embedding,
+                            current: all_embeddings.len(),
+                            total: total_symbols,
+                            current_file: None,
+                        });
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to generate embeddings, continuing without");
+                        all_embeddings.extend(std::iter::repeat_with(|| None).take(chunk.len()));
+                        failed = true;
+                    }
                 }
             }
+
+            all_embeddings
         } else {
             vec![None; total_symbols]
         };
