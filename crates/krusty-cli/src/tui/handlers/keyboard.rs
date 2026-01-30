@@ -222,9 +222,17 @@ impl App {
         }
     }
 
-    /// Handle bracketed paste events (routes to popup or main input)
+    /// Handle bracketed paste events (routes to focused terminal, popup, or main input)
     pub fn handle_paste(&mut self, text: String) {
         use crate::tui::popups::auth::AuthState;
+
+        // Forward paste to focused terminal
+        if let Some(idx) = self.blocks.focused_terminal {
+            if let Some(tp) = self.blocks.terminal.get_mut(idx) {
+                let _ = tp.write(text.as_bytes());
+            }
+            return;
+        }
 
         // Route paste to auth popup if active and in input state
         if let Popup::Auth = &self.ui.popup {

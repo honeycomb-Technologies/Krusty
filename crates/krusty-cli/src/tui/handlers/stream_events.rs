@@ -175,42 +175,36 @@ impl App {
         let should_check_completion =
             self.active_plan.is_some() && COMPLETION_KEYWORDS.iter().any(|kw| delta.contains(kw));
 
-        // Use cached streaming assistant index (O(1)) instead of O(n) scan per delta
-        let should_append = if let Some(idx) = self.chat.streaming_assistant_idx {
-            // Verify cache is still valid: idx is in bounds and is the last message
-            idx == self.chat.messages.len().saturating_sub(1)
+        // Use cached streaming assistant index (O(1)) instead of O(n) scan per delta.
+        // If tool blocks were inserted since the last delta, the cache points to the
+        // assistant message that preceded them — append there to avoid orphan fragments.
+        let append_idx = if let Some(idx) = self.chat.streaming_assistant_idx {
+            if idx < self.chat.messages.len()
                 && self
                     .chat
                     .messages
                     .get(idx)
                     .map(|(role, _)| role == "assistant")
                     .unwrap_or(false)
+            {
+                Some(idx)
+            } else {
+                None
+            }
         } else {
-            // Cache miss - find the last assistant message
-            let last_assistant_idx = self
-                .chat
+            // Cache miss — scan backwards for the last assistant message in this turn
+            self.chat
                 .messages
                 .iter()
                 .enumerate()
                 .rev()
                 .find(|(_, (role, _))| role == "assistant")
-                .map(|(idx, _)| idx);
-
-            if let Some(idx) = last_assistant_idx {
-                if idx == self.chat.messages.len() - 1 {
-                    // Cache it for subsequent deltas
-                    self.chat.streaming_assistant_idx = Some(idx);
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
+                .map(|(idx, _)| idx)
         };
 
-        if should_append {
-            if let Some((_, content)) = self.chat.messages.last_mut() {
+        if let Some(idx) = append_idx {
+            self.chat.streaming_assistant_idx = Some(idx);
+            if let Some((_, content)) = self.chat.messages.get_mut(idx) {
                 content.push_str(&delta);
             }
         } else {
