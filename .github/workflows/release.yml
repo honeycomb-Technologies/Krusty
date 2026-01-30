@@ -19,23 +19,18 @@ jobs:
           # Linux x86_64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            cross: false
-          # Linux ARM64 (use cross for OpenSSL)
+          # Linux ARM64 (native runner — cross toolchain too old for ort_sys)
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            cross: true
+            os: ubuntu-24.04-arm
           # macOS Intel
           - target: x86_64-apple-darwin
             os: macos-15-intel
-            cross: false
           # macOS Apple Silicon
           - target: aarch64-apple-darwin
             os: macos-latest
-            cross: false
           # Windows
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            cross: false
 
     steps:
       - uses: actions/checkout@v4
@@ -49,16 +44,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross
-        if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Build with cross
-        if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }}
-
-      - name: Build with cargo
-        if: ${{ !matrix.cross }}
+      - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package (Unix)
