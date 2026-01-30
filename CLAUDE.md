@@ -39,12 +39,16 @@ Tests on request only. When adding tests:
 
 ## Before Committing
 
+All four checks MUST pass before committing, pushing, or creating a release. If any check fails, fix the issue and re-run ALL checks until they all pass. Never push or release with failing checks.
+
 ```bash
 cargo fmt --all
 cargo clippy --workspace -- -D warnings
+cargo build --workspace
+cargo test --workspace
 ```
 
-Both must pass. Use conventional commits:
+Use conventional commits:
 - `feat:` - New features
 - `fix:` - Bug fixes
 - `refactor:` - Code changes that don't add features or fix bugs
