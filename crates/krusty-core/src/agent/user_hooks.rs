@@ -882,8 +882,8 @@ mod tests {
         let hook = create_test_hook(
             UserHookType::PreToolUse,
             "Write",
-            // This reads stdin and checks if it's valid JSON
-            "if grep -q '\"test\"' <(cat); then exit 0; else exit 1; fi",
+            // This reads stdin and checks if it contains the expected JSON key
+            "cat | grep -q '\"test\"'",
         );
 
         let params = json!({"test": "value"});

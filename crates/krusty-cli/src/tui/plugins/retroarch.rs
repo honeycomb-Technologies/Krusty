@@ -976,7 +976,7 @@ impl RetroArchPlugin {
             }
             RetroArchState::Menu(MenuState::RomBrowser) => {
                 if let Some(path) = self.roms.get(self.menu_index).cloned() {
-                    if path == PathBuf::from("..") {
+                    if path.as_os_str() == ".." {
                         // Go up a directory
                         if let Some(parent) = self.current_rom_dir.parent() {
                             self.current_rom_dir = parent.to_path_buf();
@@ -1252,7 +1252,7 @@ impl RetroArchPlugin {
             let selected = idx == self.menu_index;
             let prefix = if selected { "▶ " } else { "  " };
 
-            let name = if *item == PathBuf::from("..") {
+            let name = if *item == Path::new("..") {
                 "..".to_string()
             } else if show_full_name {
                 item.file_name()
@@ -1279,7 +1279,7 @@ impl RetroArchPlugin {
                     cell.set_char(ch);
                     let color = if selected {
                         ctx.theme.accent_color
-                    } else if item.is_dir() || *item == PathBuf::from("..") {
+                    } else if item.is_dir() || *item == Path::new("..") {
                         ctx.theme.text_color
                     } else {
                         ctx.theme.success_color
