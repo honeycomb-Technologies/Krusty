@@ -14,8 +14,6 @@ use ratatui::{buffer::Buffer, layout::Rect};
 
 use crate::tui::themes::Theme;
 
-pub mod brick_breaker;
-pub mod galaga;
 #[cfg(unix)]
 pub mod gamepad;
 pub mod kitty_graphics;
@@ -24,8 +22,6 @@ pub mod libretro;
 #[cfg(unix)]
 pub mod retroarch;
 
-pub use brick_breaker::BrickBreakerPlugin;
-pub use galaga::GalagaPlugin;
 #[cfg(unix)]
 pub use gamepad::GamepadHandler;
 pub use kitty_graphics::{KittyGraphics, PluginFrame};
@@ -132,10 +128,7 @@ pub trait Plugin: Send + Sync {
 
 /// List of available built-in plugins
 pub fn builtin_plugins() -> Vec<Box<dyn Plugin>> {
-    let mut plugins: Vec<Box<dyn Plugin>> = vec![
-        Box::new(BrickBreakerPlugin::new()),
-        Box::new(GalagaPlugin::new()),
-    ];
+    let mut plugins: Vec<Box<dyn Plugin>> = vec![];
     #[cfg(unix)]
     plugins.insert(0, Box::new(RetroArchPlugin::new()));
     plugins
@@ -146,8 +139,6 @@ pub fn get_plugin_by_id(id: &str) -> Option<Box<dyn Plugin>> {
     match id {
         #[cfg(unix)]
         "retroarch" => Some(Box::new(RetroArchPlugin::new())),
-        "brick_breaker" => Some(Box::new(BrickBreakerPlugin::new())),
-        "galaga" => Some(Box::new(GalagaPlugin::new())),
         _ => None,
     }
 }
