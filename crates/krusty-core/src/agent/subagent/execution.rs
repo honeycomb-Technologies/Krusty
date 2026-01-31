@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::agent::build_context::SharedBuildContext;
 use crate::agent::cache::SharedExploreCache;
@@ -29,6 +29,11 @@ pub(crate) trait AgentConfig: Send + Sync {
 
     /// Tool timeout in seconds
     fn timeout_secs(&self) -> u64;
+
+    /// Per-turn API call timeout
+    fn api_call_timeout(&self) -> Duration {
+        crate::agent::constants::timeouts::EXPLORER_API_CALL
+    }
 
     /// Max tokens for API calls
     fn max_tokens(&self) -> usize;
@@ -187,6 +192,10 @@ impl AgentConfig for BuilderConfig {
         120 // Builders get more time
     }
 
+    fn api_call_timeout(&self) -> Duration {
+        crate::agent::constants::timeouts::BUILDER_API_CALL
+    }
+
     fn max_tokens(&self) -> usize {
         // High limit - let the model stop naturally when done
         16384
@@ -322,7 +331,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             config,
         );
 
-        let response = match call_subagent_api(
+        let api_future = call_subagent_api(
             client,
             model,
             &system_prompt,
@@ -330,11 +339,11 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             &ai_tools,
             config.max_tokens(),
             task.thinking_enabled,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
+        );
+
+        let response = match tokio::time::timeout(config.api_call_timeout(), api_future).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
                 send_progress(
                     AgentProgressStatus::Failed,
                     "error",
@@ -351,6 +360,35 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     duration_ms: start.elapsed().as_millis() as u64,
                     turns_used: turns,
                     error: Some(e.to_string()),
+                };
+            }
+            Err(_) => {
+                warn!(
+                    task_id = %task_id,
+                    turn = turns,
+                    timeout_secs = config.api_call_timeout().as_secs(),
+                    "Sub-agent API call timed out"
+                );
+                send_progress(
+                    AgentProgressStatus::Failed,
+                    "timeout",
+                    total_tool_calls,
+                    estimated_tokens,
+                    config,
+                );
+                config.cleanup();
+                return SubAgentResult {
+                    task_id,
+                    success: false,
+                    output: final_output,
+                    files_examined,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    turns_used: turns,
+                    error: Some(format!(
+                        "API call timed out after {}s on turn {}",
+                        config.api_call_timeout().as_secs(),
+                        turns
+                    )),
                 };
             }
         };

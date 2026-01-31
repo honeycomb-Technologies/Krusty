@@ -26,6 +26,10 @@ pub mod timeouts {
     pub const TOOL_EXECUTION: Duration = Duration::from_secs(30);
     /// Default streaming timeout
     pub const STREAMING: Duration = Duration::from_secs(120);
+    /// Explorer sub-agent per-turn API call timeout
+    pub const EXPLORER_API_CALL: Duration = Duration::from_secs(90);
+    /// Builder sub-agent per-turn API call timeout
+    pub const BUILDER_API_CALL: Duration = Duration::from_secs(180);
 }
 
 /// Retry configuration
