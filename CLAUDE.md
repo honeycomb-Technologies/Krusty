@@ -37,6 +37,12 @@ Tests on request only. When adding tests:
 - Inline tests: `#[cfg(test)] mod tests { }` at file end
 - Use descriptive test names that explain the scenario
 
+## Branching
+
+- **`main`** - Stable, release-ready code only. Merges from `dev` via PR when releasing.
+- **`dev`** - Day-to-day development. All work happens here (or in feature branches merged into `dev`).
+- Always work on `dev`. Never commit directly to `main`.
+
 ## Before Committing
 
 All four checks MUST pass before committing, pushing, or creating a release. If any check fails, fix the issue and re-run ALL checks until they all pass. Never push or release with failing checks.
