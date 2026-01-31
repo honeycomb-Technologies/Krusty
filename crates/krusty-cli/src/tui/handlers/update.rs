@@ -105,17 +105,15 @@ impl App {
                     self.update_status = None;
                     clear_channel = true;
                 }
-                UpdateStatus::Available(info) => {
-                    // Only show if not already showing a toast for this
-                    self.show_toast(Toast::info(format!("Downloading v{}...", info.new_version)));
+                UpdateStatus::Available(_) => {
+                    // Silent - download in progress, toast shown when ready
                 }
                 UpdateStatus::Downloading { progress: _ } => {
                     // Silent - don't spam user with progress
                 }
                 UpdateStatus::Ready { version } => {
-                    // Update is downloaded and ready - user needs to restart
                     self.show_toast(Toast::success(format!(
-                        "v{} ready - restart to update",
+                        "v{} ready — restart to install",
                         version
                     )));
                     clear_channel = true;

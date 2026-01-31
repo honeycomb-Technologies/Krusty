@@ -33,8 +33,6 @@ const TOAST_GAP: u16 = 1;
 /// Type of toast notification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToastType {
-    /// Neutral info (update available, background task complete)
-    Info,
     /// Positive confirmation (copied, saved, updated)
     Success,
 }
@@ -42,14 +40,12 @@ pub enum ToastType {
 impl ToastType {
     fn color(&self, theme: &Theme) -> Color {
         match self {
-            ToastType::Info => theme.accent_color,
             ToastType::Success => theme.success_color,
         }
     }
 
     fn icon(&self) -> &'static str {
         match self {
-            ToastType::Info => "●",
             ToastType::Success => "✓",
         }
     }
@@ -69,11 +65,6 @@ pub struct Toast {
 }
 
 impl Toast {
-    /// Create a new info toast
-    pub fn info(message: impl Into<String>) -> Self {
-        Self::new(message, ToastType::Info)
-    }
-
     /// Create a new success toast
     pub fn success(message: impl Into<String>) -> Self {
         Self::new(message, ToastType::Success)
