@@ -4,6 +4,7 @@
 //! Each popup type has its own module for focused, testable handlers.
 
 mod auth;
+mod file_preview;
 mod hooks;
 mod mcp;
 mod pinch;

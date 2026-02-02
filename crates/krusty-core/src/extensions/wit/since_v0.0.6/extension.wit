@@ -5,8 +5,6 @@ world extension {
     import platform;
     import nodejs;
 
-    use lsp.{completion, symbol};
-
     /// Initializes the extension.
     export init-extension: func();
 
@@ -125,6 +123,4 @@ world extension {
         end: u32,
     }
 
-    export labels-for-completions: func(language-server-id: string, completions: list<completion>) -> result<list<option<code-label>>, string>;
-    export labels-for-symbols: func(language-server-id: string, symbols: list<symbol>) -> result<list<option<code-label>>, string>;
 }

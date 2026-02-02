@@ -20,7 +20,6 @@ wasmtime::component::bindgen!({
         "zed:extension/platform": latest::zed::extension::platform,
         "zed:extension/nodejs": latest::zed::extension::nodejs,
         "zed:extension/http-client": latest::zed::extension::http_client,
-        "zed:extension/lsp": latest::zed::extension::lsp,
         "zed:extension/common": latest::zed::extension::common,
         "zed:extension/slash-command": latest::zed::extension::slash_command,
     },

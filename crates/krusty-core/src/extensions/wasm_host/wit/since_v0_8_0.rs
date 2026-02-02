@@ -470,8 +470,6 @@ impl zed::extension::slash_command::Host for WasmState {}
 
 impl zed::extension::context_server::Host for WasmState {}
 
-impl zed::extension::lsp::Host for WasmState {}
-
 impl zed::extension::common::Host for WasmState {}
 
 impl zed::extension::dap::Host for WasmState {

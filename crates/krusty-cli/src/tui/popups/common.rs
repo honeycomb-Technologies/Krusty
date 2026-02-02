@@ -12,6 +12,7 @@ use crate::tui::themes::Theme;
 
 /// Standard popup sizes (fixed width x height in characters)
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum PopupSize {
     /// Small popup - auth method, provider selection
     Small,

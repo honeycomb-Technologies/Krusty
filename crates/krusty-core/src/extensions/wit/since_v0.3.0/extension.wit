@@ -8,7 +8,6 @@ world extension {
     import nodejs;
 
     use common.{env-vars, range};
-    use lsp.{completion, symbol};
     use process.{command};
     use slash-command.{slash-command, slash-command-argument-completion, slash-command-output};
 
@@ -120,9 +119,6 @@ world extension {
         /// The name of the highlight to use for this literal.
         highlight-name: option<string>,
     }
-
-    export labels-for-completions: func(language-server-id: string, completions: list<completion>) -> result<list<option<code-label>>, string>;
-    export labels-for-symbols: func(language-server-id: string, symbols: list<symbol>) -> result<list<option<code-label>>, string>;
 
     /// Returns the completions that should be shown when completing the provided slash command with the given query.
     export complete-slash-command-argument: func(command: slash-command, args: list<string>) -> result<list<slash-command-argument-completion>, string>;

@@ -85,20 +85,12 @@ impl Tool for WriteTool {
 
         match fs::write(&path, &params.content).await {
             Ok(_) => {
-                ctx.touch_file(&path, true).await;
-
-                let mut output = json!({
+                let output = json!({
                     "message": format!("Successfully wrote {} lines", params.content.lines().count()),
                     "bytes_written": params.content.len(),
                     "file_path": path.display().to_string()
                 })
                 .to_string();
-
-                if let Some(diagnostics) = ctx.get_file_diagnostics(&path) {
-                    output.push_str("\n\n");
-                    output.push_str(&diagnostics);
-                    output.push_str("This file has errors. Please fix them.");
-                }
 
                 ToolResult::success(output)
             }

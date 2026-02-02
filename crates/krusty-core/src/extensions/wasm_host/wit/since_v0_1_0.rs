@@ -128,8 +128,6 @@ impl HostKeyValueStore for WasmState {
     }
 }
 
-impl zed::extension::lsp::Host for WasmState {}
-
 impl ExtensionImports for WasmState {
     async fn get_settings(
         &mut self,

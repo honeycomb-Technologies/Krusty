@@ -311,7 +311,7 @@ impl App {
                 "Context: search"
             );
         }
-        let has_thinking_conversation = self.thinking_enabled
+        let _has_thinking_conversation = self.thinking_enabled
             && self.chat.conversation.iter().any(|msg| {
                 msg.role == Role::Assistant
                     && msg

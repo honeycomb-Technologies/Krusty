@@ -108,8 +108,6 @@ impl Tool for EditTool {
 
         match fs::write(&path, &new_content).await {
             Ok(_) => {
-                ctx.touch_file(&path, true).await;
-
                 let replaced = if params.replace_all { count } else { 1 };
                 let mut output = json!({
                     "message": format!("Replaced {} occurrence(s)", replaced),
@@ -121,12 +119,6 @@ impl Tool for EditTool {
                 if !diff.is_empty() {
                     output.push_str("\n\n[DIFF]\n");
                     output.push_str(&diff);
-                }
-
-                if let Some(diagnostics) = ctx.get_file_diagnostics(&path) {
-                    output.push_str("\n\n");
-                    output.push_str(&diagnostics);
-                    output.push_str("This file has errors. Please fix them.");
                 }
 
                 ToolResult::success(output)

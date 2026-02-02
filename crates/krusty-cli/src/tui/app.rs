@@ -15,12 +15,7 @@ use crossterm::{
 };
 use futures::StreamExt;
 use ratatui::{backend::CrosstermBackend, Terminal};
-use std::{
-    io,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{io, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
 use crate::agent::{
@@ -104,7 +99,8 @@ pub struct AppServices {
     pub cached_ai_tools: Vec<AiTool>,
     pub user_hook_manager: Arc<RwLock<UserHookManager>>,
 
-    // Extensions
+    // Extensions (not yet wired into tool dispatch)
+    #[allow(dead_code)]
     pub wasm_host: Option<Arc<WasmHost>>,
 
     // Skills/MCP
