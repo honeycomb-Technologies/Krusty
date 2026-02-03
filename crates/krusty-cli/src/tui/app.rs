@@ -138,6 +138,8 @@ pub struct App {
     pub context_tokens_used: usize,
     /// Flag to trigger auto-pinch after current response completes
     pub pending_auto_pinch: bool,
+    /// Auto-pinch in progress (bypasses popup when AI is busy)
+    pub auto_pinch_in_progress: bool,
 
     // AI client
     pub ai_client: Option<AiClient>,
@@ -218,8 +220,9 @@ pub struct App {
     // Toast notification queue
     pub toasts: crate::tui::components::ToastQueue,
 
-    // Semantic retrieval embedding engine (eager background init)
-    pub embedding_engine: Option<krusty_core::index::EmbeddingEngine>,
+    // Semantic retrieval embedding engine (shared with search_codebase tool)
+    pub embedding_engine:
+        Arc<tokio::sync::RwLock<Option<Arc<krusty_core::index::EmbeddingEngine>>>>,
     pub embedding_init_failed: bool,
     pub embedding_handle:
         Option<tokio::task::JoinHandle<anyhow::Result<krusty_core::index::EmbeddingEngine>>>,
@@ -272,6 +275,7 @@ impl App {
             current_model,
             context_tokens_used: 0,
             pending_auto_pinch: false,
+            auto_pinch_in_progress: false,
             ai_client: None,
             api_key: None,
             dual_mind: None,
@@ -328,7 +332,7 @@ impl App {
             exploration_budget_count: 0,
 
             // Semantic retrieval
-            embedding_engine: None,
+            embedding_engine: Arc::new(tokio::sync::RwLock::new(None)),
             embedding_init_failed: false,
             embedding_handle: None,
 
@@ -414,20 +418,21 @@ impl App {
 
     /// Trigger auto-pinch if pending and conditions are right
     ///
-    /// Called from main loop when not streaming/executing tools.
-    /// Opens the pinch popup with an explanatory message.
+    /// Called from main loop. When AI is busy (autonomous work), bypasses the popup
+    /// entirely and runs pinch in the background. When idle, shows the popup for
+    /// manual interaction.
     pub fn trigger_pending_auto_pinch(&mut self) {
         if !self.pending_auto_pinch {
             return;
         }
 
-        // Don't trigger if still busy
+        // Don't trigger if still busy with streaming or tools
         if self.chat.is_streaming || self.chat.is_executing_tools {
             return;
         }
 
-        // Don't trigger if already in a popup
-        if self.ui.popup != crate::tui::app::Popup::None {
+        // Don't trigger if already in a popup or auto-pinch is running
+        if self.ui.popup != crate::tui::app::Popup::None || self.auto_pinch_in_progress {
             return;
         }
 
@@ -458,12 +463,27 @@ impl App {
             ),
         ));
 
-        // Get top files for pinch context (same as manual /pinch command)
-        let top_files = self.get_top_files_preview(5);
+        // Check if conversation has pending AI work (multi-turn tool loop).
+        // If the last message is a tool result or assistant message with tool calls,
+        // the AI was mid-flow — bypass popup and auto-pinch silently.
+        let was_autonomous = self.chat.conversation.last().is_some_and(|msg| {
+            msg.role == crate::ai::types::Role::User
+                && msg
+                    .content
+                    .iter()
+                    .any(|c| matches!(c, crate::ai::types::Content::ToolResult { .. }))
+        });
 
-        // Open pinch popup (same as manual trigger)
-        self.popups.pinch.start(usage_percent, top_files);
-        self.ui.popup = crate::tui::app::Popup::Pinch;
+        if was_autonomous {
+            // AI was working autonomously — bypass popup
+            tracing::info!("Auto-pinch: AI was autonomous, bypassing popup");
+            self.start_auto_pinch();
+        } else {
+            // User is interactive — show popup as before
+            let top_files = self.get_top_files_preview(5);
+            self.popups.pinch.start(usage_percent, top_files);
+            self.ui.popup = crate::tui::app::Popup::Pinch;
+        }
     }
 
     /// Show a toast notification
@@ -734,6 +754,11 @@ impl App {
             self.poll_opencodezen_fetch();
             self.poll_title_generation();
             self.poll_summarization();
+
+            // Poll auto-pinch (background pinch without popup)
+            if self.auto_pinch_in_progress {
+                self.poll_auto_pinch();
+            }
 
             // Update menu animations (only when on start menu for efficiency)
             if self.ui.view == View::StartMenu {

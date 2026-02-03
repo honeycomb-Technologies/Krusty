@@ -56,12 +56,17 @@ impl App {
             )
             .await;
 
-            // Register search_codebase tool (keyword search over indexed symbols)
-            // Semantic search is handled passively via build_search_context;
-            // this tool gives the AI an explicit way to query the index.
+            // Register search_codebase tool (keyword + semantic search over indexed symbols)
+            // Shares the embedding engine ref so the tool gets semantic search once initialized.
             let db_path = crate::paths::config_dir().join("krusty.db");
             let codebase_path = self.working_dir.to_string_lossy().to_string();
-            register_search_tool(&self.services.tool_registry, db_path, None, codebase_path).await;
+            register_search_tool(
+                &self.services.tool_registry,
+                db_path,
+                self.embedding_engine.clone(),
+                codebase_path,
+            )
+            .await;
 
             // Update cached tools so API knows about explore, build, and search
             self.services.cached_ai_tools = self.services.tool_registry.get_ai_tools().await;

@@ -79,9 +79,13 @@ impl Observation {
         let mut msg = format!("[Observation] {}: {}", self.action, self.summary);
 
         if let Some(content) = &self.content {
-            // Truncate long content
+            // Truncate long content (char-boundary safe)
             let truncated = if content.len() > 2000 {
-                format!("{}...[truncated]", &content[..2000])
+                let mut end = 2000;
+                while end > 0 && !content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...[truncated]", &content[..end])
             } else {
                 content.clone()
             };

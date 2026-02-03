@@ -57,6 +57,8 @@ pub use write::WriteTool;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tokio::sync::RwLock;
+
 use crate::agent::AgentCancellation;
 use crate::ai::client::AiClient;
 use crate::index::EmbeddingEngine;
@@ -125,11 +127,13 @@ pub async fn register_build_tool(
 
 /// Register the search_codebase tool for querying the semantic index
 ///
-/// Call this after the codebase index is initialized.
+/// Accepts a shared embedding engine reference that gets populated lazily.
+/// The tool reads the current value at call time, so it picks up the engine
+/// once `ensure_embedding_engine()` resolves it.
 pub async fn register_search_tool(
     registry: &ToolRegistry,
     db_path: PathBuf,
-    embedding_engine: Option<Arc<EmbeddingEngine>>,
+    embedding_engine: Arc<RwLock<Option<Arc<EmbeddingEngine>>>>,
     codebase_path: String,
 ) {
     registry

@@ -202,6 +202,212 @@ impl App {
         Vec::new()
     }
 
+    /// Start auto-pinch (bypasses popup, used when AI is working autonomously)
+    ///
+    /// Directly starts summarization without popup interaction.
+    pub fn start_auto_pinch(&mut self) {
+        self.auto_pinch_in_progress = true;
+
+        let ranked_files = self.get_ranked_files_for_summarization();
+        let file_contents = self.read_key_file_contents(&ranked_files);
+        let project_context = self.read_project_context();
+        let conversation = self.chat.conversation.clone();
+        let current_model = self.current_model.clone();
+
+        let client = match self.create_summarization_client() {
+            Some(c) => c,
+            None => {
+                tracing::error!("Auto-pinch: no AI client for summarization");
+                self.auto_pinch_in_progress = false;
+                return;
+            }
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.channels.summarization = Some(rx);
+
+        let msg_count = conversation.len();
+        let file_count = file_contents.len();
+
+        tokio::spawn(async move {
+            let result = generate_summary(
+                &client,
+                &conversation,
+                None, // no preservation hints in auto mode
+                &ranked_files,
+                &file_contents,
+                project_context.as_deref(),
+                Some(&current_model),
+            )
+            .await;
+
+            let update = SummarizationUpdate {
+                result: result.map_err(|e| e.to_string()),
+            };
+            let _ = tx.send(update);
+        });
+
+        tracing::info!(
+            "Auto-pinch: started summarization with {} messages, {} file contents",
+            msg_count,
+            file_count
+        );
+    }
+
+    /// Poll auto-pinch summarization and complete when ready
+    pub fn poll_auto_pinch(&mut self) {
+        if !self.auto_pinch_in_progress {
+            return;
+        }
+
+        let rx = match self.channels.summarization.as_mut() {
+            Some(rx) => rx,
+            None => return,
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                self.channels.summarization = None;
+                match update.result {
+                    Ok(summary) => {
+                        tracing::info!(
+                            "Auto-pinch: summarization complete: {}",
+                            &summary.work_summary[..100.min(summary.work_summary.len())]
+                        );
+                        self.complete_auto_pinch(summary);
+                    }
+                    Err(e) => {
+                        tracing::error!("Auto-pinch: summarization failed: {}", e);
+                        self.auto_pinch_in_progress = false;
+                        self.chat
+                            .messages
+                            .push(("system".to_string(), format!("Auto-pinch failed: {}", e)));
+                    }
+                }
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                // Still summarizing
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                self.channels.summarization = None;
+                self.auto_pinch_in_progress = false;
+                tracing::error!("Auto-pinch: summarization task cancelled");
+            }
+        }
+    }
+
+    /// Complete auto-pinch: create linked session and resume AI
+    fn complete_auto_pinch(&mut self, summary_result: SummarizationResult) {
+        let ranked_files = self.get_ranked_files_for_summarization();
+        let project_context = self.read_project_context();
+        let key_file_contents = self
+            .read_key_file_contents(&ranked_files)
+            .into_iter()
+            .take(5)
+            .collect();
+        let active_plan = self.active_plan.as_ref().map(|p| p.to_markdown());
+
+        // Extract summary text before consuming summary_result
+        let summary_text = summary_result.work_summary.clone();
+
+        let pinch_ctx = PinchContext::new(
+            self.current_session_id.clone().unwrap_or_default(),
+            self.session_title
+                .clone()
+                .unwrap_or_else(|| "Untitled".to_string()),
+            summary_result,
+            ranked_files,
+            None, // no preservation hints
+            None, // no direction — auto-continue
+            project_context,
+            key_file_contents,
+            active_plan,
+        );
+
+        let Some(sm) = &self.services.session_manager else {
+            tracing::error!("Auto-pinch: no session manager");
+            self.auto_pinch_in_progress = false;
+            return;
+        };
+
+        let Some(parent_id) = &self.current_session_id else {
+            tracing::error!("Auto-pinch: no current session");
+            self.auto_pinch_in_progress = false;
+            return;
+        };
+
+        let parent_title = self
+            .session_title
+            .clone()
+            .unwrap_or_else(|| "Session".to_string());
+        let fallback_title = format!(
+            "{} (cont.)",
+            &parent_title.chars().take(45).collect::<String>()
+        );
+
+        match sm.create_linked_session(
+            &fallback_title,
+            parent_id,
+            &pinch_ctx,
+            Some(&self.current_model),
+            Some(&self.working_dir.to_string_lossy()),
+        ) {
+            Ok(new_id) => {
+                // Save pinch context as first message
+                let system_msg = pinch_ctx.to_system_message();
+                if let Err(e) = sm.save_message(&new_id, "system", &system_msg) {
+                    tracing::warn!("Auto-pinch: failed to save pinch message: {}", e);
+                }
+
+                // Carry over active plan
+                if let Some(ref plan) = self.active_plan {
+                    if let Err(e) = self
+                        .services
+                        .plan_manager
+                        .save_plan_for_session(&new_id, plan)
+                    {
+                        tracing::warn!("Auto-pinch: failed to carry over plan: {}", e);
+                    }
+                }
+
+                // Save "Continue working on the current task." as user message
+                let content_json = serde_json::to_string(&vec![crate::ai::types::Content::Text {
+                    text: "Continue working on the current task.".to_string(),
+                }])
+                .unwrap_or_else(|_| "[\"Continue working on the current task.\"]".to_string());
+
+                if let Err(e) = sm.save_message(&new_id, "user", &content_json) {
+                    tracing::warn!("Auto-pinch: failed to save continue message: {}", e);
+                }
+
+                // Spawn title generation
+                self.spawn_pinch_title_generation(new_id.clone(), parent_title, summary_text, None);
+
+                // Load the new session and resume
+                self.save_block_ui_states();
+                if let Err(e) = self.load_session(&new_id) {
+                    tracing::error!("Auto-pinch: failed to load new session: {}", e);
+                    self.auto_pinch_in_progress = false;
+                    return;
+                }
+
+                tracing::info!(
+                    "Auto-pinch: complete, resuming AI in new session {}",
+                    new_id
+                );
+                self.auto_pinch_in_progress = false;
+                self.send_to_ai();
+            }
+            Err(e) => {
+                tracing::error!("Auto-pinch: failed to create session: {}", e);
+                self.auto_pinch_in_progress = false;
+                self.chat
+                    .messages
+                    .push(("system".to_string(), format!("Auto-pinch failed: {}", e)));
+            }
+        }
+    }
+
     /// Complete the pinch by creating a linked session
     pub fn complete_pinch(&mut self) {
         use crate::tui::popups::pinch::PinchStage;

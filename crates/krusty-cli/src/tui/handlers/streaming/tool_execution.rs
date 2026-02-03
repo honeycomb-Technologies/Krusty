@@ -1235,9 +1235,13 @@ fn create_observation(
     output: &str,
     success: bool,
 ) -> Observation {
-    // Truncate output for summary
+    // Truncate output for summary (char-boundary safe)
     let summary = if output.len() > 500 {
-        format!("{}...[truncated]", &output[..500])
+        let mut end = 500;
+        while end > 0 && !output.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...[truncated]", &output[..end])
     } else {
         output.to_string()
     };
@@ -1328,9 +1332,13 @@ fn create_intent_summary(tool_name: &str, args: &serde_json::Value) -> String {
                 .get("command")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            // Truncate long commands
+            // Truncate long commands (char-boundary safe)
             let cmd_preview = if cmd.len() > 100 {
-                format!("{}...", &cmd[..100])
+                let mut end = 100;
+                while end > 0 && !cmd.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...", &cmd[..end])
             } else {
                 cmd.to_string()
             };

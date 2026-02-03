@@ -6,16 +6,16 @@ use rusqlite::{params, Connection};
 use super::embeddings::EmbeddingEngine;
 use super::parser::SymbolType;
 
+// Minimal stop words — only articles, prepositions, and pronouns.
+// Code-relevant words (get, set, new, type, self, etc.) are kept since
+// they appear in symbol names and signatures.
 const STOP_WORDS: &[&str] = &[
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
-    "do", "does", "did", "will", "would", "could", "should", "may", "might", "shall", "can", "to",
-    "of", "in", "for", "on", "with", "at", "by", "from", "as", "into", "about", "between",
-    "through", "during", "before", "after", "above", "below", "and", "but", "or", "nor", "not",
-    "so", "yet", "both", "either", "neither", "each", "every", "all", "any", "few", "more", "most",
-    "other", "some", "such", "no", "only", "own", "same", "than", "too", "very", "just", "because",
-    "if", "when", "where", "how", "what", "which", "who", "whom", "this", "that", "these", "those",
-    "i", "me", "my", "we", "our", "you", "your", "he", "him", "his", "she", "her", "it", "its",
-    "they", "them", "their",
+    "do", "does", "did", "will", "would", "could", "should", "may", "might", "shall", "to", "of",
+    "in", "for", "on", "with", "at", "by", "from", "as", "into", "about", "between", "through",
+    "during", "before", "after", "above", "below", "and", "but", "or", "nor", "not", "so", "yet",
+    "because", "if", "when", "where", "how", "what", "which", "who", "whom", "me", "my", "we",
+    "our", "you", "your", "he", "him", "his", "she", "her", "they", "them", "their",
 ];
 
 fn extract_search_words(query: &str) -> Vec<String> {
@@ -273,7 +273,7 @@ impl<'a> SemanticRetrieval<'a> {
                 .iter()
                 .map(|_| {
                     let idx = params_vec.len() + 1;
-                    let clause = format!("(symbol_name LIKE ?{idx} OR symbol_path LIKE ?{idx})");
+                    let clause = format!("(symbol_name LIKE ?{idx} OR symbol_path LIKE ?{idx} OR signature LIKE ?{idx})");
                     clause
                 })
                 .collect();
@@ -346,15 +346,23 @@ impl<'a> SemanticRetrieval<'a> {
 
             let symbol_type = SymbolType::parse(&symbol_type_str).unwrap_or(SymbolType::Function);
 
-            // Score by how many query words match
+            // Score by how many query words match (name, path, or signature)
             let score = if words.is_empty() {
                 1.0
             } else {
                 let name_lower = symbol_name.to_lowercase();
                 let path_lower = symbol_path.to_lowercase();
+                let sig_lower = signature
+                    .as_deref()
+                    .map(|s| s.to_lowercase())
+                    .unwrap_or_default();
                 let matches = words
                     .iter()
-                    .filter(|w| name_lower.contains(w.as_str()) || path_lower.contains(w.as_str()))
+                    .filter(|w| {
+                        name_lower.contains(w.as_str())
+                            || path_lower.contains(w.as_str())
+                            || sig_lower.contains(w.as_str())
+                    })
                     .count();
                 matches as f32 / words.len() as f32
             };

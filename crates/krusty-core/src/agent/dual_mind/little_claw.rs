@@ -234,9 +234,13 @@ impl LittleClaw {
             );
         }
 
-        // Truncate very long output
+        // Truncate very long output (char-boundary safe)
         let truncated_output = if output.len() > 3000 {
-            format!("{}...[truncated]", &output[..3000])
+            let mut end = 3000;
+            while end > 0 && !output.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...[truncated]", &output[..end])
         } else {
             output.to_string()
         };
@@ -472,11 +476,15 @@ impl LittleClaw {
 
             match result {
                 Some(ToolExecResult { output, is_error }) => {
-                    // Truncate very long outputs
+                    // Truncate very long outputs (char-boundary safe)
                     let truncated = if output.len() > 5000 {
+                        let mut end = 5000;
+                        while end > 0 && !output.is_char_boundary(end) {
+                            end -= 1;
+                        }
                         format!(
                             "{}...[truncated, {} total chars]",
-                            &output[..5000],
+                            &output[..end],
                             output.len()
                         )
                     } else {

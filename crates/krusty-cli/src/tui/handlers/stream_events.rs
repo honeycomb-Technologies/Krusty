@@ -169,8 +169,9 @@ impl App {
             self.active_plan.is_some() && COMPLETION_KEYWORDS.iter().any(|kw| delta.contains(kw));
 
         // Use cached streaming assistant index (O(1)) instead of O(n) scan per delta.
-        // If tool blocks were inserted since the last delta, the cache points to the
-        // assistant message that preceded them — append there to avoid orphan fragments.
+        // Cache is cleared at the start of each new streaming session (start_streaming),
+        // so a None cache means this is the first text delta of a new turn — create a
+        // fresh message block instead of appending to a previous turn's message.
         let append_idx = if let Some(idx) = self.chat.streaming_assistant_idx {
             if idx < self.chat.messages.len()
                 && self
@@ -185,14 +186,8 @@ impl App {
                 None
             }
         } else {
-            // Cache miss — scan backwards for the last assistant message in this turn
-            self.chat
-                .messages
-                .iter()
-                .enumerate()
-                .rev()
-                .find(|(_, (role, _))| role == "assistant")
-                .map(|(idx, _)| idx)
+            // Cache empty — new turn, will create a new assistant message block below
+            None
         };
 
         if let Some(idx) = append_idx {

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::sync::RwLock;
 
 use crate::index::{CodebaseStore, EmbeddingEngine, SearchQuery, SemanticRetrieval, SymbolType};
 use crate::storage::Database;
@@ -14,7 +15,7 @@ use crate::tools::{parse_params, ToolContext, ToolResult};
 
 pub struct SearchCodebaseTool {
     db_path: PathBuf,
-    embedding_engine: Option<Arc<EmbeddingEngine>>,
+    embedding_engine: Arc<RwLock<Option<Arc<EmbeddingEngine>>>>,
     codebase_path: String,
 }
 
@@ -29,7 +30,7 @@ struct Params {
 impl SearchCodebaseTool {
     pub fn new(
         db_path: PathBuf,
-        embedding_engine: Option<Arc<EmbeddingEngine>>,
+        embedding_engine: Arc<RwLock<Option<Arc<EmbeddingEngine>>>>,
         codebase_path: String,
     ) -> Self {
         Self {
@@ -87,7 +88,8 @@ impl Tool for SearchCodebaseTool {
         // Clone what we need for the blocking task
         let db_path = self.db_path.clone();
         let codebase_path = self.codebase_path.clone();
-        let embedding_engine = self.embedding_engine.clone();
+        // Read the current engine from the shared ref (populated lazily by ensure_embedding_engine)
+        let embedding_engine = self.embedding_engine.read().await.clone();
 
         // Run database operations on a blocking thread since rusqlite::Connection is !Send
         let result = tokio::task::spawn_blocking(move || {

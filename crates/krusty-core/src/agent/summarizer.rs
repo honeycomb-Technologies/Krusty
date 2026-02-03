@@ -12,6 +12,18 @@ use crate::ai::providers::ProviderId;
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::storage::RankedFile;
 
+/// Truncate a string to at most `max_bytes` without splitting a UTF-8 char.
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Extended thinking budget for thorough analysis (Anthropic only)
 ///
 /// 32K tokens allows the model to deeply analyze the conversation context
@@ -103,7 +115,7 @@ pub fn build_summarization_prompt(
         prompt.push_str("## PROJECT CONTEXT (CLAUDE.md)\n\n");
         // Truncate if too long
         if ctx.len() > 5000 {
-            prompt.push_str(&ctx[..5000]);
+            prompt.push_str(truncate_str(ctx, 5000));
             prompt.push_str("\n...[truncated]\n");
         } else {
             prompt.push_str(ctx);
@@ -132,7 +144,7 @@ pub fn build_summarization_prompt(
             prompt.push_str(&format!("### {}\n```\n", path));
             // Truncate long files
             if content.len() > 3000 {
-                prompt.push_str(&content[..3000]);
+                prompt.push_str(truncate_str(content, 3000));
                 prompt.push_str("\n...[truncated]\n");
             } else {
                 prompt.push_str(content);
@@ -158,7 +170,7 @@ pub fn build_summarization_prompt(
                     let preview = if text.len() > 2000 {
                         format!(
                             "{}...[truncated, {} chars total]",
-                            &text[..2000],
+                            truncate_str(text, 2000),
                             text.len()
                         )
                     } else {
@@ -186,7 +198,7 @@ pub fn build_summarization_prompt(
                         .as_str()
                         .map(|s| {
                             if s.len() > 200 {
-                                format!("{}...", &s[..200])
+                                format!("{}...", truncate_str(s, 200))
                             } else {
                                 s.to_string()
                             }
@@ -203,7 +215,7 @@ pub fn build_summarization_prompt(
                         prompt.push_str(&format!(
                             "{}: [Thinking: {}...]\n\n",
                             role_str,
-                            &thinking[..500]
+                            truncate_str(thinking, 500)
                         ));
                     }
                 }
@@ -238,7 +250,7 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
             .and_then(|v| v.as_str())
             .map(|c| {
                 if c.len() > 50 {
-                    format!("{}...", &c[..50])
+                    format!("{}...", truncate_str(c, 50))
                 } else {
                     c.to_string()
                 }

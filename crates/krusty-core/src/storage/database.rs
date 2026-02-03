@@ -34,6 +34,9 @@ impl Database {
         // This prevents lock contention when multiple instances try to access the database
         conn.pragma_update(None, "journal_mode", "WAL")?;
 
+        // Enable foreign key enforcement for referential integrity
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+
         // Set busy timeout to avoid immediate failures on lock contention
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
@@ -79,8 +82,18 @@ impl Database {
     }
 
     /// Set schema version after successful migration
+    #[allow(dead_code)]
     fn set_schema_version(&self, version: i32) -> Result<()> {
         self.conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?1)",
+            [version],
+        )?;
+        Ok(())
+    }
+
+    /// Set schema version within a transaction
+    fn set_schema_version_tx(&self, tx: &rusqlite::Transaction, version: i32) -> Result<()> {
+        tx.execute(
             "INSERT INTO schema_version (version) VALUES (?1)",
             [version],
         )?;
@@ -99,10 +112,13 @@ impl Database {
             return Ok(());
         }
 
+        // Wrap migrations in a transaction for atomicity
+        let tx = self.conn.unchecked_transaction()?;
+
         // Migration 1: Initial schema
         if current_version < 1 {
             info!("Running migration 1: Initial schema");
-            self.conn.execute_batch(
+            tx.execute_batch(
                 r#"
                 -- Sessions table
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -141,21 +157,20 @@ impl Database {
                 );
                 "#,
             )?;
-            self.set_schema_version(1)?;
+            self.set_schema_version_tx(&tx, 1)?;
         }
 
         // Migration 2: Add token_count to sessions
         if current_version < 2 {
             info!("Running migration 2: Add token_count to sessions");
-            self.conn
-                .execute_batch("ALTER TABLE sessions ADD COLUMN token_count INTEGER DEFAULT 0;")?;
-            self.set_schema_version(2)?;
+            tx.execute_batch("ALTER TABLE sessions ADD COLUMN token_count INTEGER DEFAULT 0;")?;
+            self.set_schema_version_tx(&tx, 2)?;
         }
 
         // Migration 3: Block UI state table for session restoration
         if current_version < 3 {
             info!("Running migration 3: Add block_ui_state table");
-            self.conn.execute_batch(
+            tx.execute_batch(
                 r#"
                 -- Block UI state for session restoration
                 -- Stores collapsed/expanded state and scroll position per block
@@ -174,13 +189,13 @@ impl Database {
                     ON block_ui_state(session_id);
                 "#,
             )?;
-            self.set_schema_version(3)?;
+            self.set_schema_version_tx(&tx, 3)?;
         }
 
         // Migration 4: Pinch support
         if current_version < 4 {
             info!("Running migration 4: Pinch support");
-            self.conn.execute_batch(
+            tx.execute_batch(
                 r#"
                 -- Add parent_session_id to sessions for chain tracking
                 ALTER TABLE sessions ADD COLUMN parent_session_id TEXT REFERENCES sessions(id);
@@ -217,25 +232,24 @@ impl Database {
                 );
                 "#,
             )?;
-            self.set_schema_version(4)?;
+            self.set_schema_version_tx(&tx, 4)?;
         }
 
         // Migration 5: Rename handoff_metadata to pinch_metadata
         if current_version < 5 {
             info!("Running migration 5: Rename to pinch_metadata");
             // Check if old table exists and rename it, or create new one
-            let has_old_table: bool = self.conn.query_row(
+            let has_old_table: bool = tx.query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='handoff_metadata'",
                 [],
                 |row| row.get(0),
             ).unwrap_or(0) > 0;
 
             if has_old_table {
-                self.conn
-                    .execute_batch("ALTER TABLE handoff_metadata RENAME TO pinch_metadata;")?;
+                tx.execute_batch("ALTER TABLE handoff_metadata RENAME TO pinch_metadata;")?;
             } else {
                 // Create fresh if neither exists
-                self.conn.execute_batch(
+                tx.execute_batch(
                     r#"
                     CREATE TABLE IF NOT EXISTS pinch_metadata (
                         id TEXT PRIMARY KEY,
@@ -252,13 +266,13 @@ impl Database {
                     "#,
                 )?;
             }
-            self.set_schema_version(5)?;
+            self.set_schema_version_tx(&tx, 5)?;
         }
 
         // Migration 6: Plans table for strict session-plan linkage
         if current_version < 6 {
             info!("Running migration 6: Plans table with session linkage");
-            self.conn.execute_batch(
+            tx.execute_batch(
                 r#"
                 -- Plans table with strict 1:1 session linkage
                 -- session_id UNIQUE enforces one plan per session
@@ -283,13 +297,13 @@ impl Database {
                     ON plans(status);
                 "#,
             )?;
-            self.set_schema_version(6)?;
+            self.set_schema_version_tx(&tx, 6)?;
         }
 
         // Migration 7: User hooks table
         if current_version < 7 {
             info!("Running migration 7: User hooks table");
-            self.conn.execute_batch(
+            tx.execute_batch(
                 r#"
                 -- User-configurable hooks for tool execution
                 -- hook_type: PreToolUse, PostToolUse, Notification, UserPromptSubmit
@@ -309,13 +323,13 @@ impl Database {
                     ON user_hooks(hook_type);
                 "#,
             )?;
-            self.set_schema_version(7)?;
+            self.set_schema_version_tx(&tx, 7)?;
         }
 
         // Migration 8: Agent state tracking for background execution
         if current_version < 8 {
             info!("Running migration 8: Agent state tracking");
-            self.conn.execute_batch(
+            tx.execute_batch(
                 r#"
                 -- Add agent execution state to sessions
                 -- agent_state: 'idle', 'streaming', 'tool_executing', 'awaiting_input', 'error'
@@ -332,13 +346,13 @@ impl Database {
                     ON sessions(agent_state) WHERE agent_state != 'idle';
                 "#,
             )?;
-            self.set_schema_version(8)?;
+            self.set_schema_version_tx(&tx, 8)?;
         }
 
         // Migration 9: Multi-tenant core tables (users, workspaces)
         if current_version < 9 {
             info!("Running migration 9: Multi-tenant core tables");
-            self.conn.execute_batch(
+            tx.execute_batch(
                 r#"
                 -- Users table for multi-tenant SaaS
                 CREATE TABLE IF NOT EXISTS users (
@@ -400,13 +414,13 @@ impl Database {
                 CREATE INDEX IF NOT EXISTS idx_usage_user_period ON usage_tracking(user_id, period_start);
                 "#,
             )?;
-            self.set_schema_version(9)?;
+            self.set_schema_version_tx(&tx, 9)?;
         }
 
         // Migration 10: Add user_id columns to existing tables
         if current_version < 10 {
             info!("Running migration 10: Add user_id to existing tables");
-            self.conn.execute_batch(
+            tx.execute_batch(
                 r#"
                 -- Add user_id to sessions
                 ALTER TABLE sessions ADD COLUMN user_id TEXT REFERENCES users(id);
@@ -420,13 +434,13 @@ impl Database {
                 ALTER TABLE user_hooks ADD COLUMN workspace_id TEXT REFERENCES workspaces(id);
                 "#,
             )?;
-            self.set_schema_version(10)?;
+            self.set_schema_version_tx(&tx, 10)?;
         }
 
         // Migration 11: Indexes for user-scoped queries
         if current_version < 11 {
             info!("Running migration 11: User-scoped indexes");
-            self.conn.execute_batch(
+            tx.execute_batch(
                 r#"
                 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
                 CREATE INDEX IF NOT EXISTS idx_sessions_workspace ON sessions(workspace_id);
@@ -436,7 +450,7 @@ impl Database {
                 CREATE INDEX IF NOT EXISTS idx_hooks_workspace ON user_hooks(workspace_id);
                 "#,
             )?;
-            self.set_schema_version(11)?;
+            self.set_schema_version_tx(&tx, 11)?;
         }
 
         // Migration 12: Smart Codebase Memory System
@@ -513,8 +527,10 @@ impl Database {
                 ALTER TABLE sessions ADD COLUMN codebase_id TEXT REFERENCES codebases(id);
                 "#,
             )?;
-            self.set_schema_version(12)?;
+            self.set_schema_version_tx(&tx, 12)?;
         }
+
+        tx.commit()?;
 
         info!("Migrations complete");
         Ok(())

@@ -289,8 +289,8 @@ impl PinchPopup {
         f.render_widget(title, chunks[0]);
 
         // Context usage bar
-        let bar_width = 30;
-        let filled = (bar_width as f64 * context_percent as f64 / 100.0) as usize;
+        let bar_width: usize = 30;
+        let filled = ((bar_width as f64 * context_percent as f64 / 100.0) as usize).min(bar_width);
         let empty = bar_width - filled;
         let bar_color = if context_percent >= 90 {
             theme.error_color

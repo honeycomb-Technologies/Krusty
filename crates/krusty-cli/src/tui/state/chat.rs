@@ -28,10 +28,11 @@ impl ChatState {
         Self::default()
     }
 
-    /// Start streaming from AI - sets is_streaming flag
+    /// Start streaming from AI - sets is_streaming flag and clears caches
     pub fn start_streaming(&mut self) {
         self.is_streaming = true;
         self.current_activity = Some("thinking".to_string());
+        self.streaming_assistant_idx = None;
     }
 
     /// Stop streaming from AI - clears is_streaming flag and related caches

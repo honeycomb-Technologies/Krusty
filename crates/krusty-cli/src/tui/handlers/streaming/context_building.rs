@@ -350,9 +350,11 @@ You MUST follow this disciplined workflow. Do NOT batch-complete tasks or skip s
             _ => return String::new(),
         };
 
-        let has_embeddings = self.embedding_engine.is_some();
+        let engine_guard = self.embedding_engine.try_read().ok();
+        let engine_ref = engine_guard.as_ref().and_then(|g| g.as_ref());
+        let has_embeddings = engine_ref.is_some();
         let mut retrieval = SemanticRetrieval::new(conn);
-        if let Some(ref engine) = self.embedding_engine {
+        if let Some(engine) = engine_ref {
             retrieval = retrieval.with_embeddings(engine);
         }
 

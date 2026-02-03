@@ -10,6 +10,8 @@
 mod context_building;
 mod tool_execution;
 
+use std::sync::Arc;
+
 use tokio::sync::mpsc;
 
 use crate::agent::{AgentEvent, InterruptReason};
@@ -35,24 +37,61 @@ fn check_file_limit(count: usize) -> anyhow::Result<()> {
 
 impl App {
     /// Resolve the embedding engine from the background init handle, or fall back to sync init.
+    /// Populates the shared Arc<RwLock<...>> so the search_codebase tool can also use it.
     fn ensure_embedding_engine(&mut self) {
-        if self.embedding_engine.is_some() || self.embedding_init_failed {
+        // Check if already initialized (non-blocking read)
+        if self.embedding_init_failed {
             return;
         }
+        if let Ok(guard) = self.embedding_engine.try_read() {
+            if guard.is_some() {
+                return;
+            }
+        }
 
-        let result = if let Some(handle) = self.embedding_handle.take() {
-            // Background init was started in run() — wait for it to finish
-            tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(handle))
-                .unwrap_or_else(|e| Err(anyhow::anyhow!("Embedding init task panicked: {e}")))
-        } else {
-            // Fallback: no handle (e.g. ACP mode) — init synchronously
-            krusty_core::index::EmbeddingEngine::new()
-        };
+        // Try to resolve the background init handle
+        if let Some(handle) = &self.embedding_handle {
+            if !handle.is_finished() {
+                tracing::debug!(
+                    "Embedding engine still initializing, will use keyword search for this request"
+                );
+                return;
+            }
+            // Handle is finished - take it and resolve
+            if let Some(handle) = self.embedding_handle.take() {
+                match futures::executor::block_on(handle) {
+                    Ok(Ok(engine)) => {
+                        let engine = Arc::new(engine);
+                        if let Ok(mut guard) = self.embedding_engine.try_write() {
+                            *guard = Some(engine);
+                        }
+                        tracing::info!("Embedding engine initialized from background task");
+                        return;
+                    }
+                    Ok(Err(e)) => {
+                        tracing::debug!(
+                            "Embedding engine background init failed (keyword fallback): {e}"
+                        );
+                        self.embedding_init_failed = true;
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::debug!("Embedding engine background task panicked: {e}");
+                        self.embedding_init_failed = true;
+                        return;
+                    }
+                }
+            }
+        }
 
-        match result {
+        // No handle was ever created (e.g., ACP mode) - try sync init
+        match krusty_core::index::EmbeddingEngine::new() {
             Ok(engine) => {
+                let engine = Arc::new(engine);
+                if let Ok(mut guard) = self.embedding_engine.try_write() {
+                    *guard = Some(engine);
+                }
                 tracing::info!("Embedding engine initialized for semantic search");
-                self.embedding_engine = Some(engine);
             }
             Err(e) => {
                 tracing::debug!("Embedding engine init failed (keyword fallback): {e}");
