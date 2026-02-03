@@ -13,7 +13,6 @@ pub mod markdown;
 pub mod plugins;
 pub mod polling;
 pub mod popups;
-pub mod render_model;
 pub mod state;
 pub mod streaming;
 pub mod themes;

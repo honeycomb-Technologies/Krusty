@@ -37,7 +37,7 @@ use crate::tui::polling::{
     poll_background_processes, poll_init_exploration, poll_mcp_status, poll_oauth_status,
 };
 use crate::tui::state::{
-    BlockManager, BlockUiStates, ChatState, PopupState, ScrollSystem, ToolResultCache, UiState,
+    BlockManager, BlockUiStates, ChatState, PopupState, ScrollSystem, ToolResultCache,
 };
 use crate::tui::streaming::StreamingManager;
 use crate::tui::utils::{AsyncChannels, TitleEditor};
@@ -112,8 +112,16 @@ pub struct AppServices {
 
 /// UI-only state (view, popups, inputs, rendering, animations)
 pub struct AppUi {
-    /// Core UI state (view, popup, theme, work_mode)
-    pub ui: UiState,
+    /// Current view (StartMenu, Chat)
+    pub view: View,
+    /// Current active popup
+    pub popup: Popup,
+    /// Current work mode (Build, Plan)
+    pub work_mode: WorkMode,
+    /// Active theme
+    pub theme: Arc<crate::tui::themes::Theme>,
+    /// Theme name for display/saving
+    pub theme_name: String,
     /// Pending view change to apply at end of event loop
     pub pending_view_change: Option<View>,
     /// Plan sidebar component state
@@ -151,7 +159,11 @@ impl AppUi {
         working_dir: PathBuf,
     ) -> Self {
         Self {
-            ui: UiState::new(theme, theme_name),
+            view: View::StartMenu,
+            popup: Popup::None,
+            work_mode: WorkMode::Build,
+            theme,
+            theme_name,
             pending_view_change: None,
             plan_sidebar: crate::tui::components::PlanSidebarState::default(),
             plugin_window: crate::tui::components::PluginWindowState::default(),
@@ -250,9 +262,6 @@ pub struct AppRuntime {
     pub just_updated: bool,
     /// Update status
     pub update_status: Option<krusty_core::updater::UpdateStatus>,
-    /// Path to krusty repo for self-update
-    #[allow(dead_code)]
-    pub update_repo_path: Option<PathBuf>,
     /// Should quit flag
     pub should_quit: bool,
 }
@@ -303,7 +312,6 @@ impl AppRuntime {
             exploration_budget_count: 0,
             just_updated: false,
             update_status: None,
-            update_repo_path: krusty_core::updater::detect_repo_path(),
             should_quit: false,
         }
     }
@@ -386,7 +394,7 @@ impl App {
     /// Clear the active plan and sync UI state
     pub fn clear_plan(&mut self) {
         self.runtime.active_plan = None;
-        self.ui.ui.work_mode = WorkMode::Build;
+        self.ui.work_mode = WorkMode::Build;
         self.ui.plan_sidebar.reset();
     }
 
@@ -446,7 +454,7 @@ impl App {
         }
 
         // Don't trigger if already in a popup or auto-pinch is running
-        if self.ui.ui.popup != crate::tui::app::Popup::None || self.runtime.auto_pinch_in_progress {
+        if self.ui.popup != crate::tui::app::Popup::None || self.runtime.auto_pinch_in_progress {
             return;
         }
 
@@ -496,7 +504,7 @@ impl App {
             // User is interactive — show popup as before
             let top_files = self.get_top_files_preview(5);
             self.ui.popups.pinch.start(usage_percent, top_files);
-            self.ui.ui.popup = crate::tui::app::Popup::Pinch;
+            self.ui.popup = crate::tui::app::Popup::Pinch;
         }
     }
 
@@ -544,7 +552,7 @@ impl App {
     /// Apply any pending view change (called at end of event loop iteration)
     pub fn apply_pending_view_change(&mut self) {
         if let Some(view) = self.ui.pending_view_change.take() {
-            self.ui.ui.view = view;
+            self.ui.view = view;
         }
     }
 
@@ -555,7 +563,7 @@ impl App {
 
     /// Start editing the session title
     pub fn start_title_edit(&mut self) {
-        if self.ui.ui.view == View::Chat {
+        if self.ui.view == View::Chat {
             self.runtime
                 .title_editor
                 .start(self.runtime.session_title.as_deref());
@@ -730,7 +738,7 @@ impl App {
                 self.runtime.process_registry.try_oldest_running_elapsed();
 
             // Keep process popup updated while open (non-blocking)
-            if self.ui.ui.popup == Popup::ProcessList {
+            if self.ui.popup == Popup::ProcessList {
                 if let Some(processes) = self.runtime.process_registry.try_list() {
                     self.ui.popups.process.update(processes);
                 }
@@ -779,7 +787,7 @@ impl App {
             }
 
             // Update menu animations (only when on start menu for efficiency)
-            if self.ui.ui.view == View::StartMenu {
+            if self.ui.view == View::StartMenu {
                 // Use inner_area width (terminal width minus borders) so crab stays contained
                 let term_size = terminal.size()?;
                 let inner_width = term_size.width.saturating_sub(2); // Account for logo border

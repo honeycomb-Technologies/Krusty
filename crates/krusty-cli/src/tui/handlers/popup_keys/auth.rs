@@ -13,7 +13,7 @@ impl App {
     pub fn handle_auth_popup_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         match &self.ui.popups.auth.state {
             AuthState::ProviderSelection { .. } => match code {
-                KeyCode::Esc => self.ui.ui.popup = Popup::None,
+                KeyCode::Esc => self.ui.popup = Popup::None,
                 KeyCode::Up => self.ui.popups.auth.prev_provider(),
                 KeyCode::Down => self.ui.popups.auth.next_provider(),
                 KeyCode::Enter => {
@@ -44,7 +44,7 @@ impl App {
             AuthState::Complete { .. } => {
                 if code == KeyCode::Esc || code == KeyCode::Enter {
                     self.ui.popups.auth.reset();
-                    self.ui.ui.popup = Popup::None;
+                    self.ui.popup = Popup::None;
                 }
             }
         }

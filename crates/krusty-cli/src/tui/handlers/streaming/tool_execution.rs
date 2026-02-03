@@ -39,7 +39,7 @@ impl App {
                 self.clear_plan();
                 tracing::info!("Cleared existing plan");
             }
-            self.ui.ui.work_mode = WorkMode::Plan;
+            self.ui.work_mode = WorkMode::Plan;
             tracing::info!("Switched to Plan mode: {}", reason);
 
             results.push(Content::ToolResult {
@@ -696,7 +696,7 @@ impl App {
         let process_registry = self.runtime.process_registry.clone();
         let skills_manager = self.services.skills_manager.clone();
         let cancel_token = self.runtime.cancellation.child_token();
-        let plan_mode = self.ui.ui.work_mode == crate::tui::app::WorkMode::Plan;
+        let plan_mode = self.ui.work_mode == crate::tui::app::WorkMode::Plan;
         let current_model = self.runtime.current_model.clone();
         let dual_mind = self.runtime.dual_mind.clone();
         let dual_mind_tx = dual_mind_tx;

@@ -462,7 +462,7 @@ impl App {
         });
 
         // Check for plan structure in AI response when in plan mode
-        if self.ui.ui.work_mode == WorkMode::Plan && !final_text.is_empty() {
+        if self.ui.work_mode == WorkMode::Plan && !final_text.is_empty() {
             self.try_detect_and_save_plan(&final_text);
         }
 
@@ -583,7 +583,7 @@ impl App {
                         let task_count = new_plan.total_tasks();
 
                         self.set_plan(new_plan);
-                        self.ui.ui.work_mode = WorkMode::Plan;
+                        self.ui.work_mode = WorkMode::Plan;
                         if !self.ui.plan_sidebar.visible {
                             self.ui.plan_sidebar.toggle();
                         }

@@ -30,7 +30,7 @@ impl App {
         }
 
         // Handle popups first (ignore Release events)
-        if self.ui.ui.popup != Popup::None {
+        if self.ui.popup != Popup::None {
             if is_press {
                 self.handle_popup_key(code, modifiers);
             }
@@ -185,7 +185,7 @@ impl App {
         // Ctrl+B to open process list
         if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('b') {
             self.refresh_process_popup();
-            self.ui.ui.popup = Popup::ProcessList;
+            self.ui.popup = Popup::ProcessList;
             return;
         }
 
@@ -210,13 +210,13 @@ impl App {
 
         // Ctrl+G to toggle work mode (BUILD/PLAN)
         if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('g') {
-            let old_mode = self.ui.ui.work_mode;
-            self.ui.ui.work_mode = self.ui.ui.work_mode.toggle();
-            tracing::info!(from = ?old_mode, to = ?self.ui.ui.work_mode, "Work mode toggled via Ctrl+G");
+            let old_mode = self.ui.work_mode;
+            self.ui.work_mode = self.ui.work_mode.toggle();
+            tracing::info!(from = ?old_mode, to = ?self.ui.work_mode, "Work mode toggled via Ctrl+G");
             return;
         }
 
-        match self.ui.ui.view {
+        match self.ui.view {
             View::StartMenu => self.handle_start_menu_key(code, modifiers),
             View::Chat => self.handle_chat_key(code, modifiers),
         }
@@ -235,7 +235,7 @@ impl App {
         }
 
         // Route paste to auth popup if active and in input state
-        if let Popup::Auth = &self.ui.ui.popup {
+        if let Popup::Auth = &self.ui.popup {
             if let AuthState::ApiKeyInput { .. } = &self.ui.popups.auth.state {
                 for c in text.trim().chars() {
                     self.ui.popups.auth.add_api_key_char(c);
@@ -245,7 +245,7 @@ impl App {
         }
 
         // Route paste to pinch popup if in input state
-        if let Popup::Pinch = &self.ui.ui.popup {
+        if let Popup::Pinch = &self.ui.popup {
             use crate::tui::popups::pinch::PinchStage;
             match &self.ui.popups.pinch.stage {
                 PinchStage::PreservationInput { .. } | PinchStage::DirectionInput { .. } => {
@@ -651,7 +651,7 @@ impl App {
                 match idx {
                     0 => {
                         // Execute - switch to BUILD mode and auto-start
-                        self.ui.ui.work_mode = crate::tui::app::WorkMode::Build;
+                        self.ui.work_mode = crate::tui::app::WorkMode::Build;
 
                         // Auto-send execute message to Claude
                         let execute_msg =

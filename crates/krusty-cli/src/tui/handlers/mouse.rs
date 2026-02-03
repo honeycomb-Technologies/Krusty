@@ -373,7 +373,7 @@ impl App {
                     self.ui.input.get_file_ref_at_click(relative_x, relative_y)
                 {
                     self.ui.popups.file_preview.open(path);
-                    self.ui.ui.popup = Popup::FilePreview;
+                    self.ui.popup = Popup::FilePreview;
                     return;
                 }
                 self.ui.input.handle_click(relative_x, relative_y);
@@ -1083,7 +1083,7 @@ impl App {
                         if let Some(path) = self.runtime.attached_files.get(display_name) {
                             // Open the preview popup
                             self.ui.popups.file_preview.open(path.clone());
-                            self.ui.ui.popup = Popup::FilePreview;
+                            self.ui.popup = Popup::FilePreview;
                             return true;
                         }
                     }

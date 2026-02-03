@@ -9,7 +9,7 @@ impl App {
         match code {
             KeyCode::Esc => {
                 self.ui.popups.file_preview.reset();
-                self.ui.ui.popup = Popup::None;
+                self.ui.popup = Popup::None;
             }
             KeyCode::Left | KeyCode::Char('h') => self.ui.popups.file_preview.prev_page(),
             KeyCode::Right | KeyCode::Char('l') => self.ui.popups.file_preview.next_page(),

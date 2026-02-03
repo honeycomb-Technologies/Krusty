@@ -12,7 +12,6 @@ mod popups;
 mod scroll;
 mod scroll_system;
 mod selection;
-mod ui;
 mod ui_state;
 
 pub use blocks::BlockManager;
@@ -27,5 +26,4 @@ pub use selection::{
     BlockScrollbarDrag, DragTarget, EdgeScrollDirection, EdgeScrollState, ScrollbarDrag,
     SelectionArea, SelectionState,
 };
-pub use ui::UiState;
 pub use ui_state::{hash_content, BlockUiStates, ToolResultCache};

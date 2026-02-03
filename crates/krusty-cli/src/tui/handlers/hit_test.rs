@@ -160,13 +160,13 @@ impl App {
                         .blocks
                         .thinking
                         .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.ui.theme)),
+                        .map(|b| b.height(content_width, &self.ui.theme)),
                     BlockType::Bash => self
                         .runtime
                         .blocks
                         .bash
                         .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.ui.theme)),
+                        .map(|b| b.height(content_width, &self.ui.theme)),
                     BlockType::TerminalPane => {
                         // Skip pinned terminal - handled separately at top
                         if self.runtime.blocks.pinned_terminal == Some(idx) {
@@ -176,7 +176,7 @@ impl App {
                                 .blocks
                                 .terminal
                                 .get(idx)
-                                .map(|b| b.height(content_width, &self.ui.ui.theme))
+                                .map(|b| b.height(content_width, &self.ui.theme))
                         }
                     }
                     BlockType::ToolResult => self
@@ -184,43 +184,43 @@ impl App {
                         .blocks
                         .tool_result
                         .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.ui.theme)),
+                        .map(|b| b.height(content_width, &self.ui.theme)),
                     BlockType::Read => self
                         .runtime
                         .blocks
                         .read
                         .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.ui.theme)),
+                        .map(|b| b.height(content_width, &self.ui.theme)),
                     BlockType::Edit => self
                         .runtime
                         .blocks
                         .edit
                         .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.ui.theme)),
+                        .map(|b| b.height(content_width, &self.ui.theme)),
                     BlockType::Write => self
                         .runtime
                         .blocks
                         .write
                         .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.ui.theme)),
+                        .map(|b| b.height(content_width, &self.ui.theme)),
                     BlockType::WebSearch => self
                         .runtime
                         .blocks
                         .web_search
                         .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.ui.theme)),
+                        .map(|b| b.height(content_width, &self.ui.theme)),
                     BlockType::Explore => self
                         .runtime
                         .blocks
                         .explore
                         .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.ui.theme)),
+                        .map(|b| b.height(content_width, &self.ui.theme)),
                     BlockType::Build => self
                         .runtime
                         .blocks
                         .build
                         .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.ui.theme)),
+                        .map(|b| b.height(content_width, &self.ui.theme)),
                 };
 
                 if let Some(height) = height {

@@ -12,7 +12,7 @@ impl App {
                 if self.ui.popups.skills.search_active {
                     self.ui.popups.skills.toggle_search();
                 } else {
-                    self.ui.ui.popup = Popup::None;
+                    self.ui.popup = Popup::None;
                 }
             }
             KeyCode::Up => self.ui.popups.skills.prev(),

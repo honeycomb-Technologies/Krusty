@@ -19,9 +19,9 @@ use crate::tui::app::{App, Popup};
 impl App {
     /// Handle keyboard events when a popup is open
     pub fn handle_popup_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        match &self.ui.ui.popup {
+        match &self.ui.popup {
             Popup::Help => match code {
-                KeyCode::Esc => self.ui.ui.popup = Popup::None,
+                KeyCode::Esc => self.ui.popup = Popup::None,
                 KeyCode::Tab => self.ui.popups.help.next_tab(),
                 _ => {}
             },
@@ -30,7 +30,7 @@ impl App {
                     KeyCode::Esc => {
                         // Restore original theme on cancel
                         self.restore_original_theme();
-                        self.ui.ui.popup = Popup::None;
+                        self.ui.popup = Popup::None;
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         self.ui.popups.theme.prev();
@@ -49,7 +49,7 @@ impl App {
                     KeyCode::Enter => {
                         if let Some(name) = self.ui.popups.theme.get_selected_theme_name() {
                             self.set_theme(&name); // Apply AND save
-                            self.ui.ui.popup = Popup::None;
+                            self.ui.popup = Popup::None;
                         }
                     }
                     _ => {}
@@ -98,7 +98,7 @@ impl App {
             }
         } else {
             match code {
-                KeyCode::Esc => self.ui.ui.popup = Popup::None,
+                KeyCode::Esc => self.ui.popup = Popup::None,
                 KeyCode::Up | KeyCode::Char('k') => self.ui.popups.model.prev(),
                 KeyCode::Down | KeyCode::Char('j') => self.ui.popups.model.next(),
                 KeyCode::Char('i') | KeyCode::Char('/') => self.ui.popups.model.toggle_search(),
@@ -157,7 +157,7 @@ impl App {
                     }
                 }
 
-                self.ui.ui.popup = Popup::None;
+                self.ui.popup = Popup::None;
             }
         }
     }
@@ -165,7 +165,7 @@ impl App {
     /// Handle session list popup keys
     fn handle_session_list_key(&mut self, code: KeyCode) {
         match code {
-            KeyCode::Esc => self.ui.ui.popup = Popup::None,
+            KeyCode::Esc => self.ui.popup = Popup::None,
             KeyCode::Up | KeyCode::Char('k') => self.ui.popups.session.prev(),
             KeyCode::Down | KeyCode::Char('j') => self.ui.popups.session.next(),
             KeyCode::Char('d') | KeyCode::Delete => {
@@ -185,7 +185,7 @@ impl App {
                     } else {
                         self.ui.pending_view_change = Some(crate::tui::app::View::Chat);
                     }
-                    self.ui.ui.popup = Popup::None;
+                    self.ui.popup = Popup::None;
                 }
             }
             _ => {}

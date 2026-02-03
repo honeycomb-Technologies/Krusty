@@ -276,6 +276,6 @@ impl App {
             PinchStage::Summarizing { .. } | PinchStage::Creating
         );
 
-        blocks || sidebar || plugin_window || pinch_active || self.ui.ui.view == View::StartMenu
+        blocks || sidebar || plugin_window || pinch_active || self.ui.view == View::StartMenu
     }
 }

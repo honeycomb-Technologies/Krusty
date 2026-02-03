@@ -8,7 +8,7 @@ impl App {
     /// Handle process list popup keyboard events
     pub fn handle_process_popup_key(&mut self, code: KeyCode) {
         match code {
-            KeyCode::Esc => self.ui.ui.popup = Popup::None,
+            KeyCode::Esc => self.ui.popup = Popup::None,
             KeyCode::Up | KeyCode::Char('k') => self.ui.popups.process.prev(),
             KeyCode::Down | KeyCode::Char('j') => self.ui.popups.process.next(),
             KeyCode::Char('s') => {

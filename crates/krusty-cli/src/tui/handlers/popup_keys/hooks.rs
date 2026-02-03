@@ -12,7 +12,7 @@ impl App {
     pub fn handle_hooks_popup_key(&mut self, code: KeyCode) {
         match &self.ui.popups.hooks.stage {
             HooksStage::List => match code {
-                KeyCode::Esc => self.ui.ui.popup = Popup::None,
+                KeyCode::Esc => self.ui.popup = Popup::None,
                 KeyCode::Up | KeyCode::Char('k') => self.ui.popups.hooks.prev(),
                 KeyCode::Down | KeyCode::Char('j') => self.ui.popups.hooks.next(),
                 KeyCode::Enter => {

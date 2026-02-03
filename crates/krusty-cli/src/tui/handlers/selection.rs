@@ -274,7 +274,7 @@ impl App {
             match role.as_str() {
                 "thinking" => {
                     if let Some(block) = self.runtime.blocks.thinking.get(thinking_idx) {
-                        let height = block.height(content_width, &self.ui.ui.theme) as usize;
+                        let height = block.height(content_width, &self.ui.theme) as usize;
                         // Get text content and pad/truncate to match rendered height
                         let text_lines = block
                             .get_text_content()
@@ -287,7 +287,7 @@ impl App {
                 }
                 "bash" => {
                     if let Some(block) = self.runtime.blocks.bash.get(bash_idx) {
-                        let height = block.height(content_width, &self.ui.ui.theme) as usize;
+                        let height = block.height(content_width, &self.ui.theme) as usize;
                         let text_lines = block
                             .get_text_content()
                             .map(|t| t.lines().map(|s| s.to_string()).collect::<Vec<_>>())
@@ -301,7 +301,7 @@ impl App {
                     // Skip pinned terminals (same as render)
                     if self.runtime.blocks.pinned_terminal != Some(terminal_idx) {
                         if let Some(block) = self.runtime.blocks.terminal.get(terminal_idx) {
-                            let height = block.height(content_width, &self.ui.ui.theme) as usize;
+                            let height = block.height(content_width, &self.ui.theme) as usize;
                             let text_lines = block
                                 .get_text_content()
                                 .map(|t| t.lines().map(|s| s.to_string()).collect::<Vec<_>>())
@@ -314,7 +314,7 @@ impl App {
                 }
                 "tool_result" => {
                     if let Some(block) = self.runtime.blocks.tool_result.get(tool_result_idx) {
-                        let height = block.height(content_width, &self.ui.ui.theme) as usize;
+                        let height = block.height(content_width, &self.ui.theme) as usize;
                         let text_lines = block
                             .get_text_content()
                             .map(|t| t.lines().map(|s| s.to_string()).collect::<Vec<_>>())
@@ -326,7 +326,7 @@ impl App {
                 }
                 "read" => {
                     if let Some(block) = self.runtime.blocks.read.get(read_idx) {
-                        let height = block.height(content_width, &self.ui.ui.theme) as usize;
+                        let height = block.height(content_width, &self.ui.theme) as usize;
                         let text_lines = block
                             .get_text_content()
                             .map(|t| t.lines().map(|s| s.to_string()).collect::<Vec<_>>())
@@ -338,7 +338,7 @@ impl App {
                 }
                 "edit" => {
                     if let Some(block) = self.runtime.blocks.edit.get(edit_idx) {
-                        let height = block.height(content_width, &self.ui.ui.theme) as usize;
+                        let height = block.height(content_width, &self.ui.theme) as usize;
                         let text_lines = block
                             .get_text_content()
                             .map(|t| t.lines().map(|s| s.to_string()).collect::<Vec<_>>())
@@ -350,7 +350,7 @@ impl App {
                 }
                 "write" => {
                     if let Some(block) = self.runtime.blocks.write.get(write_idx) {
-                        let height = block.height(content_width, &self.ui.ui.theme) as usize;
+                        let height = block.height(content_width, &self.ui.theme) as usize;
                         let text_lines = block
                             .get_text_content()
                             .map(|t| t.lines().map(|s| s.to_string()).collect::<Vec<_>>())
@@ -362,7 +362,7 @@ impl App {
                 }
                 "web_search" => {
                     if let Some(block) = self.runtime.blocks.web_search.get(web_search_idx) {
-                        let height = block.height(content_width, &self.ui.ui.theme) as usize;
+                        let height = block.height(content_width, &self.ui.theme) as usize;
                         let text_lines = block
                             .get_text_content()
                             .map(|t| t.lines().map(|s| s.to_string()).collect::<Vec<_>>())

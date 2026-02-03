@@ -11,7 +11,7 @@ impl App {
     pub fn handle_mcp_popup_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Esc => {
-                self.ui.ui.popup = Popup::None;
+                self.ui.popup = Popup::None;
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.ui.popups.mcp.prev();

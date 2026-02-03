@@ -21,7 +21,7 @@ pub fn sanitize_plan_title(title: &str) -> String {
 impl App {
     /// Build plan context for AI - shown in both PLAN and BUILD modes when a plan is active
     pub fn build_plan_context(&self) -> String {
-        match self.ui.ui.work_mode {
+        match self.ui.work_mode {
             WorkMode::Plan => self.build_plan_mode_context(),
             WorkMode::Build => self.build_build_mode_context(),
         }

@@ -43,8 +43,8 @@ impl App {
         render_toolbar(
             f,
             chunks[0],
-            &self.ui.ui.theme,
-            self.ui.ui.work_mode,
+            &self.ui.theme,
+            self.ui.work_mode,
             None,
             false,
             "",
@@ -56,8 +56,8 @@ impl App {
         let logo_block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(self.ui.ui.theme.border_color))
-            .style(Style::default().bg(self.ui.ui.theme.bg_color));
+            .border_style(Style::default().fg(self.ui.theme.border_color))
+            .style(Style::default().bg(self.ui.theme.bg_color));
 
         let inner_area = logo_block.inner(chunks[1]);
         f.render_widget(logo_block, chunks[1]);
@@ -86,7 +86,7 @@ impl App {
                 Span::styled(
                     "▄ •▄ ▄▄▄  ▄• ▄▌.▄▄ · ▄▄▄▄▄ ▄· ▄▌",
                     Style::default()
-                        .fg(self.ui.ui.theme.logo_primary_color)
+                        .fg(self.ui.theme.logo_primary_color)
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
@@ -94,28 +94,28 @@ impl App {
                 Span::raw(&title_padding),
                 Span::styled(
                     "█▌▄▌▪▀▄ █·█▪██▌▐█ ▀. •██  ▐█▪██▌",
-                    Style::default().fg(self.ui.ui.theme.logo_primary_color),
+                    Style::default().fg(self.ui.theme.logo_primary_color),
                 ),
             ]),
             Line::from(vec![
                 Span::raw(&title_padding),
                 Span::styled(
                     "▐▀▀▄·▐▀▀▄ █▌▐█▌▄▀▀▀█▄ ▐█.▪▐█▌▐█▪",
-                    Style::default().fg(self.ui.ui.theme.logo_secondary_color),
+                    Style::default().fg(self.ui.theme.logo_secondary_color),
                 ),
             ]),
             Line::from(vec![
                 Span::raw(&title_padding),
                 Span::styled(
                     "▐█.█▌▐█•█▌▐█▄█▌▐█▄▪▐█ ▐█▌· ▐█▀·.",
-                    Style::default().fg(self.ui.ui.theme.logo_secondary_color),
+                    Style::default().fg(self.ui.theme.logo_secondary_color),
                 ),
             ]),
             Line::from(vec![
                 Span::raw(&title_padding),
                 Span::styled(
                     "·▀  ▀.▀  ▀ ▀▀▀  ▀▀▀▀  ▀▀▀   ▀ • ",
-                    Style::default().fg(self.ui.ui.theme.logo_primary_color),
+                    Style::default().fg(self.ui.theme.logo_primary_color),
                 ),
             ]),
         ];
@@ -126,8 +126,8 @@ impl App {
         let crab_height = crab_frames.len() as u16;
         let crab_y = inner_area.y + inner_area.height.saturating_sub(crab_height);
 
-        let crab_color = self.ui.ui.theme.accent_color;
-        let eye_color = self.ui.ui.theme.mode_chat_color;
+        let crab_color = self.ui.theme.accent_color;
+        let eye_color = self.ui.theme.mode_chat_color;
 
         for (i, line) in crab_frames.into_iter().enumerate() {
             let y = crab_y + i as u16;
@@ -172,7 +172,7 @@ impl App {
                 Span::styled(
                     "Quick Actions:",
                     Style::default()
-                        .fg(self.ui.ui.theme.title_color)
+                        .fg(self.ui.theme.title_color)
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
@@ -180,88 +180,88 @@ impl App {
                 Span::raw(&padding),
                 Span::styled(
                     "  /init   ",
-                    Style::default().fg(self.ui.ui.theme.accent_color),
+                    Style::default().fg(self.ui.theme.accent_color),
                 ),
                 Span::styled(
                     "Initialize project (KRAB.md)",
-                    Style::default().fg(self.ui.ui.theme.text_color),
+                    Style::default().fg(self.ui.theme.text_color),
                 ),
             ]),
             Line::from(vec![
                 Span::raw(&padding),
                 Span::styled(
                     "  /load   ",
-                    Style::default().fg(self.ui.ui.theme.accent_color),
+                    Style::default().fg(self.ui.theme.accent_color),
                 ),
                 Span::styled(
                     "Load previous session",
-                    Style::default().fg(self.ui.ui.theme.text_color),
+                    Style::default().fg(self.ui.theme.text_color),
                 ),
             ]),
             Line::from(vec![
                 Span::raw(&padding),
                 Span::styled(
                     "  /model  ",
-                    Style::default().fg(self.ui.ui.theme.accent_color),
+                    Style::default().fg(self.ui.theme.accent_color),
                 ),
                 Span::styled(
                     "Select AI model",
-                    Style::default().fg(self.ui.ui.theme.text_color),
+                    Style::default().fg(self.ui.theme.text_color),
                 ),
             ]),
             Line::from(vec![
                 Span::raw(&padding),
                 Span::styled(
                     "  /auth   ",
-                    Style::default().fg(self.ui.ui.theme.accent_color),
+                    Style::default().fg(self.ui.theme.accent_color),
                 ),
                 Span::styled(
                     "Manage API providers",
-                    Style::default().fg(self.ui.ui.theme.text_color),
+                    Style::default().fg(self.ui.theme.text_color),
                 ),
             ]),
             Line::from(vec![
                 Span::raw(&padding),
                 Span::styled(
                     "  /theme  ",
-                    Style::default().fg(self.ui.ui.theme.accent_color),
+                    Style::default().fg(self.ui.theme.accent_color),
                 ),
                 Span::styled(
                     "Change color theme",
-                    Style::default().fg(self.ui.ui.theme.text_color),
+                    Style::default().fg(self.ui.theme.text_color),
                 ),
             ]),
             Line::from(vec![
                 Span::raw(&padding),
                 Span::styled(
                     "  /skills ",
-                    Style::default().fg(self.ui.ui.theme.accent_color),
+                    Style::default().fg(self.ui.theme.accent_color),
                 ),
                 Span::styled(
                     "Browse skills",
-                    Style::default().fg(self.ui.ui.theme.text_color),
+                    Style::default().fg(self.ui.theme.text_color),
                 ),
             ]),
             Line::from(vec![
                 Span::raw(&padding),
                 Span::styled(
                     "  /hooks  ",
-                    Style::default().fg(self.ui.ui.theme.accent_color),
+                    Style::default().fg(self.ui.theme.accent_color),
                 ),
                 Span::styled(
                     "Configure tool hooks",
-                    Style::default().fg(self.ui.ui.theme.text_color),
+                    Style::default().fg(self.ui.theme.text_color),
                 ),
             ]),
             Line::from(vec![
                 Span::raw(&padding),
                 Span::styled(
                     "  /cmd    ",
-                    Style::default().fg(self.ui.ui.theme.accent_color),
+                    Style::default().fg(self.ui.theme.accent_color),
                 ),
                 Span::styled(
                     "Show all controls",
-                    Style::default().fg(self.ui.ui.theme.text_color),
+                    Style::default().fg(self.ui.theme.text_color),
                 ),
             ]),
         ];
@@ -270,8 +270,8 @@ impl App {
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(self.ui.ui.theme.border_color))
-                .style(Style::default().bg(self.ui.ui.theme.bg_color)),
+                .border_style(Style::default().fg(self.ui.theme.border_color))
+                .style(Style::default().bg(self.ui.theme.bg_color)),
         );
         f.render_widget(commands, chunks[2]);
 
@@ -291,9 +291,9 @@ impl App {
 
         // Border color changes to accent when thinking mode enabled (Tab toggle)
         let input_border_color = if self.runtime.thinking_enabled {
-            self.ui.ui.theme.accent_color
+            self.ui.theme.accent_color
         } else {
-            self.ui.ui.theme.border_color
+            self.ui.theme.border_color
         };
         // Get hover range for file ref highlighting
         let hover_range = self
@@ -305,13 +305,13 @@ impl App {
             .map(|(s, e, _)| (*s, *e));
         let input_widget = self.ui.input.render_styled_with_file_refs(
             input_area,
-            self.ui.ui.theme.bg_color,
+            self.ui.theme.bg_color,
             input_border_color,
-            self.ui.ui.theme.text_color,
+            self.ui.theme.text_color,
             input_selection,
-            self.ui.ui.theme.selection_bg_color,
-            self.ui.ui.theme.selection_fg_color,
-            Some(self.ui.ui.theme.link_color),
+            self.ui.theme.selection_bg_color,
+            self.ui.theme.selection_fg_color,
+            Some(self.ui.theme.link_color),
             hover_range,
         );
         f.render_widget(input_widget, input_area);
@@ -333,7 +333,7 @@ impl App {
             total_lines,
             visible_lines,
             self.ui.input.get_viewport_offset(),
-            &self.ui.ui.theme,
+            &self.ui.theme,
         );
 
         // Autocomplete popup above input
@@ -345,7 +345,7 @@ impl App {
                 input_area.width,
                 ac_height,
             );
-            self.ui.autocomplete.render(f, ac_area, &self.ui.ui.theme);
+            self.ui.autocomplete.render(f, ac_area, &self.ui.theme);
         }
 
         // File search popup above input (mutually exclusive with autocomplete)
@@ -360,14 +360,14 @@ impl App {
                 input_area.width,
                 fs_height,
             );
-            self.ui.file_search.render(f, fs_area, &self.ui.ui.theme);
+            self.ui.file_search.render(f, fs_area, &self.ui.theme);
         }
 
         // Status bar (no context tokens in start menu)
         render_status_bar(
             f,
             chunks[4],
-            &self.ui.ui.theme,
+            &self.ui.theme,
             &self.runtime.current_model,
             &self.runtime.working_dir,
             None,
@@ -428,7 +428,7 @@ impl App {
             .blocks
             .pinned_terminal
             .and_then(|idx| self.runtime.blocks.terminal.get(idx))
-            .map(|tp| tp.height(pinned_render_width, &self.ui.ui.theme))
+            .map(|tp| tp.height(pinned_render_width, &self.ui.theme))
             .unwrap_or(0);
 
         // Layout: toolbar, pinned (0 if none), messages, prompt (0 if none), input, status
@@ -448,8 +448,8 @@ impl App {
         self.ui.scroll_system.layout.toolbar_title_area = render_toolbar(
             f,
             chunks[0],
-            &self.ui.ui.theme,
-            self.ui.ui.work_mode,
+            &self.ui.theme,
+            self.ui.work_mode,
             self.runtime.session_title.as_deref(),
             self.runtime.title_editor.is_editing,
             &self.runtime.title_editor.buffer,
@@ -471,7 +471,7 @@ impl App {
                 tp.render(
                     pinned_area,
                     f.buffer_mut(),
-                    &self.ui.ui.theme,
+                    &self.ui.theme,
                     is_focused,
                     None,
                 );
@@ -527,7 +527,7 @@ impl App {
             self.ui.scroll_system.scroll.offset,
             msg_total_lines,
             msg_visible_height as usize,
-            &self.ui.ui.theme,
+            &self.ui.theme,
         );
 
         // Decision prompt (chunks[3])
@@ -536,7 +536,7 @@ impl App {
             self.ui.scroll_system.layout.prompt_area = Some(prompt_area);
             self.ui
                 .decision_prompt
-                .render(f.buffer_mut(), prompt_area, &self.ui.ui.theme);
+                .render(f.buffer_mut(), prompt_area, &self.ui.theme);
         } else {
             self.ui.scroll_system.layout.prompt_area = None;
         }
@@ -557,9 +557,9 @@ impl App {
 
         // Border color changes to accent when thinking mode enabled (Tab toggle)
         let input_border_color = if self.runtime.thinking_enabled {
-            self.ui.ui.theme.accent_color
+            self.ui.theme.accent_color
         } else {
-            self.ui.ui.theme.border_color
+            self.ui.theme.border_color
         };
         // Get hover range for file ref highlighting
         let hover_range = self
@@ -571,13 +571,13 @@ impl App {
             .map(|(s, e, _)| (*s, *e));
         let input_widget = self.ui.input.render_styled_with_file_refs(
             input_area,
-            self.ui.ui.theme.bg_color,
+            self.ui.theme.bg_color,
             input_border_color,
-            self.ui.ui.theme.text_color,
+            self.ui.theme.text_color,
             input_selection,
-            self.ui.ui.theme.selection_bg_color,
-            self.ui.ui.theme.selection_fg_color,
-            Some(self.ui.ui.theme.link_color),
+            self.ui.theme.selection_bg_color,
+            self.ui.theme.selection_fg_color,
+            Some(self.ui.theme.link_color),
             hover_range,
         );
         f.render_widget(input_widget, input_area);
@@ -598,7 +598,7 @@ impl App {
             total_lines,
             visible_lines,
             self.ui.input.get_viewport_offset(),
-            &self.ui.ui.theme,
+            &self.ui.theme,
         );
 
         // Autocomplete popup above input
@@ -610,7 +610,7 @@ impl App {
                 input_area.width,
                 ac_height,
             );
-            self.ui.autocomplete.render(f, ac_area, &self.ui.ui.theme);
+            self.ui.autocomplete.render(f, ac_area, &self.ui.theme);
         }
 
         // File search popup above input (mutually exclusive with autocomplete)
@@ -625,7 +625,7 @@ impl App {
                 input_area.width,
                 fs_height,
             );
-            self.ui.file_search.render(f, fs_area, &self.ui.ui.theme);
+            self.ui.file_search.render(f, fs_area, &self.ui.theme);
         }
 
         // Status bar (with context tokens in chat mode)
@@ -637,7 +637,7 @@ impl App {
         render_status_bar(
             f,
             chunks[5],
-            &self.ui.ui.theme,
+            &self.ui.theme,
             &self.runtime.current_model,
             &self.runtime.working_dir,
             context_tokens,
@@ -690,7 +690,7 @@ impl App {
                         f.buffer_mut(),
                         plan_rect,
                         &plan,
-                        &self.ui.ui.theme,
+                        &self.ui.theme,
                         &mut self.ui.plan_sidebar,
                     );
                     self.ui.scroll_system.layout.plan_sidebar_scrollbar_area =
@@ -703,7 +703,7 @@ impl App {
                 render_divider(
                     f.buffer_mut(),
                     divider_rect,
-                    &self.ui.ui.theme,
+                    &self.ui.theme,
                     divider_hovered,
                 );
 
@@ -712,7 +712,7 @@ impl App {
                 let result = render_plugin_window(
                     f.buffer_mut(),
                     plugin_rect,
-                    &self.ui.ui.theme,
+                    &self.ui.theme,
                     &mut self.ui.plugin_window,
                 );
                 self.ui.scroll_system.layout.plugin_window_scrollbar_area = result.scrollbar_area;
@@ -724,7 +724,7 @@ impl App {
                         f.buffer_mut(),
                         sidebar_rect,
                         &plan,
-                        &self.ui.ui.theme,
+                        &self.ui.theme,
                         &mut self.ui.plan_sidebar,
                     );
                     self.ui.scroll_system.layout.plan_sidebar_scrollbar_area =
@@ -739,7 +739,7 @@ impl App {
                 let result = render_plugin_window(
                     f.buffer_mut(),
                     sidebar_rect,
-                    &self.ui.ui.theme,
+                    &self.ui.theme,
                     &mut self.ui.plugin_window,
                 );
                 self.ui.scroll_system.layout.plugin_window_scrollbar_area = result.scrollbar_area;

@@ -17,7 +17,7 @@ impl App {
                 self.runtime.chat.streaming_assistant_idx = None;
                 self.runtime.chat.conversation.clear();
                 self.clear_plan();
-                self.ui.ui.view = View::StartMenu;
+                self.ui.view = View::StartMenu;
             }
             "/load" => {
                 // Set current directory for the popup title
@@ -36,7 +36,7 @@ impl App {
                     .collect();
 
                 self.ui.popups.session.set_sessions(sessions);
-                self.ui.ui.popup = Popup::SessionList;
+                self.ui.popup = Popup::SessionList;
             }
             "/model" => {
                 // Populate model list from registry (non-blocking)
@@ -61,7 +61,7 @@ impl App {
                     self.ui.popups.model.set_models(recent_models, models_vec);
                 }
 
-                self.ui.ui.popup = Popup::ModelSelect;
+                self.ui.popup = Popup::ModelSelect;
 
                 // If OpenRouter is configured but has no models, trigger fetch
                 if configured.contains(&crate::ai::providers::ProviderId::OpenRouter) {
@@ -90,22 +90,22 @@ impl App {
                 // Set configured providers to show checkmarks
                 let configured = self.configured_providers();
                 self.ui.popups.auth.set_configured_providers(configured);
-                self.ui.ui.popup = Popup::Auth;
+                self.ui.popup = Popup::Auth;
             }
             "/ps" | "/processes" => {
                 self.refresh_process_popup();
-                self.ui.ui.popup = Popup::ProcessList;
+                self.ui.popup = Popup::ProcessList;
             }
             "/theme" => {
-                self.ui.popups.theme.open(&self.ui.ui.theme_name);
-                self.ui.ui.popup = Popup::ThemeSelect;
+                self.ui.popups.theme.open(&self.ui.theme_name);
+                self.ui.popup = Popup::ThemeSelect;
             }
             "/clear" => {
                 self.runtime.chat.messages.clear();
                 self.runtime.chat.streaming_assistant_idx = None;
                 self.runtime.blocks = crate::tui::state::BlockManager::new();
             }
-            "/cmd" => self.ui.ui.popup = Popup::Help,
+            "/cmd" => self.ui.popup = Popup::Help,
             "/init" => {
                 self.handle_init_command();
             }
@@ -160,8 +160,8 @@ impl App {
         }
 
         // If on start menu, switch to chat view
-        if self.ui.ui.view == View::StartMenu {
-            self.ui.ui.view = View::Chat;
+        if self.ui.view == View::StartMenu {
+            self.ui.view = View::Chat;
         }
 
         // Create session if none exists
@@ -518,7 +518,7 @@ impl App {
 
         // Start the pinch popup
         self.ui.popups.pinch.start(usage_percent, top_files);
-        self.ui.ui.popup = Popup::Pinch;
+        self.ui.popup = Popup::Pinch;
     }
 
     /// Get top N files by activity for preview
@@ -704,7 +704,7 @@ impl App {
         };
 
         self.ui.popups.skills.set_skills(skills);
-        self.ui.ui.popup = Popup::SkillsBrowser;
+        self.ui.popup = Popup::SkillsBrowser;
     }
 
     /// Refresh skills in the browser
@@ -723,7 +723,7 @@ impl App {
     fn open_mcp_browser(&mut self) {
         // Update the popup with current server state
         self.refresh_mcp_popup();
-        self.ui.ui.popup = Popup::McpBrowser;
+        self.ui.popup = Popup::McpBrowser;
     }
 
     /// Refresh MCP servers in the browser popup
@@ -744,7 +744,7 @@ impl App {
                 .to_vec()
         });
         self.ui.popups.hooks.set_hooks(hooks);
-        self.ui.ui.popup = Popup::Hooks;
+        self.ui.popup = Popup::Hooks;
     }
 }
 

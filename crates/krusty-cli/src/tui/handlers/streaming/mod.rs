@@ -108,8 +108,8 @@ impl App {
             return;
         }
 
-        if self.ui.ui.view == View::StartMenu {
-            self.ui.ui.view = View::Chat;
+        if self.ui.view == View::StartMenu {
+            self.ui.view = View::Chat;
         }
 
         if !self.is_authenticated() {

@@ -12,7 +12,7 @@ impl App {
             PinchStage::PreservationInput { .. } => match code {
                 KeyCode::Esc => {
                     self.ui.popups.pinch.reset();
-                    self.ui.ui.popup = Popup::None;
+                    self.ui.popup = Popup::None;
                 }
                 KeyCode::Enter => {
                     self.start_pinch_summarization();
@@ -28,13 +28,13 @@ impl App {
                 if code == KeyCode::Esc {
                     self.runtime.cancellation.cancel();
                     self.ui.popups.pinch.reset();
-                    self.ui.ui.popup = Popup::None;
+                    self.ui.popup = Popup::None;
                 }
             }
             PinchStage::DirectionInput { .. } => match code {
                 KeyCode::Esc => {
                     self.ui.popups.pinch.reset();
-                    self.ui.ui.popup = Popup::None;
+                    self.ui.popup = Popup::None;
                 }
                 KeyCode::Up => self.ui.popups.pinch.scroll_up(),
                 KeyCode::Down => self.ui.popups.pinch.scroll_down(),
@@ -71,11 +71,11 @@ impl App {
                             self.send_to_ai();
                         }
                         self.ui.popups.pinch.reset();
-                        self.ui.ui.popup = Popup::None;
+                        self.ui.popup = Popup::None;
                     }
                     KeyCode::Esc => {
                         self.ui.popups.pinch.reset();
-                        self.ui.ui.popup = Popup::None;
+                        self.ui.popup = Popup::None;
                     }
                     _ => {}
                 }
@@ -83,7 +83,7 @@ impl App {
             PinchStage::Error { .. } => {
                 if code == KeyCode::Esc {
                     self.ui.popups.pinch.reset();
-                    self.ui.ui.popup = Popup::None;
+                    self.ui.popup = Popup::None;
                 }
             }
         }

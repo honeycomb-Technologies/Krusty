@@ -214,7 +214,7 @@ impl App {
                     WorkMode::Plan
                 };
                 self.set_plan(plan);
-                self.ui.ui.work_mode = resume_mode;
+                self.ui.work_mode = resume_mode;
                 if !self.ui.plan_sidebar.visible {
                     self.ui.plan_sidebar.toggle();
                 }
