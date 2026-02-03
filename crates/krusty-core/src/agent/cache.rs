@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 
+/// Maximum cache size to prevent unbounded growth
+const MAX_CACHE_ENTRIES: usize = 10_000;
+
 /// Cached file content with modification time for invalidation
 #[derive(Clone, Debug)]
 pub struct CachedFile {
@@ -81,6 +84,16 @@ impl SharedExploreCache {
 
     /// Store file content in cache with modification time for validation
     pub fn put_file(&self, path: PathBuf, content: String) {
+        // Enforce cache size limit - evict oldest entry if at capacity
+        if self.files.len() >= MAX_CACHE_ENTRIES {
+            // Remove oldest entry (first key in iteration)
+            if let Some(entry) = self.files.iter().next() {
+                let key = entry.key().clone();
+                self.files.remove(&key);
+                tracing::debug!(path = %key.display(), "Cache EVICT (size limit)");
+            }
+        }
+
         // Get current mtime for future validation
         let mtime = std::fs::metadata(&path)
             .ok()
@@ -110,6 +123,16 @@ impl SharedExploreCache {
 
     /// Store glob results in cache
     pub fn put_glob(&self, pattern: String, base_dir: PathBuf, results: Vec<PathBuf>) {
+        // Enforce cache size limit - evict oldest entry if at capacity
+        if self.globs.len() >= MAX_CACHE_ENTRIES {
+            // Remove oldest entry (first key in iteration)
+            if let Some(entry) = self.globs.iter().next() {
+                let key = entry.key().clone();
+                self.globs.remove(&key);
+                tracing::debug!(pattern = %key.0, "Glob cache EVICT (size limit)");
+            }
+        }
+
         self.glob_misses.fetch_add(1, Ordering::Relaxed);
         tracing::debug!(pattern, base_dir = %base_dir.display(), count = results.len(), "Glob cache PUT");
         self.globs.insert((pattern, base_dir), results);

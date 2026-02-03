@@ -237,20 +237,34 @@ impl App {
         delta: String,
         citations: Vec<crate::ai::types::Citation>,
     ) {
-        // Same logic as TextDelta - append only if last msg is assistant
-        let last_is_assistant = self
-            .chat
-            .messages
-            .last()
-            .map(|(role, _)| role == "assistant")
-            .unwrap_or(false);
+        // Use cached streaming assistant index (O(1)) instead of O(n) scan per delta.
+        let append_idx = if let Some(idx) = self.chat.streaming_assistant_idx {
+            if idx < self.chat.messages.len()
+                && self
+                    .chat
+                    .messages
+                    .get(idx)
+                    .map(|(role, _)| role == "assistant")
+                    .unwrap_or(false)
+            {
+                Some(idx)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
-        if last_is_assistant {
-            if let Some((_, content)) = self.chat.messages.last_mut() {
+        if let Some(idx) = append_idx {
+            self.chat.streaming_assistant_idx = Some(idx);
+            if let Some((_, content)) = self.chat.messages.get_mut(idx) {
                 content.push_str(&delta);
             }
         } else {
+            // Create new assistant message at end and cache its index
+            let new_idx = self.chat.messages.len();
             self.chat.messages.push(("assistant".to_string(), delta));
+            self.chat.streaming_assistant_idx = Some(new_idx);
         }
 
         if !citations.is_empty() {

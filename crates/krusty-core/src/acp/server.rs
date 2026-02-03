@@ -105,7 +105,7 @@ impl AcpServer {
         local
             .run_until(async move {
                 // Create notification channel
-                let (tx, mut rx) = mpsc::unbounded_channel();
+                let (tx, mut rx) = mpsc::channel(1000);
 
                 // Give the sender to the agent
                 self.agent.set_notification_channel(tx).await;

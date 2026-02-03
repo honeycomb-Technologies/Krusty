@@ -26,7 +26,7 @@ mod tests {
 
         // Database should initialize with schema_version table
         let version = db.get_schema_version();
-        assert_eq!(version, 11, "Expected current schema version to be 11");
+        assert_eq!(version, 12, "Expected current schema version to be 12");
     }
 
     #[test]
@@ -144,8 +144,8 @@ mod tests {
         let db = Database::new(&db_path).expect("Failed to create database");
         let version = db.get_schema_version();
 
-        // After all migrations, version should be 11
-        assert_eq!(version, 11, "Expected final schema version");
+        // After all migrations, version should be 12
+        assert_eq!(version, 12, "Expected final schema version");
     }
 
     #[test]

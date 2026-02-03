@@ -19,8 +19,10 @@ pub struct MarkdownCache {
     cache: HashMap<CacheKey, Arc<RenderedMarkdown>>,
     /// Legacy cache for backward compatibility (no link tracking)
     legacy_cache: HashMap<CacheKey, Arc<Vec<Line<'static>>>>,
-    /// Last render width to invalidate on resize
+    /// Last render width to track changes
     last_width: usize,
+    /// Max cache entries to prevent unbounded growth
+    max_entries: usize,
 }
 
 impl Default for MarkdownCache {
@@ -36,20 +38,40 @@ impl MarkdownCache {
             cache: HashMap::new(),
             legacy_cache: HashMap::new(),
             last_width: 0,
+            max_entries: 1000, // Reasonable limit for typical usage
         }
     }
 
-    /// Check if width changed and invalidate if needed
-    /// Returns true if cache was invalidated
-    pub fn check_width(&mut self, width: usize) -> bool {
-        if self.last_width != width {
-            self.cache.clear();
-            self.legacy_cache.clear();
-            self.last_width = width;
-            true
-        } else {
-            false
+    /// Evict entries if cache exceeds max_entries
+    fn evict_if_full(&mut self) {
+        if self.cache.len() >= self.max_entries {
+            let remove_count = self.max_entries / 5;
+            let keys_to_remove: Vec<_> = self.cache.keys().take(remove_count).cloned().collect();
+            for k in keys_to_remove {
+                self.cache.remove(&k);
+            }
         }
+        if self.legacy_cache.len() >= self.max_entries {
+            let remove_count = self.max_entries / 5;
+            let keys_to_remove: Vec<_> = self
+                .legacy_cache
+                .keys()
+                .take(remove_count)
+                .cloned()
+                .collect();
+            for k in keys_to_remove {
+                self.legacy_cache.remove(&k);
+            }
+        }
+    }
+
+    /// Check if width changed and update tracking
+    /// NOTE: No longer clears cache since cache key includes width.
+    /// Entries at old widths will naturally age out via cache size limits.
+    pub fn check_width(&mut self, width: usize) -> bool {
+        let changed = self.last_width != width;
+        self.last_width = width;
+        changed
     }
 
     /// Get cached lines for content hash (legacy, no link tracking)
@@ -70,6 +92,7 @@ impl MarkdownCache {
         if let Some(cached) = self.cache.get(&key) {
             Arc::clone(cached)
         } else {
+            self.evict_if_full();
             let rendered = super::render_with_links(content, width, theme);
             let arc = Arc::new(rendered);
             self.cache.insert(key, Arc::clone(&arc));

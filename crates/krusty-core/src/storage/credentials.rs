@@ -65,36 +65,48 @@ impl CredentialStore {
 
     /// Save credentials to a specific path
     ///
+    /// Uses atomic write-to-temp-file-then-rename pattern to prevent corruption.
     /// On Unix systems, sets file permissions to 0600 (user read/write only).
     /// On Windows, logs a warning that credentials may be accessible to other users.
     ///
     /// # Security
+    /// - Atomic write: writes to temp file, then renames over original
     /// - Unix: Sets restrictive 0600 permissions (owner read/write only)
     /// - Windows: No granular permission control, logs warning
     ///
     /// # Errors
-    /// Returns error if directory creation or file write fails.
+    /// Returns error if directory creation, temp file write, or rename fails.
     pub fn save_to_path(&self, path: &std::path::Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let contents = serde_json::to_string_pretty(self)?;
-        fs::write(path, contents)?;
 
-        // Set restrictive permissions on Unix (user read/write only)
+        // Create a temporary file in the same directory for atomic rename
+        let temp_path = path.with_extension("tmp");
+        let contents = serde_json::to_string_pretty(self)?;
+
+        // Write to temp file first
+        fs::write(&temp_path, contents)?;
+
+        // Set restrictive permissions on temp file before renaming (Unix)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Ok(metadata) = fs::metadata(path) {
+            if let Ok(metadata) = fs::metadata(&temp_path) {
                 let mut permissions = metadata.permissions();
                 permissions.set_mode(0o600);
-                fs::set_permissions(path, permissions)
+                fs::set_permissions(&temp_path, permissions)
                     .map_err(|e| anyhow::anyhow!("Failed to set secure file permissions: {}", e))?;
-                tracing::debug!("Set 0o600 permissions on credentials file");
+                tracing::debug!("Set 0o600 permissions on credentials temp file");
             } else {
-                tracing::warn!("Could not get metadata for credentials file, permissions not set");
+                tracing::warn!(
+                    "Could not get metadata for credentials temp file, permissions not set"
+                );
             }
         }
+
+        // Atomically replace the original file
+        fs::rename(&temp_path, path)?;
 
         #[cfg(windows)]
         {
@@ -103,6 +115,7 @@ impl CredentialStore {
             );
         }
 
+        tracing::debug!("Credentials saved atomically to {:?}", path);
         Ok(())
     }
 

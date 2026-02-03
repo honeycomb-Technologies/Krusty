@@ -9,19 +9,25 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod agent_state;
+mod block_ui;
 pub mod credentials;
 mod database;
 mod file_activity;
+mod messages;
 mod plans;
 mod preferences;
 mod sessions;
 
+pub use agent_state::AgentState;
+pub use block_ui::BlockUiState;
 pub use credentials::CredentialStore;
 pub use database::{Database, SharedDatabase};
 pub use file_activity::{FileActivityTracker, RankedFile};
+pub use messages::MessageStore;
 pub use plans::{PlanStore, PlanSummary};
 pub use preferences::Preferences;
-pub use sessions::{AgentState, SessionInfo, SessionManager};
+pub use sessions::{SessionInfo, SessionManager};
 
 /// Get current Unix timestamp in seconds
 #[inline]

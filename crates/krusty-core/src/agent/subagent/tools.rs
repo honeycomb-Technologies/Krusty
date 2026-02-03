@@ -13,6 +13,82 @@ use crate::ai::types::AiTool;
 use crate::tools::implementations::{BashTool, EditTool, GlobTool, GrepTool, ReadTool, WriteTool};
 use crate::tools::registry::{Tool, ToolContext, ToolResult};
 
+/// RAII guard for builder file locks
+///
+/// Automatically releases the lock when dropped, ensuring
+/// locks are never leaked due to early returns or panics.
+struct FileLockGuard {
+    path: PathBuf,
+    builder_id: String,
+    context: Arc<SharedBuildContext>,
+    locked: bool,
+}
+
+impl FileLockGuard {
+    /// Try to acquire a file lock with exponential backoff
+    async fn acquire(
+        context: Arc<SharedBuildContext>,
+        path: PathBuf,
+        builder_id: String,
+    ) -> Result<Self, String> {
+        use crate::agent::constants::retry;
+
+        let start = Instant::now();
+
+        for (attempt, delay) in retry::DELAYS_MS.iter().enumerate() {
+            match context.acquire_lock(path.clone(), builder_id.clone(), "write/edit".to_string()) {
+                Ok(()) => {
+                    // Record wait time if we had to wait
+                    let wait_time = start.elapsed();
+                    if wait_time > retry::LOG_THRESHOLD {
+                        context.record_lock_wait(path.clone(), wait_time);
+                    }
+                    return Ok(Self {
+                        path,
+                        builder_id,
+                        context,
+                        locked: true,
+                    });
+                }
+                Err(holder) => {
+                    if attempt < retry::DELAYS_MS.len() - 1 {
+                        tracing::debug!(
+                            builder = %builder_id,
+                            path = %path.display(),
+                            holder = %holder,
+                            attempt = attempt,
+                            "File locked, backoff {}ms",
+                            delay
+                        );
+                        tokio::time::sleep(Duration::from_millis(*delay)).await;
+                    } else {
+                        // Record the failed wait time too
+                        let wait_time = start.elapsed();
+                        context.record_lock_wait(path.clone(), wait_time);
+                        return Err(format!(
+                            "File {} locked by {} (tried {}x, waited {:.1}s)",
+                            path.display(),
+                            holder,
+                            retry::MAX_ATTEMPTS,
+                            wait_time.as_secs_f64()
+                        ));
+                    }
+                }
+            }
+        }
+        Err("Lock acquisition failed".to_string())
+    }
+}
+
+impl Drop for FileLockGuard {
+    fn drop(&mut self) {
+        if self.locked {
+            self.context.release_lock(&self.path, &self.builder_id);
+            tracing::debug!(path = %self.path.display(), "File lock released via RAII guard");
+        }
+    }
+}
+
 /// Sub-agent tools - read-only access with shared cache
 pub(crate) struct SubAgentTools {
     glob: GlobTool,
@@ -187,56 +263,6 @@ impl BuilderTools {
         }
     }
 
-    /// Try to acquire a file lock with exponential backoff (fast for brief locks)
-    async fn acquire_lock_with_retry(&self, path: &std::path::Path) -> Result<(), String> {
-        use crate::agent::constants::retry;
-
-        let path_buf = path.to_path_buf();
-        let start = Instant::now();
-
-        for (attempt, delay) in retry::DELAYS_MS.iter().enumerate() {
-            match self.context.acquire_lock(
-                path_buf.clone(),
-                self.builder_id.clone(),
-                "write/edit".to_string(),
-            ) {
-                Ok(()) => {
-                    // Record wait time if we had to wait
-                    let wait_time = start.elapsed();
-                    if wait_time > retry::LOG_THRESHOLD {
-                        self.context.record_lock_wait(path_buf, wait_time);
-                    }
-                    return Ok(());
-                }
-                Err(holder) => {
-                    if attempt < retry::DELAYS_MS.len() - 1 {
-                        tracing::debug!(
-                            builder = %self.builder_id,
-                            path = %path.display(),
-                            holder = %holder,
-                            attempt = attempt,
-                            "File locked, backoff {}ms",
-                            delay
-                        );
-                        tokio::time::sleep(Duration::from_millis(*delay)).await;
-                    } else {
-                        // Record the failed wait time too
-                        let wait_time = start.elapsed();
-                        self.context.record_lock_wait(path_buf, wait_time);
-                        return Err(format!(
-                            "File {} locked by {} (tried {}x, waited {:.1}s)",
-                            path.display(),
-                            holder,
-                            retry::MAX_ATTEMPTS,
-                            wait_time.as_secs_f64()
-                        ));
-                    }
-                }
-            }
-        }
-        Err("Lock acquisition failed".to_string())
-    }
-
     pub fn get_ai_tools(&self) -> Vec<AiTool> {
         vec![
             AiTool {
@@ -319,13 +345,22 @@ impl BuilderTools {
                     }
                 };
 
-                // Acquire lock with retry (waits for other builders)
-                if let Err(e) = self.acquire_lock_with_retry(&path).await {
-                    return Some(ToolResult {
-                        output: format!("Cannot write: {}", e),
-                        is_error: true,
-                    });
-                }
+                // Acquire lock with RAII guard (auto-releases on drop)
+                let _guard = match FileLockGuard::acquire(
+                    self.context.clone(),
+                    path.clone(),
+                    self.builder_id.clone(),
+                )
+                .await
+                {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        return Some(ToolResult {
+                            output: format!("Cannot write: {}", e),
+                            is_error: true,
+                        })
+                    }
+                };
 
                 let result = self.write.execute(params.clone(), ctx).await;
 
@@ -339,8 +374,7 @@ impl BuilderTools {
                         .record_modification(path.clone(), self.builder_id.clone());
                 }
 
-                // Release lock after write
-                self.context.release_lock(&path, &self.builder_id);
+                // Lock released automatically when _guard drops
                 Some(result)
             }
             "edit" => {
@@ -355,13 +389,22 @@ impl BuilderTools {
                     }
                 };
 
-                // Acquire lock with retry (waits for other builders)
-                if let Err(e) = self.acquire_lock_with_retry(&path).await {
-                    return Some(ToolResult {
-                        output: format!("Cannot edit: {}", e),
-                        is_error: true,
-                    });
-                }
+                // Acquire lock with RAII guard (auto-releases on drop)
+                let _guard = match FileLockGuard::acquire(
+                    self.context.clone(),
+                    path.clone(),
+                    self.builder_id.clone(),
+                )
+                .await
+                {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        return Some(ToolResult {
+                            output: format!("Cannot edit: {}", e),
+                            is_error: true,
+                        })
+                    }
+                };
 
                 let result = self.edit.execute(params.clone(), ctx).await;
 
@@ -386,8 +429,7 @@ impl BuilderTools {
                         .record_modification(path.clone(), self.builder_id.clone());
                 }
 
-                // Release lock after edit
-                self.context.release_lock(&path, &self.builder_id);
+                // Lock released automatically when _guard drops
                 Some(result)
             }
             "bash" => Some(self.bash.execute(params, ctx).await),

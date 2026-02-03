@@ -323,36 +323,13 @@ impl SessionManager {
     /// Save a message to a session
     /// The content field stores JSON-serialized Vec<Content> for full fidelity
     pub fn save_message(&self, session_id: &str, role: &str, content_json: &str) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-
-        self.db.conn().execute(
-            "INSERT INTO messages (session_id, role, content, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![session_id, role, content_json, now],
-        )?;
-
-        // Update session timestamp
-        self.db.conn().execute(
-            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
-            params![now, session_id],
-        )?;
-
-        Ok(())
+        super::messages::MessageStore::new(&self.db).save_message(session_id, role, content_json)
     }
 
     /// Load all messages for a session
     /// Returns (role, content_json) pairs where content_json can be deserialized to Vec<Content>
     pub fn load_session_messages(&self, session_id: &str) -> Result<Vec<(String, String)>> {
-        let mut stmt = self
-            .db
-            .conn()
-            .prepare("SELECT role, content FROM messages WHERE session_id = ?1 ORDER BY id")?;
-
-        let messages = stmt.query_map([session_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-
-        messages.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        super::messages::MessageStore::new(&self.db).load_session_messages(session_id)
     }
 
     /// Generate a title from the first message content
@@ -400,34 +377,17 @@ impl SessionManager {
         collapsed: bool,
         scroll_offset: u16,
     ) -> Result<()> {
-        self.db.conn().execute(
-            "INSERT OR REPLACE INTO block_ui_state (session_id, block_id, block_type, collapsed, scroll_offset)
-             VALUES (?1, ?2, '', ?3, ?4)",
-            params![session_id, block_id, collapsed as i32, scroll_offset as i32],
-        )?;
-        Ok(())
+        super::block_ui::BlockUiStore::new(&self.db).save_block_ui_state(
+            session_id,
+            block_id,
+            collapsed,
+            scroll_offset,
+        )
     }
 
     /// Load all block UI states for a session
-    pub fn load_block_ui_states(&self, session_id: &str) -> Vec<BlockUiState> {
-        let result = (|| -> Result<Vec<BlockUiState>> {
-            let mut stmt = self.db.conn().prepare(
-                "SELECT block_id, collapsed, scroll_offset
-                 FROM block_ui_state WHERE session_id = ?1",
-            )?;
-
-            let states = stmt.query_map([session_id], |row| {
-                Ok(BlockUiState {
-                    block_id: row.get(0)?,
-                    collapsed: row.get::<_, i32>(1)? != 0,
-                    scroll_offset: row.get::<_, i32>(2)? as u16,
-                })
-            })?;
-
-            states.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-        })();
-
-        result.unwrap_or_default()
+    pub fn load_block_ui_states(&self, session_id: &str) -> Vec<super::block_ui::BlockUiState> {
+        super::block_ui::BlockUiStore::new(&self.db).load_block_ui_states(session_id)
     }
 
     // =========================================================================
@@ -486,92 +446,23 @@ impl SessionManager {
     ///
     /// Valid states: "idle", "streaming", "tool_executing", "awaiting_input", "error"
     pub fn set_agent_state(&self, session_id: &str, state: &str) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-
-        // Update state and last_event_at
-        // Set agent_started_at only when transitioning from idle
-        self.db.conn().execute(
-            "UPDATE sessions SET
-                agent_state = ?1,
-                agent_last_event_at = ?2,
-                agent_started_at = CASE
-                    WHEN agent_state = 'idle' AND ?1 != 'idle' THEN ?2
-                    WHEN ?1 = 'idle' THEN NULL
-                    ELSE agent_started_at
-                END
-             WHERE id = ?3",
-            params![state, now, session_id],
-        )?;
-        Ok(())
+        super::agent_state::AgentStateStore::new(&self.db).set_agent_state(session_id, state)
     }
 
     /// Get the agent state for a session
-    pub fn get_agent_state(&self, session_id: &str) -> Option<AgentState> {
-        let result = self.db.conn().query_row(
-            "SELECT agent_state, agent_started_at, agent_last_event_at
-             FROM sessions WHERE id = ?1",
-            [session_id],
-            |row| {
-                Ok(AgentState {
-                    state: row.get::<_, String>(0)?,
-                    started_at: row.get::<_, Option<String>>(1)?,
-                    last_event_at: row.get::<_, Option<String>>(2)?,
-                })
-            },
-        );
-
-        result.ok()
+    pub fn get_agent_state(&self, session_id: &str) -> Option<super::agent_state::AgentState> {
+        super::agent_state::AgentStateStore::new(&self.db).get_agent_state(session_id)
     }
 
     /// Update agent last_event_at timestamp (for keeping session "alive")
     pub fn touch_agent_event(&self, session_id: &str) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        self.db.conn().execute(
-            "UPDATE sessions SET agent_last_event_at = ?1 WHERE id = ?2",
-            params![now, session_id],
-        )?;
-        Ok(())
+        super::agent_state::AgentStateStore::new(&self.db).touch_agent_event(session_id)
     }
 
     /// List sessions with active agents (not idle)
-    pub fn list_active_sessions(&self) -> Result<Vec<(String, AgentState)>> {
-        let mut stmt = self.db.conn().prepare(
-            "SELECT id, agent_state, agent_started_at, agent_last_event_at
-             FROM sessions WHERE agent_state != 'idle'",
-        )?;
-
-        let sessions = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                AgentState {
-                    state: row.get::<_, String>(1)?,
-                    started_at: row.get::<_, Option<String>>(2)?,
-                    last_event_at: row.get::<_, Option<String>>(3)?,
-                },
-            ))
-        })?;
-
-        sessions.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    pub fn list_active_sessions(&self) -> Result<Vec<(String, super::agent_state::AgentState)>> {
+        super::agent_state::AgentStateStore::new(&self.db).list_active_sessions()
     }
-}
-
-/// Agent execution state
-#[derive(Debug, Clone)]
-pub struct AgentState {
-    /// Current state: "idle", "streaming", "tool_executing", "awaiting_input", "error"
-    pub state: String,
-    /// When the agent started processing
-    pub started_at: Option<String>,
-    /// Last event timestamp
-    pub last_event_at: Option<String>,
-}
-
-/// Block UI state for session restoration
-#[derive(Debug, Clone)]
-pub struct BlockUiState {
-    pub block_id: String,
-    pub collapsed: bool,
-    pub scroll_offset: u16,
 }
 
 #[cfg(test)]

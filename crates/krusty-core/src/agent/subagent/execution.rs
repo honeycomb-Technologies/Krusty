@@ -11,6 +11,7 @@ use tracing::{info, warn};
 
 use crate::agent::build_context::SharedBuildContext;
 use crate::agent::cache::SharedExploreCache;
+use crate::agent::constants::subagent;
 use crate::ai::client::AiClient;
 use crate::ai::retry::{with_retry, RetryConfig};
 use crate::ai::types::{AiTool, Content, ModelMessage, Role};
@@ -315,6 +316,33 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
 
         turns += 1;
 
+        // Enforce max turn limit to prevent infinite loops
+        if turns > subagent::MAX_TURNS {
+            warn!(
+                task_id = %task_id,
+                turns = turns,
+                max_turns = subagent::MAX_TURNS,
+                "Sub-agent exceeded max turns, forcing completion"
+            );
+            send_progress(
+                AgentProgressStatus::Complete,
+                "max turns reached",
+                total_tool_calls,
+                estimated_tokens,
+                config,
+            );
+            config.cleanup();
+            return SubAgentResult {
+                task_id,
+                success: true,
+                output: final_output,
+                files_examined,
+                duration_ms: start.elapsed().as_millis() as u64,
+                turns_used: turns,
+                error: None,
+            };
+        }
+
         // Get system prompt (may be dynamic for builders)
         let system_prompt = config.system_prompt(turns);
 
@@ -489,6 +517,23 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             role: Role::User,
             content: tool_results,
         });
+
+        // Prune messages to keep context size manageable
+        // Keep first message (user prompt) and recent messages
+        if messages.len() > subagent::MAX_MESSAGES {
+            let to_remove = messages.len() - subagent::MAX_MESSAGES;
+            // Remove messages after the first one (index 1) up to to_remove count
+            // This preserves the original prompt and keeps recent context
+            for _ in 0..to_remove {
+                messages.remove(1);
+            }
+            tracing::debug!(
+                task_id = %task_id,
+                removed = to_remove,
+                remaining = messages.len(),
+                "Pruned messages to stay within limit"
+            );
+        }
     }
 }
 

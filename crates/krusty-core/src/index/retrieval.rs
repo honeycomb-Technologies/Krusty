@@ -164,91 +164,95 @@ impl<'a> SemanticRetrieval<'a> {
         Ok(results)
     }
 
-    /// Load candidate symbols with embeddings
+    /// Load candidate symbols with embeddings (chunked for scalability)
     fn load_candidates(
         &self,
         codebase_id: &str,
         query: &SearchQuery,
     ) -> Result<Vec<SearchCandidate>> {
-        let mut sql = String::from(
-            "SELECT id, symbol_type, symbol_name, symbol_path, file_path,
-                    line_start, line_end, signature, embedding
-             FROM codebase_index WHERE codebase_id = ?1",
-        );
+        const CHUNK_SIZE: i64 = 500;
+        let mut all_candidates = Vec::new();
+        let mut offset = 0;
 
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(codebase_id.to_string())];
+        loop {
+            let mut sql = String::from(
+                "SELECT id, symbol_type, symbol_name, symbol_path, file_path,
+                        line_start, line_end, signature, embedding
+                 FROM codebase_index WHERE codebase_id = ?1 AND embedding IS NOT NULL",
+            );
 
-        if let Some(st) = &query.symbol_type {
-            sql.push_str(" AND symbol_type = ?");
-            params_vec.push(Box::new(st.as_str().to_string()));
+            let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> =
+                vec![Box::new(codebase_id.to_string())];
+
+            if let Some(st) = &query.symbol_type {
+                sql.push_str(" AND symbol_type = ?");
+                params_vec.push(Box::new(st.as_str().to_string()));
+            }
+
+            if let Some(pattern) = &query.file_pattern {
+                sql.push_str(" AND file_path LIKE ?");
+                params_vec.push(Box::new(format!("%{}%", pattern)));
+            }
+
+            // Add pagination for chunked loading
+            sql.push_str(&format!(" LIMIT {} OFFSET {}", CHUNK_SIZE, offset));
+
+            let mut stmt = self.conn.prepare(&sql)?;
+
+            let params_refs: Vec<&dyn rusqlite::ToSql> =
+                params_vec.iter().map(|b| b.as_ref()).collect();
+
+            let chunk: Vec<SearchCandidate> = stmt
+                .query_map(params_refs.as_slice(), |row| {
+                    let id: i64 = row.get(0)?;
+                    let symbol_type_str: String = row.get(1)?;
+                    let symbol_name: String = row.get(2)?;
+                    let symbol_path: String = row.get(3)?;
+                    let file_path: String = row.get(4)?;
+                    let line_start: i64 = row.get(5)?;
+                    let line_end: i64 = row.get(6)?;
+                    let signature: Option<String> = row.get(7)?;
+                    let embedding_blob: Option<Vec<u8>> = row.get(8)?;
+
+                    // Parse embedding blob with validation
+                    let embedding_opt = match embedding_blob {
+                        Some(blob) => EmbeddingEngine::blob_to_embedding(&blob),
+                        None => None,
+                    };
+
+                    let symbol_type =
+                        SymbolType::parse(&symbol_type_str).unwrap_or(SymbolType::Function);
+
+                    Ok((
+                        id,
+                        embedding_opt,
+                        SymbolMeta {
+                            symbol_type,
+                            symbol_name,
+                            symbol_path,
+                            file_path,
+                            line_start: line_start as usize,
+                            line_end: line_end as usize,
+                            signature,
+                        },
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            if chunk.is_empty() {
+                break; // No more candidates
+            }
+
+            all_candidates.extend(chunk);
+            offset += CHUNK_SIZE;
+
+            // Stop if we have enough candidates (2x requested limit for better results)
+            if query.limit > 0 && all_candidates.len() >= query.limit * 2 {
+                break;
+            }
         }
 
-        if let Some(pattern) = &query.file_pattern {
-            sql.push_str(" AND file_path LIKE ?");
-            params_vec.push(Box::new(format!("%{}%", pattern)));
-        }
-
-        let mut stmt = self.conn.prepare(&sql)?;
-
-        let params_refs: Vec<&dyn rusqlite::ToSql> =
-            params_vec.iter().map(|b| b.as_ref()).collect();
-        let rows = stmt.query_map(params_refs.as_slice(), |row| {
-            let id: i64 = row.get(0)?;
-            let symbol_type_str: String = row.get(1)?;
-            let symbol_name: String = row.get(2)?;
-            let symbol_path: String = row.get(3)?;
-            let file_path: String = row.get(4)?;
-            let line_start: i64 = row.get(5)?;
-            let line_end: i64 = row.get(6)?;
-            let signature: Option<String> = row.get(7)?;
-            let embedding_blob: Option<Vec<u8>> = row.get(8)?;
-
-            Ok((
-                id,
-                symbol_type_str,
-                symbol_name,
-                symbol_path,
-                file_path,
-                line_start,
-                line_end,
-                signature,
-                embedding_blob,
-            ))
-        })?;
-
-        let mut candidates = Vec::new();
-        for row in rows {
-            let (
-                id,
-                symbol_type_str,
-                symbol_name,
-                symbol_path,
-                file_path,
-                line_start,
-                line_end,
-                signature,
-                embedding_blob,
-            ) = row?;
-
-            let symbol_type = SymbolType::parse(&symbol_type_str).unwrap_or(SymbolType::Function);
-            let embedding = embedding_blob.and_then(|b| EmbeddingEngine::blob_to_embedding(&b));
-
-            candidates.push((
-                id,
-                embedding,
-                SymbolMeta {
-                    symbol_type,
-                    symbol_name,
-                    symbol_path,
-                    file_path,
-                    line_start: line_start as usize,
-                    line_end: line_end as usize,
-                    signature,
-                },
-            ));
-        }
-
-        Ok(candidates)
+        Ok(all_candidates)
     }
 
     /// Keyword search with per-word OR matching and relevance ranking

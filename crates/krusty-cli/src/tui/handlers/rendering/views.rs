@@ -481,14 +481,15 @@ impl App {
         self.scroll_system.layout.messages_area = Some(messages_chunk);
 
         // Debounce expensive line calculation during sidebar animation
-        // Only recalculate when NOT animating or when width changed significantly
+        // Only recalculate when NOT animating or when width changed
         let msg_total_lines = if self.plan_sidebar.is_animating()
             && self.scroll_system.layout_cache.message_lines > 0
+            && self.scroll_system.layout_cache.cached_width == messages_chunk.width
         {
-            // During animation: use cached value
+            // During animation with same width: use cached value
             self.scroll_system.layout_cache.message_lines
         } else {
-            // Animation complete or no animation: recalculate and cache
+            // Animation complete, width changed, or no cache: recalculate
             let lines = self.calculate_message_lines(messages_chunk.width);
             self.scroll_system.layout_cache.message_lines = lines;
             self.scroll_system.layout_cache.cached_width = messages_chunk.width;

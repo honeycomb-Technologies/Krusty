@@ -80,6 +80,25 @@ fn clear_area(buf: &mut ratatui::buffer::Buffer, area: Rect, bg_color: Color) {
 }
 
 impl App {
+    /// Helper: add block position to tracking arrays (used in both passes)
+    fn track_block_position(
+        block_positions: &mut Vec<BlockPosition>,
+        total_lines: &mut usize,
+        message_heights: &mut Vec<usize>,
+        height: u16,
+        block_idx: usize,
+        block_type: BlockType,
+    ) {
+        block_positions.push(BlockPosition {
+            line_start: *total_lines,
+            height,
+            block_idx,
+            block_type,
+        });
+        *total_lines += height as usize + 1; // blank after
+        message_heights.push(0);
+    }
+
     /// Render the messages panel
     pub fn render_messages(&mut self, f: &mut Frame, area: Rect) {
         let block = Block::default()
@@ -163,34 +182,32 @@ impl App {
             if role == "thinking" {
                 if let Some(tb) = self.blocks.thinking.get(thinking_idx) {
                     let height = tb.height(content_width, &self.ui.theme);
-                    block_positions.push(BlockPosition {
-                        line_start: total_lines,
+                    Self::track_block_position(
+                        &mut block_positions,
+                        &mut total_lines,
+                        &mut message_heights,
                         height,
-                        block_idx: thinking_idx,
-                        block_type: BlockType::Thinking,
-                    });
-                    total_lines += height as usize;
-                    total_lines += 1; // blank after
+                        thinking_idx,
+                        BlockType::Thinking,
+                    );
                 }
                 thinking_idx += 1;
-                message_heights.push(0); // Block - height tracked separately
                 continue;
             }
 
             if role == "bash" {
                 if let Some(bb) = self.blocks.bash.get(bash_idx) {
                     let height = bb.height(content_width, &self.ui.theme);
-                    block_positions.push(BlockPosition {
-                        line_start: total_lines,
+                    Self::track_block_position(
+                        &mut block_positions,
+                        &mut total_lines,
+                        &mut message_heights,
                         height,
-                        block_idx: bash_idx,
-                        block_type: BlockType::Bash,
-                    });
-                    total_lines += height as usize;
-                    total_lines += 1; // blank after
+                        bash_idx,
+                        BlockType::Bash,
+                    );
                 }
                 bash_idx += 1;
-                message_heights.push(0); // Block - height tracked separately
                 continue;
             }
 
@@ -198,137 +215,129 @@ impl App {
                 if self.blocks.pinned_terminal != Some(terminal_idx) {
                     if let Some(tp) = self.blocks.terminal.get(terminal_idx) {
                         let height = tp.height(content_width, &self.ui.theme);
-                        block_positions.push(BlockPosition {
-                            line_start: total_lines,
+                        Self::track_block_position(
+                            &mut block_positions,
+                            &mut total_lines,
+                            &mut message_heights,
                             height,
-                            block_idx: terminal_idx,
-                            block_type: BlockType::Terminal,
-                        });
-                        total_lines += height as usize;
-                        total_lines += 1;
+                            terminal_idx,
+                            BlockType::Terminal,
+                        );
                     }
                 }
                 terminal_idx += 1;
-                message_heights.push(0);
                 continue;
             }
 
             if role == "tool_result" {
                 if let Some(tr) = self.blocks.tool_result.get(tool_result_idx) {
                     let height = tr.height(content_width, &self.ui.theme);
-                    block_positions.push(BlockPosition {
-                        line_start: total_lines,
+                    Self::track_block_position(
+                        &mut block_positions,
+                        &mut total_lines,
+                        &mut message_heights,
                         height,
-                        block_idx: tool_result_idx,
-                        block_type: BlockType::ToolResult,
-                    });
-                    total_lines += height as usize;
-                    total_lines += 1;
+                        tool_result_idx,
+                        BlockType::ToolResult,
+                    );
                 }
                 tool_result_idx += 1;
-                message_heights.push(0);
                 continue;
             }
 
             if role == "read" {
                 if let Some(rb) = self.blocks.read.get(read_idx) {
                     let height = rb.height(content_width, &self.ui.theme);
-                    block_positions.push(BlockPosition {
-                        line_start: total_lines,
+                    Self::track_block_position(
+                        &mut block_positions,
+                        &mut total_lines,
+                        &mut message_heights,
                         height,
-                        block_idx: read_idx,
-                        block_type: BlockType::Read,
-                    });
-                    total_lines += height as usize;
-                    total_lines += 1;
+                        read_idx,
+                        BlockType::Read,
+                    );
                 }
                 read_idx += 1;
-                message_heights.push(0);
                 continue;
             }
 
             if role == "edit" {
                 if let Some(eb) = self.blocks.edit.get(edit_idx) {
                     let height = eb.height(content_width, &self.ui.theme);
-                    block_positions.push(BlockPosition {
-                        line_start: total_lines,
+                    Self::track_block_position(
+                        &mut block_positions,
+                        &mut total_lines,
+                        &mut message_heights,
                         height,
-                        block_idx: edit_idx,
-                        block_type: BlockType::Edit,
-                    });
-                    total_lines += height as usize;
-                    total_lines += 1;
+                        edit_idx,
+                        BlockType::Edit,
+                    );
                 }
                 edit_idx += 1;
-                message_heights.push(0);
                 continue;
             }
 
             if role == "write" {
                 if let Some(wb) = self.blocks.write.get(write_idx) {
                     let height = wb.height(content_width, &self.ui.theme);
-                    block_positions.push(BlockPosition {
-                        line_start: total_lines,
+                    Self::track_block_position(
+                        &mut block_positions,
+                        &mut total_lines,
+                        &mut message_heights,
                         height,
-                        block_idx: write_idx,
-                        block_type: BlockType::Write,
-                    });
-                    total_lines += height as usize;
-                    total_lines += 1;
+                        write_idx,
+                        BlockType::Write,
+                    );
                 }
                 write_idx += 1;
-                message_heights.push(0);
                 continue;
             }
 
             if role == "web_search" {
                 if let Some(ws) = self.blocks.web_search.get(web_search_idx) {
                     let height = ws.height(content_width, &self.ui.theme);
-                    block_positions.push(BlockPosition {
-                        line_start: total_lines,
+                    Self::track_block_position(
+                        &mut block_positions,
+                        &mut total_lines,
+                        &mut message_heights,
                         height,
-                        block_idx: web_search_idx,
-                        block_type: BlockType::WebSearch,
-                    });
-                    total_lines += height as usize;
-                    total_lines += 1;
+                        web_search_idx,
+                        BlockType::WebSearch,
+                    );
                 }
                 web_search_idx += 1;
-                message_heights.push(0);
                 continue;
             }
 
             if role == "explore" {
                 if let Some(eb) = self.blocks.explore.get(explore_idx) {
                     let height = eb.height(content_width, &self.ui.theme);
-                    block_positions.push(BlockPosition {
-                        line_start: total_lines,
+                    Self::track_block_position(
+                        &mut block_positions,
+                        &mut total_lines,
+                        &mut message_heights,
                         height,
-                        block_idx: explore_idx,
-                        block_type: BlockType::Explore,
-                    });
-                    total_lines += height as usize;
-                    total_lines += 1;
+                        explore_idx,
+                        BlockType::Explore,
+                    );
                 }
                 explore_idx += 1;
-                message_heights.push(0);
                 continue;
             }
 
             if role == "build" {
                 if let Some(bb) = self.blocks.build.get(build_idx) {
                     let height = bb.height(content_width, &self.ui.theme);
-                    block_positions.push(BlockPosition {
-                        line_start: total_lines,
+                    Self::track_block_position(
+                        &mut block_positions,
+                        &mut total_lines,
+                        &mut message_heights,
                         height,
-                        block_idx: build_idx,
-                        block_type: BlockType::Build,
-                    });
-                    total_lines += height as usize;
-                    total_lines += 1;
+                        build_idx,
+                        BlockType::Build,
+                    );
                 }
                 build_idx += 1;
-                message_heights.push(0);
                 continue;
             }
 

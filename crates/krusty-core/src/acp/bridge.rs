@@ -18,12 +18,12 @@ use tracing::info;
 /// through a channel, which are then forwarded to the real connection
 /// by the server.
 pub struct NotificationBridge {
-    tx: mpsc::UnboundedSender<SessionNotification>,
+    tx: mpsc::Sender<SessionNotification>,
 }
 
 impl NotificationBridge {
     /// Create a new notification bridge
-    pub fn new(tx: mpsc::UnboundedSender<SessionNotification>) -> Self {
+    pub fn new(tx: mpsc::Sender<SessionNotification>) -> Self {
         Self { tx }
     }
 }
@@ -73,20 +73,22 @@ impl Client for NotificationBridge {
     async fn session_notification(&self, notification: SessionNotification) -> AcpResult<()> {
         self.tx
             .send(notification)
+            .await
             .map_err(|e| AcpError::new(-32603, format!("Channel send error: {}", e)))
     }
 }
 
-/// Create a notification channel and bridge
+/// Create a bounded notification channel and bridge
+///
+/// Uses bounded channels (capacity 1000) to prevent unbounded memory growth
+/// from slow notification consumers.
 ///
 /// Returns (bridge, receiver) tuple:
 /// - bridge: implements Client, used by PromptProcessor
 /// - receiver: receives notifications to forward to real connection
-pub fn create_notification_channel() -> (
-    NotificationBridge,
-    mpsc::UnboundedReceiver<SessionNotification>,
-) {
-    let (tx, rx) = mpsc::unbounded_channel();
+pub fn create_notification_channel() -> (NotificationBridge, mpsc::Receiver<SessionNotification>) {
+    const CHANNEL_CAPACITY: usize = 1000;
+    let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
     (NotificationBridge::new(tx), rx)
 }
 

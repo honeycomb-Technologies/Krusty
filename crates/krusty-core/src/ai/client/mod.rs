@@ -9,6 +9,7 @@
 
 pub mod config;
 pub mod core;
+pub mod request_builder;
 pub mod simple;
 pub mod streaming;
 pub mod thinking;
@@ -18,3 +19,4 @@ pub mod tools;
 pub use config::{AiClientConfig, CallOptions};
 pub use core::AiClient;
 pub use core::KRUSTY_SYSTEM_PROMPT;
+pub use request_builder::{BuildOptions, RequestBuilder};

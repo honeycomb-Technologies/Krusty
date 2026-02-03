@@ -211,8 +211,24 @@ impl Indexer {
             return Ok(codebase);
         }
 
-        // Phase 2: Parse files and extract symbols
-        let mut all_symbols: Vec<(PathBuf, ParsedSymbol)> = Vec::new();
+        // Phase 2 & 3: Parse files, extract symbols, and generate embeddings in streaming batches
+        // This avoids loading all symbols into memory at once
+        const EMBED_CHUNK_SIZE: usize = 64;
+
+        send_progress(IndexProgress {
+            phase: IndexPhase::Parsing,
+            current: 0,
+            total: total_files,
+            current_file: None,
+        });
+
+        // Clear existing index
+        store.clear_index(&codebase.id)?;
+
+        let now = Utc::now().to_rfc3339();
+        let mut parsed_symbols: Vec<(PathBuf, ParsedSymbol)> = Vec::new();
+        let mut total_symbols = 0;
+        let mut embedding_failed = false;
 
         for (idx, file_path) in rust_files.iter().enumerate() {
             send_progress(IndexProgress {
@@ -225,97 +241,59 @@ impl Indexer {
             match self.parse_file(file_path) {
                 Ok(symbols) => {
                     for symbol in symbols {
-                        all_symbols.push((file_path.clone(), symbol));
+                        parsed_symbols.push((file_path.clone(), symbol));
                     }
                 }
                 Err(e) => {
                     warn!(file = %file_path.display(), error = %e, "Failed to parse file");
                 }
             }
-        }
 
-        let total_symbols = all_symbols.len();
-        info!(symbols = total_symbols, "Extracted symbols");
+            // When we have enough symbols, process embeddings and insert in batch
+            if parsed_symbols.len() >= EMBED_CHUNK_SIZE || idx == total_files - 1 {
+                // Generate embeddings for this batch
+                let embeddings: Vec<Option<Vec<f32>>> = if let Some(ref engine) = self.embeddings {
+                    send_progress(IndexProgress {
+                        phase: IndexPhase::Embedding,
+                        current: total_symbols,
+                        total: total_symbols + parsed_symbols.len(),
+                        current_file: None,
+                    });
 
-        // Phase 3: Generate embeddings (optional, chunked for progress)
-        const EMBED_CHUNK_SIZE: usize = 64;
-        let embeddings: Vec<Option<Vec<f32>>> = if let Some(ref engine) = self.embeddings {
-            send_progress(IndexProgress {
-                phase: IndexPhase::Embedding,
-                current: 0,
-                total: total_symbols,
-                current_file: None,
-            });
+                    let texts: Vec<String> = parsed_symbols
+                        .iter()
+                        .map(|(_, sym)| self.symbol_to_embedding_text(sym))
+                        .collect();
 
-            let texts: Vec<String> = all_symbols
-                .iter()
-                .map(|(_, sym)| self.symbol_to_embedding_text(sym))
-                .collect();
-
-            let mut all_embeddings: Vec<Option<Vec<f32>>> = Vec::with_capacity(texts.len());
-            let mut failed = false;
-
-            for chunk in texts.chunks(EMBED_CHUNK_SIZE) {
-                if failed {
-                    all_embeddings.extend(std::iter::repeat_with(|| None).take(chunk.len()));
-                    continue;
-                }
-                match engine.embed_batch(chunk.to_vec()).await {
-                    Ok(embs) => {
-                        all_embeddings.extend(embs.into_iter().map(Some));
-                        send_progress(IndexProgress {
-                            phase: IndexPhase::Embedding,
-                            current: all_embeddings.len(),
-                            total: total_symbols,
-                            current_file: None,
-                        });
+                    if !embedding_failed {
+                        match engine.embed_batch(texts.clone()).await {
+                            Ok(embs) => embs.into_iter().map(Some).collect(),
+                            Err(e) => {
+                                warn!(error = %e, "Failed to generate embeddings, continuing without");
+                                embedding_failed = true;
+                                vec![None; texts.len()]
+                            }
+                        }
+                    } else {
+                        vec![None; texts.len()]
                     }
-                    Err(e) => {
-                        warn!(error = %e, "Failed to generate embeddings, continuing without");
-                        all_embeddings.extend(std::iter::repeat_with(|| None).take(chunk.len()));
-                        failed = true;
-                    }
-                }
-            }
+                } else {
+                    vec![None; parsed_symbols.len()]
+                };
 
-            all_embeddings
-        } else {
-            vec![None; total_symbols]
-        };
+                // Insert batch with transaction
+                self.insert_symbols_batch(conn, &codebase.id, &parsed_symbols, &embeddings, &now)?;
 
-        // Phase 4: Store in database
-        send_progress(IndexProgress {
-            phase: IndexPhase::Storing,
-            current: 0,
-            total: total_symbols,
-            current_file: None,
-        });
+                total_symbols += parsed_symbols.len();
+                parsed_symbols.clear();
 
-        // Clear existing index
-        store.clear_index(&codebase.id)?;
-
-        // Insert new symbols
-        let now = Utc::now().to_rfc3339();
-        for (idx, ((file_path, symbol), embedding)) in
-            all_symbols.into_iter().zip(embeddings).enumerate()
-        {
-            if idx % 100 == 0 {
                 send_progress(IndexProgress {
                     phase: IndexPhase::Storing,
-                    current: idx,
+                    current: total_symbols,
                     total: total_symbols,
                     current_file: None,
                 });
             }
-
-            self.insert_symbol(
-                conn,
-                &codebase.id,
-                &file_path,
-                &symbol,
-                embedding.as_deref(),
-                &now,
-            )?;
         }
 
         // Mark as indexed
@@ -338,6 +316,47 @@ impl Indexer {
         store
             .get_by_id(&codebase.id)?
             .context("Codebase not found after indexing")
+    }
+
+    /// Insert a batch of symbols in a single transaction
+    fn insert_symbols_batch(
+        &self,
+        conn: &Connection,
+        codebase_id: &str,
+        symbols: &[(PathBuf, ParsedSymbol)],
+        embeddings: &[Option<Vec<f32>>],
+        indexed_at: &str,
+    ) -> Result<()> {
+        let tx = conn.unchecked_transaction()?;
+
+        for ((file_path, symbol), embedding) in symbols.iter().zip(embeddings.iter()) {
+            let file_path_str = file_path.to_string_lossy().to_string();
+            let calls_json = serde_json::to_string(&symbol.calls)?;
+            let embedding_blob = embedding.as_deref().map(EmbeddingEngine::embedding_to_blob);
+
+            tx.execute(
+                "INSERT INTO codebase_index
+                 (codebase_id, symbol_type, symbol_name, symbol_path, file_path,
+                  line_start, line_end, signature, embedding, calls, indexed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    codebase_id,
+                    symbol.symbol_type.as_str(),
+                    symbol.name,
+                    symbol.full_path,
+                    file_path_str,
+                    symbol.line_start as i64,
+                    symbol.line_end as i64,
+                    symbol.signature,
+                    embedding_blob,
+                    calls_json,
+                    indexed_at,
+                ],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
     }
 
     /// Scan for Rust files in a directory

@@ -55,3 +55,11 @@ pub mod models {
     /// Claude Opus 4.5 model ID
     pub const OPUS_4_5: &str = "claude-opus-4-5-20251101";
 }
+
+/// Sub-agent execution limits
+pub mod subagent {
+    /// Maximum turns before forcing completion (prevents infinite loops)
+    pub const MAX_TURNS: usize = 50;
+    /// Maximum messages to keep in context before pruning
+    pub const MAX_MESSAGES: usize = 100;
+}

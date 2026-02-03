@@ -71,10 +71,16 @@ impl Tool for GlobTool {
         let mut files: Vec<_> = entries
             .flatten()
             .filter_map(|entry| {
-                // Filter out paths outside sandbox
+                // Filter out paths outside sandbox - deny if canonicalize fails in sandboxed mode
                 if let Some(ref sandbox) = ctx.sandbox_root {
-                    if let Ok(canonical) = entry.canonicalize() {
-                        if !canonical.starts_with(sandbox) {
+                    match entry.canonicalize() {
+                        Ok(canonical) => {
+                            if !canonical.starts_with(sandbox) {
+                                return None;
+                            }
+                        }
+                        Err(_) => {
+                            // Cannot verify path is within sandbox - deny it
                             return None;
                         }
                     }

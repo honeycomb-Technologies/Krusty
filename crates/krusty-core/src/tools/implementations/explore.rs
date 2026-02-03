@@ -48,7 +48,7 @@ struct Params {
 }
 
 fn default_concurrency() -> usize {
-    100 // No practical limit - let all agents run in parallel
+    10 // Balanced limit to prevent resource exhaustion while allowing parallelism
 }
 
 #[async_trait]

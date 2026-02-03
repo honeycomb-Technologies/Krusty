@@ -1,12 +1,15 @@
 //! OAuth token storage
 //!
 //! Stores OAuth tokens in ~/.krusty/tokens/oauth.json with secure permissions.
+//! Uses in-memory caching to reduce per-call I/O.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use anyhow::Result;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
 use super::types::OAuthTokenData;
@@ -21,42 +24,78 @@ pub struct OAuthTokenStore {
     tokens: HashMap<String, OAuthTokenData>,
 }
 
+/// In-memory cache for OAuth token store
+///
+/// Reduces disk I/O for frequent token lookups.
+/// Cache is invalidated when tokens are modified (save/remove).
+static TOKEN_CACHE: Lazy<Mutex<Option<OAuthTokenStore>>> = Lazy::new(|| Mutex::new(None));
+
 impl OAuthTokenStore {
     /// Get the OAuth tokens file path
     fn path() -> PathBuf {
         paths::tokens_dir().join("oauth.json")
     }
 
-    /// Load OAuth tokens from disk
+    /// Load OAuth tokens from disk (with caching)
     pub fn load() -> Result<Self> {
+        // Check cache first
+        if let Ok(cache) = TOKEN_CACHE.try_lock() {
+            if let Some(cached) = cache.as_ref() {
+                tracing::debug!("Using cached OAuth token store");
+                return Ok(cached.clone());
+            }
+        }
+
+        // Cache miss or lock contention - load from disk
         let path = Self::path();
         if !path.exists() {
             return Ok(Self::default());
         }
         let contents = fs::read_to_string(&path)?;
         let store: OAuthTokenStore = serde_json::from_str(&contents)?;
+
+        // Update cache
+        if let Ok(mut cache) = TOKEN_CACHE.try_lock() {
+            *cache = Some(store.clone());
+        }
+
         Ok(store)
     }
 
-    /// Save OAuth tokens to disk with secure permissions
+    /// Save OAuth tokens to disk with secure permissions (atomic write)
     pub fn save(&self) -> Result<()> {
         let path = Self::path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let contents = serde_json::to_string_pretty(self)?;
-        fs::write(&path, contents)?;
 
-        // Set restrictive permissions on Unix (0o600 - owner read/write only)
+        // Create a temporary file in the same directory for atomic rename
+        let temp_path = path.with_extension("tmp");
+        let contents = serde_json::to_string_pretty(self)?;
+
+        // Write to temp file first
+        fs::write(&temp_path, contents)?;
+
+        // Set restrictive permissions on temp file before renaming (Unix)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Ok(metadata) = fs::metadata(&path) {
+            if let Ok(metadata) = fs::metadata(&temp_path) {
                 let mut permissions = metadata.permissions();
                 permissions.set_mode(0o600);
-                let _ = fs::set_permissions(&path, permissions);
+                let _ = fs::set_permissions(&temp_path, permissions);
             }
         }
+
+        // Atomically replace the original file
+        fs::rename(&temp_path, path)?;
+
+        // Update cache after successful save
+        if let Ok(mut cache) = TOKEN_CACHE.try_lock() {
+            *cache = Some(self.clone());
+            tracing::debug!("OAuth token cache updated after save");
+        }
+
         Ok(())
     }
 

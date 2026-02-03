@@ -199,6 +199,7 @@ async fn execute_streaming(
     let stderr = child.stderr.take();
 
     let mut combined_output = String::new();
+    const MAX_OUTPUT_SIZE: usize = 10_000_000; // 10MB cap to prevent unbounded growth
 
     // Spawn tasks to read stdout and stderr concurrently
     let stdout_tx = output_tx.clone();
@@ -283,13 +284,28 @@ async fn execute_streaming(
 
     // Collect output from tasks
     if let Ok(stdout_output) = stdout_handle.await {
-        combined_output.push_str(&stdout_output);
+        if combined_output.len() + stdout_output.len() <= MAX_OUTPUT_SIZE {
+            combined_output.push_str(&stdout_output);
+        } else {
+            let remaining = MAX_OUTPUT_SIZE.saturating_sub(combined_output.len());
+            combined_output.push_str(&stdout_output[..remaining.min(stdout_output.len())]);
+            combined_output.push_str("\n[OUTPUT TRUNCATED: exceeded size limit]");
+        }
     }
     if let Ok(stderr_output) = stderr_handle.await {
-        if !combined_output.is_empty() && !stderr_output.is_empty() {
-            combined_output.push('\n');
+        if combined_output.len() + stderr_output.len() <= MAX_OUTPUT_SIZE {
+            if !combined_output.is_empty() && !stderr_output.is_empty() {
+                combined_output.push('\n');
+            }
+            combined_output.push_str(&stderr_output);
+        } else if combined_output.len() < MAX_OUTPUT_SIZE {
+            let remaining = MAX_OUTPUT_SIZE.saturating_sub(combined_output.len());
+            if !combined_output.is_empty() {
+                combined_output.push('\n');
+            }
+            combined_output.push_str(&stderr_output[..remaining.min(stderr_output.len())]);
+            combined_output.push_str("\n[OUTPUT TRUNCATED: exceeded size limit]");
         }
-        combined_output.push_str(&stderr_output);
     }
 
     // Send completion signal

@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use rusqlite::params;
 
 use super::database::Database;
 
@@ -113,25 +114,71 @@ impl<'a> FileActivityTracker<'a> {
             .map_err(Into::into)
     }
 
-    /// Get ranked files sorted by importance
+    /// Get ranked files sorted by importance (SQL-level ranking with paging)
     pub fn get_ranked_files(&self, limit: usize) -> Result<Vec<RankedFile>> {
-        let now = Utc::now();
-        let activities = self.get_all_activities()?;
+        self.get_ranked_files_sql(limit)
+    }
 
-        // Convert to ranked files and sort by score
-        let mut ranked: Vec<RankedFile> = activities
-            .iter()
-            .map(|a| RankedFile::from_activity(a, now))
-            .collect();
+    /// Get ranked files using SQL-level ranking and sorting
+    ///
+    /// This is more efficient than get_all_activities() for large datasets because:
+    /// - Ranking is done in SQL (no in-memory sorting)
+    /// - Uses LIMIT to avoid loading all rows
+    /// - Only loads the top N files
+    pub fn get_ranked_files_sql(&self, limit: usize) -> Result<Vec<RankedFile>> {
+        // Calculate importance score in SQL
+        // Formula: (writes*3 + edits*2 + reads + user_bonus*5) * (0.5 + 0.5 * recency_mult)
+        // where recency_mult = 1.0 / (1.0 + hours_ago / 24.0)
+        let sql = r#"
+            SELECT
+                file_path,
+                read_count,
+                write_count,
+                edit_count,
+                last_accessed,
+                user_referenced,
+                (
+                    (write_count * 3 + edit_count * 2 + read_count + CASE WHEN user_referenced = 1 THEN 5 ELSE 0 END)
+                    *
+                    (0.5 + 0.5 / (1.0 + CAST(strftime('%s', 'now') - strftime('%s', last_accessed) AS REAL) / 86400.0))
+                ) as importance_score
+            FROM file_activity
+            WHERE session_id = ?1
+            ORDER BY importance_score DESC
+            LIMIT ?2
+        "#;
 
-        ranked.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        ranked.truncate(limit);
+        let mut stmt = self.db.conn().prepare(sql)?;
 
-        Ok(ranked)
+        let files = stmt.query_map(params![&self.session_id, limit as i64], |row| {
+            let file_path: String = row.get(0)?;
+            let read_count: i64 = row.get(1)?;
+            let write_count: i64 = row.get(2)?;
+            let edit_count: i64 = row.get(3)?;
+            let score: f64 = row.get(6)?;
+
+            let mut reasons = Vec::new();
+            if write_count > 0 {
+                reasons.push(format!("written {} time(s)", write_count));
+            }
+            if edit_count > 0 {
+                reasons.push(format!("edited {} time(s)", edit_count));
+            }
+            if read_count > 0 {
+                reasons.push(format!("read {} time(s)", read_count));
+            }
+            if row.get::<_, i64>(5)? != 0 {
+                reasons.push("referenced by user".to_string());
+            }
+
+            Ok(RankedFile {
+                path: file_path,
+                score,
+                reasons,
+            })
+        })?;
+
+        files.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// Get top N files as (path, score) pairs for preview

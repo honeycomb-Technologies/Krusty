@@ -15,6 +15,10 @@ use super::types::{
     WebSearchResult,
 };
 
+/// Maximum partial line buffer size to prevent unbounded growth
+/// SSE lines should never exceed this in practice (1MB)
+const MAX_PARTIAL_LINE_SIZE: usize = 1024 * 1024;
+
 /// Common SSE stream processor that handles partial lines and buffering
 pub struct SseStreamProcessor {
     /// Accumulated partial line from previous chunks
@@ -80,7 +84,16 @@ impl SseStreamProcessor {
         while let Some(line) = lines_iter.next() {
             // If this is the last line and there's no trailing newline, it's partial
             if lines_iter.peek().is_none() && !has_trailing_newline {
-                self.partial_line = line.to_string();
+                // Enforce size limit to prevent unbounded buffer growth
+                if line.len() < MAX_PARTIAL_LINE_SIZE {
+                    self.partial_line = line.to_string();
+                } else {
+                    warn!(
+                        "Partial line exceeds {} bytes, truncating to prevent OOM",
+                        MAX_PARTIAL_LINE_SIZE
+                    );
+                    self.partial_line = line[..MAX_PARTIAL_LINE_SIZE].to_string();
+                }
                 break;
             }
 

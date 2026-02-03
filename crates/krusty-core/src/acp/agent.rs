@@ -53,7 +53,7 @@ pub struct KrustyAgent {
     /// Prompt processor for AI integration
     processor: RwLock<PromptProcessor>,
     /// Channel for sending notifications to the connection
-    notification_tx: RwLock<Option<mpsc::UnboundedSender<SessionNotification>>>,
+    notification_tx: RwLock<Option<mpsc::Sender<SessionNotification>>>,
     /// Current model configuration (provider + model)
     current_model: RwLock<Option<ModelConfig>>,
     /// Available model configurations from all providers
@@ -283,7 +283,7 @@ impl KrustyAgent {
     }
 
     /// Set the notification channel sender
-    pub async fn set_notification_channel(&self, tx: mpsc::UnboundedSender<SessionNotification>) {
+    pub async fn set_notification_channel(&self, tx: mpsc::Sender<SessionNotification>) {
         *self.notification_tx.write().await = Some(tx);
     }
 
@@ -383,7 +383,7 @@ impl KrustyAgent {
                 session_id.clone(),
                 SessionUpdate::AvailableCommandsUpdate(update),
             );
-            if let Err(e) = tx.send(notification) {
+            if let Err(e) = tx.send(notification).await {
                 warn!("Failed to send available commands: {}", e);
             } else {
                 info!(
