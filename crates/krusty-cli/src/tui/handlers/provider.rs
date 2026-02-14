@@ -14,6 +14,15 @@ use crate::tui::app::App;
 impl App {
     /// Try to load existing authentication for the active provider
     pub async fn try_load_auth(&mut self) -> Result<()> {
+        // Refresh expired OAuth tokens before checking auth
+        if self.runtime.active_provider.supports_oauth() {
+            if let Err(e) =
+                krusty_core::auth::refresh_oauth_token(self.runtime.active_provider).await
+            {
+                tracing::debug!("OAuth token refresh skipped: {}", e);
+            }
+        }
+
         // Try credential store for all providers (API keys and OAuth tokens)
         if let Some(key) = self
             .services

@@ -10,7 +10,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::ai::providers::ProviderId;
-use crate::auth::OAuthTokenStore;
+use crate::auth::{try_refresh_oauth_token_blocking, OAuthTokenStore};
 use crate::paths;
 
 /// Storage for API keys indexed by provider
@@ -168,9 +168,16 @@ impl CredentialStore {
         if provider.supports_oauth() {
             if let Ok(oauth_store) = OAuthTokenStore::load() {
                 if let Some(token) = oauth_store.get(provider) {
-                    // Only return non-expired tokens
                     if !token.is_expired() {
                         return Some(token.access_token.clone());
+                    }
+                    // Token expired — attempt refresh
+                    if let Some(refreshed) = token
+                        .refresh_token
+                        .as_ref()
+                        .and_then(|_| try_refresh_oauth_token_blocking(*provider))
+                    {
+                        return Some(refreshed.access_token);
                     }
                 }
             }
