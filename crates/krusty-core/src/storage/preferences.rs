@@ -123,10 +123,9 @@ impl Preferences {
         self.set_recent_models(&recent)
     }
 
-    /// Get current model ID (defaults to Claude Opus 4.5)
-    pub fn get_current_model(&self) -> String {
+    /// Get current model ID (None if never set)
+    pub fn get_current_model(&self) -> Option<String> {
         self.get("current_model")
-            .unwrap_or_else(|| "claude-opus-4-5-20251101".to_string())
     }
 
     /// Save current model ID

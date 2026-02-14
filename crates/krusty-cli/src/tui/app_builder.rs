@@ -70,11 +70,11 @@ pub async fn init_services(
     // Model registry
     let model_registry = init_model_registry(&preferences);
 
-    // Current model from preferences
+    // Current model from preferences (empty until user selects one)
     let current_model = preferences
         .as_ref()
-        .map(|p| p.get_current_model())
-        .unwrap_or_else(|| "claude-opus-4-5-20251101".to_string());
+        .and_then(|p| p.get_current_model())
+        .unwrap_or_default();
 
     // Skills manager
     let global_skills_dir = paths::config_dir().join("skills");
