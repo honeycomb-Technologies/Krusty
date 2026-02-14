@@ -134,13 +134,12 @@ impl App {
                 }
                 self.runtime.current_model = model_id.clone();
 
-                // Reinitialize AI client and dual-mind with new model
+                // Reinitialize AI client with new model
                 if self.runtime.api_key.is_some() {
                     let config = self.create_client_config();
                     if let Some(key) = &self.runtime.api_key {
                         self.runtime.ai_client = Some(AiClient::with_api_key(config, key.clone()));
                     }
-                    self.init_dual_mind();
                 }
 
                 // Mark model as recently used

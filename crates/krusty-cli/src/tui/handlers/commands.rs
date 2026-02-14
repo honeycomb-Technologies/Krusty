@@ -73,17 +73,6 @@ impl App {
                         self.start_openrouter_fetch();
                     }
                 }
-
-                // If OpenCode Zen is configured but has no models, trigger fetch
-                if configured.contains(&crate::ai::providers::ProviderId::OpenCodeZen) {
-                    if let Some(false) = self
-                        .services
-                        .model_registry
-                        .try_has_models(crate::ai::providers::ProviderId::OpenCodeZen)
-                    {
-                        self.start_opencodezen_fetch();
-                    }
-                }
             }
             "/auth" => {
                 self.ui.popups.auth.reset();
@@ -248,10 +237,7 @@ impl App {
     /// 4. Poll exploration progress and show in UI
     fn start_init_exploration(&mut self) {
         use crate::agent::subagent::{SubAgentPool, SubAgentTask};
-        use crate::paths;
         use crate::tui::utils::InitExplorationResult;
-        use krusty_core::index::Indexer;
-        use krusty_core::storage::Database;
         use std::sync::Arc;
 
         let client = match self.create_ai_client() {
@@ -272,14 +258,6 @@ impl App {
         // Cache languages once at /init start (used during polling)
         self.runtime.cached_init_languages = Some(self.detect_project_languages());
 
-        // Create indexing progress channel
-        let (indexing_tx, indexing_rx) = tokio::sync::mpsc::unbounded_channel();
-        self.runtime.channels.indexing_progress = Some(indexing_rx);
-
-        // Create indexing completion channel (exploration waits on this)
-        let (indexing_done_tx, indexing_done_rx) = tokio::sync::oneshot::channel();
-        // Note: we don't store indexing_done_rx in channels - it's passed to the exploration task
-
         // Create exploration result channel
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         self.runtime.channels.init_exploration = Some(result_rx);
@@ -288,55 +266,8 @@ impl App {
         let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();
         self.runtime.channels.init_progress = Some(progress_rx);
 
-        // Get database path for spawned thread
-        let db_path = paths::config_dir().join("krusty.db");
-        let indexing_working_dir = working_dir.clone();
-
-        // Spawn indexing in blocking task (opens its own DB connection)
-        // Attempts embeddings first; falls back to sync indexing without embeddings
-        tokio::task::spawn_blocking(move || {
-            let result = (|| -> Result<(), String> {
-                let db = Database::new(&db_path).map_err(|e| e.to_string())?;
-
-                // Try with embeddings first (uses async index_codebase via block_on)
-                match Indexer::new().map_err(|e| e.to_string())?.with_embeddings() {
-                    Ok(mut indexer) => {
-                        tracing::info!("Indexing with embeddings enabled");
-                        let handle = tokio::runtime::Handle::current();
-                        handle
-                            .block_on(indexer.index_codebase(
-                                db.conn(),
-                                &indexing_working_dir,
-                                Some(indexing_tx),
-                            ))
-                            .map_err(|e| e.to_string())?;
-                    }
-                    Err(e) => {
-                        tracing::info!("Embeddings unavailable ({e}), indexing without");
-                        let mut indexer = Indexer::new().map_err(|e| e.to_string())?;
-                        indexer
-                            .index_codebase_sync(
-                                db.conn(),
-                                &indexing_working_dir,
-                                Some(indexing_tx),
-                            )
-                            .map_err(|e| e.to_string())?;
-                    }
-                }
-                Ok(())
-            })();
-            let _ = indexing_done_tx.send(result);
-        });
-
-        // Spawn async task that waits for indexing then runs AI exploration
+        // Spawn async task that runs AI exploration
         tokio::spawn(async move {
-            // Wait for indexing to complete before starting AI exploration
-            match indexing_done_rx.await {
-                Ok(Ok(())) => tracing::info!("Codebase indexing complete, starting AI exploration"),
-                Ok(Err(e)) => tracing::warn!("Indexing failed: {}, proceeding with exploration", e),
-                Err(_) => tracing::warn!("Indexing task cancelled, proceeding with exploration"),
-            }
-
             let pool = SubAgentPool::new(client, cancellation)
                 .with_concurrency(4)
                 .with_override_model(Some(current_model));

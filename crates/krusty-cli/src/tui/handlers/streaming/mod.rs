@@ -10,8 +10,6 @@
 mod context_building;
 mod tool_execution;
 
-use std::sync::Arc;
-
 use tokio::sync::mpsc;
 
 use crate::agent::{AgentEvent, InterruptReason};
@@ -36,70 +34,6 @@ fn check_file_limit(count: usize) -> anyhow::Result<()> {
 }
 
 impl App {
-    /// Resolve the embedding engine from the background init handle, or fall back to sync init.
-    /// Populates the shared Arc<RwLock<...>> so the search_codebase tool can also use it.
-    fn ensure_embedding_engine(&mut self) {
-        // Check if already initialized (non-blocking read)
-        if self.runtime.embedding_init_failed {
-            return;
-        }
-        if let Ok(guard) = self.runtime.embedding_engine.try_read() {
-            if guard.is_some() {
-                return;
-            }
-        }
-
-        // Try to resolve the background init handle
-        if let Some(handle) = &self.runtime.embedding_handle {
-            if !handle.is_finished() {
-                tracing::debug!(
-                    "Embedding engine still initializing, will use keyword search for this request"
-                );
-                return;
-            }
-            // Handle is finished - take it and resolve
-            if let Some(handle) = self.runtime.embedding_handle.take() {
-                match futures::executor::block_on(handle) {
-                    Ok(Ok(engine)) => {
-                        let engine = Arc::new(engine);
-                        if let Ok(mut guard) = self.runtime.embedding_engine.try_write() {
-                            *guard = Some(engine);
-                        }
-                        tracing::info!("Embedding engine initialized from background task");
-                        return;
-                    }
-                    Ok(Err(e)) => {
-                        tracing::debug!(
-                            "Embedding engine background init failed (keyword fallback): {e}"
-                        );
-                        self.runtime.embedding_init_failed = true;
-                        return;
-                    }
-                    Err(e) => {
-                        tracing::debug!("Embedding engine background task panicked: {e}");
-                        self.runtime.embedding_init_failed = true;
-                        return;
-                    }
-                }
-            }
-        }
-
-        // No handle was ever created (e.g., ACP mode) - try sync init
-        match krusty_core::index::EmbeddingEngine::new() {
-            Ok(engine) => {
-                let engine = Arc::new(engine);
-                if let Ok(mut guard) = self.runtime.embedding_engine.try_write() {
-                    *guard = Some(engine);
-                }
-                tracing::info!("Embedding engine initialized for semantic search");
-            }
-            Err(e) => {
-                tracing::debug!("Embedding engine init failed (keyword fallback): {e}");
-                self.runtime.embedding_init_failed = true;
-            }
-        }
-    }
-
     /// Handle user input submission (message or command)
     pub fn handle_input_submit(&mut self, text: String) {
         // Check if this is a slash command vs a file path
@@ -321,15 +255,10 @@ impl App {
             message_count: self.runtime.chat.conversation.len(),
         });
 
-        // Lazy-init embedding engine for semantic search
-        self.ensure_embedding_engine();
-
         // Build context
         let plan_context = self.build_plan_context();
         let skills_context = self.build_skills_context();
         let project_context = self.build_project_context();
-        let insights_context = self.build_insights_context();
-        let search_context = self.build_search_context();
 
         // Log all context injection for monitoring
         if !plan_context.is_empty() {
@@ -340,22 +269,6 @@ impl App {
         }
         if !project_context.is_empty() {
             tracing::info!(chars = project_context.len(), "Context: project");
-        }
-        if !insights_context.is_empty() {
-            let insight_count = insights_context.matches("\n- [").count();
-            tracing::info!(
-                chars = insights_context.len(),
-                insights = insight_count,
-                "Context: insights"
-            );
-        }
-        if !search_context.is_empty() {
-            let result_count = search_context.matches("\n- [").count();
-            tracing::info!(
-                chars = search_context.len(),
-                results = result_count,
-                "Context: search"
-            );
         }
         let _has_thinking_conversation = self.runtime.thinking_enabled
             && self.runtime.chat.conversation.iter().any(|msg| {
@@ -403,34 +316,6 @@ impl App {
                     role: Role::System,
                     content: vec![Content::Text {
                         text: skills_context,
-                    }],
-                },
-            );
-            system_insert_count += 1;
-        }
-
-        // Inject insights context
-        if !insights_context.is_empty() {
-            conversation.insert(
-                system_insert_count,
-                ModelMessage {
-                    role: Role::System,
-                    content: vec![Content::Text {
-                        text: insights_context,
-                    }],
-                },
-            );
-            system_insert_count += 1;
-        }
-
-        // Inject search context (semantic/keyword codebase search results)
-        if !search_context.is_empty() {
-            conversation.insert(
-                system_insert_count,
-                ModelMessage {
-                    role: Role::System,
-                    content: vec![Content::Text {
-                        text: search_context,
                     }],
                 },
             );

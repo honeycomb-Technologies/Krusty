@@ -5,12 +5,10 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::sync::RwLock;
 
-use crate::agent::dual_mind::{DualMind, DualMindConfig};
 use crate::ai::client::AiClient;
 use crate::ai::providers::ProviderId;
-use crate::tools::{register_build_tool, register_explore_tool, register_search_tool};
+use crate::tools::{register_build_tool, register_explore_tool};
 use crate::tui::app::App;
 
 impl App {
@@ -25,7 +23,6 @@ impl App {
             let config = self.create_client_config();
             self.runtime.ai_client = Some(AiClient::with_api_key(config, key.clone()));
             self.runtime.api_key = Some(key);
-            self.init_dual_mind();
             self.register_explore_tool_if_client().await;
             return Ok(());
         }
@@ -56,22 +53,10 @@ impl App {
             )
             .await;
 
-            // Register search_codebase tool (keyword + semantic search over indexed symbols)
-            // Shares the embedding engine ref so the tool gets semantic search once initialized.
-            let db_path = crate::paths::config_dir().join("krusty.db");
-            let codebase_path = self.runtime.working_dir.to_string_lossy().to_string();
-            register_search_tool(
-                &self.services.tool_registry,
-                db_path,
-                self.runtime.embedding_engine.clone(),
-                codebase_path,
-            )
-            .await;
-
-            // Update cached tools so API knows about explore, build, and search
+            // Update cached tools so API knows about explore and build
             self.services.cached_ai_tools = self.services.tool_registry.get_ai_tools().await;
             tracing::info!(
-                "Registered explore, build, and search tools, total tools: {}",
+                "Registered explore and build tools, total tools: {}",
                 self.services.cached_ai_tools.len()
             );
         }
@@ -102,7 +87,6 @@ impl App {
         let config = self.create_client_config();
         self.runtime.ai_client = Some(AiClient::with_api_key(config, key.clone()));
         self.runtime.api_key = Some(key.clone());
-        self.init_dual_mind();
 
         // Save to credential store (unified storage for all providers)
         self.services
@@ -158,7 +142,6 @@ impl App {
             let config = self.create_client_config();
             self.runtime.ai_client = Some(AiClient::with_api_key(config, key.clone()));
             self.runtime.api_key = Some(key);
-            self.init_dual_mind();
             tracing::info!(
                 "Switched to provider {} (loaded existing auth)",
                 provider_id
@@ -167,7 +150,6 @@ impl App {
             // No stored credentials - user will need to authenticate
             self.runtime.ai_client = None;
             self.runtime.api_key = None;
-            self.runtime.dual_mind = None;
             tracing::info!(
                 "Switched to provider {} (requires authentication)",
                 provider_id
@@ -184,60 +166,5 @@ impl App {
     /// Check if authenticated
     pub fn is_authenticated(&self) -> bool {
         self.runtime.ai_client.is_some()
-    }
-
-    /// Initialize dual-mind system when AI client is available
-    /// Public because it's called when model changes in popup handlers
-    pub fn init_dual_mind(&mut self) {
-        let Some(client) = self.create_ai_client() else {
-            self.runtime.dual_mind = None;
-            // DEBUG: Log initialization failure
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/dual_mind_dialogue.log")
-            {
-                use std::io::Write;
-                let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                let _ = writeln!(
-                    file,
-                    "\n[{}] INIT FAILED: Could not create AI client for Little Claw",
-                    timestamp
-                );
-            }
-            return;
-        };
-
-        let client = Arc::new(client);
-        let config = DualMindConfig {
-            enabled: true,
-            review_all: false, // Only review significant actions
-            max_discussion_depth: 3,
-        };
-
-        let dual_mind = DualMind::with_tools(
-            client,
-            config,
-            self.services.tool_registry.clone(),
-            self.runtime.working_dir.clone(),
-        );
-
-        self.runtime.dual_mind = Some(Arc::new(RwLock::new(dual_mind)));
-        tracing::info!("Dual-mind system initialized (Big Claw / Little Claw)");
-
-        // DEBUG: Log successful initialization
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/dual_mind_dialogue.log")
-        {
-            use std::io::Write;
-            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-            let _ = writeln!(
-                file,
-                "\n[{}] INIT SUCCESS: Dual-mind system initialized",
-                timestamp
-            );
-        }
     }
 }

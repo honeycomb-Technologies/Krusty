@@ -18,9 +18,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{io, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
-use crate::agent::{
-    dual_mind::DualMind, AgentCancellation, AgentConfig, AgentEventBus, AgentState, UserHookManager,
-};
+use crate::agent::{AgentCancellation, AgentConfig, AgentEventBus, AgentState, UserHookManager};
 use crate::ai::client::AiClient;
 use crate::ai::models::SharedModelRegistry;
 use crate::ai::providers::ProviderId;
@@ -182,7 +180,7 @@ impl AppUi {
     }
 }
 
-/// Runtime state (AI, streaming, processes, sessions, plans, agents, embeddings)
+/// Runtime state (AI, streaming, processes, sessions, plans, agents)
 pub struct AppRuntime {
     /// Active plan file
     pub active_plan: Option<PlanFile>,
@@ -200,8 +198,6 @@ pub struct AppRuntime {
     pub ai_client: Option<AiClient>,
     /// API key
     pub api_key: Option<String>,
-    /// Dual-mind quality control
-    pub dual_mind: Option<Arc<RwLock<DualMind>>>,
     /// Active AI provider
     pub active_provider: ProviderId,
     /// Background process registry
@@ -248,14 +244,6 @@ pub struct AppRuntime {
     pub tool_results: ToolResultCache,
     /// Attached files mapping
     pub attached_files: std::collections::HashMap<String, PathBuf>,
-    /// Semantic retrieval embedding engine
-    pub embedding_engine:
-        Arc<tokio::sync::RwLock<Option<Arc<krusty_core::index::EmbeddingEngine>>>>,
-    /// Embedding init failed flag
-    pub embedding_init_failed: bool,
-    /// Embedding init handle
-    pub embedding_handle:
-        Option<tokio::task::JoinHandle<anyhow::Result<krusty_core::index::EmbeddingEngine>>>,
     /// Exploration budget tracking
     pub exploration_budget_count: usize,
     /// Just updated flag
@@ -282,7 +270,6 @@ impl AppRuntime {
             auto_pinch_in_progress: false,
             ai_client: None,
             api_key: None,
-            dual_mind: None,
             active_provider,
             process_registry,
             running_process_count: 0,
@@ -306,9 +293,6 @@ impl AppRuntime {
             blocks: BlockManager::new(),
             tool_results: ToolResultCache::new(),
             attached_files: std::collections::HashMap::new(),
-            embedding_engine: Arc::new(tokio::sync::RwLock::new(None)),
-            embedding_init_failed: false,
-            embedding_handle: None,
             exploration_budget_count: 0,
             just_updated: false,
             update_status: None,
@@ -629,29 +613,6 @@ impl App {
             }
         }
 
-        // Start background refresh of OpenCode Zen models if configured and cache is stale
-        if self
-            .services
-            .credential_store
-            .get(&crate::ai::providers::ProviderId::OpenCodeZen)
-            .is_some()
-        {
-            let should_refresh = self
-                .services
-                .preferences
-                .as_ref()
-                .map(|p| p.is_opencodezen_cache_stale())
-                .unwrap_or(true);
-
-            if should_refresh {
-                tracing::info!("Starting background OpenCode Zen model refresh");
-                self.start_opencodezen_fetch();
-            }
-        }
-
-        // Eagerly initialize embedding engine in background
-        self.runtime.embedding_handle = Some(krusty_core::index::EmbeddingEngine::init_async());
-
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(
@@ -777,7 +738,6 @@ impl App {
 
             // Poll async operations
             self.poll_openrouter_fetch();
-            self.poll_opencodezen_fetch();
             self.poll_title_generation();
             self.poll_summarization();
 
@@ -806,23 +766,6 @@ impl App {
 
             // Poll build progress channel for builder updates
             self.poll_build_progress();
-
-            // Poll dual-mind dialogue for Big Claw / Little Claw updates
-            let dual_mind_result = self.poll_dual_mind();
-            if dual_mind_result.needs_redraw {
-                self.ui.needs_redraw = true;
-            }
-            self.process_poll_actions(dual_mind_result);
-
-            // Poll /init indexing progress (runs before AI exploration)
-            let indexing_result = crate::tui::polling::poll_indexing_progress(
-                &mut self.runtime.channels,
-                &mut self.runtime.blocks.explore,
-                &self.runtime.init_explore_id,
-            );
-            if indexing_result.needs_redraw {
-                self.ui.needs_redraw = true;
-            }
 
             // Poll /init exploration progress and result
             // Clone cached languages to avoid borrow conflict (cleared on completion)

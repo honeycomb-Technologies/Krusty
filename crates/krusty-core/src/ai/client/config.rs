@@ -23,7 +23,7 @@ pub struct AiClientConfig {
     pub provider_id: ProviderId,
     /// API format for this model (Anthropic, OpenAI, Google)
     pub api_format: ApiFormat,
-    /// Custom headers to send with requests (e.g., User-Agent for Kimi)
+    /// Custom headers to send with requests
     pub custom_headers: HashMap<String, String>,
 }
 
@@ -34,7 +34,7 @@ impl Default for AiClientConfig {
             max_tokens: constants::ai::MAX_OUTPUT_TOKENS,
             base_url: None,
             auth_header: AuthHeader::XApiKey,
-            provider_id: ProviderId::Anthropic,
+            provider_id: ProviderId::MiniMax,
             api_format: ApiFormat::Anthropic,
             custom_headers: HashMap::new(),
         }
@@ -43,42 +43,14 @@ impl Default for AiClientConfig {
 
 impl AiClientConfig {
     /// Get the API URL to use
-    ///
-    /// For OpenCode Zen, routes to correct endpoint based on model's API format:
-    /// - Anthropic format → /v1/messages
-    /// - OpenAI format → /v1/chat/completions
-    /// - OpenAI Responses → /v1/responses
-    /// - Google format → /v1/models/{model}:streamGenerateContent
     pub fn api_url(&self) -> String {
-        const DEFAULT_API_URL: &str = "https://api.anthropic.com/v1/messages";
+        const DEFAULT_API_URL: &str = "https://api.minimax.io/anthropic/v1/messages";
 
         if let Some(base) = &self.base_url {
-            // For OpenCode Zen, modify the endpoint based on format
-            if self.provider_id == ProviderId::OpenCodeZen {
-                let base_without_endpoint = base
-                    .trim_end_matches("/messages")
-                    .trim_end_matches("/chat/completions")
-                    .trim_end_matches("/responses");
-
-                return match self.api_format {
-                    ApiFormat::Anthropic => format!("{}/messages", base_without_endpoint),
-                    ApiFormat::OpenAI => format!("{}/chat/completions", base_without_endpoint),
-                    ApiFormat::OpenAIResponses => format!("{}/responses", base_without_endpoint),
-                    ApiFormat::Google => format!(
-                        "{}/models/{}:streamGenerateContent",
-                        base_without_endpoint, self.model
-                    ),
-                };
-            }
             base.clone()
         } else {
             DEFAULT_API_URL.to_string()
         }
-    }
-
-    /// Check if this config is for the native Anthropic API
-    pub fn is_anthropic(&self) -> bool {
-        self.provider_id == ProviderId::Anthropic
     }
 
     /// Get the provider ID
@@ -106,8 +78,8 @@ impl AiClientConfig {
 
     /// Check if this provider uses Anthropic-compatible API
     ///
-    /// All providers (Anthropic, OpenRouter, Z.ai, MiniMax, Kimi) use Anthropic Messages API
-    /// Exception: OpenCode Zen routes some models to OpenAI or Google format
+    /// All providers (OpenRouter, Z.ai, MiniMax) use Anthropic Messages API
+    /// Exception: OpenAI uses its own format
     pub fn uses_anthropic_api(&self) -> bool {
         !self.uses_openai_format() && !self.uses_google_format()
     }

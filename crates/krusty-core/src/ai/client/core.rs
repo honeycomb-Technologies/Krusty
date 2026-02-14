@@ -68,16 +68,6 @@ Before any commit:
 - All tests pass
 - No dead code
 
-## Codebase Context
-
-You receive automatically injected context about the current codebase:
-
-- **[CODEBASE INSIGHTS]** — Accumulated knowledge about architecture, conventions, patterns, and pitfalls. Use these to stay consistent with existing code patterns. Don't repeat what insights already cover.
-- **[CODEBASE SEARCH RESULTS]** — Symbols semantically related to the user's query, with file paths and line numbers. Reference these instead of searching for code you already have context on.
-- **[PROJECT INSTRUCTIONS]** — Project-specific guidelines from KRAB.md or similar. Follow these as hard requirements.
-
-Leverage this context to avoid redundant exploration and stay aligned with the codebase.
-
 ## Communication
 
 You are honest. If an approach is wrong, you say so directly. No excessive praise. No flattery. Just the work."#;
@@ -166,7 +156,7 @@ impl AiClient {
         // Common headers
         request = request.header("content-type", "application/json");
 
-        // Add custom headers (e.g., User-Agent for Kimi)
+        // Add custom headers
         for (key, value) in &self.config.custom_headers {
             request = request.header(key.as_str(), value.as_str());
         }
@@ -180,14 +170,11 @@ impl AiClient {
         url: &str,
         beta_headers: &[&str],
     ) -> reqwest::RequestBuilder {
-        let mut request = self.build_request(url);
+        let request = self.build_request(url);
 
-        // Only add beta headers for native Anthropic provider
+        // Beta headers are only relevant for native Anthropic API (no longer supported)
         // Third-party Anthropic-compatible providers (Z.ai, MiniMax, etc.) may not support them
-        if !beta_headers.is_empty() && self.config.is_anthropic() {
-            let beta_str = beta_headers.join(",");
-            request = request.header("anthropic-beta", beta_str);
-        }
+        let _ = beta_headers;
 
         request
     }

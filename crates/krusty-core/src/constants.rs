@@ -25,7 +25,7 @@ pub mod ai {
     pub const MAX_OUTPUT_TOKENS: usize = 16384;
 
     /// Default model ID
-    pub const DEFAULT_MODEL: &str = "claude-opus-4-5-20251101";
+    pub const DEFAULT_MODEL: &str = "MiniMax-M2.1";
 }
 
 /// UI configuration

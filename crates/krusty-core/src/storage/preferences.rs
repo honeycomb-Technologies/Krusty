@@ -157,32 +157,6 @@ impl Preferences {
         cached_at == 0 || (unix_timestamp() - cached_at) > 86400
     }
 
-    /// Get cached OpenCode Zen models
-    pub fn get_cached_opencodezen_models(&self) -> Option<Vec<ModelMetadata>> {
-        self.get("opencodezen_models_cache")
-            .and_then(|s| serde_json::from_str(&s).ok())
-    }
-
-    /// Cache OpenCode Zen models
-    pub fn cache_opencodezen_models(&self, models: &[ModelMetadata]) -> Result<()> {
-        let json = serde_json::to_string(models)?;
-        self.set("opencodezen_models_cache", &json)?;
-        self.set(
-            "opencodezen_models_cached_at",
-            &unix_timestamp().to_string(),
-        )
-    }
-
-    /// Check if OpenCode Zen cache is stale (>24 hours old)
-    pub fn is_opencodezen_cache_stale(&self) -> bool {
-        let cached_at: u64 = self
-            .get("opencodezen_models_cached_at")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-
-        cached_at == 0 || (unix_timestamp() - cached_at) > 86400
-    }
-
     /// Get active plugin ID
     pub fn get_active_plugin(&self) -> Option<String> {
         self.get("active_plugin")

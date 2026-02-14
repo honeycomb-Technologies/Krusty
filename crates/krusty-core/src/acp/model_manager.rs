@@ -111,11 +111,11 @@ mod tests {
         let manager = ModelManager::new();
 
         // First call should cache
-        let info1 = manager.get_provider(ProviderId::Anthropic).await;
+        let info1 = manager.get_provider(ProviderId::MiniMax).await;
         assert!(info1.is_some());
 
         // Second call should use cache
-        let info2 = manager.get_provider(ProviderId::Anthropic).await;
+        let info2 = manager.get_provider(ProviderId::MiniMax).await;
         assert!(info2.is_some());
 
         // Both should return the same info
@@ -127,19 +127,19 @@ mod tests {
         let manager = ModelManager::new();
 
         // Cache a provider
-        manager.get_provider(ProviderId::Anthropic).await;
+        manager.get_provider(ProviderId::MiniMax).await;
         assert!(manager
             .provider_cache
             .read()
             .await
-            .contains_key(&ProviderId::Anthropic));
+            .contains_key(&ProviderId::MiniMax));
 
         // Invalidate it
-        manager.invalidate_provider(ProviderId::Anthropic).await;
+        manager.invalidate_provider(ProviderId::MiniMax).await;
         assert!(!manager
             .provider_cache
             .read()
             .await
-            .contains_key(&ProviderId::Anthropic));
+            .contains_key(&ProviderId::MiniMax));
     }
 }

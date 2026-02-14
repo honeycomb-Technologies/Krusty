@@ -16,7 +16,6 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::{ClipContext, EventResult, StreamBlock};
 use crate::agent::subagent::{AgentProgress, AgentProgressStatus};
 use crate::tui::themes::Theme;
-use krusty_core::index::{IndexPhase, IndexProgress};
 
 /// Spiral spinner for agent rows - Unicode 16.0 square spirals
 /// Rotates clockwise: top-left → top-right → bottom-right → bottom-left
@@ -218,10 +217,6 @@ pub struct ExploreBlock {
     /// Final summary text
     summary: Option<String>,
 
-    // === Indexing phase (before AI exploration) ===
-    /// Current indexing progress (None = not indexing or complete)
-    indexing_progress: Option<IndexProgress>,
-
     // === Cached totals (updated every tick while streaming) ===
     cached_total_tools: usize,
     cached_total_tokens: usize,
@@ -248,7 +243,6 @@ impl ExploreBlock {
             spiral_idx: 0,
             selected_idx: None,
             summary: None,
-            indexing_progress: None,
             // Initialize cached totals
             cached_total_tools: 0,
             cached_total_tokens: 0,
@@ -273,16 +267,6 @@ impl ExploreBlock {
             self.agent_order.push(task_id.clone());
             self.agents
                 .insert(task_id, AgentEntry::from_progress(&progress));
-        }
-    }
-
-    /// Update indexing phase progress (shown before AI exploration begins)
-    pub fn update_indexing_progress(&mut self, progress: IndexProgress) {
-        // Clear indexing on completion
-        if progress.phase == IndexPhase::Complete {
-            self.indexing_progress = None;
-        } else {
-            self.indexing_progress = Some(progress);
         }
     }
 
@@ -670,68 +654,22 @@ impl StreamBlock for ExploreBlock {
         if !self.agents.is_empty() {
             self.render_agents(agents_area, buf, theme);
         } else {
-            // Show indexing progress or prompt when no agents yet
+            // Show prompt when no agents yet
             let border_style = Style::default().fg(theme.border_color);
             let dim_style = Style::default().fg(theme.dim_color);
-            let accent_style = Style::default().fg(theme.accent_color);
 
             for row in 0..agents_height {
                 let y = agents_area.y + row;
                 buf.set_string(area.x, y, "│", border_style);
 
                 if row == 0 {
-                    if let Some(ref progress) = self.indexing_progress {
-                        // Show indexing progress
-                        let status = match progress.phase {
-                            IndexPhase::Scanning => format!(
-                                " {} Scanning files...",
-                                SPIRAL_FRAMES[self.spiral_idx % SPIRAL_FRAMES.len()]
-                            ),
-                            IndexPhase::Parsing => {
-                                let file_name = progress
-                                    .current_file
-                                    .as_ref()
-                                    .and_then(|f| f.rsplit('/').next())
-                                    .unwrap_or("...");
-                                format!(
-                                    " {} Parsing {}/{}: {}",
-                                    SPIRAL_FRAMES[self.spiral_idx % SPIRAL_FRAMES.len()],
-                                    progress.current,
-                                    progress.total,
-                                    file_name
-                                )
-                            }
-                            IndexPhase::Embedding => format!(
-                                " {} Embedding {}/{}",
-                                SPIRAL_FRAMES[self.spiral_idx % SPIRAL_FRAMES.len()],
-                                progress.current,
-                                progress.total
-                            ),
-                            IndexPhase::Storing => format!(
-                                " {} Storing {}/{}",
-                                SPIRAL_FRAMES[self.spiral_idx % SPIRAL_FRAMES.len()],
-                                progress.current,
-                                progress.total
-                            ),
-                            IndexPhase::Complete => " ✓ Indexing complete".to_string(),
-                        };
-                        let max_len = (width as usize).saturating_sub(3);
-                        let display = if status.len() > max_len && max_len > 3 {
-                            format!("{}...", &status[..max_len - 3])
-                        } else {
-                            status
-                        };
-                        buf.set_string(area.x + 1, y, &display, accent_style);
+                    let prompt_max = (width as usize).saturating_sub(4);
+                    let prompt_display = if self.prompt.len() > prompt_max && prompt_max > 3 {
+                        format!(" {}...", &self.prompt[..prompt_max - 4])
                     } else {
-                        // Show prompt
-                        let prompt_max = (width as usize).saturating_sub(4);
-                        let prompt_display = if self.prompt.len() > prompt_max && prompt_max > 3 {
-                            format!(" {}...", &self.prompt[..prompt_max - 4])
-                        } else {
-                            format!(" {}", self.prompt)
-                        };
-                        buf.set_string(area.x + 1, y, &prompt_display, dim_style);
-                    }
+                        format!(" {}", self.prompt)
+                    };
+                    buf.set_string(area.x + 1, y, &prompt_display, dim_style);
                 }
                 buf.set_string(area.x + width - 1, y, "│", border_style);
             }

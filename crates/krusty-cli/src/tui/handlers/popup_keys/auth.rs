@@ -92,9 +92,6 @@ impl App {
                         if provider == ProviderId::OpenRouter {
                             self.start_openrouter_fetch();
                         }
-                        if provider == ProviderId::OpenCodeZen {
-                            self.start_opencodezen_fetch();
-                        }
                     }
                 }
             }

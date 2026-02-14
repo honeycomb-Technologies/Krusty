@@ -6,12 +6,6 @@
 //! 2. Call AI provider with streaming
 //! 3. Stream responses back via ACP session/update notifications
 //! 4. Execute tool calls and stream their results
-//!
-//! ## Dual-Mind Integration
-//! When enabled, Little Claw reviews Big Claw's actions:
-//! - Pre-review: Before executing tool calls
-//! - Post-review: After tool results
-//! - Dialogue streamed as thought chunks
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,12 +15,8 @@ use agent_client_protocol::{
     SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallId,
 };
 use anyhow::Result;
-use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-use crate::agent::dual_mind::{
-    DialogueResult, DialogueTurn, DualMind, DualMindConfig, Observation,
-};
 use crate::ai::client::{AiClient, AiClientConfig, CallOptions};
 use crate::ai::format_detection::detect_api_format;
 use crate::ai::providers::{get_provider, AuthHeader, ProviderId};
@@ -42,43 +32,6 @@ use super::tools::{
     text_to_tool_content, tool_name_to_kind,
 };
 
-/// Tracks cumulative read-only exploration volume for review triggers
-struct ExplorationTracker {
-    read_count: std::sync::atomic::AtomicUsize,
-    total_read_bytes: std::sync::atomic::AtomicUsize,
-}
-
-impl ExplorationTracker {
-    fn new() -> Self {
-        Self {
-            read_count: std::sync::atomic::AtomicUsize::new(0),
-            total_read_bytes: std::sync::atomic::AtomicUsize::new(0),
-        }
-    }
-
-    fn record_read(&self, bytes: usize) {
-        self.read_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.total_read_bytes
-            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn should_review(&self) -> bool {
-        let count = self.read_count.load(std::sync::atomic::Ordering::Relaxed);
-        let bytes = self
-            .total_read_bytes
-            .load(std::sync::atomic::Ordering::Relaxed);
-        count > 0 && (count.is_multiple_of(5) || bytes > 10_000)
-    }
-
-    fn reset(&self) {
-        self.read_count
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-        self.total_read_bytes
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
 /// Prompt processor that connects ACP to Krusty's AI and tools
 pub struct PromptProcessor {
     /// AI client for making inference calls
@@ -87,12 +40,6 @@ pub struct PromptProcessor {
     tools: Arc<ToolRegistry>,
     /// Working directory for tool execution
     cwd: PathBuf,
-    /// Dual-mind system (Big Claw / Little Claw) - wrapped in RwLock for interior mutability
-    dual_mind: Option<Arc<RwLock<DualMind>>>,
-    /// Dual-mind configuration
-    dual_mind_config: DualMindConfig,
-    /// Cumulative exploration tracking for review triggers
-    exploration_tracker: ExplorationTracker,
     /// Git identity for commit attribution
     git_identity: Option<GitIdentity>,
 }
@@ -104,29 +51,7 @@ impl PromptProcessor {
             ai_client: None,
             tools,
             cwd,
-            dual_mind: None,
-            dual_mind_config: DualMindConfig::default(),
-            exploration_tracker: ExplorationTracker::new(),
             git_identity: Some(GitIdentity::default()),
-        }
-    }
-
-    /// Create with dual-mind disabled
-    pub fn without_dual_mind(tools: Arc<ToolRegistry>, cwd: PathBuf) -> Self {
-        let mut processor = Self::new(tools, cwd);
-        processor.dual_mind_config.enabled = false;
-        processor
-    }
-
-    /// Enable or disable dual-mind
-    pub async fn set_dual_mind_enabled(&self, enabled: bool) {
-        if let Some(dm) = &self.dual_mind {
-            let mut dm = dm.write().await;
-            if enabled {
-                dm.enable();
-            } else {
-                dm.disable();
-            }
         }
     }
 
@@ -180,23 +105,11 @@ impl PromptProcessor {
         };
 
         let client = Arc::new(AiClient::new(config, api_key));
-        self.ai_client = Some(client.clone());
-
-        // Initialize dual-mind if enabled
-        if self.dual_mind_config.enabled {
-            let dual_mind = DualMind::with_tools(
-                client,
-                self.dual_mind_config.clone(),
-                self.tools.clone(),
-                self.cwd.clone(),
-            );
-            self.dual_mind = Some(Arc::new(RwLock::new(dual_mind)));
-            info!("Dual-mind system initialized (Little Claw active with research tools)");
-        }
+        self.ai_client = Some(client);
 
         info!(
-            "AI client initialized: provider={:?}, model={}, dual_mind={}",
-            provider, model, self.dual_mind_config.enabled
+            "AI client initialized: provider={:?}, model={}",
+            provider, model
         );
     }
 
@@ -352,60 +265,6 @@ impl PromptProcessor {
                 return Ok(stop_reason);
             }
 
-            // Little Claw pre-review: Question the intent before execution
-            if let Some(dual_mind) = &self.dual_mind {
-                let intent = format_tool_calls_intent(&pending_tool_calls);
-
-                let (review_result, dialogue) = {
-                    let mut dm = dual_mind.write().await;
-                    let result = dm.pre_review(&intent).await;
-                    let dialogue = dm.take_dialogue();
-                    (result, dialogue)
-                };
-
-                // Stream the dialogue as thought chunks
-                stream_dialogue_turns(session, connection, &dialogue).await;
-
-                // Handle review result
-                match review_result {
-                    DialogueResult::NeedsEnhancement { critique, .. } => {
-                        info!("Little Claw raised pre-action concerns");
-
-                        // Inject Little Claw's concerns into the conversation
-                        // Big Claw will see this before proceeding
-                        let concern_prompt = format!(
-                            "[Quality Review - Pre-Action Concern]\n\n\
-                            Before executing, Little Claw has raised a concern:\n\n\
-                            {}\n\n\
-                            Consider this feedback. If you believe your approach is correct, \
-                            explain briefly why and proceed. If the concern is valid, \
-                            adjust your approach.",
-                            critique
-                        );
-
-                        session.add_system_context(concern_prompt).await;
-
-                        // Stream thought notification
-                        let chunk = ContentChunk::new(AcpContent::Text(TextContent::new(format!(
-                            "\n[Little Claw: {}]\n",
-                            critique
-                        ))));
-                        let notification = SessionNotification::new(
-                            session.id.clone(),
-                            SessionUpdate::AgentThoughtChunk(chunk),
-                        );
-                        let _ = connection.session_notification(notification).await;
-
-                        // Don't execute these tool calls - loop back for Big Claw to respond
-                        continue;
-                    }
-                    DialogueResult::Consensus { .. } => {
-                        debug!("Little Claw approved the action");
-                    }
-                    _ => {}
-                }
-            }
-
             // Execute tool calls and add results to history
             self.execute_tool_calls(session, pending_tool_calls, connection)
                 .await?;
@@ -504,159 +363,11 @@ impl PromptProcessor {
                 session
                     .add_tool_result(&tool_call.id, output.clone(), is_error_for_history)
                     .await;
-
-                // Track cumulative exploration for review triggers
-                let is_readonly = matches!(
-                    tool_call.name.as_str(),
-                    "Read" | "read" | "Glob" | "glob" | "Grep" | "grep" | "search_codebase"
-                );
-                if is_readonly {
-                    self.exploration_tracker.record_read(output.len());
-                } else {
-                    self.exploration_tracker.reset();
-                }
-
-                // Sync observation to Little Claw
-                if let Some(dual_mind) = &self.dual_mind {
-                    let observation =
-                        create_observation(&tool_call.name, output, !is_error_for_history);
-                    let dm = dual_mind.read().await;
-                    dm.sync_observation(observation).await;
-                }
-
-                // Little Claw post-review: Validate the output
-                if let Some(dual_mind) = &self.dual_mind {
-                    // Only review significant outputs (not trivial reads)
-                    if should_post_review(&tool_call.name, output, &self.exploration_tracker) {
-                        let (review_result, dialogue) = {
-                            let mut dm = dual_mind.write().await;
-                            let result = dm.post_review(output).await;
-                            let dialogue = dm.take_dialogue();
-                            (result, dialogue)
-                        };
-
-                        // Stream the dialogue as thought chunks
-                        stream_dialogue_turns(session, connection, &dialogue).await;
-
-                        // Reset cumulative tracker after review
-                        self.exploration_tracker.reset();
-
-                        // Handle review result - trigger enhancement sweep if needed
-                        if let DialogueResult::NeedsEnhancement { critique, .. } = review_result {
-                            info!("Little Claw found issues, triggering enhancement sweep");
-
-                            // Inject the critique into the conversation as a system message
-                            // Big Claw will see this and address the issues
-                            let enhancement_prompt = format!(
-                                "[Quality Review - Enhancement Required]\n\n\
-                                Little Claw has identified issues with the recent output:\n\n\
-                                {}\n\n\
-                                Please address these concerns and enhance the code accordingly. \
-                                Focus on the specific issues mentioned.",
-                                critique
-                            );
-
-                            session.add_system_context(enhancement_prompt).await;
-
-                            // Stream notification to user that enhancement is happening
-                            let chunk = ContentChunk::new(AcpContent::Text(TextContent::new(
-                                "\n[Enhancing based on quality review...]\n",
-                            )));
-                            let notification = SessionNotification::new(
-                                session.id.clone(),
-                                SessionUpdate::AgentMessageChunk(chunk),
-                            );
-                            let _ = connection.session_notification(notification).await;
-                        }
-                    }
-                }
             }
         }
 
         // Tool calls completed - model should continue
         Ok(StopReason::EndTurn)
-    }
-}
-
-/// Stream dialogue turns as thought chunks
-async fn stream_dialogue_turns<C: AcpClient>(
-    session: &SessionState,
-    connection: &C,
-    dialogue: &[DialogueTurn],
-) {
-    if dialogue.is_empty() {
-        return;
-    }
-
-    // Format dialogue for display
-    let mut formatted = String::new();
-    for turn in dialogue {
-        formatted.push_str(&format!(
-            "[{}] {}\n\n",
-            turn.speaker.display_name(),
-            turn.content
-        ));
-    }
-
-    // Stream as thought chunk
-    let chunk = ContentChunk::new(AcpContent::Text(TextContent::new(&formatted)));
-    let notification =
-        SessionNotification::new(session.id.clone(), SessionUpdate::AgentThoughtChunk(chunk));
-    if let Err(e) = connection.session_notification(notification).await {
-        warn!("Failed to send dual-mind dialogue: {}", e);
-    }
-
-    debug!("Streamed {} dialogue turns", dialogue.len());
-}
-
-/// Format tool calls into a human-readable intent description
-fn format_tool_calls_intent(tool_calls: &[AiToolCall]) -> String {
-    if tool_calls.len() == 1 {
-        let tc = &tool_calls[0];
-        format!(
-            "Execute {} with arguments: {}",
-            tc.name,
-            serde_json::to_string_pretty(&tc.arguments)
-                .unwrap_or_else(|_| tc.arguments.to_string())
-        )
-    } else {
-        let names: Vec<&str> = tool_calls.iter().map(|tc| tc.name.as_str()).collect();
-        format!("Execute {} tools: {}", tool_calls.len(), names.join(", "))
-    }
-}
-
-/// Create an observation from a tool result
-fn create_observation(tool_name: &str, output: &str, success: bool) -> Observation {
-    match tool_name {
-        "Edit" | "edit" => {
-            // Extract file path from output if possible
-            Observation::file_edit("unknown", "File edited", output)
-        }
-        "Write" | "write" => Observation::file_write("unknown", "File written"),
-        "Bash" | "bash" => Observation::bash("command", output, success),
-        _ => Observation::tool_result(tool_name, output, success),
-    }
-}
-
-/// Determine if a tool output warrants post-review
-fn should_post_review(tool_name: &str, output: &str, tracker: &ExplorationTracker) -> bool {
-    match tool_name {
-        "Read" | "read" | "Glob" | "glob" | "Grep" | "grep" | "search_codebase" => {
-            // Individual large output OR cumulative exploration threshold
-            output.len() > 2000 || tracker.should_review()
-        }
-        "Edit" | "edit" | "Write" | "write" => {
-            // Always review file modifications
-            true
-        }
-        "Bash" | "bash" => {
-            // Review bash commands that produced output
-            !output.trim().is_empty()
-        }
-        _ => {
-            // Default: review if output is non-trivial
-            output.len() > 500
-        }
     }
 }
 
@@ -771,43 +482,8 @@ mod tests {
 
     #[test]
     fn test_default_model() {
-        let provider = get_provider(ProviderId::Anthropic).unwrap();
+        let provider = get_provider(ProviderId::MiniMax).unwrap();
         let model = provider.default_model();
-        assert!(model.contains("claude"));
-    }
-
-    #[test]
-    fn test_should_post_review() {
-        let tracker = ExplorationTracker::new();
-
-        // Read operations with small output should not trigger review
-        assert!(!should_post_review("Read", "small content", &tracker));
-
-        // Edit operations should always trigger review
-        assert!(should_post_review("Edit", "any content", &tracker));
-        assert!(should_post_review("Write", "", &tracker));
-
-        // Bash with output should trigger review
-        assert!(should_post_review("Bash", "command output", &tracker));
-        assert!(!should_post_review("Bash", "", &tracker));
-
-        // Cumulative reads should trigger review after threshold
-        for _ in 0..5 {
-            tracker.record_read(100);
-        }
-        assert!(should_post_review("Read", "small", &tracker));
-    }
-
-    #[test]
-    fn test_format_tool_calls_intent() {
-        let calls = vec![AiToolCall {
-            id: "1".to_string(),
-            name: "Edit".to_string(),
-            arguments: serde_json::json!({"file": "test.rs"}),
-        }];
-
-        let intent = format_tool_calls_intent(&calls);
-        assert!(intent.contains("Edit"));
-        assert!(intent.contains("test.rs"));
+        assert!(model.contains("MiniMax"));
     }
 }

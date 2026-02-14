@@ -49,14 +49,14 @@ pub struct ProviderSpecificParams {
     /// Top K sampling (model-specific defaults)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_k: Option<i32>,
-    /// Chat template args for GLM/Kimi thinking models
+    /// Chat template args for GLM thinking models
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_template_args: Option<Value>,
 }
 
 /// Get temperature for a model (based on OpenCode's logic)
 ///
-/// For OpenAI-compatible models (GLM, MiniMax, Kimi), delegates to glm module
+/// For OpenAI-compatible models (GLM, MiniMax), delegates to glm module
 pub fn temperature_for_model(model_id: &str) -> Option<f32> {
     let id = model_id.to_lowercase();
 
@@ -123,9 +123,9 @@ pub fn supports_reasoning_effort(model_id: &str) -> bool {
 
 /// Get chat template args for thinking models
 ///
-/// For GLM/Kimi models, delegates to glm module with the user's reasoning preference
+/// For GLM models, delegates to glm module with the user's reasoning preference
 pub fn chat_template_args_for_model(model_id: &str, thinking_enabled: bool) -> Option<Value> {
-    // GLM/Kimi models: use glm module for thinking-specific handling
+    // GLM models: use glm module for thinking-specific handling
     if glm::is_openai_compatible_model(model_id) {
         return glm::get_chat_template_args(model_id, glm::ReasoningMode::from(thinking_enabled));
     }
@@ -134,20 +134,11 @@ pub fn chat_template_args_for_model(model_id: &str, thinking_enabled: bool) -> O
 }
 
 /// Build provider-specific parameters for a model
-///
-/// Note: For OpenCode Zen, we skip model-specific params since Zen handles
-/// translation internally. Adding params like chat_template_args breaks requests.
 pub fn build_provider_params(
     model_id: &str,
-    provider_id: ProviderId,
+    _provider_id: ProviderId,
     thinking_enabled: bool,
 ) -> ProviderSpecificParams {
-    // OpenCode Zen handles model-specific params internally - don't add them
-    // Adding chat_template_args etc. breaks requests to Zen's routing layer
-    if provider_id == ProviderId::OpenCodeZen {
-        return ProviderSpecificParams::default();
-    }
-
     ProviderSpecificParams {
         temperature: temperature_for_model(model_id),
         top_p: top_p_for_model(model_id),
@@ -159,33 +150,12 @@ pub fn build_provider_params(
 /// Wrap options in provider-specific structure
 pub fn wrap_provider_options(options: Value, provider_id: ProviderId) -> ProviderOptions {
     match provider_id {
-        ProviderId::Anthropic => ProviderOptions {
-            anthropic: Some(options),
-            ..Default::default()
-        },
         ProviderId::OpenRouter => ProviderOptions {
             openrouter: Some(options),
             ..Default::default()
         },
-        ProviderId::OpenCodeZen => {
-            if options
-                .as_object()
-                .and_then(|o| o.get("chat_template_args"))
-                .is_some()
-            {
-                ProviderOptions {
-                    openai_compatible: Some(options),
-                    ..Default::default()
-                }
-            } else {
-                ProviderOptions {
-                    anthropic: Some(options),
-                    ..Default::default()
-                }
-            }
-        }
-        ProviderId::ZAi | ProviderId::MiniMax | ProviderId::Kimi | ProviderId::OpenAI => {
-            // For OpenAI-compatible providers (GLM, MiniMax, Kimi, OpenAI)
+        ProviderId::ZAi | ProviderId::MiniMax | ProviderId::OpenAI => {
+            // For OpenAI-compatible providers (GLM, MiniMax, OpenAI)
             // Check if options contain reasoning_content (DeepSeek/MiniMax style)
             if options
                 .as_object()
@@ -334,8 +304,6 @@ mod tests {
         assert_eq!(temperature_for_model("gemini-3-pro"), Some(1.0));
         assert_eq!(temperature_for_model("glm-4.7"), Some(1.0));
         assert_eq!(temperature_for_model("minimax-m2.1"), Some(1.0));
-        assert_eq!(temperature_for_model("kimi-k2"), Some(0.6));
-        assert_eq!(temperature_for_model("kimi-k2-thinking"), Some(1.0));
     }
 
     #[test]
@@ -377,14 +345,6 @@ mod tests {
 
         // GLM-4.6 with thinking disabled: returns None
         let args = chat_template_args_for_model("glm-4.6", false);
-        assert!(args.is_none());
-
-        // Kimi K2 thinking with thinking enabled: returns chat_template_args
-        let args = chat_template_args_for_model("kimi-k2-thinking", true);
-        assert!(args.is_some());
-
-        // Kimi K2 with thinking disabled: returns None
-        let args = chat_template_args_for_model("kimi-k2-thinking", false);
         assert!(args.is_none());
 
         // MiniMax M2: doesn't use chat_template_args (even with thinking enabled)

@@ -23,7 +23,6 @@ use super::bridge::NotificationBridge;
 use super::error::AcpError;
 use super::processor::PromptProcessor;
 use super::session::{SessionManager, SessionState};
-use crate::ai::opencodezen;
 use crate::ai::openrouter;
 use crate::ai::providers::{get_provider, ProviderId};
 use crate::storage::credentials::CredentialStore;
@@ -119,7 +118,7 @@ impl KrustyAgent {
             store.configured_providers().into_iter().collect();
         info!("Found {} configured providers", configured.len());
 
-        // Iterate in the canonical order: Anthropic first, OpenRouter last
+        // Iterate in the canonical order: MiniMax first, OpenRouter last
         // This matches the TUI model selection order
         for &provider in ProviderId::all() {
             if !configured.contains(&provider) {
@@ -155,48 +154,6 @@ impl KrustyAgent {
                             Err(e) => {
                                 warn!("Failed to fetch OpenRouter models: {}", e);
                                 // Fallback to static models if available
-                                if let Some(provider_config) = get_provider(provider) {
-                                    for model_info in &provider_config.models {
-                                        let model_id =
-                                            format!("{}:{}", provider.storage_key(), model_info.id);
-                                        models.push((
-                                            model_id,
-                                            provider,
-                                            model_info.id.clone(),
-                                            api_key.clone(),
-                                            model_info.display_name.clone(),
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    ProviderId::OpenCodeZen => {
-                        info!("Fetching models from OpenCode Zen...");
-                        match opencodezen::fetch_models(api_key).await {
-                            Ok(fetched) => {
-                                for model in fetched {
-                                    let model_id =
-                                        format!("{}:{}", provider.storage_key(), model.id);
-                                    models.push((
-                                        model_id,
-                                        provider,
-                                        model.id.clone(),
-                                        api_key.clone(),
-                                        model.display_name.clone(),
-                                    ));
-                                }
-                                info!(
-                                    "Added {} models from OpenCode Zen",
-                                    models
-                                        .iter()
-                                        .filter(|(_, p, _, _, _)| *p == ProviderId::OpenCodeZen)
-                                        .count()
-                                );
-                            }
-                            Err(e) => {
-                                warn!("Failed to fetch OpenCode Zen models: {}", e);
-                                // Fallback to static models
                                 if let Some(provider_config) = get_provider(provider) {
                                     for model_info in &provider_config.models {
                                         let model_id =

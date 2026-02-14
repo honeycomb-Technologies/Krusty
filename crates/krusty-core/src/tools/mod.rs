@@ -14,6 +14,5 @@ pub use image::{
 };
 pub use implementations::{
     register_acp_tools, register_all_tools, register_build_tool, register_explore_tool,
-    register_search_tool,
 };
 pub use registry::{parse_params, ToolContext, ToolOutputChunk, ToolRegistry, ToolResult};

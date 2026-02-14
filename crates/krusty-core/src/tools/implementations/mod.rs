@@ -29,7 +29,6 @@ pub mod grep;
 pub mod plan_mode;
 pub mod processes;
 pub mod read;
-pub mod search_codebase;
 pub mod set_dependency;
 pub mod skill;
 pub mod task_complete;
@@ -47,21 +46,16 @@ pub use grep::GrepTool;
 pub use plan_mode::EnterPlanModeTool;
 pub use processes::ProcessesTool;
 pub use read::ReadTool;
-pub use search_codebase::SearchCodebaseTool;
 pub use set_dependency::SetDependencyTool;
 pub use skill::SkillTool;
 pub use task_complete::TaskCompleteTool;
 pub use task_start::TaskStartTool;
 pub use write::WriteTool;
 
-use std::path::PathBuf;
 use std::sync::Arc;
-
-use tokio::sync::RwLock;
 
 use crate::agent::AgentCancellation;
 use crate::ai::client::AiClient;
-use crate::index::EmbeddingEngine;
 use crate::tools::registry::ToolRegistry;
 
 /// Register all built-in tools (except explore which needs client)
@@ -122,25 +116,5 @@ pub async fn register_build_tool(
 ) {
     registry
         .register(Arc::new(BuildTool::new(client, cancellation)))
-        .await;
-}
-
-/// Register the search_codebase tool for querying the semantic index
-///
-/// Accepts a shared embedding engine reference that gets populated lazily.
-/// The tool reads the current value at call time, so it picks up the engine
-/// once `ensure_embedding_engine()` resolves it.
-pub async fn register_search_tool(
-    registry: &ToolRegistry,
-    db_path: PathBuf,
-    embedding_engine: Arc<RwLock<Option<Arc<EmbeddingEngine>>>>,
-    codebase_path: String,
-) {
-    registry
-        .register(Arc::new(SearchCodebaseTool::new(
-            db_path,
-            embedding_engine,
-            codebase_path,
-        )))
         .await;
 }

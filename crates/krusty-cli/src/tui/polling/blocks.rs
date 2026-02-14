@@ -9,7 +9,7 @@ use crate::tui::blocks::{BuildBlock, ExploreBlock, StreamBlock};
 use crate::tui::handlers::commands::generate_krab_from_exploration;
 use crate::tui::utils::AsyncChannels;
 
-use super::{PollAction, PollResult};
+use super::PollResult;
 
 /// Poll explore progress channel and update ExploreBlock with agent progress
 pub fn poll_explore_progress(
@@ -217,14 +217,6 @@ pub fn poll_init_exploration(
                                     content.len()
                                 ),
                             );
-
-                            // Store exploration results as insights
-                            result = result.with_action(PollAction::StoreInitInsights {
-                                architecture: exploration_result.architecture.clone(),
-                                conventions: exploration_result.conventions.clone(),
-                                key_files: exploration_result.key_files.clone(),
-                                build_system: exploration_result.build_system,
-                            });
                         }
                         Err(e) => {
                             result = result.with_message(
@@ -248,61 +240,6 @@ pub fn poll_init_exploration(
                 *init_explore_id = None;
                 *cached_languages = None; // Clear language cache on cancellation
                 result = result.with_message("assistant", "Exploration was cancelled.");
-            }
-        }
-    }
-
-    result
-}
-
-/// Poll /init indexing progress and update ExploreBlock
-pub fn poll_indexing_progress(
-    channels: &mut AsyncChannels,
-    explore_blocks: &mut [ExploreBlock],
-    init_explore_id: &Option<String>,
-) -> PollResult {
-    let mut result = PollResult::new();
-
-    let Some(mut rx) = channels.indexing_progress.take() else {
-        return result;
-    };
-
-    loop {
-        match rx.try_recv() {
-            Ok(progress) => {
-                result.needs_redraw = true;
-                // Update the init ExploreBlock with indexing progress
-                if let Some(ref explore_id) = init_explore_id {
-                    for block in explore_blocks.iter_mut() {
-                        if block.tool_use_id() == Some(explore_id.as_str()) {
-                            block.update_indexing_progress(progress.clone());
-                            break;
-                        }
-                    }
-                }
-            }
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                channels.indexing_progress = Some(rx);
-                break;
-            }
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                tracing::debug!("Indexing progress channel disconnected");
-                // Clear indexing progress when channel closes (indexing complete)
-                if let Some(ref explore_id) = init_explore_id {
-                    for block in explore_blocks.iter_mut() {
-                        if block.tool_use_id() == Some(explore_id.as_str()) {
-                            // Signal completion by clearing the progress
-                            block.update_indexing_progress(krusty_core::index::IndexProgress {
-                                phase: krusty_core::index::IndexPhase::Complete,
-                                current: 0,
-                                total: 0,
-                                current_file: None,
-                            });
-                            break;
-                        }
-                    }
-                }
-                break;
             }
         }
     }

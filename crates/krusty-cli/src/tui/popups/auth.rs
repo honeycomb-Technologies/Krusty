@@ -742,12 +742,9 @@ impl AuthPopup {
 
         // Instructions with provider-specific URL
         let url = match provider {
-            ProviderId::Anthropic => "https://console.anthropic.com/",
             ProviderId::OpenRouter => "https://openrouter.ai/keys",
-            ProviderId::OpenCodeZen => "https://opencode.ai/zen",
             ProviderId::ZAi => "https://z.ai/",
             ProviderId::MiniMax => "https://platform.minimax.io/",
-            ProviderId::Kimi => "https://platform.moonshot.cn/",
             ProviderId::OpenAI => "https://platform.openai.com/api-keys",
         };
 

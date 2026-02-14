@@ -91,14 +91,6 @@ moka = { version = "0.12", features = ["sync"] }
 # File System
 ignore = "0.4"
 
-# Code Parsing
-tree-sitter = "0.24"
-tree-sitter-rust = "0.23"
-streaming-iterator = "0.1"
-
-# Local Embeddings
-fastembed = "4"
-
 # Agent Client Protocol (ACP)
 agent-client-protocol = { version = "0.9", features = ["unstable_session_model"] }
 

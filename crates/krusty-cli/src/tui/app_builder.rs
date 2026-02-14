@@ -245,19 +245,6 @@ fn init_model_registry(preferences: &Option<Preferences>) -> SharedModelRegistry
         }
     }
 
-    // Load cached OpenCode Zen models
-    if let Some(ref prefs) = preferences {
-        if let Some(cached_models) = prefs.get_cached_opencodezen_models() {
-            futures::executor::block_on(
-                model_registry.set_models(ProviderId::OpenCodeZen, cached_models.clone()),
-            );
-            tracing::info!(
-                "Loaded {} cached OpenCode Zen models from preferences",
-                cached_models.len()
-            );
-        }
-    }
-
     // Load recent models
     if let Some(ref prefs) = preferences {
         let recent_ids = prefs.get_recent_models();

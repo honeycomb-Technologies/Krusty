@@ -44,13 +44,10 @@ Krusty supports multiple AI providers. Add API keys via `/auth` in the TUI.
 
 | Provider | Models |
 |----------|--------|
-| **Anthropic** | Claude Opus 4.5, Claude Sonnet 4.5, Claude Haiku 4.5 |
-| **OpenAI Codex** | GPT 5.2 Codex, GPT 5.2 |
-| **OpenRouter** | 100+ Frontier and OSS models |
-| **OpenCode Zen** | Claude Opus 4.5/4.1, Claude Sonnet 4.5/4, Claude Haiku 4.5/3.5, GPT-5.2, GPT-5.2 Codex, GPT-5.1, GPT-5.1 Codex/Max/Mini, GPT-5, GPT-5 Codex/Nano, Gemini 3 Pro/Flash, GLM 4.7/4.6, Kimi K2/K2 Thinking, Qwen3 Coder 480B, Grok Code Fast 1, MiniMax M2.1, Big Pickle |
-| **Z.ai** | GLM-4.7, GLM-4.5-Air |
 | **MiniMax** | MiniMax M2.1 Lightning, MiniMax M2.1, MiniMax M2 |
-| **Kimi** | Kimi K2, Kimi K2 Thinking |
+| **OpenAI** | GPT 5.2 Codex, GPT 5.2 |
+| **OpenRouter** | 100+ Frontier and OSS models |
+| **Z.ai** | GLM-4.7, GLM-4.5-Air |
 
 Switch providers and models anytime with `/model` or `Ctrl+M`.
 

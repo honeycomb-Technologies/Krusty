@@ -1,14 +1,12 @@
 //! AI-powered conversation summarization for pinch
 //!
-//! Uses the user's current model by default. For Anthropic, enables
-//! extended thinking for deeper analysis. Produces a structured summary
+//! Uses the user's current model to produce a structured summary
 //! for the next session.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::ai::client::AiClient;
-use crate::ai::providers::ProviderId;
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::storage::RankedFile;
 
@@ -24,17 +22,9 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
-/// Extended thinking budget for thorough analysis (Anthropic only)
+/// Max tokens for summarization calls
 ///
-/// 32K tokens allows the model to deeply analyze the conversation context
-/// and produce high-quality summaries. Extended thinking is more effective
-/// than simple prompts for complex reasoning tasks.
-const THINKING_BUDGET: u32 = 32000;
-
-/// Max tokens for non-thinking summarization calls
-///
-/// 4000 tokens is sufficient for summary output on non-Anthropic providers
-/// that don't support extended thinking. The output is structured JSON,
+/// 4000 tokens is sufficient for summary output. The output is structured JSON,
 /// so it doesn't need to be verbose.
 const SUMMARIZATION_MAX_TOKENS: usize = 4000;
 
@@ -301,28 +291,20 @@ pub async fn generate_summary(
     let model = client.config().model.as_str();
     let provider = client.provider_id();
 
-    let response = if provider == ProviderId::Anthropic {
-        // Anthropic: Use extended thinking for deep analysis
-        tracing::info!("Using extended thinking with model {}", model);
-        client
-            .call_with_thinking(model, SUMMARIZATION_SYSTEM_PROMPT, &prompt, THINKING_BUDGET)
-            .await?
-    } else {
-        // Other providers: Use simple call with current model
-        tracing::info!(
-            "Using simple call with model {} for provider {:?}",
+    // Use simple call with current model
+    tracing::info!(
+        "Using simple call with model {} for provider {:?}",
+        model,
+        provider
+    );
+    let response = client
+        .call_simple(
             model,
-            provider
-        );
-        client
-            .call_simple(
-                model,
-                SUMMARIZATION_SYSTEM_PROMPT,
-                &prompt,
-                SUMMARIZATION_MAX_TOKENS,
-            )
-            .await?
-    };
+            SUMMARIZATION_SYSTEM_PROMPT,
+            &prompt,
+            SUMMARIZATION_MAX_TOKENS,
+        )
+        .await?;
 
     // Parse the JSON response
     parse_summary_response(&response)

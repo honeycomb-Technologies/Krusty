@@ -1,6 +1,6 @@
 //! AI provider layer
 //!
-//! Handles communication with AI providers (Anthropic, OpenRouter, OpenCodeZen, etc.)
+//! Handles communication with AI providers (MiniMax, OpenRouter, ZAi, OpenAI, etc.)
 //! Supports multiple API formats: Anthropic, OpenAI, and Google.
 
 // Modular architecture
@@ -12,7 +12,6 @@ pub mod retry;
 // Provider-specific configuration
 pub mod glm;
 pub mod models;
-pub mod opencodezen;
 pub mod openrouter;
 
 // Shared infrastructure

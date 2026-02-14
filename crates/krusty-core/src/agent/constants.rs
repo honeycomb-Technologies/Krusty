@@ -46,16 +46,6 @@ pub mod retry {
     pub const LOG_THRESHOLD: Duration = Duration::from_millis(100);
 }
 
-/// Model identifiers
-pub mod models {
-    /// Claude Haiku 4.5 model ID
-    pub const HAIKU_4_5: &str = "claude-haiku-4-5-20251001";
-    /// Claude Sonnet 4.5 model ID
-    pub const SONNET_4_5: &str = "claude-sonnet-4-5-20250929";
-    /// Claude Opus 4.5 model ID
-    pub const OPUS_4_5: &str = "claude-opus-4-5-20251101";
-}
-
 /// Sub-agent execution limits
 pub mod subagent {
     /// Maximum turns before forcing completion (prevents infinite loops)

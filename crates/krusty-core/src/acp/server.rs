@@ -86,12 +86,9 @@ impl AcpServer {
             warn!(
                 "No API key found in environment. Set one of:\n\
                  - KRUSTY_PROVIDER + KRUSTY_API_KEY (+ optional KRUSTY_MODEL)\n\
-                 - ANTHROPIC_API_KEY\n\
-                 - OPENROUTER_API_KEY\n\
-                 - OPENCODEZEN_API_KEY\n\
-                 - ZAI_API_KEY\n\
                  - MINIMAX_API_KEY\n\
-                 - KIMI_API_KEY"
+                 - OPENROUTER_API_KEY\n\
+                 - ZAI_API_KEY"
             );
         }
 
@@ -180,11 +177,11 @@ pub struct AcpEnvConfig {
 ///
 /// Checks in order:
 /// 1. Environment variables (KRUSTY_PROVIDER + KRUSTY_API_KEY)
-/// 2. Provider-specific env vars (ANTHROPIC_API_KEY, OPENROUTER_API_KEY, etc.)
+/// 2. Provider-specific env vars (MINIMAX_API_KEY, OPENROUTER_API_KEY, etc.)
 /// 3. Krusty's stored credentials (~/.krusty/tokens/credentials.json)
 ///
 /// Environment variable options:
-/// - KRUSTY_PROVIDER: anthropic, openrouter, opencodezen, zai, minimax, kimi
+/// - KRUSTY_PROVIDER: minimax, openrouter, zai
 /// - KRUSTY_MODEL: Override the default model for the provider
 /// - KRUSTY_API_KEY: Generic API key (used with KRUSTY_PROVIDER)
 fn detect_api_key_from_env() -> Option<AcpEnvConfig> {
@@ -193,12 +190,9 @@ fn detect_api_key_from_env() -> Option<AcpEnvConfig> {
     // Check for explicit provider configuration first
     if let Ok(provider_str) = std::env::var("KRUSTY_PROVIDER") {
         let provider = match provider_str.to_lowercase().as_str() {
-            "anthropic" => Some(ProviderId::Anthropic),
-            "openrouter" => Some(ProviderId::OpenRouter),
-            "opencodezen" | "opencode" => Some(ProviderId::OpenCodeZen),
-            "zai" | "z.ai" => Some(ProviderId::ZAi),
             "minimax" => Some(ProviderId::MiniMax),
-            "kimi" => Some(ProviderId::Kimi),
+            "openrouter" => Some(ProviderId::OpenRouter),
+            "zai" | "z.ai" => Some(ProviderId::ZAi),
             _ => None,
         };
 
@@ -221,12 +215,9 @@ fn detect_api_key_from_env() -> Option<AcpEnvConfig> {
 
     // Fall back to checking provider-specific environment variables
     let providers_and_vars = [
-        (ProviderId::Anthropic, "ANTHROPIC_API_KEY"),
-        (ProviderId::OpenRouter, "OPENROUTER_API_KEY"),
-        (ProviderId::OpenCodeZen, "OPENCODEZEN_API_KEY"),
-        (ProviderId::ZAi, "ZAI_API_KEY"),
         (ProviderId::MiniMax, "MINIMAX_API_KEY"),
-        (ProviderId::Kimi, "KIMI_API_KEY"),
+        (ProviderId::OpenRouter, "OPENROUTER_API_KEY"),
+        (ProviderId::ZAi, "ZAI_API_KEY"),
         // OpenAI key maps to OpenRouter (which supports OpenAI models)
         (ProviderId::OpenRouter, "OPENAI_API_KEY"),
     ];
@@ -300,12 +291,9 @@ fn detect_from_credential_store(model: Option<String>) -> Option<AcpEnvConfig> {
 /// Get API key for a specific provider from environment
 fn get_provider_api_key(provider: ProviderId) -> Option<String> {
     let env_var = match provider {
-        ProviderId::Anthropic => "ANTHROPIC_API_KEY",
-        ProviderId::OpenRouter => "OPENROUTER_API_KEY",
-        ProviderId::OpenCodeZen => "OPENCODEZEN_API_KEY",
-        ProviderId::ZAi => "ZAI_API_KEY",
         ProviderId::MiniMax => "MINIMAX_API_KEY",
-        ProviderId::Kimi => "KIMI_API_KEY",
+        ProviderId::OpenRouter => "OPENROUTER_API_KEY",
+        ProviderId::ZAi => "ZAI_API_KEY",
         ProviderId::OpenAI => "OPENAI_API_KEY",
     };
     std::env::var(env_var).ok().filter(|s| !s.is_empty())

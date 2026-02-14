@@ -12,14 +12,12 @@ use crate::storage::CredentialStore;
 ///
 /// Handles special cases:
 /// - OpenAI: OAuth vs API key detection for endpoint routing
-/// - OpenCode Zen: Model-specific API format routing
-/// - Kimi: OpenAI format
-/// - Others: Anthropic format
+/// - Others: format detection based on provider and model
 pub fn create_client_config(
     provider: ProviderId,
     model: &str,
     credential_store: &CredentialStore,
-    model_registry: &SharedModelRegistry,
+    _model_registry: &SharedModelRegistry,
 ) -> AiClientConfig {
     // OpenAI requires special handling to detect OAuth vs API key
     // and route to the correct endpoint (ChatGPT Responses API vs OpenAI Chat Completions)
@@ -30,26 +28,12 @@ pub fn create_client_config(
     let provider_config = match get_provider(provider) {
         Some(config) => config,
         None => {
-            tracing::warn!(
-                "Provider {:?} not found, falling back to Anthropic",
-                provider
-            );
-            get_provider(ProviderId::Anthropic)
-                .expect("Anthropic provider must always be available")
+            tracing::warn!("Provider {:?} not found, falling back to MiniMax", provider);
+            get_provider(ProviderId::MiniMax).expect("MiniMax provider must be available")
         }
     };
 
-    // Determine API format based on provider and model
-    // For OpenCodeZen: try registry first (may have richer metadata), fallback to detection
-    // For others: use canonical detection logic
-    let api_format = if provider == ProviderId::OpenCodeZen {
-        model_registry
-            .try_get_model(model)
-            .map(|m| m.api_format)
-            .unwrap_or_else(|| detect_api_format(provider, model))
-    } else {
-        detect_api_format(provider, model)
-    };
+    let api_format = detect_api_format(provider, model);
 
     AiClientConfig {
         model: model.to_string(),

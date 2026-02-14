@@ -4,13 +4,11 @@
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::agent::dual_mind::{DialogueResult, Observation, ObservedAction};
 use crate::agent::subagent::AgentProgress;
 use crate::ai::types::{AiToolCall, Content};
 use crate::tools::{ToolContext, ToolOutputChunk};
 use crate::tui::app::App;
 use crate::tui::components::{PromptOption, PromptQuestion};
-use crate::tui::utils::DualMindUpdate;
 
 impl App {
     /// Handle enter_plan_mode tool calls to switch modes
@@ -494,12 +492,9 @@ impl App {
         );
 
         // Track exploration budget: count consecutive read-only tool calls
-        let all_readonly = tool_calls.iter().all(|t| {
-            matches!(
-                t.name.as_str(),
-                "read" | "glob" | "grep" | "search_codebase"
-            )
-        });
+        let all_readonly = tool_calls
+            .iter()
+            .all(|t| matches!(t.name.as_str(), "read" | "glob" | "grep"));
         let has_action = tool_calls.iter().any(|t| {
             matches!(
                 t.name.as_str(),
@@ -649,39 +644,6 @@ impl App {
             None
         };
 
-        // Create dual-mind dialogue channel if dual-mind is active
-        let dual_mind_tx = if self.runtime.dual_mind.is_some() {
-            let (tx, rx) = mpsc::unbounded_channel::<DualMindUpdate>();
-            self.runtime.channels.dual_mind = Some(rx);
-            // DEBUG: Log that dual-mind is active for this execution
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/dual_mind_dialogue.log")
-            {
-                use std::io::Write;
-                let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                let _ = writeln!(
-                    file,
-                    "\n[{}] TOOL EXECUTION: dual_mind is ACTIVE",
-                    timestamp
-                );
-            }
-            Some(tx)
-        } else {
-            // DEBUG: Log that dual-mind is not active
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/dual_mind_dialogue.log")
-            {
-                use std::io::Write;
-                let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                let _ = writeln!(file, "\n[{}] TOOL EXECUTION: dual_mind is NONE", timestamp);
-            }
-            None
-        };
-
         // Create result channel
         let (result_tx, result_rx) = oneshot::channel();
         self.runtime.channels.tool_results = Some(result_rx);
@@ -698,8 +660,6 @@ impl App {
         let cancel_token = self.runtime.cancellation.child_token();
         let plan_mode = self.ui.work_mode == crate::tui::app::WorkMode::Plan;
         let current_model = self.runtime.current_model.clone();
-        let dual_mind = self.runtime.dual_mind.clone();
-        let dual_mind_tx = dual_mind_tx;
 
         tokio::spawn(async move {
             let mut tool_results: Vec<Content> = Vec::new();
@@ -712,38 +672,6 @@ impl App {
 
                 let tool_name = tool_call.name.clone();
 
-                // Pre-review: Little Claw questions the intent before execution
-                // Only review mutating tools - read-only tools don't need quality review
-                let is_mutating_tool = matches!(
-                    tool_name.as_str(),
-                    "edit" | "write" | "bash" | "build" | "Edit" | "Write" | "Bash"
-                );
-
-                if let (true, Some(dm)) = (is_mutating_tool, dual_mind.as_ref()) {
-                    // Create concise intent summary (not full JSON dump)
-                    let intent = create_intent_summary(&tool_name, &tool_call.arguments);
-
-                    let review_result = {
-                        let mut dm_guard = dm.write().await;
-                        dm_guard.pre_review(&intent).await
-                    };
-
-                    // Only act on actual concerns - approvals are silent
-                    if let DialogueResult::NeedsEnhancement { critique, .. } = review_result {
-                        tracing::info!(
-                            "Little Claw raised concern before {}: {}",
-                            tool_name,
-                            critique
-                        );
-                        // Send enhancement for potential UI display
-                        if let Some(ref tx) = dual_mind_tx {
-                            let _ = tx.send(DualMindUpdate {
-                                enhancement: Some(critique),
-                                review_output: None,
-                            });
-                        }
-                    }
-                }
                 let working_dir =
                     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
 
@@ -785,62 +713,9 @@ impl App {
                 };
 
                 if let Some(result) = result {
-                    // Sync observation to Little Claw (so it knows what happened)
-                    if let Some(ref dm) = dual_mind {
-                        let observation = create_observation(
-                            &tool_name,
-                            &tool_call.arguments,
-                            &result.output,
-                            !result.is_error,
-                        );
-                        let dm_guard = dm.read().await;
-                        dm_guard.little_claw().observe(observation).await;
-                    }
-
-                    // Post-review: Little Claw validates the output
-                    // Only reviews mutating tools with successful, non-trivial outputs
-                    let final_output =
-                        if is_mutating_tool && !result.is_error && result.output.len() > 100 {
-                            if let Some(ref dm) = dual_mind {
-                                let review_result = {
-                                    let mut dm_guard = dm.write().await;
-                                    dm_guard.post_review(&result.output).await
-                                };
-
-                                if let DialogueResult::NeedsEnhancement { critique, .. } =
-                                    review_result
-                                {
-                                    tracing::info!(
-                                        "Little Claw found issue with {} output: {}",
-                                        tool_name,
-                                        critique
-                                    );
-                                    if let Some(ref tx) = dual_mind_tx {
-                                        let _ = tx.send(DualMindUpdate {
-                                            enhancement: Some(critique.clone()),
-                                            review_output: Some(critique.clone()),
-                                        });
-                                    }
-                                    format!("{}\n\n[Quality Review]: {}", result.output, critique)
-                                } else {
-                                    if let Some(ref tx) = dual_mind_tx {
-                                        let _ = tx.send(DualMindUpdate {
-                                            enhancement: None,
-                                            review_output: Some(result.output.clone()),
-                                        });
-                                    }
-                                    result.output
-                                }
-                            } else {
-                                result.output
-                            }
-                        } else {
-                            result.output
-                        };
-
                     tool_results.push(Content::ToolResult {
                         tool_use_id: tool_call.id.clone(),
-                        output: serde_json::Value::String(final_output),
+                        output: serde_json::Value::String(result.output),
                         is_error: if result.is_error { Some(true) } else { None },
                     });
                 } else {
@@ -852,12 +727,6 @@ impl App {
                         )),
                         is_error: Some(true),
                     });
-                }
-
-                // Clear dialogue depth after each tool so subsequent tools aren't skipped
-                if let Some(ref dm) = dual_mind {
-                    let mut dm_guard = dm.write().await;
-                    dm_guard.take_dialogue();
                 }
 
                 if cancel_token.is_cancelled() {
@@ -894,7 +763,7 @@ impl App {
                     .push(("bash".to_string(), tool_call.id.clone()));
             }
 
-            if tool_name == "grep" || tool_name == "glob" || tool_name == "search_codebase" {
+            if tool_name == "grep" || tool_name == "glob" {
                 let pattern = tool_call
                     .arguments
                     .get("pattern")
@@ -1119,7 +988,7 @@ impl App {
                 You have made {} consecutive read-only operations without taking action.\n\
                 STOP exploring and take action NOW.\n\
                 If you are working on a plan, call task_start and begin implementation.\n\
-                If you need more context, use search_codebase for targeted results.\n\
+                If you need more context, use grep or glob for targeted results.\n\
                 Further exploration without action is unacceptable.",
                 self.runtime.exploration_budget_count
             );
@@ -1129,7 +998,7 @@ impl App {
                 "[EXPLORATION BUDGET]\n\
                 You have made {} consecutive read-only operations without taking action.\n\
                 If you are working on a plan, call task_start and begin implementation.\n\
-                If you need more context, use search_codebase for targeted results.\n\
+                If you need more context, use grep or glob for targeted results.\n\
                 Continued exploration without action is wasteful. Act now or explain why you need more context.",
                 self.runtime.exploration_budget_count
             );
@@ -1237,130 +1106,5 @@ impl App {
                 break;
             }
         }
-    }
-}
-
-/// Create appropriate observation based on tool type
-/// Uses specific observation constructors for file operations to preserve path info
-fn create_observation(
-    tool_name: &str,
-    args: &serde_json::Value,
-    output: &str,
-    success: bool,
-) -> Observation {
-    // Truncate output for summary (char-boundary safe)
-    let summary = if output.len() > 500 {
-        let mut end = 500;
-        while end > 0 && !output.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}...[truncated]", &output[..end])
-    } else {
-        output.to_string()
-    };
-
-    match tool_name {
-        "edit" => {
-            let path = args
-                .get("file_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            if success {
-                Observation::file_edit(path, &summary, output)
-            } else {
-                Observation::tool_result(
-                    tool_name,
-                    &format!("Failed to edit {}: {}", path, summary),
-                    false,
-                )
-            }
-        }
-        "write" => {
-            let path = args
-                .get("file_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            if success {
-                Observation::file_write(path, &summary)
-            } else {
-                Observation::tool_result(
-                    tool_name,
-                    &format!("Failed to write {}: {}", path, summary),
-                    false,
-                )
-            }
-        }
-        "read" => {
-            let path = args
-                .get("file_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            Observation {
-                action: ObservedAction::FileRead {
-                    path: path.to_string(),
-                },
-                summary: format!("Read {}", path),
-                content: Some(summary),
-                success,
-            }
-        }
-        "bash" => {
-            let cmd = args
-                .get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            Observation::bash(cmd, output, success)
-        }
-        _ => Observation::tool_result(tool_name, &summary, success),
-    }
-}
-
-/// Create a concise intent summary for Little Claw review
-/// Avoids dumping full JSON - extracts key info only
-fn create_intent_summary(tool_name: &str, args: &serde_json::Value) -> String {
-    match tool_name {
-        "edit" => {
-            let file = args
-                .get("file_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            format!("Edit file: {}", file)
-        }
-        "write" => {
-            let file = args
-                .get("file_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            format!("Write file: {}", file)
-        }
-        "read" => {
-            let file = args
-                .get("file_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            format!("Read file: {}", file)
-        }
-        "bash" => {
-            let cmd = args
-                .get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            // Truncate long commands (char-boundary safe)
-            let cmd_preview = if cmd.len() > 100 {
-                let mut end = 100;
-                while end > 0 && !cmd.is_char_boundary(end) {
-                    end -= 1;
-                }
-                format!("{}...", &cmd[..end])
-            } else {
-                cmd.to_string()
-            };
-            format!("Run command: {}", cmd_preview)
-        }
-        "grep" | "glob" => {
-            let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("*");
-            format!("{}: {}", tool_name, pattern)
-        }
-        _ => format!("Execute {} tool", tool_name),
     }
 }

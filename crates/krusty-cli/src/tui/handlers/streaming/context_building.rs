@@ -5,9 +5,7 @@
 //! - Available skills
 //! - Project instructions
 
-use crate::ai::types::Content;
 use crate::tui::app::{App, WorkMode};
-use krusty_core::index::{CodebaseStore, InsightStore, SearchQuery, SemanticRetrieval};
 
 /// Sanitize plan titles for safe markdown embedding
 /// Escapes backticks and quotes that could break formatting
@@ -239,44 +237,6 @@ You MUST follow this disciplined workflow. Do NOT batch-complete tasks or skip s
         context
     }
 
-    /// Build insights context from accumulated codebase learnings
-    pub fn build_insights_context(&self) -> String {
-        let Some(ref sm) = self.services.session_manager else {
-            return String::new();
-        };
-
-        let conn = sm.db().conn();
-        let working_dir_str = self.runtime.working_dir.to_string_lossy().to_string();
-
-        let codebase_id = match CodebaseStore::new(conn).get_by_path(&working_dir_str) {
-            Ok(Some(codebase)) => codebase.id,
-            _ => return String::new(),
-        };
-
-        let insight_store = InsightStore::new(conn);
-        let insights = match insight_store.get_top(&codebase_id, 20) {
-            Ok(insights) if !insights.is_empty() => insights,
-            _ => return String::new(),
-        };
-
-        // Touch access counts for ranking
-        let ids: Vec<&str> = insights.iter().map(|i| i.id.as_str()).collect();
-        if let Err(e) = insight_store.touch_accessed(&ids) {
-            tracing::debug!("Failed to update insight access counts: {e}");
-        }
-
-        let mut context = String::from("[CODEBASE RULES]\nIMPORTANT: These are verified patterns and conventions for this codebase. You MUST follow them.\nViolating these will introduce inconsistencies and bugs.\n\n");
-        for insight in &insights {
-            context.push_str(&format!(
-                "- [{}] {} (confidence: {:.0}%)\n",
-                insight.insight_type.as_str(),
-                insight.content,
-                insight.confidence * 100.0
-            ));
-        }
-        context
-    }
-
     /// Build project context from instruction files.
     ///
     /// Reads project-specific instructions from the working directory.
@@ -314,105 +274,5 @@ You MUST follow this disciplined workflow. Do NOT batch-complete tasks or skip s
         }
 
         String::new()
-    }
-
-    /// Extract the latest user message text from the conversation
-    fn extract_latest_user_query(&self) -> Option<String> {
-        self.runtime
-            .chat
-            .conversation
-            .iter()
-            .rev()
-            .find(|msg| msg.role == crate::ai::types::Role::User)
-            .and_then(|msg| {
-                msg.content.iter().find_map(|c| match c {
-                    Content::Text { text } => Some(text.clone()),
-                    _ => None,
-                })
-            })
-    }
-
-    /// Build search context from codebase index (semantic or keyword search)
-    pub fn build_search_context(&self) -> String {
-        let query_text = match self.extract_latest_user_query() {
-            Some(text) if !text.is_empty() => text,
-            _ => return String::new(),
-        };
-
-        let Some(ref sm) = self.services.session_manager else {
-            return String::new();
-        };
-
-        let conn = sm.db().conn();
-        let working_dir_str = self.runtime.working_dir.to_string_lossy().to_string();
-
-        let codebase_id = match CodebaseStore::new(conn).get_by_path(&working_dir_str) {
-            Ok(Some(codebase)) => codebase.id,
-            _ => return String::new(),
-        };
-
-        let engine_guard = self.runtime.embedding_engine.try_read().ok();
-        let engine_ref = engine_guard.as_ref().and_then(|g| g.as_ref());
-        let has_embeddings = engine_ref.is_some();
-        let mut retrieval = SemanticRetrieval::new(conn);
-        if let Some(engine) = engine_ref {
-            retrieval = retrieval.with_embeddings(engine);
-        }
-
-        let search_query = SearchQuery::new().text(&query_text).limit(10);
-
-        let results =
-            match futures::executor::block_on(retrieval.search(&codebase_id, search_query)) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::debug!("Codebase search failed: {e}");
-                    return String::new();
-                }
-            };
-
-        let filtered: Vec<_> = results.into_iter().filter(|r| r.score >= 0.3).collect();
-
-        if filtered.is_empty() {
-            tracing::debug!(
-                mode = if has_embeddings {
-                    "semantic"
-                } else {
-                    "keyword"
-                },
-                "Search: no results above threshold"
-            );
-            return String::new();
-        }
-
-        let top_score = filtered.first().map(|r| r.score).unwrap_or(0.0);
-        tracing::info!(
-            mode = if has_embeddings {
-                "semantic"
-            } else {
-                "keyword"
-            },
-            results = filtered.len(),
-            top_score = format!("{:.2}", top_score),
-            "Search: matched symbols"
-        );
-
-        let mut context = String::from("[CODEBASE SEARCH RESULTS]\nSymbols matching the current query. Reference these locations before searching manually.\n\n");
-        for result in &filtered {
-            let sig = result
-                .signature
-                .as_deref()
-                .map(|s| format!(": {s}"))
-                .unwrap_or_default();
-            context.push_str(&format!(
-                "- [{}] {}{} ({}:{}-{})\n",
-                result.symbol_type.as_str(),
-                result.symbol_path,
-                sig,
-                result.file_path,
-                result.line_start,
-                result.line_end,
-            ));
-        }
-        context
     }
 }

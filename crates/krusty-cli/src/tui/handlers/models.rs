@@ -1,6 +1,6 @@
 //! Model fetching handlers
 //!
-//! Async model fetching from dynamic providers (OpenRouter, OpenCode Zen).
+//! Async model fetching from dynamic providers (OpenRouter).
 
 use crate::ai::providers::ProviderId;
 use crate::tui::app::App;
@@ -51,51 +51,6 @@ impl App {
         });
     }
 
-    /// Start async fetch of OpenCode Zen models
-    pub fn start_opencodezen_fetch(&mut self) {
-        // Don't start if already fetching
-        if self.runtime.channels.opencodezen_models.is_some() {
-            return;
-        }
-
-        // Get OpenCode Zen API key
-        let api_key = match self.services.credential_store.get(&ProviderId::OpenCodeZen) {
-            Some(key) => key.clone(),
-            None => {
-                tracing::warn!("Cannot fetch OpenCode Zen models: no API key configured");
-                return;
-            }
-        };
-
-        // Mark popup as loading (only if popup is open)
-        self.ui.popups.model.set_loading(true);
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.runtime.channels.opencodezen_models = Some(rx);
-
-        // Clone registry for async task
-        let registry = self.services.model_registry.clone();
-
-        tokio::spawn(async move {
-            let result = crate::ai::opencodezen::fetch_models(&api_key).await;
-
-            match &result {
-                Ok(models) => {
-                    // Store in registry
-                    registry
-                        .set_models(ProviderId::OpenCodeZen, models.clone())
-                        .await;
-                    tracing::info!("Fetched {} OpenCode Zen models", models.len());
-                }
-                Err(e) => {
-                    tracing::error!("Failed to fetch OpenCode Zen models: {}", e);
-                }
-            }
-
-            let _ = tx.send(result.map_err(|e| e.to_string()));
-        });
-    }
-
     /// Poll for OpenRouter model fetch completion
     pub fn poll_openrouter_fetch(&mut self) {
         if let Some(rx) = &mut self.runtime.channels.openrouter_models {
@@ -129,44 +84,6 @@ impl App {
                         .model
                         .set_error("Fetch task closed unexpectedly".to_string());
                     self.runtime.channels.openrouter_models = None;
-                }
-            }
-        }
-    }
-
-    /// Poll for OpenCode Zen model fetch completion
-    pub fn poll_opencodezen_fetch(&mut self) {
-        if let Some(rx) = &mut self.runtime.channels.opencodezen_models {
-            match rx.try_recv() {
-                Ok(result) => {
-                    match result {
-                        Ok(models) => {
-                            // Cache models to preferences
-                            if let Some(ref prefs) = self.services.preferences {
-                                if let Err(e) = prefs.cache_opencodezen_models(&models) {
-                                    tracing::warn!("Failed to cache OpenCode Zen models: {}", e);
-                                }
-                            }
-                            // Refresh the popup with new models
-                            self.refresh_model_popup();
-                            tracing::info!(
-                                "OpenCode Zen models loaded and cached: {} models",
-                                models.len()
-                            );
-                        }
-                        Err(e) => {
-                            self.ui.popups.model.set_error(e);
-                        }
-                    }
-                    self.runtime.channels.opencodezen_models = None;
-                }
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    self.ui
-                        .popups
-                        .model
-                        .set_error("Fetch task closed unexpectedly".to_string());
-                    self.runtime.channels.opencodezen_models = None;
                 }
             }
         }

@@ -78,17 +78,11 @@ impl AiClient {
         });
 
         // Add thinking configuration when enabled
-        // - Native Anthropic: Full thinking with budget_tokens
-        // - MiniMax: Simple thinking without budget_tokens (their API doesn't support it)
-        // - Z.ai/others: No thinking support for sub-agents
+        // MiniMax: Simple thinking without budget_tokens (their API doesn't support it)
+        // Z.ai/others: No thinking support for sub-agents
         if thinking_enabled {
             let provider = self.provider_id();
-            if self.config().is_anthropic() {
-                body["thinking"] = serde_json::json!({
-                    "type": "enabled",
-                    "budget_tokens": 32000  // Maximum budget for sub-agents
-                });
-            } else if provider == crate::ai::providers::ProviderId::MiniMax {
+            if provider == crate::ai::providers::ProviderId::MiniMax {
                 // MiniMax uses Anthropic-compatible thinking but without budget_tokens
                 body["thinking"] = serde_json::json!({
                     "type": "enabled"
@@ -96,14 +90,7 @@ impl AiClient {
             }
         }
 
-        // Add thinking beta headers for native Anthropic only
-        // MiniMax and Z.ai don't need/support these headers
-        let request = if self.config().is_anthropic() {
-            let beta_headers = vec!["interleaved-thinking-2025-05-14"];
-            self.build_request_with_beta(&self.config().api_url(), &beta_headers)
-        } else {
-            self.build_request(&self.config().api_url())
-        };
+        let request = self.build_request(&self.config().api_url());
 
         info!(model = model, provider = %self.provider_id(), "Sub-agent API call starting");
         let start = Instant::now();

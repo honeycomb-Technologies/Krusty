@@ -9,7 +9,6 @@ use crate::agent::SummarizationResult;
 use crate::ai::models::ModelMetadata;
 use crate::ai::types::Content;
 use crate::tools::ToolOutputChunk;
-use krusty_core::index::IndexProgress;
 
 /// AI-generated title update
 pub struct TitleUpdate {
@@ -58,23 +57,6 @@ pub struct OAuthStatusUpdate {
     pub token: Option<krusty_core::auth::OAuthTokenData>,
 }
 
-/// Dual-mind update from tool execution
-/// Only sent when Little Claw has actual concerns (not routine approvals)
-pub struct DualMindUpdate {
-    /// Enhancement critique if issues were found
-    pub enhancement: Option<String>,
-    /// Full review output for insight extraction (post-review only)
-    pub review_output: Option<String>,
-}
-
-/// Phase of dual-mind review (kept for potential future use)
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub enum DualMindPhase {
-    PreReview,
-    PostReview,
-}
-
 /// Device code information for OAuth device flow
 pub struct DeviceCodeInfo {
     pub user_code: String,
@@ -100,20 +82,14 @@ pub struct AsyncChannels {
     pub build_progress: Option<mpsc::UnboundedReceiver<AgentProgress>>,
     /// OpenRouter model fetch result receiver
     pub openrouter_models: Option<oneshot::Receiver<Result<Vec<ModelMetadata>, String>>>,
-    /// OpenCode Zen model fetch result receiver
-    pub opencodezen_models: Option<oneshot::Receiver<Result<Vec<ModelMetadata>, String>>>,
     /// /init codebase exploration result receiver
     pub init_exploration: Option<oneshot::Receiver<InitExplorationResult>>,
     /// /init exploration progress updates
     pub init_progress: Option<mpsc::UnboundedReceiver<AgentProgress>>,
-    /// /init indexing progress updates (file scanning/parsing before AI exploration)
-    pub indexing_progress: Option<mpsc::UnboundedReceiver<IndexProgress>>,
     /// Auto-updater status updates
     pub update_status: Option<mpsc::UnboundedReceiver<krusty_core::updater::UpdateStatus>>,
     /// OAuth authentication status updates
     pub oauth_status: Option<mpsc::UnboundedReceiver<OAuthStatusUpdate>>,
-    /// Dual-mind dialogue updates from tool execution
-    pub dual_mind: Option<mpsc::UnboundedReceiver<DualMindUpdate>>,
 }
 
 impl AsyncChannels {
