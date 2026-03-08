@@ -360,11 +360,17 @@ impl App {
             &pinch_ctx,
             Some(&self.runtime.current_model),
             Some(&self.runtime.working_dir.to_string_lossy()),
+            self.runtime
+                .git_status
+                .as_ref()
+                .and_then(|status| status.branch.as_deref()),
         ) {
             Ok(new_id) => {
                 // Save pinch context as first message
-                let system_msg = pinch_ctx.to_system_message();
-                if let Err(e) = sm.save_message(&new_id, "system", &system_msg) {
+                let system_msg_text = pinch_ctx.to_system_message();
+                let system_msg_json =
+                    serde_json::json!([{ "type": "text", "text": system_msg_text }]).to_string();
+                if let Err(e) = sm.save_message(&new_id, "system", &system_msg_json) {
                     tracing::warn!("Auto-pinch: failed to save pinch message: {}", e);
                 }
 
@@ -522,11 +528,17 @@ impl App {
             &pinch_ctx,
             Some(&self.runtime.current_model),
             Some(&self.runtime.working_dir.to_string_lossy()),
+            self.runtime
+                .git_status
+                .as_ref()
+                .and_then(|status| status.branch.as_deref()),
         ) {
             Ok(new_id) => {
                 // Save pinch context as first message
-                let system_msg = pinch_ctx.to_system_message();
-                if let Err(e) = sm.save_message(&new_id, "system", &system_msg) {
+                let system_msg_text = pinch_ctx.to_system_message();
+                let system_msg_json =
+                    serde_json::json!([{ "type": "text", "text": system_msg_text }]).to_string();
+                if let Err(e) = sm.save_message(&new_id, "system", &system_msg_json) {
                     tracing::warn!("Failed to save pinch message: {}", e);
                 }
 

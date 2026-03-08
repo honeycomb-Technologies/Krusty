@@ -7,7 +7,7 @@ use serde_json::Value;
 use tracing::{debug, info};
 
 use super::{needs_role_alternation_filler, FormatHandler, RequestOptions};
-use crate::ai::providers::ProviderId;
+use crate::ai::providers::{ProviderCapabilities, ProviderId};
 use crate::ai::types::{AiTool, Content, ModelMessage, Role};
 
 /// Anthropic format handler
@@ -54,6 +54,9 @@ impl FormatHandler for AnthropicFormat {
         // Anthropic: Only preserve last thinking with pending tools (signature validation)
         let preserve_all_thinking = provider_id == Some(ProviderId::MiniMax);
         let include_signature = provider_id != Some(ProviderId::MiniMax);
+        let strip_images = provider_id
+            .map(|pid| !ProviderCapabilities::for_provider(pid).supports_vision)
+            .unwrap_or(false);
 
         // Determine which assistant message (if any) should keep thinking blocks.
         // This is the last assistant message that has tool_use AND is followed by tool_result.
@@ -118,7 +121,9 @@ impl FormatHandler for AnthropicFormat {
             let content: Vec<Value> = msg
                 .content
                 .iter()
-                .filter_map(|c| convert_content(c, include_thinking, include_signature))
+                .filter_map(|c| {
+                    convert_content(c, include_thinking, include_signature, strip_images)
+                })
                 .collect();
 
             result.push(serde_json::json!({
@@ -199,6 +204,7 @@ fn convert_content(
     content: &Content,
     include_thinking: bool,
     include_signature: bool,
+    strip_images: bool,
 ) -> Option<Value> {
     match content {
         Content::Text { text } => Some(serde_json::json!({
@@ -222,6 +228,12 @@ fn convert_content(
             "is_error": is_error.unwrap_or(false)
         })),
         Content::Image { image, detail: _ } => {
+            if strip_images {
+                return Some(serde_json::json!({
+                    "type": "text",
+                    "text": "[Image attached - use MCP vision tools to analyze]"
+                }));
+            }
             if let Some(base64_data) = &image.base64 {
                 Some(serde_json::json!({
                     "type": "image",
@@ -247,6 +259,12 @@ fn convert_content(
             }
         }
         Content::Document { source } => {
+            if strip_images {
+                return Some(serde_json::json!({
+                    "type": "text",
+                    "text": "[Document attached - use MCP vision tools to analyze]"
+                }));
+            }
             if let Some(data) = &source.data {
                 Some(serde_json::json!({
                     "type": "document",

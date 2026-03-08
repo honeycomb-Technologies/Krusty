@@ -136,13 +136,18 @@ impl SseParser for GoogleParser {
                 .get("candidatesTokenCount")
                 .and_then(|t| t.as_u64())
                 .unwrap_or(0) as usize;
+            // Gemini 2.5+ reports implicit cache hits via cachedContentTokenCount
+            let cached = usage
+                .get("cachedContentTokenCount")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0) as usize;
             if prompt > 0 || completion > 0 {
                 return Ok(SseEvent::Usage(crate::ai::types::Usage {
                     prompt_tokens: prompt,
                     completion_tokens: completion,
                     total_tokens: prompt + completion,
                     cache_creation_input_tokens: 0,
-                    cache_read_input_tokens: 0,
+                    cache_read_input_tokens: cached,
                 }));
             }
         }

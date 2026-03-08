@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import Send from 'lucide-svelte/icons/send';
 	import Clock from 'lucide-svelte/icons/clock';
 	import StopCircle from 'lucide-svelte/icons/stop-circle';
@@ -10,10 +10,23 @@
 	import Brain from 'lucide-svelte/icons/brain';
 	import Hammer from 'lucide-svelte/icons/hammer';
 	import FileText from 'lucide-svelte/icons/file-text';
-	import Bot from 'lucide-svelte/icons/bot';
+
+	import Mic from 'lucide-svelte/icons/mic';
+	import X from 'lucide-svelte/icons/x';
+	import Check from 'lucide-svelte/icons/check';
 	import Message from './Message.svelte';
 	import AsciiTitle from './AsciiTitle.svelte';
-	import { sessionStore, sendMessage, stopGeneration, togglePermissionMode, toggleThinking, setMode, type Attachment, type SessionMode } from '$stores/session';
+	import { sessionStore, sendMessage, stopGeneration, togglePermissionMode, toggleThinking, setMode, thinkingLevelLabel, type Attachment, type SessionMode } from '$stores/session';
+
+	// Web Speech API type declarations (for browsers that support it)
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	type SpeechRecognitionType = any;
+
+	interface Props {
+		currentModel: string;
+	}
+
+	let { currentModel }: Props = $props();
 
 	let inputValue = $state('');
 	let inputElement = $state<HTMLTextAreaElement>(undefined!);
@@ -23,6 +36,21 @@
 	
 	// AI Controls expanded state
 	let showAiControls = $state(false);
+
+	// Voice transcription state
+	let isTranscribing = $state(false);
+	let transcribedText = $state('');
+
+	// Check for Web Speech API support (with type assertion)
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	const isSpeechSupported = typeof window !== 'undefined' && 
+		('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
+	
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	function getSpeechRecognition(): any {
+		if (typeof window === 'undefined') return null;
+		return (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+	}
 
 	function toggleAiControls() {
 		showAiControls = !showAiControls;
@@ -36,28 +64,139 @@
 		// Emit event to parent to open model selector
 		const event = new CustomEvent('openmodel');
 		window.dispatchEvent(event);
-		closeAiControls();
+		// Don't close menu - let user continue selecting options
 	}
 
 	function handleThinkClick() {
 		toggleThinking();
-		closeAiControls();
+		// Don't close menu - let user cycle through levels
 	}
 
 	function handleModeClick() {
 		const newMode: SessionMode = $sessionStore.mode === 'build' ? 'plan' : 'build';
 		setMode(newMode);
-		closeAiControls();
+		// Don't close menu - let user continue selecting options
 	}
 
 	function handlePermClick() {
 		togglePermissionMode();
-		closeAiControls();
+		// Don't close menu - let user continue selecting options
+	}
+
+	function formatModelLabel(modelId: string): string {
+		if (!modelId) return 'Default';
+		const compact = modelId.includes('/') ? modelId.split('/').pop() || modelId : modelId;
+		return compact.length > 16 ? `${compact.slice(0, 13)}...` : compact;
+	}
+
+	function startTranscription() {
+		if (!isSpeechSupported || isTranscribing) return;
+
+		isTranscribing = true;
+		transcribedText = '';
+		
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const SpeechRecognition = getSpeechRecognition();
+		if (!SpeechRecognition) {
+			isTranscribing = false;
+			return;
+		}
+
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const recognition: any = new SpeechRecognition();
+		recognition.continuous = true;
+		recognition.interimResults = true;
+		recognition.lang = 'en-US';
+
+		recognition.onresult = (event: SpeechRecognitionType) => {
+			let interimTranscript = '';
+			let finalTranscript = '';
+
+			for (let i = event.resultIndex; i < event.results.length; i++) {
+				const transcript = event.results[i][0].transcript;
+				if (event.results[i].isFinal) {
+					finalTranscript += transcript + ' ';
+				} else {
+					interimTranscript += transcript;
+				}
+			}
+
+			// Update input with transcribed text
+			if (finalTranscript) {
+				transcribedText += finalTranscript;
+				inputValue = transcribedText;
+				autoResize();
+			} else if (interimTranscript) {
+				// Show interim results
+				inputValue = transcribedText + interimTranscript;
+				autoResize();
+			}
+		};
+
+		recognition.onerror = (event: SpeechRecognitionType) => {
+			console.error('Speech recognition error:', event.error);
+			stopTranscription();
+		};
+
+		recognition.onend = () => {
+			// Only stop if user manually ended or there was an error
+			// Don't auto-restart
+		};
+
+		// Store reference for stopping
+		(window as unknown as { _speechRecognition: SpeechRecognitionType })._speechRecognition = recognition;
+
+		try {
+			recognition.start();
+		} catch (e) {
+			console.error('Failed to start speech recognition:', e);
+			isTranscribing = false;
+		}
+	}
+
+	function stopTranscription() {
+		if (typeof window === 'undefined') {
+			isTranscribing = false;
+			return;
+		}
+
+		const recognition = (window as unknown as { _speechRecognition?: SpeechRecognitionType })._speechRecognition;
+		if (recognition) {
+			try {
+				recognition.stop();
+			} catch (e) {
+				// Ignore errors when stopping
+			}
+			(window as unknown as { _speechRecognition?: SpeechRecognitionType })._speechRecognition = undefined;
+		}
+		isTranscribing = false;
 	}
 
 	function handleSubmit() {
-		if (!inputValue.trim()) return;
+		// If transcribing, stop first
+		if (isTranscribing) {
+			stopTranscription();
+			return;
+		}
 
+		const hasText = inputValue.trim().length > 0;
+		const hasContent = hasText || attachedFiles.length > 0;
+
+		// While streaming, empty submit acts as stop.
+		if ($sessionStore.isStreaming && !hasContent) {
+			stopGeneration();
+			return;
+		}
+
+		// Empty input on idle starts voice transcription (if supported).
+		if (!hasContent) {
+			if (isSpeechSupported) {
+				startTranscription();
+			}
+			return;
+		}
+
+		// Allow sending with attachments or text (but at least one required)
 		// Convert files to attachments
 		const attachments: Attachment[] = attachedFiles.map(file => ({
 			file,
@@ -67,8 +206,10 @@
 		sendMessage(inputValue.trim(), attachments);
 		inputValue = '';
 		attachedFiles = [];
-		// Reset input height after clearing
-		autoResize();
+		if (inputElement) {
+			inputElement.value = '';
+			inputElement.style.height = '';
+		}
 	}
 
 	function handleFileSelect(e: Event) {
@@ -113,13 +254,24 @@
 	onMount(() => {
 		inputElement?.focus();
 	});
+
+	onDestroy(() => {
+		stopTranscription();
+	});
 </script>
 
-<div class="flex h-full min-h-0 flex-col">
+<div class="flex h-full min-h-0 flex-col" style:padding-bottom="var(--keyboard-height)">
+	<!-- Error display -->
+	{#if $sessionStore.error}
+		<div class="mx-4 mt-2 rounded-lg bg-destructive/20 px-4 py-2 text-sm text-destructive">
+			{$sessionStore.error}
+		</div>
+	{/if}
+
 	<!-- Messages area -->
 	<div
 		bind:this={messagesContainer}
-		class="messages-scroll min-h-0 flex-1 overflow-y-auto px-4 py-4"
+		class="messages-scroll min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-4"
 	>
 		{#if !$sessionStore.sessionId && $sessionStore.messages.length === 0}
 			<!-- Welcome state - animated ASCII title -->
@@ -139,7 +291,7 @@
 
 	<!-- Input area - only show when session is active -->
 	{#if $sessionStore.sessionId}
-		<div class="shrink-0 px-4 pb-5">
+		<div class="shrink-0 px-4 pb-2">
 			<!-- Hidden file input - accepts all file types including images -->
 			<input
 				bind:this={fileInput}
@@ -167,27 +319,21 @@
 
 			<div class="mx-auto max-w-3xl">
 				<div class="flex items-end gap-2 rounded-xl border border-border/50 bg-card/60 backdrop-blur-sm p-2">
-					<!-- Attachment button -->
-					<button
-						onclick={() => fileInput.click()}
-						class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground
-							transition-colors hover:bg-muted hover:text-foreground"
-						title="Attach file or image"
-					>
-						<Paperclip class="h-4 w-4" />
-					</button>
-
-					<!-- AI Controls: Robot button -->
+					<!-- AI Controls -->
 					<div class="relative">
 						<button
-							onclick={toggleAiControls}
+							onclick={showAiControls ? closeAiControls : toggleAiControls}
 							class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors
 								{showAiControls 
-									? 'bg-primary text-primary-foreground' 
-									: 'text-muted-foreground hover:bg-muted hover:text-foreground'}"
-							title="AI Controls"
+										? 'bg-destructive text-destructive-foreground' 
+										: 'text-muted-foreground hover:bg-muted hover:text-foreground'}"
+							title={showAiControls ? "Close menu" : "AI Controls"}
 						>
-							<Bot class="h-4 w-4" />
+							{#if showAiControls}
+								<X class="h-4 w-4" />
+							{:else}
+								<img src="/icon.svg" alt="AI Controls" class="h-8 w-8 rounded" />
+							{/if}
 						</button>
 
 						<!-- Expanded AI Controls Popover -->
@@ -203,20 +349,22 @@
 										<Cpu class="h-4 w-4 text-muted-foreground" />
 										<span>Model</span>
 									</div>
-									<span class="text-xs text-muted-foreground">MiniMax</span>
+									<span class="text-xs text-muted-foreground" title={currentModel}>
+										{formatModelLabel(currentModel)}
+									</span>
 								</button>
 								
-								<!-- Think -->
+								<!-- Think - cycles through thinking levels -->
 								<button
 									onclick={handleThinkClick}
 									class="flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors hover:bg-muted
 										{$sessionStore.thinkingEnabled ? 'bg-purple-500/20 text-purple-400' : ''}"
-									title="Toggle thinking"
+									title="Click to cycle thinking level"
 								>
 									<Brain class="h-4 w-4 {$sessionStore.thinkingEnabled ? 'text-purple-400' : 'text-muted-foreground'}" />
 									<span>Think</span>
 									{#if $sessionStore.thinkingEnabled}
-										<span class="ml-auto h-2 w-2 rounded-full bg-purple-400"></span>
+										<span class="ml-auto text-xs uppercase text-purple-400">{thinkingLevelLabel($sessionStore.thinkingLevel)}</span>
 									{/if}
 								</button>
 								
@@ -255,49 +403,83 @@
 						{/if}
 					</div>
 
+					<!-- Attachment button -->
+					<button
+						onclick={() => fileInput.click()}
+						class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground
+							transition-colors hover:bg-muted hover:text-foreground"
+						title="Attach file or image"
+					>
+						<Paperclip class="h-4 w-4" />
+					</button>
+
 					<!-- Text input -->
 					<textarea
 						bind:this={inputElement}
 						bind:value={inputValue}
 						onkeydown={handleKeyDown}
 						oninput={autoResize}
-						placeholder={$sessionStore.isStreaming ? 'Queue a message...' : 'Message Krusty...'}
+						placeholder={isTranscribing ? 'Listening...' : ($sessionStore.isStreaming ? 'Queue a message...' : 'Message Krusty...')}
 						rows={1}
-						inputmode="text"
 						enterkeyhint="send"
 						class="max-h-[200px] min-h-[36px] flex-1 resize-none bg-transparent py-2 text-sm
 							placeholder:text-muted-foreground focus:outline-none"
 					></textarea>
 
-					<!-- Combined Send/Queue/Stop button -->
-					<button
-						onclick={$sessionStore.isStreaming ? (inputValue.trim() ? handleSubmit : stopGeneration) : handleSubmit}
-						disabled={!$sessionStore.isStreaming && !inputValue.trim()}
-						class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors
-							{$sessionStore.isStreaming
-								? inputValue.trim()
-									? 'bg-amber-500 text-white hover:bg-amber-600'  // Queue
-									: 'bg-destructive text-white hover:bg-destructive/90'  // Stop
-								: 'bg-primary text-primary-foreground hover:bg-primary/90'  // Send (white text)
+					<!-- Combined Send/Queue/Stop/Voice button -->
+					{#if isTranscribing}
+						<!-- Transcription active - show check/stop button (green, reassuring) -->
+						<button
+							onclick={handleSubmit}
+							class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-green-500 text-white hover:bg-green-600 transition-colors"
+							title="Click to stop recording"
+						>
+							<Check class="h-4 w-4" />
+						</button>
+					{:else}
+						<!-- Unified send/queue/stop/voice button -->
+						{@const hasDraftContent = inputValue.trim().length > 0 || attachedFiles.length > 0}
+						{@const isQueueing = $sessionStore.isStreaming && hasDraftContent}
+						{@const isStopping = $sessionStore.isStreaming && !hasDraftContent}
+						{@const canStartVoice = isSpeechSupported && !hasDraftContent && !$sessionStore.isStreaming}
+						<button
+							onclick={handleSubmit}
+							disabled={!$sessionStore.isStreaming && !hasDraftContent && !isSpeechSupported}
+							class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors
+								{isQueueing
+										? 'bg-amber-500 text-white hover:bg-amber-600'
+										: isStopping
+												? 'bg-destructive text-white hover:bg-destructive/90'
+												: canStartVoice
+														? 'bg-blue-500 text-white hover:bg-blue-600'
+														: 'bg-primary text-primary-foreground hover:bg-primary/90'
+								}
+								{!$sessionStore.isStreaming && !hasDraftContent && !isSpeechSupported ? 'disabled:cursor-not-allowed disabled:opacity-50' : ''}"
+							title={isQueueing
+								? 'Queue message'
+								: isStopping
+										? 'Stop generation'
+										: canStartVoice
+												? 'Start voice transcription'
+												: 'Send message'
 							}
-								{!$sessionStore.isStreaming && !inputValue.trim() ? 'disabled:cursor-not-allowed disabled:opacity-50' : ''}"
-						title={$sessionStore.isStreaming
-							? (inputValue.trim() ? 'Queue message' : 'Stop generation')
-							: 'Send message'
-						}
-					>
-						{#if $sessionStore.isStreaming && inputValue.trim()}
-							<Clock class="h-4 w-4" />
-						{:else if $sessionStore.isStreaming}
-							<StopCircle class="h-4 w-4" />
-						{:else}
-							<Send class="h-4 w-4" />
-						{/if}
-					</button>
+						>
+							{#if isQueueing}
+								<Clock class="h-4 w-4" />
+							{:else if isStopping}
+								<StopCircle class="h-4 w-4" />
+							{:else if canStartVoice}
+								<Mic class="h-4 w-4" />
+							{:else}
+								<Send class="h-4 w-4" />
+							{/if}
+						</button>
+					{/if}
 				</div>
 			</div>
 		</div>
 	{/if}
+
 </div>
 
 <style>

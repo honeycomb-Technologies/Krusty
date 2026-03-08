@@ -10,6 +10,8 @@ use crate::auth::types::OAuthConfig;
 
 /// OpenAI's public OAuth client ID (used by Codex CLI)
 pub const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+/// Default first-party originator used by the Codex CLI login flow.
+pub const OPENAI_OAUTH_ORIGINATOR: &str = "codex_cli_rs";
 
 /// Get the OAuth configuration for OpenAI
 ///
@@ -38,7 +40,10 @@ pub fn openai_oauth_config() -> OAuthConfig {
         extra_auth_params: vec![
             ("id_token_add_organizations".to_string(), "true".to_string()),
             ("codex_cli_simplified_flow".to_string(), "true".to_string()),
-            ("originator".to_string(), "krusty".to_string()),
+            (
+                "originator".to_string(),
+                OPENAI_OAUTH_ORIGINATOR.to_string(),
+            ),
         ],
     }
 }

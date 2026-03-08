@@ -94,13 +94,46 @@ impl AiClient {
         max_tokens: usize,
         thinking_enabled: bool,
     ) -> Result<Value> {
+        // Sort tools deterministically to maintain stable cache prefix.
+        // Tool order is part of the cached prefix; non-deterministic order breaks caching.
+        let mut sorted_tools = tools;
+        sorted_tools.sort_by(|a, b| {
+            let name_a = a.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let name_b = b.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            name_a.cmp(name_b)
+        });
+
+        // Only apply cache_control for providers that support prompt caching.
+        // MiniMax, Z.ai, etc. use Anthropic format but don't support caching —
+        // sending cache_control or array-format system prompts may cause errors.
+        let capabilities =
+            crate::ai::providers::ProviderCapabilities::for_provider(self.provider_id());
+        let enable_caching = capabilities.prompt_caching;
+
+        let system_value: Value = if enable_caching {
+            serde_json::json!([{
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"}
+            }])
+        } else {
+            Value::String(system_prompt.to_string())
+        };
+
         let mut body = serde_json::json!({
             "model": model,
             "max_tokens": max_tokens,
             "messages": messages,
-            "system": system_prompt,
-            "tools": tools
+            "system": system_value,
+            "tools": sorted_tools
         });
+
+        // Enable auto-caching at the request level. The API automatically places
+        // the cache breakpoint on the last cacheable block, replacing the need for
+        // manual breakpoints on the last tool and last message.
+        if enable_caching {
+            body["cache_control"] = serde_json::json!({"type": "ephemeral"});
+        }
 
         // Add thinking configuration when enabled
         // MiniMax: Simple thinking without budget_tokens (their API doesn't support it)

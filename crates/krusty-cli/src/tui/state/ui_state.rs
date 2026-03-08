@@ -109,15 +109,33 @@ impl ToolResultCache {
         );
     }
 
-    /// Parse bash JSON output: {"output": "...", "exitCode": N}
+    /// Parse bash JSON output from either legacy or structured tool envelopes.
     fn parse_bash_output(output: &str) -> (String, i32) {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
             let actual_output = json
-                .get("output")
+                .get("data")
+                .and_then(|v| v.get("output"))
                 .and_then(|v| v.as_str())
+                .or_else(|| json.get("output").and_then(|v| v.as_str()))
+                .or_else(|| {
+                    json.get("error")
+                        .and_then(|v| v.get("message"))
+                        .and_then(|v| v.as_str())
+                })
                 .unwrap_or(output)
                 .to_string();
-            let exit_code = json.get("exitCode").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let exit_code = json
+                .get("metadata")
+                .and_then(|v| v.get("exit_code"))
+                .and_then(|v| v.as_str())
+                .and_then(|v| v.parse::<i64>().ok())
+                .or_else(|| {
+                    json.get("metadata")
+                        .and_then(|v| v.get("exit_code"))
+                        .and_then(|v| v.as_i64())
+                })
+                .or_else(|| json.get("exitCode").and_then(|v| v.as_i64()))
+                .unwrap_or(0) as i32;
             (actual_output, exit_code)
         } else {
             (output.to_string(), 0)

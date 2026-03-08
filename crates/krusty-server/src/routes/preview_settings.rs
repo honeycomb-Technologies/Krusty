@@ -40,7 +40,7 @@ impl Default for PreviewSettings {
         Self {
             enabled: true,
             auto_refresh_secs: 5,
-            show_only_http_like: true,
+            show_only_http_like: false,
             probe_timeout_ms: DEFAULT_PROBE_TIMEOUT_MS,
             allow_force_open_non_http: true,
             pinned_ports: vec![],

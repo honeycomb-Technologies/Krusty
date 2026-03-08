@@ -22,6 +22,14 @@ pub fn router() -> Router<AppState> {
         .route("/:name/tools", get(list_tools))
 }
 
+/// Keep AI-visible MCP tools in sync with current connected MCP servers.
+async fn sync_mcp_tool_registry(state: &AppState) {
+    // Remove all previously-registered MCP wrappers, then re-register from live connections.
+    state.tool_registry.unregister_by_prefix("mcp__").await;
+    krusty_core::mcp::tool::register_mcp_tools(state.mcp_manager.clone(), &state.tool_registry)
+        .await;
+}
+
 /// MCP server info for API response
 #[derive(Serialize)]
 pub struct McpServerResponse {
@@ -81,6 +89,8 @@ async fn reload_config(
         .await
         .map_err(|e| AppError::Internal(format!("Failed to reload MCP config: {}", e)))?;
 
+    sync_mcp_tool_registry(&state).await;
+
     // Return updated server list
     list_servers(State(state)).await
 }
@@ -95,6 +105,8 @@ async fn connect_server(
         .connect(&name)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to connect to {}: {}", name, e)))?;
+
+    sync_mcp_tool_registry(&state).await;
 
     // Get updated server info
     let servers = state.mcp_manager.list_servers().await;
@@ -127,6 +139,7 @@ async fn disconnect_server(
     Path(name): Path<String>,
 ) -> Result<Json<McpServerResponse>, AppError> {
     state.mcp_manager.disconnect(&name).await;
+    sync_mcp_tool_registry(&state).await;
 
     // Get updated server info
     let servers = state.mcp_manager.list_servers().await;

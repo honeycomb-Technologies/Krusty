@@ -1,40 +1,15 @@
 //! Stream event handlers
 //!
-//! Processes streaming events from the AI and updates application state.
-//! Extracted from app.rs to reduce its size and improve organization.
+//! Processes orchestrator loop events and updates application state.
+//! The core orchestrator handles the agentic cycle (stream -> tools -> repeat)
+//! and emits LoopEvents that this module translates to TUI visual state.
 
-use once_cell::sync::Lazy;
-use regex::Regex;
-
+use crate::agent::loop_events::LoopEvent;
 use crate::agent::AgentEvent;
-use crate::ai::types::{Content, ModelMessage, Role};
+use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
 use crate::plan::PlanFile;
 use crate::tui::app::{App, WorkMode};
 use crate::tui::blocks::{StreamBlock, WebSearchBlock};
-use crate::tui::streaming::StreamEvent;
-
-// ============================================================================
-// Static regex patterns for plan abandonment detection (compiled once)
-// Patterns are intentionally specific to avoid false positives on discussions
-// ============================================================================
-
-/// Pattern: Explicit action - "I'm abandoning/stopping the plan", "I will abandon"
-/// Requires first-person confirmation to avoid matching hypotheticals
-static RE_ABANDON: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(?:I'?m|I\s+will|I'll)\s+(?:now\s+)?(?:abandon|stop|cancel|clear|end)(?:ing)?\s+(?:the\s+)?(?:current\s+)?plan\b").unwrap()
-});
-
-/// Pattern: Confirmed past tense - "plan has been abandoned/stopped"
-/// Past tense indicates action completed, not hypothetical
-static RE_STOPPED: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(?:the\s+)?(?:current\s+)?plan\s+(?:has\s+been|is\s+now|was)\s+(?:abandoned|stopped|cancelled|cleared|ended)\b").unwrap()
-});
-
-/// Pattern: Acknowledged request - "okay, stopping the plan", "understood, abandoning"
-/// Requires acknowledgment word to confirm intent
-static RE_ACKNOWLEDGED: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(?:okay|ok|understood|sure|alright|very\s+well)[,.]?\s+(?:I'?m\s+)?(?:abandon|stop|cancel|clear|end)(?:ing|ed)?\s+(?:the\s+)?(?:current\s+)?plan\b").unwrap()
-});
 
 impl App {
     fn append_streaming_assistant_delta(&mut self, delta: String) {
@@ -73,128 +48,193 @@ impl App {
         }
     }
 
-    fn process_plan_completion_checks(&mut self, check_text: &str) {
-        if check_text.is_empty() {
-            return;
-        }
+    // =========================================================================
+    // Core Orchestrator LoopEvent Consumer
+    // =========================================================================
 
-        tracing::info!(
-            "Plan active, checking {} chars (text + thinking) for completions",
-            check_text.len()
-        );
-        let preview: String = check_text.chars().take(200).collect();
-        tracing::debug!("Check text preview: {}...", preview);
-
-        if self.try_detect_plan_abandonment(check_text) {
-            // Plan was abandoned, skip completion check
-        } else {
-            self.try_update_task_completions(check_text);
-        }
-    }
-
-    /// Process all pending stream events from the StreamingManager
+    /// Process all pending events from the core orchestrator loop.
     ///
-    /// This is the main streaming event loop that handles all StreamEvent variants.
+    /// The orchestrator handles the entire agentic cycle (stream -> tools -> repeat)
+    /// and emits LoopEvents for every state change. This method translates those
+    /// events to TUI visual state (blocks, messages, prompts).
+    ///
     /// Returns true if any events were processed.
-    ///
-    pub fn process_stream_events(&mut self) -> bool {
-        let mut processed_any = false;
+    pub fn process_loop_events(&mut self) -> bool {
+        let Some(mut rx) = self.runtime.channels.loop_events.take() else {
+            return false;
+        };
 
-        while let Some(event) = self.runtime.streaming.poll() {
+        let mut processed_any = false;
+        let mut events = Vec::new();
+        let mut disconnected = false;
+
+        // Drain available events into a local buffer (avoids borrow conflict)
+        loop {
+            match rx.try_recv() {
+                Ok(event) => events.push(event),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+
+        // Put receiver back unless disconnected
+        if !disconnected {
+            self.runtime.channels.loop_events = Some(rx);
+        }
+
+        // Process all buffered events
+        for event in events {
             processed_any = true;
-            self.handle_stream_event(event);
+            self.handle_loop_event(event);
         }
 
         processed_any
     }
 
-    /// Handle a single stream event
-    fn handle_stream_event(&mut self, event: StreamEvent) {
+    /// Handle a single orchestrator LoopEvent
+    fn handle_loop_event(&mut self, event: LoopEvent) {
         match event {
-            StreamEvent::TextDelta { delta } => {
+            // -- Streaming ------------------------------------------------
+            LoopEvent::TextDelta { delta } => {
                 self.handle_text_delta(delta);
             }
-            StreamEvent::TextDeltaWithCitations { delta, citations } => {
+            LoopEvent::TextDeltaWithCitations { delta, citations } => {
                 self.handle_text_delta_with_citations(delta, citations);
             }
-            StreamEvent::ToolStart { name } => {
-                self.handle_tool_start(name);
-            }
-            StreamEvent::ToolDelta => {
-                // Currently ignored - tool deltas not displayed
-            }
-            StreamEvent::ToolComplete { call } => {
-                tracing::info!(
-                    "StreamEvent::ToolComplete - id={}, name={}",
-                    call.id,
-                    call.name
-                );
-            }
-            StreamEvent::Finished { reason } => {
-                self.handle_stream_finished(reason);
-            }
-            StreamEvent::Complete { text } => {
-                self.handle_stream_complete(text);
-            }
-            StreamEvent::Error { error } => {
-                self.handle_stream_error(error);
-            }
-            StreamEvent::Usage {
-                prompt_tokens,
-                completion_tokens,
-                cache_read_tokens,
-                cache_created_tokens,
-            } => {
-                self.handle_usage(
-                    prompt_tokens,
-                    completion_tokens,
-                    cache_read_tokens,
-                    cache_created_tokens,
-                );
-            }
-            StreamEvent::ContextEdited {
-                cleared_tokens,
-                cleared_tool_uses,
-                cleared_thinking_turns,
-            } => {
-                self.handle_context_edited(
-                    cleared_tokens,
-                    cleared_tool_uses,
-                    cleared_thinking_turns,
-                );
-            }
-            StreamEvent::ThinkingStart => {
-                self.handle_thinking_start();
-            }
-            StreamEvent::ThinkingDelta { thinking } => {
+            LoopEvent::ThinkingDelta { thinking } => {
+                // Create ThinkingBlock on first delta (orchestrator doesn't emit ThinkingStart)
+                let needs_block = self
+                    .runtime
+                    .blocks
+                    .thinking
+                    .last()
+                    .map(|b| !b.is_streaming())
+                    .unwrap_or(true);
+                if needs_block {
+                    self.handle_thinking_start();
+                }
                 self.handle_thinking_delta(thinking);
             }
-            StreamEvent::ThinkingComplete { signature } => {
+            LoopEvent::ThinkingComplete {
+                thinking: _,
+                signature,
+            } => {
                 self.handle_thinking_complete(signature);
             }
-            StreamEvent::ServerToolStart { id, name } => {
-                tracing::info!("Server tool started: {} ({})", name, id);
+
+            // -- Tool lifecycle -------------------------------------------
+            LoopEvent::ToolCallStart { id: _, name } => {
+                self.handle_tool_start(name);
+            }
+            LoopEvent::ToolCallComplete {
+                id,
+                name,
+                arguments,
+            } => {
+                // Store AskUser calls for when AwaitingInput arrives
+                if name == "AskUserQuestion" {
+                    self.runtime.pending_ask_user_calls.push(AiToolCall {
+                        id: id.clone(),
+                        name: name.clone(),
+                        arguments: arguments.clone(),
+                    });
+                }
+                // Create visual blocks from completed tool call
+                let tool_call = AiToolCall {
+                    id,
+                    name,
+                    arguments,
+                };
+                self.create_tool_blocks(&[tool_call]);
+            }
+            LoopEvent::ToolExecuting { id: _, name: _ } => {
+                if !self.runtime.chat.is_executing_tools {
+                    self.start_tool_execution();
+                }
+            }
+            LoopEvent::ToolOutputDelta { id, delta } => {
+                // Route streaming output to the matching BashBlock
+                for block in &mut self.runtime.blocks.bash {
+                    if block.tool_use_id() == Some(&id) {
+                        block.append(&delta);
+                        break;
+                    }
+                }
+                if self.ui.scroll_system.scroll.auto_scroll {
+                    self.ui.scroll_system.scroll.request_scroll_to_bottom();
+                }
+            }
+            LoopEvent::ToolResult {
+                id,
+                output,
+                is_error: _,
+            } => {
+                self.update_tool_result_block(&id, &output);
+                self.update_read_block(&id, &output);
+                self.update_bash_block(&id, &output);
+                self.update_explore_block(&id, &output);
+                self.update_build_block(&id, &output);
+            }
+
+            // -- Interaction ----------------------------------------------
+            LoopEvent::ToolApprovalRequired {
+                id,
+                name,
+                arguments: _,
+            } => {
+                let names = vec![name];
+                let ids = vec![id];
+                self.ui.decision_prompt.show_tool_approval(names, ids);
+                self.runtime.approval_requested_at = Some(std::time::Instant::now());
+            }
+            LoopEvent::ToolApproved { id } => {
+                tracing::info!("Tool approved: {}", id);
+            }
+            LoopEvent::ToolDenied { id } => {
+                tracing::info!("Tool denied: {}", id);
+            }
+            LoopEvent::AwaitingInput {
+                tool_call_id,
+                tool_name,
+            } => {
+                if tool_name == "AskUserQuestion" {
+                    if let Some(call) = self
+                        .runtime
+                        .pending_ask_user_calls
+                        .iter()
+                        .find(|c| c.id == tool_call_id)
+                        .cloned()
+                    {
+                        self.handle_ask_user_question_tools(vec![call]);
+                    }
+                } else if tool_name == "PlanConfirm" {
+                    tracing::info!("Plan confirmation awaiting input: {}", tool_call_id);
+                }
+            }
+
+            // -- Server-side tools ----------------------------------------
+            LoopEvent::ServerToolStart { id, name } => {
                 self.handle_server_tool_start(id, name);
             }
-            StreamEvent::ServerToolDelta => {
-                // Currently ignored
-            }
-            StreamEvent::ServerToolComplete { id, name } => {
+            LoopEvent::ServerToolComplete { id, name } => {
                 tracing::info!("Server tool completed: {} ({})", name, id);
             }
-            StreamEvent::WebSearchResults {
+            LoopEvent::WebSearchResults {
                 tool_use_id,
                 results,
             } => {
                 self.handle_web_search_results(tool_use_id, results);
             }
-            StreamEvent::WebFetchResult {
+            LoopEvent::WebFetchResult {
                 tool_use_id,
                 content,
             } => {
                 self.handle_web_fetch_result(tool_use_id, content);
             }
-            StreamEvent::ServerToolError {
+            LoopEvent::ServerToolError {
                 tool_use_id,
                 error_code,
             } => {
@@ -203,6 +243,116 @@ impl App {
                     "system".to_string(),
                     format!("Web tool error: {}", error_code),
                 ));
+            }
+
+            // -- Mode + Plan ----------------------------------------------
+            LoopEvent::ModeChange { mode, reason } => {
+                let new_mode = match mode.as_str() {
+                    "plan" | "Plan" => WorkMode::Plan,
+                    _ => WorkMode::Build,
+                };
+                self.ui.work_mode = new_mode;
+                if let Some(reason) = reason {
+                    tracing::info!("Mode changed to {:?}: {}", new_mode, reason);
+                }
+            }
+            LoopEvent::PlanUpdate { tasks } => {
+                tracing::info!("Plan updated: {} tasks", tasks.len());
+            }
+            LoopEvent::PlanComplete {
+                tool_call_id: _,
+                title,
+                task_count,
+            } => {
+                // Reload plan from DB and show confirmation
+                if let Some(session_id) = self.runtime.current_session_id.clone() {
+                    if let Some(ref pm) = self.services.plan_manager {
+                        if let Ok(Some(plan)) = pm.get_plan(&session_id) {
+                            self.set_plan(plan);
+                            self.ui.work_mode = WorkMode::Plan;
+                            if !self.ui.plan_sidebar.visible {
+                                self.ui.plan_sidebar.toggle();
+                            }
+                            self.ui
+                                .decision_prompt
+                                .show_plan_confirm(&title, task_count);
+                        }
+                    }
+                }
+            }
+
+            // -- Turn lifecycle -------------------------------------------
+            LoopEvent::TurnComplete { turn, has_more } => {
+                self.runtime.agent_state.current_turn = turn;
+                if !has_more {
+                    self.stop_tool_execution();
+                }
+            }
+            LoopEvent::Usage {
+                prompt_tokens,
+                completion_tokens,
+            } => {
+                self.runtime.context_tokens_used = prompt_tokens + completion_tokens;
+                self.save_session_token_count();
+            }
+            LoopEvent::TitleGenerated { title } => {
+                self.runtime.session_title = Some(title);
+            }
+            LoopEvent::Finished { session_id } => {
+                tracing::info!("Orchestrator finished for session {}", session_id);
+                self.reload_conversation_from_db();
+                self.stop_streaming();
+                self.stop_tool_execution();
+                self.runtime.channels.loop_events = None;
+                self.runtime.channels.loop_input = None;
+                self.runtime.pending_ask_user_calls.clear();
+                self.check_auto_pinch();
+            }
+            LoopEvent::Error { error } => {
+                self.handle_stream_error(error);
+            }
+        }
+    }
+
+    /// Reload the conversation from the database.
+    ///
+    /// Called when the orchestrator finishes to sync the TUI's in-memory
+    /// conversation with what the orchestrator saved to the DB.
+    fn reload_conversation_from_db(&mut self) {
+        let Some(session_id) = &self.runtime.current_session_id else {
+            return;
+        };
+        let Some(sm) = &self.services.session_manager else {
+            return;
+        };
+
+        match sm.load_session_messages(session_id) {
+            Ok(messages) => {
+                self.runtime.chat.conversation.clear();
+                for (role, content_json) in messages {
+                    let api_role = match role.as_str() {
+                        "user" => Role::User,
+                        "assistant" => Role::Assistant,
+                        "system" => Role::System,
+                        _ => Role::User,
+                    };
+                    let content: Vec<Content> = serde_json::from_str::<Vec<Content>>(&content_json)
+                        .or_else(|_| {
+                            serde_json::from_str::<Content>(&content_json).map(|c| vec![c])
+                        })
+                        .unwrap_or_else(|_| vec![Content::Text { text: content_json }]);
+                    self.runtime.chat.conversation.push(ModelMessage {
+                        role: api_role,
+                        content,
+                    });
+                }
+                tracing::info!(
+                    "Reloaded {} conversation messages from DB",
+                    self.runtime.chat.conversation.len()
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Failed to reload conversation from DB: {}", e);
             }
         }
     }
@@ -218,7 +368,7 @@ impl App {
 
         // Check for task completion keywords in delta for real-time updates
         const COMPLETION_KEYWORDS: &[&str] = &[
-            "complete", "Complete", "done", "Done", "finished", "Finished", "✓", "✅",
+            "complete", "Complete", "done", "Done", "finished", "Finished", "\u{2713}", "\u{2705}",
         ];
         let should_check_completion = self.runtime.active_plan.is_some()
             && COMPLETION_KEYWORDS.iter().any(|kw| delta.contains(kw));
@@ -319,7 +469,6 @@ impl App {
                 .push(("write".to_string(), String::new()));
         }
 
-        // NOTE: ExploreBlock is created in spawn_tool_execution where we have the tool_use_id
         if name == "Task" || name == "explore" {
             tracing::info!(
                 "handle_tool_start: explore tool '{}' detected, block will be created on execution",
@@ -401,385 +550,8 @@ impl App {
     }
 
     // =========================================================================
-    // Stream Lifecycle
+    // Error Handling
     // =========================================================================
-
-    /// Handle stream finished event (API done sending)
-    fn handle_stream_finished(&mut self, reason: crate::ai::types::FinishReason) {
-        let turn_duration = self
-            .runtime
-            .agent_state
-            .turn_duration()
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
-        self.runtime
-            .event_bus
-            .emit(AgentEvent::StreamEnd { reason });
-        self.runtime.event_bus.emit(AgentEvent::TurnComplete {
-            turn: self.runtime.agent_state.current_turn,
-            duration_ms: turn_duration,
-            tokens: crate::ai::types::Usage {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: self.runtime.context_tokens_used,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-            },
-        });
-    }
-
-    /// Handle stream complete event (channel closed)
-    fn handle_stream_complete(&mut self, final_text: String) {
-        let turn_duration = self
-            .runtime
-            .agent_state
-            .turn_duration()
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
-        tracing::info!(
-            "StreamEvent::Complete - final_text_len={}, phase={}",
-            final_text.len(),
-            self.runtime.streaming.phase_name()
-        );
-
-        self.runtime.event_bus.emit(AgentEvent::TurnComplete {
-            turn: self.runtime.agent_state.current_turn,
-            duration_ms: turn_duration,
-            tokens: crate::ai::types::Usage {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: self.runtime.context_tokens_used,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-            },
-        });
-
-        // Check for plan structure in AI response when in plan mode
-        if self.ui.work_mode == WorkMode::Plan && !final_text.is_empty() {
-            self.try_detect_and_save_plan(&final_text);
-        }
-
-        // Check for task completion mentions (works in both modes if plan is active)
-        // Include thinking block content since models often mention completions there
-        if self.runtime.active_plan.is_some() {
-            if let Some(thinking_text) = self.runtime.streaming.thinking_text() {
-                tracing::debug!(
-                    "Appending {} chars of thinking content for completion check",
-                    thinking_text.len()
-                );
-                let mut check_text =
-                    String::with_capacity(final_text.len() + thinking_text.len() + 1);
-                check_text.push_str(&final_text);
-                check_text.push('\n');
-                check_text.push_str(&thinking_text);
-                self.process_plan_completion_checks(&check_text);
-            } else {
-                self.process_plan_completion_checks(&final_text);
-            }
-        } else {
-            tracing::debug!("No active plan, skipping task completion check");
-        }
-
-        // If no tools to execute, build and save the assistant message now
-        if !self.runtime.streaming.is_ready_for_tools() {
-            self.stop_streaming();
-
-            // Build and save assistant message using StreamingManager
-            if let Some(assistant_msg) = self.runtime.streaming.build_assistant_message() {
-                tracing::info!(
-                    "SAVING assistant message with {} content blocks (no tools)",
-                    assistant_msg.content.len()
-                );
-                self.runtime.chat.conversation.push(assistant_msg);
-                if let Some(saved_msg) = self.runtime.chat.conversation.last() {
-                    self.save_model_message(saved_msg);
-                }
-            } else {
-                // Check if we need a filler message after tool_result
-                self.maybe_add_filler_message();
-            }
-
-            self.runtime.streaming.reset();
-        }
-        // If ready for tools, the tool execution logic will handle it
-    }
-
-    /// Try to detect plan structure in AI response and save it
-    fn try_detect_and_save_plan(&mut self, response_text: &str) {
-        // Try to parse plan structure from response
-        let parsed_plan = match PlanFile::try_parse_from_response(response_text) {
-            Some(plan) => plan,
-            None => return, // No plan structure found
-        };
-
-        tracing::info!(
-            "Detected plan in AI response: '{}' with {} phases, {} tasks",
-            parsed_plan.title,
-            parsed_plan.phases.len(),
-            parsed_plan.total_tasks()
-        );
-
-        // Get working directory for the plan
-        let working_dir = self.runtime.working_dir.to_string_lossy().into_owned();
-        let session_id = self.runtime.current_session_id.clone();
-
-        if let Some(ref mut active_plan) = self.runtime.active_plan {
-            // Merge into existing plan
-            active_plan.merge_from(&parsed_plan);
-            tracing::info!(
-                "Merged plan updates into existing plan: '{}'",
-                active_plan.title
-            );
-
-            // Save the updated plan
-            if let Some(ref pm) = self.services.plan_manager {
-                if let Err(e) = pm.save_plan(active_plan) {
-                    tracing::warn!("Failed to save merged plan: {}", e);
-                } else {
-                    tracing::info!(
-                        "Plan saved: {} ({}/{})",
-                        active_plan.title,
-                        active_plan.completed_tasks(),
-                        active_plan.total_tasks()
-                    );
-                }
-            }
-        } else {
-            // Create new plan - requires a session
-            let Some(session_id) = session_id else {
-                tracing::warn!("Cannot create plan without an active session");
-                return;
-            };
-
-            if let Some(ref pm) = self.services.plan_manager {
-                match pm.create_plan(&parsed_plan.title, &session_id, Some(&working_dir)) {
-                    Ok(mut new_plan) => {
-                        // Copy phases from parsed plan
-                        new_plan.phases = parsed_plan.phases;
-                        new_plan.notes = parsed_plan.notes;
-
-                        // Save with the full content
-                        if let Err(e) = pm.save_plan(&new_plan) {
-                            tracing::warn!("Failed to save new plan: {}", e);
-                        } else {
-                            tracing::info!("Created new plan: '{}'", new_plan.title);
-                            let plan_title = new_plan.title.clone();
-                            let task_count = new_plan.total_tasks();
-
-                            self.set_plan(new_plan);
-                            self.ui.work_mode = WorkMode::Plan;
-                            if !self.ui.plan_sidebar.visible {
-                                self.ui.plan_sidebar.toggle();
-                            }
-
-                            // Show decision prompt for plan confirmation
-                            self.ui
-                                .decision_prompt
-                                .show_plan_confirm(&plan_title, task_count);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to create plan: {}", e);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Try to detect and update task completions from AI response
-    fn try_update_task_completions(&mut self, response_text: &str) {
-        tracing::debug!(
-            "Checking for task completions in {} chars of text",
-            response_text.len()
-        );
-
-        let completed_ids = PlanFile::extract_completed_task_ids(response_text);
-        tracing::debug!("Extracted task IDs: {:?}", completed_ids);
-
-        if completed_ids.is_empty() {
-            tracing::debug!("No task completion patterns found");
-            return;
-        }
-
-        let active_plan = match self.runtime.active_plan.as_mut() {
-            Some(plan) => plan,
-            None => return,
-        };
-
-        let mut updated_any = false;
-        let mut updated_tasks: Vec<String> = Vec::new();
-
-        for task_id in &completed_ids {
-            // Only update if task exists and isn't already complete
-            if let Some(task) = active_plan.find_task(task_id) {
-                if !task.completed && active_plan.check_task(task_id) {
-                    tracing::info!("Marked task {} as complete", task_id);
-                    updated_tasks.push(task_id.clone());
-                    updated_any = true;
-                }
-            } else {
-                tracing::debug!("Task {} not found in plan", task_id);
-            }
-        }
-
-        if updated_any {
-            let (completed, total) = active_plan.progress();
-            let plan_complete = active_plan.is_complete();
-            let plan_title = active_plan.title.clone();
-
-            // If plan is complete, mark it as such before saving
-            if plan_complete {
-                active_plan.status = crate::plan::PlanStatus::Completed;
-            }
-
-            // Save the updated plan
-            if let Some(ref pm) = self.services.plan_manager {
-                if let Err(e) = pm.save_plan(active_plan) {
-                    tracing::warn!("Failed to save plan after task updates: {}", e);
-                } else {
-                    tracing::info!(
-                        "Plan progress updated: {}/{} tasks complete",
-                        completed,
-                        total
-                    );
-
-                    // Show visible feedback to user
-                    let task_list = updated_tasks.join(", ");
-                    self.runtime.chat.messages.push((
-                        "system".to_string(),
-                        format!("✓ Task {} complete ({}/{})", task_list, completed, total),
-                    ));
-
-                    // If plan is complete, disengage elegantly with animated collapse
-                    if plan_complete {
-                        tracing::info!(
-                            "Plan '{}' completed - starting graceful disengage",
-                            plan_title
-                        );
-                        self.runtime.chat.messages.push((
-                            "system".to_string(),
-                            format!(
-                                "🎉 Plan '{}' complete! All {} tasks finished.",
-                                plan_title, total
-                            ),
-                        ));
-
-                        // Start graceful collapse - plan clears when animation completes
-                        self.ui.plan_sidebar.start_collapse();
-                    }
-                }
-            }
-        }
-    }
-
-    /// Real-time task completion detection during streaming
-    ///
-    /// Called when completion keywords are detected in text deltas.
-    /// Only updates tasks that haven't already been marked complete.
-    fn try_update_task_completions_realtime(&mut self, text: &str) {
-        let completed_ids = PlanFile::extract_completed_task_ids(text);
-        if completed_ids.is_empty() {
-            return;
-        }
-
-        let active_plan = match self.runtime.active_plan.as_mut() {
-            Some(plan) => plan,
-            None => return,
-        };
-
-        let mut updated_any = false;
-        let mut updated_tasks: Vec<String> = Vec::new();
-
-        for task_id in &completed_ids {
-            // Only update if task exists and isn't already complete
-            if let Some(task) = active_plan.find_task(task_id) {
-                if !task.completed && active_plan.check_task(task_id) {
-                    tracing::info!("Real-time: Marked task {} as complete", task_id);
-                    updated_tasks.push(task_id.clone());
-                    updated_any = true;
-                }
-            }
-        }
-
-        if updated_any {
-            let (completed, total) = active_plan.progress();
-            let plan_complete = active_plan.is_complete();
-            let plan_title = active_plan.title.clone();
-
-            if plan_complete {
-                active_plan.status = crate::plan::PlanStatus::Completed;
-            }
-
-            // Save immediately for real-time persistence
-            if let Some(ref pm) = self.services.plan_manager {
-                if let Err(e) = pm.save_plan(active_plan) {
-                    tracing::warn!("Failed to save plan after real-time task update: {}", e);
-                }
-            }
-
-            // Show inline feedback
-            let task_list = updated_tasks.join(", ");
-            self.runtime.chat.messages.push((
-                "system".to_string(),
-                format!("✓ Task {} complete ({}/{})", task_list, completed, total),
-            ));
-
-            if plan_complete {
-                tracing::info!("Plan '{}' completed (real-time detection)", plan_title);
-                self.runtime.chat.messages.push((
-                    "system".to_string(),
-                    format!(
-                        "🎉 Plan '{}' complete! All {} tasks finished.",
-                        plan_title, total
-                    ),
-                ));
-                self.ui.plan_sidebar.start_collapse();
-            }
-        }
-    }
-
-    /// Detect if AI is abandoning/stopping the plan via natural language
-    /// Returns true if plan was abandoned
-    /// Uses pre-compiled static regexes for performance.
-    fn try_detect_plan_abandonment(&mut self, response_text: &str) -> bool {
-        // Check all abandonment patterns using pre-compiled static regexes
-        if RE_ABANDON.is_match(response_text)
-            || RE_STOPPED.is_match(response_text)
-            || RE_ACKNOWLEDGED.is_match(response_text)
-        {
-            if let Some(ref mut plan) = self.runtime.active_plan {
-                plan.status = crate::plan::PlanStatus::Abandoned;
-                let title = plan.title.clone();
-                let file_path = plan
-                    .file_path
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default();
-
-                if let Some(ref pm) = self.services.plan_manager {
-                    if let Err(e) = pm.save_plan(plan) {
-                        tracing::warn!("Failed to save abandoned plan: {}", e);
-                    }
-                }
-
-                tracing::info!("Plan '{}' abandoned via natural language", title);
-
-                // Show abandonment with file path for reference
-                let msg = if file_path.is_empty() {
-                    format!("Plan '{}' abandoned.", title)
-                } else {
-                    format!("Plan '{}' abandoned. Saved at: {}", title, file_path)
-                };
-                self.runtime.chat.messages.push(("system".to_string(), msg));
-                self.clear_plan();
-                return true;
-            }
-        }
-
-        false
-    }
 
     /// Handle stream error event
     fn handle_stream_error(&mut self, error: String) {
@@ -821,55 +593,6 @@ impl App {
             if let Some(saved_msg) = self.runtime.chat.conversation.last() {
                 self.save_model_message(saved_msg);
             }
-        }
-
-        self.runtime.streaming.reset();
-    }
-
-    // =========================================================================
-    // Metrics and Context
-    // =========================================================================
-
-    /// Handle usage event
-    fn handle_usage(
-        &mut self,
-        prompt_tokens: usize,
-        completion_tokens: usize,
-        cache_read_tokens: usize,
-        cache_created_tokens: usize,
-    ) {
-        self.runtime.context_tokens_used = prompt_tokens + completion_tokens;
-        if cache_read_tokens > 0 || cache_created_tokens > 0 {
-            tracing::info!(
-                "Cache: read={} created={} total_input={}",
-                cache_read_tokens,
-                cache_created_tokens,
-                prompt_tokens
-            );
-        }
-        self.save_session_token_count();
-
-        // Check if we should trigger auto-pinch (after AI finishes)
-        self.check_auto_pinch();
-    }
-
-    /// Handle context edited event
-    ///
-    /// When the API clears old context (tool results, thinking blocks), it sends
-    /// this event. The next Usage event will have the updated (lower) token count.
-    fn handle_context_edited(
-        &mut self,
-        cleared_tokens: usize,
-        cleared_tool_uses: usize,
-        cleared_thinking_turns: usize,
-    ) {
-        if cleared_tokens > 0 {
-            tracing::info!(
-                "Context edited by server: cleared {} tokens ({} tool uses, {} thinking turns)",
-                cleared_tokens,
-                cleared_tool_uses,
-                cleared_thinking_turns
-            );
         }
     }
 
@@ -931,6 +654,79 @@ impl App {
     }
 
     // =========================================================================
+    // Plan Tracking
+    // =========================================================================
+
+    /// Real-time task completion detection during streaming
+    ///
+    /// Called when completion keywords are detected in text deltas.
+    /// Only updates tasks that haven't already been marked complete.
+    fn try_update_task_completions_realtime(&mut self, text: &str) {
+        let completed_ids = PlanFile::extract_completed_task_ids(text);
+        if completed_ids.is_empty() {
+            return;
+        }
+
+        let active_plan = match self.runtime.active_plan.as_mut() {
+            Some(plan) => plan,
+            None => return,
+        };
+
+        let mut updated_any = false;
+        let mut updated_tasks: Vec<String> = Vec::new();
+
+        for task_id in &completed_ids {
+            // Only update if task exists and isn't already complete
+            if let Some(task) = active_plan.find_task(task_id) {
+                if !task.completed && active_plan.check_task(task_id) {
+                    tracing::info!("Real-time: Marked task {} as complete", task_id);
+                    updated_tasks.push(task_id.clone());
+                    updated_any = true;
+                }
+            }
+        }
+
+        if updated_any {
+            let (completed, total) = active_plan.progress();
+            let plan_complete = active_plan.is_complete();
+            let plan_title = active_plan.title.clone();
+
+            if plan_complete {
+                active_plan.status = crate::plan::PlanStatus::Completed;
+            }
+
+            // Save immediately for real-time persistence
+            if let Some(ref pm) = self.services.plan_manager {
+                if let Err(e) = pm.save_plan(active_plan) {
+                    tracing::warn!("Failed to save plan after real-time task update: {}", e);
+                }
+            }
+
+            // Show inline feedback
+            let task_list = updated_tasks.join(", ");
+            self.runtime.chat.messages.push((
+                "system".to_string(),
+                format!(
+                    "\u{2713} Task {} complete ({}/{})",
+                    task_list, completed, total
+                ),
+            ));
+
+            if plan_complete {
+                tracing::info!("Plan '{}' completed (real-time detection)", plan_title);
+                self.runtime.chat.messages.push((
+                    "system".to_string(),
+                    format!(
+                        "\u{1f389} Plan '{}' complete! All {} tasks finished.",
+                        plan_title, total
+                    ),
+                ));
+                self.ui.plan_sidebar.start_collapse();
+            }
+        }
+    }
+
+    // =========================================================================
     // Helpers
     // =========================================================================
 
@@ -954,77 +750,6 @@ impl App {
         for ws in &mut self.runtime.blocks.web_search {
             if ws.is_streaming() {
                 ws.complete();
-            }
-        }
-        // NOTE: ExploreBlocks are NOT completed here - they wait for tool results
-        // for eb in &mut self.runtime.blocks.explore {
-        //     if eb.is_streaming() {
-        //         eb.complete(String::new());
-        //     }
-        // }
-    }
-
-    /// Add a filler message after tool_result if needed
-    /// Note: Filler messages are only added to in-memory conversation for API alternation.
-    /// They are NOT saved to database - the API client handles filler insertion dynamically.
-    fn maybe_add_filler_message(&mut self) {
-        let needs_assistant_follow_up = self
-            .runtime
-            .chat
-            .conversation
-            .last()
-            .map(|msg| {
-                msg.role == Role::User
-                    && msg
-                        .content
-                        .iter()
-                        .any(|c| matches!(c, Content::ToolResult { .. }))
-            })
-            .unwrap_or(false);
-
-        if needs_assistant_follow_up {
-            tracing::debug!(
-                "Adding in-memory filler assistant message after tool_result (not saved to DB)"
-            );
-            let assistant_msg = ModelMessage {
-                role: Role::Assistant,
-                content: vec![Content::Text {
-                    text: ".".to_string(),
-                }],
-            };
-            // Only push to conversation for API alternation - do NOT save to database
-            self.runtime.chat.conversation.push(assistant_msg);
-        }
-    }
-
-    /// Check and execute pending tools when ready
-    pub fn check_and_execute_tools(&mut self) {
-        // Don't execute tools while decision prompt is visible (waiting for user input)
-        if self.ui.decision_prompt.visible {
-            return;
-        }
-
-        if self.runtime.streaming.is_ready_for_tools()
-            && self.runtime.channels.tool_results.is_none()
-        {
-            // Build and save assistant message BEFORE executing tools
-            if let Some(assistant_msg) = self.runtime.streaming.build_assistant_message() {
-                tracing::info!(
-                    "SAVING assistant message with {} content blocks BEFORE tool execution",
-                    assistant_msg.content.len()
-                );
-                self.runtime.chat.conversation.push(assistant_msg);
-                if let Some(saved_msg) = self.runtime.chat.conversation.last() {
-                    self.save_model_message(saved_msg);
-                }
-            }
-
-            // Take tool calls from StreamingManager (transitions to Complete state)
-            if let Some((_text, _thinking_blocks, tool_calls)) =
-                self.runtime.streaming.take_tool_calls()
-            {
-                // Spawn tool execution as background task
-                self.spawn_tool_execution(tool_calls);
             }
         }
     }

@@ -42,10 +42,10 @@
 	.quick-actions {
 		display: flex;
 		align-items: center;
-		gap: 0.5rem;
+		gap: 0.375rem;
 		overflow-x: auto;
 		overscroll-behavior-x: contain;
-		padding: 0.625rem 0.75rem;
+		padding: 0.5rem 0.5rem;
 		border-top: 1px solid hsl(var(--border) / 0.5);
 		background: hsl(var(--card) / 0.95);
 		backdrop-filter: blur(8px);
@@ -62,9 +62,9 @@
 
 	.quick-btn {
 		flex-shrink: 0;
-		padding: 0.5rem 0.875rem;
-		border-radius: 0.5rem;
-		font-size: 0.75rem;
+		padding: 0.375rem 0.625rem;
+		border-radius: 0.375rem;
+		font-size: 0.6875rem;
 		font-weight: 500;
 		font-family: ui-monospace, SFMono-Regular, 'SF Mono', monospace;
 		background: hsl(var(--muted));
@@ -99,7 +99,7 @@
 	.quick-btn.nav {
 		background: hsl(var(--muted));
 		color: hsl(var(--muted-foreground));
-		min-width: 2.5rem;
+		min-width: 2rem;
 	}
 
 	.quick-btn.nav:hover {
@@ -123,8 +123,8 @@
 		background: hsl(142 71% 25% / 0.8);
 		color: hsl(142 71% 70%);
 		border-color: hsl(142 71% 35% / 0.5);
-		font-size: 1rem;
-		min-width: 2.75rem;
+		font-size: 0.875rem;
+		min-width: 2.25rem;
 	}
 
 	.quick-btn.enter:hover {

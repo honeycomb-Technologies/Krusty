@@ -41,6 +41,11 @@ impl PkceVerifier {
         PkceChallenge(encoded)
     }
 
+    /// Reconstruct a verifier from a previously stored string
+    pub fn from_string(verifier: String) -> Self {
+        Self(verifier)
+    }
+
     /// Get the verifier string for use in token exchange
     pub fn as_str(&self) -> &str {
         &self.0

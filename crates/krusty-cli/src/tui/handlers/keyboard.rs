@@ -325,6 +325,11 @@ impl App {
                 // Cancel the background task
                 self.runtime.cancellation.cancel();
 
+                // Cancel the core orchestrator if active
+                if let Some(ref tx) = self.runtime.channels.loop_input {
+                    let _ = tx.send(crate::agent::loop_events::LoopInput::Cancel);
+                }
+
                 // Emit interrupt event
                 self.runtime.event_bus.emit(AgentEvent::Interrupt {
                     turn: self.runtime.agent_state.current_turn,
@@ -333,9 +338,10 @@ impl App {
 
                 // Update state
                 self.runtime.agent_state.interrupt();
-                self.runtime.streaming.reset();
                 self.stop_streaming();
                 self.stop_tool_execution();
+                self.runtime.channels.loop_events = None;
+                self.runtime.channels.loop_input = None;
                 self.runtime
                     .chat
                     .messages
@@ -624,23 +630,7 @@ impl App {
 
     /// Handle plan confirmation answer
     fn handle_plan_confirm_answer(&mut self, answers: &[crate::tui::components::PromptAnswer]) {
-        use crate::ai::types::{ModelMessage, Role};
         use crate::tui::components::PromptAnswer;
-
-        // Flush any pending tool results that were deferred while prompt was visible
-        let pending_results = std::mem::take(&mut self.runtime.pending_tool_results);
-        if !pending_results.is_empty() {
-            tracing::info!(
-                "Flushing {} pending tool results after plan confirmation",
-                pending_results.len()
-            );
-            let msg = ModelMessage {
-                role: Role::User,
-                content: pending_results,
-            };
-            self.runtime.chat.conversation.push(msg.clone());
-            self.save_model_message(&msg);
-        }
 
         match answers.first() {
             Some(PromptAnswer::Selected(idx)) => {
@@ -730,20 +720,15 @@ impl App {
             is_error: None,
         };
 
-        // Include any pending tool results that were deferred while prompt was visible
-        let mut content = std::mem::take(&mut self.runtime.pending_tool_results);
-        content.push(tool_result);
-
         // Add to conversation as user message (tool results are sent as user role)
         let msg = ModelMessage {
             role: Role::User,
-            content,
+            content: vec![tool_result],
         };
 
         tracing::info!(
             tool_use_id = %tool_use_id,
             answer_count = answers.len(),
-            pending_results = msg.content.len() - 1,
             "Sending AskUserQuestion tool result"
         );
 

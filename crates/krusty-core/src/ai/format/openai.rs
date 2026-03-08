@@ -10,7 +10,7 @@ use tracing::debug;
 use super::{needs_role_alternation_filler, FormatHandler, RequestOptions};
 use crate::ai::models::ApiFormat;
 use crate::ai::providers::ProviderId;
-use crate::ai::types::{AiTool, Content, ModelMessage, Role};
+use crate::ai::types::{AiTool, Content, ImageContent, ModelMessage, Role};
 
 /// OpenAI format handler
 pub struct OpenAIFormat {
@@ -32,6 +32,63 @@ impl OpenAIFormat {
 
     fn is_responses_format(&self) -> bool {
         matches!(self.api_format, ApiFormat::OpenAIResponses)
+    }
+
+    /// Convert image content to a URL accepted by OpenAI:
+    /// - pass-through remote URL
+    /// - data URL for base64 payloads
+    fn image_to_url(image: &ImageContent) -> Option<String> {
+        if let Some(url) = &image.url {
+            return Some(url.clone());
+        }
+
+        image.base64.as_ref().map(|base64| {
+            let media_type = image.media_type.as_deref().unwrap_or("image/png");
+            format!("data:{};base64,{}", media_type, base64)
+        })
+    }
+
+    /// Build a user text content part for the current OpenAI API flavor.
+    fn user_text_part(&self, text: &str) -> Value {
+        if self.is_responses_format() {
+            serde_json::json!({
+                "type": "input_text",
+                "text": text
+            })
+        } else {
+            serde_json::json!({
+                "type": "text",
+                "text": text
+            })
+        }
+    }
+
+    /// Build a user image content part for the current OpenAI API flavor.
+    fn user_image_part(&self, image: &ImageContent, detail: Option<&str>) -> Option<Value> {
+        let image_url = Self::image_to_url(image)?;
+        let detail = detail.filter(|d| !d.is_empty());
+
+        if self.is_responses_format() {
+            let mut part = serde_json::json!({
+                "type": "input_image",
+                "image_url": image_url
+            });
+            if let Some(detail) = detail {
+                part["detail"] = serde_json::json!(detail);
+            }
+            Some(part)
+        } else {
+            let mut image_url_obj = serde_json::json!({
+                "url": image_url
+            });
+            if let Some(detail) = detail {
+                image_url_obj["detail"] = serde_json::json!(detail);
+            }
+            Some(serde_json::json!({
+                "type": "image_url",
+                "image_url": image_url_obj
+            }))
+        }
     }
 }
 
@@ -215,21 +272,36 @@ impl FormatHandler for OpenAIFormat {
                 continue;
             }
 
-            // Regular messages - extract text content and thinking blocks
+            // Regular messages - extract text/thinking and preserve user image parts
             let mut text_parts: Vec<String> = Vec::new();
+            let mut user_parts: Vec<Value> = Vec::new();
+            let mut has_user_images = false;
 
             for content in &msg.content {
                 match content {
                     Content::Text { text } => {
                         if !text.is_empty() {
                             text_parts.push(text.clone());
+                            if role == "user" {
+                                user_parts.push(self.user_text_part(text));
+                            }
                         }
                     }
                     // Preserve thinking blocks as formatted text
                     // This maintains context for reasoning models
                     Content::Thinking { thinking, .. } => {
                         if !thinking.is_empty() {
-                            text_parts.push(format!("[Thinking]\n{}\n[/Thinking]", thinking));
+                            let formatted = format!("[Thinking]\n{}\n[/Thinking]", thinking);
+                            text_parts.push(formatted.clone());
+                            if role == "user" {
+                                user_parts.push(self.user_text_part(&formatted));
+                            }
+                        }
+                    }
+                    Content::Image { image, detail } if role == "user" => {
+                        if let Some(part) = self.user_image_part(image, detail.as_deref()) {
+                            user_parts.push(part);
+                            has_user_images = true;
                         }
                     }
                     _ => {}
@@ -238,7 +310,13 @@ impl FormatHandler for OpenAIFormat {
 
             let text = text_parts.join("\n\n");
 
-            if !text.is_empty() {
+            if role == "user" && has_user_images && !user_parts.is_empty() {
+                result.push(serde_json::json!({
+                    "role": role,
+                    "content": user_parts
+                }));
+                last_role = Some(role);
+            } else if !text.is_empty() {
                 result.push(serde_json::json!({
                     "role": role,
                     "content": text
@@ -329,5 +407,72 @@ impl FormatHandler for OpenAIFormat {
 
     fn endpoint_path(&self, _model: &str) -> &str {
         &self.endpoint
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::types::{Content, ImageContent, ModelMessage, Role};
+
+    #[test]
+    fn convert_messages_openai_chat_preserves_user_image_parts() {
+        let format = OpenAIFormat::new(ApiFormat::OpenAI);
+        let messages = vec![ModelMessage {
+            role: Role::User,
+            content: vec![
+                Content::Text {
+                    text: "Describe this".to_string(),
+                },
+                Content::Image {
+                    image: ImageContent {
+                        url: None,
+                        base64: Some("AAA".to_string()),
+                        media_type: Some("image/jpeg".to_string()),
+                    },
+                    detail: Some("high".to_string()),
+                },
+            ],
+        }];
+
+        let converted = format.convert_messages(&messages, None);
+        assert_eq!(converted.len(), 1);
+        let content = converted[0]
+            .get("content")
+            .and_then(|c| c.as_array())
+            .expect("content should be a multimodal array");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "Describe this");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/jpeg;base64,AAA");
+        assert_eq!(content[1]["image_url"]["detail"], "high");
+    }
+
+    #[test]
+    fn convert_messages_openai_responses_uses_input_image() {
+        let format = OpenAIFormat::new(ApiFormat::OpenAIResponses);
+        let messages = vec![ModelMessage {
+            role: Role::User,
+            content: vec![Content::Image {
+                image: ImageContent {
+                    url: Some("https://example.com/cat.png".to_string()),
+                    base64: None,
+                    media_type: None,
+                },
+                detail: Some("low".to_string()),
+            }],
+        }];
+
+        let converted = format.convert_messages(&messages, None);
+        assert_eq!(converted.len(), 1);
+        let content = converted[0]
+            .get("content")
+            .and_then(|c| c.as_array())
+            .expect("content should be a multimodal array");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "input_image");
+        assert_eq!(content[0]["image_url"], "https://example.com/cat.png");
+        assert_eq!(content[0]["detail"], "low");
     }
 }

@@ -2,11 +2,17 @@
 //!
 //! Uses the user's current model to produce a structured summary
 //! for the next session.
+//!
+//! Cache-safe: Summarization reuses the parent conversation's cached prefix
+//! (system prompt + conversation messages) instead of using a separate system
+//! prompt. This follows the principle that fork operations should share the
+//! parent's prefix so the cached tokens are reused, not wasted.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::ai::client::AiClient;
+use crate::ai::client::KRUSTY_SYSTEM_PROMPT;
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::storage::RankedFile;
 
@@ -28,7 +34,25 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
 /// so it doesn't need to be verbose.
 const SUMMARIZATION_MAX_TOKENS: usize = 4000;
 
-/// System prompt for summarization
+/// Summarization instructions — placed in the appended user message (not system prompt)
+/// so that the system prompt matches the parent conversation's cached prefix.
+const SUMMARIZATION_INSTRUCTIONS: &str = r#"Analyze the conversation above and produce a structured summary for continuing this work in a new session.
+
+You MUST respond with a valid JSON object (no markdown code blocks, no extra text):
+{
+  "work_summary": "2-3 paragraph summary of what was accomplished, focusing on the WHY and WHAT",
+  "key_decisions": ["Important architectural or design decisions made"],
+  "pending_tasks": ["Incomplete work or clearly identified next steps"],
+  "important_files": ["Top 10 most relevant file paths for continuing work"]
+}
+
+Guidelines:
+1. Work Summary: Focus on accomplishments, not mechanics. What was built? What problems were solved? What's the current state?
+2. Key Decisions: Capture architectural choices, patterns adopted, trade-offs made.
+3. Pending Tasks: Identify explicitly mentioned TODOs, incomplete work, or logical next steps. Be specific.
+4. Important Files: List files most critical for continuing the work. Prioritize files that were modified or are central to the work."#;
+
+/// Legacy system prompt for fallback path (when no conversation prefix is available)
 const SUMMARIZATION_SYSTEM_PROMPT: &str = r#"You are a specialized summarization agent for pinch (context continuation) between coding sessions.
 
 Your task is to analyze a conversation history and produce a structured summary that will help the next session continue effectively.
@@ -260,10 +284,15 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
     }
 }
 
-/// Generate a summary using the user's current model
+/// Generate a summary using the user's current model.
 ///
-/// For Anthropic: Uses extended thinking for deep analysis
-/// For all providers: Uses the current model from the client
+/// Cache-safe: When the conversation has user/assistant messages, the call
+/// reuses the parent conversation's cached prefix (system prompt + messages)
+/// and appends the summarization instruction as a new user message. This
+/// means the only uncached tokens are the summarization instruction itself.
+///
+/// Falls back to the legacy `call_simple` path when no conversation context
+/// is available (e.g., server-side API with no message history).
 pub async fn generate_summary(
     client: &AiClient,
     conversation: &[ModelMessage],
@@ -273,41 +302,119 @@ pub async fn generate_summary(
     project_context: Option<&str>,
     _current_model: Option<&str>, // Deprecated: model comes from client.config()
 ) -> Result<SummarizationResult> {
-    let prompt = build_summarization_prompt(
-        conversation,
-        preservation_hints,
-        ranked_files,
-        file_contents,
-        project_context,
-    );
-
     tracing::info!(
         "Starting summarization with {} conversation messages, {} file contents",
         conversation.len(),
         file_contents.len()
     );
 
-    // Use the client's configured model (user's current model)
     let model = client.config().model.as_str();
     let provider = client.provider_id();
 
-    // Use simple call with current model
-    tracing::info!(
-        "Using simple call with model {} for provider {:?}",
-        model,
-        provider
-    );
-    let response = client
-        .call_simple(
-            model,
-            SUMMARIZATION_SYSTEM_PROMPT,
-            &prompt,
-            SUMMARIZATION_MAX_TOKENS,
-        )
-        .await?;
+    // Check if we have actual conversation messages to reuse as prefix
+    let has_conversation = conversation
+        .iter()
+        .any(|m| m.role == Role::User || m.role == Role::Assistant);
 
-    // Parse the JSON response
+    let response = if has_conversation {
+        // Cache-safe path: reuse parent conversation's prefix.
+        // The system prompt is KRUSTY_SYSTEM_PROMPT (same as parent),
+        // conversation messages are sent as actual API messages, and the
+        // summarization instruction is appended as a new user message.
+        let appended_message =
+            build_summarization_user_message(preservation_hints, ranked_files, file_contents);
+
+        tracing::info!(
+            "Cache-safe summarization: reusing {} conversation messages as prefix for {:?}",
+            conversation.len(),
+            provider,
+        );
+
+        client
+            .call_with_conversation(
+                model,
+                KRUSTY_SYSTEM_PROMPT,
+                conversation,
+                &appended_message,
+                SUMMARIZATION_MAX_TOKENS,
+            )
+            .await?
+    } else {
+        // Legacy path: no conversation to reuse, use call_simple
+        let prompt = build_summarization_prompt(
+            conversation,
+            preservation_hints,
+            ranked_files,
+            file_contents,
+            project_context,
+        );
+
+        tracing::info!(
+            "Fallback summarization (no conversation prefix) with model {} for {:?}",
+            model,
+            provider,
+        );
+
+        client
+            .call_simple(
+                model,
+                SUMMARIZATION_SYSTEM_PROMPT,
+                &prompt,
+                SUMMARIZATION_MAX_TOKENS,
+            )
+            .await?
+    };
+
     parse_summary_response(&response)
+}
+
+/// Build the user message for the cache-safe summarization path.
+///
+/// Contains the summarization instructions plus any extra context
+/// (preservation hints, file rankings, file contents). The conversation
+/// history is already in the API messages, so we don't flatten it here.
+fn build_summarization_user_message(
+    preservation_hints: Option<&str>,
+    ranked_files: &[RankedFile],
+    file_contents: &[(String, String)],
+) -> String {
+    let mut message = String::new();
+
+    message.push_str(SUMMARIZATION_INSTRUCTIONS);
+
+    if let Some(hints) = preservation_hints {
+        message.push_str("\n\n## USER'S PRESERVATION PRIORITIES (IMPORTANT)\n\n");
+        message.push_str(hints);
+        message.push_str("\n\nWeight these areas heavily in your summary.");
+    }
+
+    if !ranked_files.is_empty() {
+        message.push_str("\n\n## FILES BY ACTIVITY\n\n");
+        for (i, file) in ranked_files.iter().take(20).enumerate() {
+            let reasons = if file.reasons.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", file.reasons.join(", "))
+            };
+            message.push_str(&format!("{}. {}{}\n", i + 1, file.path, reasons));
+        }
+    }
+
+    if !file_contents.is_empty() {
+        message.push_str("\n\n## KEY FILE CONTENTS\n\n");
+        for (path, content) in file_contents.iter().take(10) {
+            message.push_str(&format!("### {}\n```\n", path));
+            if content.len() > 3000 {
+                message.push_str(truncate_str(content, 3000));
+                message.push_str("\n...[truncated]\n");
+            } else {
+                message.push_str(content);
+            }
+            message.push_str("\n```\n\n");
+        }
+    }
+
+    message
 }
 
 /// Parse the JSON response from the summarization AI

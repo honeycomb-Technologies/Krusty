@@ -18,6 +18,13 @@ const initialState: TerminalState = {
 	activeTabId: null
 };
 
+const MAX_RECONNECT_ATTEMPTS = 8;
+const RECONNECT_INITIAL_DELAY_MS = 250;
+const RECONNECT_MAX_DELAY_MS = 5_000;
+const RECONNECT_STABLE_RESET_MS = 30_000;
+const HEARTBEAT_INTERVAL_MS = 15_000;
+const HEARTBEAT_TIMEOUT_MS = 45_000;
+
 export const terminalStore = writable<TerminalState>(initialState);
 
 // Subscribe to workspace changes - cd to directory when it changes
@@ -91,11 +98,146 @@ export function executePendingCd(tabId: string) {
 // Per-tab WebSocket connections and callbacks
 const connections = new Map<string, WebSocket>();
 const callbacks = new Map<string, (data: string) => void>();
+const manualDisconnects = new Set<string>();
+const reconnectAttempts = new Map<string, number>();
+const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const stableResetTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const heartbeatIntervals = new Map<string, ReturnType<typeof setInterval>>();
+const heartbeatTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+const textDecoder = new TextDecoder();
 
 let tabCounter = 0;
 
 function generateTabId(): string {
 	return `term-${++tabCounter}`;
+}
+
+function tabExists(tabId: string): boolean {
+	return get(terminalStore).tabs.some((tab) => tab.id === tabId);
+}
+
+function updateTab(tabId: string, updater: (tab: TerminalTab) => TerminalTab) {
+	terminalStore.update((s) => ({
+		...s,
+		tabs: s.tabs.map((tab) => (tab.id === tabId ? updater(tab) : tab))
+	}));
+}
+
+function clearReconnectTimer(tabId: string) {
+	const timer = reconnectTimers.get(tabId);
+	if (timer) {
+		clearTimeout(timer);
+		reconnectTimers.delete(tabId);
+	}
+}
+
+function clearStableResetTimer(tabId: string) {
+	const timer = stableResetTimers.get(tabId);
+	if (timer) {
+		clearTimeout(timer);
+		stableResetTimers.delete(tabId);
+	}
+}
+
+function clearHeartbeat(tabId: string) {
+	const interval = heartbeatIntervals.get(tabId);
+	if (interval) {
+		clearInterval(interval);
+		heartbeatIntervals.delete(tabId);
+	}
+
+	const timeout = heartbeatTimeouts.get(tabId);
+	if (timeout) {
+		clearTimeout(timeout);
+		heartbeatTimeouts.delete(tabId);
+	}
+}
+
+function touchHeartbeat(tabId: string, ws: WebSocket) {
+	const timeout = heartbeatTimeouts.get(tabId);
+	if (timeout) {
+		clearTimeout(timeout);
+	}
+
+	const nextTimeout = setTimeout(() => {
+		if (connections.get(tabId) === ws && ws.readyState === WebSocket.OPEN) {
+			ws.close(4000, 'heartbeat_timeout');
+		}
+	}, HEARTBEAT_TIMEOUT_MS);
+	heartbeatTimeouts.set(tabId, nextTimeout);
+}
+
+function startHeartbeat(tabId: string, ws: WebSocket) {
+	clearHeartbeat(tabId);
+	touchHeartbeat(tabId, ws);
+
+	const interval = setInterval(() => {
+		if (connections.get(tabId) !== ws || ws.readyState !== WebSocket.OPEN) {
+			return;
+		}
+
+		try {
+			ws.send(JSON.stringify({ type: 'ping' }));
+		} catch {
+			ws.close();
+		}
+	}, HEARTBEAT_INTERVAL_MS);
+
+	heartbeatIntervals.set(tabId, interval);
+}
+
+function scheduleStableReset(tabId: string, ws: WebSocket) {
+	clearStableResetTimer(tabId);
+	const timer = setTimeout(() => {
+		if (connections.get(tabId) === ws && ws.readyState === WebSocket.OPEN) {
+			reconnectAttempts.delete(tabId);
+		}
+		stableResetTimers.delete(tabId);
+	}, RECONNECT_STABLE_RESET_MS);
+	stableResetTimers.set(tabId, timer);
+}
+
+function scheduleReconnect(tabId: string) {
+	if (!tabExists(tabId) || manualDisconnects.has(tabId) || reconnectTimers.has(tabId)) {
+		return;
+	}
+
+	const attempt = reconnectAttempts.get(tabId) ?? 0;
+	if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+		updateTab(tabId, (tab) => ({
+			...tab,
+			error: 'Connection lost. Retry limit reached.'
+		}));
+		return;
+	}
+
+	const attemptNumber = attempt + 1;
+	const delay = Math.min(
+		RECONNECT_INITIAL_DELAY_MS * 2 ** attempt,
+		RECONNECT_MAX_DELAY_MS
+	);
+	reconnectAttempts.set(tabId, attemptNumber);
+
+	updateTab(tabId, (tab) => ({
+		...tab,
+		error: `Reconnecting (${attemptNumber}/${MAX_RECONNECT_ATTEMPTS})...`
+	}));
+
+	const timer = setTimeout(() => {
+		reconnectTimers.delete(tabId);
+		if (!tabExists(tabId) || manualDisconnects.has(tabId)) {
+			return;
+		}
+
+		const callback = callbacks.get(tabId);
+		if (!callback) {
+			return;
+		}
+
+		connectTerminalInternal(tabId, callback, true);
+	}, delay);
+
+	reconnectTimers.set(tabId, timer);
 }
 
 export function createTab(title?: string): string {
@@ -116,13 +258,7 @@ export function createTab(title?: string): string {
 }
 
 export function closeTab(tabId: string) {
-	// Disconnect WebSocket
-	const ws = connections.get(tabId);
-	if (ws) {
-		ws.close();
-		connections.delete(tabId);
-		callbacks.delete(tabId);
-	}
+	disconnectTerminal(tabId);
 
 	terminalStore.update((s) => {
 		const newTabs = s.tabs.filter((t) => t.id !== tabId);
@@ -131,16 +267,20 @@ export function closeTab(tabId: string) {
 		// If closing active tab, switch to another
 		if (s.activeTabId === tabId) {
 			const closedIndex = s.tabs.findIndex((t) => t.id === tabId);
-			if (newTabs.length > 0) {
-				// Prefer tab to the left, otherwise first tab
-				newActiveId = newTabs[Math.max(0, closedIndex - 1)]?.id || newTabs[0]?.id;
-			} else {
-				newActiveId = null;
+				if (newTabs.length > 0) {
+					// Prefer tab to the left, otherwise first tab
+					newActiveId = newTabs[Math.max(0, closedIndex - 1)]?.id || newTabs[0]?.id;
+				} else {
+					newActiveId = null;
+				}
 			}
-		}
 
-		return { tabs: newTabs, activeTabId: newActiveId };
-	});
+			if (newTabs.length === 0) {
+				cleanupWorkspaceSync();
+			}
+
+			return { tabs: newTabs, activeTabId: newActiveId };
+		});
 }
 
 export function setActiveTab(tabId: string) {
@@ -154,30 +294,58 @@ export function renameTab(tabId: string, title: string) {
 	}));
 }
 
-export function connectTerminal(tabId: string, onData: (data: string) => void) {
+function connectTerminalInternal(
+	tabId: string,
+	onData: (data: string) => void,
+	isReconnect: boolean
+) {
+	if (!browser) return;
+
 	// Initialize workspace sync on first connection
 	initWorkspaceSync();
+	manualDisconnects.delete(tabId);
+	clearReconnectTimer(tabId);
 
 	// Already connected?
 	const existingWs = connections.get(tabId);
-	if (existingWs?.readyState === WebSocket.OPEN) {
+	if (
+		existingWs?.readyState === WebSocket.OPEN ||
+		existingWs?.readyState === WebSocket.CONNECTING
+	) {
 		callbacks.set(tabId, onData);
 		return;
 	}
 
+	if (existingWs && existingWs.readyState !== WebSocket.CLOSED) {
+		existingWs.close();
+	}
+	clearHeartbeat(tabId);
+	connections.delete(tabId);
+
 	callbacks.set(tabId, onData);
+	if (!isReconnect) {
+		reconnectAttempts.delete(tabId);
+		updateTab(tabId, (tab) => ({ ...tab, connected: false, error: null }));
+	}
 
 	const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 	const wsUrl = `${protocol}//${window.location.host}/ws/terminal`;
 
 	const ws = new WebSocket(wsUrl);
+	ws.binaryType = 'arraybuffer';
 	connections.set(tabId, ws);
 
 	ws.onopen = () => {
-		terminalStore.update((s) => ({
-			...s,
-			tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, connected: true, error: null } : t))
-		}));
+		updateTab(tabId, (tab) => ({ ...tab, connected: true, error: null }));
+		scheduleStableReset(tabId, ws);
+		startHeartbeat(tabId, ws);
+		try {
+			ws.send(JSON.stringify({ type: 'hello', binary_output: true }));
+		} catch {
+			ws.close();
+			return;
+		}
+
 		// Execute any pending cd from workspace initialization
 		executePendingCd(tabId);
 	};
@@ -185,34 +353,67 @@ export function connectTerminal(tabId: string, onData: (data: string) => void) {
 	ws.onmessage = (event) => {
 		const callback = callbacks.get(tabId);
 		if (!callback) return;
+		touchHeartbeat(tabId, ws);
+
+		if (event.data instanceof ArrayBuffer) {
+			callback(textDecoder.decode(new Uint8Array(event.data)));
+			return;
+		}
+
+		if (event.data instanceof Blob) {
+			void event.data.arrayBuffer().then((buffer) => {
+				callback(textDecoder.decode(new Uint8Array(buffer)));
+			});
+			return;
+		}
+
+		const raw = typeof event.data === 'string' ? event.data : String(event.data);
 
 		try {
-			const msg = JSON.parse(event.data);
-			if (msg.type === 'output') {
+			const msg = JSON.parse(raw);
+			if (msg.type === 'output' && typeof msg.data === 'string') {
 				callback(msg.data);
+			} else if (msg.type === 'error' && typeof msg.error === 'string') {
+				updateTab(tabId, (tab) => ({ ...tab, error: msg.error }));
 			}
 		} catch {
-			callback(event.data);
+			callback(raw);
 		}
 	};
 
 	ws.onerror = () => {
-		terminalStore.update((s) => ({
-			...s,
-			tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, error: 'WebSocket error' } : t))
+		updateTab(tabId, (tab) => ({
+			...tab,
+			error: tab.error || 'WebSocket error'
 		}));
 	};
 
 	ws.onclose = () => {
-		terminalStore.update((s) => ({
-			...s,
-			tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, connected: false } : t))
-		}));
+		clearHeartbeat(tabId);
+		clearStableResetTimer(tabId);
 		connections.delete(tabId);
+		updateTab(tabId, (tab) => ({ ...tab, connected: false }));
+
+		if (manualDisconnects.has(tabId)) {
+			manualDisconnects.delete(tabId);
+			return;
+		}
+
+		scheduleReconnect(tabId);
 	};
 }
 
+export function connectTerminal(tabId: string, onData: (data: string) => void) {
+	connectTerminalInternal(tabId, onData, false);
+}
+
 export function disconnectTerminal(tabId: string) {
+	manualDisconnects.add(tabId);
+	clearReconnectTimer(tabId);
+	clearStableResetTimer(tabId);
+	clearHeartbeat(tabId);
+	reconnectAttempts.delete(tabId);
+
 	const ws = connections.get(tabId);
 	ws?.close();
 	connections.delete(tabId);

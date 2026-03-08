@@ -42,7 +42,9 @@ pub enum PermissionMode {
 /// Categorize a tool by name.
 pub fn tool_category(name: &str) -> ToolCategory {
     match name {
-        "read" | "glob" | "grep" | "web_search" | "web_fetch" | "explore" => ToolCategory::ReadOnly,
+        "read" | "glob" | "grep" | "list" | "web_search" | "web_fetch" | "explore" => {
+            ToolCategory::ReadOnly
+        }
         "AskUserQuestion" | "PlanConfirm" | "enter_plan_mode" | "set_work_mode" | "task_start"
         | "task_complete" | "add_subtask" | "set_dependency" => ToolCategory::Interactive,
         _ => ToolCategory::Write,
@@ -68,16 +70,75 @@ impl ToolResult {
         }
     }
 
+    /// Create a structured success envelope with `ok=true` and `data`.
+    pub fn success_data(data: Value) -> Self {
+        Self::success_data_with(data, Vec::new(), None, None)
+    }
+
+    /// Create a structured success envelope with optional warnings/diff/metadata.
+    pub fn success_data_with(
+        data: Value,
+        warnings: Vec<String>,
+        diff: Option<String>,
+        metadata: Option<Value>,
+    ) -> Self {
+        let mut envelope = serde_json::Map::new();
+        envelope.insert("ok".to_string(), Value::Bool(true));
+        envelope.insert("data".to_string(), data);
+
+        if !warnings.is_empty() {
+            envelope.insert(
+                "warnings".to_string(),
+                Value::Array(warnings.into_iter().map(Value::String).collect()),
+            );
+        }
+
+        if let Some(diff) = diff.filter(|d| !d.is_empty()) {
+            envelope.insert("diff".to_string(), Value::String(diff));
+        }
+
+        if let Some(metadata) = metadata {
+            envelope.insert("metadata".to_string(), metadata);
+        }
+
+        Self {
+            output: Value::Object(envelope).to_string(),
+            is_error: false,
+        }
+    }
+
     /// Create a structured error with explicit code.
     pub fn error_with_code(code: &str, msg: impl std::fmt::Display) -> Self {
+        Self::error_with_details(code, msg, None, None)
+    }
+
+    /// Create a structured error envelope with optional data/metadata.
+    pub fn error_with_details(
+        code: &str,
+        msg: impl std::fmt::Display,
+        data: Option<Value>,
+        metadata: Option<Value>,
+    ) -> Self {
+        let mut envelope = serde_json::Map::new();
+        envelope.insert("ok".to_string(), Value::Bool(false));
+        envelope.insert(
+            "error".to_string(),
+            serde_json::json!({
+                "code": code,
+                "message": msg.to_string()
+            }),
+        );
+
+        if let Some(data) = data {
+            envelope.insert("data".to_string(), data);
+        }
+
+        if let Some(metadata) = metadata {
+            envelope.insert("metadata".to_string(), metadata);
+        }
+
         Self {
-            output: serde_json::json!({
-                "error": {
-                    "code": code,
-                    "message": msg.to_string()
-                }
-            })
-            .to_string(),
+            output: Value::Object(envelope).to_string(),
             is_error: true,
         }
     }
@@ -91,16 +152,7 @@ impl ToolResult {
     pub fn error(msg: impl std::fmt::Display) -> Self {
         let message = msg.to_string();
         let code = classify_error_code(&message);
-        Self {
-            output: serde_json::json!({
-                "error": {
-                    "code": code,
-                    "message": message
-                }
-            })
-            .to_string(),
-            is_error: true,
-        }
+        Self::error_with_details(code, message, None, None)
     }
 }
 
@@ -444,17 +496,23 @@ impl ToolRegistry {
         tools.get(name).cloned()
     }
 
-    /// Get all tools as AI tool definitions
+    /// Get all tools as AI tool definitions, sorted by name.
+    ///
+    /// Deterministic ordering is critical for prompt caching — tool definitions
+    /// are part of the cached prefix, and non-deterministic order (from HashMap
+    /// iteration) silently breaks the cache between API calls.
     pub async fn get_ai_tools(&self) -> Vec<AiTool> {
         let tools = self.tools.read().await;
-        tools
+        let mut ai_tools: Vec<AiTool> = tools
             .values()
             .map(|t| AiTool {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
                 input_schema: t.parameters_schema(),
             })
-            .collect()
+            .collect();
+        ai_tools.sort_by(|a, b| a.name.cmp(&b.name));
+        ai_tools
     }
 
     /// Unregister all tools with names starting with the given prefix
@@ -491,10 +549,7 @@ impl ToolRegistry {
                 HookResult::Continue => {}
                 HookResult::Block { reason } => {
                     tracing::info!(tool = name, reason = %reason, "Pre-hook blocked execution");
-                    return Some(ToolResult {
-                        output: format!("Blocked: {}", reason),
-                        is_error: true,
-                    });
+                    return Some(ToolResult::error_with_code("blocked_by_policy", reason));
                 }
             }
         }
@@ -508,14 +563,14 @@ impl ToolRegistry {
                     timeout_secs = timeout.as_secs(),
                     "Tool execution timed out"
                 );
-                ToolResult {
-                    output: format!(
+                ToolResult::error_with_code(
+                    "timeout",
+                    format!(
                         "Tool '{}' timed out after {} seconds",
                         name,
                         timeout.as_secs()
                     ),
-                    is_error: true,
-                }
+                )
             }
         };
 
@@ -533,8 +588,11 @@ impl ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::hooks::{HookResult, PreToolHook};
+    use async_trait::async_trait;
     use serde_json::json;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn create_test_context() -> ToolContext {
         ToolContext {
@@ -580,8 +638,45 @@ mod tests {
         assert!(result.output.contains("error"));
         assert!(result.output.contains("Test error"));
         let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(parsed["ok"], false);
         assert_eq!(parsed["error"]["message"], "Test error");
         assert_eq!(parsed["error"]["code"], "tool_error");
+    }
+
+    #[tokio::test]
+    async fn test_tool_result_success_data_with_envelope_fields() {
+        let result = ToolResult::success_data_with(
+            json!({"message": "ok"}),
+            vec!["warn".to_string()],
+            Some("diff body".to_string()),
+            Some(json!({"exit_code": 0})),
+        );
+
+        assert!(!result.is_error);
+        let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(parsed["data"]["message"], "ok");
+        assert_eq!(parsed["warnings"][0], "warn");
+        assert_eq!(parsed["diff"], "diff body");
+        assert_eq!(parsed["metadata"]["exit_code"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_tool_result_error_with_details_includes_data_and_metadata() {
+        let result = ToolResult::error_with_details(
+            "command_failed",
+            "Command exited",
+            Some(json!({"output": "stderr"})),
+            Some(json!({"exit_code": 1})),
+        );
+
+        assert!(result.is_error);
+        let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(parsed["ok"], false);
+        assert_eq!(parsed["error"]["code"], "command_failed");
+        assert_eq!(parsed["error"]["message"], "Command exited");
+        assert_eq!(parsed["data"]["output"], "stderr");
+        assert_eq!(parsed["metadata"]["exit_code"], 1);
     }
 
     #[tokio::test]
@@ -668,5 +763,63 @@ mod tests {
         // Without sandbox, any path should be allowed (including traversal)
         let result = ctx.sandboxed_resolve_new_path("../other/file.txt");
         assert!(result.is_ok());
+    }
+
+    struct TestTool;
+
+    #[async_trait]
+    impl Tool for TestTool {
+        fn name(&self) -> &str {
+            "test_tool"
+        }
+
+        fn description(&self) -> &str {
+            "Test tool"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({
+                "type": "object",
+                "additionalProperties": false
+            })
+        }
+
+        async fn execute(&self, _params: Value, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::success("{}")
+        }
+    }
+
+    struct AlwaysBlockHook;
+
+    #[async_trait]
+    impl PreToolHook for AlwaysBlockHook {
+        async fn before_execute(
+            &self,
+            _name: &str,
+            _params: &Value,
+            _ctx: &ToolContext,
+        ) -> HookResult {
+            HookResult::Block {
+                reason: "blocked for test".to_string(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pre_hook_block_returns_structured_json_error() {
+        let mut registry = ToolRegistry::new();
+        registry.add_pre_hook(Arc::new(AlwaysBlockHook));
+        registry.register(Arc::new(TestTool)).await;
+        let ctx = create_test_context();
+
+        let result = registry
+            .execute("test_tool", json!({}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(parsed["error"]["code"], "blocked_by_policy");
+        assert_eq!(parsed["error"]["message"], "blocked for test");
     }
 }

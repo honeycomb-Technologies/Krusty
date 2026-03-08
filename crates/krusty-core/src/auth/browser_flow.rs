@@ -75,7 +75,11 @@ impl BrowserOAuthFlow {
     }
 
     /// Exchange authorization code for tokens
-    async fn exchange_code(&self, code: &str, verifier: &PkceVerifier) -> Result<OAuthTokenData> {
+    pub async fn exchange_code(
+        &self,
+        code: &str,
+        verifier: &PkceVerifier,
+    ) -> Result<OAuthTokenData> {
         let client = reqwest::Client::new();
 
         let params = [
@@ -322,7 +326,7 @@ struct TokenResponse {
 }
 
 /// Result from the OAuth callback
-enum CallbackResult {
+pub enum CallbackResult {
     Success { code: String },
     Error { error: String, description: String },
 }
@@ -349,7 +353,7 @@ fn parse_query_params(path: &str) -> HashMap<String, String> {
 }
 
 /// Run the local callback server
-fn run_callback_server(port: u16, expected_state: String, tx: mpsc::Sender<CallbackResult>) {
+pub fn run_callback_server(port: u16, expected_state: String, tx: mpsc::Sender<CallbackResult>) {
     let addr = format!("127.0.0.1:{}", port);
     let server = match tiny_http::Server::http(&addr) {
         Ok(s) => s,

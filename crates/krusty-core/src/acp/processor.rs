@@ -41,26 +41,18 @@ pub struct PromptProcessor {
     ai_client: Option<Arc<AiClient>>,
     /// Tool registry for executing tools
     tools: Arc<ToolRegistry>,
-    /// Working directory for tool execution
-    cwd: PathBuf,
     /// Git identity for commit attribution
     git_identity: Option<GitIdentity>,
 }
 
 impl PromptProcessor {
     /// Create a new prompt processor
-    pub fn new(tools: Arc<ToolRegistry>, cwd: PathBuf) -> Self {
+    pub fn new(tools: Arc<ToolRegistry>, _cwd: PathBuf) -> Self {
         Self {
             ai_client: None,
             tools,
-            cwd,
             git_identity: Some(GitIdentity::default()),
         }
-    }
-
-    /// Update the working directory (called when session cwd changes)
-    pub fn set_cwd(&mut self, cwd: PathBuf) {
-        self.cwd = cwd;
     }
 
     /// Set git identity for commit attribution
@@ -302,7 +294,9 @@ impl PromptProcessor {
         connection: &C,
     ) -> Result<StopReason, AcpError> {
         let mut ctx = ToolContext {
-            working_dir: self.cwd.clone(),
+            // Always honor the session-specific working directory to prevent
+            // cross-session cwd bleed when multiple ACP sessions are active.
+            working_dir: session.cwd.clone(),
             ..Default::default()
         };
 

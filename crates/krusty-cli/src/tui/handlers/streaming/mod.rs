@@ -3,22 +3,20 @@
 //! Handles sending messages to AI and executing tool calls.
 //!
 //! This module is split into focused submodules:
-//! - `mod.rs`: Input handling and AI communication
-//! - `tool_execution.rs`: Tool call execution and result processing
-//! - `context_building.rs`: Context injection (diagnostics, plans, skills)
+//! - `mod.rs`: Input handling and AI communication (via core orchestrator)
+//! - `tool_execution.rs`: TUI-specific tool interception (plan tools, AskUser, blocks)
 
-mod context_building;
-mod tool_execution;
+pub(crate) mod tool_execution;
 
-use tokio::sync::mpsc;
+use std::sync::Arc;
 
-use crate::agent::{AgentEvent, InterruptReason};
+use crate::agent::{AgentEvent, InterruptReason, OrchestratorConfig, OrchestratorServices};
 use crate::ai::client::config::AnthropicAdaptiveEffort;
 use crate::ai::client::{CallOptions, CodexReasoningEffort};
-use crate::ai::streaming::StreamPart;
 use crate::ai::types::{
     Content, ContextManagement, ModelMessage, Role, ThinkingConfig, WebFetchConfig, WebSearchConfig,
 };
+use crate::paths;
 use crate::tools::{load_from_clipboard_rgba, load_from_path, load_from_url};
 use crate::tui::app::{App, ThinkingLevel, View};
 use crate::tui::input::{has_image_references, parse_input, InputSegment};
@@ -42,9 +40,6 @@ impl App {
             self.handle_slash_command(&text);
             return;
         }
-
-        // New user input starts a fresh failure-tracking window.
-        self.runtime.tool_failure_signatures.clear();
 
         if self.ui.view == View::StartMenu {
             self.ui.view = View::Chat;
@@ -179,9 +174,12 @@ impl App {
         extensions.iter().any(|ext| lower.ends_with(ext))
     }
 
-    /// Send the current conversation to the AI and start streaming response
+    /// Send the current conversation to the AI via the core orchestrator.
+    ///
+    /// The orchestrator runs the entire agentic loop (AI call → tools → repeat)
+    /// as a spawned task. Events are consumed by `process_loop_events()` in the
+    /// main event loop.
     pub fn send_to_ai(&mut self) {
-        // Block sending while decision prompt is visible (waiting for user input)
         if self.ui.decision_prompt.visible {
             tracing::info!("send_to_ai blocked - waiting for user decision");
             return;
@@ -197,32 +195,6 @@ impl App {
             self.runtime.chat.conversation.len()
         );
 
-        // Log conversation structure for debugging
-        for (i, msg) in self.runtime.chat.conversation.iter().enumerate() {
-            let content_summary: Vec<String> = msg
-                .content
-                .iter()
-                .map(|c| match c {
-                    Content::Text { text } => format!("Text({})", text.len()),
-                    Content::ToolUse { id, name, .. } => format!("ToolUse({}, {})", name, id),
-                    Content::ToolResult { tool_use_id, .. } => {
-                        format!("ToolResult({})", tool_use_id)
-                    }
-                    Content::Image { .. } => "Image".to_string(),
-                    Content::Document { .. } => "Document".to_string(),
-                    Content::Thinking { thinking, .. } => format!("Thinking({})", thinking.len()),
-                    Content::RedactedThinking { .. } => "RedactedThinking".to_string(),
-                })
-                .collect();
-            tracing::debug!(
-                "  conversation[{}] {:?}: {:?}",
-                i,
-                msg.role,
-                content_summary
-            );
-        }
-
-        // Check max turns limit
         if self
             .runtime
             .agent_config
@@ -242,89 +214,6 @@ impl App {
             return;
         }
 
-        let Some(ref _client) = self.runtime.ai_client else {
-            self.runtime
-                .chat
-                .messages
-                .push(("system".to_string(), "No AI client configured".to_string()));
-            return;
-        };
-
-        self.start_streaming();
-        self.runtime.streaming.reset();
-
-        self.runtime.agent_state.start_turn();
-        self.runtime.event_bus.emit(AgentEvent::TurnStart {
-            turn: self.runtime.agent_state.current_turn,
-            message_count: self.runtime.chat.conversation.len(),
-        });
-
-        // Build context
-        let plan_context = self.build_plan_context();
-        let skills_context = self.build_skills_context();
-        let project_context = self.build_project_context();
-
-        // Log all context injection for monitoring
-        if !plan_context.is_empty() {
-            tracing::info!(chars = plan_context.len(), "Context: plan");
-        }
-        if !skills_context.is_empty() {
-            tracing::info!(chars = skills_context.len(), "Context: skills");
-        }
-        if !project_context.is_empty() {
-            tracing::info!(chars = project_context.len(), "Context: project");
-        }
-        let _has_thinking_conversation = self.runtime.thinking_level.is_enabled()
-            && self.runtime.chat.conversation.iter().any(|msg| {
-                msg.role == Role::Assistant
-                    && msg
-                        .content
-                        .iter()
-                        .any(|c| matches!(c, Content::Thinking { .. }))
-            });
-
-        let mut conversation = self.runtime.chat.conversation.clone();
-        let mut system_insert_count = 0;
-
-        // Inject project context FIRST
-        if !project_context.is_empty() {
-            conversation.insert(
-                system_insert_count,
-                ModelMessage {
-                    role: Role::System,
-                    content: vec![Content::Text {
-                        text: project_context,
-                    }],
-                },
-            );
-            system_insert_count += 1;
-        }
-
-        // Inject plan context
-        if !plan_context.is_empty() {
-            conversation.insert(
-                system_insert_count,
-                ModelMessage {
-                    role: Role::System,
-                    content: vec![Content::Text { text: plan_context }],
-                },
-            );
-            system_insert_count += 1;
-        }
-
-        // Inject skills context
-        if !skills_context.is_empty() {
-            conversation.insert(
-                system_insert_count,
-                ModelMessage {
-                    role: Role::System,
-                    content: vec![Content::Text {
-                        text: skills_context,
-                    }],
-                },
-            );
-        }
-
         let client = match self.create_ai_client() {
             Some(c) => c,
             None => {
@@ -336,10 +225,25 @@ impl App {
             }
         };
 
-        let tools = self.services.cached_ai_tools.clone();
-        let tool_names: Vec<_> = tools.iter().map(|t| t.name.as_str()).collect();
-        tracing::info!("Sending {} tools to API: {:?}", tools.len(), tool_names);
+        let Some(session_id) = self.runtime.current_session_id.clone() else {
+            self.runtime
+                .chat
+                .messages
+                .push(("system".to_string(), "No active session".to_string()));
+            return;
+        };
 
+        self.start_streaming();
+        self.runtime.chat.streaming_assistant_idx = None;
+
+        self.runtime.agent_state.start_turn();
+        self.runtime.event_bus.emit(AgentEvent::TurnStart {
+            turn: self.runtime.agent_state.current_turn,
+            message_count: self.runtime.chat.conversation.len(),
+        });
+
+        // Build CallOptions (thinking, web tools, etc.)
+        let tools = self.services.cached_ai_tools.clone();
         let can_use_thinking = self.runtime.thinking_level.is_enabled();
         let thinking = can_use_thinking.then(ThinkingConfig::default);
         let codex_reasoning_effort = if self.is_codex_thinking_mode() {
@@ -353,7 +257,6 @@ impl App {
         } else {
             None
         };
-
         let anthropic_adaptive_effort = if self.is_anthropic_opus_thinking_mode() {
             match self.runtime.thinking_level {
                 ThinkingLevel::Off => None,
@@ -364,7 +267,6 @@ impl App {
         } else {
             None
         };
-
         let context_management = match (can_use_thinking, !tools.is_empty()) {
             (true, _) => Some(ContextManagement::default_for_thinking_and_tools()),
             (false, true) => Some(ContextManagement::default_tools_only()),
@@ -378,58 +280,42 @@ impl App {
             context_management,
             web_search: Some(WebSearchConfig::default()),
             web_fetch: Some(WebFetchConfig::default()),
-            session_id: self.runtime.current_session_id.clone(),
+            session_id: Some(session_id.clone()),
             codex_reasoning_effort,
             codex_parallel_tool_calls: true,
             anthropic_adaptive_effort,
             ..Default::default()
         };
 
-        self.runtime.cancellation.reset();
-        let cancel_token = self.runtime.cancellation.child_token();
+        // Determine if this is a new session (first user message → generate title)
+        let is_new_session = self.runtime.chat.conversation.len() <= 1;
 
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.runtime.streaming.start_stream(rx);
+        // Create orchestrator services and config
+        let db_path = paths::config_dir().join("krusty.db");
+        let services = OrchestratorServices {
+            ai_client: Arc::new(client),
+            tool_registry: self.services.tool_registry.clone(),
+            process_registry: self.runtime.process_registry.clone(),
+            db_path,
+            skills_manager: self.services.skills_manager.clone(),
+        };
 
-        // Spawn streaming task in background.
-        // JoinHandle is dropped - streaming communicated via channel.
-        let _handle = tokio::spawn(async move {
-            tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    let _ = tx.send(StreamPart::Error {
-                        error: "Interrupted by user".to_string()
-                    });
-                }
-                result = client.call_streaming(conversation, &options) => {
-                    match result {
-                        Ok(mut api_rx) => {
-                            loop {
-                                tokio::select! {
-                                    _ = cancel_token.cancelled() => {
-                                        let _ = tx.send(StreamPart::Error {
-                                            error: "Interrupted by user".to_string()
-                                        });
-                                        break;
-                                    }
-                                    part = api_rx.recv() => {
-                                        match part {
-                                            Some(p) => {
-                                                if tx.send(p).is_err() {
-                                                    break;
-                                                }
-                                            }
-                                            None => break,
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            let _ = tx.send(StreamPart::Error { error: e.to_string() });
-                        }
-                    }
-                }
-            }
-        });
+        let config = OrchestratorConfig {
+            session_id,
+            working_dir: self.runtime.working_dir.clone(),
+            permission_mode: self.runtime.permission_mode,
+            max_iterations: self.runtime.agent_config.max_turns.unwrap_or(50).min(50),
+            user_id: None,
+            initial_work_mode: self.ui.work_mode.into(),
+            generate_title: is_new_session,
+        };
+
+        let conversation = self.runtime.chat.conversation.clone();
+        let orchestrator = crate::agent::AgenticOrchestrator::new(services, config);
+        let (event_rx, input_tx) = orchestrator.run(conversation, options);
+
+        // Store channels for the event loop to poll
+        self.runtime.channels.loop_events = Some(event_rx);
+        self.runtime.channels.loop_input = Some(input_tx);
     }
 }

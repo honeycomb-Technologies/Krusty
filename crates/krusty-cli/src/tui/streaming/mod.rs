@@ -1,8 +1,6 @@
-//! Streaming State Machine
+//! Streaming State
 //!
-//! Replaces fragile flag-based streaming state with a proper enum state machine.
-//! All streaming state is centralized here for clarity and correctness.
+//! The core orchestrator now handles the stream-to-event pipeline and tool
+//! execution via LoopEvent/LoopInput channels.
 
 pub mod state;
-
-pub use state::{StreamEvent, StreamingManager};

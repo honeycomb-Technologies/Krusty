@@ -1,10 +1,8 @@
 <script lang="ts">
 	import { Pencil, Check, Plus, GitBranch, X, Folder, ChevronUp, Loader2, History } from 'lucide-svelte';
 	import { sessionStore, updateSessionTitle, initSession } from '$stores/session';
-	import { planStore, setPlanVisible } from '$stores/plan';
 	import { createSession, getLastDirectory, loadDirectories, sessionsStore } from '$stores/sessions';
-	import { gitStore, refreshGit, checkoutBranch, switchWorktree, startGitPolling, stopGitPolling } from '$stores/git';
-	import { workspaceStore } from '$stores/workspace';
+	import { gitStore, refreshGit, startGitPolling, stopGitPolling } from '$stores/git';
 	import { apiClient } from '$api/client';
 	import { onMount } from 'svelte';
 
@@ -30,6 +28,17 @@
 	let directories = $state<{ name: string; path: string }[]>([]);
 	let isLoadingDirs = $state(false);
 	let dirError = $state<string | null>(null);
+	let createError = $state<string | null>(null);
+
+	type BranchMode = 'current' | 'existing' | 'new';
+	let branchMode = $state<BranchMode>('current');
+	let branchCurrent = $state<string | null>(null);
+	let branchOptions = $state<string[]>([]);
+	let existingBranch = $state<string>('');
+	let newBranchName = $state('');
+	let branchStatus = $state<'idle' | 'loading' | 'ready' | 'not_repo' | 'error'>('idle');
+	let branchError = $state<string | null>(null);
+	let branchLoadToken = 0;
 
 	// Directory cache for instant navigation
 	type DirCache = { current: string; parent: string | null; directories: { name: string; path: string }[] };
@@ -39,8 +48,6 @@
 	let dirListContainer = $state<HTMLDivElement>(undefined!);
 	let dirScrollTimeout: ReturnType<typeof setTimeout>;
 	let pendingPrefetch: ReturnType<typeof setTimeout> | null = null;
-	let isSwitchingBranch = $state(false);
-	let isSwitchingWorktree = $state(false);
 
 	function handleDirScroll() {
 		dirListContainer?.classList.add('dir-scrolling');
@@ -130,17 +137,92 @@
 		}
 	}
 
+	function resetBranchState() {
+		branchMode = 'current';
+		branchCurrent = null;
+		branchOptions = [];
+		existingBranch = '';
+		newBranchName = '';
+		branchStatus = 'idle';
+		branchError = null;
+	}
+
+	async function loadBranchContext(path: string | null) {
+		const token = ++branchLoadToken;
+
+		if (!path) {
+			resetBranchState();
+			return;
+		}
+
+		branchStatus = 'loading';
+		branchError = null;
+
+		try {
+			const status = await apiClient.getGitStatus(path);
+			if (token !== branchLoadToken) return;
+
+			if (!status.in_repo) {
+				resetBranchState();
+				branchStatus = 'not_repo';
+				return;
+			}
+
+			branchCurrent = status.branch;
+			const branches = await apiClient.getGitBranches(path);
+			if (token !== branchLoadToken) return;
+
+			branchOptions = branches.branches
+				.filter((branch) => !branch.is_remote)
+				.map((branch) => branch.name);
+
+			existingBranch = branchCurrent ?? branchOptions[0] ?? '';
+			branchStatus = 'ready';
+		} catch (err) {
+			if (token !== branchLoadToken) return;
+			branchStatus = 'error';
+			branchError = err instanceof Error ? err.message : 'Failed to load git branches';
+		}
+	}
+
 	async function handleCreateSession() {
 		if (isCreating) return;
 		isCreating = true;
+		createError = null;
 		try {
-			const newSession = await createSession(undefined, selectedDirectory ?? undefined);
+			let targetBranch: string | undefined;
+			const directory = selectedDirectory ?? undefined;
+
+			if (directory && branchStatus === 'ready') {
+				if (branchMode === 'current') {
+					targetBranch = branchCurrent ?? undefined;
+				} else if (branchMode === 'existing') {
+					targetBranch = existingBranch || branchCurrent || undefined;
+					if (targetBranch) {
+						await apiClient.checkoutGitBranch(targetBranch, directory, false);
+					}
+				} else if (branchMode === 'new') {
+					const branch = newBranchName.trim();
+					if (!branch) {
+						createError = 'Enter a branch name or switch branch mode.';
+						return;
+					}
+					const create = !branchOptions.includes(branch);
+					await apiClient.checkoutGitBranch(branch, directory, create);
+					targetBranch = branch;
+				}
+			}
+
+			const newSession = await createSession(undefined, directory, targetBranch);
 			if (newSession) {
 				// Initialize the current session with the new ID and title
 				initSession(newSession.id, newSession.title);
 			}
 			showNewSessionModal = false;
 			onNewSession();
+			await refreshGit(true);
+		} catch (err) {
+			createError = err instanceof Error ? err.message : 'Failed to create session';
 		} finally {
 			isCreating = false;
 		}
@@ -148,16 +230,20 @@
 
 	async function openNewSessionModal() {
 		dirCache.clear();
+		resetBranchState();
+		createError = null;
 		selectedDirectory = getLastDirectory();
 		showNewSessionModal = true;
 		// Load initial directory
 		await loadDirectory(selectedDirectory ?? undefined);
+		await loadBranchContext(selectedDirectory);
 		// Pre-fetch parent and first few subdirs for instant navigation
 		if (parentPath) prefetchDirectory(parentPath);
 		directories.slice(0, 5).forEach(d => prefetchDirectory(d.path));
 	}
 
 	function closeModal() {
+		createError = null;
 		showNewSessionModal = false;
 	}
 
@@ -166,6 +252,7 @@
 		if (pendingPrefetch) clearTimeout(pendingPrefetch);
 		selectedDirectory = path;
 		loadDirectory(path);
+		void loadBranchContext(path);
 		// Pre-fetch visible subdirectories for instant next click
 		pendingPrefetch = setTimeout(() => {
 			const cached = dirCache.get(path);
@@ -180,12 +267,14 @@
 		if (parentPath) {
 			selectedDirectory = parentPath;
 			loadDirectory(parentPath);
+			void loadBranchContext(parentPath);
 		}
 	}
 
 	function jumpToRecent(dir: string) {
 		selectedDirectory = dir;
 		loadDirectory(dir);
+		void loadBranchContext(dir);
 	}
 
 	function formatTokens(count: number): string {
@@ -241,50 +330,14 @@
 		return parts.slice(-2).join('/') || path;
 	}
 
-	function shouldShowGitSummary(): boolean {
-		if (!$gitStore.status?.in_repo) return false;
-		return $gitStore.status.total_changes > 0
-			|| $gitStore.status.branch_additions > 0
-			|| $gitStore.status.branch_deletions > 0;
+	function dirtyFileCount(): number {
+		if (!$gitStore.status?.in_repo) return 0;
+		return $gitStore.status.total_changes;
 	}
 
-	function currentWorktreePath(): string {
-		const current = $gitStore.worktrees.find((w) => w.is_current);
-		return current?.path ?? $workspaceStore.directory ?? '';
-	}
-
-	async function handleBranchChange(event: Event) {
-		const select = event.currentTarget as HTMLSelectElement;
-		const branch = select.value;
-		if (!branch || branch === $gitStore.status?.branch) return;
-
-		isSwitchingBranch = true;
-		try {
-			await checkoutBranch(branch);
-		} catch (err) {
-			console.error('Branch checkout failed:', err);
-			alert(err instanceof Error ? err.message : 'Failed to switch branch');
-			await refreshGit(false);
-		} finally {
-			isSwitchingBranch = false;
-		}
-	}
-
-	async function handleWorktreeChange(event: Event) {
-		const select = event.currentTarget as HTMLSelectElement;
-		const nextPath = select.value;
-		if (!nextPath || nextPath === $workspaceStore.directory) return;
-
-		isSwitchingWorktree = true;
-		try {
-			await switchWorktree(nextPath, $sessionStore.sessionId);
-		} catch (err) {
-			console.error('Worktree switch failed:', err);
-			alert(err instanceof Error ? err.message : 'Failed to switch worktree');
-			await refreshGit(false);
-		} finally {
-			isSwitchingWorktree = false;
-		}
+	function currentBranchLabel(): string {
+		if (!$gitStore.status?.in_repo) return 'No repo';
+		return $gitStore.status.branch ?? 'detached';
 	}
 </script>
 
@@ -292,8 +345,8 @@
 
 <!--
   Mobile (< md): Two rows
-    - Row 1: History | Title | Pinch | New chat
-    - Row 2: Diff | Context
+    - Row 1: History | Wave + Title (flex) | Pinch | New chat
+    - Row 2: Git status left | Context right
   Desktop (md+): Single row, original layout
 -->
 <header class="relative z-50 flex flex-col md:flex-row md:items-center md:justify-between shrink-0 border-b border-border/50 bg-card/60 backdrop-blur-sm px-4 md:h-14">
@@ -314,8 +367,19 @@
 			{/if}
 		</div>
 
-		<!-- Center: Title -->
-		<div class="flex items-center gap-2 min-w-0 flex-1 justify-center">
+		<!-- Center: Title + Wave -->
+		<div class="relative flex items-center min-w-0 flex-1 justify-center">
+			<!-- Wave indicator: absolutely positioned left, fills gap without shifting title -->
+			{#if $sessionStore.isStreaming}
+				<div class="absolute left-1 top-1/2 -translate-y-1/2 flex items-center gap-0.5 h-4 pointer-events-none" title="Streaming">
+					<span class="w-1 h-1 rounded-full bg-green-500 animate-wave"></span>
+					<span class="w-1 h-1.5 rounded-full bg-green-500 animate-wave" style="animation-delay: 0.1s"></span>
+					<span class="w-1 h-2 rounded-full bg-green-500 animate-wave" style="animation-delay: 0.2s"></span>
+					<span class="w-1 h-1.5 rounded-full bg-green-500 animate-wave" style="animation-delay: 0.3s"></span>
+					<span class="w-1 h-1 rounded-full bg-green-500 animate-wave" style="animation-delay: 0.4s"></span>
+				</div>
+			{/if}
+
 			{#if !$sessionStore.sessionId}
 				<span class="text-sm text-muted-foreground">No session</span>
 			{:else if isEditingTitle}
@@ -324,7 +388,7 @@
 					bind:value={editedTitle}
 					onkeydown={handleTitleKeyDown}
 					onblur={saveTitle}
-					class="w-full min-w-[120px] max-w-[160px] rounded border border-input bg-background px-2 py-1 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-ring"
+					class="w-full min-w-[120px] rounded border border-input bg-background px-2 py-1 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-ring"
 				/>
 				<button onclick={saveTitle} class="rounded p-1 text-green-500 hover:bg-muted shrink-0">
 					<Check class="h-4 w-4" />
@@ -332,33 +396,23 @@
 			{:else}
 				<button
 					onclick={startEditTitle}
-					class="group flex items-center gap-2 rounded-lg px-2 py-1 text-sm font-medium transition-colors hover:bg-muted truncate"
+					class="group flex items-center gap-2 rounded-lg px-2 py-1 text-sm font-medium transition-colors hover:bg-muted min-w-0"
 				>
-					<span class="truncate max-w-[120px]">{$sessionStore.title}</span>
+					<span class="truncate">{$sessionStore.title}</span>
 					<Pencil class="h-3 w-3 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 shrink-0" />
 				</button>
-			{/if}
-
-			{#if $sessionStore.isStreaming}
-				<div class="flex items-center gap-0.5 h-4 shrink-0" title="Streaming">
-					<span class="w-1 h-1 rounded-full bg-green-500 animate-[wave_1s_ease-in-out_infinite]"></span>
-					<span class="w-1 h-1.5 rounded-full bg-green-500 animate-[wave_1s_ease-in-out_infinite_0.1s]"></span>
-					<span class="w-1 h-2 rounded-full bg-green-500 animate-[wave_1s_ease-in-out_infinite_0.2s]"></span>
-					<span class="w-1 h-1.5 rounded-full bg-green-500 animate-[wave_1s_ease-in-out_infinite_0.3s]"></span>
-					<span class="w-1 h-1 rounded-full bg-green-500 animate-[wave_1s_ease-in-out_infinite_0.4s]"></span>
-				</div>
 			{/if}
 		</div>
 
 		<!-- Right: Pinch + New chat -->
 		<div class="flex items-center gap-1">
 			<!-- Pinch button -->
-			<button
-				onclick={onPinch}
-				disabled={!$sessionStore.sessionId || isPinching}
-				class="rounded p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-				title="Pinch (branch session)"
-			>
+				<button
+					onclick={onPinch}
+					disabled={!$sessionStore.sessionId || isPinching}
+					class="rounded p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+					title="Pinch (continue session)"
+				>
 				{#if isPinching}
 					<span class="h-4 w-4 animate-spin rounded-full border border-current border-t-transparent"></span>
 				{:else}
@@ -378,41 +432,31 @@
 	</div>
 
 	<!-- ============================================
-	     MOBILE ROW 2: Diff | Git controls | Context (hidden on desktop)
+	     MOBILE ROW 2: Git status (left) | Context (right)
 	     ============================================ -->
-	<div class="flex items-center justify-between border-t border-border/30 py-2 md:hidden md:border-none md:py-0">
-		<!-- Left: Diff summary -->
+	<div class="flex items-center justify-between border-t border-border/30 py-1.5 md:hidden md:border-none md:py-0">
+		<!-- Left: Git status -->
 		<div class="flex items-center gap-2">
-			{#if shouldShowGitSummary()}
-				<span class="inline-flex items-center gap-1 text-xs">
-					<span class="text-green-500">+{$gitStore.status?.branch_additions}</span>
-					<span class="text-red-500">-{$gitStore.status?.branch_deletions}</span>
+			{#if $gitStore.status?.in_repo}
+				<span class="inline-flex items-center rounded-md border border-border/60 bg-muted/30 px-1.5 py-0.5 text-xs text-muted-foreground">
+					Dirty: {dirtyFileCount()}
+				</span>
+				<span class="inline-flex items-center rounded-md border border-border/60 bg-muted/30 px-1.5 py-0.5 text-xs text-muted-foreground">
+					Branch: {currentBranchLabel()}
+				</span>
+			{:else}
+				<span class="inline-flex items-center rounded-md border border-border/60 bg-muted/30 px-1.5 py-0.5 text-xs text-muted-foreground">
+					No repo
 				</span>
 			{/if}
-		</div>
 
-		<!-- Center: Git branch dropdown -->
-		<div class="flex items-center">
-			{#if $gitStore.status?.in_repo && $gitStore.branches.length > 0}
-				<select
-					class="max-w-[80px] rounded border border-input bg-background px-1 py-0.5 text-xs truncate"
-					title="Switch git branch"
-					value={$gitStore.status.branch ?? ''}
-					onchange={handleBranchChange}
-					disabled={isSwitchingBranch || $sessionStore.isStreaming}
-				>
-					{#each $gitStore.branches.filter(b => !b.is_remote).slice(0, 5) as branch (branch.name)}
-						<option value={branch.name}>{branch.is_current ? '• ' : ''}{branch.name}</option>
-					{/each}
-					{#if $gitStore.branches.filter(b => !b.is_remote).length > 5}
-						<option value="...">More...</option>
-					{/if}
-				</select>
+			{#if $gitStore.isLoading}
+				<Loader2 class="h-3 w-3 animate-spin text-muted-foreground" />
 			{/if}
 		</div>
 
 		<!-- Right: Context -->
-		<div class="flex items-center gap-2">
+		<div class="flex items-center">
 			{#if $sessionStore.tokenCount > 0}
 				{@const status = getContextStatus($sessionStore.tokenCount)}
 				<span class="text-xs {status.color}" title="Context usage">
@@ -442,64 +486,27 @@
 			{/if}
 		</div>
 
-		<!-- Center: Git info + Title -->
-		<div class="flex items-center gap-2 flex-1 justify-center">
-			<!-- Git info -->
-			<div class="flex items-center gap-2">
-				{#if $gitStore.status?.in_repo}
-					{#if shouldShowGitSummary()}
-						<span
-							class="hidden sm:inline-flex items-center gap-1 rounded-md border border-border/60 bg-muted/30 px-2 py-1 text-xs"
-							title="Git status"
-						>
-							<span class="text-muted-foreground">{$gitStore.status.branch_files} files</span>
-							<span class="text-green-500">+{$gitStore.status.branch_additions}</span>
-							<span class="text-red-500">-{$gitStore.status.branch_deletions}</span>
+			<!-- Center: Git info + Title -->
+			<div class="relative flex items-center gap-2 flex-1 justify-center">
+				<!-- Git info -->
+				<div class="flex items-center gap-2">
+					{#if $gitStore.status?.in_repo}
+						<span class="hidden sm:inline-flex items-center rounded-md border border-border/60 bg-muted/30 px-2 py-1 text-xs text-muted-foreground">
+							Dirty: {dirtyFileCount()}
+						</span>
+						<span class="hidden md:inline-flex items-center rounded-md border border-border/60 bg-muted/30 px-2 py-1 text-xs text-muted-foreground">
+							Branch: {currentBranchLabel()}
+						</span>
+					{:else}
+						<span class="hidden sm:inline-flex items-center rounded-md border border-border/60 bg-muted/30 px-2 py-1 text-xs text-muted-foreground">
+							No repo
 						</span>
 					{/if}
 
-					{#if $gitStore.worktrees.length > 1}
-						<select
-							class="hidden md:block max-w-[180px] rounded-md border border-input bg-background px-2 py-1 text-xs"
-							title="Switch git worktree"
-							value={currentWorktreePath()}
-							onchange={handleWorktreeChange}
-							disabled={isSwitchingWorktree || $sessionStore.isStreaming}
-						>
-							{#each $gitStore.worktrees as wt (wt.path)}
-								<option value={wt.path}>
-									{wt.is_current ? '• ' : ''}{getShortPath(wt.path)}
-								</option>
-							{/each}
-						</select>
+					{#if $gitStore.isLoading}
+						<Loader2 class="h-4 w-4 animate-spin text-muted-foreground" />
 					{/if}
-
-					{#if $gitStore.branches.length > 0}
-						<select
-							class="hidden md:block max-w-[160px] rounded-md border border-input bg-background px-2 py-1 text-xs"
-							title="Switch git branch"
-							value={$gitStore.status.branch ?? ''}
-							onchange={handleBranchChange}
-							disabled={isSwitchingBranch || $sessionStore.isStreaming}
-						>
-							{#each $gitStore.branches.filter(b => !b.is_remote) as branch (branch.name)}
-								<option value={branch.name}>{branch.is_current ? '• ' : ''}{branch.name}</option>
-							{/each}
-							{#if $gitStore.branches.some(b => b.is_remote)}
-								<optgroup label="Remote">
-									{#each $gitStore.branches.filter(b => b.is_remote) as branch (branch.name)}
-										<option value={branch.name}>{branch.name}</option>
-									{/each}
-								</optgroup>
-							{/if}
-						</select>
-					{/if}
-				{/if}
-
-				{#if $gitStore.isLoading || isSwitchingBranch || isSwitchingWorktree}
-					<Loader2 class="h-4 w-4 animate-spin text-muted-foreground" />
-				{/if}
-			</div>
+				</div>
 
 			<!-- Title -->
 			{#if $sessionStore.sessionId}
@@ -525,7 +532,7 @@
 				{/if}
 
 				{#if $sessionStore.isStreaming}
-					<span class="flex items-center gap-2 text-sm text-muted-foreground">
+					<span class="absolute left-2 top-1/2 -translate-y-1/2 flex items-center gap-2 text-sm text-muted-foreground pointer-events-none">
 						<span class="h-2 w-2 animate-pulse rounded-full bg-green-500"></span>
 						{$sessionStore.isThinking ? 'Thinking...' : 'Streaming...'}
 					</span>
@@ -548,12 +555,12 @@
 		<!-- Right: Pinch + New chat -->
 		<div class="flex items-center gap-2">
 			<!-- Pinch button -->
-			<button
-				onclick={onPinch}
-				disabled={!$sessionStore.sessionId || isPinching}
-				class="rounded p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-				title="Pinch (branch session)"
-			>
+				<button
+					onclick={onPinch}
+					disabled={!$sessionStore.sessionId || isPinching}
+					class="rounded p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+					title="Pinch (continue session)"
+				>
 				{#if isPinching}
 					<span class="h-4 w-4 animate-spin rounded-full border border-current border-t-transparent"></span>
 				{:else}
@@ -634,20 +641,89 @@
 			</div>
 		{/if}
 
+		<!-- Optional branch setup -->
+		{#if selectedDirectory}
+			<div class="shrink-0 border-t border-border">
+				<div class="px-4 py-1 text-xs font-medium text-muted-foreground bg-muted/30">Branch setup (optional)</div>
+				<div class="p-3 space-y-2">
+					{#if branchStatus === 'loading'}
+						<div class="flex items-center gap-2 text-sm text-muted-foreground">
+							<Loader2 class="h-4 w-4 animate-spin" />
+							<span>Loading git branches...</span>
+						</div>
+					{:else if branchStatus === 'not_repo'}
+						<p class="text-sm text-muted-foreground">This directory is not a git repository.</p>
+					{:else if branchStatus === 'error'}
+						<p class="text-sm text-red-500">{branchError}</p>
+					{:else if branchStatus === 'ready'}
+						<label class="block text-xs text-muted-foreground">Session branch behavior</label>
+						<select
+							class="w-full rounded border border-input bg-background px-2 py-1.5 text-sm"
+							bind:value={branchMode}
+						>
+							<option value="current">Keep current branch ({branchCurrent ?? 'detached'})</option>
+							<option value="existing">Checkout existing branch</option>
+							<option value="new">Create or checkout branch</option>
+						</select>
+
+						{#if branchMode === 'existing'}
+							<select
+								class="w-full rounded border border-input bg-background px-2 py-1.5 text-sm"
+								bind:value={existingBranch}
+								disabled={branchOptions.length === 0}
+							>
+								{#if branchOptions.length === 0}
+									<option value="">No local branches available</option>
+								{:else}
+									{#each branchOptions as branch (branch)}
+										<option value={branch}>{branch}</option>
+									{/each}
+								{/if}
+							</select>
+						{:else if branchMode === 'new'}
+							<input
+								type="text"
+								placeholder="feature/new-work"
+								bind:value={newBranchName}
+								class="w-full rounded border border-input bg-background px-2 py-1.5 text-sm"
+							/>
+							<p class="text-xs text-muted-foreground">
+								If the branch exists, Krusty checks it out. If not, it creates it from current HEAD.
+							</p>
+						{/if}
+					{/if}
+				</div>
+			</div>
+		{/if}
+
 		<!-- Actions -->
 		<div class="shrink-0 flex items-center justify-between gap-2 border-t border-border p-3 bg-muted/20">
-			<button onclick={() => { selectedDirectory = null; handleCreateSession(); }} class="rounded-lg px-3 py-2 text-sm text-muted-foreground hover:bg-muted">
+			<button
+				onclick={() => {
+					selectedDirectory = null;
+					resetBranchState();
+					handleCreateSession();
+				}}
+				class="rounded-lg px-3 py-2 text-sm text-muted-foreground hover:bg-muted"
+			>
 				No Directory
 			</button>
 			<div class="flex gap-2">
 				<button onclick={closeModal} class="rounded-lg px-4 py-2 text-sm text-muted-foreground hover:bg-muted">
 					Cancel
 				</button>
-				<button onclick={handleCreateSession} disabled={isCreating} class="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
+				<button
+					onclick={handleCreateSession}
+					disabled={isCreating || branchStatus === 'loading'}
+					class="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+				>
 					{isCreating ? 'Creating...' : 'Create'}
 				</button>
 			</div>
 		</div>
+		{#if createError}
+			<div class="shrink-0 px-4 pb-3 text-sm text-red-500">{createError}</div>
+		{/if}
 	</div>
 {/if}
 

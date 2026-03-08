@@ -25,7 +25,7 @@ use crate::ai::sse::{
 };
 use crate::ai::streaming::StreamPart;
 use crate::ai::transform::build_provider_params;
-use crate::ai::types::{Content, ModelMessage, Role};
+use crate::ai::types::{Content, ImageContent, ModelMessage, Role};
 
 /// Spawn a stream processing task for an HTTP SSE response.
 ///
@@ -79,24 +79,41 @@ fn spawn_sse_stream_task<S, P>(
     });
 }
 
-fn first_text_block(content: &[Content]) -> Option<&str> {
+pub(crate) fn first_text_block(content: &[Content]) -> Option<&str> {
     content.iter().find_map(|block| match block {
         Content::Text { text } => Some(text.as_str()),
         _ => None,
     })
 }
 
-fn collect_system_message_text(messages: &[ModelMessage]) -> String {
-    let mut combined = String::new();
+/// Partition system messages into project-level (stable, cacheable) and
+/// session-level (dynamic, not cached) blocks.
+///
+/// Project context (CLAUDE.md, KRAB.md, etc.) is identified by its
+/// `[PROJECT INSTRUCTIONS` prefix and rarely changes within a session.
+/// Everything else (plan state, skills list) changes frequently and should
+/// NOT be included in the cached prefix.
+pub(crate) fn partition_system_messages(messages: &[ModelMessage]) -> (String, String) {
+    let mut project_context = String::new();
+    let mut session_context = String::new();
+
     for message in messages.iter().filter(|m| m.role == Role::System) {
         if let Some(text) = first_text_block(&message.content) {
-            if !combined.is_empty() {
-                combined.push_str("\n\n");
+            if text.starts_with("[PROJECT INSTRUCTIONS") {
+                if !project_context.is_empty() {
+                    project_context.push_str("\n\n");
+                }
+                project_context.push_str(text);
+            } else {
+                if !session_context.is_empty() {
+                    session_context.push_str("\n\n");
+                }
+                session_context.push_str(text);
             }
-            combined.push_str(text);
         }
     }
-    combined
+
+    (project_context, session_context)
 }
 
 fn collect_message_text(content: &[Content], separator: &str) -> String {
@@ -112,15 +129,87 @@ fn collect_message_text(content: &[Content], separator: &str) -> String {
     combined
 }
 
+/// Convert image content to a URL accepted by Codex input_image:
+/// - pass-through remote URL
+/// - data URL for base64 payloads
+fn codex_image_url(image: &ImageContent) -> Option<String> {
+    if let Some(url) = &image.url {
+        return Some(url.clone());
+    }
+
+    image.base64.as_ref().map(|base64| {
+        let media_type = image.media_type.as_deref().unwrap_or("image/png");
+        format!("data:{};base64,{}", media_type, base64)
+    })
+}
+
+/// Build user content items for ChatGPT Codex input message format.
+/// Preserves block order (text/images) from the original conversation.
+fn build_codex_user_content(content: &[Content]) -> Vec<Value> {
+    let mut items: Vec<Value> = Vec::new();
+
+    for block in content {
+        match block {
+            Content::Text { text } => {
+                if !text.is_empty() {
+                    items.push(serde_json::json!({
+                        "type": "input_text",
+                        "text": text
+                    }));
+                }
+            }
+            Content::Image { image, detail } => {
+                if let Some(image_url) = codex_image_url(image) {
+                    let mut item = serde_json::json!({
+                        "type": "input_image",
+                        "image_url": image_url
+                    });
+                    if let Some(detail) = detail.as_deref().filter(|d| !d.is_empty()) {
+                        item["detail"] = serde_json::json!(detail);
+                    }
+                    items.push(item);
+                }
+            }
+            Content::Thinking { thinking, .. } => {
+                if !thinking.is_empty() {
+                    items.push(serde_json::json!({
+                        "type": "input_text",
+                        "text": format!("[Thinking]\n{}\n[/Thinking]", thinking)
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    items
+}
+
+/// Build a combined system prompt for non-Anthropic providers (OpenAI, Google).
+///
+/// Orders content by stability for optimal automatic prefix caching:
+/// base prompt (static) → project context (stable) → session context (dynamic).
+/// OpenAI and Gemini 2.5+ use automatic prefix caching — putting stable content
+/// first maximizes the cacheable prefix without any explicit annotations.
 fn build_default_system_prompt(messages: &[ModelMessage], options: &CallOptions) -> String {
-    let system = collect_system_message_text(messages);
-    if !system.is_empty() {
-        format!("{}\n\n{}", KRUSTY_SYSTEM_PROMPT, system)
-    } else if let Some(custom) = &options.system_prompt {
+    let base = if let Some(custom) = &options.system_prompt {
         custom.clone()
     } else {
         KRUSTY_SYSTEM_PROMPT.to_string()
+    };
+
+    let (project_context, session_context) = partition_system_messages(messages);
+
+    let mut prompt = base;
+    if !project_context.is_empty() {
+        prompt.push_str("\n\n---\n\n");
+        prompt.push_str(&project_context);
     }
+    if !session_context.is_empty() {
+        prompt.push_str("\n\n---\n\n");
+        prompt.push_str(&session_context);
+    }
+    prompt
 }
 
 async fn ensure_success_stream_response(
@@ -261,25 +350,17 @@ impl AiClient {
         let anthropic_messages =
             format_handler.convert_messages(&messages, Some(self.provider_id()));
 
-        // Extract any system messages from conversation (e.g., pinch context)
-        let injected_context = collect_system_message_text(&messages);
+        // Partition system messages into stable (project) and dynamic (session) parts.
+        // Project context (CLAUDE.md) rarely changes and should be cached.
+        // Session context (plan state, skills) changes frequently and goes last.
+        let (project_context, session_context) = partition_system_messages(&messages);
 
-        // Build system prompt
-        let mut system = if let Some(custom) = &options.system_prompt {
+        // Build base system prompt
+        let base_system = if let Some(custom) = &options.system_prompt {
             custom.clone()
         } else {
             KRUSTY_SYSTEM_PROMPT.to_string()
         };
-
-        // Handle injected context
-        if !injected_context.is_empty() {
-            system.push_str("\n\n---\n\n");
-            system.push_str(&injected_context);
-            info!(
-                "Injected {} chars of context into system prompt",
-                injected_context.len()
-            );
-        }
 
         // Determine max_tokens based on reasoning format
         let fallback_tokens = options.max_tokens.unwrap_or(self.config().max_tokens) as u32;
@@ -298,36 +379,94 @@ impl AiClient {
             "stream": true,
         });
 
-        // Add system prompt with cache control
-        // For Anthropic OAuth, prepend CC identity prompt as first block
+        // Build system prompt blocks ordered by stability for optimal caching.
+        //
+        // Prompt caching is prefix-based: the API caches everything from the start
+        // up to each cache_control breakpoint. Static content MUST come first so
+        // that the maximum prefix is shared across requests.
+        //
+        // Order (most stable → least stable):
+        //   1. CC identity (Anthropic OAuth only) — globally stable, cached
+        //   2. Base system prompt (KRUSTY_SYSTEM_PROMPT) — globally stable, cached
+        //   3. Project context (CLAUDE.md / KRAB.md) — stable per project, cached
+        //   4. Session context (plan state, skills) — dynamic, NOT cached
+        //
+        // Dynamic session context is appended WITHOUT cache_control so it doesn't
+        // invalidate the cached prefix when plan state changes between turns.
         let is_anthropic_oauth = self.provider_id() == ProviderId::Anthropic
             && crate::auth::is_anthropic_oauth_token(self.api_key());
-        if !system.is_empty() {
-            if options.enable_caching {
-                if is_anthropic_oauth {
-                    // OAuth: CC identity prompt + Krusty system prompt as separate cached blocks
-                    body["system"] = serde_json::json!([
-                        {
-                            "type": "text",
-                            "text": "You are Claude Code, Anthropic's official CLI for Claude.",
-                            "cache_control": {"type": "ephemeral"}
-                        },
-                        {
-                            "type": "text",
-                            "text": system,
-                            "cache_control": {"type": "ephemeral"}
-                        }
-                    ]);
-                    debug!("CC identity + Krusty system prompt added for Anthropic OAuth");
-                } else {
-                    body["system"] = serde_json::json!([{
-                        "type": "text",
-                        "text": system,
-                        "cache_control": {"type": "ephemeral"}
-                    }]);
-                }
-                debug!("Cache breakpoint added to system prompt");
-            } else {
+
+        // Gate caching on both the caller's flag AND the provider's capability.
+        // `enable_caching` defaults to true for all providers, but only Anthropic
+        // actually supports cache_control blocks. Sending them to MiniMax, Z.ai,
+        // etc. may cause errors since they use Anthropic format but don't support caching.
+        let provider_caps = ProviderCapabilities::for_provider(self.provider_id());
+        let use_caching = options.enable_caching && provider_caps.prompt_caching;
+
+        if use_caching {
+            let mut system_blocks: Vec<Value> = Vec::new();
+
+            // Block 1 (optional): CC identity — globally cached across all sessions
+            if is_anthropic_oauth {
+                system_blocks.push(serde_json::json!({
+                    "type": "text",
+                    "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                    "cache_control": {"type": "ephemeral"}
+                }));
+            }
+
+            // Block 2: Base system prompt — globally cached, never changes
+            if !base_system.is_empty() {
+                system_blocks.push(serde_json::json!({
+                    "type": "text",
+                    "text": base_system,
+                    "cache_control": {"type": "ephemeral"}
+                }));
+            }
+
+            // Block 3 (optional): Project context — cached per project, stable within session
+            if !project_context.is_empty() {
+                system_blocks.push(serde_json::json!({
+                    "type": "text",
+                    "text": project_context,
+                    "cache_control": {"type": "ephemeral"}
+                }));
+                debug!(
+                    "Project context block added ({} chars, cached)",
+                    project_context.len()
+                );
+            }
+
+            // Block 4 (optional): Session context — dynamic, NO cache_control
+            // Plan state and skills change frequently. Placing them last without
+            // a cache breakpoint means they don't invalidate the static prefix.
+            if !session_context.is_empty() {
+                system_blocks.push(serde_json::json!({
+                    "type": "text",
+                    "text": session_context
+                }));
+                debug!(
+                    "Session context block added ({} chars, not cached)",
+                    session_context.len()
+                );
+            }
+
+            if !system_blocks.is_empty() {
+                body["system"] = Value::Array(system_blocks);
+            }
+            debug!("System prompt split into cache-optimized blocks");
+        } else {
+            // No caching: combine everything into a single string
+            let mut system = base_system;
+            if !project_context.is_empty() {
+                system.push_str("\n\n---\n\n");
+                system.push_str(&project_context);
+            }
+            if !session_context.is_empty() {
+                system.push_str("\n\n---\n\n");
+                system.push_str(&session_context);
+            }
+            if !system.is_empty() {
                 body["system"] = Value::String(system);
             }
         }
@@ -340,11 +479,15 @@ impl AiClient {
             }
         }
 
-        // Build tools array
+        // Build tools array — sorted deterministically by name.
+        // Tool ordering is part of the cached prefix. Non-deterministic ordering
+        // (e.g., from HashMap iteration) silently breaks the cache between turns.
         let mut all_tools: Vec<Value> = Vec::new();
 
         if let Some(tools) = &options.tools {
-            for tool in tools {
+            let mut sorted_tools: Vec<_> = tools.iter().collect();
+            sorted_tools.sort_by(|a, b| a.name.cmp(&b.name));
+            for tool in sorted_tools {
                 all_tools.push(serde_json::json!({
                     "name": tool.name,
                     "description": tool.description,
@@ -354,18 +497,22 @@ impl AiClient {
         }
 
         // Add server-executed tools based on provider capabilities
-        let capabilities = ProviderCapabilities::for_provider(self.provider_id());
-        self.add_server_tools(&mut all_tools, &mut body, options, &capabilities);
+        self.add_server_tools(&mut all_tools, &mut body, options, &provider_caps);
 
-        // Add all tools to body with cache breakpoint on last one
+        // Add all tools to body — no manual cache breakpoint needed,
+        // auto-caching handles the last-block breakpoint automatically.
         if !all_tools.is_empty() {
-            if options.enable_caching {
-                if let Some(last) = all_tools.last_mut() {
-                    last["cache_control"] = serde_json::json!({"type": "ephemeral"});
-                }
-                debug!("Cache breakpoint added to last tool");
-            }
             body["tools"] = Value::Array(all_tools);
+        }
+
+        // Enable auto-caching at the request level.
+        // The API automatically places a cache breakpoint on the last cacheable
+        // block in the request, so we don't need to manually navigate JSON to
+        // find the last tool or last message. Block-level breakpoints on system
+        // prompt blocks above still work alongside auto-caching for the static prefix.
+        if use_caching {
+            body["cache_control"] = serde_json::json!({"type": "ephemeral"});
+            debug!("Auto-caching enabled at request level");
         }
 
         // Add reasoning/thinking config
@@ -472,9 +619,12 @@ impl AiClient {
             }
         }
 
-        // Add tools
+        // Add tools — sorted deterministically for stable prefix ordering.
+        // OpenAI uses automatic prefix caching; consistent tool order maximizes hits.
         if let Some(tools) = &options.tools {
-            let openai_tools = format_handler.convert_tools(tools);
+            let mut sorted: Vec<_> = tools.to_vec();
+            sorted.sort_by(|a, b| a.name.cmp(&b.name));
+            let openai_tools = format_handler.convert_tools(&sorted);
             if !openai_tools.is_empty() {
                 body["tools"] = serde_json::json!(openai_tools);
             }
@@ -722,8 +872,11 @@ impl AiClient {
             body["generationConfig"]["temperature"] = serde_json::json!(temp);
         }
 
+        // Sort tools deterministically — Gemini 2.5+ uses implicit prefix caching.
         if let Some(tools) = &options.tools {
-            let google_tools = format_handler.convert_tools(tools);
+            let mut sorted: Vec<_> = tools.to_vec();
+            sorted.sort_by(|a, b| a.name.cmp(&b.name));
+            let google_tools = format_handler.convert_tools(&sorted);
             if !google_tools.is_empty() {
                 body["tools"] = serde_json::json!([{
                     "functionDeclarations": google_tools
@@ -1183,11 +1336,22 @@ impl AiClient {
                 continue;
             }
 
-            // Regular message - extract text
-            let text = collect_message_text(&msg.content, "\n");
+            // Regular user messages preserve multimodal input blocks (text + images)
+            if role == "user" {
+                let user_content = build_codex_user_content(&msg.content);
+                if !user_content.is_empty() {
+                    input_messages.push(serde_json::json!({
+                        "type": "message",
+                        "role": "user",
+                        "content": user_content
+                    }));
+                }
+                continue;
+            }
 
+            // Non-user regular messages (assistant/tool): text-only fallback
+            let text = collect_message_text(&msg.content, "\n");
             if !text.is_empty() {
-                // Codex format: wrapped message with typed content
                 let content_type = if role == "assistant" {
                     "output_text"
                 } else {

@@ -58,15 +58,33 @@ impl SseStreamProcessor {
     }
 
     fn emit_usage(&self, usage: Usage, source: &str) {
-        info!(
-            "SSE Usage ({}): prompt={}, completion={}, total={}, cache_read={}, cache_created={}",
-            source,
-            usage.prompt_tokens,
-            usage.completion_tokens,
-            usage.total_tokens,
-            usage.cache_read_input_tokens,
-            usage.cache_creation_input_tokens
-        );
+        // Calculate cache hit rate as a percentage of total input tokens.
+        // This is the key metric Thariq recommends monitoring like uptime.
+        let total_input =
+            usage.prompt_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
+        let cache_hit_rate = if total_input > 0 {
+            (usage.cache_read_input_tokens as f64 / total_input as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        if usage.cache_read_input_tokens > 0 || usage.cache_creation_input_tokens > 0 {
+            info!(
+                "SSE Usage ({}): prompt={}, completion={}, total={}, cache_read={}, cache_created={}, cache_hit_rate={:.1}%",
+                source,
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.total_tokens,
+                usage.cache_read_input_tokens,
+                usage.cache_creation_input_tokens,
+                cache_hit_rate
+            );
+        } else {
+            info!(
+                "SSE Usage ({}): prompt={}, completion={}, total={}",
+                source, usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
+            );
+        }
         let _ = self.tx.send(StreamPart::Usage { usage });
     }
 

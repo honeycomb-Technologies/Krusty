@@ -3,10 +3,13 @@
 //! Core tools:
 //! - read: Read files
 //! - write: Create/overwrite files
-//! - edit: Edit specific lines
+//! - edit: Edit specific lines with fuzzy matching
+//! - multiedit: Multiple edits to one file
 //! - bash: Execute shell commands
 //! - grep: Search with ripgrep
 //! - glob: Find files by pattern
+//! - list: List directory contents
+//! - apply_patch: Multi-file patch application
 //! - processes: Manage background processes
 //! - explore: Spawn parallel sub-agents for deep codebase exploration
 //! - build: Spawn parallel Opus builder agents (The Kraken)
@@ -20,6 +23,7 @@
 //! - enter_plan_mode: Switch to plan mode (handled by UI)
 
 pub mod add_subtask;
+pub mod apply_patch;
 pub mod ask_user;
 pub mod bash;
 pub mod build;
@@ -27,6 +31,8 @@ pub mod edit;
 pub mod explore;
 pub mod glob;
 pub mod grep;
+pub mod list;
+pub mod multiedit;
 pub mod plan_mode;
 pub mod processes;
 pub mod read;
@@ -38,6 +44,7 @@ pub mod task_start;
 pub mod write;
 
 pub use add_subtask::AddSubtaskTool;
+pub use apply_patch::ApplyPatchTool;
 pub use ask_user::AskUserQuestionTool;
 pub use bash::BashTool;
 pub use build::BuildTool;
@@ -45,6 +52,8 @@ pub use edit::EditTool;
 pub use explore::ExploreTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
+pub use list::ListTool;
+pub use multiedit::MultiEditTool;
 pub use plan_mode::EnterPlanModeTool;
 pub use processes::ProcessesTool;
 pub use read::ReadTool;
@@ -66,9 +75,12 @@ pub async fn register_all_tools(registry: &ToolRegistry) {
     registry.register(Arc::new(ReadTool)).await;
     registry.register(Arc::new(WriteTool)).await;
     registry.register(Arc::new(EditTool)).await;
+    registry.register(Arc::new(MultiEditTool)).await;
     registry.register(Arc::new(BashTool)).await;
     registry.register(Arc::new(GrepTool)).await;
     registry.register(Arc::new(GlobTool)).await;
+    registry.register(Arc::new(ListTool)).await;
+    registry.register(Arc::new(ApplyPatchTool)).await;
     registry.register(Arc::new(ProcessesTool)).await;
     registry.register(Arc::new(SkillTool)).await;
     registry.register(Arc::new(AskUserQuestionTool)).await;
@@ -91,9 +103,12 @@ pub async fn register_acp_tools(registry: &ToolRegistry) {
     registry.register(Arc::new(ReadTool)).await;
     registry.register(Arc::new(WriteTool)).await;
     registry.register(Arc::new(EditTool)).await;
+    registry.register(Arc::new(MultiEditTool)).await;
     registry.register(Arc::new(BashTool)).await;
     registry.register(Arc::new(GrepTool)).await;
     registry.register(Arc::new(GlobTool)).await;
+    registry.register(Arc::new(ListTool)).await;
+    registry.register(Arc::new(ApplyPatchTool)).await;
     registry.register(Arc::new(ProcessesTool)).await;
 }
 

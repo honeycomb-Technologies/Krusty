@@ -1,7 +1,9 @@
 //! Agent system for Krusty
 //!
-//! Provides centralized event handling, state tracking, and control
-//! for the AI agent loop.
+//! ## Orchestrator (the canonical agentic loop)
+//! - `AgenticOrchestrator` - Unified loop: streaming, tools, plans, failure detection
+//! - `LoopEvent` / `LoopInput` - Event protocol between orchestrator and consumers
+//! - `OrchestratorConfig` / `OrchestratorServices` - Configuration and dependencies
 //!
 //! ## Core Components
 //! - `AgentEventBus` - Central event dispatcher
@@ -29,20 +31,32 @@ pub mod build_context;
 pub mod cache;
 pub mod cancellation;
 pub mod constants;
+pub mod context;
 pub mod event_bus;
 pub mod events;
+pub mod executor;
+pub mod failure;
 pub mod hooks;
+pub mod loop_events;
+pub mod orchestrator;
 pub mod pinch_context;
+pub mod plan_handler;
 pub mod state;
+pub mod stream;
 pub mod subagent;
 pub mod summarizer;
 pub mod user_hooks;
 
 pub use build_context::SharedBuildContext;
 pub use cancellation::AgentCancellation;
+pub use context::{
+    build_plan_context, build_project_context, build_skills_context, inject_context,
+};
 pub use event_bus::AgentEventBus;
 pub use events::{AgentEvent, InterruptReason};
 pub use hooks::{LoggingHook, PlanModeHook, SafetyHook};
+pub use loop_events::{LoopEvent, LoopInput, PlanTaskInfo};
+pub use orchestrator::{AgenticOrchestrator, OrchestratorConfig, OrchestratorServices};
 pub use pinch_context::{PinchContext, PinchContextInput};
 pub use state::{AgentConfig, AgentState};
 pub use summarizer::{generate_summary, SummarizationResult};

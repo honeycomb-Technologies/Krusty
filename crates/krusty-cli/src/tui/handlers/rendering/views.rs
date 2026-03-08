@@ -33,7 +33,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),            // Toolbar
-                Constraint::Length(15),           // Logo + crab area
+                Constraint::Length(24),           // Logo + crab area
                 Constraint::Min(8),               // Quick actions
                 Constraint::Length(input_height), // Input
                 Constraint::Length(1),            // Status bar
@@ -91,6 +91,8 @@ impl App {
         // ASCII logo with two colors
         let title_padding = " ".repeat(((inner_area.width as usize).saturating_sub(33)) / 2);
         let logo_text = vec![
+            Line::from(""),
+            Line::from(""),
             Line::from(vec![
                 Span::raw(&title_padding),
                 Span::styled(

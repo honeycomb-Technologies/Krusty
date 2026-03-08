@@ -91,8 +91,19 @@ async fn create_session(
     let session_manager = SessionManager::new(db);
 
     let title = req.title.as_deref().unwrap_or("New Session");
-    let session_id =
-        session_manager.create_session(title, req.model.as_deref(), req.working_dir.as_deref())?;
+    let target_branch = req.target_branch.as_deref().map(str::trim).and_then(|b| {
+        if b.is_empty() {
+            None
+        } else {
+            Some(b)
+        }
+    });
+    let session_id = session_manager.create_session_with_target_branch(
+        title,
+        req.model.as_deref(),
+        req.working_dir.as_deref(),
+        target_branch,
+    )?;
 
     let session = session_manager
         .get_session(&session_id)?
@@ -164,9 +175,15 @@ async fn update_session(
         return Err(AppError::NotFound(format!("Session {} not found", id)));
     }
 
-    if req.title.is_none() && req.working_dir.is_none() && req.mode.is_none() && req.model.is_none() {
+    if req.title.is_none()
+        && req.working_dir.is_none()
+        && req.mode.is_none()
+        && req.model.is_none()
+        && req.target_branch.is_none()
+    {
         return Err(AppError::BadRequest(
-            "At least one of title, working_dir, mode, or model must be provided".to_string(),
+            "At least one of title, working_dir, mode, model, or target_branch must be provided"
+                .to_string(),
         ));
     }
 
@@ -189,12 +206,18 @@ async fn update_session(
     }
 
     if let Some(model) = req.model.as_deref() {
-        let normalized = if model.is_empty() {
+        let normalized = if model.is_empty() { None } else { Some(model) };
+        session_manager.update_session_model(&id, normalized)?;
+    }
+
+    if let Some(target_branch) = req.target_branch.as_deref() {
+        let normalized = target_branch.trim();
+        let normalized = if normalized.is_empty() {
             None
         } else {
-            Some(model)
+            Some(normalized)
         };
-        session_manager.update_session_model(&id, normalized)?;
+        session_manager.update_session_target_branch(&id, normalized)?;
     }
 
     let session = session_manager
@@ -310,9 +333,10 @@ async fn pinch_session(
     }
 
     // Generate summary using AI if configured, otherwise use defaults.
-    let summary_result = if let Some(ai_client) = &state.ai_client {
+    let summary_model = source_session.model.as_deref();
+    let summary_result = if let Some(ai_client) = state.resolve_ai_client(summary_model).await {
         generate_summary(
-            ai_client,
+            &ai_client,
             &messages,
             req.preservation_hints.as_deref(),
             &[],  // ranked files
@@ -356,12 +380,15 @@ async fn pinch_session(
         &pinch_ctx,
         model_for_child,
         Some(working_dir_for_child),
+        source_session.target_branch.as_deref(),
     )?;
 
     // Inject the pinch context as first message in new session
-    // Save as "system" message (matches TUI behavior) with raw string format
-    let system_msg = pinch_ctx.to_system_message();
-    session_manager.save_message(&new_session_id, "system", &system_msg)?;
+    // Save as "system" message (matches TUI behavior) as proper JSON array
+    let system_msg_text = pinch_ctx.to_system_message();
+    let system_msg_json =
+        serde_json::json!([{ "type": "text", "text": system_msg_text }]).to_string();
+    session_manager.save_message(&new_session_id, "system", &system_msg_json)?;
 
     // Get the new session info
     let new_session = session_manager

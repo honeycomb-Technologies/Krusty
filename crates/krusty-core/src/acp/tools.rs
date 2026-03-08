@@ -34,9 +34,11 @@ pub fn tool_name_to_kind(tool_name: &str) -> ToolKind {
         // Read operations
         "read" | "Read" | "cat" => ToolKind::Read,
         // Edit operations
-        "edit" | "Edit" | "write" | "Write" | "patch" => ToolKind::Edit,
+        "edit" | "Edit" | "write" | "Write" | "patch" | "apply_patch" | "multiedit"
+        | "multi_edit" => ToolKind::Edit,
         // Search operations
-        "grep" | "Grep" | "glob" | "Glob" | "find" | "search" | "ripgrep" => ToolKind::Search,
+        "grep" | "Grep" | "glob" | "Glob" | "find" | "search" | "ripgrep" | "list" | "ls"
+        | "list_dir" => ToolKind::Search,
         // Execute operations
         "bash" | "Bash" | "shell" | "exec" | "run" | "terminal" => ToolKind::Execute,
         // Fetch operations
@@ -74,8 +76,8 @@ pub fn extract_locations(tool_name: &str, input: &Value) -> Vec<ToolCallLocation
         }
     }
 
-    // For grep/glob, extract the search path
-    if matches!(tool_name, "grep" | "Grep" | "glob" | "Glob") {
+    // For grep/glob/list, extract the search path
+    if matches!(tool_name, "grep" | "Grep" | "glob" | "Glob" | "list") {
         if let Some(path_str) = input.get("directory").and_then(|v| v.as_str()) {
             locations.push(ToolCallLocation::new(PathBuf::from(path_str)));
         }
@@ -164,6 +166,47 @@ pub fn create_tool_title(tool_name: &str, input: &Value) -> String {
                 format!("Searching web: {}", query)
             } else {
                 "Searching web".to_string()
+            }
+        }
+        "list" => {
+            if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
+                let dirname = Path::new(path)
+                    .file_name()
+                    .map(|s| s.to_string_lossy())
+                    .unwrap_or_else(|| path.into());
+                format!("Listing {}", dirname)
+            } else {
+                "Listing directory".to_string()
+            }
+        }
+        "apply_patch" => {
+            if let Some(patch) = input.get("patch").and_then(|v| v.as_str()) {
+                let file_count = patch.matches("*** Update File:").count()
+                    + patch.matches("*** Add File:").count()
+                    + patch.matches("*** Delete File:").count();
+                if file_count > 0 {
+                    format!("Patching {} files", file_count)
+                } else {
+                    "Applying patch".to_string()
+                }
+            } else {
+                "Applying patch".to_string()
+            }
+        }
+        "multiedit" | "multi_edit" => {
+            if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
+                let filename = Path::new(path)
+                    .file_name()
+                    .map(|s| s.to_string_lossy())
+                    .unwrap_or_else(|| path.into());
+                let edit_count = input
+                    .get("edits")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                format!("Editing {} ({} edits)", filename, edit_count)
+            } else {
+                "Multi-editing file".to_string()
             }
         }
         _ => format!("Running {}", tool_name),

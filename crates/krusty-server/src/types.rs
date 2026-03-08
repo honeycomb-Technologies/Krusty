@@ -2,7 +2,7 @@
 
 use krusty_core::storage::{SessionInfo, WorkMode};
 use krusty_core::tools::registry::PermissionMode;
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize};
 
 // ============================================================================
 // Session Types
@@ -13,6 +13,7 @@ pub struct CreateSessionRequest {
     pub title: Option<String>,
     pub model: Option<String>,
     pub working_dir: Option<String>,
+    pub target_branch: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -21,6 +22,7 @@ pub struct UpdateSessionRequest {
     pub working_dir: Option<String>,
     pub mode: Option<WorkMode>,
     pub model: Option<String>,
+    pub target_branch: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -53,6 +55,7 @@ pub struct SessionResponse {
     pub working_dir: Option<String>,
     pub mode: WorkMode,
     pub model: Option<String>,
+    pub target_branch: Option<String>,
 }
 
 impl From<SessionInfo> for SessionResponse {
@@ -66,6 +69,7 @@ impl From<SessionInfo> for SessionResponse {
             working_dir: s.working_dir,
             mode: s.work_mode,
             model: s.model,
+            target_branch: s.target_branch,
         }
     }
 }
@@ -103,19 +107,71 @@ pub struct MessageResponse {
 
 /// Content block from PWA (text or image)
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum ContentBlock {
     Text { text: String },
-    Image {
-        source: ImageSource,
-    },
+    Image { source: ImageSource },
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum ImageSource {
     Base64 { media_type: String, data: String },
     Url { url: String },
+}
+
+/// Extended thinking level (accepts legacy bool and newer string levels from clients).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThinkingLevel {
+    #[default]
+    Off,
+    Low,
+    Medium,
+    High,
+    XHigh,
+}
+
+impl ThinkingLevel {
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ThinkingLevelInput {
+    Bool(bool),
+    String(String),
+}
+
+fn deserialize_thinking_level<'de, D>(deserializer: D) -> Result<ThinkingLevel, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let input = Option::<ThinkingLevelInput>::deserialize(deserializer)?;
+    match input {
+        None => Ok(ThinkingLevel::Off),
+        Some(ThinkingLevelInput::Bool(enabled)) => Ok(if enabled {
+            ThinkingLevel::High
+        } else {
+            ThinkingLevel::Off
+        }),
+        Some(ThinkingLevelInput::String(raw)) => {
+            let value = raw.trim().to_ascii_lowercase();
+            match value.as_str() {
+                "" | "off" | "false" | "disabled" | "none" => Ok(ThinkingLevel::Off),
+                "on" | "true" | "enabled" => Ok(ThinkingLevel::High),
+                "low" => Ok(ThinkingLevel::Low),
+                "medium" => Ok(ThinkingLevel::Medium),
+                "high" => Ok(ThinkingLevel::High),
+                "xhigh" | "x-high" | "extra-high" => Ok(ThinkingLevel::XHigh),
+                _ => Err(de::Error::custom(format!(
+                    "invalid thinking_enabled value '{}'; expected bool or one of off/low/medium/high/xhigh",
+                    raw
+                ))),
+            }
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -130,13 +186,60 @@ pub struct ChatRequest {
     /// Model override
     pub model: Option<String>,
     /// Enable extended thinking
-    #[serde(default)]
-    pub thinking_enabled: bool,
+    #[serde(default, deserialize_with = "deserialize_thinking_level")]
+    pub thinking_enabled: ThinkingLevel,
     /// Optional mode override for the session before starting this turn
     pub mode: Option<WorkMode>,
     /// Permission mode for tool execution
     #[serde(default)]
     pub permission_mode: PermissionMode,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChatRequest, ThinkingLevel};
+    use serde_json::json;
+
+    #[test]
+    fn chat_request_accepts_legacy_bool_thinking() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "message": "hello",
+            "thinking_enabled": true
+        }))
+        .expect("request should deserialize");
+        assert_eq!(req.thinking_enabled, ThinkingLevel::High);
+    }
+
+    #[test]
+    fn chat_request_accepts_string_thinking_level() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "message": "hello",
+            "thinking_enabled": "medium"
+        }))
+        .expect("request should deserialize");
+        assert_eq!(req.thinking_enabled, ThinkingLevel::Medium);
+    }
+
+    #[test]
+    fn chat_request_defaults_thinking_to_off() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "message": "hello"
+        }))
+        .expect("request should deserialize");
+        assert_eq!(req.thinking_enabled, ThinkingLevel::Off);
+    }
+
+    #[test]
+    fn chat_request_rejects_invalid_thinking_value() {
+        let result = serde_json::from_value::<ChatRequest>(json!({
+            "message": "hello",
+            "thinking_enabled": "turbo"
+        }));
+        match result {
+            Ok(_) => panic!("request should fail"),
+            Err(err) => assert!(err.to_string().contains("invalid thinking_enabled value")),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -432,4 +535,114 @@ pub enum AgenticEvent {
     ToolDenied { id: String },
     /// Error occurred
     Error { error: String },
+}
+
+impl From<krusty_core::agent::LoopEvent> for AgenticEvent {
+    fn from(event: krusty_core::agent::LoopEvent) -> Self {
+        use krusty_core::agent::LoopEvent;
+        match event {
+            LoopEvent::TextDelta { delta } => Self::TextDelta { delta },
+            LoopEvent::TextDeltaWithCitations { delta, .. } => Self::TextDelta { delta },
+            LoopEvent::ThinkingDelta { thinking } => Self::ThinkingDelta { thinking },
+            LoopEvent::ThinkingComplete { .. } => {
+                // Server doesn't need thinking lifecycle events
+                Self::ThinkingDelta {
+                    thinking: String::new(),
+                }
+            }
+            LoopEvent::ToolCallStart { id, name } => Self::ToolCallStart { id, name },
+            LoopEvent::ToolCallComplete {
+                id,
+                name,
+                arguments,
+            } => Self::ToolCallComplete {
+                id,
+                name,
+                arguments,
+            },
+            LoopEvent::ToolExecuting { id, name } => Self::ToolExecuting { id, name },
+            LoopEvent::ToolOutputDelta { id, delta } => Self::ToolOutputDelta { id, delta },
+            LoopEvent::ToolResult {
+                id,
+                output,
+                is_error,
+            } => Self::ToolResult {
+                id,
+                output,
+                is_error,
+            },
+            LoopEvent::AwaitingInput {
+                tool_call_id,
+                tool_name,
+            } => Self::AwaitingInput {
+                tool_call_id,
+                tool_name,
+            },
+            LoopEvent::ToolApprovalRequired {
+                id,
+                name,
+                arguments,
+            } => Self::ToolApprovalRequired {
+                id,
+                name,
+                arguments,
+            },
+            LoopEvent::ToolApproved { id } => Self::ToolApproved { id },
+            LoopEvent::ToolDenied { id } => Self::ToolDenied { id },
+            // Server-side tool events — pass through as tool execution events
+            LoopEvent::ServerToolStart { id, name } => Self::ToolExecuting { id, name },
+            LoopEvent::ServerToolComplete { id, name } => Self::ToolResult {
+                id,
+                output: format!("{} completed", name),
+                is_error: false,
+            },
+            LoopEvent::WebSearchResults { .. } => {
+                // Web search results are consumed by the AI, not forwarded to SSE
+                Self::TextDelta {
+                    delta: String::new(),
+                }
+            }
+            LoopEvent::WebFetchResult { .. } => Self::TextDelta {
+                delta: String::new(),
+            },
+            LoopEvent::ServerToolError {
+                tool_use_id,
+                error_code,
+            } => Self::ToolResult {
+                id: tool_use_id,
+                output: format!("Server tool error: {}", error_code),
+                is_error: true,
+            },
+            LoopEvent::ModeChange { mode, reason } => Self::ModeChange { mode, reason },
+            LoopEvent::PlanUpdate { tasks } => Self::PlanUpdate {
+                items: tasks
+                    .into_iter()
+                    .map(|t| PlanItem {
+                        content: t.description,
+                        completed: t.completed,
+                    })
+                    .collect(),
+            },
+            LoopEvent::PlanComplete {
+                tool_call_id,
+                title,
+                task_count,
+            } => Self::PlanComplete {
+                tool_call_id,
+                title,
+                task_count,
+            },
+            LoopEvent::TurnComplete { turn, has_more } => Self::TurnComplete { turn, has_more },
+            LoopEvent::Usage {
+                prompt_tokens,
+                completion_tokens,
+            } => Self::Usage {
+                prompt_tokens,
+                completion_tokens,
+            },
+            LoopEvent::TitleGenerated { title } => Self::TitleUpdate { title },
+            LoopEvent::Finished { session_id } => Self::Finish { session_id },
+            LoopEvent::Error { error } => Self::Error { error },
+        }
+    }
 }

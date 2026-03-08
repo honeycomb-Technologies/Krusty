@@ -33,6 +33,8 @@ curl -fsSL https://raw.githubusercontent.com/honeycomb-Technologies/Krusty/main/
 Or from source:
 
 ```bash
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libudev-dev
 git clone https://github.com/honeycomb-Technologies/Krusty.git
 cd Krusty
 cargo build --release
@@ -50,18 +52,25 @@ cargo build --release
 
 `krusty serve` bundles everything — API server, agent runtime, and PWA frontend — into a single process. On first run it walks you through provider and API key setup. If Tailscale is installed, it auto-configures remote HTTPS access.
 
+If `krusty serve` reports Tailscale permission denied, run this once:
+
+```bash
+sudo tailscale set --operator=$USER
+```
+
 ## Supported Providers
 
-Configure providers via `/auth` in the TUI or on first run of `krusty serve`.
+Configure providers via `/auth` in the TUI or on first run of `krusty serve`. Anthropic and OpenAI support OAuth browser login in addition to API keys.
 
 | Provider | Models |
 |----------|--------|
 | **MiniMax** | MiniMax M2.5 |
-| **OpenAI** | GPT 5.3 Codex |
-| **OpenRouter** | 100+ Frontier and OSS models |
+| **Anthropic** | Claude Opus 4.6, Claude Haiku 4.5 |
+| **OpenAI** | GPT-5.3 Codex |
+| **OpenRouter** | 100+ models (Claude, GPT, Gemini, Llama, DeepSeek, Qwen) |
 | **Z.ai** | GLM-5 |
 
-Switch providers and models anytime with `/model` or `Ctrl+M`.
+Switch providers and models anytime with `/model`.
 
 ## TUI Controls
 
@@ -71,21 +80,15 @@ Switch providers and models anytime with `/model` or `Ctrl+M`.
 |-----|--------|
 | `Enter` | Send message |
 | `Shift+Enter` | New line in input |
-| `Ctrl+C` | Cancel current generation |
-| `Ctrl+L` | Clear screen |
-| `Ctrl+M` | Open model selector |
-| `Ctrl+N` | New session |
-| `Ctrl+K` | Open command palette |
+| `Esc` | Interrupt AI response / Close popup |
+| `Ctrl+Q` | Quit application |
 | `Ctrl+G` | Toggle BUILD/PLAN mode |
 | `Ctrl+T` | Toggle plan sidebar |
-| `Ctrl+P` | View background processes |
-| `Ctrl+Q` | Quit application |
-| `Ctrl+V` | Paste text or image |
-| `Ctrl+W` | Delete word |
-| `Tab` | Toggle extended thinking |
-| `Esc` | Close popup / Cancel |
+| `Ctrl+B` | Open process list |
+| `Ctrl+P` | Toggle plugin window |
+| `Ctrl+F` | Toggle fuzzy/tree file search mode |
+| `Tab` | Cycle thinking level (Off/Low/Medium/High/XHigh) |
 | `@` | Search and attach files |
-| `↑/↓` | Scroll / Navigate history |
 | `PgUp/PgDn` | Scroll messages |
 
 ### Slash Commands
@@ -100,36 +103,36 @@ Switch providers and models anytime with `/model` or `Ctrl+M`.
 | `/clear` | Clear current conversation |
 | `/pinch` | Compress context to new session |
 | `/plan` | View and manage active plan |
-| `/lsp` | Browse and install language servers |
 | `/mcp` | Manage MCP servers |
 | `/skills` | Browse available skills |
+| `/plugins` | Manage plugins |
+| `/hooks` | Manage pre/post-tool hooks |
+| `/permissions` | Switch between Supervised and Autonomous mode |
 | `/ps` | View background processes |
-| `/terminal` | Open interactive terminal |
+| `/terminal` | Open interactive terminal (aliases: `/term`, `/shell`) |
 | `/init` | Generate KRAB.md project context file |
+| `/update` | Check for updates |
 | `/cmd` | Show command help popup |
 
 ### Mouse
 
-- Click to select text
+- Click and drag to select text
 - Scroll wheel to navigate
 - Click links to open in browser
-- Click code blocks to copy
 
 ## Features
 
 ### Multi-Provider AI
 Configure multiple providers and switch between them seamlessly. Your conversation continues even when switching models.
 
-### Language Server Protocol (LSP)
-Install language servers from Zed's extension marketplace for 100+ languages. Use `/lsp` in the TUI to browse and install interactively.
-
 ### Tool Execution
-- **Read/Write/Edit** - File operations with syntax highlighting
+- **Read/Write/Edit/MultiEdit** - File operations with syntax highlighting
 - **Bash** - Run shell commands with streaming output
-- **Glob/Grep** - Search files and content (ripgrep-powered)
+- **Glob/Grep/List** - Search files and content (ripgrep-powered)
 - **Explore** - Spawn parallel sub-agents for codebase analysis
-- **Build** - Parallel task execution for complex operations
-- **Web Search/Fetch** - Search and fetch web content (Anthropic models)
+- **Build** - Spawn parallel builder agents for complex operations
+- **Apply Patch** - Multi-file patch application
+- **Ask User** - Interactive prompts with multi-choice or custom input
 
 ### Plan/Build Mode
 Toggle between structured planning and execution modes with `Ctrl+G`:
@@ -145,7 +148,19 @@ Open an interactive terminal session with `/terminal` for direct shell access wi
 Use `/pinch` to compress long conversations into a new session with summarized context, preserving essential information while reducing token usage.
 
 ### Skills
-Modular instruction sets for domain-specific tasks. Add custom skills in `~/.krusty/skills/` or project `.krusty/skills/`.
+Modular instruction sets for domain-specific tasks. Add custom skills in `~/.krusty/skills/` or project `.krusty/skills/`. Browse with `/skills`.
+
+### Plugins
+Extensible plugin system with install, enable/disable, and reload support. Manage with `/plugins`.
+
+### Hooks
+Pre and post-tool execution hooks for custom workflows. Configure with `/hooks`.
+
+### Permission Modes
+- **Supervised** (default) - Requires approval for write operations
+- **Autonomous** - Auto-executes all tools
+
+Switch with `/permissions`.
 
 ### Sessions
 All conversations are saved locally in SQLite. Resume any session with `/load` (filtered by current directory).
@@ -154,7 +169,7 @@ All conversations are saved locally in SQLite. Resume any session with `/load` (
 31 built-in themes including krusty (default), tokyo_night, dracula, catppuccin_mocha, gruvbox_dark, nord, one_dark, solarized_dark, synthwave_84, monokai, rosepine, and more. Switch with `/theme`.
 
 ### Auto-Updates
-Krusty checks for updates and can self-update.
+Krusty checks for updates and can self-update via `/update`.
 
 ## Configuration
 

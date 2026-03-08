@@ -7,14 +7,21 @@
 
 pub mod browser_flow;
 pub mod device_flow;
+pub mod hosted_browser_flow;
+pub mod openai_device_flow;
 pub mod pkce;
 pub mod providers;
 pub mod storage;
 pub mod types;
 
 // Re-exports for convenience
-pub use browser_flow::{open_browser, BrowserOAuthFlow, PasteCodeOAuthFlow, DEFAULT_CALLBACK_PORT};
+pub use browser_flow::{
+    open_browser, run_callback_server, BrowserOAuthFlow, CallbackResult, PasteCodeOAuthFlow,
+    DEFAULT_CALLBACK_PORT,
+};
 pub use device_flow::{DeviceCodeFlow, DeviceCodeResponse};
+pub use hosted_browser_flow::HostedBrowserOAuthFlow;
+pub use openai_device_flow::{OpenAIDeviceAuthFlow, OpenAIDeviceCodeResponse};
 pub use pkce::{PkceChallenge, PkceVerifier};
 pub use providers::{anthropic_oauth_config, openai_oauth_config};
 pub use storage::OAuthTokenStore;

@@ -15,9 +15,8 @@
 <div class="w-full">
 	<button
 		onclick={() => (isExpanded = !isExpanded)}
-		class="flex w-full items-center gap-2 rounded-xl border border-purple-500/30 bg-purple-500/10
-			px-3 py-2 text-left text-sm text-purple-300 transition-colors
-			hover:border-purple-500/50 hover:bg-purple-500/15"
+		class="flex w-full items-center gap-2 px-1 py-1.5 text-left text-sm text-purple-300/80
+			transition-colors hover:text-purple-300"
 	>
 		<Brain class="h-4 w-4 shrink-0" />
 		{#if isStreaming}
@@ -38,7 +37,7 @@
 	</button>
 
 	{#if isExpanded && content}
-		<div class="mt-2 rounded-xl border border-purple-500/20 bg-purple-500/5 p-3">
+		<div class="px-1 pt-1 pb-2">
 			<pre class="whitespace-pre-wrap font-mono text-xs text-muted-foreground leading-relaxed">{content}</pre>
 		</div>
 	{/if}

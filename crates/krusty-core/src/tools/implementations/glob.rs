@@ -100,13 +100,10 @@ impl Tool for GlobTool {
             .map(|(path, _)| path.display().to_string())
             .collect();
 
-        ToolResult::success(
-            json!({
-                "matches": matches,
-                "count": files.len(),
-                "search_path": base_path.display().to_string()
-            })
-            .to_string(),
-        )
+        ToolResult::success_data(json!({
+            "matches": matches,
+            "count": files.len(),
+            "search_path": base_path.display().to_string()
+        }))
     }
 }

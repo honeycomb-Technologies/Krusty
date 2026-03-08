@@ -47,9 +47,70 @@ interface SessionState {
 	isThinking: boolean;
 	thinkingContent: string;
 	thinkingEnabled: boolean;
+	thinkingLevel: ThinkingLevel;
 	tokenCount: number;
 	error: string | null;
 	model: string | null;
+}
+
+// Thinking level enum - matches TUI behavior
+export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high' | 'xhigh';
+
+export function isThinkingEnabled(level: ThinkingLevel): boolean {
+	return level !== 'off';
+}
+
+export function cycleThinkingLevel(
+	current: ThinkingLevel,
+	model: string | null
+): ThinkingLevel {
+	const modelLower = (model ?? '').toLowerCase();
+	const isCodex = modelLower.includes('codex');
+	const isOpus = modelLower.includes('opus-4-6') || modelLower.includes('opus 4.6');
+
+	// Codex: full cycle (off -> low -> medium -> high -> xhigh -> off)
+	if (isCodex) {
+		switch (current) {
+			case 'off': return 'low';
+			case 'low': return 'medium';
+			case 'medium': return 'high';
+			case 'high': return 'xhigh';
+			case 'xhigh': return 'off';
+		}
+	}
+
+	// Anthropic Opus 4.6: no xhigh (off -> low -> medium -> high -> off)
+	if (isOpus) {
+		switch (current) {
+			case 'off': return 'low';
+			case 'low': return 'medium';
+			case 'medium': return 'high';
+			case 'high':
+			case 'xhigh': return 'off';
+		}
+	}
+
+	// Other models: basic toggle (off <-> medium)
+	if (current === 'off') {
+		return 'medium';
+	}
+	return 'off';
+}
+
+export function thinkingLevelToApiValue(level: ThinkingLevel): string | undefined {
+	if (level === 'off') return undefined;
+	// Map our levels to API values
+	switch (level) {
+		case 'low': return 'low';
+		case 'medium': return 'medium';
+		case 'high': return 'high';
+		case 'xhigh': return 'high'; // API might not support xhigh, map to high
+	}
+	return undefined;
+}
+
+export function thinkingLevelLabel(level: ThinkingLevel): string {
+	return level;
 }
 
 function toErrorMessage(err: unknown, fallback = 'Unknown error'): string {
@@ -76,6 +137,7 @@ const initialState: SessionState = {
 	isThinking: false,
 	thinkingContent: '',
 	thinkingEnabled: true,
+	thinkingLevel: 'medium',
 	tokenCount: 0,
 	error: null,
 	model: null
@@ -347,7 +409,8 @@ export async function sendMessage(content: string, attachments: Attachment[] = [
 				session_id: state.sessionId ?? undefined,
 				message: content,
 				content: contentBlocks,
-				thinking_enabled: state.thinkingEnabled,
+				model: state.model ?? undefined,
+				thinking_enabled: thinkingLevelToApiValue(state.thinkingLevel),
 				permission_mode: state.permissionMode,
 				mode: state.mode
 			},
@@ -536,10 +599,14 @@ export function initSession(sessionId: string, title: string) {
 }
 
 export function toggleThinking() {
-	sessionStore.update((s) => ({
-		...s,
-		thinkingEnabled: !s.thinkingEnabled
-	}));
+	sessionStore.update((s) => {
+		const newLevel = cycleThinkingLevel(s.thinkingLevel, s.model);
+		return {
+			...s,
+			thinkingEnabled: isThinkingEnabled(newLevel),
+			thinkingLevel: newLevel
+		};
+	});
 }
 
 export function setTitle(title: string) {

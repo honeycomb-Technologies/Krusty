@@ -10,7 +10,7 @@ use std::io::{self, Write};
 use krusty_core::ai::providers::ProviderId;
 use krusty_core::server_instance;
 use krusty_core::storage::credentials::CredentialStore;
-use krusty_core::tailscale;
+use krusty_core::tailscale::{self, TailscaleServeSetup};
 
 /// Run the serve command.
 pub async fn run(port: u16) -> Result<()> {
@@ -22,9 +22,7 @@ pub async fn run(port: u16) -> Result<()> {
             instance.pid
         );
         // Don't start a new server — just print the URLs and exit
-        if let Some(url) = tailscale::setup_tailscale_serve(instance.port) {
-            println!("  Tailscale: {}", url);
-        }
+        print_tailscale_status(tailscale::setup_tailscale_serve(instance.port));
         return Ok(());
     }
 
@@ -47,14 +45,7 @@ pub async fn run(port: u16) -> Result<()> {
     print_banner(port, true);
 
     // Setup Tailscale serve (non-blocking, best-effort)
-    if let Some(url) = tailscale::setup_tailscale_serve(port) {
-        println!("  Tailscale: {}\n", url);
-    } else if !tailscale::is_installed() {
-        println!("  Tip: Install Tailscale to access Krusty from any device.");
-        println!("       https://tailscale.com/download\n");
-    } else {
-        println!();
-    }
+    print_tailscale_status(tailscale::setup_tailscale_serve(port));
 
     // Initialize tracing for server mode (stdout, not file)
     tracing_subscriber::fmt()
@@ -84,6 +75,31 @@ pub async fn run(port: u16) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn print_tailscale_status(setup: TailscaleServeSetup) {
+    match setup {
+        TailscaleServeSetup::Configured { url } => {
+            println!("  Tailscale: {}\n", url);
+        }
+        TailscaleServeSetup::PermissionDenied { url, detail } => {
+            println!("  Tailscale URL: {}", url);
+            println!("  Tailscale setup skipped: permission denied for `tailscale serve`.");
+            println!("  Fix once: sudo tailscale set --operator=$USER");
+            println!("  Then rerun: krusty serve");
+            println!("  Details: {}\n", detail);
+        }
+        TailscaleServeSetup::NotInstalled => {
+            println!("  Tip: Install Tailscale to access Krusty from any device.");
+            println!("       https://tailscale.com/download\n");
+        }
+        TailscaleServeSetup::Offline => {
+            println!("  Tailscale installed, but this device is offline.\n");
+        }
+        TailscaleServeSetup::Failed { detail } => {
+            println!("  Tailscale setup failed: {}\n", detail);
+        }
+    }
 }
 
 fn print_banner(port: u16, starting: bool) {

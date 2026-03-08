@@ -1,8 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 	import {
-		Laptop,
-		Globe,
 		RefreshCw,
 		Pin,
 		PinOff,
@@ -14,7 +12,9 @@
 		ChevronRight,
 		RotateCw,
 		X,
-		ArrowRight
+		ArrowRight,
+		Plus,
+		Ellipsis
 	} from 'lucide-svelte';
 
 	import { apiClient, getApiUrl, type PortEntry, type PreviewSettings } from '$api/client';
@@ -47,6 +47,8 @@
 	let previewTabs = $state<PreviewTab[]>([]);
 	let activeTabId = $state<string | null>(null);
 	let previewAddress = $state('');
+	let showNewTab = $state(false);
+	let tabMenuOpen = $state<string | null>(null);
 
 	const previewFrames = new Map<string, HTMLIFrameElement>();
 
@@ -304,6 +306,7 @@
 		const existing = previewTabs.find((tab) => tab.port === port.port);
 		if (existing) {
 			setPreviewState(previewTabs, existing.id);
+			showNewTab = false;
 			return;
 		}
 
@@ -318,6 +321,28 @@
 			error: null
 		};
 		setPreviewState([...previewTabs, newTab], newTab.id);
+		showNewTab = false;
+	}
+
+	function openNewTabPage() {
+		showNewTab = true;
+		activeTabId = null;
+		syncPreviewAddress();
+	}
+
+	function openTabExternal(tabId: string) {
+		const tab = previewTabs.find((t) => t.id === tabId);
+		if (!tab) return;
+		const url = tab.history[tab.historyIndex];
+		window.open(url, '_blank', 'noopener,noreferrer');
+	}
+
+	function handleWindowClick(e: PointerEvent) {
+		if (tabMenuOpen === null) return;
+		const target = e.target as HTMLElement;
+		if (!target.closest('[data-tab-menu]')) {
+			tabMenuOpen = null;
+		}
 	}
 
 	function setActiveTab(tabId: string) {
@@ -542,288 +567,281 @@
 	}
 </script>
 
-<div class="flex h-full flex-col bg-background">
-	<div class="flex items-center gap-2 border-b border-border bg-card px-4 py-2">
-		<Laptop class="h-4 w-4 text-muted-foreground" />
-		<span class="text-sm font-medium">Port Forwarding</span>
-		<div class="flex-1"></div>
-		<button
-			onclick={() => loadPorts(true)}
-			class="rounded-lg bg-muted p-2 text-muted-foreground hover:text-foreground"
-			disabled={refreshing}
-			title="Refresh previews"
-		>
-			<RefreshCw class="h-4 w-4 {refreshing ? 'animate-spin' : ''}" />
-		</button>
-	</div>
-
-	<div class="flex-1 min-h-0 p-4 md:p-6">
-		{#if loading}
-			<div class="flex h-full items-center justify-center text-muted-foreground">
-				<RefreshCw class="h-5 w-5 animate-spin" />
-			</div>
-		{:else if settings && !settings.enabled}
-			<div class="mx-auto max-w-xl rounded-xl border border-border bg-card p-5 text-center">
+<div class="flex h-full flex-col bg-background" onpointerdown={handleWindowClick} role="presentation">
+	{#if loading}
+		<div class="flex h-full items-center justify-center text-muted-foreground">
+			<RefreshCw class="h-5 w-5 animate-spin" />
+		</div>
+	{:else if settings && !settings.enabled}
+		<div class="flex h-full items-center justify-center p-6">
+			<div class="max-w-xl rounded-xl border border-border bg-card p-5 text-center">
 				<div class="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-					<Globe class="h-6 w-6 text-muted-foreground" />
+					<AlertCircle class="h-6 w-6 text-muted-foreground" />
 				</div>
 				<h2 class="text-lg font-semibold">Preview Forwarding Disabled</h2>
 				<p class="mt-2 text-sm text-muted-foreground">
-					Enable preview forwarding in Menu → Settings → Preview & Port Forwarding.
+					Enable preview forwarding in Menu &rarr; Settings &rarr; Preview &amp; Port Forwarding.
 				</p>
 			</div>
-		{:else}
-			<div class="flex h-full min-h-0 flex-col gap-4">
-				{#if error}
-					<div class="flex items-start gap-2 rounded-lg bg-destructive/10 p-3 text-sm text-destructive">
-						<AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
-						<span>{error}</span>
-					</div>
-				{/if}
+		</div>
+	{:else}
+		{#if error}
+			<div class="flex items-start gap-2 border-b border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+				<AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
+				<span class="flex-1">{error}</span>
+				<button onclick={() => (error = null)} class="shrink-0 p-0.5 hover:opacity-70">
+					<X class="h-3.5 w-3.5" />
+				</button>
+			</div>
+		{/if}
 
-				{#if discoveryWarning}
-					<div class="flex items-start gap-2 rounded-lg bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-400">
-						<AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
-						<span>{discoveryWarning}</span>
-					</div>
-				{/if}
+		{#if discoveryWarning}
+			<div class="flex items-start gap-2 border-b border-amber-500/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
+				<AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
+				<span class="flex-1">{discoveryWarning}</span>
+			</div>
+		{/if}
 
-				<div class="grid min-h-0 flex-1 gap-4 xl:grid-cols-[360px_minmax(0,1fr)]">
-					<section class="min-h-0 rounded-xl border border-border bg-card">
-						<div class="border-b border-border px-4 py-3">
-							<div class="text-sm font-medium">Detected Ports</div>
-							<div class="mt-1 text-xs text-muted-foreground">
-								{ports.filter((p) => p.active).length} active · {ports.length} visible
+		<!-- Tab Bar -->
+		<div class="flex items-center gap-1 border-b border-border bg-card px-2 py-1.5">
+			<div class="flex min-w-0 flex-1 gap-1 overflow-x-auto">
+				{#each previewTabs as tab}
+					<div class="relative shrink-0" data-tab-menu>
+						<div
+							class="inline-flex items-center rounded-md text-xs transition-colors {tab.id === activeTabId && !showNewTab
+								? 'bg-primary/10 text-primary'
+								: 'text-muted-foreground hover:bg-muted hover:text-foreground'}"
+						>
+							<button
+								class="inline-flex items-center gap-1 py-1.5 pl-2.5 pr-1"
+								onclick={() => {
+									setActiveTab(tab.id);
+									showNewTab = false;
+								}}
+							>
+								<span class="max-w-[120px] truncate">{tab.title}</span>
+								<span class="font-mono opacity-60">:{tab.port}</span>
+							</button>
+							<button
+								onclick={() => (tabMenuOpen = tabMenuOpen === tab.id ? null : tab.id)}
+								class="rounded p-1 hover:bg-black/5 dark:hover:bg-white/10"
+								aria-label="Tab options for {tab.title}"
+							>
+								<Ellipsis class="h-3.5 w-3.5" />
+							</button>
+							<button
+								onclick={() => closeTab(tab.id)}
+								class="rounded p-1 hover:bg-black/5 dark:hover:bg-white/10"
+								aria-label="Close {tab.title}"
+							>
+								<X class="h-3 w-3" />
+							</button>
+						</div>
+
+						<!-- Tab Dropdown Menu -->
+						{#if tabMenuOpen === tab.id}
+							<div class="absolute left-0 top-full z-50 mt-1 min-w-[160px] rounded-lg border border-border bg-card py-1 shadow-lg">
+								{#if findPort(tab.port)}
+									<button
+										class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-muted"
+										disabled={mutatingPort === tab.port}
+										onclick={() => {
+											const p = findPort(tab.port);
+											if (p) togglePin(p);
+											tabMenuOpen = null;
+										}}
+									>
+										{#if findPort(tab.port)?.pinned}
+											<PinOff class="h-3.5 w-3.5" />
+											Unpin
+										{:else}
+											<Pin class="h-3.5 w-3.5" />
+											Pin
+										{/if}
+									</button>
+									<button
+										class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-muted"
+										disabled={mutatingPort === tab.port}
+										onclick={() => {
+											hidePort(tab.port);
+											tabMenuOpen = null;
+										}}
+									>
+										<EyeOff class="h-3.5 w-3.5" />
+										Hide
+									</button>
+								{/if}
+								<button
+									class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-muted"
+									onclick={() => {
+										openTabExternal(tab.id);
+										tabMenuOpen = null;
+									}}
+								>
+									<ExternalLink class="h-3.5 w-3.5" />
+									Open External
+								</button>
+								<button
+									class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-muted"
+									onclick={() => {
+										copyPreviewUrl(tab.port);
+										tabMenuOpen = null;
+									}}
+								>
+									<Copy class="h-3.5 w-3.5" />
+									{copiedPort === tab.port ? 'Copied!' : 'Copy URL'}
+								</button>
+								<div class="my-1 border-t border-border"></div>
+								<button
+									class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-destructive hover:bg-muted"
+									onclick={() => {
+										closeTab(tab.id);
+										tabMenuOpen = null;
+									}}
+								>
+									<X class="h-3.5 w-3.5" />
+									Close Tab
+								</button>
 							</div>
-						</div>
+						{/if}
+					</div>
+				{/each}
+			</div>
 
-						<div class="max-h-full min-h-0 space-y-3 overflow-y-auto p-3">
-							{#if ports.length === 0}
-								<div class="rounded-lg border border-border p-4 text-sm text-muted-foreground">
-									No preview servers detected. Start a dev server or pin a port from Settings.
-								</div>
-							{:else}
-								{#each ports as port}
-									<div class="rounded-lg border border-border p-3">
-										<div class="flex flex-wrap items-center gap-2">
-											<span class="font-medium">{port.name}</span>
-											<span class="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-												localhost:{port.port}
-											</span>
-											{#if port.pinned}
-												<span class="rounded-full bg-primary/15 px-2 py-0.5 text-xs text-primary">Pinned</span>
-											{/if}
-										</div>
+			<button
+				onclick={openNewTabPage}
+				class="shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+				title="New tab"
+			>
+				<Plus class="h-4 w-4" />
+			</button>
 
-										<div class="mt-2 flex flex-wrap items-center gap-2 text-xs">
-											<span
-												class="rounded-full px-2 py-0.5 {port.active
-													? 'bg-green-500/15 text-green-600 dark:text-green-400'
-													: 'bg-amber-500/15 text-amber-700 dark:text-amber-400'}"
-											>
-												{port.active ? 'Listening' : 'Offline'}
-											</span>
-											<span
-												class="rounded-full px-2 py-0.5 {port.is_previewable_http
-													? 'bg-green-500/15 text-green-600 dark:text-green-400'
-													: 'bg-slate-500/20 text-slate-700 dark:text-slate-300'}"
-											>
-												{probeStatusText(port)}
-											</span>
-										</div>
+			<button
+				onclick={() => loadPorts(true)}
+				class="shrink-0 rounded-md p-1.5 text-muted-foreground hover:text-foreground"
+				disabled={refreshing}
+				title="Refresh ports"
+			>
+				<RefreshCw class="h-3.5 w-3.5 {refreshing ? 'animate-spin' : ''}" />
+			</button>
+		</div>
 
-										{#if port.description}
-											<div class="mt-2 text-xs text-muted-foreground">{port.description}</div>
-										{/if}
-										{#if port.command}
-											<div class="mt-1 truncate font-mono text-xs text-muted-foreground" title={port.command}>
-												{port.command}
-											</div>
-										{/if}
+		<!-- Browser Controls Bar -->
+		<div class="flex items-center gap-1.5 border-b border-border bg-card px-2 py-1.5">
+			<button
+				onclick={goBack}
+				disabled={showNewTab || !getActiveTab() || (getActiveTab()?.historyIndex ?? 0) === 0}
+				class="rounded-md p-1.5 hover:bg-muted disabled:opacity-40"
+				title="Back"
+			>
+				<ChevronLeft class="h-4 w-4" />
+			</button>
+			<button
+				onclick={goForward}
+				disabled={showNewTab || !getActiveTab() || (getActiveTab()?.historyIndex ?? 0) >= (getActiveTab()?.history.length ?? 1) - 1}
+				class="rounded-md p-1.5 hover:bg-muted disabled:opacity-40"
+				title="Forward"
+			>
+				<ChevronRight class="h-4 w-4" />
+			</button>
+			<button
+				onclick={reloadActiveTab}
+				disabled={showNewTab || !getActiveTab()}
+				class="rounded-md p-1.5 hover:bg-muted disabled:opacity-40"
+				title="Reload"
+			>
+				<RotateCw class="h-4 w-4" />
+			</button>
 
-										<div class="mt-3 flex flex-wrap gap-2">
-											<button
-												onclick={() => openPortInPreview(port, !port.is_previewable_http)}
-												disabled={!canOpenEmbedded(port)}
-												class="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
-												title={port.is_previewable_http
-													? 'Open in embedded preview tab'
-													: 'Force open in embedded preview tab'}
-											>
-												{port.is_previewable_http ? 'Open' : 'Force Open'}
-											</button>
+			<form
+				onsubmit={(e) => {
+					e.preventDefault();
+					navigateFromAddressBar();
+				}}
+				class="flex min-w-0 flex-1 items-center"
+			>
+				<input
+					type="text"
+					bind:value={previewAddress}
+					disabled={showNewTab || !getActiveTab()}
+					placeholder={showNewTab || !getActiveTab() ? 'Select a tab or open a port' : '/api/ports/5173/proxy'}
+					class="w-full rounded-md border border-input bg-background px-3 py-1 text-sm disabled:opacity-50"
+				/>
+			</form>
 
-											<a
-												href={getPreviewUrl(port.port)}
-												target="_blank"
-												rel="noreferrer"
-												class="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-muted {port.active
-													? ''
-													: 'pointer-events-none opacity-50'}"
-												title={port.active ? 'Open in external browser window' : 'Port is not currently listening'}
-											>
-												<ExternalLink class="h-3.5 w-3.5" />
-												External
-											</a>
+			<button
+				onclick={openActiveTabExternal}
+				disabled={showNewTab || !getActiveTab()}
+				class="rounded-md p-1.5 hover:bg-muted disabled:opacity-40"
+				title="Open in external browser"
+			>
+				<ExternalLink class="h-4 w-4" />
+			</button>
+		</div>
 
-											<button
-												onclick={() => copyPreviewUrl(port.port)}
-												class="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-muted"
-											>
-												<Copy class="h-3.5 w-3.5" />
-												{copiedPort === port.port ? 'Copied' : 'Copy URL'}
-											</button>
-
-											<button
-												onclick={() => togglePin(port)}
-												disabled={mutatingPort === port.port}
-												class="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
-											>
-												{#if port.pinned}
-													<PinOff class="h-3.5 w-3.5" />
-													Unpin
-												{:else}
-													<Pin class="h-3.5 w-3.5" />
-													Pin
-												{/if}
-											</button>
-
-											<button
-												onclick={() => hidePort(port.port)}
-												disabled={mutatingPort === port.port}
-												class="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
-											>
-												<EyeOff class="h-3.5 w-3.5" />
-												Hide
-											</button>
-										</div>
-									</div>
-								{/each}
-							{/if}
-						</div>
-					</section>
-
-					<section class="min-h-0 rounded-xl border border-border bg-card">
-						{#if previewTabs.length === 0}
-							<div class="flex h-full min-h-0 items-center justify-center p-6 text-center text-sm text-muted-foreground">
-								<div class="max-w-md">
-									<div class="mb-2 text-base font-medium text-foreground">Embedded Preview Browser</div>
-									Open a port from the left panel to launch it in an in-app preview tab with browser controls.
+		<!-- Content Area -->
+		<div class="relative min-h-0 flex-1">
+			{#if showNewTab || previewTabs.length === 0}
+				<!-- New Tab / Port Picker -->
+				<div class="h-full overflow-y-auto p-4 md:p-6">
+					<div class="mx-auto max-w-2xl">
+						{#if ports.length === 0}
+							<div class="flex flex-col items-center justify-center py-16 text-center">
+								<div class="mb-3 text-sm text-muted-foreground">
+									No servers detected. Start a dev server or pin a port.
 								</div>
 							</div>
 						{:else}
-							<div class="flex h-full min-h-0 flex-col">
-								<div class="border-b border-border px-2 py-2">
-									<div class="flex gap-2 overflow-x-auto pb-1">
-										{#each previewTabs as tab}
-											<div
-												class="inline-flex shrink-0 items-center gap-1 rounded-lg border px-2 py-1 text-xs {tab.id === activeTabId
-													? 'border-primary bg-primary/10 text-primary'
-													: 'border-border bg-muted text-muted-foreground'}"
-											>
-												<button class="inline-flex items-center gap-1" onclick={() => setActiveTab(tab.id)}>
-													{tab.title}
-													<span class="font-mono">:{tab.port}</span>
-												</button>
-												<button
-													onclick={() => closeTab(tab.id)}
-													class="rounded p-0.5 hover:bg-black/5 dark:hover:bg-white/10"
-													aria-label={`Close preview tab ${tab.title}`}
-												>
-													<X class="h-3 w-3" />
-												</button>
-											</div>
-										{/each}
-									</div>
-
-									<div class="mt-2 flex flex-wrap items-center gap-2">
-										<button
-											onclick={goBack}
-											disabled={!getActiveTab() || (getActiveTab()?.historyIndex ?? 0) === 0}
-											class="rounded-lg border border-border p-2 hover:bg-muted disabled:opacity-50"
-											title="Back"
-										>
-											<ChevronLeft class="h-4 w-4" />
-										</button>
-										<button
-											onclick={goForward}
-											disabled={!getActiveTab() || (getActiveTab()?.historyIndex ?? 0) >= (getActiveTab()?.history.length ?? 1) - 1}
-											class="rounded-lg border border-border p-2 hover:bg-muted disabled:opacity-50"
-											title="Forward"
-										>
-											<ChevronRight class="h-4 w-4" />
-										</button>
-										<button
-											onclick={reloadActiveTab}
-											disabled={!getActiveTab()}
-											class="rounded-lg border border-border p-2 hover:bg-muted disabled:opacity-50"
-											title="Reload"
-										>
-											<RotateCw class="h-4 w-4" />
-										</button>
-
-										<form onsubmit={(e) => {
-											e.preventDefault();
-											navigateFromAddressBar();
-										}} class="flex min-w-[240px] flex-1 items-center gap-2">
-											<input
-												type="text"
-												bind:value={previewAddress}
-												placeholder="/api/ports/5173/proxy"
-												class="w-full rounded-lg border border-input bg-background px-3 py-1.5 text-sm"
-											/>
-											<button
-												type="submit"
-												disabled={!getActiveTab()}
-												class="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
-											>
-												<ArrowRight class="h-3.5 w-3.5" />
-												Go
-											</button>
-										</form>
-
-										<button
-											onclick={openActiveTabExternal}
-											disabled={!getActiveTab()}
-											class="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
-											title="Open active preview in external browser"
-										>
-											<ExternalLink class="h-3.5 w-3.5" />
-											External
-										</button>
-									</div>
-								</div>
-
-								<div class="relative min-h-0 flex-1 bg-background">
-									{#each previewTabs as tab (tab.id)}
-										<iframe
-											use:registerPreviewFrame={tab.id}
-											src={tab.history[tab.historyIndex]}
-											title={`Preview tab ${tab.title}`}
-											class="h-full w-full border-0 {tab.id === activeTabId ? 'block' : 'hidden'}"
-											onload={() => onIframeLoad(tab.id)}
-											onerror={() => onIframeError(tab.id)}
-										></iframe>
-									{/each}
-
-									{#if getActiveTab()?.isLoading}
-										<div class="pointer-events-none absolute right-3 top-3 inline-flex items-center gap-1 rounded-full bg-card/95 px-3 py-1 text-xs text-muted-foreground shadow">
-											<RefreshCw class="h-3.5 w-3.5 animate-spin" />
-											Loading preview
+							<div class="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+								{#each ports as port}
+									<button
+										onclick={() => openPortInPreview(port, !port.is_previewable_http)}
+										disabled={!canOpenEmbedded(port)}
+										class="group flex flex-col items-start gap-1.5 rounded-lg border border-border p-3 text-left transition-colors hover:bg-muted disabled:opacity-50"
+									>
+										<div class="flex w-full items-center gap-2">
+											<span
+												class="h-2 w-2 shrink-0 rounded-full {port.is_previewable_http
+													? 'bg-green-500'
+													: port.active
+														? 'bg-amber-500'
+														: 'bg-muted-foreground/40'}"
+											></span>
+											<span class="truncate text-sm font-medium">{port.name}</span>
 										</div>
-									{/if}
-
-									{#if getActiveTab()?.error}
-										<div class="absolute bottom-3 left-3 right-3 rounded-lg bg-destructive/10 p-3 text-sm text-destructive">
-											{getActiveTab()?.error}
-										</div>
-									{/if}
-								</div>
+										<span class="font-mono text-xs text-muted-foreground">localhost:{port.port}</span>
+									</button>
+								{/each}
 							</div>
 						{/if}
-					</section>
+					</div>
 				</div>
-			</div>
-		{/if}
-	</div>
+			{:else}
+				<!-- Iframe Content -->
+				{#each previewTabs as tab (tab.id)}
+					<iframe
+						use:registerPreviewFrame={tab.id}
+						src={tab.history[tab.historyIndex]}
+						title={`Preview: ${tab.title}`}
+						class="h-full w-full border-0 {tab.id === activeTabId ? 'block' : 'hidden'}"
+						onload={() => onIframeLoad(tab.id)}
+						onerror={() => onIframeError(tab.id)}
+					></iframe>
+				{/each}
+
+				{#if getActiveTab()?.isLoading}
+					<div class="pointer-events-none absolute right-3 top-3 inline-flex items-center gap-1 rounded-full bg-card/95 px-3 py-1 text-xs text-muted-foreground shadow">
+						<RefreshCw class="h-3.5 w-3.5 animate-spin" />
+						Loading
+					</div>
+				{/if}
+
+				{#if getActiveTab()?.error}
+					<div class="absolute bottom-3 left-3 right-3 rounded-lg bg-destructive/10 p-3 text-sm text-destructive">
+						{getActiveTab()?.error}
+					</div>
+				{/if}
+			{/if}
+		</div>
+	{/if}
 </div>

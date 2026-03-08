@@ -1,8 +1,9 @@
-//! Write tool - Create or overwrite files
+//! Write tool - Create or overwrite files with diff output
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use similar::TextDiff;
 use tokio::fs;
 use tracing::info;
 
@@ -27,7 +28,7 @@ impl Tool for WriteTool {
     }
 
     fn description(&self) -> &str {
-        "Create new files or completely overwrite existing files. WARNING: Overwrites without backup - prefer 'edit' tool for modifying existing files. Creates parent directories if needed. Reports LSP errors after write. Max 10MB content."
+        "Create new files or completely overwrite existing files. Shows diff when overwriting. WARNING: Overwrites without backup - prefer 'edit' tool for modifying existing files. Creates parent directories if needed. Max 10MB content."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -54,7 +55,6 @@ impl Tool for WriteTool {
             Err(e) => return e,
         };
 
-        // Check content size to prevent disk exhaustion
         if params.content.len() > MAX_WRITE_SIZE {
             return ToolResult::error(format!(
                 "Content too large: {} bytes (max {} MB)",
@@ -63,7 +63,6 @@ impl Tool for WriteTool {
             ));
         }
 
-        // Resolve path with sandbox enforcement (handles non-existent parent directories securely)
         let path = match ctx.sandboxed_resolve_new_path(&params.file_path) {
             Ok(p) => p,
             Err(e) => {
@@ -75,6 +74,13 @@ impl Tool for WriteTool {
             path, ctx.working_dir
         );
 
+        // Read existing content for diff (before writing)
+        let old_content = if path.is_file() {
+            fs::read_to_string(&path).await.ok()
+        } else {
+            None
+        };
+
         // Create parent directories if needed
         if let Some(parent) = path.parent().filter(|p| !p.exists()) {
             info!("Write tool: creating parent directory {:?}", parent);
@@ -85,16 +91,49 @@ impl Tool for WriteTool {
 
         match fs::write(&path, &params.content).await {
             Ok(_) => {
-                let output = json!({
-                    "message": format!("Successfully wrote {} lines", params.content.lines().count()),
-                    "bytes_written": params.content.len(),
-                    "file_path": path.display().to_string()
-                })
-                .to_string();
+                let line_count = params.content.lines().count();
 
-                ToolResult::success(output)
+                let data = match &old_content {
+                    Some(_) => json!({
+                        "message": format!("Successfully overwrote file ({} lines)", line_count),
+                        "bytes_written": params.content.len(),
+                        "line_count": line_count,
+                        "file_path": path.display().to_string()
+                    }),
+                    None => json!({
+                        "message": format!("Created new file ({} lines)", line_count),
+                        "bytes_written": params.content.len(),
+                        "line_count": line_count,
+                        "file_path": path.display().to_string()
+                    }),
+                };
+
+                let diff = if let Some(old) = &old_content {
+                    let diff = generate_compact_diff(old, &params.content, &path);
+                    if !diff.is_empty() {
+                        Some(diff)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                ToolResult::success_data_with(data, Vec::new(), diff, None)
             }
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
         }
     }
+}
+
+fn generate_compact_diff(old: &str, new: &str, path: &std::path::Path) -> String {
+    let diff = TextDiff::from_lines(old, new);
+    let mut output = String::new();
+    for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
+        output.push_str(&format!("{}", hunk));
+    }
+    if output.is_empty() {
+        return String::new();
+    }
+    format!("--- {}\n+++ {}\n{}", path.display(), path.display(), output)
 }

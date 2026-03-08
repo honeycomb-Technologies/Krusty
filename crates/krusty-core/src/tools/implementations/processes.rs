@@ -78,13 +78,14 @@ impl Tool for ProcessesTool {
                     })
                     .collect();
 
-                ToolResult::success(
-                    serde_json::to_string_pretty(&output).unwrap_or_else(|_| "[]".to_string()),
-                )
+                ToolResult::success_data(json!({
+                    "processes": output,
+                    "count": processes.len()
+                }))
             }
             "kill" => {
                 let Some(id) = params.process_id else {
-                    return ToolResult::error("process_id required for kill");
+                    return ToolResult::invalid_parameters("process_id required for kill");
                 };
 
                 let result = match user_id {
@@ -93,15 +94,17 @@ impl Tool for ProcessesTool {
                 };
 
                 match result {
-                    Ok(_) => ToolResult::success(
-                        json!({"success": true, "message": "Process killed"}).to_string(),
-                    ),
+                    Ok(_) => ToolResult::success_data(json!({
+                        "success": true,
+                        "message": "Process killed",
+                        "process_id": id
+                    })),
                     Err(e) => ToolResult::error(e.to_string()),
                 }
             }
             "status" => {
                 let Some(id) = params.process_id else {
-                    return ToolResult::error("process_id required for status");
+                    return ToolResult::invalid_parameters("process_id required for status");
                 };
 
                 let process = match user_id {
@@ -110,19 +113,16 @@ impl Tool for ProcessesTool {
                 };
 
                 match process {
-                    Some(p) => ToolResult::success(
-                        json!({
-                            "id": p.id,
-                            "status": p.display_status(),
-                            "command": p.command,
-                            "duration_seconds": p.duration().as_secs(),
-                        })
-                        .to_string(),
-                    ),
+                    Some(p) => ToolResult::success_data(json!({
+                        "id": p.id,
+                        "status": p.display_status(),
+                        "command": p.command,
+                        "duration_seconds": p.duration().as_secs(),
+                    })),
                     None => ToolResult::error("Process not found"),
                 }
             }
-            _ => ToolResult::error("Unknown action. Use 'list', 'kill', or 'status'"),
+            _ => ToolResult::invalid_parameters("Unknown action. Use 'list', 'kill', or 'status'"),
         }
     }
 }

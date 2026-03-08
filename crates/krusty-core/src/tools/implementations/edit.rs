@@ -1,4 +1,4 @@
-//! Edit tool - Edit files by replacing text
+//! Edit tool - Edit files by replacing text with fuzzy matching cascade
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -7,6 +7,7 @@ use tokio::fs;
 
 use similar::TextDiff;
 
+use crate::tools::matching;
 use crate::tools::registry::Tool;
 use crate::tools::{parse_params, ToolContext, ToolResult};
 
@@ -28,7 +29,7 @@ impl Tool for EditTool {
     }
 
     fn description(&self) -> &str {
-        "Exact string replacement in files. Requires unique old_string match (or use replace_all:true for bulk rename). Reports LSP errors after modification."
+        "String replacement in files with fuzzy matching. Handles whitespace and unicode differences automatically. Requires unique old_string match (or use replace_all:true for bulk rename)."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -49,7 +50,7 @@ impl Tool for EditTool {
                 },
                 "replace_all": {
                     "type": "boolean",
-                    "description": "Replace all occurrences (default: false)",
+                    "description": "Replace all occurrences (default: false). Only uses exact matching.",
                     "default": false
                 }
             },
@@ -64,7 +65,6 @@ impl Tool for EditTool {
             Err(e) => return e,
         };
 
-        // Use sandboxed resolve for multi-tenant path isolation
         let path = match ctx.sandboxed_resolve(&params.file_path) {
             Ok(p) => p,
             Err(e) => {
@@ -85,45 +85,87 @@ impl Tool for EditTool {
             Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
         };
 
-        let count = content.matches(&params.old_string).count();
-
-        if count == 0 {
-            return ToolResult::error(format!("String not found in file: {:?}", params.old_string));
-        }
-
-        if count > 1 && !params.replace_all {
-            return ToolResult::error(format!(
-                "String found {} times. Use replace_all=true to replace all occurrences, or provide more context to make it unique.",
-                count
-            ));
-        }
-
-        let new_content = if params.replace_all {
-            content.replace(&params.old_string, &params.new_string)
-        } else {
-            content.replacen(&params.old_string, &params.new_string, 1)
-        };
-
-        let diff = generate_compact_diff(&content, &new_content, &path);
-
-        match fs::write(&path, &new_content).await {
-            Ok(_) => {
-                let replaced = if params.replace_all { count } else { 1 };
-                let mut output = json!({
-                    "message": format!("Replaced {} occurrence(s)", replaced),
-                    "replacements": replaced,
-                    "file_path": path.display().to_string()
-                })
-                .to_string();
-
-                if !diff.is_empty() {
-                    output.push_str("\n\n[DIFF]\n");
-                    output.push_str(&diff);
-                }
-
-                ToolResult::success(output)
+        if params.replace_all {
+            // replace_all: exact matching only (fuzzy replace-all is dangerous)
+            let count = content.matches(&params.old_string).count();
+            if count == 0 {
+                return ToolResult::error(format!(
+                    "String not found in file: {:?}",
+                    params.old_string
+                ));
             }
-            Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
+
+            let new_content = content.replace(&params.old_string, &params.new_string);
+            let diff = generate_compact_diff(&content, &new_content, &path);
+
+            match fs::write(&path, &new_content).await {
+                Ok(_) => {
+                    let data = json!({
+                        "message": format!("Replaced {} occurrence(s)", count),
+                        "replacements": count,
+                        "file_path": path.display().to_string()
+                    });
+
+                    ToolResult::success_data_with(data, Vec::new(), Some(diff), None)
+                }
+                Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
+            }
+        } else {
+            // Single replacement: use fuzzy matching cascade
+            let exact_count = content.matches(&params.old_string).count();
+
+            if exact_count > 1 {
+                return ToolResult::error(format!(
+                    "String found {} times. Use replace_all=true to replace all occurrences, or provide more context to make it unique.",
+                    exact_count
+                ));
+            }
+
+            match matching::fuzzy_find(&content, &params.old_string) {
+                Some(m) => {
+                    if m.pass > 1 {
+                        tracing::debug!(
+                            pass = m.pass,
+                            file = %path.display(),
+                            "Fuzzy edit matched on pass {}",
+                            m.pass
+                        );
+                    }
+
+                    let new_content = format!(
+                        "{}{}{}",
+                        &content[..m.start],
+                        &params.new_string,
+                        &content[m.end..]
+                    );
+
+                    let diff = generate_compact_diff(&content, &new_content, &path);
+
+                    match fs::write(&path, &new_content).await {
+                        Ok(_) => {
+                            let mut msg = "Replaced 1 occurrence".to_string();
+                            let mut warnings = Vec::new();
+                            if m.pass > 1 {
+                                msg.push_str(&format!(" (fuzzy match pass {})", m.pass));
+                                warnings.push(format!("Used fuzzy matching pass {}", m.pass));
+                            }
+
+                            let data = json!({
+                                "message": msg,
+                                "replacements": 1,
+                                "file_path": path.display().to_string(),
+                                "match_pass": m.pass
+                            });
+
+                            ToolResult::success_data_with(data, warnings, Some(diff), None)
+                        }
+                        Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
+                    }
+                }
+                None => {
+                    ToolResult::error(format!("String not found in file: {:?}", params.old_string))
+                }
+            }
         }
     }
 }

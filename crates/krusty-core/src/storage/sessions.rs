@@ -11,21 +11,21 @@ use super::database::Database;
 use crate::agent::PinchContext;
 
 const LIST_SESSIONS_SQL_ALL: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch
              FROM sessions
              ORDER BY updated_at DESC";
 const LIST_SESSIONS_SQL_BY_DIR: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch
              FROM sessions
              WHERE working_dir = ?1
              ORDER BY updated_at DESC";
 const LIST_SESSIONS_SQL_BY_USER: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch
              FROM sessions
              WHERE user_id = ?1
              ORDER BY updated_at DESC";
 const LIST_SESSIONS_SQL_BY_DIR_AND_USER: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch
              FROM sessions
              WHERE working_dir = ?1 AND user_id = ?2
              ORDER BY updated_at DESC";
@@ -36,12 +36,12 @@ const LIST_SESSION_DIRS_SQL_BY_USER: &str = "SELECT DISTINCT working_dir FROM se
                  WHERE working_dir IS NOT NULL AND user_id = ?1
                  ORDER BY working_dir";
 const LIST_SESSIONS_BY_DIRECTORY_SQL: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch
              FROM sessions
              WHERE working_dir IS NOT NULL
              ORDER BY working_dir, updated_at DESC";
 const GET_SESSION_SQL: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch
              FROM sessions
              WHERE id = ?1";
 
@@ -62,6 +62,8 @@ pub struct SessionInfo {
     pub work_mode: WorkMode,
     /// Model selected for this session
     pub model: Option<String>,
+    /// Optional target branch selected for this session
+    pub target_branch: Option<String>,
 }
 
 /// Session work mode
@@ -117,7 +119,24 @@ impl SessionManager {
         model: Option<&str>,
         working_dir: Option<&str>,
     ) -> Result<String> {
-        self.create_session_for_user(title, model, working_dir, None)
+        self.create_session_with_target_branch(title, model, working_dir, None)
+    }
+
+    /// Create a new session with optional target branch metadata.
+    pub fn create_session_with_target_branch(
+        &self,
+        title: &str,
+        model: Option<&str>,
+        working_dir: Option<&str>,
+        target_branch: Option<&str>,
+    ) -> Result<String> {
+        self.create_session_for_user_with_target_branch(
+            title,
+            model,
+            working_dir,
+            None,
+            target_branch,
+        )
     }
 
     /// Create a new session with user ownership (multi-tenant)
@@ -128,13 +147,25 @@ impl SessionManager {
         working_dir: Option<&str>,
         user_id: Option<&str>,
     ) -> Result<String> {
+        self.create_session_for_user_with_target_branch(title, model, working_dir, user_id, None)
+    }
+
+    /// Create a new session with user ownership and optional target branch.
+    pub fn create_session_for_user_with_target_branch(
+        &self,
+        title: &str,
+        model: Option<&str>,
+        working_dir: Option<&str>,
+        user_id: Option<&str>,
+        target_branch: Option<&str>,
+    ) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
 
         self.db.conn().execute(
-            "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, user_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, title, now, now, model, working_dir, user_id],
+            "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, user_id, target_branch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, title, now, now, model, working_dir, user_id, target_branch],
         )?;
 
         Ok(id)
@@ -195,6 +226,7 @@ impl SessionManager {
         let token_count: Option<i64> = row.get(3)?;
         let work_mode_raw: String = row.get(7)?;
         let model: Option<String> = row.get(8)?;
+        let target_branch: Option<String> = row.get(9)?;
 
         Ok(SessionInfo {
             id: row.get(0)?,
@@ -208,6 +240,7 @@ impl SessionManager {
             user_id: row.get(6)?,
             work_mode: work_mode_raw.parse().unwrap_or_default(),
             model,
+            target_branch,
         })
     }
 
@@ -357,6 +390,22 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Update optional target branch metadata for a session.
+    pub fn update_session_target_branch(
+        &self,
+        session_id: &str,
+        target_branch: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.db.conn().execute(
+            "UPDATE sessions SET target_branch = ?1, updated_at = ?2 WHERE id = ?3",
+            params![target_branch, now, session_id],
+        )?;
+
+        Ok(())
+    }
+
     /// Update session token count
     pub fn update_token_count(&self, session_id: &str, token_count: usize) -> Result<()> {
         self.db.conn().execute(
@@ -501,15 +550,25 @@ impl SessionManager {
         pinch_ctx: &PinchContext,
         model: Option<&str>,
         working_dir: Option<&str>,
+        target_branch: Option<&str>,
     ) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
 
         // Create new session with parent reference
         self.db.conn().execute(
-            "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, parent_session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, title, now, now, model, working_dir, parent_session_id],
+            "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, parent_session_id, target_branch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id,
+                title,
+                now,
+                now,
+                model,
+                working_dir,
+                parent_session_id,
+                target_branch
+            ],
         )?;
 
         // Store pinch metadata
@@ -889,6 +948,7 @@ mod tests {
         assert_eq!(session.id, session_id);
         assert_eq!(session.title, "Test Session");
         assert_eq!(session.working_dir, Some("/tmp".to_string()));
+        assert_eq!(session.target_branch, None);
     }
 
     #[test]
@@ -934,6 +994,36 @@ mod tests {
             .expect("Failed to get session")
             .expect("Session should exist");
         assert_eq!(session.working_dir, Some("/home/user/project".to_string()));
+    }
+
+    #[test]
+    fn test_update_session_target_branch() {
+        let (db, _temp) = create_test_db();
+        let manager = SessionManager::new(db);
+
+        let session_id = manager
+            .create_session("Session", Some("claude-3-5-sonnet"), Some("/tmp"))
+            .expect("Failed to create session");
+
+        manager
+            .update_session_target_branch(&session_id, Some("feature/test"))
+            .expect("Failed to update target branch");
+
+        let session = manager
+            .get_session(&session_id)
+            .expect("Failed to get session")
+            .expect("Session should exist");
+        assert_eq!(session.target_branch.as_deref(), Some("feature/test"));
+
+        manager
+            .update_session_target_branch(&session_id, None)
+            .expect("Failed to clear target branch");
+
+        let session = manager
+            .get_session(&session_id)
+            .expect("Failed to get session")
+            .expect("Session should exist");
+        assert_eq!(session.target_branch, None);
     }
 
     #[test]

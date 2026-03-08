@@ -27,17 +27,12 @@ pub struct ProviderStatus {
     pub name: String,
     pub configured: bool,
     pub has_oauth: bool,
-}
-
-fn has_oauth_for_provider(
-    store: &krusty_core::storage::CredentialStore,
-    provider: ProviderId,
-) -> bool {
-    provider.supports_oauth() && store.get(&provider).is_none() && store.has_auth(&provider)
+    pub supports_oauth: bool,
 }
 
 async fn list_providers(State(state): State<AppState>) -> Json<Vec<ProviderStatus>> {
     let store = state.credential_store.read().await;
+    let oauth_store = krusty_core::auth::OAuthTokenStore::load().unwrap_or_default();
 
     let providers = ProviderId::all()
         .iter()
@@ -45,7 +40,8 @@ async fn list_providers(State(state): State<AppState>) -> Json<Vec<ProviderStatu
             id: id.storage_key().to_string(),
             name: id.to_string(),
             configured: store.has_key(id),
-            has_oauth: has_oauth_for_provider(&store, *id),
+            has_oauth: oauth_store.has_token(id),
+            supports_oauth: id.supports_oauth(),
         })
         .collect();
 
@@ -58,12 +54,14 @@ async fn get_provider(
 ) -> Result<Json<ProviderStatus>, AppError> {
     let provider_id = parse_provider(&provider)?;
     let store = state.credential_store.read().await;
+    let oauth_store = krusty_core::auth::OAuthTokenStore::load().unwrap_or_default();
 
     Ok(Json(ProviderStatus {
         id: provider_id.storage_key().to_string(),
         name: provider_id.to_string(),
         configured: store.has_key(&provider_id),
-        has_oauth: has_oauth_for_provider(&store, provider_id),
+        has_oauth: oauth_store.has_token(&provider_id),
+        supports_oauth: provider_id.supports_oauth(),
     }))
 }
 
@@ -102,11 +100,13 @@ async fn set_credential(
         });
     }
 
+    let oauth_store = krusty_core::auth::OAuthTokenStore::load().unwrap_or_default();
     Ok(Json(ProviderStatus {
         id: provider_id.storage_key().to_string(),
         name: provider_id.to_string(),
         configured: true,
-        has_oauth: false,
+        has_oauth: oauth_store.has_token(&provider_id),
+        supports_oauth: provider_id.supports_oauth(),
     }))
 }
 
@@ -128,11 +128,13 @@ async fn delete_credential(
         state.model_registry.set_models(provider_id, vec![]).await;
     }
 
+    let oauth_store = krusty_core::auth::OAuthTokenStore::load().unwrap_or_default();
     Ok(Json(ProviderStatus {
         id: provider_id.storage_key().to_string(),
         name: provider_id.to_string(),
         configured: false,
-        has_oauth: false,
+        has_oauth: oauth_store.has_token(&provider_id),
+        supports_oauth: provider_id.supports_oauth(),
     }))
 }
 

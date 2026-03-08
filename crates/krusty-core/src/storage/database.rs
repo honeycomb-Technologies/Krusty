@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use tracing::info;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 15;
+const SCHEMA_VERSION: i32 = 16;
 
 /// Shared database handle for connection reuse
 ///
@@ -601,6 +601,20 @@ impl Database {
                 "#,
             )?;
             self.set_schema_version_tx(&tx, 15)?;
+        }
+
+        // Migration 16: Optional target git branch on sessions
+        if current_version < 16 {
+            info!("Running migration 16: Session target branch");
+            tx.execute_batch(
+                r#"
+                ALTER TABLE sessions ADD COLUMN target_branch TEXT;
+
+                CREATE INDEX IF NOT EXISTS idx_sessions_target_branch
+                    ON sessions(target_branch);
+                "#,
+            )?;
+            self.set_schema_version_tx(&tx, 16)?;
         }
 
         tx.commit()?;

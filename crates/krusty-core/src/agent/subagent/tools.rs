@@ -3,7 +3,6 @@
 //! Read-only tools for explorers, read-write tools for builders.
 
 use serde_json::{json, Value};
-use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,41 +13,34 @@ use crate::ai::types::AiTool;
 use crate::tools::implementations::{BashTool, EditTool, GlobTool, GrepTool, ReadTool, WriteTool};
 use crate::tools::registry::{Tool, ToolContext, ToolResult};
 
-fn format_paths(paths: &[PathBuf]) -> String {
-    let mut output = String::new();
-    for (idx, path) in paths.iter().enumerate() {
-        if idx > 0 {
-            output.push('\n');
-        }
-        let _ = write!(&mut output, "{}", path.display());
-    }
-    output
+fn parse_tool_payload(output: &str) -> Option<Value> {
+    let parsed = serde_json::from_str::<Value>(output).ok()?;
+    Some(parsed.get("data").cloned().unwrap_or(parsed))
 }
 
-fn format_read_output(content: &str) -> String {
-    let mut output = String::new();
-    for (line_num, line) in content.lines().enumerate() {
-        if line_num > 0 {
-            output.push('\n');
+fn extract_glob_matches(output: &str) -> Vec<PathBuf> {
+    if let Some(payload) = parse_tool_payload(output) {
+        if let Some(matches) = payload.get("matches").and_then(|v| v.as_array()) {
+            return matches
+                .iter()
+                .filter_map(|v| v.as_str().map(PathBuf::from))
+                .collect();
         }
-        let _ = write!(&mut output, "{:>6}→{}", line_num + 1, line);
     }
+
+    // Legacy fallback: newline-delimited paths.
     output
+        .lines()
+        .filter(|l| !l.is_empty() && *l != "No matches found")
+        .map(PathBuf::from)
+        .collect()
 }
 
-fn strip_read_output_line_numbers(output: &str) -> String {
-    let mut raw = String::new();
-    for (idx, line) in output.lines().enumerate() {
-        if idx > 0 {
-            raw.push('\n');
-        }
-        if let Some(pos) = line.find('→') {
-            raw.push_str(&line[pos + '→'.len_utf8()..]);
-        } else {
-            raw.push_str(line);
-        }
-    }
-    raw
+fn extract_read_content(output: &str) -> Option<String> {
+    parse_tool_payload(output)?
+        .get("content")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string)
 }
 
 /// RAII guard for builder file locks
@@ -182,28 +174,20 @@ impl SubAgentTools {
                 let base_dir = ctx.working_dir.clone();
 
                 if let Some(cached_paths) = self.cache.get_glob(&pattern, &base_dir) {
-                    // Return cached result formatted as the tool would
-                    let output = format_paths(&cached_paths);
-                    return Some(ToolResult {
-                        output: if output.is_empty() {
-                            "No matches found".to_string()
-                        } else {
-                            output
-                        },
-                        is_error: false,
-                    });
+                    return Some(ToolResult::success_data(json!({
+                        "matches": cached_paths
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>(),
+                        "count": cached_paths.len(),
+                        "search_path": base_dir.display().to_string()
+                    })));
                 }
 
                 // Execute and cache
                 let result = self.glob.execute(params, ctx).await;
                 if !result.is_error {
-                    // Parse paths from output and cache
-                    let paths: Vec<PathBuf> = result
-                        .output
-                        .lines()
-                        .filter(|l| !l.is_empty() && *l != "No matches found")
-                        .map(PathBuf::from)
-                        .collect();
+                    let paths = extract_glob_matches(&result.output);
                     self.cache.put_glob(pattern, base_dir, paths);
                 }
                 Some(result)
@@ -227,21 +211,22 @@ impl SubAgentTools {
 
                     if !has_offset && !has_limit {
                         if let Some(cached) = self.cache.get_file(&path) {
-                            // Format like the read tool does (with line numbers)
-                            let output = format_read_output(&cached.content);
-                            return Some(ToolResult {
-                                output,
-                                is_error: false,
-                            });
+                            let total_lines = cached.content.lines().count();
+                            return Some(ToolResult::success_data(json!({
+                                "content": cached.content,
+                                "total_lines": total_lines,
+                                "lines_returned": total_lines,
+                                "start_line": 1
+                            })));
                         }
                     }
 
                     // Execute and cache (only full reads)
                     let result = self.read.execute(params, ctx).await;
                     if !result.is_error && !has_offset && !has_limit {
-                        // Extract raw content (strip line numbers)
-                        let raw_content = strip_read_output_line_numbers(&result.output);
-                        self.cache.put_file(path, raw_content);
+                        if let Some(content) = extract_read_content(&result.output) {
+                            self.cache.put_file(path, content);
+                        }
                     }
                     Some(result)
                 } else {
@@ -354,10 +339,9 @@ impl BuilderTools {
                 let path = match params.get("file_path").and_then(|v| v.as_str()) {
                     Some(p) => PathBuf::from(p),
                     None => {
-                        return Some(ToolResult {
-                            output: "Missing file_path parameter".to_string(),
-                            is_error: true,
-                        })
+                        return Some(ToolResult::invalid_parameters(
+                            "Missing file_path parameter",
+                        ))
                     }
                 };
 
@@ -371,10 +355,10 @@ impl BuilderTools {
                 {
                     Ok(guard) => guard,
                     Err(e) => {
-                        return Some(ToolResult {
-                            output: format!("Cannot write: {}", e),
-                            is_error: true,
-                        })
+                        return Some(ToolResult::error_with_code(
+                            "file_locked",
+                            format!("Cannot write: {}", e),
+                        ));
                     }
                 };
 
@@ -398,10 +382,9 @@ impl BuilderTools {
                 let path = match params.get("file_path").and_then(|v| v.as_str()) {
                     Some(p) => PathBuf::from(p),
                     None => {
-                        return Some(ToolResult {
-                            output: "Missing file_path parameter".to_string(),
-                            is_error: true,
-                        })
+                        return Some(ToolResult::invalid_parameters(
+                            "Missing file_path parameter",
+                        ))
                     }
                 };
 
@@ -415,10 +398,10 @@ impl BuilderTools {
                 {
                     Ok(guard) => guard,
                     Err(e) => {
-                        return Some(ToolResult {
-                            output: format!("Cannot edit: {}", e),
-                            is_error: true,
-                        })
+                        return Some(ToolResult::error_with_code(
+                            "file_locked",
+                            format!("Cannot edit: {}", e),
+                        ));
                     }
                 };
 
@@ -451,11 +434,12 @@ impl BuilderTools {
             "bash" => Some(self.bash.execute(params, ctx).await),
             "register_interface" => {
                 // Register an interface for other builders to see
-                let file_path = params
-                    .get("file_path")
-                    .and_then(|v| v.as_str())
-                    .map(PathBuf::from)
-                    .unwrap_or_default();
+                let Some(file_path) = params.get("file_path").and_then(|v| v.as_str()) else {
+                    return Some(ToolResult::invalid_parameters(
+                        "Missing required field: file_path",
+                    ));
+                };
+                let file_path = PathBuf::from(file_path);
                 let exports: Vec<String> = params
                     .get("exports")
                     .and_then(|v| v.as_array())
@@ -465,11 +449,17 @@ impl BuilderTools {
                             .collect()
                     })
                     .unwrap_or_default();
-                let description = params
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                if exports.is_empty() {
+                    return Some(ToolResult::invalid_parameters(
+                        "Missing required field: exports",
+                    ));
+                }
+                let Some(description) = params.get("description").and_then(|v| v.as_str()) else {
+                    return Some(ToolResult::invalid_parameters(
+                        "Missing required field: description",
+                    ));
+                };
+                let description = description.to_string();
 
                 let interface = BuilderInterface {
                     builder_id: self.builder_id.clone(),
@@ -480,14 +470,15 @@ impl BuilderTools {
 
                 self.context.register_interface(interface);
 
-                Some(ToolResult {
-                    output: format!(
+                Some(ToolResult::success_data(json!({
+                    "message": format!(
                         "Registered interface: {} exports from {}",
                         exports.len(),
                         file_path.display()
                     ),
-                    is_error: false,
-                })
+                    "file_path": file_path.display().to_string(),
+                    "exports_count": exports.len()
+                })))
             }
             _ => None,
         }

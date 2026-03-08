@@ -12,6 +12,8 @@
 	let timeLoc: WebGLUniformLocation | null = null;
 	let isVisible = true;
 	let isTabActive = true;
+	let isInitialized = false;
+	let webglUnavailable = false;
 	let cachedWidth = 0;
 	let cachedHeight = 0;
 
@@ -65,7 +67,7 @@ void main() {
 
 		try {
 			gl = canvas.getContext('webgl', {
-				alpha: false,
+				alpha: true,
 				antialias: false,
 				depth: false,
 				stencil: false,
@@ -185,7 +187,10 @@ void main() {
 		observer.observe(canvas);
 
 		if (init()) {
+			isInitialized = true;
 			animationId = requestAnimationFrame(render);
+		} else {
+			webglUnavailable = true;
 		}
 
 		return () => {
@@ -199,7 +204,14 @@ void main() {
 
 <canvas
 	bind:this={canvas}
-	class="pointer-events-none fixed inset-0 h-screen w-screen"
-	style="z-index:-100"
+	class="pointer-events-none fixed inset-0 z-0 h-screen w-screen transition-opacity duration-300 {isInitialized ? 'opacity-100' : 'opacity-0'}"
 	aria-hidden="true"
 ></canvas>
+
+{#if webglUnavailable}
+	<div
+		class="pointer-events-none fixed inset-0 z-0"
+		style="background: radial-gradient(120% 100% at 50% 10%, rgba(16, 28, 44, 0.75), rgba(6, 9, 16, 0.9));"
+		aria-hidden="true"
+	></div>
+{/if}

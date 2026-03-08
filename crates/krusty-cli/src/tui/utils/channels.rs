@@ -5,9 +5,8 @@
 use tokio::sync::{mpsc, oneshot};
 
 use crate::agent::subagent::AgentProgress;
-use crate::agent::SummarizationResult;
+use crate::agent::{LoopEvent, LoopInput, SummarizationResult};
 use crate::ai::models::ModelMetadata;
-use crate::ai::types::Content;
 use crate::tools::ToolOutputChunk;
 
 /// AI-generated title update
@@ -70,8 +69,6 @@ pub struct AsyncChannels {
     pub mcp_status: Option<mpsc::UnboundedReceiver<McpStatusUpdate>>,
     /// Streaming bash output receiver (bounded for backpressure)
     pub bash_output: Option<mpsc::Receiver<ToolOutputChunk>>,
-    /// Pending tool execution results receiver
-    pub tool_results: Option<oneshot::Receiver<Vec<Content>>>,
     /// AI-generated title update receiver
     pub title_update: Option<oneshot::Receiver<TitleUpdate>>,
     /// AI-generated summarization result for pinch
@@ -92,6 +89,10 @@ pub struct AsyncChannels {
     pub oauth_status: Option<mpsc::UnboundedReceiver<OAuthStatusUpdate>>,
     /// Anthropic PKCE verifier for paste-code flow
     pub anthropic_verifier: Option<oneshot::Receiver<krusty_core::auth::PkceVerifier>>,
+    /// Core orchestrator event receiver (replaces StreamingManager when active)
+    pub loop_events: Option<mpsc::UnboundedReceiver<LoopEvent>>,
+    /// Core orchestrator input sender (for approvals, AskUser responses, cancellation)
+    pub loop_input: Option<mpsc::UnboundedSender<LoopInput>>,
 }
 
 impl AsyncChannels {

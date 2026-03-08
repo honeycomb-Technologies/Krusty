@@ -35,7 +35,6 @@ sw.addEventListener('push', (event) => {
 			icon: '/icon-192.png',
 			badge: '/icon-192.png',
 			tag: data.tag,
-			renotify: true,
 			data: { session_id: data.session_id, url: `/app?session=${data.session_id}` }
 		})
 	);

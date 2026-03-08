@@ -3,14 +3,28 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::VecDeque;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
-use tokio::time::timeout;
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::process::{Child, Command};
+use tokio::sync::{mpsc, Mutex};
+use tokio::time::{sleep, timeout};
 
 use crate::tools::registry::{Tool, ToolOutputChunk};
+use crate::tools::truncation;
 use crate::tools::{parse_params, ToolContext, ToolResult};
+
+const MAX_OUTPUT_LINES: usize = 2000;
+const MAX_OUTPUT_BYTES: usize = 50_000; // 50KB
+
+// Bounded raw capture for foreground execution. Final model output is additionally
+// truncated by MAX_OUTPUT_LINES/MAX_OUTPUT_BYTES after ANSI stripping.
+const RAW_CAPTURE_MAX_LINES: usize = 8_000;
+const RAW_CAPTURE_MAX_BYTES: usize = 2_000_000; // 2MB
+const READER_JOIN_TIMEOUT_MS: u64 = 2_000;
+const TIMEOUT_KILL_GRACE_MS: u64 = 800;
 
 pub struct BashTool;
 
@@ -23,6 +37,378 @@ struct Params {
     description: Option<String>,
     #[serde(default)]
     run_in_background: Option<bool>,
+}
+
+#[derive(Clone)]
+struct StreamContext {
+    output_tx: mpsc::UnboundedSender<ToolOutputChunk>,
+    tool_use_id: String,
+}
+
+struct BoundedOutputBuffer {
+    lines: VecDeque<String>,
+    total_bytes: usize,
+    dropped_lines: usize,
+    max_lines: usize,
+    max_bytes: usize,
+}
+
+impl BoundedOutputBuffer {
+    fn new(max_lines: usize, max_bytes: usize) -> Self {
+        Self {
+            lines: VecDeque::new(),
+            total_bytes: 0,
+            dropped_lines: 0,
+            max_lines,
+            max_bytes,
+        }
+    }
+
+    fn push_line(&mut self, line: &str) {
+        let mut kept = line.to_string();
+        if kept.len() > self.max_bytes {
+            kept = tail_by_bytes(&kept, self.max_bytes);
+        }
+
+        self.total_bytes = self.total_bytes.saturating_add(kept.len());
+        self.lines.push_back(kept);
+
+        while self.lines.len() > self.max_lines || self.total_bytes > self.max_bytes {
+            if let Some(removed) = self.lines.pop_front() {
+                self.total_bytes = self.total_bytes.saturating_sub(removed.len());
+                self.dropped_lines = self.dropped_lines.saturating_add(1);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn into_text(self) -> String {
+        let mut out = self.lines.into_iter().collect::<Vec<_>>().join("\n");
+        if self.dropped_lines > 0 {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&format!(
+                "[... omitted {} earlier line(s) due to buffer limits ...]",
+                self.dropped_lines
+            ));
+        }
+        out
+    }
+}
+
+/// Keep the tail of a string within `max_bytes`, preserving UTF-8 boundaries.
+fn tail_by_bytes(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+
+    let mut start = text.len().saturating_sub(max_bytes);
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_string()
+}
+
+/// Strip ANSI escape sequences from text
+fn strip_ansi(text: &str) -> String {
+    let re = regex::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\[[\?0-9;]*[a-zA-Z]")
+        .expect("valid regex");
+    re.replace_all(text, "").into_owned()
+}
+
+/// Detect a trailing shell background operator (`&`) that is not quoted/escaped,
+/// and return the command without it.
+fn strip_shell_background_suffix(command: &str) -> Option<String> {
+    let trimmed = command.trim_end();
+    let (amp_idx, last_char) = trimmed.char_indices().last()?;
+    if last_char != '&' {
+        return None;
+    }
+
+    let prefix = trimmed[..amp_idx].trim_end();
+    if prefix.is_empty() {
+        return None;
+    }
+
+    // Reject `&&` and `|&` style endings.
+    if matches!(prefix.chars().last(), Some('&' | '|')) {
+        return None;
+    }
+
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    for (idx, ch) in trimmed.char_indices() {
+        if idx == amp_idx {
+            if in_single || in_double || escaped {
+                return None;
+            }
+            break;
+        }
+
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if !in_single => escaped = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            _ => {}
+        }
+    }
+
+    Some(prefix.to_string())
+}
+
+fn build_shell_command(command: &str, ctx: &ToolContext) -> Command {
+    let mut cmd = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.arg("/C").arg(command);
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(command);
+        c
+    };
+
+    cmd.env("NO_COLOR", "1");
+
+    if let Some(ref identity) = ctx.git_identity {
+        for (key, val) in identity.env_vars() {
+            cmd.env(key, val);
+        }
+    }
+
+    cmd.current_dir(&ctx.working_dir);
+    cmd
+}
+
+fn configure_foreground_process_group(cmd: &mut Command) {
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+}
+
+async fn collect_pipe_output<R>(
+    pipe: Option<R>,
+    stream: Option<StreamContext>,
+    buffer: Arc<Mutex<BoundedOutputBuffer>>,
+) where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let Some(pipe) = pipe else {
+        return;
+    };
+
+    let mut reader = BufReader::new(pipe).lines();
+    while let Ok(Some(line)) = reader.next_line().await {
+        if let Some(stream) = &stream {
+            let _ = stream.output_tx.send(ToolOutputChunk {
+                tool_use_id: stream.tool_use_id.clone(),
+                chunk: format!("{}\n", line),
+                is_complete: false,
+                exit_code: None,
+            });
+        }
+
+        buffer.lock().await.push_line(&line);
+    }
+}
+
+async fn join_reader_with_timeout(mut handle: tokio::task::JoinHandle<()>) {
+    if timeout(Duration::from_millis(READER_JOIN_TIMEOUT_MS), &mut handle)
+        .await
+        .is_err()
+    {
+        handle.abort();
+    }
+
+    let _ = handle.await;
+}
+
+#[cfg(unix)]
+async fn terminate_unix_process_tree(pid: u32) {
+    let pgid = format!("-{}", pid);
+
+    let group_term_ok = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(&pgid)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !group_term_ok {
+        let _ = std::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status();
+    }
+
+    sleep(Duration::from_millis(200)).await;
+
+    let still_running = std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if still_running {
+        let _ = std::process::Command::new("kill")
+            .arg("-KILL")
+            .arg(&pgid)
+            .status();
+        let _ = std::process::Command::new("kill")
+            .arg("-KILL")
+            .arg(pid.to_string())
+            .status();
+    }
+}
+
+#[cfg(windows)]
+async fn terminate_windows_process_tree(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .output();
+}
+
+async fn terminate_process_tree(child: &mut Child) {
+    let Some(pid) = child.id() else {
+        let _ = child.kill().await;
+        return;
+    };
+
+    #[cfg(unix)]
+    terminate_unix_process_tree(pid).await;
+
+    #[cfg(windows)]
+    terminate_windows_process_tree(pid).await;
+
+    if timeout(Duration::from_millis(TIMEOUT_KILL_GRACE_MS), child.wait())
+        .await
+        .is_err()
+    {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+}
+
+async fn execute_foreground(
+    mut cmd: Command,
+    timeout_duration: Duration,
+    stream: Option<StreamContext>,
+) -> ToolResult {
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return ToolResult::error(format!("Failed to spawn command: {}", e)),
+    };
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let buffer = Arc::new(Mutex::new(BoundedOutputBuffer::new(
+        RAW_CAPTURE_MAX_LINES,
+        RAW_CAPTURE_MAX_BYTES,
+    )));
+
+    let stdout_handle = tokio::spawn(collect_pipe_output(
+        stdout,
+        stream.clone(),
+        Arc::clone(&buffer),
+    ));
+    let stderr_handle = tokio::spawn(collect_pipe_output(
+        stderr,
+        stream.clone(),
+        Arc::clone(&buffer),
+    ));
+
+    let wait_result = timeout(timeout_duration, child.wait()).await;
+    let (exit_code, killed, timed_out) = match wait_result {
+        Ok(Ok(status)) => {
+            if let Some(code) = status.code() {
+                (code, false, false)
+            } else {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    match status.signal() {
+                        Some(2) | Some(15) => (0, false, false),
+                        Some(sig) => {
+                            tracing::debug!("Process killed by signal {}", sig);
+                            (128 + sig, false, false)
+                        }
+                        None => (-1, false, false),
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    (-1, false, false)
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            tracing::error!("Process wait error: {}", e);
+            (-1, false, false)
+        }
+        Err(_) => {
+            terminate_process_tree(&mut child).await;
+            (-1, true, true)
+        }
+    };
+
+    join_reader_with_timeout(stdout_handle).await;
+    join_reader_with_timeout(stderr_handle).await;
+
+    let combined_output = {
+        let mut guard = buffer.lock().await;
+        let captured = std::mem::replace(
+            &mut *guard,
+            BoundedOutputBuffer::new(RAW_CAPTURE_MAX_LINES, RAW_CAPTURE_MAX_BYTES),
+        );
+        captured.into_text()
+    };
+
+    if let Some(stream) = &stream {
+        let _ = stream.output_tx.send(ToolOutputChunk {
+            tool_use_id: stream.tool_use_id.clone(),
+            chunk: String::new(),
+            is_complete: true,
+            exit_code: Some(exit_code),
+        });
+    }
+
+    let processed = process_output(combined_output);
+    let metadata = Some(json!({
+        "exit_code": exit_code,
+        "killed": killed,
+    }));
+
+    if timed_out {
+        ToolResult::error_with_details(
+            "timeout",
+            format!(
+                "Command timed out after {} ms",
+                timeout_duration.as_millis()
+            ),
+            Some(json!({ "output": processed })),
+            metadata,
+        )
+    } else if exit_code == 0 {
+        ToolResult::success_data_with(json!({ "output": processed }), Vec::new(), None, metadata)
+    } else {
+        ToolResult::error_with_details(
+            "command_failed",
+            format!("Command exited with code {}", exit_code),
+            Some(json!({ "output": processed })),
+            metadata,
+        )
+    }
 }
 
 #[async_trait]
@@ -100,43 +486,23 @@ impl Tool for BashTool {
             params.command.clone()
         };
 
-        // Build command based on platform
-        let mut cmd = if cfg!(windows) {
-            let mut c = Command::new("cmd");
-            c.arg("/C").arg(&effective_command);
-            c
-        } else {
-            let mut c = Command::new("sh");
-            c.arg("-c").arg(&effective_command);
-            c
-        };
+        let inferred_background_command = strip_shell_background_suffix(&effective_command);
+        let inferred_from_shell_suffix = inferred_background_command.is_some();
 
-        // Apply git author env vars if in Author mode
-        if let Some(ref identity) = ctx.git_identity {
-            for (key, val) in identity.env_vars() {
-                cmd.env(key, val);
-            }
-        }
-
-        cmd.current_dir(&ctx.working_dir);
-
-        // Detect shell background syntax (command ending with &)
-        // Treat this the same as run_in_background: true
-        let command_trimmed = effective_command.trim();
-        let is_shell_backgrounded =
-            command_trimmed.ends_with('&') && !command_trimmed.ends_with("&&"); // Don't match && (logical AND)
-
-        // Handle background execution (explicit param OR shell & syntax)
-        if params.run_in_background.unwrap_or(false) || is_shell_backgrounded {
-            // Strip trailing & if present (we'll handle backgrounding ourselves)
-            let clean_command = if is_shell_backgrounded {
-                command_trimmed.trim_end_matches('&').trim().to_string()
+        // Handle background execution (explicit param OR safe shell suffix detection)
+        if params.run_in_background.unwrap_or(false) || inferred_from_shell_suffix {
+            let clean_command =
+                inferred_background_command.unwrap_or_else(|| effective_command.clone());
+            let warnings = if inferred_from_shell_suffix {
+                vec![
+                    "Background mode inferred from trailing '&'; prefer run_in_background:true for clarity."
+                        .to_string(),
+                ]
             } else {
-                effective_command.clone()
+                Vec::new()
             };
-            // Use process registry if available for tracking
+
             if let Some(ref registry) = ctx.process_registry {
-                // Use user_id for multi-tenant isolation
                 let spawn_result = match ctx.user_id.as_deref() {
                     Some(uid) => {
                         registry
@@ -160,13 +526,15 @@ impl Tool for BashTool {
                 };
                 match spawn_result {
                     Ok(process_id) => {
-                        return ToolResult::success(
+                        return ToolResult::success_data_with(
                             json!({
-                                "output": "Process started in background",
-                                "processId": process_id,
+                                "message": "Process started in background",
+                                "process_id": process_id,
                                 "status": "running"
-                            })
-                            .to_string(),
+                            }),
+                            warnings,
+                            None,
+                            None,
                         );
                     }
                     Err(e) => {
@@ -174,227 +542,48 @@ impl Tool for BashTool {
                     }
                 }
             } else {
-                // Fallback to legacy background execution without tracking
-                return execute_background(cmd).await;
+                let background_cmd = build_shell_command(&clean_command, ctx);
+                return execute_background(background_cmd, warnings).await;
             }
         }
 
-        // Foreground execution with streaming output
+        // Foreground execution with bounded output capture.
+        let mut cmd = build_shell_command(&effective_command, ctx);
+        configure_foreground_process_group(&mut cmd);
         cmd.kill_on_drop(true);
-        cmd.stdin(Stdio::null()); // Prevent hanging on input
+        cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let timeout_ms = params.timeout.unwrap_or(30_000).min(600_000); // 30s default
+        let timeout_ms = params.timeout.unwrap_or(30_000).min(600_000);
         let timeout_duration = Duration::from_millis(timeout_ms);
 
-        // Check if we have streaming output channel
-        let has_streaming = ctx.output_tx.is_some() && ctx.tool_use_id.is_some();
+        let stream = match (ctx.output_tx.as_ref(), ctx.tool_use_id.as_ref()) {
+            (Some(tx), Some(id)) => Some(StreamContext {
+                output_tx: tx.clone(),
+                tool_use_id: id.clone(),
+            }),
+            (None, None) => None,
+            _ => return ToolResult::error("Streaming context incomplete for bash tool"),
+        };
 
-        if has_streaming {
-            // Streaming mode: spawn and read lines incrementally
-            execute_streaming(cmd, timeout_duration, ctx).await
-        } else {
-            // Legacy mode: wait for completion
-            execute_blocking(cmd, timeout_duration).await
-        }
+        execute_foreground(cmd, timeout_duration, stream).await
     }
 }
 
-/// Execute command with real-time output streaming
-async fn execute_streaming(
-    mut cmd: Command,
-    timeout_duration: Duration,
-    ctx: &ToolContext,
-) -> ToolResult {
-    let output_tx = match ctx.output_tx.as_ref() {
-        Some(tx) => tx,
-        None => return ToolResult::error("Streaming output channel not available".to_string()),
-    };
-    let tool_use_id = match ctx.tool_use_id.as_ref() {
-        Some(id) => id.clone(),
-        None => return ToolResult::error("Tool use ID not available for streaming".to_string()),
-    };
-
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => return ToolResult::error(format!("Failed to spawn command: {}", e)),
-    };
-
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-
-    let mut combined_output = String::new();
-    const MAX_OUTPUT_SIZE: usize = 10_000_000; // 10MB cap to prevent unbounded growth
-
-    // Spawn tasks to read stdout and stderr concurrently
-    let stdout_tx = output_tx.clone();
-    let stdout_id = tool_use_id.clone();
-    let stdout_handle = tokio::spawn(async move {
-        let mut lines = Vec::new();
-        if let Some(stdout) = stdout {
-            let mut reader = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                // Send line to UI immediately
-                let _ = stdout_tx.send(ToolOutputChunk {
-                    tool_use_id: stdout_id.clone(),
-                    chunk: format!("{}\n", line),
-                    is_complete: false,
-                    exit_code: None,
-                });
-                lines.push(line);
-            }
-        }
-        lines.join("\n")
-    });
-
-    let stderr_tx = output_tx.clone();
-    let stderr_id = tool_use_id.clone();
-    let stderr_handle = tokio::spawn(async move {
-        let mut lines = Vec::new();
-        if let Some(stderr) = stderr {
-            let mut reader = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                // Send line to UI immediately (stderr)
-                let _ = stderr_tx.send(ToolOutputChunk {
-                    tool_use_id: stderr_id.clone(),
-                    chunk: format!("{}\n", line),
-                    is_complete: false,
-                    exit_code: None,
-                });
-                lines.push(line);
-            }
-        }
-        lines.join("\n")
-    });
-
-    // Wait for process with timeout
-    let wait_result = timeout(timeout_duration, child.wait()).await;
-
-    let (exit_code, killed) = match wait_result {
-        Ok(Ok(status)) => {
-            // Check for normal exit code first
-            if let Some(code) = status.code() {
-                (code, false)
-            } else {
-                // Process was killed by signal (Unix)
-                // On Unix, check if it was a user-initiated signal (SIGINT=2, SIGTERM=15)
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::ExitStatusExt;
-                    match status.signal() {
-                        Some(2) | Some(15) => (0, false), // SIGINT/SIGTERM = user closed, treat as success
-                        Some(sig) => {
-                            tracing::debug!("Process killed by signal {}", sig);
-                            (128 + sig, false) // Convention: 128 + signal number
-                        }
-                        None => (-1, false),
-                    }
-                }
-                #[cfg(not(unix))]
-                {
-                    (-1, false)
-                }
-            }
-        }
-        Ok(Err(e)) => {
-            tracing::error!("Process wait error: {}", e);
-            (-1, false)
-        }
-        Err(_) => {
-            // Timeout - kill the process
-            let _ = child.kill().await;
-            (-1, true)
-        }
-    };
-
-    // Collect output from tasks
-    if let Ok(stdout_output) = stdout_handle.await {
-        if combined_output.len() + stdout_output.len() <= MAX_OUTPUT_SIZE {
-            combined_output.push_str(&stdout_output);
-        } else {
-            let remaining = MAX_OUTPUT_SIZE.saturating_sub(combined_output.len());
-            combined_output.push_str(&stdout_output[..remaining.min(stdout_output.len())]);
-            combined_output.push_str("\n[OUTPUT TRUNCATED: exceeded size limit]");
-        }
-    }
-    if let Ok(stderr_output) = stderr_handle.await {
-        if combined_output.len() + stderr_output.len() <= MAX_OUTPUT_SIZE {
-            if !combined_output.is_empty() && !stderr_output.is_empty() {
-                combined_output.push('\n');
-            }
-            combined_output.push_str(&stderr_output);
-        } else if combined_output.len() < MAX_OUTPUT_SIZE {
-            let remaining = MAX_OUTPUT_SIZE.saturating_sub(combined_output.len());
-            if !combined_output.is_empty() {
-                combined_output.push('\n');
-            }
-            combined_output.push_str(&stderr_output[..remaining.min(stderr_output.len())]);
-            combined_output.push_str("\n[OUTPUT TRUNCATED: exceeded size limit]");
-        }
-    }
-
-    // Send completion signal
-    let _ = output_tx.send(ToolOutputChunk {
-        tool_use_id: tool_use_id.clone(),
-        chunk: String::new(),
-        is_complete: true,
-        exit_code: Some(exit_code),
-    });
-
-    ToolResult {
-        output: json!({
-            "output": combined_output,
-            "exitCode": exit_code,
-            "killed": killed
-        })
-        .to_string(),
-        is_error: exit_code != 0,
-    }
-}
-
-/// Execute command blocking (legacy mode without streaming)
-async fn execute_blocking(mut cmd: Command, timeout_duration: Duration) -> ToolResult {
-    let timeout_ms = timeout_duration.as_millis();
-
-    match timeout(timeout_duration, cmd.output()).await {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let exit_code = output.status.code().unwrap_or(-1);
-
-            let combined = match (stdout.is_empty(), stderr.is_empty()) {
-                (true, true) => String::new(),
-                (false, true) => stdout.into_owned(),
-                (true, false) => stderr.into_owned(),
-                (false, false) => format!("{}\n{}", stdout, stderr),
-            };
-
-            ToolResult {
-                output: json!({
-                    "output": combined,
-                    "exitCode": exit_code,
-                    "killed": false
-                })
-                .to_string(),
-                is_error: exit_code != 0,
-            }
-        }
-        Ok(Err(e)) => ToolResult::error(format!("Failed to execute command: {}", e)),
-        Err(_) => ToolResult {
-            output: json!({
-                "output": format!("Command timed out after {} ms", timeout_ms),
-                "exitCode": -1,
-                "killed": true
-            })
-            .to_string(),
-            is_error: true,
-        },
+/// Apply ANSI stripping and truncation to the final output sent to the AI model.
+fn process_output(combined: String) -> String {
+    let stripped = strip_ansi(&combined);
+    let result = truncation::truncate_tail(&stripped, MAX_OUTPUT_LINES, MAX_OUTPUT_BYTES);
+    if let Some(notice) = result.notice() {
+        format!("{}{}", result.text, notice)
+    } else {
+        result.text
     }
 }
 
 /// Execute command in background, return immediately with shell ID
-async fn execute_background(mut cmd: Command) -> ToolResult {
+async fn execute_background(mut cmd: Command, warnings: Vec<String>) -> ToolResult {
     let shell_id = uuid::Uuid::new_v4().to_string();
 
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
@@ -404,21 +593,80 @@ async fn execute_background(mut cmd: Command) -> ToolResult {
             let pid = child.id().unwrap_or(0);
             tracing::info!(shell_id = %shell_id, pid = pid, "Started background process");
 
-            // Detach - let the process run independently
             tokio::spawn(async move {
                 let _ = child.wait_with_output().await;
             });
 
-            ToolResult::success(
+            ToolResult::success_data_with(
                 json!({
-                    "output": "Process started in background",
-                    "exitCode": 0,
-                    "killed": false,
-                    "shellId": shell_id
-                })
-                .to_string(),
+                    "message": "Process started in background",
+                    "shell_id": shell_id,
+                    "status": "running"
+                }),
+                warnings,
+                None,
+                Some(json!({
+                    "exit_code": 0,
+                    "killed": false
+                })),
             )
         }
         Err(e) => ToolResult::error(format!("Failed to start background process: {}", e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_shell_background_suffix_accepts_simple_suffix() {
+        let parsed = strip_shell_background_suffix("npm run dev &");
+        assert_eq!(parsed.as_deref(), Some("npm run dev"));
+    }
+
+    #[test]
+    fn strip_shell_background_suffix_rejects_quoted_ampersand() {
+        let parsed = strip_shell_background_suffix("echo '&'");
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn strip_shell_background_suffix_rejects_escaped_ampersand() {
+        let parsed = strip_shell_background_suffix(r"echo foo \&");
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn strip_shell_background_suffix_rejects_double_ampersand() {
+        let parsed = strip_shell_background_suffix("echo hi &&");
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn bounded_output_buffer_keeps_recent_lines() {
+        let mut buffer = BoundedOutputBuffer::new(3, 1024);
+        buffer.push_line("l1");
+        buffer.push_line("l2");
+        buffer.push_line("l3");
+        buffer.push_line("l4");
+
+        let text = buffer.into_text();
+        assert!(!text.contains("l1"));
+        assert!(text.contains("l2"));
+        assert!(text.contains("l3"));
+        assert!(text.contains("l4"));
+    }
+
+    #[test]
+    fn bounded_output_buffer_clips_to_max_bytes() {
+        let mut buffer = BoundedOutputBuffer::new(100, 10);
+        buffer.push_line("12345");
+        buffer.push_line("67890");
+        buffer.push_line("abcdef");
+
+        let text = buffer.into_text();
+        assert!(text.len() <= 200); // Includes optional omission notice.
+        assert!(text.contains("abcdef") || text.contains("bcdef"));
     }
 }

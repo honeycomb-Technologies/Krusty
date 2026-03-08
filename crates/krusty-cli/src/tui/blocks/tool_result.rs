@@ -95,25 +95,27 @@ impl ToolResultBlock {
     pub fn set_results(&mut self, output: &str) {
         // Try to parse JSON output
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
+            let payload = json.get("data").unwrap_or(&json);
             if self.tool_name == "glob" {
-                if let Some(matches) = json.get("matches").and_then(|v| v.as_array()) {
+                if let Some(matches) = payload.get("matches").and_then(|v| v.as_array()) {
                     self.results = matches
                         .iter()
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
                         .collect();
-                    self.count =
-                        json.get("count")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(self.results.len() as u64) as usize;
+                    self.count = payload
+                        .get("count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(self.results.len() as u64)
+                        as usize;
                 }
             } else if self.tool_name == "grep" {
-                self.count = json
+                self.count = payload
                     .get("total_matches")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as usize;
 
                 // Content mode: matches array with file/line/line_number
-                if let Some(matches) = json.get("matches").and_then(|v| v.as_array()) {
+                if let Some(matches) = payload.get("matches").and_then(|v| v.as_array()) {
                     self.results = matches
                         .iter()
                         .filter_map(|m| {
@@ -129,7 +131,7 @@ impl ToolResultBlock {
                         .collect();
                 }
                 // files_with_matches mode: files array
-                else if let Some(files) = json.get("files").and_then(|v| v.as_array()) {
+                else if let Some(files) = payload.get("files").and_then(|v| v.as_array()) {
                     self.results = files
                         .iter()
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))

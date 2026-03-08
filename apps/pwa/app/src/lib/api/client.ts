@@ -17,6 +17,7 @@ export interface SessionResponse {
 	mode: 'build' | 'plan';
 	updated_at: string;
 	model?: string | null;
+	target_branch?: string | null;
 }
 
 /** Message content block */
@@ -122,6 +123,30 @@ export interface ProviderStatus {
 	name: string;
 	configured: boolean;
 	has_oauth: boolean;
+	supports_oauth: boolean;
+}
+
+/** OAuth start response */
+export interface OAuthDeviceCodeInfo {
+	user_code: string;
+	verification_uri: string;
+	verification_uri_complete?: string | null;
+	expires_in: number;
+}
+
+/** OAuth start response */
+export interface OAuthStartResponse {
+	auth_url: string;
+	provider: string;
+	flow_type: 'browser_callback' | 'device' | 'paste_code';
+	paste_code: boolean;
+	device_code?: OAuthDeviceCodeInfo | null;
+}
+
+/** OAuth status response */
+export interface OAuthStatusResponse {
+	has_token: boolean;
+	flow_active: boolean;
 }
 
 /** Push diagnostics summary */
@@ -288,16 +313,16 @@ export const apiClient = {
 			directories: { name: string; path: string }[];
 		}>(`/files/browse${path ? `?path=${encodeURIComponent(path)}` : ''}`),
 
-	createSession: (title?: string, workingDir?: string) =>
+	createSession: (title?: string, workingDir?: string, targetBranch?: string) =>
 		request<SessionResponse>('/sessions', {
 			method: 'POST',
-			body: JSON.stringify({ title, working_dir: workingDir })
+			body: JSON.stringify({ title, working_dir: workingDir, target_branch: targetBranch })
 		}),
 
 	deleteSession: (id: string) =>
 		request<void>(`/sessions/${id}`, { method: 'DELETE' }),
 
-	updateSession: (id: string, data: { title?: string; working_dir?: string; mode?: 'build' | 'plan'; model?: string }) =>
+	updateSession: (id: string, data: { title?: string; working_dir?: string; mode?: 'build' | 'plan'; model?: string; target_branch?: string }) =>
 		request<SessionResponse>(`/sessions/${id}`, {
 			method: 'PATCH',
 			body: JSON.stringify(data)
@@ -398,6 +423,27 @@ export const apiClient = {
 	deleteCredential: (providerId: string) =>
 		request<void>(`/credentials/${providerId}`, { method: 'DELETE' }),
 
+	// OAuth
+	startOAuth: (provider: string) =>
+		request<OAuthStartResponse>('/auth/oauth/start', {
+			method: 'POST',
+			body: JSON.stringify({ provider })
+		}),
+
+	getOAuthStatus: (provider: string) =>
+		request<OAuthStatusResponse>(`/auth/oauth/status/${provider}`),
+
+	exchangeOAuthCode: (provider: string, code: string) =>
+		request<{ success: boolean }>('/auth/oauth/exchange', {
+			method: 'POST',
+			body: JSON.stringify({ provider, code })
+		}),
+
+	revokeOAuth: (provider: string) =>
+		request<OAuthStatusResponse>(`/auth/oauth/revoke/${provider}`, {
+			method: 'DELETE'
+		}),
+
 	// Push notifications
 	getVapidPublicKey: () =>
 		request<{ public_key: string }>('/push/vapid-public-key'),
@@ -478,7 +524,7 @@ interface ChatRequest {
 	message: string;
 	content?: ContentBlock[]; // For multi-modal (text + images)
 	model?: string;
-	thinking_enabled?: boolean;
+	thinking_enabled?: boolean | string; // boolean for backward compat, string for levels (low/medium/high)
 	permission_mode?: 'supervised' | 'autonomous';
 	mode?: 'build' | 'plan';
 }

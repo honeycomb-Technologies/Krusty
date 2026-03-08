@@ -307,7 +307,7 @@ fn parse_rg_json(stdout: &str, output_mode: &str, head_limit: usize) -> ToolResu
         }
     };
 
-    ToolResult::success(output.to_string())
+    ToolResult::success_data(output)
 }
 
 #[cfg(test)]

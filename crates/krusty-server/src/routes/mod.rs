@@ -11,6 +11,7 @@ mod git;
 mod hooks;
 mod mcp;
 mod models;
+pub mod oauth;
 mod ports;
 mod preview_settings;
 mod processes;
@@ -34,5 +35,6 @@ pub fn api_router() -> Router<AppState> {
         .nest("/settings/preview", preview_settings::router())
         .nest("/hooks", hooks::router())
         .nest("/push", push::router())
+        .nest("/auth/oauth", oauth::router())
         .merge(Router::new())
 }

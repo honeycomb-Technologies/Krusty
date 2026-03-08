@@ -51,9 +51,9 @@ pub fn load_from_path(path: &Path) -> Result<LoadedFile> {
     // Read and encode file
     let bytes = std::fs::read(path)?;
 
-    // Check file size (API limit is 5MB for images)
-    if bytes.len() > 5 * 1024 * 1024 {
-        bail!("Image too large: {} bytes (max 5MB)", bytes.len());
+    // Check file size (allow up to 50MB for images - matches PWA limit)
+    if bytes.len() > 50 * 1024 * 1024 {
+        bail!("Image too large: {} bytes (max 50MB)", bytes.len());
     }
 
     let base64_data = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -141,10 +141,10 @@ pub fn load_from_clipboard_rgba(
     let mut cursor = std::io::Cursor::new(&mut png_bytes);
     img.write_to(&mut cursor, image::ImageFormat::Png)?;
 
-    // Check size
-    if png_bytes.len() > 5 * 1024 * 1024 {
+    // Check size (allow up to 50MB)
+    if png_bytes.len() > 50 * 1024 * 1024 {
         bail!(
-            "Clipboard image too large: {} bytes (max 5MB)",
+            "Clipboard image too large: {} bytes (max 50MB)",
             png_bytes.len()
         );
     }

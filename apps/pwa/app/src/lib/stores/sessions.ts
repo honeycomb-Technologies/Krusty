@@ -9,6 +9,7 @@ export interface Session {
 	token_count?: number | null;
 	parent_session_id?: string | null;
 	working_dir?: string | null;
+	target_branch?: string | null;
 }
 
 interface SessionsState {
@@ -60,11 +61,11 @@ export async function loadDirectories() {
 	}
 }
 
-export async function createSession(title?: string, workingDir?: string) {
+export async function createSession(title?: string, workingDir?: string, targetBranch?: string) {
 	sessionsStore.update((s) => ({ ...s, isLoading: true }));
 
 	try {
-		const data = await apiClient.createSession(title, workingDir);
+		const data = await apiClient.createSession(title, workingDir, targetBranch);
 		const state = get(sessionsStore);
 
 		sessionsStore.update((s) => ({

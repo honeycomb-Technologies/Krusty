@@ -26,7 +26,7 @@ mod tests {
 
         // Database should initialize with schema_version table
         let version = db.get_schema_version();
-        assert_eq!(version, 15, "Expected current schema version to be 15");
+        assert_eq!(version, 16, "Expected current schema version to be 16");
     }
 
     #[test]
@@ -65,6 +65,7 @@ mod tests {
         assert!(columns.contains(&"user_id".to_string()));
         assert!(columns.contains(&"working_dir".to_string()));
         assert!(columns.contains(&"work_mode".to_string()));
+        assert!(columns.contains(&"target_branch".to_string()));
     }
 
     #[test]
@@ -146,7 +147,7 @@ mod tests {
         let version = db.get_schema_version();
 
         // After all migrations, version should be current
-        assert_eq!(version, 15, "Expected final schema version");
+        assert_eq!(version, 16, "Expected final schema version");
     }
 
     #[test]

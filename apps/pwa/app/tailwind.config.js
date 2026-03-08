@@ -71,13 +71,18 @@ export default {
 				'pulse-subtle': {
 					'0%, 100%': { opacity: '1' },
 					'50%': { opacity: '0.7' }
+				},
+				'wave': {
+					'0%, 100%': { transform: 'scaleY(0.5)' },
+					'50%': { transform: 'scaleY(1)' }
 				}
 			},
 			animation: {
 				'slide-in-right': 'slide-in-right 0.3s ease-out',
 				'slide-in-left': 'slide-in-left 0.3s ease-out',
 				'fade-in': 'fade-in 0.2s ease-out',
-				'pulse-subtle': 'pulse-subtle 2s ease-in-out infinite'
+				'pulse-subtle': 'pulse-subtle 2s ease-in-out infinite',
+				'wave': 'wave 1s ease-in-out infinite'
 			}
 		}
 	},

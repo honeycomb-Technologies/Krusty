@@ -28,7 +28,7 @@ use crate::agent::{AgentCancellation, AgentConfig, AgentEventBus, AgentState, Us
 use crate::ai::client::AiClient;
 use crate::ai::models::SharedModelRegistry;
 use crate::ai::providers::ProviderId;
-use crate::ai::types::{AiTool, AiToolCall, Content};
+use crate::ai::types::{AiTool, AiToolCall};
 use crate::extensions::WasmHost;
 use crate::plan::{PlanFile, PlanManager};
 use crate::plugins::PluginManager;
@@ -45,7 +45,6 @@ use crate::tui::polling::{
 use crate::tui::state::{
     BlockManager, BlockUiStates, ChatState, PopupState, ScrollSystem, ToolResultCache,
 };
-use crate::tui::streaming::StreamingManager;
 use crate::tui::utils::{AsyncChannels, TitleEditor};
 use krusty_core::skills::SkillsManager;
 
@@ -86,6 +85,24 @@ impl WorkMode {
         match self {
             WorkMode::Build => WorkMode::Plan,
             WorkMode::Plan => WorkMode::Build,
+        }
+    }
+}
+
+impl From<WorkMode> for krusty_core::storage::WorkMode {
+    fn from(mode: WorkMode) -> Self {
+        match mode {
+            WorkMode::Build => krusty_core::storage::WorkMode::Build,
+            WorkMode::Plan => krusty_core::storage::WorkMode::Plan,
+        }
+    }
+}
+
+impl From<krusty_core::storage::WorkMode> for WorkMode {
+    fn from(mode: krusty_core::storage::WorkMode) -> Self {
+        match mode {
+            krusty_core::storage::WorkMode::Build => WorkMode::Build,
+            krusty_core::storage::WorkMode::Plan => WorkMode::Plan,
         }
     }
 }
@@ -290,10 +307,6 @@ pub struct AppRuntime {
     pub init_explore_id: Option<String>,
     /// Cached languages for /init
     pub cached_init_languages: Option<Vec<String>>,
-    /// Queued tool calls waiting for explore
-    pub queued_tools: Vec<AiToolCall>,
-    /// Pending tool results to combine
-    pub pending_tool_results: Vec<Content>,
     /// Agent event bus
     pub event_bus: AgentEventBus,
     /// Agent state
@@ -304,8 +317,6 @@ pub struct AppRuntime {
     pub cancellation: AgentCancellation,
     /// Extended thinking level (Tab cycles levels for Codex models)
     pub thinking_level: ThinkingLevel,
-    /// Streaming state machine
-    pub streaming: StreamingManager,
     /// Clipboard images pending resolution
     pub pending_clipboard_images: std::collections::HashMap<String, (usize, usize, Vec<u8>)>,
     /// Block manager (owns all block types)
@@ -318,10 +329,8 @@ pub struct AppRuntime {
     pub permission_mode: PermissionMode,
     /// When a tool approval prompt was shown (for timeout)
     pub approval_requested_at: Option<Instant>,
-    /// Exploration budget tracking
-    pub exploration_budget_count: usize,
-    /// Counts of repeated tool failure signatures for fail-fast loop protection
-    pub tool_failure_signatures: std::collections::HashMap<String, usize>,
+    /// AskUserQuestion tool calls stored between ToolCallComplete and AwaitingInput events
+    pub pending_ask_user_calls: Vec<AiToolCall>,
     /// Just updated flag
     pub just_updated: bool,
     /// Update status
@@ -362,22 +371,18 @@ impl AppRuntime {
             channels: AsyncChannels::new(),
             init_explore_id: None,
             cached_init_languages: None,
-            queued_tools: Vec::new(),
-            pending_tool_results: Vec::new(),
             event_bus: AgentEventBus::new(),
             agent_state: AgentState::new(),
             agent_config: AgentConfig::default(),
             cancellation: AgentCancellation::new(),
             thinking_level: ThinkingLevel::Off,
-            streaming: StreamingManager::new(),
             pending_clipboard_images: std::collections::HashMap::new(),
             blocks: BlockManager::new(),
             tool_results: ToolResultCache::new(),
             attached_files: std::collections::HashMap::new(),
             permission_mode: PermissionMode::Supervised,
             approval_requested_at: None,
-            exploration_budget_count: 0,
-            tool_failure_signatures: std::collections::HashMap::new(),
+            pending_ask_user_calls: Vec::new(),
             just_updated: false,
             update_status: None,
             should_quit: false,
@@ -848,39 +853,13 @@ impl App {
                 }
             }
 
-            // Process streaming events (extracted to handlers/stream_events.rs)
-            // Trigger redraw when events were processed - ensures buffered text renders
-            // even after is_streaming becomes false (fixes GLM/Z.ai streaming freeze)
-            if self.process_stream_events() {
+            // Process core orchestrator events (LoopEvent channel)
+            if self.process_loop_events() {
                 self.ui.needs_redraw = true;
             }
 
-            // Execute tools when ready
-            self.check_and_execute_tools();
-
             // Check for timed-out tool approvals
             self.check_approval_timeout();
-
-            // Check for completed tool execution
-            if let Some(ref mut rx) = self.runtime.channels.tool_results {
-                match rx.try_recv() {
-                    Ok(tool_results) => {
-                        self.runtime.channels.tool_results = None;
-                        self.stop_streaming();
-                        self.stop_tool_execution();
-                        self.handle_tool_results(tool_results);
-                    }
-                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                        // Still waiting for tools to complete
-                    }
-                    Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                        // Task finished without sending results (error case)
-                        self.runtime.channels.tool_results = None;
-                        self.stop_streaming();
-                        self.stop_tool_execution();
-                    }
-                }
-            }
 
             // Poll async operations
             self.poll_openrouter_fetch();

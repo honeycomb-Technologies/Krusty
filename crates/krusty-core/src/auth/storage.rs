@@ -38,15 +38,14 @@ impl OAuthTokenStore {
 
     /// Load OAuth tokens from disk (with caching)
     pub fn load() -> Result<Self> {
-        // Check cache first
-        if let Ok(cache) = TOKEN_CACHE.try_lock() {
+        // Check cache first (use lock() not try_lock() to ensure consistency)
+        if let Ok(cache) = TOKEN_CACHE.lock() {
             if let Some(cached) = cache.as_ref() {
-                tracing::debug!("Using cached OAuth token store");
                 return Ok(cached.clone());
             }
         }
 
-        // Cache miss or lock contention - load from disk
+        // Cache miss - load from disk
         let path = Self::path();
         if !path.exists() {
             return Ok(Self::default());
@@ -55,7 +54,7 @@ impl OAuthTokenStore {
         let store: OAuthTokenStore = serde_json::from_str(&contents)?;
 
         // Update cache
-        if let Ok(mut cache) = TOKEN_CACHE.try_lock() {
+        if let Ok(mut cache) = TOKEN_CACHE.lock() {
             *cache = Some(store.clone());
         }
 
@@ -90,10 +89,9 @@ impl OAuthTokenStore {
         // Atomically replace the original file
         fs::rename(&temp_path, path)?;
 
-        // Update cache after successful save
-        if let Ok(mut cache) = TOKEN_CACHE.try_lock() {
+        // Update cache after successful save (use lock() to guarantee update)
+        if let Ok(mut cache) = TOKEN_CACHE.lock() {
             *cache = Some(self.clone());
-            tracing::debug!("OAuth token cache updated after save");
         }
 
         Ok(())

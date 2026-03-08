@@ -591,8 +591,11 @@ pub(crate) async fn call_subagent_api(
         })
         .collect();
 
-    // Build tools JSON
-    let tools_json: Vec<Value> = tools
+    // Build tools JSON — sorted by name for deterministic ordering.
+    // Tool order is part of the cached prefix; non-deterministic order breaks caching.
+    let mut sorted_tools: Vec<_> = tools.iter().collect();
+    sorted_tools.sort_by(|a, b| a.name.cmp(&b.name));
+    let tools_json: Vec<Value> = sorted_tools
         .iter()
         .map(|t| {
             json!({

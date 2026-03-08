@@ -70,35 +70,16 @@ pub fn render_status_bar(f: &mut Frame, area: Rect, props: StatusBarProps<'_>) {
         }
     }
 
-    // Git summary in compact diff format:
-    // 50 files +5162 -700
-    // Hidden when there are no branch/local changes.
+    // Git summary in local-dirty format:
+    // Dirty: 12
     if let Some(git) = git_status {
-        let has_changes =
-            git.total_changes() > 0 || git.branch_additions > 0 || git.branch_deletions > 0;
-        if has_changes {
-            let files_text = format!("{} files ", git.branch_files);
-            let plus_text = format!("+{}", git.branch_additions);
-            let minus_text = format!(" -{}", git.branch_deletions);
-
-            left_width += 3
-                + files_text.width() as u16
-                + plus_text.width() as u16
-                + minus_text.width() as u16;
-            left_spans.push(Span::styled(" │ ", Style::default().fg(theme.dim_color)));
-            left_spans.push(Span::styled(
-                files_text,
-                Style::default().fg(theme.dim_color),
-            ));
-            left_spans.push(Span::styled(
-                plus_text,
-                Style::default().fg(theme.success_color),
-            ));
-            left_spans.push(Span::styled(
-                minus_text,
-                Style::default().fg(theme.error_color),
-            ));
-        }
+        let dirty_text = format!("Dirty: {}", git.total_changes());
+        left_width += 3 + dirty_text.width() as u16;
+        left_spans.push(Span::styled(" │ ", Style::default().fg(theme.dim_color)));
+        left_spans.push(Span::styled(
+            dirty_text,
+            Style::default().fg(theme.dim_color),
+        ));
     }
 
     // Add context indicator if available (fixed width to prevent flashing)

@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { ArrowLeft, MessageSquare, Trash2, Plus, RefreshCw } from 'lucide-svelte';
 	import { sessionsStore, loadSessions, selectSession, deleteSession, createSession } from '$stores/sessions';
+	import { workspaceStore } from '$stores/workspace';
 
 	interface Props {
 		onBack: () => void;
@@ -41,7 +42,9 @@
 	}
 
 	async function handleNew() {
-		await createSession();
+		// Use current workspace directory if set, otherwise create session without directory
+		const currentDir = $workspaceStore.directory;
+		await createSession(undefined, currentDir ?? undefined);
 		window.location.href = '/';
 	}
 </script>
