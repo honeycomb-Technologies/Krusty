@@ -11,11 +11,33 @@
 		LogOut,
 		ExternalLink
 	} from 'lucide-svelte';
-	import { apiClient, type ProviderStatus } from '$lib/api/client';
+	import {
+		apiClient,
+		type OAuthDeviceCodeInfo,
+		type ProviderStatus
+	} from '$lib/api/client';
 
 	interface Props {
 		onBack: () => void;
 	}
+
+	type OAuthDialog =
+		| {
+				kind: 'browser_callback';
+				providerId: string;
+				url: string;
+		  }
+		| {
+				kind: 'device';
+				providerId: string;
+				url: string;
+				deviceCode: OAuthDeviceCodeInfo;
+		  }
+		| {
+				kind: 'paste_code';
+				providerId: string;
+				url: string;
+		  };
 
 	let { onBack }: Props = $props();
 
@@ -36,17 +58,31 @@
 	let pasteCodeProvider = $state<string | null>(null);
 	let oauthPollingInterval = $state<ReturnType<typeof setInterval> | null>(null);
 	let pasteCodeInputEl = $state<HTMLInputElement>(undefined!);
+	let oauthBridgeChannel: BroadcastChannel | null = null;
 
-	// OAuth iframe modal
-	let oauthIframeUrl = $state<string | null>(null);
-	let oauthIframePasteCode = $state(false);
+	let oauthDialog = $state<OAuthDialog | null>(null);
 
 	onMount(() => {
+		window.addEventListener('message', handleOAuthMessage);
+		window.addEventListener('storage', handleOAuthStorage);
+		if (typeof BroadcastChannel !== 'undefined') {
+			oauthBridgeChannel = new BroadcastChannel('krusty:oauth');
+			oauthBridgeChannel.onmessage = (event) => {
+				void completeOAuthFromBrowser(event.data);
+			};
+		}
+		void consumeStoredOAuthResult();
 		loadProviders();
 	});
 
 	onDestroy(() => {
 		stopPolling();
+		window.removeEventListener('message', handleOAuthMessage);
+		window.removeEventListener('storage', handleOAuthStorage);
+		if (oauthBridgeChannel) {
+			oauthBridgeChannel.close();
+			oauthBridgeChannel = null;
+		}
 	});
 
 	function stopPolling() {
@@ -115,46 +151,67 @@
 		error = null;
 		try {
 			const result = await apiClient.startOAuth(providerId);
+			editingProvider = null;
+			pasteCodeProvider = null;
+			pasteCodeInput = '';
 
-			// Show iframe modal instead of external popup
-			oauthIframeUrl = result.auth_url;
-			oauthIframePasteCode = result.paste_code;
+			if (result.flow_type === 'browser_callback') {
+				oauthDialog = {
+					kind: 'browser_callback',
+					providerId,
+					url: result.auth_url
+				};
+				openOAuthInNewTab();
+				startPolling(providerId);
+				return;
+			}
 
-			if (result.paste_code) {
-				// Anthropic: show paste-code input in modal footer
+			if (result.flow_type === 'device' && result.device_code) {
+				oauthDialog = {
+					kind: 'device',
+					providerId,
+					url: result.auth_url,
+					deviceCode: result.device_code
+				};
+				openOAuthInNewTab();
+				startPolling(providerId);
+				return;
+			}
+
+			if (result.flow_type === 'paste_code' || result.paste_code) {
 				pasteCodeProvider = providerId;
-				pasteCodeInput = '';
-				editingProvider = null;
+				oauthDialog = {
+					kind: 'paste_code',
+					providerId,
+					url: result.auth_url
+				};
+				openOAuthInNewTab();
 				oauthLoading = null;
 				setTimeout(() => pasteCodeInputEl?.focus(), 100);
-			} else {
-				// OpenAI: poll for completion
-				startPolling(providerId);
+				return;
 			}
+
+			throw new Error('Unsupported OAuth flow response');
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to start OAuth';
 			oauthLoading = null;
 		}
 	}
 
-	function closeOAuthModal() {
-		const hadPasteCode = oauthIframePasteCode;
-		oauthIframeUrl = null;
-		oauthIframePasteCode = false;
-		if (oauthLoading) {
-			stopPolling();
+	function closeOAuthDialog() {
+		if (oauthDialog?.kind === 'paste_code') {
 			oauthLoading = null;
-		}
-		// Keep paste-code state so inline fallback UI shows
-		if (!hadPasteCode && pasteCodeProvider) {
 			pasteCodeProvider = null;
 			pasteCodeInput = '';
 		}
+		oauthDialog = null;
 	}
 
-	function openOAuthInNewTab() {
-		if (oauthIframeUrl) {
-			window.open(oauthIframeUrl, '_blank');
+	function openOAuthInNewTab(url = oauthDialog?.url) {
+		if (!url) return;
+		const popup = window.open(url, '_blank', 'noopener,noreferrer');
+		if (!popup) {
+			error = 'Your browser blocked the sign-in window. Use "Open browser" or allow popups.';
 		}
 	}
 
@@ -164,14 +221,15 @@
 			try {
 				const status = await apiClient.getOAuthStatus(providerId);
 				if (status.has_token) {
-					stopPolling();
-					oauthLoading = null;
-					oauthIframeUrl = null;
-					oauthIframePasteCode = false;
-					await loadProviders();
+					await finishOAuthSuccess(providerId);
 				} else if (!status.flow_active) {
 					stopPolling();
+					if (oauthLoading === providerId) {
+						error = 'Sign-in was cancelled or expired before completion';
+					}
 					oauthLoading = null;
+					oauthDialog = null;
+					pasteCodeProvider = null;
 				}
 			} catch {
 				// Ignore polling errors
@@ -189,8 +247,7 @@
 			pasteCodeProvider = null;
 			pasteCodeInput = '';
 			oauthLoading = null;
-			oauthIframeUrl = null;
-			oauthIframePasteCode = false;
+			oauthDialog = null;
 			await loadProviders();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to exchange code';
@@ -201,8 +258,7 @@
 	function cancelPasteCode() {
 		pasteCodeProvider = null;
 		pasteCodeInput = '';
-		oauthIframeUrl = null;
-		oauthIframePasteCode = false;
+		oauthDialog = null;
 	}
 
 	async function revokeOAuth(providerId: string) {
@@ -226,80 +282,187 @@
 	function isActive(provider: ProviderStatus): boolean {
 		return provider.configured || provider.has_oauth;
 	}
+
+	type OAuthBrowserResult = {
+		type?: string;
+		provider?: string;
+		success?: boolean;
+		error?: string | null;
+		issued_at?: number;
+	};
+
+	function handleOAuthMessage(event: MessageEvent) {
+		if (event.origin !== window.location.origin) return;
+		void completeOAuthFromBrowser(event.data);
+	}
+
+	function handleOAuthStorage(event: StorageEvent) {
+		if (event.key !== 'krusty:oauth-result' || !event.newValue) return;
+		try {
+			void completeOAuthFromBrowser(JSON.parse(event.newValue));
+		} catch {
+			// Ignore invalid payloads
+		}
+	}
+
+	async function consumeStoredOAuthResult() {
+		const raw = localStorage.getItem('krusty:oauth-result');
+		if (!raw) return;
+		try {
+			await completeOAuthFromBrowser(JSON.parse(raw));
+		} catch {
+			localStorage.removeItem('krusty:oauth-result');
+		}
+	}
+
+	async function completeOAuthFromBrowser(raw: unknown) {
+		const payload = parseOAuthBrowserResult(raw);
+		if (!payload) return;
+
+		localStorage.removeItem('krusty:oauth-result');
+
+		if (payload.success) {
+			await finishOAuthSuccess(payload.provider);
+			return;
+		}
+
+		stopPolling();
+		if (oauthLoading === payload.provider) {
+			error = payload.error || 'Sign-in failed before Krusty received the token';
+		}
+		oauthLoading = null;
+		oauthDialog = null;
+		pasteCodeProvider = null;
+		pasteCodeInput = '';
+	}
+
+	function parseOAuthBrowserResult(raw: unknown): Required<OAuthBrowserResult> | null {
+		if (!raw || typeof raw !== 'object') return null;
+		const payload = raw as OAuthBrowserResult;
+		if (payload.type !== 'krusty-oauth-complete') return null;
+		if (!payload.provider || typeof payload.provider !== 'string') return null;
+		if (typeof payload.success !== 'boolean') return null;
+
+		return {
+			type: payload.type,
+			provider: payload.provider,
+			success: payload.success,
+			error: typeof payload.error === 'string' ? payload.error : null,
+			issued_at: typeof payload.issued_at === 'number' ? payload.issued_at : Date.now()
+		};
+	}
+
+	async function finishOAuthSuccess(providerId: string) {
+		stopPolling();
+		oauthLoading = null;
+		oauthDialog = null;
+		pasteCodeProvider = null;
+		pasteCodeInput = '';
+		await loadProviders();
+	}
 </script>
 
-<!-- OAuth iframe modal -->
-{#if oauthIframeUrl}
-	<div class="fixed inset-0 z-50 flex flex-col bg-background">
-		<!-- Modal header -->
-		<div class="flex items-center justify-between border-b border-border px-4 py-3">
-			<h3 class="font-semibold">Sign in</h3>
-			<div class="flex items-center gap-2">
-				<button
-					onclick={openOAuthInNewTab}
-					class="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
-					title="Open in new tab"
-				>
-					<ExternalLink class="h-3.5 w-3.5" />
-					New tab
-				</button>
-				<button
-					onclick={closeOAuthModal}
-					class="rounded-lg p-2 hover:bg-muted"
-				>
-					<X class="h-5 w-5" />
-				</button>
+<!-- OAuth dialog -->
+{#if oauthDialog}
+	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+		<div class="w-full max-w-xl rounded-2xl border border-border bg-background shadow-2xl">
+			<div class="flex items-center justify-between border-b border-border px-4 py-3">
+				<div>
+					<h3 class="font-semibold">
+						{#if oauthDialog.kind === 'device'}
+							OpenAI sign in
+						{:else if oauthDialog.kind === 'browser_callback'}
+							Complete OpenAI sign in
+						{:else}
+							Complete sign in
+						{/if}
+					</h3>
+					<p class="text-xs text-muted-foreground">
+						Authentication continues in your browser, not inside the PWA.
+					</p>
+				</div>
+				<div class="flex items-center gap-2">
+					<button
+						onclick={() => openOAuthInNewTab()}
+						class="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+						title="Open in new tab"
+					>
+						<ExternalLink class="h-3.5 w-3.5" />
+						Open browser
+					</button>
+					<button onclick={closeOAuthDialog} class="rounded-lg p-2 hover:bg-muted">
+						<X class="h-5 w-5" />
+					</button>
+				</div>
 			</div>
-		</div>
 
-		<!-- Iframe -->
-		<div class="flex-1 overflow-hidden">
-			<iframe
-				src={oauthIframeUrl}
-				class="h-full w-full border-0"
-				title="OAuth sign-in"
-				allow="forms"
-			></iframe>
-		</div>
+			<div class="space-y-4 p-4">
+				{#if oauthDialog.kind === 'browser_callback'}
+					<p class="text-sm text-muted-foreground">
+						Finish the OpenAI sign-in in your browser. When the callback lands back on Krusty,
+						this screen should refresh automatically.
+					</p>
 
-		<!-- Modal footer: paste-code input (Anthropic) -->
-		{#if oauthIframePasteCode}
-			<div class="space-y-3 border-t border-border p-4">
-				<p class="text-xs text-muted-foreground">
-					Complete sign-in above, then paste the authorization code below.
-				</p>
-				<div class="flex gap-2">
+					<div class="flex items-center justify-center gap-2 rounded-xl border border-border bg-muted/30 p-3 text-sm text-muted-foreground">
+						<Loader2 class="h-4 w-4 animate-spin" />
+						Waiting for browser sign-in to return to Krusty...
+					</div>
+				{:else if oauthDialog.kind === 'device'}
+					<p class="text-sm text-muted-foreground">
+						The browser page should ask you to confirm a device code. Enter this code if it is not pre-filled.
+					</p>
+
+					<div class="rounded-xl border border-border bg-card p-4 text-center">
+						<div class="text-xs uppercase tracking-[0.2em] text-muted-foreground">User Code</div>
+						<div class="mt-2 font-mono text-3xl font-semibold tracking-[0.3em]">
+							{oauthDialog.deviceCode.user_code}
+						</div>
+					</div>
+
+					<div class="rounded-xl border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
+						<div class="font-medium text-foreground">Verification URL</div>
+						<div class="mt-1 break-all font-mono">{oauthDialog.deviceCode.verification_uri}</div>
+					</div>
+
+					<div class="flex items-center justify-center gap-2 rounded-xl border border-border bg-muted/30 p-3 text-sm text-muted-foreground">
+						<Loader2 class="h-4 w-4 animate-spin" />
+						Waiting for OpenAI authentication to complete...
+					</div>
+				{:else}
+					<p class="text-sm text-muted-foreground">
+						Finish the Anthropic sign-in in your browser, then paste the authorization code here.
+					</p>
+
 					<input
 						bind:this={pasteCodeInputEl}
 						type="text"
 						bind:value={pasteCodeInput}
 						placeholder="Paste authorization code..."
-						class="flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono"
+						class="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono"
 					/>
-					<button
-						onclick={submitPasteCode}
-						disabled={!pasteCodeInput.trim() || oauthLoading === pasteCodeProvider}
-						class="rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-					>
-						{#if oauthLoading === pasteCodeProvider}
-							<Loader2 class="h-4 w-4 animate-spin" />
-						{:else}
-							Submit
-						{/if}
-					</button>
-				</div>
-			</div>
-		{/if}
 
-		<!-- Modal footer: polling status (OpenAI) -->
-		{#if oauthLoading && !oauthIframePasteCode}
-			<div
-				class="flex items-center justify-center gap-2 border-t border-border p-4 text-sm text-muted-foreground"
-			>
-				<Loader2 class="h-4 w-4 animate-spin" />
-				Waiting for authentication to complete...
+					<div class="flex gap-2">
+						<button
+							onclick={cancelPasteCode}
+							class="flex-1 rounded-lg border border-border px-3 py-2 text-sm hover:bg-muted"
+						>
+							Cancel
+						</button>
+						<button
+							onclick={submitPasteCode}
+							disabled={!pasteCodeInput.trim() || oauthLoading === pasteCodeProvider}
+							class="flex-1 rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+						>
+							{#if oauthLoading === pasteCodeProvider}
+								<Loader2 class="mx-auto h-4 w-4 animate-spin" />
+							{:else}
+								Submit Code
+							{/if}
+						</button>
+					</div>
+				{/if}
 			</div>
-		{/if}
+		</div>
 	</div>
 {/if}
 
@@ -402,41 +565,6 @@
 								</div>
 							{/if}
 						</div>
-
-						<!-- Paste-code inline fallback (shown if modal closed but flow active) -->
-						{#if pasteCodeProvider === provider.id && !oauthIframeUrl}
-							<div class="mt-4 space-y-3">
-								<p class="text-xs text-muted-foreground">
-									Paste the authorization code from the sign-in page below.
-								</p>
-								<input
-									bind:this={pasteCodeInputEl}
-									type="text"
-									bind:value={pasteCodeInput}
-									placeholder="Paste authorization code..."
-									class="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono"
-								/>
-								<div class="flex gap-2">
-									<button
-										onclick={cancelPasteCode}
-										class="flex-1 rounded-lg border border-border px-3 py-2 text-sm hover:bg-muted"
-									>
-										Cancel
-									</button>
-									<button
-										onclick={submitPasteCode}
-										disabled={!pasteCodeInput.trim() || oauthLoading === provider.id}
-										class="flex-1 rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-									>
-										{#if oauthLoading === provider.id}
-											<Loader2 class="mx-auto h-4 w-4 animate-spin" />
-										{:else}
-											Submit
-										{/if}
-									</button>
-								</div>
-							</div>
-						{/if}
 
 						<!-- API key editing -->
 						{#if editingProvider === provider.id}

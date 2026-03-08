@@ -7,6 +7,8 @@
 
 pub mod browser_flow;
 pub mod device_flow;
+pub mod hosted_browser_flow;
+pub mod openai_device_flow;
 pub mod pkce;
 pub mod providers;
 pub mod storage;
@@ -18,6 +20,8 @@ pub use browser_flow::{
     DEFAULT_CALLBACK_PORT,
 };
 pub use device_flow::{DeviceCodeFlow, DeviceCodeResponse};
+pub use hosted_browser_flow::HostedBrowserOAuthFlow;
+pub use openai_device_flow::{OpenAIDeviceAuthFlow, OpenAIDeviceCodeResponse};
 pub use pkce::{PkceChallenge, PkceVerifier};
 pub use providers::{anthropic_oauth_config, openai_oauth_config};
 pub use storage::OAuthTokenStore;

@@ -110,6 +110,16 @@ pub struct AppState {
     pub oauth_flows: Arc<Mutex<HashMap<String, routes::oauth::OAuthFlowState>>>,
 }
 
+impl AppState {
+    /// Resolve a fresh AI client using the current credential store and requested model.
+    pub async fn resolve_ai_client(&self, requested_model: Option<&str>) -> Option<Arc<AiClient>> {
+        let credentials = self.credential_store.read().await.clone();
+        create_ai_client_for_model(&credentials, &self.model_registry, requested_model)
+            .await
+            .map(Arc::new)
+    }
+}
+
 /// Build an AI client from configured credentials and env overrides.
 pub fn create_ai_client(credentials: &CredentialStore) -> Option<AiClient> {
     let provider = std::env::var("KRUSTY_PROVIDER")
@@ -122,6 +132,47 @@ pub fn create_ai_client(credentials: &CredentialStore) -> Option<AiClient> {
     let model =
         std::env::var("KRUSTY_MODEL").unwrap_or_else(|_| provider_cfg.default_model().to_string());
 
+    create_ai_client_for_provider(credentials, provider, model)
+}
+
+pub async fn create_ai_client_for_model(
+    credentials: &CredentialStore,
+    model_registry: &SharedModelRegistry,
+    requested_model: Option<&str>,
+) -> Option<AiClient> {
+    let requested_model = requested_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+
+    let provider = std::env::var("KRUSTY_PROVIDER")
+        .ok()
+        .as_deref()
+        .and_then(utils::providers::parse_provider)
+        .unwrap_or(ProviderId::MiniMax);
+
+    let provider = if let Some(model) = requested_model {
+        model_registry
+            .get_model(model)
+            .await
+            .map(|metadata| metadata.provider)
+            .unwrap_or(provider)
+    } else {
+        provider
+    };
+
+    let provider_cfg = get_provider(provider)?;
+    let model = requested_model.map(ToOwned::to_owned).unwrap_or_else(|| {
+        std::env::var("KRUSTY_MODEL").unwrap_or_else(|_| provider_cfg.default_model().to_string())
+    });
+
+    create_ai_client_for_provider(credentials, provider, model)
+}
+
+fn create_ai_client_for_provider(
+    credentials: &CredentialStore,
+    provider: ProviderId,
+    model: String,
+) -> Option<AiClient> {
     let auth = credentials.get_auth(&provider).or_else(|| {
         let env_key = match provider {
             ProviderId::MiniMax => "MINIMAX_API_KEY",
@@ -133,47 +184,66 @@ pub fn create_ai_client(credentials: &CredentialStore) -> Option<AiClient> {
         std::env::var(env_key).ok()
     });
 
-    let (config, api_key) = if provider == ProviderId::OpenAI {
-        let config = AiClientConfig::for_openai_with_auth_detection(&model, credentials);
-        let resolved = krusty_core::auth::resolve_openai_auth(credentials, &model);
+    let provider_cfg = get_provider(provider)?;
 
-        let auth = resolved
-            .credential
-            .or_else(|| std::env::var("OPENAI_API_KEY").ok());
-        let api_key = match auth {
-            Some(key) => key,
-            None => {
-                tracing::warn!(
-                    "No OpenAI credentials found for resolved auth mode ({:?}); chat API unavailable",
-                    resolved.auth_type
-                );
-                return None;
-            }
-        };
-        (config, api_key)
-    } else {
-        let api_key = match auth {
-            Some(key) => key,
-            None => {
-                tracing::warn!(
-                    "No credentials found for provider {}; chat API will be unavailable until credentials are configured",
-                    provider
-                );
-                return None;
-            }
-        };
-        (
-            AiClientConfig {
-                model,
-                max_tokens: constants::ai::MAX_OUTPUT_TOKENS,
-                base_url: Some(provider_cfg.base_url.clone()),
-                auth_header: provider_cfg.auth_header,
-                provider_id: provider,
-                api_format: Default::default(),
-                custom_headers: provider_cfg.custom_headers.clone(),
-            },
-            api_key,
-        )
+    let (config, api_key) = match provider {
+        ProviderId::OpenAI => {
+            let config = AiClientConfig::for_openai_with_auth_detection(&model, credentials);
+            let resolved = krusty_core::auth::resolve_openai_auth(credentials, &model);
+
+            let auth = resolved
+                .credential
+                .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+            let api_key = match auth {
+                Some(key) => key,
+                None => {
+                    tracing::warn!(
+                        "No OpenAI credentials found for resolved auth mode ({:?}); chat API unavailable",
+                        resolved.auth_type
+                    );
+                    return None;
+                }
+            };
+            (config, api_key)
+        }
+        ProviderId::Anthropic => {
+            let config = AiClientConfig::for_anthropic_with_auth_detection(&model, credentials);
+            let api_key = match auth {
+                Some(key) => key,
+                None => {
+                    tracing::warn!(
+                        "No credentials found for provider {}; chat API will be unavailable until credentials are configured",
+                        provider
+                    );
+                    return None;
+                }
+            };
+            (config, api_key)
+        }
+        _ => {
+            let api_key = match auth {
+                Some(key) => key,
+                None => {
+                    tracing::warn!(
+                        "No credentials found for provider {}; chat API will be unavailable until credentials are configured",
+                        provider
+                    );
+                    return None;
+                }
+            };
+            (
+                AiClientConfig {
+                    model,
+                    max_tokens: constants::ai::MAX_OUTPUT_TOKENS,
+                    base_url: Some(provider_cfg.base_url.clone()),
+                    auth_header: provider_cfg.auth_header,
+                    provider_id: provider,
+                    api_format: Default::default(),
+                    custom_headers: provider_cfg.custom_headers.clone(),
+                },
+                api_key,
+            )
+        }
     };
 
     Some(AiClient::new(config, api_key))
@@ -312,6 +382,7 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
     let app = Router::new()
         .route("/health", get(health))
         .route("/ws/terminal", get(ws::terminal::handler))
+        .merge(routes::oauth::callback_router())
         .nest(
             "/api",
             routes::api_router().layer(middleware::from_fn_with_state(

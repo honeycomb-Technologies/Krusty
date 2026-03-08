@@ -160,12 +160,6 @@ async fn setup_chat_session(
     model_override: Option<&str>,
     thinking_level: ThinkingLevel,
 ) -> Result<ChatSessionContext, AppError> {
-    let base_ai_client = state
-        .ai_client
-        .as_ref()
-        .cloned()
-        .ok_or_else(|| AppError::BadRequest("No AI credentials configured".to_string()))?;
-
     let user_id = user.and_then(|u| u.0.user_id.clone());
     let user_home_dir = user.and_then(|u| u.0.home_dir.clone());
     let default_working_dir = user_home_dir
@@ -185,6 +179,12 @@ async fn setup_chat_session(
     let session = session_manager
         .get_session(session_id)?
         .ok_or_else(|| AppError::NotFound(format!("Session {} not found", session_id)))?;
+
+    let effective_model = resolve_model_override(model_override, session.model.as_deref());
+    let ai_client = state
+        .resolve_ai_client(effective_model)
+        .await
+        .ok_or_else(|| AppError::BadRequest("No AI credentials configured".to_string()))?;
 
     let working_dir = session
         .working_dir
@@ -222,16 +222,6 @@ async fn setup_chat_session(
                 .map(|content| ModelMessage { role, content })
         })
         .collect();
-
-    let effective_model = resolve_model_override(model_override, session.model.as_deref());
-
-    let ai_client = if let Some(requested_model) = effective_model {
-        let mut cfg = base_ai_client.config().clone();
-        cfg.model = requested_model.to_string();
-        Arc::new(AiClient::new(cfg, base_ai_client.api_key().to_string()))
-    } else {
-        base_ai_client
-    };
 
     let ai_tools = state.tool_registry.get_ai_tools().await;
     let mut options = CallOptions {

@@ -22,6 +22,16 @@ pub struct TailscaleInfo {
     pub online: bool,
 }
 
+/// Outcome of attempting to configure Tailscale serve for Krusty.
+#[derive(Debug, Clone)]
+pub enum TailscaleServeSetup {
+    NotInstalled,
+    Offline,
+    Configured { url: String },
+    PermissionDenied { url: String, detail: String },
+    Failed { detail: String },
+}
+
 #[derive(Deserialize)]
 struct TailscaleStatus {
     #[serde(rename = "Self")]
@@ -138,26 +148,55 @@ pub fn serve_stop(_port: u16) -> Result<()> {
 }
 
 /// Full Tailscale setup: detect, expose on port 8443, return URL.
-/// Returns None if Tailscale is not available (non-fatal).
-pub fn setup_tailscale_serve(port: u16) -> Option<String> {
+pub fn setup_tailscale_serve(port: u16) -> TailscaleServeSetup {
     if !is_installed() {
-        return None;
+        return TailscaleServeSetup::NotInstalled;
     }
 
     match device_info() {
-        Ok(info) if !info.online => {
-            tracing::warn!("Tailscale installed but device is offline");
-            None
-        }
-        Ok(_) => {
-            if let Err(e) = serve(port) {
-                tracing::warn!("Failed to setup tailscale serve: {}", e);
+        Ok(info) if !info.online => TailscaleServeSetup::Offline,
+        Ok(info) => {
+            let url = format!("https://{}:{}", info.dns_name, TAILSCALE_HTTPS_PORT);
+            match serve(port) {
+                Ok(_) => TailscaleServeSetup::Configured { url },
+                Err(e) => {
+                    let detail = e.to_string();
+                    if is_permission_denied(&detail) {
+                        TailscaleServeSetup::PermissionDenied { url, detail }
+                    } else {
+                        TailscaleServeSetup::Failed { detail }
+                    }
+                }
             }
-            device_url(port).ok()
         }
-        Err(e) => {
-            tracing::warn!("Tailscale detection failed: {}", e);
-            None
-        }
+        Err(e) => TailscaleServeSetup::Failed {
+            detail: format!("Tailscale detection failed: {}", e),
+        },
+    }
+}
+
+fn is_permission_denied(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    lower.contains("access denied")
+        || lower.contains("serve config denied")
+        || lower.contains("--operator")
+        || lower.contains("sudo tailscale serve")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_permission_denied;
+
+    #[test]
+    fn detects_tailscale_permission_denied_messages() {
+        assert!(is_permission_denied(
+            "tailscale serve failed: Access denied: serve config denied"
+        ));
+        assert!(is_permission_denied(
+            "use 'sudo tailscale set --operator=$USER' once"
+        ));
+        assert!(!is_permission_denied(
+            "tailscale serve failed: connection timeout"
+        ));
     }
 }

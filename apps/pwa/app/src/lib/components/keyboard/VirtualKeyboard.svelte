@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { KeyConfig, KeyboardLayout } from './layouts';
-	import { getLayout, getTerminalSequence, formatKeyDisplay, KeyAction } from './layouts';
+	import { getLayout, getTerminalSequence, formatKeyDisplay, KeyAction, terminalToolbar } from './layouts';
 
 	interface Props {
 		mode?: 'chat' | 'terminal';
@@ -20,9 +20,9 @@
 
 	let isTerminalMode = $derived(mode === 'terminal');
 
-	// State — always QWERTY by default regardless of mode
 	let currentLayout = $state<KeyboardLayout>('qwerty');
 	let isShifted = $state(false);
+	let ctrlActive = $state(false);
 	let keyboardEl: HTMLDivElement | undefined = $state(undefined);
 
 	let layout = $derived(getLayout(currentLayout));
@@ -37,18 +37,29 @@
 		}
 	});
 
-	// Key repeat state
+	// Track whether a touch event already handled the key press
+	let touchHandled = false;
+
+	// Key repeat state — initial delay then fast repeat (like native keyboards)
+	let repeatTimeout: ReturnType<typeof setTimeout> | null = null;
 	let repeatInterval: ReturnType<typeof setInterval> | null = null;
-	const REPEAT_INTERVAL_MS = 100;
+	const REPEAT_DELAY_MS = 400;
+	const REPEAT_INTERVAL_MS = 80;
 
 	function startRepeat(key: KeyConfig) {
 		handleKeyAction(key);
-		repeatInterval = setInterval(() => {
-			handleKeyAction(key);
-		}, REPEAT_INTERVAL_MS);
+		repeatTimeout = setTimeout(() => {
+			repeatInterval = setInterval(() => {
+				handleKeyAction(key);
+			}, REPEAT_INTERVAL_MS);
+		}, REPEAT_DELAY_MS);
 	}
 
 	function stopRepeat() {
+		if (repeatTimeout) {
+			clearTimeout(repeatTimeout);
+			repeatTimeout = null;
+		}
 		if (repeatInterval) {
 			clearInterval(repeatInterval);
 			repeatInterval = null;
@@ -91,6 +102,34 @@
 		handleKeyAction(key);
 	}
 
+	function handleToolbarKeyPress(key: KeyConfig) {
+		if (navigator.vibrate) navigator.vibrate(10);
+		const value = key.value;
+
+		if (value === 'ctrl') {
+			ctrlActive = !ctrlActive;
+			return;
+		}
+
+		// If ctrl is active, send ctrl+key for single chars
+		if (ctrlActive && value.length === 1) {
+			const code = value.toUpperCase().charCodeAt(0) - 64;
+			if (code >= 1 && code <= 26) {
+				onKeyPress?.(String.fromCharCode(code), false);
+			}
+			ctrlActive = false;
+			return;
+		}
+
+		const sequence = getTerminalSequence(value);
+		if (sequence !== value) {
+			onKeyPress?.(sequence, false);
+		} else {
+			onKeyPress?.(value, false);
+		}
+		ctrlActive = false;
+	}
+
 	function handleTerminalKeyPress(key: KeyConfig) {
 		const action = key.action;
 		const value = key.value;
@@ -119,7 +158,16 @@
 				return;
 		}
 
-		// Try escape sequence for navigation keys, otherwise emit raw value
+		// If ctrl is active, send control character
+		if (ctrlActive && value.length === 1 && value.match(/[a-z]/i)) {
+			const code = value.toUpperCase().charCodeAt(0) - 64;
+			if (code >= 1 && code <= 26) {
+				onKeyPress?.(String.fromCharCode(code), false);
+			}
+			ctrlActive = false;
+			return;
+		}
+
 		const sequence = getTerminalSequence(value);
 		if (sequence !== value) {
 			onKeyPress?.(sequence, false);
@@ -133,6 +181,7 @@
 				isShifted = false;
 			}
 		}
+		ctrlActive = false;
 	}
 
 	function handleChatKeyPress(key: KeyConfig) {
@@ -202,10 +251,6 @@
 			onClose?.();
 		}
 	}
-
-	let layoutLabel = $derived(
-		currentLayout === 'numbers' ? '123' : currentLayout === 'symbols' ? '#+=' : (mode === 'chat' ? 'Chat' : 'Terminal')
-	);
 </script>
 
 {#if visible}
@@ -237,6 +282,31 @@
 		ontouchstart={handleTouchStart}
 		ontouchend={handleTouchEnd}
 	>
+		{#if isTerminalMode}
+			<div class="toolbar-row">
+				{#each terminalToolbar as key}
+					<button
+						class="toolbar-key"
+						class:ctrl-active={key.value === 'ctrl' && ctrlActive}
+						onclick={() => {
+							if (touchHandled) { touchHandled = false; return; }
+							handleToolbarKeyPress(key);
+						}}
+						ontouchstart={(e) => {
+							e.preventDefault();
+							touchHandled = true;
+							handleToolbarKeyPress(key);
+						}}
+						ontouchend={() => {}}
+						aria-label={key.display || key.value}
+						type="button"
+					>
+						<span class="key-content">{key.display || key.value}</span>
+					</button>
+				{/each}
+			</div>
+		{/if}
+
 		{#each layout as row}
 			<div class="keyboard-row">
 				{#each row as key}
@@ -245,7 +315,10 @@
 						class:shift-active={key.action === KeyAction.Shift && isShifted}
 						data-width={key.width}
 						data-action={key.action}
-						onclick={() => handleKeyPress(key)}
+						onclick={() => {
+							if (touchHandled) { touchHandled = false; return; }
+							handleKeyPress(key);
+						}}
 						onmousedown={(e) => {
 							if (key.action === KeyAction.Backspace) startRepeat(key);
 							else showPreview(key, e);
@@ -254,7 +327,9 @@
 						onmouseleave={() => { stopRepeat(); hidePreview(); }}
 						ontouchstart={(e) => {
 							e.preventDefault();
+							touchHandled = true;
 							if (key.action === KeyAction.Backspace) startRepeat(key);
+							else handleKeyPress(key);
 						}}
 						ontouchend={() => { stopRepeat(); hidePreview(); }}
 						aria-label={key.display || key.value}
@@ -268,15 +343,10 @@
 				{/each}
 			</div>
 		{/each}
-
-		<div class="keyboard-footer">
-			<span class="mode-indicator">{layoutLabel}</span>
-		</div>
 	</div>
 {/if}
 
 <style>
-	/* Backdrop for tap-outside-to-dismiss */
 	.keyboard-backdrop {
 		position: fixed;
 		top: 0;
@@ -286,33 +356,24 @@
 		z-index: 999;
 	}
 
-	/* Key preview popup (iOS style) */
 	.key-preview {
 		position: fixed;
 		transform: translateX(-50%) translateY(-100%);
 		z-index: 1001;
-		
-		/* Popup styling */
 		min-width: 50px;
 		height: 50px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		
-		/* Glassmorphism */
 		background: rgba(40, 40, 50, 0.95);
 		backdrop-filter: blur(12px);
 		-webkit-backdrop-filter: blur(12px);
 		border-radius: 12px;
 		box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
-		
-		/* Text */
 		color: white;
 		font-size: 24px;
 		font-weight: 500;
 		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-		
-		/* Animation */
 		animation: previewPop 0.15s ease-out;
 		pointer-events: none;
 	}
@@ -334,21 +395,13 @@
 		left: 0;
 		right: 0;
 		z-index: 1000;
-
-		/* Glassmorphism styling */
 		background: rgba(20, 20, 25, 0.85);
 		backdrop-filter: blur(24px);
 		-webkit-backdrop-filter: blur(24px);
 		border-top: 1px solid rgba(255, 255, 255, 0.08);
 		border-radius: 20px 20px 0 0;
-
-		/* Nav handles safe-area, keyboard sits above it */
 		padding: 8px 4px;
-		
-		/* Animation */
 		animation: slideUp 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-		
-		/* Prevent selection */
 		user-select: none;
 		-webkit-user-select: none;
 		touch-action: manipulation;
@@ -365,11 +418,49 @@
 		}
 	}
 
+	/* Terminal toolbar row — sits above the main keyboard */
+	.toolbar-row {
+		display: flex;
+		gap: 4px;
+		padding: 0 4px 6px;
+		margin-bottom: 6px;
+		border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+	}
+
+	.toolbar-key {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		flex: 1;
+		height: 36px;
+		padding: 0;
+		border: none;
+		border-radius: 6px;
+		background: rgba(255, 255, 255, 0.1);
+		color: rgba(255, 255, 255, 0.85);
+		font-size: 13px;
+		font-weight: 500;
+		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+		transition: all 0.1s ease;
+		cursor: pointer;
+		-webkit-tap-highlight-color: transparent;
+	}
+
+	.toolbar-key:active {
+		background: rgba(255, 255, 255, 0.2);
+		transform: scale(0.95);
+	}
+
+	.toolbar-key.ctrl-active {
+		background: rgba(255, 107, 53, 0.3);
+		color: #ff6b35;
+	}
+
 	.keyboard-row {
 		display: flex;
-		justify-content: center;
 		gap: 4px;
 		margin-bottom: 6px;
+		padding: 0 4px;
 	}
 
 	.keyboard-row:last-of-type {
@@ -380,24 +471,18 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		min-width: 32px;
+		flex: 1;
 		height: 44px;
-		padding: 0 10px;
+		padding: 0;
 		border: none;
 		border-radius: 8px;
-		
-		/* Glass key appearance */
 		background: rgba(255, 255, 255, 0.06);
 		color: rgba(255, 255, 255, 0.9);
 		font-size: 16px;
 		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 		font-weight: 400;
-		
-		/* Subtle glow on press */
 		transition: all 0.1s ease;
 		cursor: pointer;
-		
-		/* Prevent highlight */
 		-webkit-tap-highlight-color: transparent;
 	}
 
@@ -406,25 +491,21 @@
 		transform: scale(0.96);
 	}
 
-	/* Wide keys (function keys) - using data attribute selector */
 	.key[data-width="wide"] {
-		min-width: 56px;
+		flex: 1.5;
 		font-size: 14px;
 		font-weight: 500;
 	}
 
-	/* Extra wide keys (spacebar) */
 	.key[data-width="extra-wide"] {
-		min-width: 140px;
+		flex: 4;
 	}
 
-	/* Action keys (special functions) */
 	.key[data-action] {
 		background: rgba(255, 255, 255, 0.1);
 		font-weight: 500;
 	}
 
-	/* Active state (shift pressed) */
 	.key.shift-active {
 		background: rgba(255, 107, 53, 0.3);
 		color: #ff6b35;
@@ -437,22 +518,6 @@
 		line-height: 1;
 	}
 
-	/* Footer with mode indicator */
-	.keyboard-footer {
-		display: flex;
-		justify-content: center;
-		padding-top: 4px;
-	}
-
-	.mode-indicator {
-		font-size: 10px;
-		color: rgba(255, 255, 255, 0.3);
-		text-transform: uppercase;
-		letter-spacing: 1px;
-		font-weight: 500;
-	}
-
-	/* Dark mode adjustments (already dark, but just in case) */
 	:global(.light) .keyboard-container {
 		background: rgba(255, 255, 255, 0.9);
 		border-top-color: rgba(0, 0, 0, 0.1);
@@ -471,7 +536,15 @@
 		background: rgba(0, 0, 0, 0.15);
 	}
 
-	/* Responsive adjustments */
+	:global(.light) .toolbar-key {
+		background: rgba(0, 0, 0, 0.08);
+		color: rgba(0, 0, 0, 0.7);
+	}
+
+	:global(.light) .toolbar-row {
+		border-bottom-color: rgba(0, 0, 0, 0.06);
+	}
+
 	@media (orientation: landscape) and (max-height: 400px) {
 		.keyboard-container {
 			padding: 4px;
@@ -484,38 +557,33 @@
 
 		.key {
 			height: 36px;
-			min-width: 28px;
 			font-size: 14px;
-			padding: 0 8px;
 		}
 
 		.key[data-width="wide"] {
-			min-width: 48px;
 			font-size: 12px;
 		}
 
-		.key[data-width="extra-wide"] {
-			min-width: 100px;
+		.toolbar-row {
+			padding-bottom: 4px;
+			margin-bottom: 4px;
 		}
 
-		.keyboard-footer {
-			display: none;
+		.toolbar-key {
+			height: 28px;
+			font-size: 11px;
 		}
 	}
 
 	@media (min-width: 768px) {
 		.key {
-			min-width: 40px;
 			height: 48px;
 			font-size: 18px;
 		}
 
-		.key[data-width="wide"] {
-			min-width: 64px;
-		}
-
-		.key[data-width="extra-wide"] {
-			min-width: 180px;
+		.toolbar-key {
+			height: 40px;
+			font-size: 14px;
 		}
 	}
 </style>

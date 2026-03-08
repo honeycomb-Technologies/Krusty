@@ -127,10 +127,20 @@ export interface ProviderStatus {
 }
 
 /** OAuth start response */
+export interface OAuthDeviceCodeInfo {
+	user_code: string;
+	verification_uri: string;
+	verification_uri_complete?: string | null;
+	expires_in: number;
+}
+
+/** OAuth start response */
 export interface OAuthStartResponse {
 	auth_url: string;
 	provider: string;
+	flow_type: 'browser_callback' | 'device' | 'paste_code';
 	paste_code: boolean;
+	device_code?: OAuthDeviceCodeInfo | null;
 }
 
 /** OAuth status response */

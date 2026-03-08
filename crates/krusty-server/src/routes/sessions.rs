@@ -333,9 +333,10 @@ async fn pinch_session(
     }
 
     // Generate summary using AI if configured, otherwise use defaults.
-    let summary_result = if let Some(ai_client) = &state.ai_client {
+    let summary_model = source_session.model.as_deref();
+    let summary_result = if let Some(ai_client) = state.resolve_ai_client(summary_model).await {
         generate_summary(
-            ai_client,
+            &ai_client,
             &messages,
             req.preservation_hints.as_deref(),
             &[],  // ranked files

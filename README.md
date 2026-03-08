@@ -33,6 +33,8 @@ curl -fsSL https://raw.githubusercontent.com/honeycomb-Technologies/Krusty/main/
 Or from source:
 
 ```bash
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libudev-dev
 git clone https://github.com/honeycomb-Technologies/Krusty.git
 cd Krusty
 cargo build --release
@@ -49,6 +51,12 @@ cargo build --release
 | `krusty acp` | Run as ACP server for editor integration |
 
 `krusty serve` bundles everything — API server, agent runtime, and PWA frontend — into a single process. On first run it walks you through provider and API key setup. If Tailscale is installed, it auto-configures remote HTTPS access.
+
+If `krusty serve` reports Tailscale permission denied, run this once:
+
+```bash
+sudo tailscale set --operator=$USER
+```
 
 ## Supported Providers
 

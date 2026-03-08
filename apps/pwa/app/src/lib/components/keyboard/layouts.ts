@@ -16,8 +16,8 @@ export { type KeyboardLayout, type KeyConfig, KeyAction } from './layouts/types'
 // Re-export layout data
 export { qwertyLayout, numbersLayout, symbolsLayout } from './layouts/data';
 
-// Re-export terminal layout and sequences
-export { terminalLayout, getTerminalSequence } from './layouts/terminal';
+// Re-export terminal toolbar and sequences
+export { terminalToolbar, getTerminalSequence } from './layouts/terminal';
 
 // Re-export utilities
 export { getLayout, formatKeyDisplay } from './layouts/utils';

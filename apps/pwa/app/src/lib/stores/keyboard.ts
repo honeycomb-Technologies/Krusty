@@ -1,14 +1,11 @@
 import { writable } from 'svelte/store';
 
-export type KeyboardSource = 'none' | 'virtual' | 'native';
-
 interface KeyboardState {
 	active: boolean;
 	height: number;
-	source: KeyboardSource;
 }
 
-const initial: KeyboardState = { active: false, height: 0, source: 'none' };
+const initial: KeyboardState = { active: false, height: 0 };
 
 export const keyboardStore = writable<KeyboardState>(initial);
 
@@ -22,31 +19,11 @@ function syncCssVariables(state: KeyboardState) {
 	}
 }
 
-export function setVirtualKeyboardHeight(height: number) {
-	keyboardStore.update((s) => {
-		// Virtual keyboard closing
-		if (height === 0 && s.source === 'virtual') {
-			const next = { active: false, height: 0, source: 'none' as KeyboardSource };
-			syncCssVariables(next);
-			return next;
-		}
-		// Virtual keyboard opening/resizing
-		if (height > 0) {
-			const next = { active: true, height, source: 'virtual' as KeyboardSource };
-			syncCssVariables(next);
-			return next;
-		}
-		return s;
-	});
-}
-
 export function setNativeKeyboardState(active: boolean, height: number) {
-	keyboardStore.update((s) => {
-		// Don't override virtual keyboard state
-		if (s.source === 'virtual' && s.active) return s;
+	keyboardStore.update(() => {
 		const next: KeyboardState = active
-			? { active: true, height, source: 'native' }
-			: { active: false, height: 0, source: 'none' };
+			? { active: true, height }
+			: { active: false, height: 0 };
 		syncCssVariables(next);
 		return next;
 	});
