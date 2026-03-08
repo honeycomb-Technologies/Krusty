@@ -1,6 +1,6 @@
 {
   "name": "@krusty/pwa-app",
-  "version": "0.1.0",
+  "version": "0.5.4",
   "private": true,
   "packageManager": "bun@1.3.0",
   "type": "module",

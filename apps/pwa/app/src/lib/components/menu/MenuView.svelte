@@ -30,7 +30,7 @@
 			<!-- Header -->
 			<div class="mb-6 flex flex-col items-center">
 				<AsciiTitle />
-				<p class="mt-2 text-sm text-muted-foreground">v0.1.0</p>
+				<p class="mt-2 text-sm text-muted-foreground">v0.5.4</p>
 			</div>
 
 			<!-- Menu items -->
