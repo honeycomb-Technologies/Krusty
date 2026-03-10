@@ -30,14 +30,18 @@
 pub mod build_context;
 pub mod cache;
 pub mod cancellation;
+pub mod compaction;
 pub mod constants;
 pub mod context;
+pub mod context_ledger;
 pub mod event_bus;
 pub mod events;
 pub mod executor;
 pub mod failure;
+pub mod history_policy;
 pub mod hooks;
 pub mod loop_events;
+mod observability;
 pub mod orchestrator;
 pub mod pinch_context;
 pub mod plan_handler;
@@ -45,10 +49,12 @@ pub mod state;
 pub mod stream;
 pub mod subagent;
 pub mod summarizer;
+mod tool_control;
 pub mod user_hooks;
 
 pub use build_context::SharedBuildContext;
 pub use cancellation::AgentCancellation;
+pub(crate) use compaction::estimate_tokens as estimate_conversation_tokens;
 pub use context::{
     build_plan_context, build_project_context, build_skills_context, inject_context,
 };

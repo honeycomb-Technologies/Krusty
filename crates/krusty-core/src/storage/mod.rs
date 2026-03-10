@@ -21,6 +21,8 @@ mod plans;
 mod preferences;
 pub mod push_delivery_attempts;
 pub mod push_subscriptions;
+mod recovery;
+mod runtime_traces;
 mod sessions;
 
 pub use agent_state::AgentState;
@@ -35,6 +37,14 @@ pub use push_delivery_attempts::{
     PushDeliveryAttempt, PushDeliveryAttemptInput, PushDeliveryAttemptStore, PushDeliverySummary,
 };
 pub use push_subscriptions::{PushSubscription, PushSubscriptionStore};
+pub use recovery::{
+    PartialAssistantState, RecoveryDecision, RecoveryNonResumableReason, RecoveryStatus,
+    RecoveryToolCall, SessionRecoveryState,
+};
+pub use runtime_traces::{
+    ReplayExpectations, ReplayGateResult, RuntimeTraceEvent, RuntimeTraceStore,
+    RuntimeTraceSummary, TraceEventCount, TraceFailureCategory,
+};
 pub use sessions::{SessionInfo, SessionManager, WorkMode};
 
 /// Get current Unix timestamp in seconds

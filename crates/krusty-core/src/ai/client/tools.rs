@@ -11,10 +11,13 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info};
 use url::Url;
 
+use super::config::{CallOptions, CodexReasoningEffort};
 use super::core::AiClient;
 use crate::ai::format::response::{
     extract_text_from_content, normalize_google_response, normalize_openai_response,
 };
+use crate::ai::transform::apply_request_body_transform;
+use crate::ai::types::ThinkingConfig;
 
 const OPENAI_WS_API_VERSION: &str = "responses_websockets=2026-02-06";
 
@@ -52,48 +55,48 @@ impl AiClient {
         max_tokens: usize,
         thinking_enabled: bool,
     ) -> Result<Value> {
+        let options = self.canonical_call_options(
+            model,
+            &CallOptions {
+                max_tokens: Some(max_tokens),
+                system_prompt: Some(system_prompt.to_string()),
+                thinking: thinking_enabled.then(ThinkingConfig::default),
+                codex_reasoning_effort: thinking_enabled.then_some(CodexReasoningEffort::High),
+                codex_parallel_tool_calls: true,
+                ..Default::default()
+            },
+        );
+
         // Route to appropriate format handler based on API format
         if self.config().uses_openai_format() {
             return self
-                .call_with_tools_openai(
-                    model,
-                    system_prompt,
-                    messages,
-                    tools,
-                    max_tokens,
-                    thinking_enabled,
-                )
+                .call_with_tools_openai(model, &options, messages, tools)
                 .await;
         }
 
         if self.config().uses_google_format() {
             return self
-                .call_with_tools_google(model, system_prompt, messages, tools, max_tokens)
+                .call_with_tools_google(model, &options, messages, tools)
                 .await;
         }
 
         // Anthropic format (default)
-        self.call_with_tools_anthropic(
-            model,
-            system_prompt,
-            messages,
-            tools,
-            max_tokens,
-            thinking_enabled,
-        )
-        .await
+        self.call_with_tools_anthropic(model, &options, messages, tools)
+            .await
     }
 
     /// Call with tools using Anthropic format
     async fn call_with_tools_anthropic(
         &self,
         model: &str,
-        system_prompt: &str,
+        options: &CallOptions,
         messages: Vec<Value>,
         tools: Vec<Value>,
-        max_tokens: usize,
-        thinking_enabled: bool,
     ) -> Result<Value> {
+        let system_prompt = options.system_prompt.as_deref().unwrap_or_default();
+        let max_tokens = options.max_tokens.unwrap_or(self.config().max_tokens);
+        let thinking_enabled = options.thinking.is_some();
+
         // Sort tools deterministically to maintain stable cache prefix.
         // Tool order is part of the cached prefix; non-deterministic order breaks caching.
         let mut sorted_tools = tools;
@@ -148,6 +151,8 @@ impl AiClient {
             }
         }
 
+        let body =
+            apply_request_body_transform(body, self.provider_id(), self.config().api_format, model);
         let request = self.build_request(&self.config().api_url());
 
         info!(model = model, provider = %self.provider_id(), "Sub-agent API call starting");
@@ -183,12 +188,14 @@ impl AiClient {
     async fn call_with_tools_openai(
         &self,
         model: &str,
-        system_prompt: &str,
+        options: &CallOptions,
         messages: Vec<Value>,
         tools: Vec<Value>,
-        max_tokens: usize,
-        thinking_enabled: bool,
     ) -> Result<Value> {
+        let system_prompt = options.system_prompt.as_deref().unwrap_or_default();
+        let max_tokens = options.max_tokens.unwrap_or(self.config().max_tokens);
+        let thinking_enabled = options.thinking.is_some();
+
         // Check if we're using ChatGPT Codex API (OAuth)
         let is_chatgpt_codex = self
             .config()
@@ -199,13 +206,7 @@ impl AiClient {
 
         if is_chatgpt_codex {
             return self
-                .call_with_tools_chatgpt_codex(
-                    model,
-                    system_prompt,
-                    messages,
-                    tools,
-                    thinking_enabled,
-                )
+                .call_with_tools_chatgpt_codex(model, options, messages, tools)
                 .await;
         }
 
@@ -344,9 +345,14 @@ impl AiClient {
 
         // Add reasoning effort when thinking is enabled (high = maximum for OpenAI API)
         if thinking_enabled {
-            body["reasoning_effort"] = serde_json::json!("high");
+            body["reasoning_effort"] = serde_json::json!(options
+                .codex_reasoning_effort
+                .unwrap_or(CodexReasoningEffort::High)
+                .as_str());
         }
 
+        let body =
+            apply_request_body_transform(body, self.provider_id(), self.config().api_format, model);
         let request = self.build_request(&self.config().api_url());
         let response = match request.json(&body).send().await {
             Ok(r) => r,
@@ -386,11 +392,12 @@ impl AiClient {
     async fn call_with_tools_chatgpt_codex(
         &self,
         model: &str,
-        system_prompt: &str,
+        options: &CallOptions,
         messages: Vec<Value>,
         tools: Vec<Value>,
-        thinking_enabled: bool,
     ) -> Result<Value> {
+        let system_prompt = options.system_prompt.as_deref().unwrap_or_default();
+        let thinking_enabled = options.thinking.is_some();
         info!(model = model, provider = %self.provider_id(), "Sub-agent ChatGPT Codex API call starting (streaming)");
         let start = Instant::now();
 
@@ -514,7 +521,7 @@ impl AiClient {
             "input": codex_input,
             "tools": codex_tools,
             "tool_choice": "auto",
-            "parallel_tool_calls": true,
+            "parallel_tool_calls": options.codex_parallel_tool_calls,
             "store": false,
             "stream": true,
             "text": {
@@ -524,7 +531,10 @@ impl AiClient {
 
         if thinking_enabled {
             body["reasoning"] = serde_json::json!({
-                "effort": "medium",
+                "effort": options
+                    .codex_reasoning_effort
+                    .unwrap_or(CodexReasoningEffort::High)
+                    .as_str(),
                 "summary": "auto"
             });
             body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
@@ -848,11 +858,12 @@ impl AiClient {
     async fn call_with_tools_google(
         &self,
         model: &str,
-        system_prompt: &str,
+        options: &CallOptions,
         messages: Vec<Value>,
         tools: Vec<Value>,
-        max_tokens: usize,
     ) -> Result<Value> {
+        let system_prompt = options.system_prompt.as_deref().unwrap_or_default();
+        let max_tokens = options.max_tokens.unwrap_or(self.config().max_tokens);
         info!(model = model, provider = %self.provider_id(), "Sub-agent Google format API call starting");
         let start = Instant::now();
 
@@ -948,6 +959,8 @@ impl AiClient {
             }]);
         }
 
+        let body =
+            apply_request_body_transform(body, self.provider_id(), self.config().api_format, model);
         let request = self.build_request(&self.config().api_url());
         let response = match request.json(&body).send().await {
             Ok(r) => r,

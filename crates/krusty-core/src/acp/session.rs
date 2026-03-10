@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 
 use super::error::AcpError;
 use crate::ai::types::{ModelMessage, Role};
-use crate::storage::SessionManager as StorageSessionManager;
+use crate::storage::{SessionManager as StorageSessionManager, SessionRecoveryState};
 use crate::tools::ToolContext;
 
 /// Thread-safe wrapper for storage session manager
@@ -47,6 +47,8 @@ pub struct SessionState {
     storage_session_id: RwLock<Option<String>>,
     /// Reference to storage manager for persisting messages
     storage: Option<StorageHandle>,
+    /// Interrupted-turn recovery state loaded from storage, consumed on first resumed prompt.
+    recovery_state: RwLock<Option<SessionRecoveryState>>,
 }
 
 impl SessionState {
@@ -77,6 +79,7 @@ impl SessionState {
             tool_context: RwLock::new(None),
             storage_session_id: RwLock::new(None),
             storage,
+            recovery_state: RwLock::new(None),
         }
     }
 
@@ -173,13 +176,22 @@ impl SessionState {
             AcpError::InternalError("No storage configured for session".to_string())
         })?;
 
-        let raw_messages = {
+        let (raw_messages, recovery_state) = {
             let storage = storage.lock().await;
-            storage
+            let raw_messages = storage
                 .load_session_messages(storage_session_id)
                 .map_err(|e| {
                     AcpError::InternalError(format!("Failed to load messages from storage: {}", e))
-                })?
+                })?;
+            let recovery_state = storage
+                .load_recovery_state(storage_session_id)
+                .map_err(|e| {
+                    AcpError::InternalError(format!(
+                        "Failed to load recovery state from storage: {}",
+                        e
+                    ))
+                })?;
+            (raw_messages, recovery_state)
         };
 
         let mut messages = self.messages.write().await;
@@ -210,6 +222,7 @@ impl SessionState {
         // Link to this storage session
         drop(messages); // Release write lock before acquiring another
         *self.storage_session_id.write().await = Some(storage_session_id.to_string());
+        *self.recovery_state.write().await = recovery_state;
 
         info!(
             "Loaded {} messages from storage session {}",
@@ -238,6 +251,20 @@ impl SessionState {
     /// Get conversation history (alias for get_messages)
     pub async fn history(&self) -> Vec<ModelMessage> {
         self.get_messages().await
+    }
+
+    /// Consume any persisted recovery state and convert it into an ephemeral prompt notice.
+    pub async fn take_recovery_notice(&self) -> Option<ModelMessage> {
+        self.recovery_state
+            .write()
+            .await
+            .take()
+            .map(|recovery_state| ModelMessage {
+                role: Role::System,
+                content: vec![crate::ai::types::Content::Text {
+                    text: format!("[RECOVERY NOTICE] {}", recovery_state.notice()),
+                }],
+            })
     }
 
     /// Add a user message to the conversation
@@ -506,6 +533,9 @@ mod tests {
     #[tokio::test]
     async fn test_session_load_from_storage() {
         use crate::storage::Database;
+        use crate::storage::{
+            PartialAssistantState, RecoveryDecision, RecoveryStatus, SessionRecoveryState,
+        };
         use tempfile::tempdir;
         use tokio::sync::Mutex;
 
@@ -520,6 +550,27 @@ mod tests {
         let storage_id = session1.init_storage_session("Test Session").await.unwrap();
         session1.add_user_message("First message".to_string()).await;
         session1.add_assistant_message("Response".to_string()).await;
+        {
+            let storage = storage.lock().await;
+            storage
+                .update_recovery_state(
+                    &storage_id,
+                    &SessionRecoveryState::new(
+                        RecoveryStatus::Interrupted,
+                        None,
+                        Some("stream stopped".to_string()),
+                        PartialAssistantState {
+                            text: "Partial answer".to_string(),
+                            thinking: String::new(),
+                            tool_calls: Vec::new(),
+                        },
+                        RecoveryDecision::Resumable {
+                            latest_user_objective: "Finish the answer".to_string(),
+                        },
+                    ),
+                )
+                .unwrap();
+        }
 
         // Create a new session from storage
         let session2 = manager
@@ -532,5 +583,16 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, Role::User);
         assert_eq!(messages[1].role, Role::Assistant);
+
+        let recovery_notice = session2
+            .take_recovery_notice()
+            .await
+            .expect("expected recovery notice");
+        assert_eq!(recovery_notice.role, Role::System);
+        assert!(recovery_notice.content.iter().any(|content| matches!(
+            content,
+            crate::ai::types::Content::Text { text }
+                if text.contains("Finish the answer")
+        )));
     }
 }

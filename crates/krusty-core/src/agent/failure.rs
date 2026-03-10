@@ -8,14 +8,17 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use crate::ai::types::{AiToolCall, Content};
+use crate::tools::registry::{tool_policy, ToolCategory};
 
 /// Default threshold: stop after this many identical failures.
 pub const REPEATED_FAILURE_THRESHOLD: usize = 2;
+/// Default threshold: stop after this many identical read-only tool sequences.
+pub const REPEATED_READ_ONLY_SEQUENCE_THRESHOLD: usize = 4;
 
 /// Check tool results for repeated failures. Returns a diagnostic message
 /// if the same tool+error signature has been seen `threshold` or more times.
 ///
-/// On any success, all counters are cleared (the agent recovered).
+/// On success, only the recovered tool signature is cleared.
 pub fn detect_repeated_failures(
     counters: &mut HashMap<String, usize>,
     tool_calls: &[AiToolCall],
@@ -29,7 +32,7 @@ pub fn detect_repeated_failures(
         );
     }
 
-    let mut saw_success = false;
+    let mut recovered_calls = Vec::new();
 
     for result in tool_results {
         let Content::ToolResult {
@@ -42,7 +45,10 @@ pub fn detect_repeated_failures(
         };
 
         if !is_error.unwrap_or(false) {
-            saw_success = true;
+            let Some((tool_name, args_hash)) = call_meta.get(tool_use_id.as_str()) else {
+                continue;
+            };
+            recovered_calls.push((tool_name.clone(), *args_hash));
             continue;
         }
 
@@ -72,8 +78,51 @@ pub fn detect_repeated_failures(
         }
     }
 
-    if saw_success {
+    if !recovered_calls.is_empty() {
+        counters.retain(|signature, _| {
+            !recovered_calls
+                .iter()
+                .any(|(tool_name, args_hash)| matches_signature(signature, tool_name, *args_hash))
+        });
+    }
+
+    None
+}
+
+/// Detect repeated identical read-only tool sequences across turns.
+///
+/// This guards against agent loops that keep reissuing the same exploration
+/// pattern without taking action on the gathered evidence.
+pub fn detect_repeated_read_only_sequence(
+    counters: &mut HashMap<String, usize>,
+    tool_calls: &[AiToolCall],
+) -> Option<String> {
+    if tool_calls.is_empty()
+        || !tool_calls
+            .iter()
+            .all(|call| tool_policy(&call.name).category == ToolCategory::ReadOnly)
+    {
         counters.clear();
+        return None;
+    }
+
+    let signature = tool_calls
+        .iter()
+        .map(|call| format!("{}:{}", call.name, hash_arguments(&call.arguments)))
+        .collect::<Vec<_>>()
+        .join("|");
+
+    counters.retain(|key, _| key == &signature);
+    let count = counters
+        .entry(signature)
+        .and_modify(|value| *value += 1)
+        .or_insert(1);
+
+    if *count >= REPEATED_READ_ONLY_SEQUENCE_THRESHOLD {
+        return Some(format!(
+            "Stopping exploration loop: the same read-only tool pattern repeated {} times without taking action. Act on the evidence or change strategy.",
+            *count
+        ));
     }
 
     None
@@ -83,6 +132,17 @@ fn hash_arguments(arguments: &serde_json::Value) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     arguments.to_string().hash(&mut hasher);
     hasher.finish()
+}
+
+fn matches_signature(signature: &str, tool_name: &str, args_hash: u64) -> bool {
+    let mut parts = signature.split('|');
+    let Some(sig_tool_name) = parts.next() else {
+        return false;
+    };
+    let Some(sig_args_hash) = signature.rsplit('|').next() else {
+        return false;
+    };
+    sig_tool_name == tool_name && sig_args_hash == args_hash.to_string()
 }
 
 fn extract_error_signature(output_str: &str) -> (String, String) {
@@ -228,6 +288,46 @@ mod tests {
     }
 
     #[test]
+    fn success_only_clears_matching_signature() {
+        let failing_call = AiToolCall {
+            id: "call_fail".to_string(),
+            name: "glob".to_string(),
+            arguments: json!({"pattern":"src/**/*.rs"}),
+        };
+        let succeeding_call = AiToolCall {
+            id: "call_ok".to_string(),
+            name: "read".to_string(),
+            arguments: json!({"file_path":"src/main.rs"}),
+        };
+
+        let fail_result = Content::ToolResult {
+            tool_use_id: "call_fail".to_string(),
+            output: serde_json::Value::String("timeout".to_string()),
+            is_error: Some(true),
+        };
+        let ok_result = Content::ToolResult {
+            tool_use_id: "call_ok".to_string(),
+            output: serde_json::Value::String("ok".to_string()),
+            is_error: Some(false),
+        };
+
+        let mut counters = HashMap::new();
+        detect_repeated_failures(
+            &mut counters,
+            &[failing_call.clone(), succeeding_call.clone()],
+            &[fail_result.clone(), ok_result.clone()],
+        );
+        assert_eq!(counters.len(), 1);
+
+        let second = detect_repeated_failures(
+            &mut counters,
+            &[failing_call, succeeding_call],
+            &[fail_result, ok_result],
+        );
+        assert!(second.is_some());
+    }
+
+    #[test]
     fn classify_error_code_matches_categories() {
         assert_eq!(
             classify_error_code("Invalid parameters: missing field `x`"),
@@ -251,5 +351,49 @@ mod tests {
             normalize_error_fingerprint("  A   spaced\n error\tmessage  "),
             "a spaced error message"
         );
+    }
+
+    #[test]
+    fn repeated_read_only_sequence_trips_threshold() {
+        let calls = vec![
+            AiToolCall {
+                id: "call_1".to_string(),
+                name: "glob".to_string(),
+                arguments: json!({"pattern":"src/**/*.rs"}),
+            },
+            AiToolCall {
+                id: "call_2".to_string(),
+                name: "grep".to_string(),
+                arguments: json!({"pattern":"TODO"}),
+            },
+        ];
+
+        let mut counters = HashMap::new();
+        for _ in 0..(REPEATED_READ_ONLY_SEQUENCE_THRESHOLD - 1) {
+            assert!(detect_repeated_read_only_sequence(&mut counters, &calls).is_none());
+        }
+
+        assert!(detect_repeated_read_only_sequence(&mut counters, &calls).is_some());
+    }
+
+    #[test]
+    fn repeated_read_only_sequence_resets_on_write() {
+        let readonly = vec![AiToolCall {
+            id: "call_1".to_string(),
+            name: "glob".to_string(),
+            arguments: json!({"pattern":"src/**/*.rs"}),
+        }];
+        let write = vec![AiToolCall {
+            id: "call_2".to_string(),
+            name: "edit".to_string(),
+            arguments: json!({"file_path":"src/main.rs"}),
+        }];
+
+        let mut counters = HashMap::new();
+        detect_repeated_read_only_sequence(&mut counters, &readonly);
+        assert!(!counters.is_empty());
+
+        assert!(detect_repeated_read_only_sequence(&mut counters, &write).is_none());
+        assert!(counters.is_empty());
     }
 }

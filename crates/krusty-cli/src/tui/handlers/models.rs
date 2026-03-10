@@ -1,105 +1,163 @@
 //! Model fetching handlers
 //!
-//! Async model fetching from dynamic providers (OpenRouter).
+//! Async model fetching from dynamic providers such as OpenRouter and OpenAI.
 
+use crate::ai::models::ModelMetadata;
 use crate::ai::providers::ProviderId;
 use crate::tui::app::App;
+use crate::tui::utils::DynamicModelUpdate;
 
 impl App {
-    /// Start async fetch of OpenRouter models
-    pub fn start_openrouter_fetch(&mut self) {
-        // Don't start if already fetching
-        if self.runtime.channels.openrouter_models.is_some() {
+    /// Start async fetch of models for a dynamic provider.
+    pub fn start_dynamic_model_fetch(&mut self, provider: ProviderId) {
+        if !crate::ai::catalog::supports_dynamic_models(provider) {
             return;
         }
 
-        // Get OpenRouter API key
-        let api_key = match self.services.credential_store.get(&ProviderId::OpenRouter) {
-            Some(key) => key.clone(),
-            None => {
-                tracing::warn!("Cannot fetch OpenRouter models: no API key configured");
-                return;
+        if self.runtime.channels.dynamic_models.is_some() {
+            return;
+        }
+
+        if !self.runtime.dynamic_model_fetches.insert(provider) {
+            return;
+        }
+
+        let credential = match provider {
+            ProviderId::OpenAI => {
+                krusty_core::auth::resolve_openai_auth(
+                    &self.services.credential_store,
+                    &self.runtime.current_model,
+                )
+                .credential
             }
+            ProviderId::Anthropic => {
+                krusty_core::auth::resolve_anthropic_auth(&self.services.credential_store)
+                    .credential
+            }
+            _ => self.services.credential_store.get_auth(&provider),
         };
 
-        // Mark popup as loading (only if popup is open)
+        let Some(credential) = credential else {
+            tracing::warn!(
+                "Cannot fetch {:?} models: no credential configured",
+                provider
+            );
+            self.runtime.dynamic_model_fetches.remove(&provider);
+            return;
+        };
+
         self.ui.popups.model.set_loading(true);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.runtime.channels.openrouter_models = Some(rx);
+        self.runtime.channels.dynamic_models = Some(rx);
 
-        // Clone registry for async task
         let registry = self.services.model_registry.clone();
 
         tokio::spawn(async move {
-            let result = crate::ai::openrouter::fetch_models(&api_key).await;
+            let result = crate::ai::catalog::fetch_dynamic_models(provider, &credential).await;
 
-            match &result {
-                Ok(models) => {
-                    // Store in registry
-                    registry
-                        .set_models(ProviderId::OpenRouter, models.clone())
-                        .await;
-                    tracing::info!("Fetched {} OpenRouter models", models.len());
-                }
-                Err(e) => {
-                    tracing::error!("Failed to fetch OpenRouter models: {}", e);
-                }
+            if let Ok(models) = &result {
+                registry.set_models(provider, models.clone()).await;
+                tracing::info!("Fetched {} {:?} models", models.len(), provider);
+            } else if let Err(error) = &result {
+                tracing::error!("Failed to fetch {:?} models: {}", provider, error);
             }
 
-            let _ = tx.send(result.map_err(|e| e.to_string()));
+            let _ = tx.send(DynamicModelUpdate {
+                provider,
+                result: result.map_err(|e| e.to_string()),
+            });
         });
     }
 
-    /// Poll for OpenRouter model fetch completion
-    pub fn poll_openrouter_fetch(&mut self) {
-        if let Some(rx) = &mut self.runtime.channels.openrouter_models {
-            match rx.try_recv() {
-                Ok(result) => {
-                    match result {
-                        Ok(models) => {
-                            // Cache models to preferences
-                            if let Some(ref prefs) = self.services.preferences {
-                                if let Err(e) = prefs.cache_openrouter_models(&models) {
-                                    tracing::warn!("Failed to cache OpenRouter models: {}", e);
-                                }
-                            }
-                            // Refresh the popup with new models
-                            self.refresh_model_popup();
-                            tracing::info!(
-                                "OpenRouter models loaded and cached: {} models",
-                                models.len()
-                            );
-                        }
-                        Err(e) => {
-                            self.ui.popups.model.set_error(e);
-                        }
+    /// Poll for dynamic model fetch completion.
+    pub fn poll_dynamic_model_fetch(&mut self) {
+        let Some(rx) = &mut self.runtime.channels.dynamic_models else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(update) => {
+                self.runtime.dynamic_model_fetches.remove(&update.provider);
+                match update.result {
+                    Ok(models) => {
+                        self.cache_dynamic_models(update.provider, &models);
+                        self.reapply_custom_models(update.provider);
+                        self.refresh_model_popup();
                     }
-                    self.runtime.channels.openrouter_models = None;
+                    Err(error) => {
+                        self.ui.popups.model.set_error(error);
+                    }
                 }
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    self.ui
-                        .popups
-                        .model
-                        .set_error("Fetch task closed unexpectedly".to_string());
-                    self.runtime.channels.openrouter_models = None;
-                }
+                self.runtime.channels.dynamic_models = None;
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                self.runtime.dynamic_model_fetches.clear();
+                self.runtime.channels.dynamic_models = None;
             }
         }
     }
 
-    /// Refresh model popup with current registry data
+    fn cache_dynamic_models(&self, provider: ProviderId, models: &[ModelMetadata]) {
+        let Some(ref prefs) = self.services.preferences else {
+            return;
+        };
+
+        if let Err(error) = prefs.cache_models(provider, models) {
+            tracing::warn!("Failed to cache {:?} models: {}", provider, error);
+        }
+    }
+
+    fn reapply_custom_models(&self, provider: ProviderId) {
+        let Some(ref prefs) = self.services.preferences else {
+            return;
+        };
+
+        let custom_models = prefs.get_custom_models(provider);
+        if custom_models.is_empty() {
+            return;
+        }
+
+        let registry = self.services.model_registry.clone();
+        futures::executor::block_on(async move {
+            for metadata in custom_models {
+                registry.upsert_model(metadata).await;
+            }
+        });
+    }
+
+    pub fn should_refresh_dynamic_models(&self, provider: ProviderId) -> bool {
+        if !crate::ai::catalog::supports_dynamic_models(provider) {
+            return false;
+        }
+
+        let has_models = self
+            .services
+            .model_registry
+            .try_has_models(provider)
+            .unwrap_or(false);
+
+        if !has_models {
+            return true;
+        }
+
+        self.services
+            .preferences
+            .as_ref()
+            .map(|prefs| prefs.is_model_cache_stale(provider))
+            .unwrap_or(true)
+    }
+
+    /// Refresh model popup with current registry data.
     pub fn refresh_model_popup(&mut self) {
         let configured = self.configured_providers();
 
-        // Get organized models from registry (non-blocking)
         if let Some((recent_models, models_by_provider)) = self
             .services
             .model_registry
             .try_get_organized_models(&configured)
         {
-            // Convert HashMap to Vec sorted by provider display order
             let models_vec: Vec<_> = ProviderId::all()
                 .iter()
                 .filter_map(|id| {

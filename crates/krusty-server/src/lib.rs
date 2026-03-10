@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -49,9 +50,12 @@ type SessionGuard = Arc<Mutex<()>>;
 type SessionLockMap = HashMap<String, (SessionGuard, Instant)>;
 type SessionInputMap =
     HashMap<String, tokio::sync::mpsc::UnboundedSender<krusty_core::agent::LoopInput>>;
+type SessionPresenceMap = presence::SessionPresenceMap;
 pub mod auth;
 pub mod error;
+pub mod presence;
 pub mod push;
+pub mod remote_access;
 pub mod routes;
 pub mod types;
 pub mod utils;
@@ -104,6 +108,12 @@ pub struct AppState {
     pub session_locks: Arc<RwLock<SessionLockMap>>,
     /// Active orchestrator input channels for tool approvals / cancellation.
     pub session_inputs: Arc<RwLock<SessionInputMap>>,
+    /// Presence registry for active viewers/controllers per session.
+    pub session_presence: Arc<RwLock<SessionPresenceMap>>,
+    /// Cached remote-access authority configuration.
+    pub remote_access: Arc<RwLock<remote_access::RemoteAccessConfig>>,
+    /// Count of currently active agent SSE streams.
+    pub active_agent_streams: Arc<AtomicUsize>,
     /// Web Push notification service (None if VAPID init failed).
     pub push_service: Option<Arc<push::PushService>>,
     /// Active OAuth flows keyed by provider storage key.
@@ -346,6 +356,9 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
                 None
             }
         };
+    let remote_access = Arc::new(RwLock::new(
+        remote_access::RemoteAccessConfig::load_or_create(&db_path)?,
+    ));
 
     let state = AppState {
         server_port: config.port,
@@ -364,6 +377,9 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
         cancellation,
         session_locks: Arc::new(RwLock::new(HashMap::new())),
         session_inputs: Arc::new(RwLock::new(HashMap::new())),
+        session_presence: Arc::new(RwLock::new(HashMap::new())),
+        remote_access,
+        active_agent_streams: Arc::new(AtomicUsize::new(0)),
         push_service,
         oauth_flows: Arc::new(Mutex::new(HashMap::new())),
     };
@@ -379,17 +395,18 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
         ])
         .allow_headers(Any);
 
+    let protected_routes = Router::new()
+        .route("/ws/terminal", get(ws::terminal::handler))
+        .nest("/api", routes::api_router())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::auth_middleware,
+        ));
+
     let app = Router::new()
         .route("/health", get(health))
-        .route("/ws/terminal", get(ws::terminal::handler))
         .merge(routes::oauth::callback_router())
-        .nest(
-            "/api",
-            routes::api_router().layer(middleware::from_fn_with_state(
-                state.clone(),
-                auth::auth_middleware,
-            )),
-        )
+        .merge(protected_routes)
         .fallback(serve_pwa)
         .layer(cors)
         .layer(TraceLayer::new_for_http())

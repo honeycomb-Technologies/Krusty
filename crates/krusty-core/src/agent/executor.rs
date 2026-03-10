@@ -1,10 +1,9 @@
 //! Tool execution for the agentic loop.
 //!
 //! Handles:
-//! - Permission-based approval workflow (supervised mode)
+//! - Centralized approval + retry policy via `tool_control`
 //! - Special tool dispatch (mode switch, plan tasks)
 //! - Regular tool execution via `ToolRegistry::execute()`
-//! - Output truncation
 //! - Tool output streaming via `ToolOutputChunk` → `LoopEvent::ToolOutputDelta`
 
 use std::path::Path;
@@ -13,18 +12,18 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
+use crate::agent::AgentConfig as RuntimeAgentConfig;
+use crate::ai::client::AiClient;
 use crate::ai::types::{AiToolCall, Content};
+use crate::plan::PlanManager;
 use crate::process::ProcessRegistry;
 use crate::storage::WorkMode;
-use crate::tools::registry::{
-    tool_category, PermissionMode, ToolCategory, ToolContext, ToolRegistry,
-};
+use crate::tools::registry::{PermissionMode, ToolContext, ToolRegistry, ToolResult};
 
-use super::loop_events::{LoopEvent, LoopInput};
+use super::loop_events::{LoopEvent, LoopInput, PlanTaskInfo};
 use super::plan_handler;
+use super::tool_control::{AuthorizationDecision, RetryDirective, ToolControl};
 
-const MAX_TOOL_OUTPUT_CHARS: usize = 30_000;
-const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Execute a batch of tool calls, emitting LoopEvents and receiving LoopInputs
@@ -34,6 +33,7 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) async fn execute_tools(
     tool_calls: &[AiToolCall],
     tool_registry: &Arc<ToolRegistry>,
+    ai_client: &Arc<AiClient>,
     working_dir: &Path,
     process_registry: &Arc<ProcessRegistry>,
     session_id: &str,
@@ -46,45 +46,16 @@ pub(crate) async fn execute_tools(
 ) -> (Vec<Content>, WorkMode) {
     let mut work_mode = current_mode;
     let mut results = Vec::new();
+    let tool_control = ToolControl::new(permission_mode);
 
     for call in tool_calls {
-        let category = tool_category(&call.name);
-
-        // ── Supervised approval ────────────────────────────────────
-        if permission_mode == PermissionMode::Supervised && category == ToolCategory::Write {
-            let _ = event_tx.send(LoopEvent::ToolApprovalRequired {
-                id: call.id.clone(),
-                name: call.name.clone(),
-                arguments: call.arguments.clone(),
-            });
-
-            let approved = wait_for_approval(call, event_tx, input_rx).await;
-
-            if !approved {
-                let denied = crate::tools::registry::ToolResult::error_with_code(
-                    "permission_denied",
-                    "Tool execution denied by user",
-                );
-                let output = truncate_output(&denied.output);
-                let _ = event_tx.send(LoopEvent::ToolDenied {
-                    id: call.id.clone(),
-                });
-                let _ = event_tx.send(LoopEvent::ToolResult {
-                    id: call.id.clone(),
-                    output: output.clone(),
-                    is_error: denied.is_error,
-                });
-                results.push(Content::ToolResult {
-                    tool_use_id: call.id.clone(),
-                    output: serde_json::Value::String(output),
-                    is_error: Some(denied.is_error),
-                });
+        match tool_control.authorize(call, event_tx, input_rx).await {
+            AuthorizationDecision::Execute => {}
+            AuthorizationDecision::Deny(denial) => {
+                let denied = denial.tool_result();
+                results.push(tool_control.publish_result(call, &denied, event_tx));
                 continue;
             }
-
-            let _ = event_tx.send(LoopEvent::ToolApproved {
-                id: call.id.clone(),
-            });
         }
 
         let _ = event_tx.send(LoopEvent::ToolExecuting {
@@ -104,21 +75,7 @@ pub(crate) async fn execute_tools(
                 });
             }
 
-            let output = truncate_output(&switch.tool_result.output);
-            let _ = event_tx.send(LoopEvent::ToolResult {
-                id: call.id.clone(),
-                output: output.clone(),
-                is_error: switch.tool_result.is_error,
-            });
-            results.push(Content::ToolResult {
-                tool_use_id: call.id.clone(),
-                output: serde_json::Value::String(output),
-                is_error: if switch.tool_result.is_error {
-                    Some(true)
-                } else {
-                    None
-                },
-            });
+            results.push(tool_control.publish_result(call, &switch.tool_result, event_tx));
             continue;
         }
 
@@ -128,160 +85,139 @@ pub(crate) async fn execute_tools(
             "task_start" | "task_complete" | "add_subtask" | "set_dependency"
         ) {
             let result = plan_handler::handle_plan_task(call, session_id, db_path);
-            let output = truncate_output(&result.output);
-            let _ = event_tx.send(LoopEvent::ToolResult {
-                id: call.id.clone(),
-                output: output.clone(),
-                is_error: result.is_error,
-            });
-            results.push(Content::ToolResult {
-                tool_use_id: call.id.clone(),
-                output: serde_json::Value::String(output),
-                is_error: if result.is_error { Some(true) } else { None },
-            });
+            if !result.is_error {
+                emit_plan_update(session_id, db_path, event_tx);
+            }
+            results.push(tool_control.publish_result(call, &result, event_tx));
             continue;
         }
 
         // ── Regular tool execution ─────────────────────────────────
-        let (output_tx, mut output_rx) =
-            mpsc::unbounded_channel::<crate::tools::registry::ToolOutputChunk>();
+        let mut retries_attempted = 0usize;
+        let result = loop {
+            let result = execute_regular_tool(
+                call,
+                tool_registry,
+                ai_client,
+                working_dir,
+                process_registry,
+                user_id,
+                permission_mode,
+                work_mode,
+                event_tx,
+            )
+            .await;
 
-        let forwarder_event_tx = event_tx.clone();
-        let forwarder_tool_id = call.id.clone();
-        let forwarder_tool_name = call.name.clone();
-        let forwarder_handle = tokio::spawn(async move {
-            let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
-            heartbeat_interval.tick().await;
-
-            loop {
-                tokio::select! {
-                    chunk = output_rx.recv() => {
-                        match chunk {
-                            Some(chunk) => {
-                                if !chunk.chunk.is_empty() {
-                                    let _ = forwarder_event_tx.send(LoopEvent::ToolOutputDelta {
-                                        id: forwarder_tool_id.clone(),
-                                        delta: chunk.chunk,
-                                    });
-                                }
-                                if chunk.is_complete {
-                                    break;
-                                }
-                            }
-                            None => break,
-                        }
-                    }
-                    _ = heartbeat_interval.tick() => {
-                        let _ = forwarder_event_tx.send(LoopEvent::ToolExecuting {
-                            id: forwarder_tool_id.clone(),
-                            name: forwarder_tool_name.clone(),
-                        });
-                    }
+            match tool_control.retry_directive(call, &result, retries_attempted) {
+                RetryDirective::Stop => break result,
+                RetryDirective::RetryOnce { reason } => {
+                    retries_attempted += 1;
+                    tracing::warn!(
+                        tool = %call.name,
+                        tool_call_id = %call.id,
+                        retries_attempted,
+                        reason,
+                        "Retrying tool execution under centralized policy"
+                    );
                 }
             }
-        });
+        };
 
-        let ctx = ToolContext {
-            working_dir: working_dir.to_path_buf(),
-            process_registry: Some(process_registry.clone()),
-            plan_mode: work_mode == WorkMode::Plan,
-            user_id: user_id.map(ToString::to_string),
-            sandbox_root: Some(working_dir.to_path_buf()),
-            ..Default::default()
-        }
-        .with_output_stream(output_tx, call.id.clone());
-
-        let result = tool_registry
-            .execute(&call.name, call.arguments.clone(), &ctx)
-            .await
-            .unwrap_or_else(|| {
-                crate::tools::registry::ToolResult::error_with_code(
-                    "unknown_tool",
-                    format!("Unknown tool: {}", call.name),
-                )
-            });
-
-        drop(ctx);
-        let _ = forwarder_handle.await;
-
-        let output = truncate_output(&result.output);
-
-        let _ = event_tx.send(LoopEvent::ToolResult {
-            id: call.id.clone(),
-            output: output.clone(),
-            is_error: result.is_error,
-        });
-
-        results.push(Content::ToolResult {
-            tool_use_id: call.id.clone(),
-            output: serde_json::Value::String(output),
-            is_error: if result.is_error { Some(true) } else { None },
-        });
+        results.push(tool_control.publish_result(call, &result, event_tx));
     }
 
     (results, work_mode)
 }
 
-/// Wait for a tool approval via the LoopInput channel.
-async fn wait_for_approval(
-    call: &AiToolCall,
-    event_tx: &mpsc::UnboundedSender<LoopEvent>,
-    input_rx: &mut mpsc::UnboundedReceiver<LoopInput>,
-) -> bool {
-    let deadline = tokio::time::Instant::now() + APPROVAL_TIMEOUT;
+fn emit_plan_update(session_id: &str, db_path: &Path, event_tx: &mpsc::UnboundedSender<LoopEvent>) {
+    let tasks = PlanManager::new(db_path.to_path_buf())
+        .ok()
+        .and_then(|pm| pm.get_plan(session_id).ok().flatten())
+        .map(|plan| {
+            plan.phases
+                .iter()
+                .flat_map(|phase| phase.tasks.iter())
+                .map(|task| PlanTaskInfo {
+                    description: task.description.clone(),
+                    completed: task.completed,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
-    loop {
-        match tokio::time::timeout_at(deadline, input_rx.recv()).await {
-            Ok(Some(LoopInput::ToolApproval {
-                tool_call_id,
-                approved,
-            })) if tool_call_id == call.id => {
-                return approved;
-            }
-            Ok(Some(LoopInput::Cancel)) => return false,
-            Ok(Some(_)) => continue,  // ignore unrelated inputs
-            Ok(None) => return false, // channel closed
-            Err(_) => {
-                let timeout_result = crate::tools::registry::ToolResult::error_with_code(
-                    "timeout",
-                    "Tool approval timed out after 5 minutes",
-                );
-                // Timeout
-                let _ = event_tx.send(LoopEvent::ToolDenied {
-                    id: call.id.clone(),
-                });
-                let _ = event_tx.send(LoopEvent::ToolResult {
-                    id: call.id.clone(),
-                    output: timeout_result.output,
-                    is_error: timeout_result.is_error,
-                });
-                return false;
+    let _ = event_tx.send(LoopEvent::PlanUpdate { tasks });
+}
+
+async fn execute_regular_tool(
+    call: &AiToolCall,
+    tool_registry: &Arc<ToolRegistry>,
+    ai_client: &Arc<AiClient>,
+    working_dir: &Path,
+    process_registry: &Arc<ProcessRegistry>,
+    user_id: Option<&str>,
+    permission_mode: PermissionMode,
+    work_mode: WorkMode,
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+) -> ToolResult {
+    let (output_tx, mut output_rx) =
+        mpsc::unbounded_channel::<crate::tools::registry::ToolOutputChunk>();
+
+    let forwarder_event_tx = event_tx.clone();
+    let forwarder_tool_id = call.id.clone();
+    let forwarder_tool_name = call.name.clone();
+    let forwarder_handle = tokio::spawn(async move {
+        let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+        heartbeat_interval.tick().await;
+
+        loop {
+            tokio::select! {
+                chunk = output_rx.recv() => {
+                    match chunk {
+                        Some(chunk) => {
+                            if !chunk.chunk.is_empty() {
+                                let _ = forwarder_event_tx.send(LoopEvent::ToolOutputDelta {
+                                    id: forwarder_tool_id.clone(),
+                                    delta: chunk.chunk,
+                                });
+                            }
+                            if chunk.is_complete {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = heartbeat_interval.tick() => {
+                    let _ = forwarder_event_tx.send(LoopEvent::ToolExecuting {
+                        id: forwarder_tool_id.clone(),
+                        name: forwarder_tool_name.clone(),
+                    });
+                }
             }
         }
-    }
-}
+    });
 
-pub(crate) fn truncate_output(output: &str) -> String {
-    if output.len() <= MAX_TOOL_OUTPUT_CHARS {
-        return output.to_string();
+    let ctx = ToolContext {
+        working_dir: working_dir.to_path_buf(),
+        process_registry: Some(process_registry.clone()),
+        plan_mode: work_mode == WorkMode::Plan,
+        user_id: user_id.map(ToString::to_string),
+        sandbox_root: Some(working_dir.to_path_buf()),
+        ..Default::default()
     }
+    .with_permission_mode(permission_mode)
+    .with_subagent_max_turns(RuntimeAgentConfig::default().subagent_max_turns)
+    .with_ai_client(ai_client.clone())
+    .with_output_stream(output_tx, call.id.clone());
 
-    let truncated_len = floor_char_boundary(output, MAX_TOOL_OUTPUT_CHARS);
-    let truncated = &output[..truncated_len];
-    let break_point = truncated.rfind('\n').unwrap_or(truncated_len);
-    let clean = &output[..break_point];
-    format!(
-        "{}\n\n[... OUTPUT TRUNCATED: {} chars -> {} chars ...]",
-        clean,
-        output.len(),
-        clean.len()
-    )
-}
+    let result = tool_registry
+        .execute(&call.name, call.arguments.clone(), &ctx)
+        .await
+        .unwrap_or_else(|| {
+            ToolResult::error_with_code("unknown_tool", format!("Unknown tool: {}", call.name))
+        });
 
-fn floor_char_boundary(text: &str, index: usize) -> usize {
-    let mut boundary = index.min(text.len());
-    while boundary > 0 && !text.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    boundary
+    drop(ctx);
+    let _ = forwarder_handle.await;
+    result
 }

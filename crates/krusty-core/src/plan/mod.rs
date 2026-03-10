@@ -14,7 +14,9 @@
 //! for export/import.
 
 mod file;
+mod lifecycle;
 mod manager;
 
 pub use file::{PlanFile, PlanPhase, PlanStatus, PlanTask, TaskStatus};
+pub use lifecycle::{is_active_plan, resolve_effective_work_mode, PlanLifecycleState};
 pub use manager::PlanManager;

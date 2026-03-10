@@ -1,6 +1,10 @@
 //! Request and response types for the API
 
-use krusty_core::storage::{SessionInfo, WorkMode};
+use krusty_core::ai::types::{Citation, WebFetchContent, WebSearchResult};
+use krusty_core::storage::{
+    PartialAssistantState, RuntimeTraceEvent, RuntimeTraceSummary, SessionInfo,
+    SessionRecoveryState, WorkMode,
+};
 use krusty_core::tools::registry::PermissionMode;
 use serde::{de, Deserialize, Deserializer, Serialize};
 
@@ -93,6 +97,90 @@ pub struct SessionStateResponse {
     pub last_event_at: Option<String>,
     /// Current persisted work mode
     pub mode: WorkMode,
+    /// Interrupted-turn recovery state, if any.
+    pub recovery: Option<SessionRecoveryState>,
+    /// Authoritative in-flight partial assistant state for active sessions.
+    pub live_partial_assistant: Option<PartialAssistantState>,
+    /// Latest persisted runtime trace sequence observed for this session.
+    pub last_event_sequence: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct SessionTraceResponse {
+    pub id: String,
+    pub summary: RuntimeTraceSummary,
+    pub events: Vec<RuntimeTraceEvent>,
+    pub latest_sequence: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct SessionPresenceHeartbeatRequest {
+    pub client_id: String,
+    pub surface: String,
+    pub capability: crate::presence::PresenceCapability,
+    pub last_event_sequence: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct SessionPresenceClientResponse {
+    pub client_id: String,
+    pub surface: String,
+    pub capability: crate::presence::PresenceCapability,
+    pub user_id: Option<String>,
+    pub last_seen_at: String,
+    pub last_event_sequence: Option<i64>,
+    pub stale: bool,
+}
+
+#[derive(Serialize)]
+pub struct SessionPresenceResponse {
+    pub session_id: String,
+    pub active_viewers: usize,
+    pub active_controllers: usize,
+    pub stale_clients: usize,
+    pub clients: Vec<SessionPresenceClientResponse>,
+}
+
+#[derive(Serialize)]
+pub struct ServerAccessResponse {
+    pub local_url: String,
+    pub remote_access_enabled: bool,
+    pub remote_access_token: String,
+    pub remote_launch_url: Option<String>,
+    pub tailscale: TailscaleAccessResponse,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateServerAccessRequest {
+    pub enabled: Option<bool>,
+    pub rotate_token: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct TailscaleAccessResponse {
+    pub status: String,
+    pub url: Option<String>,
+    pub detail: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ActiveSessionStatusResponse {
+    pub id: String,
+    pub title: String,
+    pub agent_state: String,
+    pub started_at: Option<String>,
+    pub last_event_at: Option<String>,
+    pub working_dir: Option<String>,
+    pub active_viewers: usize,
+    pub active_controllers: usize,
+    pub stale_clients: usize,
+}
+
+#[derive(Serialize)]
+pub struct ServerStatusResponse {
+    pub active_agent_streams: usize,
+    pub active_sessions: Vec<ActiveSessionStatusResponse>,
+    pub tailscale: TailscaleAccessResponse,
 }
 
 #[derive(Serialize)]
@@ -197,7 +285,8 @@ pub struct ChatRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatRequest, ThinkingLevel};
+    use super::{AgenticEvent, ChatRequest, ThinkingLevel};
+    use krusty_core::agent::LoopEvent;
     use serde_json::json;
 
     #[test]
@@ -238,6 +327,63 @@ mod tests {
         match result {
             Ok(_) => panic!("request should fail"),
             Err(err) => assert!(err.to_string().contains("invalid thinking_enabled value")),
+        }
+    }
+
+    #[test]
+    fn agentic_event_preserves_thinking_complete_shape() {
+        let mapped = AgenticEvent::from(LoopEvent::ThinkingComplete {
+            thinking: "analysis".to_string(),
+            signature: "sig-1".to_string(),
+        });
+
+        match mapped {
+            AgenticEvent::ThinkingComplete {
+                thinking,
+                signature,
+            } => {
+                assert_eq!(thinking, "analysis");
+                assert_eq!(signature, "sig-1");
+            }
+            other => panic!("unexpected mapping: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agentic_event_preserves_web_search_results_shape() {
+        let mapped = AgenticEvent::from(LoopEvent::WebSearchResults {
+            tool_use_id: "tool-1".to_string(),
+            results: Vec::new(),
+        });
+
+        match mapped {
+            AgenticEvent::WebSearchResults {
+                tool_use_id,
+                results,
+            } => {
+                assert_eq!(tool_use_id, "tool-1");
+                assert!(results.is_empty());
+            }
+            other => panic!("unexpected mapping: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agentic_event_preserves_server_tool_error_shape() {
+        let mapped = AgenticEvent::from(LoopEvent::ServerToolError {
+            tool_use_id: "tool-7".to_string(),
+            error_code: "timeout".to_string(),
+        });
+
+        match mapped {
+            AgenticEvent::ServerToolError {
+                tool_use_id,
+                error_code,
+            } => {
+                assert_eq!(tool_use_id, "tool-7");
+                assert_eq!(error_code, "timeout");
+            }
+            other => panic!("unexpected mapping: {other:?}"),
         }
     }
 }
@@ -474,8 +620,15 @@ pub struct PlanItem {
 pub enum AgenticEvent {
     /// Text content delta from AI
     TextDelta { delta: String },
+    /// Text content delta with citations
+    TextDeltaWithCitations {
+        delta: String,
+        citations: Vec<Citation>,
+    },
     /// Extended thinking delta
     ThinkingDelta { thinking: String },
+    /// Extended thinking block completed
+    ThinkingComplete { thinking: String, signature: String },
     /// AI is starting a tool call
     ToolCallStart { id: String, name: String },
     /// Tool call complete with arguments
@@ -493,6 +646,25 @@ pub enum AgenticEvent {
         id: String,
         output: String,
         is_error: bool,
+    },
+    /// Server-side tool started
+    ServerToolStart { id: String, name: String },
+    /// Server-side tool completed
+    ServerToolComplete { id: String, name: String },
+    /// Server-side web search results
+    WebSearchResults {
+        tool_use_id: String,
+        results: Vec<WebSearchResult>,
+    },
+    /// Server-side web fetch result
+    WebFetchResult {
+        tool_use_id: String,
+        content: WebFetchContent,
+    },
+    /// Server-side tool error
+    ServerToolError {
+        tool_use_id: String,
+        error_code: String,
     },
     /// Waiting for user input (AskUserQuestion)
     AwaitingInput {
@@ -519,8 +691,20 @@ pub enum AgenticEvent {
         prompt_tokens: usize,
         completion_tokens: usize,
     },
+    /// Live conversation compaction telemetry
+    ContextCompacted {
+        reason: String,
+        estimated_tokens_before: usize,
+        estimated_tokens_after: usize,
+        replaced_messages: usize,
+    },
+    /// Some non-terminal stream events were dropped because the client fell behind.
+    Lagged { skipped: usize },
     /// Agentic loop finished
-    Finish { session_id: String },
+    Finish {
+        session_id: String,
+        stop_reason: String,
+    },
     /// Session title updated (from Haiku)
     TitleUpdate { title: String },
     /// Tool requires user approval (supervised mode)
@@ -542,14 +726,17 @@ impl From<krusty_core::agent::LoopEvent> for AgenticEvent {
         use krusty_core::agent::LoopEvent;
         match event {
             LoopEvent::TextDelta { delta } => Self::TextDelta { delta },
-            LoopEvent::TextDeltaWithCitations { delta, .. } => Self::TextDelta { delta },
-            LoopEvent::ThinkingDelta { thinking } => Self::ThinkingDelta { thinking },
-            LoopEvent::ThinkingComplete { .. } => {
-                // Server doesn't need thinking lifecycle events
-                Self::ThinkingDelta {
-                    thinking: String::new(),
-                }
+            LoopEvent::TextDeltaWithCitations { delta, citations } => {
+                Self::TextDeltaWithCitations { delta, citations }
             }
+            LoopEvent::ThinkingDelta { thinking } => Self::ThinkingDelta { thinking },
+            LoopEvent::ThinkingComplete {
+                thinking,
+                signature,
+            } => Self::ThinkingComplete {
+                thinking,
+                signature,
+            },
             LoopEvent::ToolCallStart { id, name } => Self::ToolCallStart { id, name },
             LoopEvent::ToolCallComplete {
                 id,
@@ -589,29 +776,28 @@ impl From<krusty_core::agent::LoopEvent> for AgenticEvent {
             },
             LoopEvent::ToolApproved { id } => Self::ToolApproved { id },
             LoopEvent::ToolDenied { id } => Self::ToolDenied { id },
-            // Server-side tool events — pass through as tool execution events
-            LoopEvent::ServerToolStart { id, name } => Self::ToolExecuting { id, name },
-            LoopEvent::ServerToolComplete { id, name } => Self::ToolResult {
-                id,
-                output: format!("{} completed", name),
-                is_error: false,
+            LoopEvent::ServerToolStart { id, name } => Self::ServerToolStart { id, name },
+            LoopEvent::ServerToolComplete { id, name } => Self::ServerToolComplete { id, name },
+            LoopEvent::WebSearchResults {
+                tool_use_id,
+                results,
+            } => Self::WebSearchResults {
+                tool_use_id,
+                results,
             },
-            LoopEvent::WebSearchResults { .. } => {
-                // Web search results are consumed by the AI, not forwarded to SSE
-                Self::TextDelta {
-                    delta: String::new(),
-                }
-            }
-            LoopEvent::WebFetchResult { .. } => Self::TextDelta {
-                delta: String::new(),
+            LoopEvent::WebFetchResult {
+                tool_use_id,
+                content,
+            } => Self::WebFetchResult {
+                tool_use_id,
+                content,
             },
             LoopEvent::ServerToolError {
                 tool_use_id,
                 error_code,
-            } => Self::ToolResult {
-                id: tool_use_id,
-                output: format!("Server tool error: {}", error_code),
-                is_error: true,
+            } => Self::ServerToolError {
+                tool_use_id,
+                error_code,
             },
             LoopEvent::ModeChange { mode, reason } => Self::ModeChange { mode, reason },
             LoopEvent::PlanUpdate { tasks } => Self::PlanUpdate {
@@ -640,8 +826,28 @@ impl From<krusty_core::agent::LoopEvent> for AgenticEvent {
                 prompt_tokens,
                 completion_tokens,
             },
+            LoopEvent::ContextCompacted {
+                reason,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                replaced_messages,
+            } => Self::ContextCompacted {
+                reason,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                replaced_messages,
+            },
             LoopEvent::TitleGenerated { title } => Self::TitleUpdate { title },
-            LoopEvent::Finished { session_id } => Self::Finish { session_id },
+            LoopEvent::Finished {
+                session_id,
+                stop_reason,
+            } => Self::Finish {
+                session_id,
+                stop_reason: serde_json::to_value(stop_reason)
+                    .ok()
+                    .and_then(|v| v.as_str().map(ToString::to_string))
+                    .unwrap_or_else(|| "completed".to_string()),
+            },
             LoopEvent::Error { error } => Self::Error { error },
         }
     }

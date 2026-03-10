@@ -141,9 +141,16 @@ impl Tool for McpTool {
         {
             Ok(result) => {
                 let output = format_mcp_result(&result);
+                let delegated_policy = ctx
+                    .delegation_policy
+                    .as_ref()
+                    .map(|policy| policy.audit_json());
                 let metadata = Some(json!({
                     "server": self.server_name.clone(),
                     "tool": self.tool_name.clone(),
+                    "delegation_surface": "mcp_remote",
+                    "permission_mode": ctx.permission_mode,
+                    "delegation_policy": delegated_policy,
                     "is_remote_execution": true,
                     "content_items": result.content.len()
                 }));
@@ -176,6 +183,12 @@ impl Tool for McpTool {
                 Some(json!({
                     "server": self.server_name.clone(),
                     "tool": self.tool_name.clone(),
+                    "delegation_surface": "mcp_remote",
+                    "permission_mode": ctx.permission_mode,
+                    "delegation_policy": ctx
+                        .delegation_policy
+                        .as_ref()
+                        .map(|policy| policy.audit_json()),
                     "is_remote_execution": true
                 })),
             ),

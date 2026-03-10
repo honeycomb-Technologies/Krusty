@@ -8,6 +8,8 @@ Tool registry, interfaces, and implementations used by agent runtime.
 - Keep permission/approval semantics explicit and conservative.
 - Avoid hidden filesystem/network side effects in tool implementations.
 - Prefer structured tool result envelopes (`ok`, `data`, `error`, optional `warnings`/`metadata`) over ad-hoc plain strings.
+- Delegated tool surfaces (subagents, remote MCP wrappers) must carry inherited governance metadata and enforce parent permission constraints.
+- Keep filesystem path policy owned by `ToolContext`/registry logic; do not reintroduce duplicate standalone path-validation helpers.
 
 ## Validation
 - `cargo check -p krusty-core`

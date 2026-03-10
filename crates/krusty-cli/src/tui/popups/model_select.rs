@@ -15,7 +15,8 @@ use super::common::{
     center_content, center_rect, popup_block, popup_title, render_popup_background,
     scroll_indicator, PopupSize,
 };
-use crate::ai::models::ModelMetadata;
+use crate::ai::format_detection::detect_api_format;
+use crate::ai::models::{infer_model_metadata, ModelMetadata};
 use crate::ai::providers::ProviderId;
 use crate::tui::themes::Theme;
 
@@ -302,6 +303,10 @@ impl ModelSelectPopup {
         }
     }
 
+    pub fn has_selectable_results(&self) -> bool {
+        !self.selectable_indices().is_empty()
+    }
+
     /// Add OpenRouter models grouped by sub-provider
     fn add_openrouter_models(&mut self, models: Vec<ModelMetadata>) {
         use std::collections::HashMap;
@@ -374,6 +379,19 @@ impl ModelSelectPopup {
             })
     }
 
+    pub fn custom_model_metadata(&self, provider: ProviderId) -> Option<ModelMetadata> {
+        let custom_id = self.search_query.trim();
+        if custom_id.is_empty() || self.has_selectable_results() {
+            return None;
+        }
+
+        Some(infer_model_metadata(
+            provider,
+            custom_id,
+            detect_api_format(provider, custom_id),
+        ))
+    }
+
     /// Count total models (not headers)
     fn model_count(&self) -> usize {
         self.entries
@@ -386,6 +404,7 @@ impl ModelSelectPopup {
         &self,
         f: &mut Frame,
         theme: &Theme,
+        active_provider: ProviderId,
         current_model: &str,
         context_tokens_used: usize,
     ) {
@@ -461,6 +480,15 @@ impl ModelSelectPopup {
             lines.push(Line::from(vec![Span::styled(
                 format!("    Error: {}", error),
                 Style::default().fg(theme.error_color),
+            )]));
+        } else if filtered.is_empty() && !self.search_query.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                format!(
+                    "    No catalog match. Press Enter to use '{}' on {}.",
+                    self.search_query, active_provider
+                ),
+                Style::default().fg(theme.accent_color),
             )]));
         } else if self.entries.is_empty() {
             lines.push(Line::from(""));
@@ -607,6 +635,11 @@ impl ModelSelectPopup {
 
         // Footer
         let footer = if self.search_active {
+            let enter_hint = if self.has_selectable_results() {
+                "close search"
+            } else {
+                "use query as model id"
+            };
             Paragraph::new(Line::from(vec![
                 Span::styled("Type to search  ", Style::default().fg(theme.text_color)),
                 Span::styled(
@@ -615,7 +648,10 @@ impl ModelSelectPopup {
                         .fg(theme.accent_color)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(": close search  ", Style::default().fg(theme.text_color)),
+                Span::styled(
+                    format!(": {}  ", enter_hint),
+                    Style::default().fg(theme.text_color),
+                ),
                 Span::styled(
                     "Esc",
                     Style::default()

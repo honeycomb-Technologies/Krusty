@@ -152,6 +152,7 @@ impl SubAgentPool {
                             duration_ms: 0,
                             turns_used: 0,
                             error: Some(format!("Semaphore error: {}", e)),
+                            policy_violations: vec![],
                         };
                     }
                     Err(_) => {
@@ -167,6 +168,7 @@ impl SubAgentPool {
                                 "Semaphore acquire timed out after {:?}",
                                 SEMAPHORE_TIMEOUT
                             )),
+                            policy_violations: vec![],
                         };
                     }
                 };
@@ -182,6 +184,7 @@ impl SubAgentPool {
                         duration_ms: 0,
                         turns_used: 0,
                         error: Some("Cancelled".to_string()),
+                        policy_violations: vec![],
                     };
                 }
 
@@ -213,6 +216,7 @@ impl SubAgentPool {
                         duration_ms: 0,
                         turns_used: 0,
                         error: Some(format!("Task panicked: {}", e)),
+                        policy_violations: vec![],
                     });
                 }
             }
@@ -277,6 +281,7 @@ impl SubAgentPool {
                             duration_ms: 0,
                             turns_used: 0,
                             error: Some(format!("Semaphore error: {}", e)),
+                            policy_violations: vec![],
                         };
                     }
                     Err(_) => {
@@ -292,6 +297,7 @@ impl SubAgentPool {
                                 "Semaphore acquire timed out after {:?}",
                                 SEMAPHORE_TIMEOUT
                             )),
+                            policy_violations: vec![],
                         };
                     }
                 };
@@ -305,6 +311,7 @@ impl SubAgentPool {
                         duration_ms: 0,
                         turns_used: 0,
                         error: Some("Cancelled".to_string()),
+                        policy_violations: vec![],
                     };
                 }
 
@@ -337,6 +344,7 @@ impl SubAgentPool {
                         duration_ms: 0,
                         turns_used: 0,
                         error: Some(format!("Task panicked: {}", e)),
+                        policy_violations: vec![],
                     });
                 }
             }
@@ -397,6 +405,7 @@ impl SubAgentPool {
                             duration_ms: 0,
                             turns_used: 0,
                             error: Some(format!("Semaphore error: {}", e)),
+                            policy_violations: vec![],
                         };
                     }
                     Err(_) => {
@@ -412,6 +421,7 @@ impl SubAgentPool {
                                 "Semaphore acquire timed out after {:?}",
                                 SEMAPHORE_TIMEOUT
                             )),
+                            policy_violations: vec![],
                         };
                     }
                 };
@@ -425,6 +435,7 @@ impl SubAgentPool {
                         duration_ms: 0,
                         turns_used: 0,
                         error: Some("Cancelled".to_string()),
+                        policy_violations: vec![],
                     };
                 }
 
@@ -457,6 +468,7 @@ impl SubAgentPool {
                         duration_ms: 0,
                         turns_used: 0,
                         error: Some(format!("Task panicked: {}", e)),
+                        policy_violations: vec![],
                     });
                 }
             }

@@ -19,6 +19,8 @@ pub const CHATGPT_RESPONSES_API: &str = "https://chatgpt.com/backend-api/codex/r
 /// Standard OpenAI API for API key users (Chat Completions)
 /// This endpoint is used when authenticating with an API key.
 pub const OPENAI_CHAT_API: &str = "https://api.openai.com/v1/chat/completions";
+/// Standard OpenAI Responses API for API key users.
+pub const OPENAI_RESPONSES_API: &str = "https://api.openai.com/v1/responses";
 
 /// Unique identifier for each supported provider
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -182,7 +184,8 @@ impl ProviderConfig {
         } else {
             // Dynamic providers need a fallback
             match self.id {
-                ProviderId::OpenRouter => "openai/gpt-5.3-codex",
+                ProviderId::OpenRouter => "openai/gpt-5-codex",
+                ProviderId::OpenAI => "gpt-5-codex",
                 _ => "MiniMax-M2.5", // Ultimate fallback
             }
         }
@@ -197,25 +200,56 @@ impl ProviderConfig {
         self.models.iter().any(|m| m.id == model_id)
     }
 
-    /// Get the API base URL for OpenAI based on auth type
+    /// Whether the model should prefer the Responses API for best behavior.
+    pub fn openai_prefers_responses_api(model: &str) -> bool {
+        let model = model.trim().to_ascii_lowercase();
+        let normalized = model.strip_prefix("openai/").unwrap_or(&model);
+
+        normalized.contains("codex")
+            || is_openai_o_series(normalized)
+            || normalized
+                .strip_prefix("gpt-")
+                .and_then(|suffix| {
+                    suffix
+                        .split(|ch: char| !ch.is_ascii_digit())
+                        .find(|segment| !segment.is_empty())
+                })
+                .and_then(|major| major.parse::<u32>().ok())
+                .is_some_and(|major| major >= 5)
+    }
+
+    /// Get the API base URL for OpenAI based on auth type + model.
     ///
     /// - ChatGPT OAuth tokens require the Responses API at chatgpt.com
-    /// - API keys use the standard Chat Completions API at api.openai.com
-    pub fn openai_url_for_auth(auth_type: OpenAIAuthType) -> &'static str {
+    /// - GPT-5/Codex/o-series models prefer the standard Responses API
+    /// - Remaining API-key traffic uses Chat Completions for compatibility
+    pub fn openai_url_for_auth(model: &str, auth_type: OpenAIAuthType) -> &'static str {
         match auth_type {
             OpenAIAuthType::ChatGptOAuth => CHATGPT_RESPONSES_API,
-            OpenAIAuthType::ApiKey | OpenAIAuthType::None => OPENAI_CHAT_API,
+            OpenAIAuthType::ApiKey | OpenAIAuthType::None => {
+                if Self::openai_prefers_responses_api(model) {
+                    OPENAI_RESPONSES_API
+                } else {
+                    OPENAI_CHAT_API
+                }
+            }
         }
     }
 
-    /// Get the API format for OpenAI based on auth type
+    /// Get the API format for OpenAI based on auth type + model.
     ///
     /// - ChatGPT OAuth requires OpenAI Responses format
-    /// - API keys use standard OpenAI chat/completions format
-    pub fn openai_format_for_auth(auth_type: OpenAIAuthType) -> ApiFormat {
+    /// - GPT-5/Codex/o-series models prefer Responses even with API keys
+    pub fn openai_format_for_auth(model: &str, auth_type: OpenAIAuthType) -> ApiFormat {
         match auth_type {
             OpenAIAuthType::ChatGptOAuth => ApiFormat::OpenAIResponses,
-            OpenAIAuthType::ApiKey | OpenAIAuthType::None => ApiFormat::OpenAI,
+            OpenAIAuthType::ApiKey | OpenAIAuthType::None => {
+                if Self::openai_prefers_responses_api(model) {
+                    ApiFormat::OpenAIResponses
+                } else {
+                    ApiFormat::OpenAI
+                }
+            }
         }
     }
 
@@ -229,6 +263,13 @@ impl ProviderConfig {
             AnthropicAuthType::ApiKey | AnthropicAuthType::None => AuthHeader::XApiKey,
         }
     }
+}
+
+fn is_openai_o_series(model_id: &str) -> bool {
+    model_id
+        .strip_prefix('o')
+        .and_then(|suffix| suffix.chars().next())
+        .is_some_and(|ch| ch.is_ascii_digit())
 }
 
 // ============================================================================
@@ -429,7 +470,7 @@ static BUILTIN_PROVIDERS: LazyLock<Vec<ProviderConfig>> = LazyLock::new(|| {
                 ),
                 ModelInfo::new("anthropic/claude-opus-4", "Claude Opus 4", 200_000, 16_384),
                 // OpenAI models
-                ModelInfo::new("openai/gpt-5.3-codex", "GPT-5.3 Codex", 400_000, 128_000),
+                ModelInfo::new("openai/gpt-5-codex", "GPT-5 Codex", 400_000, 128_000),
                 // Google models
                 ModelInfo::new(
                     "google/gemini-2.5-pro-preview",
@@ -535,15 +576,14 @@ static BUILTIN_PROVIDERS: LazyLock<Vec<ProviderConfig>> = LazyLock::new(|| {
         ProviderConfig {
             id: ProviderId::OpenAI,
             name: "OpenAI".to_string(),
-            description: "GPT-5.3 Codex (OAuth or API key)".to_string(),
+            description: "GPT-5 + Codex models (OAuth or API key)".to_string(),
             base_url: "https://api.openai.com/v1/chat/completions".to_string(),
             auth_header: AuthHeader::Bearer,
-            models: vec![ModelInfo::new(
-                "gpt-5.3-codex",
-                "GPT-5.3 Codex",
-                400_000,
-                128_000,
-            )],
+            models: vec![
+                ModelInfo::new("gpt-5-codex", "GPT-5 Codex", 400_000, 128_000),
+                ModelInfo::new("gpt-5", "GPT-5", 400_000, 128_000),
+                ModelInfo::new("gpt-5-chat-latest", "GPT-5 Chat Latest", 400_000, 128_000),
+            ],
             supports_tools: true,
             dynamic_models: true,
             pricing_hint: None,
@@ -618,6 +658,22 @@ mod tests {
         assert_eq!(provider.base_url, "https://openrouter.ai/api/v1/messages");
         assert_eq!(provider.auth_header, AuthHeader::Bearer);
         assert!(provider.dynamic_models);
+    }
+
+    #[test]
+    fn test_openai_routing_prefers_responses_for_gpt5_and_codex() {
+        assert!(ProviderConfig::openai_prefers_responses_api("gpt-5"));
+        assert!(ProviderConfig::openai_prefers_responses_api("gpt-5-codex"));
+        assert!(ProviderConfig::openai_prefers_responses_api("gpt-6.4"));
+        assert!(ProviderConfig::openai_prefers_responses_api("o5"));
+        assert_eq!(
+            ProviderConfig::openai_format_for_auth("gpt-5-codex", OpenAIAuthType::ApiKey),
+            ApiFormat::OpenAIResponses
+        );
+        assert_eq!(
+            ProviderConfig::openai_format_for_auth("gpt-4.1", OpenAIAuthType::ApiKey),
+            ApiFormat::OpenAI
+        );
     }
 
     #[test]

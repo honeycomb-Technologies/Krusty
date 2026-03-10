@@ -7,9 +7,23 @@
 //! `LoopInput` represents external inputs that the platform provides back to
 //! the running orchestrator (tool approvals, user responses, cancellation).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ai::types::{Citation, WebFetchContent, WebSearchResult};
+
+/// Structured terminal reason for an agentic loop.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopStopReason {
+    Completed,
+    AwaitingInput,
+    BudgetExhausted,
+    ProviderError,
+    LoopGuardTriggered,
+    StreamIdleTimeout,
+    UserAbort,
+    ContextCompactionFailed,
+}
 
 /// Events emitted by the agentic orchestrator.
 ///
@@ -130,11 +144,22 @@ pub enum LoopEvent {
         completion_tokens: usize,
     },
 
+    /// Conversation history was compacted in place to preserve live context.
+    ContextCompacted {
+        reason: String,
+        estimated_tokens_before: usize,
+        estimated_tokens_after: usize,
+        replaced_messages: usize,
+    },
+
     /// Session title generated.
     TitleGenerated { title: String },
 
     /// Agentic loop finished.
-    Finished { session_id: String },
+    Finished {
+        session_id: String,
+        stop_reason: LoopStopReason,
+    },
 
     /// Error occurred.
     Error { error: String },

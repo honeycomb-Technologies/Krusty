@@ -16,6 +16,7 @@ impl App {
                 self.runtime.chat.messages.clear();
                 self.runtime.chat.streaming_assistant_idx = None;
                 self.runtime.chat.conversation.clear();
+                self.runtime.agent_state.reset();
                 self.clear_plan();
                 self.ui.view = View::StartMenu;
             }
@@ -63,15 +64,10 @@ impl App {
 
                 self.ui.popup = Popup::ModelSelect;
 
-                // If OpenRouter is configured but has no models, trigger fetch
-                if configured.contains(&crate::ai::providers::ProviderId::OpenRouter) {
-                    if let Some(false) = self
-                        .services
-                        .model_registry
-                        .try_has_models(crate::ai::providers::ProviderId::OpenRouter)
-                    {
-                        self.start_openrouter_fetch();
-                    }
+                if configured.contains(&self.runtime.active_provider)
+                    && self.should_refresh_dynamic_models(self.runtime.active_provider)
+                {
+                    self.start_dynamic_model_fetch(self.runtime.active_provider);
                 }
             }
             "/auth" => {

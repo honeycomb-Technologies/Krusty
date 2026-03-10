@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use crate::ai::models::resolve_model_metadata;
 use crate::ai::models::ApiFormat;
 use crate::ai::providers::{AuthHeader, ProviderId};
 use crate::constants;
@@ -99,8 +100,8 @@ impl AiClientConfig {
 
         let auth_resolution = resolve_openai_auth(credentials, model);
         let auth_type = auth_resolution.auth_type;
-        let base_url = ProviderConfig::openai_url_for_auth(auth_type);
-        let api_format = ProviderConfig::openai_format_for_auth(auth_type);
+        let base_url = ProviderConfig::openai_url_for_auth(model, auth_type);
+        let api_format = ProviderConfig::openai_format_for_auth(model, auth_type);
 
         tracing::info!(
             "OpenAI auth detection: {:?} -> {} (format: {:?})",
@@ -267,5 +268,123 @@ impl Default for CallOptions {
             codex_parallel_tool_calls: false,
             anthropic_adaptive_effort: None,
         }
+    }
+}
+
+impl CallOptions {
+    /// Build a canonicalized options set for a specific provider/model pipeline.
+    ///
+    /// This prevents per-surface drift by enforcing provider capabilities and
+    /// model reasoning constraints before request construction.
+    pub fn canonicalized_for(
+        &self,
+        provider: ProviderId,
+        model: &str,
+        api_format: ApiFormat,
+    ) -> Self {
+        let caps = crate::ai::providers::ProviderCapabilities::for_provider(provider);
+        let inferred = resolve_model_metadata(provider, model, api_format);
+        let mut options = self.clone();
+
+        // Keep reasoning fields aligned with model capability.
+        if inferred.reasoning_format.is_none() {
+            options.reasoning_format = None;
+            options.thinking = None;
+            options.codex_reasoning_effort = None;
+            options.anthropic_adaptive_effort = None;
+        } else {
+            if options.reasoning_format != inferred.reasoning_format {
+                options.reasoning_format = inferred.reasoning_format;
+            }
+
+            match options.reasoning_format {
+                Some(crate::ai::providers::ReasoningFormat::OpenAI) => {
+                    options.anthropic_adaptive_effort = None;
+                }
+                Some(crate::ai::providers::ReasoningFormat::Anthropic) => {
+                    options.codex_reasoning_effort = None;
+                }
+                _ => {
+                    options.codex_reasoning_effort = None;
+                    options.anthropic_adaptive_effort = None;
+                }
+            }
+        }
+
+        if !caps.context_management {
+            options.context_management = None;
+        }
+        if !caps.web_search {
+            options.web_search = None;
+        }
+        if !caps.web_fetch {
+            options.web_fetch = None;
+        }
+
+        // Codex parallel tool call flag applies only to OpenAI Responses pipeline.
+        if !(provider == ProviderId::OpenAI && matches!(api_format, ApiFormat::OpenAIResponses)) {
+            options.codex_parallel_tool_calls = false;
+        }
+
+        options
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CallOptions, CodexReasoningEffort};
+    use crate::ai::models::ApiFormat;
+    use crate::ai::providers::{ProviderId, ReasoningFormat};
+    use crate::ai::types::{ContextManagement, ThinkingConfig, WebFetchConfig, WebSearchConfig};
+
+    #[test]
+    fn canonicalization_drops_unsupported_provider_features() {
+        let options = CallOptions {
+            context_management: Some(ContextManagement::default_tools_only()),
+            web_search: Some(WebSearchConfig::default()),
+            web_fetch: Some(WebFetchConfig::default()),
+            codex_parallel_tool_calls: true,
+            ..Default::default()
+        };
+
+        let canonical =
+            options.canonicalized_for(ProviderId::MiniMax, "MiniMax-M2.5", ApiFormat::Anthropic);
+
+        assert!(canonical.context_management.is_none());
+        assert!(canonical.web_search.is_none());
+        assert!(canonical.web_fetch.is_none());
+        assert!(!canonical.codex_parallel_tool_calls);
+    }
+
+    #[test]
+    fn canonicalization_aligns_reasoning_controls_with_model_family() {
+        let options = CallOptions {
+            reasoning_format: Some(ReasoningFormat::OpenAI),
+            codex_reasoning_effort: Some(CodexReasoningEffort::High),
+            ..Default::default()
+        };
+
+        let canonical = options.canonicalized_for(
+            ProviderId::Anthropic,
+            "claude-opus-4.5",
+            ApiFormat::Anthropic,
+        );
+
+        assert_eq!(canonical.reasoning_format, Some(ReasoningFormat::Anthropic));
+        assert!(canonical.codex_reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn canonicalization_preserves_builtin_reasoning_models() {
+        let options = CallOptions {
+            thinking: Some(ThinkingConfig::default()),
+            ..Default::default()
+        };
+
+        let canonical =
+            options.canonicalized_for(ProviderId::MiniMax, "MiniMax-M2.5", ApiFormat::Anthropic);
+
+        assert_eq!(canonical.reasoning_format, Some(ReasoningFormat::Anthropic));
+        assert!(canonical.thinking.is_some());
     }
 }

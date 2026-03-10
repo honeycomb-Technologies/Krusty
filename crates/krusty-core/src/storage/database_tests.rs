@@ -26,7 +26,7 @@ mod tests {
 
         // Database should initialize with schema_version table
         let version = db.get_schema_version();
-        assert_eq!(version, 16, "Expected current schema version to be 16");
+        assert_eq!(version, 19, "Expected current schema version to be 19");
     }
 
     #[test]
@@ -66,6 +66,46 @@ mod tests {
         assert!(columns.contains(&"working_dir".to_string()));
         assert!(columns.contains(&"work_mode".to_string()));
         assert!(columns.contains(&"target_branch".to_string()));
+        assert!(columns.contains(&"context_ledger_json".to_string()));
+        assert!(columns.contains(&"continuation_json".to_string()));
+        assert!(columns.contains(&"recovery_json".to_string()));
+    }
+
+    #[test]
+    fn test_runtime_traces_table_exists() {
+        let (db, _temp) = create_test_db();
+
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_traces'")
+            .expect("Failed to prepare query");
+
+        let tables: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .expect("Failed to query tables")
+            .filter_map(Result::ok)
+            .collect();
+
+        assert!(tables.contains(&"runtime_traces".to_string()));
+
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(runtime_traces)")
+            .expect("Failed to prepare PRAGMA");
+
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("Failed to get columns")
+            .filter_map(Result::ok)
+            .collect();
+
+        assert!(columns.contains(&"session_id".to_string()));
+        assert!(columns.contains(&"run_id".to_string()));
+        assert!(columns.contains(&"sequence".to_string()));
+        assert!(columns.contains(&"turn".to_string()));
+        assert!(columns.contains(&"event_type".to_string()));
+        assert!(columns.contains(&"payload_json".to_string()));
+        assert!(columns.contains(&"failure_category".to_string()));
+        assert!(columns.contains(&"stop_reason".to_string()));
     }
 
     #[test]
@@ -147,7 +187,7 @@ mod tests {
         let version = db.get_schema_version();
 
         // After all migrations, version should be current
-        assert_eq!(version, 16, "Expected final schema version");
+        assert_eq!(version, 19, "Expected final schema version");
     }
 
     #[test]

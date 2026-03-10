@@ -12,6 +12,8 @@ use tracing::{info, warn};
 use crate::agent::build_context::SharedBuildContext;
 use crate::agent::cache::SharedExploreCache;
 use crate::agent::constants::subagent;
+use crate::agent::history_policy::build_history_tool_result;
+use crate::agent::AgentConfig as RuntimeAgentConfig;
 use crate::ai::client::AiClient;
 use crate::ai::retry::{with_retry, RetryConfig};
 use crate::ai::types::{AiTool, Content, ModelMessage, Role};
@@ -21,6 +23,8 @@ use super::tools::{BuilderTools, SubAgentTools};
 use super::types::{
     AgentProgress, AgentProgressStatus, SubAgentApiError, SubAgentResult, SubAgentTask, ToolCall,
 };
+
+const MAX_DELEGATED_POLICY_VIOLATIONS: usize = 3;
 
 /// Configuration trait for agent behavior - abstracts explorer vs builder differences
 #[async_trait::async_trait]
@@ -226,6 +230,56 @@ impl AgentConfig for BuilderConfig {
     }
 }
 
+fn delegated_turn_budget(task: &SubAgentTask) -> Option<usize> {
+    task.max_turns_override
+        .or(task
+            .delegation_policy
+            .as_ref()
+            .and_then(|policy| policy.max_turns))
+        .or(RuntimeAgentConfig::default().subagent_max_turns)
+}
+
+fn build_subagent_tool_context(task: &SubAgentTask, timeout_secs: u64) -> ToolContext {
+    let mut ctx = ToolContext {
+        working_dir: task.working_dir.clone(),
+        timeout: Some(Duration::from_secs(timeout_secs)),
+        ..Default::default()
+    }
+    .with_subagent_max_turns(delegated_turn_budget(task));
+
+    if let Some(policy) = task.delegation_policy.clone() {
+        ctx = ctx
+            .with_permission_mode(policy.inherited_permission_mode)
+            .with_delegation_policy(policy);
+    }
+
+    ctx
+}
+
+fn completion_summary_preview(text: &str) -> Option<String> {
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(4)
+        .collect::<Vec<_>>();
+
+    if lines.is_empty() {
+        return None;
+    }
+
+    let summary = lines.join(" ");
+    if summary.len() <= 600 {
+        Some(summary)
+    } else {
+        let mut end = 600;
+        while end > 0 && !summary.is_char_boundary(end) {
+            end -= 1;
+        }
+        Some(format!("{}...", &summary[..end]))
+    }
+}
+
 /// Unified agentic loop - replaces separate explorer/builder implementations
 pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     client: &AiClient,
@@ -242,11 +296,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
 
     let ai_tools = config.get_ai_tools();
 
-    let ctx = ToolContext {
-        working_dir: task.working_dir.clone(),
-        timeout: Some(Duration::from_secs(config.timeout_secs())),
-        ..Default::default()
-    };
+    let ctx = build_subagent_tool_context(task, config.timeout_secs());
 
     let mut messages: Vec<ModelMessage> = vec![ModelMessage {
         role: Role::User,
@@ -261,12 +311,14 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     let mut estimated_tokens: usize = 0;
     let mut final_output = String::new();
     let mut last_action = "starting...".to_string();
+    let mut policy_violations: Vec<String> = Vec::new();
 
     // Helper to send progress
     let send_progress = |status: AgentProgressStatus,
                          action: &str,
                          tool_count: usize,
                          tokens: usize,
+                         completion_summary: Option<String>,
                          config: &C| {
         if let Some(ref tx) = progress_tx {
             let is_complete = status == AgentProgressStatus::Complete;
@@ -277,6 +329,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 tool_count,
                 tokens,
                 current_action: Some(action.to_string()),
+                completion_summary,
                 completed_plan_task: if is_complete {
                     plan_task_id.clone()
                 } else {
@@ -290,7 +343,14 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     };
 
     // Send initial progress
-    send_progress(AgentProgressStatus::Running, &last_action, 0, 0, config);
+    send_progress(
+        AgentProgressStatus::Running,
+        &last_action,
+        0,
+        0,
+        None,
+        config,
+    );
 
     loop {
         if cancellation.is_cancelled() {
@@ -300,6 +360,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 "cancelled",
                 total_tool_calls,
                 estimated_tokens,
+                None,
                 config,
             );
             config.cleanup();
@@ -311,36 +372,44 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 duration_ms: start.elapsed().as_millis() as u64,
                 turns_used: turns,
                 error: Some("Cancelled".to_string()),
+                policy_violations,
             };
         }
 
         turns += 1;
 
-        // Enforce max turn limit to prevent infinite loops
-        if turns > subagent::MAX_TURNS {
-            warn!(
-                task_id = %task_id,
-                turns = turns,
-                max_turns = subagent::MAX_TURNS,
-                "Sub-agent exceeded max turns, forcing completion"
-            );
-            send_progress(
-                AgentProgressStatus::Complete,
-                "max turns reached",
-                total_tool_calls,
-                estimated_tokens,
-                config,
-            );
-            config.cleanup();
-            return SubAgentResult {
-                task_id,
-                success: true,
-                output: final_output,
-                files_examined,
-                duration_ms: start.elapsed().as_millis() as u64,
-                turns_used: turns,
-                error: None,
-            };
+        let max_turns_budget = delegated_turn_budget(task);
+        if let Some(max_turns) = max_turns_budget {
+            if turns > max_turns {
+                warn!(
+                    task_id = %task_id,
+                    turns = turns,
+                    max_turns = max_turns,
+                    "Sub-agent exceeded max turns"
+                );
+                send_progress(
+                    AgentProgressStatus::Failed,
+                    "max turns reached",
+                    total_tool_calls,
+                    estimated_tokens,
+                    None,
+                    config,
+                );
+                config.cleanup();
+                return SubAgentResult {
+                    task_id,
+                    success: false,
+                    output: final_output,
+                    files_examined,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    turns_used: turns,
+                    error: Some(format!(
+                        "Sub-agent exceeded configured turn budget ({})",
+                        max_turns
+                    )),
+                    policy_violations,
+                };
+            }
         }
 
         // Get system prompt (may be dynamic for builders)
@@ -356,6 +425,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             &thinking_action,
             total_tool_calls,
             estimated_tokens,
+            None,
             config,
         );
 
@@ -377,6 +447,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     "error",
                     total_tool_calls,
                     estimated_tokens,
+                    None,
                     config,
                 );
                 config.cleanup();
@@ -388,6 +459,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     duration_ms: start.elapsed().as_millis() as u64,
                     turns_used: turns,
                     error: Some(e.to_string()),
+                    policy_violations,
                 };
             }
             Err(_) => {
@@ -402,6 +474,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     "timeout",
                     total_tool_calls,
                     estimated_tokens,
+                    None,
                     config,
                 );
                 config.cleanup();
@@ -417,6 +490,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                         config.api_call_timeout().as_secs(),
                         turns
                     )),
+                    policy_violations,
                 };
             }
         };
@@ -444,6 +518,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 "complete",
                 total_tool_calls,
                 estimated_tokens,
+                completion_summary_preview(&final_output),
                 config,
             );
             config.cleanup();
@@ -455,6 +530,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 duration_ms: start.elapsed().as_millis() as u64,
                 turns_used: turns,
                 error: None,
+                policy_violations,
             };
         }
 
@@ -482,6 +558,53 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
 
         for tc in &tool_calls {
             total_tool_calls += 1;
+            if let Some(policy) = task.delegation_policy.as_ref() {
+                if let Err(reason) = policy.authorize_tool(&tc.name, ctx.plan_mode) {
+                    let violation = format!("{}: {}", tc.name, reason);
+                    policy_violations.push(violation.clone());
+                    tool_results.push(Content::ToolResult {
+                        tool_use_id: tc.id.clone(),
+                        output: build_history_tool_result(
+                            &tc.name,
+                            &ToolResult::error_with_details(
+                                "delegated_policy_block",
+                                reason,
+                                None,
+                                Some(policy.audit_json()),
+                            )
+                            .output,
+                            true,
+                        ),
+                        is_error: Some(true),
+                    });
+
+                    if policy_violations.len() >= MAX_DELEGATED_POLICY_VIOLATIONS {
+                        send_progress(
+                            AgentProgressStatus::Failed,
+                            "delegated policy blocked repeated tool calls",
+                            total_tool_calls,
+                            estimated_tokens,
+                            None,
+                            config,
+                        );
+                        config.cleanup();
+                        return SubAgentResult {
+                            task_id,
+                            success: false,
+                            output: final_output,
+                            files_examined,
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            turns_used: turns,
+                            error: Some(
+                                "Delegated policy containment triggered after repeated blocked tool attempts"
+                                    .to_string(),
+                            ),
+                            policy_violations,
+                        };
+                    }
+                    continue;
+                }
+            }
 
             // Track files examined
             if config.is_read_tool(&tc.name) {
@@ -496,6 +619,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 &last_action,
                 total_tool_calls,
                 estimated_tokens,
+                None,
                 config,
             );
 
@@ -508,7 +632,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
 
             tool_results.push(Content::ToolResult {
                 tool_use_id: tc.id.clone(),
-                output: Value::String(output),
+                output: build_history_tool_result(&tc.name, &output, is_error),
                 is_error: Some(is_error),
             });
         }
@@ -769,4 +893,54 @@ pub(crate) async fn execute_builder_with_progress(
         Some(progress_tx),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_subagent_tool_context, delegated_turn_budget};
+    use crate::agent::subagent::SubAgentTask;
+    use crate::agent::AgentConfig as RuntimeAgentConfig;
+    use crate::tools::registry::{DelegationPolicy, PermissionMode};
+    use std::path::PathBuf;
+
+    #[test]
+    fn delegated_turn_budget_prefers_task_override_then_policy_then_runtime_default() {
+        let budget_from_task = delegated_turn_budget(
+            &SubAgentTask::new("task", "prompt")
+                .with_delegation_policy(DelegationPolicy::for_subagent_build(
+                    PermissionMode::Autonomous,
+                    Some(11),
+                ))
+                .with_max_turns(7),
+        );
+        assert_eq!(budget_from_task, Some(7));
+
+        let budget_from_policy =
+            delegated_turn_budget(&SubAgentTask::new("task", "prompt").with_delegation_policy(
+                DelegationPolicy::for_subagent_explore(PermissionMode::Autonomous, Some(11)),
+            ));
+        assert_eq!(budget_from_policy, Some(11));
+
+        assert_eq!(
+            delegated_turn_budget(&SubAgentTask::new("task", "prompt")),
+            RuntimeAgentConfig::default().subagent_max_turns
+        );
+    }
+
+    #[test]
+    fn build_subagent_tool_context_inherits_delegated_policy_contract() {
+        let working_dir = PathBuf::from("/tmp/krusty-subagent");
+        let policy = DelegationPolicy::for_subagent_build(PermissionMode::Autonomous, Some(17));
+        let task = SubAgentTask::new("task", "prompt")
+            .with_working_dir(working_dir.clone())
+            .with_delegation_policy(policy.clone());
+
+        let ctx = build_subagent_tool_context(&task, 45);
+
+        assert_eq!(ctx.working_dir, working_dir);
+        assert_eq!(ctx.timeout.map(|timeout| timeout.as_secs()), Some(45));
+        assert_eq!(ctx.permission_mode, PermissionMode::Autonomous);
+        assert_eq!(ctx.subagent_max_turns, Some(17));
+        assert_eq!(ctx.delegation_policy, Some(policy));
+    }
 }

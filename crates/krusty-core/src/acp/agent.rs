@@ -23,8 +23,8 @@ use super::bridge::NotificationBridge;
 use super::error::AcpError;
 use super::processor::PromptProcessor;
 use super::session::{SessionManager, SessionState};
-use crate::ai::openrouter;
 use crate::ai::providers::{get_provider, ProviderId};
+use crate::auth::{resolve_anthropic_auth, resolve_openai_auth};
 use crate::storage::credentials::CredentialStore;
 use crate::tools::ToolRegistry;
 
@@ -108,9 +108,9 @@ impl KrustyAgent {
             }
         };
 
-        // Get configured providers as a set for quick lookup
+        // Get configured providers as a set for quick lookup, including OAuth-backed providers.
         let configured: std::collections::HashSet<_> =
-            store.configured_providers().into_iter().collect();
+            store.providers_with_auth().into_iter().collect();
         info!("Found {} configured providers", configured.len());
 
         // Iterate in the canonical order: MiniMax first, OpenRouter last
@@ -120,65 +120,60 @@ impl KrustyAgent {
                 continue;
             }
 
-            if let Some(api_key) = store.get(&provider) {
-                match provider {
-                    // Dynamic providers - fetch models from API
-                    ProviderId::OpenRouter => {
-                        info!("Fetching models from OpenRouter...");
-                        match openrouter::fetch_models(api_key).await {
-                            Ok(fetched) => {
-                                let fetched_count = fetched.len();
-                                for model in fetched {
+            let credential = match provider {
+                ProviderId::OpenAI => resolve_openai_auth(&store, "gpt-5-codex").credential,
+                ProviderId::Anthropic => resolve_anthropic_auth(&store).credential,
+                _ => store.get_auth(&provider),
+            };
+
+            if let Some(api_key) = credential {
+                if crate::ai::catalog::supports_dynamic_models(provider) {
+                    match crate::ai::catalog::fetch_dynamic_models(provider, &api_key).await {
+                        Ok(fetched) => {
+                            let fetched_count = fetched.len();
+                            for model in fetched {
+                                let model_id = format!("{}:{}", provider.storage_key(), model.id);
+                                models.push((
+                                    model_id,
+                                    provider,
+                                    model.id.clone(),
+                                    api_key.clone(),
+                                    model.display_name.clone(),
+                                ));
+                            }
+                            info!("Added {} models from {:?}", fetched_count, provider);
+                        }
+                        Err(e) => {
+                            warn!("Failed to fetch {:?} models: {}", provider, e);
+                            if let Some(provider_config) = get_provider(provider) {
+                                for model_info in &provider_config.models {
                                     let model_id =
-                                        format!("{}:{}", provider.storage_key(), model.id);
+                                        format!("{}:{}", provider.storage_key(), model_info.id);
                                     models.push((
                                         model_id,
                                         provider,
-                                        model.id.clone(),
+                                        model_info.id.clone(),
                                         api_key.clone(),
-                                        model.display_name.clone(),
+                                        model_info.display_name.clone(),
                                     ));
-                                }
-                                info!("Added {} models from OpenRouter", fetched_count);
-                            }
-                            Err(e) => {
-                                warn!("Failed to fetch OpenRouter models: {}", e);
-                                // Fallback to static models if available
-                                if let Some(provider_config) = get_provider(provider) {
-                                    for model_info in &provider_config.models {
-                                        let model_id =
-                                            format!("{}:{}", provider.storage_key(), model_info.id);
-                                        models.push((
-                                            model_id,
-                                            provider,
-                                            model_info.id.clone(),
-                                            api_key.clone(),
-                                            model_info.display_name.clone(),
-                                        ));
-                                    }
                                 }
                             }
                         }
                     }
-                    // Static providers - use hardcoded models
-                    _ => {
-                        if let Some(provider_config) = get_provider(provider) {
-                            for model_info in &provider_config.models {
-                                let model_id =
-                                    format!("{}:{}", provider.storage_key(), model_info.id);
-                                models.push((
-                                    model_id,
-                                    provider,
-                                    model_info.id.clone(),
-                                    api_key.clone(),
-                                    model_info.display_name.clone(),
-                                ));
-                                debug!(
-                                    "Added model: {} from {:?}",
-                                    model_info.display_name, provider
-                                );
-                            }
-                        }
+                } else if let Some(provider_config) = get_provider(provider) {
+                    for model_info in &provider_config.models {
+                        let model_id = format!("{}:{}", provider.storage_key(), model_info.id);
+                        models.push((
+                            model_id,
+                            provider,
+                            model_info.id.clone(),
+                            api_key.clone(),
+                            model_info.display_name.clone(),
+                        ));
+                        debug!(
+                            "Added model: {} from {:?}",
+                            model_info.display_name, provider
+                        );
                     }
                 }
             }
@@ -503,15 +498,26 @@ impl Agent for KrustyAgent {
         let session_id_str = request.session_id.to_string();
 
         // Check storage for existing messages (scope the lock)
-        let has_stored_messages = if let Some(storage) = self.sessions.storage() {
+        let has_stored_state = if let Some(storage) = self.sessions.storage() {
             let storage_lock = storage.lock().await;
-            let messages = storage_lock.load_session_messages(&session_id_str);
-            matches!(messages, Ok(ref msgs) if !msgs.is_empty())
+            let has_messages = storage_lock
+                .load_session_messages(&session_id_str)
+                .map(|messages| !messages.is_empty())
+                .unwrap_or(false);
+            let has_recovery = storage_lock
+                .load_recovery_state(&session_id_str)
+                .map(|recovery| recovery.is_some())
+                .unwrap_or(false);
+            let has_session = storage_lock
+                .get_session(&session_id_str)
+                .map(|session| session.is_some())
+                .unwrap_or(false);
+            has_messages || has_recovery || has_session
         } else {
             false
         };
 
-        if has_stored_messages {
+        if has_stored_state {
             info!("Loading session {} from storage", session_id_str);
             // Create session and restore from storage
             match self
@@ -785,7 +791,35 @@ fn build_workspace_context(cwd: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use tempfile::tempdir;
+    use tokio::sync::Mutex;
+
+    use crate::agent::loop_events::LoopStopReason;
+    use crate::storage::{
+        Database, PartialAssistantState, RecoveryDecision, RecoveryStatus,
+        SessionManager as StorageSessionManager, SessionRecoveryState,
+    };
+    use crate::tools::registry::ToolRegistry;
+
     use super::*;
+
+    fn agent_with_storage(storage: Arc<Mutex<StorageSessionManager>>) -> KrustyAgent {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let tools = Arc::new(ToolRegistry::new());
+        KrustyAgent {
+            sessions: Arc::new(SessionManager::with_storage(storage)),
+            tools: tools.clone(),
+            client_capabilities: RwLock::new(None),
+            api_key: RwLock::new(None),
+            processor: RwLock::new(PromptProcessor::new(tools, cwd)),
+            notification_tx: RwLock::new(None),
+            current_model: RwLock::new(None),
+            available_models: RwLock::new(Vec::new()),
+        }
+    }
 
     #[tokio::test]
     async fn test_agent_creation() {
@@ -801,6 +835,44 @@ mod tests {
         let response = agent.new_session(request).await?;
 
         assert!(agent.sessions().has_session(&response.session_id));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_session_restores_recovery_only_storage_session() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let db_path = dir.path().join("test.db");
+        let db = Database::new(&db_path)?;
+        let storage = Arc::new(Mutex::new(StorageSessionManager::new(db)));
+        let storage_session_id = {
+            let storage = storage.lock().await;
+            storage.create_session("Recovered Session", None, Some("/tmp"))?
+        };
+        {
+            let storage = storage.lock().await;
+            storage.update_recovery_state(
+                &storage_session_id,
+                &SessionRecoveryState::new(
+                    RecoveryStatus::Interrupted,
+                    Some(LoopStopReason::ProviderError),
+                    Some("provider failed".to_string()),
+                    PartialAssistantState {
+                        text: "Partial answer".to_string(),
+                        thinking: String::new(),
+                        tool_calls: Vec::new(),
+                    },
+                    RecoveryDecision::Resumable {
+                        latest_user_objective: "Finish the answer".to_string(),
+                    },
+                ),
+            )?;
+        }
+
+        let agent = agent_with_storage(storage);
+        let request = LoadSessionRequest::new(storage_session_id.clone(), "/tmp");
+        agent.load_session(request).await?;
+
+        assert_eq!(agent.sessions().session_count(), 1);
         Ok(())
     }
 }

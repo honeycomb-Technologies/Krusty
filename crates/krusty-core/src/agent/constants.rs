@@ -25,7 +25,7 @@ pub mod timeouts {
     /// Default tool execution timeout
     pub const TOOL_EXECUTION: Duration = Duration::from_secs(30);
     /// Default streaming timeout
-    pub const STREAMING: Duration = Duration::from_secs(120);
+    pub const STREAMING: Duration = Duration::from_secs(600);
     /// Explorer sub-agent per-turn API call timeout
     pub const EXPLORER_API_CALL: Duration = Duration::from_secs(90);
     /// Builder sub-agent per-turn API call timeout
@@ -48,8 +48,8 @@ pub mod retry {
 
 /// Sub-agent execution limits
 pub mod subagent {
-    /// Maximum turns before forcing completion (prevents infinite loops)
-    pub const MAX_TURNS: usize = 50;
+    /// Default maximum turns before failing a sub-agent loop.
+    pub const DEFAULT_MAX_TURNS: usize = 200;
     /// Maximum messages to keep in context before pruning
     pub const MAX_MESSAGES: usize = 100;
 }

@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use crate::plan::{PlanFile, PlanManager};
+use crate::plan::{PlanFile, PlanManager, TaskStatus};
 use crate::tui::blocks::{BuildBlock, ExploreBlock, StreamBlock};
 use crate::tui::handlers::commands::generate_krab_from_exploration;
 use crate::tui::utils::AsyncChannels;
@@ -78,15 +78,49 @@ pub fn poll_build_progress(
                 // Auto-complete plan task if specified
                 if let Some(ref task_id) = progress.completed_plan_task {
                     if let Some(ref mut plan) = active_plan {
-                        if plan.check_task(task_id) {
-                            tracing::debug!(task_id = %task_id, "Kraken auto-completed plan task");
-                            if let Some(pm) = plan_manager {
-                                if let Err(e) = pm.save_plan(plan) {
-                                    tracing::warn!(
-                                        "Failed to save plan after task completion: {}",
-                                        e
-                                    );
-                                }
+                        let task_status = plan.find_task(task_id).map(|task| task.status);
+                        if matches!(task_status, Some(TaskStatus::Completed) | None) {
+                            continue;
+                        }
+                        if matches!(task_status, Some(TaskStatus::Blocked)) {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                "Skipping delegated completion for blocked task"
+                            );
+                            continue;
+                        }
+                        if matches!(task_status, Some(TaskStatus::Pending)) {
+                            if let Err(err) = plan.start_task(task_id) {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    "Failed to auto-start delegated task before completion: {}",
+                                    err
+                                );
+                                continue;
+                            }
+                        }
+
+                        let summary = progress
+                            .completion_summary
+                            .clone()
+                            .unwrap_or_else(|| "Completed by delegated builder agent.".to_string());
+
+                        if let Err(err) = plan.complete_task(task_id, &summary) {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                "Failed to auto-complete delegated task: {}",
+                                err
+                            );
+                            continue;
+                        }
+
+                        tracing::debug!(
+                            task_id = %task_id,
+                            "Kraken auto-completed delegated plan task"
+                        );
+                        if let Some(pm) = plan_manager {
+                            if let Err(e) = pm.save_plan(plan) {
+                                tracing::warn!("Failed to save plan after task completion: {}", e);
                             }
                         }
                     }

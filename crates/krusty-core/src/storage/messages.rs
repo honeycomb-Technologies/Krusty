@@ -39,6 +39,34 @@ impl<'a> MessageStore<'a> {
         Ok(())
     }
 
+    /// Replace every persisted message for a session with a new ordered set.
+    pub fn replace_session_messages(
+        &self,
+        session_id: &str,
+        messages: &[(String, String)],
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let tx = self.db.conn().unchecked_transaction()?;
+
+        tx.execute("DELETE FROM messages WHERE session_id = ?1", [session_id])?;
+
+        for (role, content_json) in messages {
+            tx.execute(
+                "INSERT INTO messages (session_id, role, content, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![session_id, role, content_json, now],
+            )?;
+        }
+
+        tx.execute(
+            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+            params![now, session_id],
+        )?;
+        tx.commit()?;
+
+        Ok(())
+    }
+
     /// Load all messages for a session
     /// Returns (role, content_json) pairs where content_json can be deserialized to Vec<Content>
     pub fn load_session_messages(&self, session_id: &str) -> Result<Vec<(String, String)>> {
@@ -243,5 +271,56 @@ mod tests {
 
         assert_eq!(content, r#"[{"type":"text","text":"updated"}]"#);
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn test_replace_session_messages_rewrites_history() {
+        let (db, _temp) = create_test_db();
+        let store = MessageStore::new(&db);
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        db.conn()
+            .execute(
+                "INSERT INTO sessions (id, title, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![session_id, "Test", now, now],
+            )
+            .expect("Failed to create session");
+
+        store
+            .save_message(&session_id, "user", r#"[{"type":"text","text":"old"}]"#)
+            .expect("Failed to save message");
+        store
+            .save_message(
+                &session_id,
+                "assistant",
+                r#"[{"type":"text","text":"reply"}]"#,
+            )
+            .expect("Failed to save message");
+
+        store
+            .replace_session_messages(
+                &session_id,
+                &[
+                    (
+                        "system".to_string(),
+                        r#"[{"type":"text","text":"summary"}]"#.to_string(),
+                    ),
+                    (
+                        "user".to_string(),
+                        r#"[{"type":"text","text":"continue"}]"#.to_string(),
+                    ),
+                ],
+            )
+            .expect("Failed to replace messages");
+
+        let messages = store
+            .load_session_messages(&session_id)
+            .expect("Failed to load replaced messages");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].0, "system");
+        assert_eq!(messages[1].0, "user");
     }
 }

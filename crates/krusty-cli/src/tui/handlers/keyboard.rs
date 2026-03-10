@@ -211,8 +211,9 @@ impl App {
         // Ctrl+G to toggle work mode (BUILD/PLAN)
         if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('g') {
             let old_mode = self.ui.work_mode;
-            self.ui.work_mode = self.ui.work_mode.toggle();
-            tracing::info!(from = ?old_mode, to = ?self.ui.work_mode, "Work mode toggled via Ctrl+G");
+            let new_mode = self.ui.work_mode.toggle();
+            self.set_work_mode(new_mode);
+            tracing::info!(from = ?old_mode, to = ?new_mode, "Work mode toggled via Ctrl+G");
             return;
         }
 
@@ -637,7 +638,7 @@ impl App {
                 match idx {
                     0 => {
                         // Execute - switch to BUILD mode and auto-start
-                        self.ui.work_mode = crate::tui::app::WorkMode::Build;
+                        self.set_work_mode(crate::tui::app::WorkMode::Build);
 
                         // Auto-send execute message to Claude
                         let execute_msg =

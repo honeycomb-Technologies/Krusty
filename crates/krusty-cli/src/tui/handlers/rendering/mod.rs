@@ -44,6 +44,7 @@ impl App {
             Popup::ModelSelect => self.ui.popups.model.render(
                 f,
                 &self.ui.theme,
+                self.runtime.active_provider,
                 &self.runtime.current_model,
                 self.runtime.context_tokens_used,
             ),

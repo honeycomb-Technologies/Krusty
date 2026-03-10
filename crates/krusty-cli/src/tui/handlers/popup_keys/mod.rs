@@ -95,7 +95,13 @@ impl App {
         if self.ui.popups.model.search_active {
             match code {
                 KeyCode::Esc => self.ui.popups.model.toggle_search(),
-                KeyCode::Enter => self.ui.popups.model.close_search(),
+                KeyCode::Enter => {
+                    if self.ui.popups.model.has_selectable_results() {
+                        self.ui.popups.model.close_search();
+                    } else {
+                        self.confirm_model_selection();
+                    }
+                }
                 KeyCode::Backspace => self.ui.popups.model.backspace_search(),
                 KeyCode::Char(c) => self.ui.popups.model.add_search_char(c),
                 _ => {}
@@ -114,9 +120,22 @@ impl App {
 
     /// Confirm model selection
     fn confirm_model_selection(&mut self) {
-        let metadata = self.ui.popups.model.get_selected_metadata().cloned();
+        let selection = self
+            .ui
+            .popups
+            .model
+            .get_selected_metadata()
+            .cloned()
+            .map(|metadata| (metadata, false))
+            .or_else(|| {
+                self.ui
+                    .popups
+                    .model
+                    .custom_model_metadata(self.runtime.active_provider)
+                    .map(|metadata| (metadata, true))
+            });
 
-        if let Some(metadata) = metadata {
+        if let Some((metadata, is_custom)) = selection {
             // Check if current context exceeds new model's limit
             if self.runtime.context_tokens_used > metadata.context_window {
                 let used_k = self.runtime.context_tokens_used as f64 / 1000.0;
@@ -127,7 +146,7 @@ impl App {
                 ));
             } else {
                 let provider_id = metadata.provider;
-                let model_id = metadata.id;
+                let model_id = metadata.id.clone();
 
                 // Switch provider if selecting model from different provider
                 if provider_id != self.runtime.active_provider {
@@ -146,9 +165,13 @@ impl App {
                     }
                 }
 
-                // Mark model as recently used
+                // Ensure model metadata is present (supports custom IDs),
+                // then mark model as recently used.
                 let registry = self.services.model_registry.clone();
-                futures::executor::block_on(registry.mark_recent(&model_id));
+                futures::executor::block_on(async {
+                    registry.upsert_model(metadata.clone()).await;
+                    registry.mark_recent(&model_id).await;
+                });
 
                 // Save to preferences (current model + recent list)
                 if let Some(ref prefs) = self.services.preferences {
@@ -157,6 +180,11 @@ impl App {
                     }
                     if let Err(e) = prefs.add_recent_model(&model_id) {
                         tracing::warn!("Failed to save recent model: {}", e);
+                    }
+                    if is_custom {
+                        if let Err(e) = prefs.save_custom_model(&metadata) {
+                            tracing::warn!("Failed to persist custom model metadata: {}", e);
+                        }
                     }
                 }
 

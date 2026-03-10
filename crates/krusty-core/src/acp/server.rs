@@ -188,6 +188,8 @@ fn detect_api_key_from_env() -> Option<AcpEnvConfig> {
             "minimax" => Some(ProviderId::MiniMax),
             "openrouter" => Some(ProviderId::OpenRouter),
             "zai" | "z.ai" => Some(ProviderId::ZAi),
+            "openai" => Some(ProviderId::OpenAI),
+            "anthropic" => Some(ProviderId::Anthropic),
             _ => None,
         };
 
@@ -213,8 +215,8 @@ fn detect_api_key_from_env() -> Option<AcpEnvConfig> {
         (ProviderId::MiniMax, "MINIMAX_API_KEY"),
         (ProviderId::OpenRouter, "OPENROUTER_API_KEY"),
         (ProviderId::ZAi, "ZAI_API_KEY"),
-        // OpenAI key maps to OpenRouter (which supports OpenAI models)
-        (ProviderId::OpenRouter, "OPENAI_API_KEY"),
+        (ProviderId::OpenAI, "OPENAI_API_KEY"),
+        (ProviderId::Anthropic, "ANTHROPIC_API_KEY"),
     ];
 
     for (provider, env_var) in providers_and_vars {

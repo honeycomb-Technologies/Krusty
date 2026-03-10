@@ -6,13 +6,23 @@ use anyhow::Result;
 
 use crate::ai::client::AiClient;
 use crate::ai::types::{Content, ModelMessage, Role};
-use crate::storage::SessionManager;
+use crate::storage::{SessionManager, SessionRecoveryState};
 use crate::tui::app::{App, WorkMode};
 use crate::tui::blocks::{
     BashBlock, EditBlock, ReadBlock, ThinkingBlock, ToolResultBlock, WriteBlock,
 };
 use crate::tui::state::{hash_content, BlockManager};
 use crate::tui::utils::TitleUpdate;
+
+pub(crate) fn storage_role_to_api_role(role: &str) -> Role {
+    match role {
+        "user" => Role::User,
+        "assistant" => Role::Assistant,
+        "system" => Role::System,
+        "tool" => Role::Tool,
+        _ => Role::User,
+    }
+}
 
 impl App {
     /// Create a new session
@@ -34,9 +44,11 @@ impl App {
                 tracing::info!("Created new session: {}", id);
                 self.runtime.current_session_id = Some(id.clone());
                 self.runtime.session_title = Some(fallback_title);
+                self.runtime.agent_state.reset();
 
                 // Clear any active plan when starting a new session
-                self.clear_plan();
+                self.clear_active_plan();
+                self.persist_current_work_mode();
 
                 // Spawn AI title generation in background
                 self.spawn_title_generation(id.clone(), first_message.to_string());
@@ -168,7 +180,7 @@ impl App {
         tracing::info!("Loading session: {}", session_id);
 
         // Load all data from database upfront to avoid borrow conflicts
-        let (messages, session_info, ui_states) = {
+        let (messages, session_info, ui_states, recovery_state) = {
             let sm = self
                 .services
                 .session_manager
@@ -178,8 +190,9 @@ impl App {
             let messages = sm.load_session_messages(session_id)?;
             let session_info = sm.get_session(session_id).ok().flatten();
             let ui_states = sm.load_block_ui_states(session_id);
+            let recovery_state = sm.load_recovery_state(session_id).ok().flatten();
 
-            (messages, session_info, ui_states)
+            (messages, session_info, ui_states, recovery_state)
         };
 
         tracing::info!("Loaded {} raw messages from database", messages.len());
@@ -196,41 +209,45 @@ impl App {
         self.runtime.tool_results.clear();
         self.runtime.chat.streaming_assistant_idx = None;
         self.runtime.current_session_id = Some(session_id.to_string());
+        self.runtime.agent_state.reset();
 
         // Load plan for this session (strict 1:1 linkage, no working_dir fallback)
+        let stored_mode = session_info
+            .as_ref()
+            .map(|info| info.work_mode)
+            .unwrap_or_default();
+
         if let Some(ref pm) = self.services.plan_manager {
-            match pm.get_plan(session_id) {
-                Ok(Some(plan)) => {
-                    let (completed, total) = plan.progress();
-                    tracing::info!(
-                        "Loaded plan '{}' for session ({}/{})",
-                        plan.title,
-                        completed,
-                        total
-                    );
-                    // Resume in Build mode if work has started, Plan mode otherwise
-                    let resume_mode = if completed > 0 || plan.has_in_progress_tasks() {
-                        WorkMode::Build
+            match pm.get_lifecycle_state(session_id, stored_mode) {
+                Ok(lifecycle) => {
+                    self.ui.work_mode = WorkMode::from(lifecycle.effective_work_mode);
+
+                    if let Some(plan) = lifecycle.active_plan {
+                        let (completed, total) = plan.progress();
+                        tracing::info!(
+                            "Loaded active plan '{}' for session ({}/{})",
+                            plan.title,
+                            completed,
+                            total
+                        );
+                        self.set_plan(plan);
+                        if !self.ui.plan_sidebar.visible {
+                            self.ui.plan_sidebar.toggle();
+                        }
                     } else {
-                        WorkMode::Plan
-                    };
-                    self.set_plan(plan);
-                    self.ui.work_mode = resume_mode;
-                    if !self.ui.plan_sidebar.visible {
-                        self.ui.plan_sidebar.toggle();
+                        tracing::debug!("No active plan found for session {}", session_id);
+                        self.clear_active_plan();
                     }
                 }
-                Ok(None) => {
-                    tracing::debug!("No active plan found for session {}", session_id);
-                    self.clear_plan();
-                }
                 Err(e) => {
-                    tracing::warn!("Failed to find active plan: {}", e);
-                    self.clear_plan();
+                    tracing::warn!("Failed to resolve plan lifecycle: {}", e);
+                    self.clear_active_plan();
+                    self.ui.work_mode = WorkMode::from(stored_mode);
                 }
             }
         } else {
-            self.clear_plan();
+            self.clear_active_plan();
+            self.ui.work_mode = WorkMode::from(stored_mode);
         }
 
         // Rebuild conversation from database
@@ -240,14 +257,6 @@ impl App {
                 role,
                 &content_json.chars().take(50).collect::<String>()
             );
-
-            let api_role = match role.as_str() {
-                "user" => Role::User,
-                "assistant" => Role::Assistant,
-                "system" => Role::System,
-                "tool" => Role::Tool,
-                _ => Role::User,
-            };
 
             // Multi-tier deserialization for robust session loading:
             // 1. Try Vec<Content> (current format)
@@ -275,7 +284,7 @@ impl App {
                 });
 
             self.runtime.chat.conversation.push(ModelMessage {
-                role: api_role,
+                role: storage_role_to_api_role(role.as_str()),
                 content,
             });
         }
@@ -287,6 +296,9 @@ impl App {
         // Build caches and display from conversation
         self.build_tool_results_cache();
         self.build_display_from_conversation();
+        if let Some(recovery_state) = recovery_state.as_ref() {
+            self.push_recovery_notice(recovery_state, None);
+        }
 
         // Restore persisted block UI states (collapsed/scroll positions)
         if !ui_states.is_empty() {
@@ -415,6 +427,31 @@ impl App {
                 }
             }
         }
+    }
+
+    pub(crate) fn load_persisted_recovery_state(
+        &self,
+        session_id: &str,
+    ) -> Option<SessionRecoveryState> {
+        self.services
+            .session_manager
+            .as_ref()
+            .and_then(|sm| sm.load_recovery_state(session_id).ok().flatten())
+    }
+
+    pub(crate) fn push_recovery_notice(
+        &mut self,
+        recovery_state: &SessionRecoveryState,
+        detail: Option<String>,
+    ) {
+        let mut message = recovery_state.notice();
+        if let Some(detail) = detail {
+            message.push_str(&detail);
+        }
+        self.runtime
+            .chat
+            .messages
+            .push(("system".to_string(), message));
     }
 
     /// Find the tool name for a given tool_use_id by searching conversation
@@ -859,5 +896,17 @@ impl App {
                 content: placeholder_results,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::storage_role_to_api_role;
+    use crate::ai::types::Role;
+
+    #[test]
+    fn storage_role_mapping_preserves_tool_role() {
+        assert_eq!(storage_role_to_api_role("tool"), Role::Tool);
+        assert_eq!(storage_role_to_api_role("assistant"), Role::Assistant);
     }
 }

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::hooks::{HookResult, PostToolHook, PreToolHook};
 use crate::agent::subagent::AgentProgress;
+use crate::ai::client::AiClient;
 use crate::ai::types::AiTool;
 use crate::mcp::McpManager;
 use crate::process::ProcessRegistry;
@@ -30,6 +31,44 @@ pub enum ToolCategory {
     Interactive,
 }
 
+/// Centralized policy contract for a tool name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolPolicy {
+    pub category: ToolCategory,
+    pub requires_supervised_approval: bool,
+    pub retry_timeout_once: bool,
+    pub allowed_in_plan_mode: bool,
+}
+
+impl ToolPolicy {
+    const fn read_only() -> Self {
+        Self {
+            category: ToolCategory::ReadOnly,
+            requires_supervised_approval: false,
+            retry_timeout_once: true,
+            allowed_in_plan_mode: true,
+        }
+    }
+
+    const fn interactive() -> Self {
+        Self {
+            category: ToolCategory::Interactive,
+            requires_supervised_approval: false,
+            retry_timeout_once: false,
+            allowed_in_plan_mode: true,
+        }
+    }
+
+    const fn write() -> Self {
+        Self {
+            category: ToolCategory::Write,
+            requires_supervised_approval: true,
+            retry_timeout_once: false,
+            allowed_in_plan_mode: false,
+        }
+    }
+}
+
 /// Permission mode for tool execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -39,15 +78,111 @@ pub enum PermissionMode {
     Autonomous,
 }
 
+/// Delegated execution surface type for governance/audit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationSurface {
+    SubagentExplore,
+    SubagentBuild,
+    McpRemote,
+    Skill,
+    Extension,
+}
+
+/// Inherited delegated execution policy from the parent orchestrator/tool context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegationPolicy {
+    pub surface: DelegationSurface,
+    pub inherited_permission_mode: PermissionMode,
+    pub max_turns: Option<usize>,
+    pub read_only_only: bool,
+}
+
+impl DelegationPolicy {
+    pub fn for_subagent_explore(
+        inherited_permission_mode: PermissionMode,
+        max_turns: Option<usize>,
+    ) -> Self {
+        Self {
+            surface: DelegationSurface::SubagentExplore,
+            inherited_permission_mode,
+            max_turns,
+            read_only_only: true,
+        }
+    }
+
+    pub fn for_subagent_build(
+        inherited_permission_mode: PermissionMode,
+        max_turns: Option<usize>,
+    ) -> Self {
+        Self {
+            surface: DelegationSurface::SubagentBuild,
+            inherited_permission_mode,
+            max_turns,
+            read_only_only: false,
+        }
+    }
+
+    pub fn authorize_tool(&self, tool_name: &str, plan_mode: bool) -> Result<(), String> {
+        let policy = tool_policy(tool_name);
+        if self.read_only_only && policy.category != ToolCategory::ReadOnly {
+            return Err(format!(
+                "Delegated policy blocked tool '{}': {} only permits read-only tools",
+                tool_name,
+                self.surface_name()
+            ));
+        }
+        if self.inherited_permission_mode == PermissionMode::Supervised
+            && policy.requires_supervised_approval
+        {
+            return Err(format!(
+                "Delegated policy blocked tool '{}': supervised parent requires approval for write-capable tools",
+                tool_name
+            ));
+        }
+        if plan_mode && !policy.allowed_in_plan_mode {
+            return Err(format!(
+                "Delegated policy blocked tool '{}': tool is disallowed in plan mode",
+                tool_name
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn surface_name(&self) -> &'static str {
+        match self.surface {
+            DelegationSurface::SubagentExplore => "subagent_explore",
+            DelegationSurface::SubagentBuild => "subagent_build",
+            DelegationSurface::McpRemote => "mcp_remote",
+            DelegationSurface::Skill => "skill",
+            DelegationSurface::Extension => "extension",
+        }
+    }
+
+    pub fn audit_json(&self) -> Value {
+        serde_json::json!({
+            "surface": self.surface_name(),
+            "permission_mode": self.inherited_permission_mode,
+            "max_turns": self.max_turns,
+            "read_only_only": self.read_only_only,
+        })
+    }
+}
+
 /// Categorize a tool by name.
 pub fn tool_category(name: &str) -> ToolCategory {
+    tool_policy(name).category
+}
+
+/// Resolve the canonical policy for a tool.
+pub fn tool_policy(name: &str) -> ToolPolicy {
     match name {
-        "read" | "glob" | "grep" | "list" | "web_search" | "web_fetch" | "explore" => {
-            ToolCategory::ReadOnly
+        "read" | "glob" | "grep" | "list" | "web_search" | "web_fetch" | "explore" | "skill" => {
+            ToolPolicy::read_only()
         }
         "AskUserQuestion" | "PlanConfirm" | "enter_plan_mode" | "set_work_mode" | "task_start"
-        | "task_complete" | "add_subtask" | "set_dependency" => ToolCategory::Interactive,
-        _ => ToolCategory::Write,
+        | "task_complete" | "add_subtask" | "set_dependency" => ToolPolicy::interactive(),
+        _ => ToolPolicy::write(),
     }
 }
 
@@ -216,8 +351,16 @@ pub struct ToolContext {
     pub build_progress_tx: Option<mpsc::UnboundedSender<AgentProgress>>,
     /// Current user-selected model (for non-Anthropic providers, subagents use this)
     pub current_model: Option<String>,
+    /// Session-scoped AI client (used by tools that spawn sub-agents)
+    pub ai_client: Option<Arc<AiClient>>,
     /// Git identity for commit attribution
     pub git_identity: Option<GitIdentity>,
+    /// Parent execution permission mode inherited into delegated surfaces.
+    pub permission_mode: PermissionMode,
+    /// Optional delegated sub-agent turn budget inherited from parent config.
+    pub subagent_max_turns: Option<usize>,
+    /// Optional delegated execution policy contract for downstream calls.
+    pub delegation_policy: Option<DelegationPolicy>,
 }
 
 impl Default for ToolContext {
@@ -236,7 +379,11 @@ impl Default for ToolContext {
             explore_progress_tx: None,
             build_progress_tx: None,
             current_model: None,
+            ai_client: None,
             git_identity: None,
+            permission_mode: PermissionMode::Supervised,
+            subagent_max_turns: None,
+            delegation_policy: None,
         }
     }
 }
@@ -307,9 +454,33 @@ impl ToolContext {
         self
     }
 
+    /// Add session-scoped AI client to context
+    pub fn with_ai_client(mut self, client: Arc<AiClient>) -> Self {
+        self.ai_client = Some(client);
+        self
+    }
+
     /// Set git identity for commit attribution
     pub fn with_git_identity(mut self, identity: GitIdentity) -> Self {
         self.git_identity = Some(identity);
+        self
+    }
+
+    /// Set inherited permission mode.
+    pub fn with_permission_mode(mut self, permission_mode: PermissionMode) -> Self {
+        self.permission_mode = permission_mode;
+        self
+    }
+
+    /// Set delegated sub-agent turn budget inherited from parent config.
+    pub fn with_subagent_max_turns(mut self, max_turns: Option<usize>) -> Self {
+        self.subagent_max_turns = max_turns;
+        self
+    }
+
+    /// Attach delegated execution policy metadata.
+    pub fn with_delegation_policy(mut self, policy: DelegationPolicy) -> Self {
+        self.delegation_policy = Some(policy);
         self
     }
 
@@ -641,6 +812,55 @@ mod tests {
         assert_eq!(parsed["ok"], false);
         assert_eq!(parsed["error"]["message"], "Test error");
         assert_eq!(parsed["error"]["code"], "tool_error");
+    }
+
+    #[test]
+    fn test_tool_policy_contracts() {
+        let read_policy = tool_policy("read");
+        assert_eq!(read_policy.category, ToolCategory::ReadOnly);
+        assert!(read_policy.retry_timeout_once);
+        assert!(read_policy.allowed_in_plan_mode);
+        assert!(!read_policy.requires_supervised_approval);
+
+        let write_policy = tool_policy("apply_patch");
+        assert_eq!(write_policy.category, ToolCategory::Write);
+        assert!(!write_policy.retry_timeout_once);
+        assert!(!write_policy.allowed_in_plan_mode);
+        assert!(write_policy.requires_supervised_approval);
+
+        let interactive_policy = tool_policy("task_start");
+        assert_eq!(interactive_policy.category, ToolCategory::Interactive);
+        assert!(interactive_policy.allowed_in_plan_mode);
+        assert!(!interactive_policy.requires_supervised_approval);
+    }
+
+    #[test]
+    fn delegated_explore_policy_blocks_write_tools() {
+        let policy = DelegationPolicy::for_subagent_explore(PermissionMode::Autonomous, Some(20));
+        assert!(policy.authorize_tool("read", false).is_ok());
+        assert!(policy.authorize_tool("edit", false).is_err());
+    }
+
+    #[test]
+    fn delegated_build_policy_blocks_supervised_write_without_approval_path() {
+        let policy = DelegationPolicy::for_subagent_build(PermissionMode::Supervised, Some(10));
+        assert!(policy.authorize_tool("read", false).is_ok());
+        assert!(policy.authorize_tool("write", false).is_err());
+    }
+
+    #[test]
+    fn delegated_build_policy_allows_autonomous_write() {
+        let policy = DelegationPolicy::for_subagent_build(PermissionMode::Autonomous, Some(10));
+        assert!(policy.authorize_tool("write", false).is_ok());
+        assert!(policy.authorize_tool("bash", false).is_ok());
+    }
+
+    #[test]
+    fn skill_tool_is_classified_as_read_only() {
+        let policy = tool_policy("skill");
+        assert_eq!(policy.category, ToolCategory::ReadOnly);
+        assert!(policy.allowed_in_plan_mode);
+        assert!(!policy.requires_supervised_approval);
     }
 
     #[tokio::test]

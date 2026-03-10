@@ -49,6 +49,7 @@ Repository-level engineering guardrails for Krusty - an AI coding assistant CLI/
 
 ## Default Dev Workflow
 - Build and run current local code only; do not require `git pull` for day-to-day refinement.
+- Rust builds inherit `TMPDIR` from `.cargo/config.toml`, pointing rustc temp files at the workspace `target/` directory instead of `/tmp`.
 - **Rust backend**: `cargo run -p krusty` from repo root.
 - **PWA dev server**: `cd apps/pwa/app && bun run dev` (default `http://localhost:5173`).
 - Do active UI/PWA iteration at `http://localhost:5173` so HMR is enabled, with `/api` and `/ws` proxied to backend.

@@ -8,13 +8,14 @@ use anyhow::Result;
 use serde_json::Value;
 use tracing::debug;
 
+use super::config::CallOptions;
 use super::core::AiClient;
-use super::streaming::partition_system_messages;
 use crate::ai::format::anthropic::AnthropicFormat;
 use crate::ai::format::google::GoogleFormat;
 use crate::ai::format::openai::OpenAIFormat;
 use crate::ai::format::FormatHandler;
 use crate::ai::providers::ProviderCapabilities;
+use crate::ai::transform::apply_request_body_transform;
 use crate::ai::types::ModelMessage;
 
 fn trim_or_empty(text: Option<&str>) -> String {
@@ -47,28 +48,41 @@ impl AiClient {
         user_message: &str,
         max_tokens: usize,
     ) -> Result<String> {
+        let options = self.canonical_call_options(
+            model,
+            &CallOptions {
+                max_tokens: Some(max_tokens),
+                system_prompt: Some(system_prompt.to_string()),
+                ..Default::default()
+            },
+        );
+        let prompt_sections =
+            self.system_prompt_sections(model, &[], options.system_prompt.as_deref());
+        let system_prompt = prompt_sections.combined();
+        let max_tokens = options.max_tokens.unwrap_or(max_tokens);
+
         // ChatGPT Codex format requires streaming - handle specially
         if self.config().uses_chatgpt_codex_format() {
             return self
-                .call_simple_chatgpt_codex(model, system_prompt, user_message)
+                .call_simple_chatgpt_codex(model, &system_prompt, user_message)
                 .await;
         }
 
         // Route to appropriate format handler based on API format
         if self.config().uses_openai_format() {
             return self
-                .call_simple_openai(model, system_prompt, user_message, max_tokens)
+                .call_simple_openai(model, &system_prompt, user_message, max_tokens)
                 .await;
         }
 
         if self.config().uses_google_format() {
             return self
-                .call_simple_google(model, system_prompt, user_message, max_tokens)
+                .call_simple_google(model, &system_prompt, user_message, max_tokens)
                 .await;
         }
 
         // Anthropic format (default)
-        self.call_simple_anthropic(model, system_prompt, user_message, max_tokens)
+        self.call_simple_anthropic(model, &system_prompt, user_message, max_tokens)
             .await
     }
 
@@ -113,6 +127,8 @@ impl AiClient {
             body["cache_control"] = serde_json::json!({"type": "ephemeral"});
         }
 
+        let body =
+            apply_request_body_transform(body, self.provider_id(), self.config().api_format, model);
         let request = self.build_request(&self.config().api_url());
         let response = request.json(&body).send().await?;
         let response = self.handle_error_response(response).await?;
@@ -145,6 +161,8 @@ impl AiClient {
             ]
         });
 
+        let body =
+            apply_request_body_transform(body, self.provider_id(), self.config().api_format, model);
         let request = self.build_request(&self.config().api_url());
         let response = request.json(&body).send().await?;
         let response = self.handle_error_response(response).await?;
@@ -183,6 +201,8 @@ impl AiClient {
             }
         });
 
+        let body =
+            apply_request_body_transform(body, self.provider_id(), self.config().api_format, model);
         let request = self.build_request(&self.config().api_url());
         debug!("Google simple call to model: {}", model);
 
@@ -235,6 +255,8 @@ impl AiClient {
 
         debug!("ChatGPT Codex simple call to model: {}", model);
 
+        let body =
+            apply_request_body_transform(body, self.provider_id(), self.config().api_format, model);
         let request = self.build_request(&self.config().api_url());
         let response = request.json(&body).send().await?;
         let response = self.handle_error_response(response).await?;
@@ -287,10 +309,27 @@ impl AiClient {
         appended_user_message: &str,
         max_tokens: usize,
     ) -> Result<String> {
+        let options = self.canonical_call_options(
+            model,
+            &CallOptions {
+                max_tokens: Some(max_tokens),
+                system_prompt: Some(base_system_prompt.to_string()),
+                ..Default::default()
+            },
+        );
+        let max_tokens = options.max_tokens.unwrap_or(max_tokens);
+
         if self.config().uses_chatgpt_codex_format() {
             // Codex requires streaming — combine system prompt and fall back to simple
             return self
-                .call_simple_chatgpt_codex(model, base_system_prompt, appended_user_message)
+                .call_simple_chatgpt_codex(
+                    model,
+                    options
+                        .system_prompt
+                        .as_deref()
+                        .unwrap_or(base_system_prompt),
+                    appended_user_message,
+                )
                 .await;
         }
 
@@ -298,7 +337,10 @@ impl AiClient {
             return self
                 .call_conversation_openai(
                     model,
-                    base_system_prompt,
+                    options
+                        .system_prompt
+                        .as_deref()
+                        .unwrap_or(base_system_prompt),
                     conversation,
                     appended_user_message,
                     max_tokens,
@@ -310,7 +352,10 @@ impl AiClient {
             return self
                 .call_conversation_google(
                     model,
-                    base_system_prompt,
+                    options
+                        .system_prompt
+                        .as_deref()
+                        .unwrap_or(base_system_prompt),
                     conversation,
                     appended_user_message,
                     max_tokens,
@@ -320,7 +365,10 @@ impl AiClient {
 
         self.call_conversation_anthropic(
             model,
-            base_system_prompt,
+            options
+                .system_prompt
+                .as_deref()
+                .unwrap_or(base_system_prompt),
             conversation,
             appended_user_message,
             max_tokens,
@@ -344,6 +392,8 @@ impl AiClient {
     ) -> Result<String> {
         let capabilities = ProviderCapabilities::for_provider(self.provider_id());
         let format_handler = AnthropicFormat::new();
+        let prompt_sections =
+            self.system_prompt_sections(model, conversation, Some(base_system_prompt));
 
         // Convert parent conversation messages (System role filtered by format handler)
         let mut api_messages =
@@ -357,50 +407,38 @@ impl AiClient {
 
         // Build system prompt with the same multi-block structure as streaming.
         // This ensures the cached prefix from the parent conversation is reused.
-        let (project_context, session_context) = partition_system_messages(conversation);
-
         let system_value: Value = if capabilities.prompt_caching {
             let mut blocks: Vec<Value> = Vec::new();
 
             // Block 1: Base system prompt — cached
-            if !base_system_prompt.is_empty() {
+            if !prompt_sections.base_prompt.is_empty() {
                 blocks.push(serde_json::json!({
                     "type": "text",
-                    "text": base_system_prompt,
+                    "text": prompt_sections.base_prompt.as_str(),
                     "cache_control": {"type": "ephemeral"}
                 }));
             }
 
             // Block 2 (optional): Project context — cached
-            if !project_context.is_empty() {
+            if !prompt_sections.project_context.is_empty() {
                 blocks.push(serde_json::json!({
                     "type": "text",
-                    "text": project_context,
+                    "text": prompt_sections.project_context.as_str(),
                     "cache_control": {"type": "ephemeral"}
                 }));
             }
 
             // Block 3 (optional): Session context — not cached (dynamic)
-            if !session_context.is_empty() {
+            if !prompt_sections.session_context.is_empty() {
                 blocks.push(serde_json::json!({
                     "type": "text",
-                    "text": session_context
+                    "text": prompt_sections.session_context.as_str()
                 }));
             }
 
             Value::Array(blocks)
         } else {
-            // No caching: combine into single string
-            let mut system = base_system_prompt.to_string();
-            if !project_context.is_empty() {
-                system.push_str("\n\n---\n\n");
-                system.push_str(&project_context);
-            }
-            if !session_context.is_empty() {
-                system.push_str("\n\n---\n\n");
-                system.push_str(&session_context);
-            }
-            Value::String(system)
+            Value::String(prompt_sections.combined())
         };
 
         let mut body = serde_json::json!({
@@ -422,6 +460,8 @@ impl AiClient {
             conversation.len()
         );
 
+        let body =
+            apply_request_body_transform(body, self.provider_id(), self.config().api_format, model);
         let request = self.build_request(&self.config().api_url());
         let response = request.json(&body).send().await?;
         let response = self.handle_error_response(response).await?;
@@ -450,12 +490,14 @@ impl AiClient {
         max_tokens: usize,
     ) -> Result<String> {
         let format_handler = OpenAIFormat::new(self.config().api_format);
+        let prompt_sections =
+            self.system_prompt_sections(model, conversation, Some(base_system_prompt));
 
         let mut api_messages =
             format_handler.convert_messages(conversation, Some(self.provider_id()));
 
         // Prepend system message with combined prompt (same order as streaming)
-        let system_prompt = build_combined_system_prompt(base_system_prompt, conversation);
+        let system_prompt = prompt_sections.combined();
         api_messages.insert(
             0,
             serde_json::json!({"role": "system", "content": system_prompt}),
@@ -478,6 +520,8 @@ impl AiClient {
             conversation.len()
         );
 
+        let body =
+            apply_request_body_transform(body, self.provider_id(), self.config().api_format, model);
         let request = self.build_request(&self.config().api_url());
         let response = request.json(&body).send().await?;
         let response = self.handle_error_response(response).await?;
@@ -497,13 +541,15 @@ impl AiClient {
     /// Cache-safe conversation call using Google format.
     async fn call_conversation_google(
         &self,
-        _model: &str,
+        model: &str,
         base_system_prompt: &str,
         conversation: &[ModelMessage],
         appended_user_message: &str,
         max_tokens: usize,
     ) -> Result<String> {
         let format_handler = GoogleFormat::new();
+        let prompt_sections =
+            self.system_prompt_sections(model, conversation, Some(base_system_prompt));
 
         let mut contents = format_handler.convert_messages(conversation, Some(self.provider_id()));
 
@@ -513,7 +559,7 @@ impl AiClient {
             "parts": [{"text": appended_user_message}]
         }));
 
-        let system_prompt = build_combined_system_prompt(base_system_prompt, conversation);
+        let system_prompt = prompt_sections.combined();
 
         let body = serde_json::json!({
             "contents": contents,
@@ -530,6 +576,8 @@ impl AiClient {
             conversation.len()
         );
 
+        let body =
+            apply_request_body_transform(body, self.provider_id(), self.config().api_format, model);
         let request = self.build_request(&self.config().api_url());
         let response = request.json(&body).send().await?;
         let response = self.handle_error_response(response).await?;
@@ -548,23 +596,4 @@ impl AiClient {
                 .and_then(|t| t.as_str()),
         ))
     }
-}
-
-/// Build a combined system prompt for non-Anthropic providers.
-///
-/// Orders content by stability (base → project → session) matching
-/// the streaming path for optimal automatic prefix caching.
-fn build_combined_system_prompt(base: &str, conversation: &[ModelMessage]) -> String {
-    let (project_context, session_context) = partition_system_messages(conversation);
-
-    let mut prompt = base.to_string();
-    if !project_context.is_empty() {
-        prompt.push_str("\n\n---\n\n");
-        prompt.push_str(&project_context);
-    }
-    if !session_context.is_empty() {
-        prompt.push_str("\n\n---\n\n");
-        prompt.push_str(&session_context);
-    }
-    prompt
 }

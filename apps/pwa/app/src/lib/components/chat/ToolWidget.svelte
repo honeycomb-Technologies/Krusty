@@ -15,7 +15,6 @@
 	import Loader2 from 'lucide-svelte/icons/loader-2';
 	import Compass from 'lucide-svelte/icons/compass';
 	import Hammer from 'lucide-svelte/icons/hammer';
-	import { FileDiff, getFiletypeFromFileName } from '@pierre/diffs';
 	import type { ToolCall } from '$stores/session';
 
 	interface Props {
@@ -299,36 +298,57 @@
 	let diffContainer: HTMLDivElement | undefined = $state();
 	let writeDiffContainer: HTMLDivElement | undefined = $state();
 	let multiEditDiffContainer: HTMLDivElement | undefined = $state();
+	let diffModulePromise: Promise<typeof import('@pierre/diffs')> | null = null;
+
+	function loadDiffModule(): Promise<typeof import('@pierre/diffs')> {
+		diffModulePromise ??= import('@pierre/diffs');
+		return diffModulePromise;
+	}
 
 	// Edit tool diff
 	$effect(() => {
 		if (!isEditTool || !diffContainer) return;
 
-		const args = toolCall.arguments!;
-		const fp = String(args.file_path || 'file');
-		const lang = getFiletypeFromFileName(fp) ?? undefined;
+		let isDisposed = false;
+		let cleanup: (() => void) | null = null;
 
-		const instance = new FileDiff({
-			theme: 'pierre-dark',
-			themeType: 'dark',
-			diffStyle: 'unified',
-			overflow: 'wrap',
-			disableFileHeader: true,
-			disableLineNumbers: false,
-			unsafeCSS: `
-				pre { background: transparent !important; }
-				code { background: transparent !important; }
-			`,
-		});
+		void (async () => {
+			const { FileDiff, getFiletypeFromFileName } = await loadDiffModule();
+			if (isDisposed) return;
 
-		instance.render({
-			oldFile: { name: fp, contents: String(args.old_string), lang },
-			newFile: { name: fp, contents: String(args.new_string), lang },
-			containerWrapper: diffContainer,
-		});
+			const args = toolCall.arguments!;
+			const fp = String(args.file_path || 'file');
+			const lang = getFiletypeFromFileName(fp) ?? undefined;
+
+			const instance = new FileDiff({
+				theme: 'pierre-dark',
+				themeType: 'dark',
+				diffStyle: 'unified',
+				overflow: 'wrap',
+				disableFileHeader: true,
+				disableLineNumbers: false,
+				unsafeCSS: `
+					pre { background: transparent !important; }
+					code { background: transparent !important; }
+				`,
+			});
+
+			if (isDisposed) {
+				instance.cleanUp();
+				return;
+			}
+
+			instance.render({
+				oldFile: { name: fp, contents: String(args.old_string), lang },
+				newFile: { name: fp, contents: String(args.new_string), lang },
+				containerWrapper: diffContainer,
+			});
+			cleanup = () => instance.cleanUp();
+		})();
 
 		return () => {
-			instance.cleanUp();
+			isDisposed = true;
+			cleanup?.();
 		};
 	});
 
@@ -336,32 +356,47 @@
 	$effect(() => {
 		if (!isWriteTool || !writeDiffContainer) return;
 
-		const args = toolCall.arguments!;
-		const fp = String(args.file_path || 'file');
-		const content = String(args.content || '');
-		const lang = getFiletypeFromFileName(fp) ?? undefined;
+		let isDisposed = false;
+		let cleanup: (() => void) | null = null;
 
-		const instance = new FileDiff({
-			theme: 'pierre-dark',
-			themeType: 'dark',
-			diffStyle: 'unified',
-			overflow: 'wrap',
-			disableFileHeader: true,
-			disableLineNumbers: false,
-			unsafeCSS: `
-				pre { background: transparent !important; }
-				code { background: transparent !important; }
-			`,
-		});
+		void (async () => {
+			const { FileDiff, getFiletypeFromFileName } = await loadDiffModule();
+			if (isDisposed) return;
 
-		instance.render({
-			oldFile: { name: fp, contents: '', lang },
-			newFile: { name: fp, contents: content, lang },
-			containerWrapper: writeDiffContainer,
-		});
+			const args = toolCall.arguments!;
+			const fp = String(args.file_path || 'file');
+			const content = String(args.content || '');
+			const lang = getFiletypeFromFileName(fp) ?? undefined;
+
+			const instance = new FileDiff({
+				theme: 'pierre-dark',
+				themeType: 'dark',
+				diffStyle: 'unified',
+				overflow: 'wrap',
+				disableFileHeader: true,
+				disableLineNumbers: false,
+				unsafeCSS: `
+					pre { background: transparent !important; }
+					code { background: transparent !important; }
+				`,
+			});
+
+			if (isDisposed) {
+				instance.cleanUp();
+				return;
+			}
+
+			instance.render({
+				oldFile: { name: fp, contents: '', lang },
+				newFile: { name: fp, contents: content, lang },
+				containerWrapper: writeDiffContainer,
+			});
+			cleanup = () => instance.cleanUp();
+		})();
 
 		return () => {
-			instance.cleanUp();
+			isDisposed = true;
+			cleanup?.();
 		};
 	});
 
@@ -369,35 +404,50 @@
 	$effect(() => {
 		if (!isMultiEditTool || !multiEditDiffContainer) return;
 
-		const args = toolCall.arguments!;
-		const fp = String(args.file_path || 'file');
-		const edits = (args.edits as Array<{ old_string: string; new_string: string }>) || [];
-		const lang = getFiletypeFromFileName(fp) ?? undefined;
+		let isDisposed = false;
+		let cleanup: (() => void) | null = null;
 
-		const oldParts = edits.map((e) => String(e.old_string)).join('\n...\n');
-		const newParts = edits.map((e) => String(e.new_string)).join('\n...\n');
+		void (async () => {
+			const { FileDiff, getFiletypeFromFileName } = await loadDiffModule();
+			if (isDisposed) return;
 
-		const instance = new FileDiff({
-			theme: 'pierre-dark',
-			themeType: 'dark',
-			diffStyle: 'unified',
-			overflow: 'wrap',
-			disableFileHeader: true,
-			disableLineNumbers: false,
-			unsafeCSS: `
-				pre { background: transparent !important; }
-				code { background: transparent !important; }
-			`,
-		});
+			const args = toolCall.arguments!;
+			const fp = String(args.file_path || 'file');
+			const edits = (args.edits as Array<{ old_string: string; new_string: string }>) || [];
+			const lang = getFiletypeFromFileName(fp) ?? undefined;
 
-		instance.render({
-			oldFile: { name: fp, contents: oldParts, lang },
-			newFile: { name: fp, contents: newParts, lang },
-			containerWrapper: multiEditDiffContainer,
-		});
+			const oldParts = edits.map((e) => String(e.old_string)).join('\n...\n');
+			const newParts = edits.map((e) => String(e.new_string)).join('\n...\n');
+
+			const instance = new FileDiff({
+				theme: 'pierre-dark',
+				themeType: 'dark',
+				diffStyle: 'unified',
+				overflow: 'wrap',
+				disableFileHeader: true,
+				disableLineNumbers: false,
+				unsafeCSS: `
+					pre { background: transparent !important; }
+					code { background: transparent !important; }
+				`,
+			});
+
+			if (isDisposed) {
+				instance.cleanUp();
+				return;
+			}
+
+			instance.render({
+				oldFile: { name: fp, contents: oldParts, lang },
+				newFile: { name: fp, contents: newParts, lang },
+				containerWrapper: multiEditDiffContainer,
+			});
+			cleanup = () => instance.cleanUp();
+		})();
 
 		return () => {
-			instance.cleanUp();
+			isDisposed = true;
+			cleanup?.();
 		};
 	});
 

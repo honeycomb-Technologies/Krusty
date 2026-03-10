@@ -7,6 +7,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::agent::subagent::AgentProgress;
 use crate::agent::{LoopEvent, LoopInput, SummarizationResult};
 use crate::ai::models::ModelMetadata;
+use crate::ai::providers::ProviderId;
 use crate::tools::ToolOutputChunk;
 
 /// AI-generated title update
@@ -56,6 +57,12 @@ pub struct OAuthStatusUpdate {
     pub token: Option<krusty_core::auth::OAuthTokenData>,
 }
 
+/// Result from fetching models for a dynamic provider.
+pub struct DynamicModelUpdate {
+    pub provider: ProviderId,
+    pub result: Result<Vec<ModelMetadata>, String>,
+}
+
 /// Device code information for OAuth device flow
 pub struct DeviceCodeInfo {
     pub user_code: String,
@@ -77,8 +84,8 @@ pub struct AsyncChannels {
     pub explore_progress: Option<mpsc::Receiver<AgentProgress>>,
     /// Build tool builder agent progress updates (bounded for backpressure)
     pub build_progress: Option<mpsc::Receiver<AgentProgress>>,
-    /// OpenRouter model fetch result receiver
-    pub openrouter_models: Option<oneshot::Receiver<Result<Vec<ModelMetadata>, String>>>,
+    /// Dynamic provider model fetch result receiver
+    pub dynamic_models: Option<oneshot::Receiver<DynamicModelUpdate>>,
     /// /init codebase exploration result receiver
     pub init_exploration: Option<oneshot::Receiver<InitExplorationResult>>,
     /// /init exploration progress updates

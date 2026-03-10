@@ -2,6 +2,46 @@ const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/+$/, '');
 
 const STREAM_ACTIVITY_TIMEOUT = 30_000; // 30 seconds
 const STREAM_CHECK_INTERVAL = 5_000; // Check every 5 seconds
+const REMOTE_TOKEN_STORAGE_KEY = 'krusty:remote-token';
+const REMOTE_TOKEN_HASH_KEY = 'krusty-remote-token';
+
+function isLocalHost(hostname: string): boolean {
+	const normalized = hostname.trim().toLowerCase();
+	return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
+}
+
+function isRemoteOrigin(): boolean {
+	if (typeof window === 'undefined') {
+		return false;
+	}
+	return !isLocalHost(window.location.hostname);
+}
+
+function getRemoteAccessToken(): string | null {
+	if (typeof window === 'undefined') {
+		return null;
+	}
+
+	try {
+		const hash = window.location.hash.startsWith('#')
+			? window.location.hash.slice(1)
+			: window.location.hash;
+		const hashParams = new URLSearchParams(hash);
+		const tokenFromHash = hashParams.get(REMOTE_TOKEN_HASH_KEY);
+		if (tokenFromHash) {
+			localStorage.setItem(REMOTE_TOKEN_STORAGE_KEY, tokenFromHash);
+			hashParams.delete(REMOTE_TOKEN_HASH_KEY);
+			const nextHash = hashParams.toString();
+			const nextUrl = `${window.location.pathname}${window.location.search}${nextHash ? `#${nextHash}` : ''}`;
+			window.history.replaceState({}, '', nextUrl);
+			return tokenFromHash;
+		}
+
+		return localStorage.getItem(REMOTE_TOKEN_STORAGE_KEY);
+	} catch {
+		return null;
+	}
+}
 
 // ============================================================================
 // Type Definitions
@@ -217,25 +257,127 @@ export interface PortListResponse {
 	discovery_error?: string | null;
 }
 
+export interface RecoveryToolCall {
+	id: string;
+	name: string;
+}
+
+export interface SessionRecoveryState {
+	schema_version: number;
+	status: string;
+	stop_reason: string | null;
+	last_error: string | null;
+	partial_assistant: {
+		text: string;
+		thinking?: string;
+		tool_calls: RecoveryToolCall[];
+	};
+	decision: Record<string, unknown>;
+}
+
+export interface PartialAssistantState {
+	text: string;
+	thinking?: string;
+	tool_calls: RecoveryToolCall[];
+}
+
+export interface SessionStateResponse {
+	id: string;
+	agent_state: string;
+	started_at: string | null;
+	last_event_at: string | null;
+	mode: 'build' | 'plan';
+	recovery?: SessionRecoveryState | null;
+	live_partial_assistant?: PartialAssistantState | null;
+	last_event_sequence?: number | null;
+}
+
+export type PresenceCapability = 'observer' | 'controller';
+
+export interface SessionPresenceClientResponse {
+	client_id: string;
+	surface: string;
+	capability: PresenceCapability;
+	user_id?: string | null;
+	last_seen_at: string;
+	last_event_sequence?: number | null;
+	stale: boolean;
+}
+
+export interface SessionPresenceResponse {
+	session_id: string;
+	active_viewers: number;
+	active_controllers: number;
+	stale_clients: number;
+	clients: SessionPresenceClientResponse[];
+}
+
+export interface TailscaleAccessResponse {
+	status: string;
+	url?: string | null;
+	detail?: string | null;
+}
+
+export interface ServerAccessResponse {
+	local_url: string;
+	remote_access_enabled: boolean;
+	remote_access_token: string;
+	remote_launch_url?: string | null;
+	tailscale: TailscaleAccessResponse;
+}
+
+export interface ActiveSessionStatusResponse {
+	id: string;
+	title: string;
+	agent_state: string;
+	started_at?: string | null;
+	last_event_at?: string | null;
+	working_dir?: string | null;
+	active_viewers: number;
+	active_controllers: number;
+	stale_clients: number;
+}
+
+export interface ServerStatusResponse {
+	active_agent_streams: number;
+	active_sessions: ActiveSessionStatusResponse[];
+	tailscale: TailscaleAccessResponse;
+}
+
 /** SSE stream event types */
 export type StreamEvent =
 	| { type: 'text_delta'; delta: string }
+	| { type: 'text_delta_with_citations'; delta: string; citations: unknown[] }
 	| { type: 'thinking_delta'; thinking: string }
+	| { type: 'thinking_complete'; thinking: string; signature: string }
 	| { type: 'tool_call_start'; id: string; name: string }
 	| { type: 'tool_call_complete'; id: string; name: string; arguments: Record<string, unknown> }
 	| { type: 'tool_executing'; id: string; name: string }
 	| { type: 'tool_output_delta'; id: string; delta: string }
 	| { type: 'tool_result'; id: string; output: string; is_error: boolean }
+	| { type: 'server_tool_start'; id: string; name: string }
+	| { type: 'server_tool_complete'; id: string; name: string }
+	| { type: 'web_search_results'; tool_use_id: string; results: unknown[] }
+	| { type: 'web_fetch_result'; tool_use_id: string; content: unknown }
+	| { type: 'server_tool_error'; tool_use_id: string; error_code: string }
 	| { type: 'plan_update'; items: PlanItem[] }
 	| { type: 'mode_change'; mode: string; reason?: string }
 	| { type: 'plan_complete'; tool_call_id: string; title: string; task_count: number }
 	| { type: 'usage'; prompt_tokens: number; completion_tokens: number }
+	| {
+			type: 'context_compacted';
+			reason: string;
+			estimated_tokens_before: number;
+			estimated_tokens_after: number;
+			replaced_messages: number;
+	  }
+	| { type: 'lagged'; skipped: number }
 	| { type: 'title_update'; title: string }
 	| { type: 'tool_approval_required'; id: string; name: string; arguments: Record<string, unknown> }
 	| { type: 'tool_approved'; id: string }
 	| { type: 'tool_denied'; id: string }
 	| { type: 'turn_complete'; turn: number; has_more: boolean }
-	| { type: 'finish'; session_id: string }
+	| { type: 'finish'; session_id: string; stop_reason: string }
 	| { type: 'error'; error: string };
 
 // ============================================================================
@@ -258,6 +400,19 @@ export function getApiUrl(path: string): string {
 	return `${API_BASE}${normalized}`;
 }
 
+export async function bootstrapRemoteAccess(): Promise<void> {
+	if (typeof window === 'undefined' || isRemoteOrigin()) {
+		return;
+	}
+
+	try {
+		const access = await apiClient.getServerAccess();
+		localStorage.setItem(REMOTE_TOKEN_STORAGE_KEY, access.remote_access_token);
+	} catch {
+		// Best-effort only; local operation does not depend on remote bootstrap.
+	}
+}
+
 class ApiError extends Error {
 	constructor(
 		public status: number,
@@ -277,6 +432,11 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
 	if (currentUserId) {
 		headers['X-User-Id'] = currentUserId;
+	}
+
+	const remoteToken = getRemoteAccessToken();
+	if (isRemoteOrigin() && remoteToken) {
+		headers.Authorization = `Bearer ${remoteToken}`;
 	}
 
 	const response = await fetch(getApiUrl(path), {
@@ -343,13 +503,39 @@ export const apiClient = {
 		}),
 
 	getSessionState: (id: string) =>
-		request<{
-			id: string;
-			agent_state: string;
-			started_at: string | null;
-			last_event_at: string | null;
-			mode: 'build' | 'plan';
-		}>(`/sessions/${id}/state`),
+		request<SessionStateResponse>(`/sessions/${id}/state`),
+
+	getSessionPresence: (id: string) =>
+		request<SessionPresenceResponse>(`/sessions/${id}/presence`),
+
+	heartbeatSessionPresence: (
+		id: string,
+		data: {
+			client_id: string;
+			surface: string;
+			capability: PresenceCapability;
+			last_event_sequence?: number | null;
+		}
+	) =>
+		request<SessionPresenceResponse>(`/sessions/${id}/presence`, {
+			method: 'PUT',
+			body: JSON.stringify(data)
+		}),
+
+	removeSessionPresence: (id: string, clientId: string) =>
+		request<SessionPresenceResponse>(`/sessions/${id}/presence/${encodeURIComponent(clientId)}`, {
+			method: 'DELETE'
+		}),
+
+	getServerAccess: () => request<ServerAccessResponse>('/server/access'),
+
+	updateServerAccess: (data: { enabled?: boolean; rotate_token?: boolean }) =>
+		request<ServerAccessResponse>('/server/access', {
+			method: 'PATCH',
+			body: JSON.stringify(data)
+		}),
+
+	getServerStatus: () => request<ServerStatusResponse>('/server/status'),
 
 	// Models
 	getModels: () => request<ModelsResponse>('/models'),
@@ -570,6 +756,10 @@ async function streamSSE(
 	if (currentUserId) {
 		headers['X-User-Id'] = currentUserId;
 	}
+	const remoteToken = getRemoteAccessToken();
+	if (isRemoteOrigin() && remoteToken) {
+		headers.Authorization = `Bearer ${remoteToken}`;
+	}
 
 	const response = await fetch(getApiUrl(url), {
 		method: 'POST',
@@ -659,8 +849,13 @@ function handleEvent(event: StreamEvent, callbacks: StreamCallbacks) {
 		case 'text_delta':
 			callbacks.onTextDelta(event.delta);
 			break;
+		case 'text_delta_with_citations':
+			callbacks.onTextDelta(event.delta);
+			break;
 		case 'thinking_delta':
 			callbacks.onThinkingDelta(event.thinking);
+			break;
+		case 'thinking_complete':
 			break;
 		case 'tool_call_start':
 			callbacks.onToolCallStart(event.id, event.name);
@@ -677,6 +872,22 @@ function handleEvent(event: StreamEvent, callbacks: StreamCallbacks) {
 		case 'tool_result':
 			callbacks.onToolResult(event.id, event.output, event.is_error);
 			break;
+		case 'server_tool_start':
+			callbacks.onToolCallStart(event.id, event.name);
+			break;
+		case 'server_tool_complete':
+			callbacks.onToolResult(event.id, `${event.name} completed`, false);
+			break;
+		case 'web_search_results':
+		case 'web_fetch_result':
+			break;
+		case 'server_tool_error':
+			callbacks.onToolResult(
+				event.tool_use_id,
+				`Server tool error: ${event.error_code}`,
+				true
+			);
+			break;
 		case 'plan_update':
 			callbacks.onPlanUpdate(event.items);
 			break;
@@ -688,6 +899,9 @@ function handleEvent(event: StreamEvent, callbacks: StreamCallbacks) {
 			break;
 		case 'usage':
 			callbacks.onUsage(event.prompt_tokens, event.completion_tokens);
+			break;
+		case 'context_compacted':
+		case 'lagged':
 			break;
 		case 'title_update':
 			callbacks.onTitleUpdate(event.title);

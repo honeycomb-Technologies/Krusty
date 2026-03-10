@@ -7,6 +7,7 @@ Interactive terminal UI runtime.
 - Protect frame-time performance and input responsiveness.
 - Avoid heavy allocations in render/event hot paths.
 - Keep streaming updates idempotent and visually stable.
+- Keep stream backpressure policy, queue telemetry, and interruption recovery messaging explicit in shared TUI state/handlers rather than hidden in rendering code.
 
 ## Key Subsystems
 - `handlers/`: event and streaming orchestration.

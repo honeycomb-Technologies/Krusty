@@ -2,6 +2,7 @@
 
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -234,6 +235,12 @@ async fn setup_chat_session(
         apply_thinking_config(&ai_client, thinking_level, &mut options);
     }
 
+    let effective_work_mode = PlanManager::new((*state.db_path).clone())
+        .ok()
+        .and_then(|pm| pm.get_lifecycle_state(session_id, session.work_mode).ok())
+        .map(|state| state.effective_work_mode)
+        .unwrap_or(session.work_mode);
+
     Ok(ChatSessionContext {
         ai_client,
         options,
@@ -241,7 +248,7 @@ async fn setup_chat_session(
         session_id: session_id.to_string(),
         session_manager,
         working_dir,
-        work_mode: session.work_mode,
+        work_mode: effective_work_mode,
         user_id,
         guard,
     })
@@ -449,8 +456,20 @@ async fn tool_result(
 
 async fn tool_approval(
     State(state): State<AppState>,
+    user: Option<CurrentUser>,
     Json(req): Json<ToolApprovalRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let session_manager = SessionManager::new(Database::new(&state.db_path)?);
+    if !session_manager.verify_session_ownership(
+        &req.session_id,
+        user.as_ref().and_then(|u| u.0.user_id.as_deref()),
+    )? {
+        return Err(AppError::NotFound(format!(
+            "Session {} not found",
+            req.session_id
+        )));
+    }
+
     let inputs = state.session_inputs.read().await;
     let sender = inputs
         .get(&req.session_id)
@@ -463,6 +482,84 @@ async fn tool_approval(
 }
 
 // ── Orchestrator → SSE bridge ────────────────────────────────────────
+
+fn loop_event_requires_delivery(event: &LoopEvent) -> bool {
+    matches!(
+        event,
+        LoopEvent::AwaitingInput { .. }
+            | LoopEvent::ToolApprovalRequired { .. }
+            | LoopEvent::PlanComplete { .. }
+            | LoopEvent::Finished { .. }
+            | LoopEvent::Error { .. }
+    )
+}
+
+fn event_to_sse(event: &AgenticEvent) -> Option<Event> {
+    Event::default().json_data(event).ok()
+}
+
+async fn forward_loop_event(
+    sse_tx: &mpsc::Sender<Result<Event, Infallible>>,
+    session_id: &str,
+    loop_event: LoopEvent,
+    skipped_events: &mut usize,
+) -> bool {
+    let requires_delivery = loop_event_requires_delivery(&loop_event);
+
+    if *skipped_events > 0 {
+        let lagged_event = AgenticEvent::Lagged {
+            skipped: *skipped_events,
+        };
+
+        if let Some(sse_event) = event_to_sse(&lagged_event) {
+            if requires_delivery {
+                if sse_tx.send(Ok(sse_event)).await.is_err() {
+                    return false;
+                }
+                *skipped_events = 0;
+            } else {
+                match sse_tx.try_send(Ok(sse_event)) {
+                    Ok(()) => *skipped_events = 0,
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        *skipped_events = skipped_events.saturating_add(1);
+                        tracing::warn!(
+                            session_id,
+                            skipped = *skipped_events,
+                            "Dropping SSE event because client queue is full"
+                        );
+                        return true;
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => return false,
+                }
+            }
+        } else {
+            *skipped_events = 0;
+        }
+    }
+
+    let agentic_event: AgenticEvent = loop_event.into();
+    let Some(sse_event) = event_to_sse(&agentic_event) else {
+        return true;
+    };
+
+    if requires_delivery {
+        sse_tx.send(Ok(sse_event)).await.is_ok()
+    } else {
+        match sse_tx.try_send(Ok(sse_event)) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                *skipped_events = skipped_events.saturating_add(1);
+                tracing::warn!(
+                    session_id,
+                    skipped = *skipped_events,
+                    "Dropping SSE event because client queue is full"
+                );
+                true
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        }
+    }
+}
 
 async fn start_orchestrator_sse(
     state: &AppState,
@@ -502,15 +599,18 @@ async fn start_orchestrator_sse(
     }
 
     let session_inputs = Arc::clone(&state.session_inputs);
+    let active_agent_streams = Arc::clone(&state.active_agent_streams);
     let push_service = state.push_service.clone();
     let user_id = ctx.user_id;
     let db_path = Arc::clone(&state.db_path);
     let guard = ctx.guard;
 
     tokio::spawn(async move {
+        active_agent_streams.fetch_add(1, Ordering::Relaxed);
         let _guard = guard;
         let mut awaiting_input = false;
         let mut had_error = false;
+        let mut skipped_events = 0usize;
 
         while let Some(loop_event) = event_rx.recv().await {
             let is_finished = matches!(loop_event, LoopEvent::Finished { .. });
@@ -534,9 +634,8 @@ async fn start_orchestrator_sse(
                 had_error = true;
             }
 
-            let agentic_event: AgenticEvent = loop_event.into();
-            if let Ok(sse_event) = Event::default().json_data(&agentic_event) {
-                let _ = sse_tx.send(Ok(sse_event)).await;
+            if !forward_loop_event(&sse_tx, &session_id, loop_event, &mut skipped_events).await {
+                break;
             }
 
             if is_finished {
@@ -577,6 +676,7 @@ async fn start_orchestrator_sse(
         // Clean up session input channel
         let mut inputs = session_inputs.write().await;
         inputs.remove(&session_id);
+        active_agent_streams.fetch_sub(1, Ordering::Relaxed);
     });
 
     let stream = ReceiverStream::new(sse_rx);
@@ -667,7 +767,86 @@ fn fire_push(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_model_override;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use axum::extract::State;
+    use axum::Json;
+    use tokio::sync::mpsc::error::TryRecvError;
+    use tokio::sync::{mpsc, Mutex, RwLock};
+
+    use krusty_core::agent::loop_events::LoopStopReason;
+    use krusty_core::agent::{AgentCancellation, LoopEvent, LoopInput, UserHookManager};
+    use krusty_core::ai::models::create_model_registry;
+    use krusty_core::mcp::McpManager;
+    use krusty_core::process::ProcessRegistry;
+    use krusty_core::skills::SkillsManager;
+    use krusty_core::storage::credentials::CredentialStore;
+    use krusty_core::storage::Database;
+    use krusty_core::tools::registry::ToolRegistry;
+    use krusty_core::SessionManager;
+
+    use super::{forward_loop_event, resolve_model_override, tool_approval};
+    use crate::auth::{AuthenticatedUser, CurrentUser};
+    use crate::error::AppError;
+    use crate::types::ToolApprovalRequest;
+    use crate::AppState;
+
+    fn create_test_state() -> (AppState, PathBuf) {
+        let temp_dir =
+            std::env::temp_dir().join(format!("krusty-server-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        let db_path = temp_dir.join("krusty.db");
+        Database::new(&db_path).expect("database should initialize");
+        let working_dir = temp_dir.join("workspace");
+        std::fs::create_dir_all(&working_dir).expect("workspace should exist");
+
+        (
+            AppState {
+                server_port: 3000,
+                db_path: Arc::new(db_path),
+                working_dir: Arc::new(working_dir.clone()),
+                ai_client: None,
+                tool_registry: Arc::new(ToolRegistry::new()),
+                process_registry: Arc::new(ProcessRegistry::new()),
+                model_registry: create_model_registry(),
+                credential_store: Arc::new(RwLock::new(CredentialStore::default())),
+                mcp_manager: Arc::new(McpManager::new(working_dir.clone())),
+                hook_manager: Arc::new(RwLock::new(UserHookManager::new())),
+                skills_manager: Arc::new(RwLock::new(SkillsManager::with_defaults(&working_dir))),
+                cancellation: AgentCancellation::new(),
+                session_locks: Arc::new(RwLock::new(HashMap::new())),
+                session_inputs: Arc::new(RwLock::new(HashMap::new())),
+                session_presence: Arc::new(RwLock::new(HashMap::new())),
+                remote_access: Arc::new(RwLock::new(crate::remote_access::RemoteAccessConfig {
+                    enabled: true,
+                    token: "test-token".to_string(),
+                })),
+                active_agent_streams: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                push_service: None,
+                oauth_flows: Arc::new(Mutex::new(HashMap::new())),
+            },
+            temp_dir,
+        )
+    }
+
+    fn create_test_user(state: &AppState, user_id: &str) {
+        let db = Database::new(&state.db_path).expect("database should open");
+        db.conn()
+            .execute(
+                "INSERT INTO users (id, email, license_tier) VALUES (?1, ?2, ?3)",
+                (user_id, format!("{user_id}@example.com"), "free"),
+            )
+            .expect("user should insert");
+    }
+
+    fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
+        CurrentUser(AuthenticatedUser {
+            user_id: Some(user_id.to_string()),
+            home_dir: Some(home_dir.to_path_buf()),
+        })
+    }
 
     #[test]
     fn resolve_model_override_prefers_request_and_trims_input() {
@@ -688,5 +867,109 @@ mod tests {
     #[test]
     fn resolve_model_override_ignores_empty_values() {
         assert_eq!(resolve_model_override(Some("   "), Some("   ")), None);
+    }
+
+    #[tokio::test]
+    async fn tool_approval_rejects_foreign_owner() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        create_test_user(&state, "bob");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let session_id = session_manager
+            .create_session_for_user("Owned Session", None, None, Some("alice"))
+            .expect("session creation should succeed");
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<LoopInput>();
+        state
+            .session_inputs
+            .write()
+            .await
+            .insert(session_id.clone(), tx);
+
+        let result = tool_approval(
+            State(state),
+            Some(current_user("bob", std::path::Path::new("/tmp"))),
+            Json(ToolApprovalRequest {
+                session_id,
+                tool_call_id: "tool-1".to_string(),
+                approved: true,
+            }),
+        )
+        .await;
+
+        assert!(matches!(result, Err(AppError::NotFound(_))));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn forward_loop_event_surfaces_lag_before_terminal_event() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut skipped_events = 0usize;
+
+        assert!(
+            forward_loop_event(
+                &tx,
+                "session-1",
+                LoopEvent::TextDelta {
+                    delta: "first".to_string(),
+                },
+                &mut skipped_events,
+            )
+            .await
+        );
+        assert_eq!(skipped_events, 0);
+
+        assert!(
+            forward_loop_event(
+                &tx,
+                "session-1",
+                LoopEvent::TextDelta {
+                    delta: "second".to_string(),
+                },
+                &mut skipped_events,
+            )
+            .await
+        );
+        assert_eq!(skipped_events, 1);
+
+        let first = rx.recv().await.expect("first event should arrive");
+        let first = first.expect("sse event should be ok");
+        let first = format!("{first:?}");
+        assert!(first.contains("text_delta"));
+
+        let mut finish_skipped_events = skipped_events;
+        let tx_clone = tx.clone();
+        let finish_handle = tokio::spawn(async move {
+            let delivered = forward_loop_event(
+                &tx_clone,
+                "session-1",
+                LoopEvent::Finished {
+                    session_id: "session-1".to_string(),
+                    stop_reason: LoopStopReason::Completed,
+                },
+                &mut finish_skipped_events,
+            )
+            .await;
+            (delivered, finish_skipped_events)
+        });
+
+        let lagged = rx.recv().await.expect("lagged event should arrive");
+        let lagged = lagged.expect("lagged event should be ok");
+        let lagged = format!("{lagged:?}");
+        assert!(lagged.contains("lagged"));
+        assert!(lagged.contains("skipped"));
+
+        let finish = rx.recv().await.expect("finish event should arrive");
+        let finish = finish.expect("finish event should be ok");
+        let finish = format!("{finish:?}");
+        assert!(finish.contains("finish"));
+
+        let (delivered, skipped_events) = finish_handle.await.expect("finish task should join");
+        assert!(delivered);
+        assert_eq!(skipped_events, 0);
+
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }

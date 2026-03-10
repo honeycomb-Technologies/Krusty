@@ -3,11 +3,13 @@
 //! Core types for sub-agent configuration, progress tracking, and results.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::ai::retry::is_retryable_status;
 use crate::ai::retry::IsRetryable;
+use crate::tools::registry::DelegationPolicy;
 
 /// Error type for subagent API calls that supports retry logic
 #[derive(Debug)]
@@ -93,6 +95,8 @@ pub struct AgentProgress {
     pub tokens: usize,
     /// Current action description (e.g., "reading app.rs")
     pub current_action: Option<String>,
+    /// Short completion summary when the sub-agent finishes a delegated task.
+    pub completion_summary: Option<String>,
     /// Lines added (for build agents)
     pub lines_added: usize,
     /// Lines removed (for build agents)
@@ -129,6 +133,10 @@ pub struct SubAgentTask {
     pub plan_task_id: Option<String>,
     /// Whether thinking/reasoning is enabled for this agent
     pub thinking_enabled: bool,
+    /// Inherited delegated execution policy from parent tool context.
+    pub delegation_policy: Option<DelegationPolicy>,
+    /// Optional per-task turn budget inherited from parent.
+    pub max_turns_override: Option<usize>,
 }
 
 impl SubAgentTask {
@@ -142,6 +150,8 @@ impl SubAgentTask {
             working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             plan_task_id: None,
             thinking_enabled: false, // Default off for sub-agents
+            delegation_policy: None,
+            max_turns_override: None,
         }
     }
 
@@ -162,6 +172,16 @@ impl SubAgentTask {
 
     pub fn with_thinking(mut self, enabled: bool) -> Self {
         self.thinking_enabled = enabled;
+        self
+    }
+
+    pub fn with_delegation_policy(mut self, policy: DelegationPolicy) -> Self {
+        self.delegation_policy = Some(policy);
+        self
+    }
+
+    pub fn with_max_turns(mut self, max_turns: usize) -> Self {
+        self.max_turns_override = Some(max_turns);
         self
     }
 
@@ -216,6 +236,68 @@ pub struct SubAgentResult {
     pub duration_ms: u64,
     pub turns_used: usize,
     pub error: Option<String>,
+    pub policy_violations: Vec<String>,
+}
+
+impl SubAgentResult {
+    pub fn brief_summary(&self) -> String {
+        let lines = self
+            .output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .take(4)
+            .collect::<Vec<_>>();
+
+        let summary = if lines.is_empty() {
+            self.error
+                .clone()
+                .unwrap_or_else(|| "No summary produced".to_string())
+        } else {
+            lines.join(" ")
+        };
+
+        truncate_preview(&summary, 600)
+    }
+
+    pub fn evidence_json(&self) -> Value {
+        json!({
+            "agent": self.task_id,
+            "success": self.success,
+            "summary": self.brief_summary(),
+            "files_examined": dedup_files(&self.files_examined, 12),
+            "turns_used": self.turns_used,
+            "duration_ms": self.duration_ms,
+            "error": self.error,
+            "policy_violations": self.policy_violations,
+        })
+    }
+}
+
+fn dedup_files(files: &[String], limit: usize) -> Vec<String> {
+    let mut unique = Vec::new();
+    for file in files {
+        if !unique.iter().any(|existing| existing == file) {
+            unique.push(file.clone());
+        }
+        if unique.len() >= limit {
+            break;
+        }
+    }
+    unique
+}
+
+fn truncate_preview(text: &str, max_chars: usize) -> String {
+    if text.len() <= max_chars {
+        return text.to_string();
+    }
+
+    let mut boundary = max_chars.min(text.len());
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+
+    text[..boundary].trim_end().to_string()
 }
 
 /// Parsed tool call from API response

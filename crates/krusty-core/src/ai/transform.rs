@@ -4,7 +4,9 @@
 //! transformations, and compatibility layers based on OpenCode's logic.
 
 use crate::ai::glm;
+use crate::ai::models::ApiFormat;
 use crate::ai::providers::ProviderId;
+use crate::ai::streaming::StreamPart;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -203,6 +205,72 @@ pub fn transform_message_for_provider(
     message.clone()
 }
 
+/// Apply a final request-body transform immediately before dispatch.
+///
+/// This keeps provider quirks out of the transport call-sites and gives us one
+/// seam to patch request bodies as model families drift.
+pub fn apply_request_body_transform(
+    mut body: Value,
+    provider_id: ProviderId,
+    api_format: ApiFormat,
+    model_id: &str,
+) -> Value {
+    if let Some(messages) = body
+        .get_mut("messages")
+        .and_then(|value| value.as_array_mut())
+    {
+        for message in messages.iter_mut() {
+            *message = transform_message_for_provider(message, model_id, provider_id);
+            if requires_tool_call_id_sanitization(model_id) {
+                sanitize_tool_call_ids_in_value(message);
+            }
+        }
+    }
+
+    if matches!(api_format, ApiFormat::OpenAIResponses)
+        && body
+            .get("tools")
+            .and_then(|value| value.as_array())
+            .is_some()
+        && body.get("parallel_tool_calls").is_none()
+    {
+        body["parallel_tool_calls"] = Value::Bool(true);
+    }
+
+    body
+}
+
+/// Apply a final stream-part transform after parser mapping.
+///
+/// This is currently used for provider families that need sanitized tool IDs so
+/// tool call start/delta/complete events stay aligned.
+pub fn apply_stream_part_transform(
+    part: StreamPart,
+    _provider_id: ProviderId,
+    _api_format: ApiFormat,
+    model_id: &str,
+) -> StreamPart {
+    if !requires_tool_call_id_sanitization(model_id) {
+        return part;
+    }
+
+    match part {
+        StreamPart::ToolCallStart { id, name } => StreamPart::ToolCallStart {
+            id: sanitize_tool_call_id(&id),
+            name,
+        },
+        StreamPart::ToolCallDelta { id, delta } => StreamPart::ToolCallDelta {
+            id: sanitize_tool_call_id(&id),
+            delta,
+        },
+        StreamPart::ToolCallComplete { mut tool_call } => {
+            tool_call.id = sanitize_tool_call_id(&tool_call.id);
+            StreamPart::ToolCallComplete { tool_call }
+        }
+        other => other,
+    }
+}
+
 /// Transform message for Mistral/GLM/MiniMax (tool call ID sanitization)
 fn transform_mistral_message(message: &serde_json::Value) -> serde_json::Value {
     let mut msg = message.clone();
@@ -213,20 +281,10 @@ fn transform_mistral_message(message: &serde_json::Value) -> serde_json::Value {
                 if let Some(part_obj) = part.as_object_mut() {
                     if let Some(tool_call_id) = part_obj.get("toolCallId") {
                         if let Some(id_str) = tool_call_id.as_str() {
-                            let normalized: String = id_str
-                                .chars()
-                                .filter(|c| c.is_alphanumeric())
-                                .collect::<String>()
-                                .chars()
-                                .take(9)
-                                .collect::<String>();
-
-                            let padding_len = 9_usize.saturating_sub(normalized.chars().count());
-                            let padding = std::iter::repeat_n('0', padding_len);
-
-                            let final_id: String = normalized.chars().chain(padding).collect();
-
-                            part_obj.insert("toolCallId".to_string(), Value::String(final_id));
+                            part_obj.insert(
+                                "toolCallId".to_string(),
+                                Value::String(sanitize_tool_call_id(id_str)),
+                            );
                         }
                     }
                 }
@@ -299,9 +357,60 @@ fn transform_glm_message(message: &serde_json::Value) -> serde_json::Value {
     msg
 }
 
+fn requires_tool_call_id_sanitization(model_id: &str) -> bool {
+    let id = model_id.to_ascii_lowercase();
+    id.contains("mistral")
+        || id.contains("deepseek")
+        || id.contains("glm")
+        || id.contains("minimax")
+}
+
+fn sanitize_tool_call_id(id: &str) -> String {
+    let normalized: String = id
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>()
+        .chars()
+        .take(9)
+        .collect();
+
+    let padding_len = 9_usize.saturating_sub(normalized.chars().count());
+    let padding = std::iter::repeat_n('0', padding_len);
+    normalized.chars().chain(padding).collect()
+}
+
+fn sanitize_tool_call_ids_in_value(value: &mut Value) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                sanitize_tool_call_ids_in_value(item);
+            }
+        }
+        Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if matches!(
+                    key.as_str(),
+                    "toolCallId" | "tool_call_id" | "tool_use_id" | "call_id"
+                ) {
+                    if let Some(id) = child.as_str() {
+                        *child = Value::String(sanitize_tool_call_id(id));
+                        continue;
+                    }
+                }
+
+                sanitize_tool_call_ids_in_value(child);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::streaming::StreamPart;
+    use crate::ai::types::AiToolCall;
+    use serde_json::json;
 
     #[test]
     fn test_temperature_for_model() {
@@ -360,5 +469,72 @@ mod tests {
         // Non-OpenAI-compatible model
         let args = chat_template_args_for_model("claude-sonnet-4", true);
         assert!(args.is_none());
+    }
+
+    #[test]
+    fn request_transform_sets_parallel_tool_calls_for_responses() {
+        let body = json!({
+            "model": "gpt-5-codex",
+            "tools": [{"name": "read"}]
+        });
+
+        let transformed = apply_request_body_transform(
+            body,
+            ProviderId::OpenAI,
+            ApiFormat::OpenAIResponses,
+            "gpt-5-codex",
+        );
+
+        assert_eq!(transformed["parallel_tool_calls"], Value::Bool(true));
+    }
+
+    #[test]
+    fn request_transform_sanitizes_message_tool_ids() {
+        let body = json!({
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "toolCallId": "call_1:weird"
+                }]
+            }]
+        });
+
+        let transformed = apply_request_body_transform(
+            body,
+            ProviderId::MiniMax,
+            ApiFormat::Anthropic,
+            "minimax-m2.5",
+        );
+
+        assert_eq!(
+            transformed["messages"][0]["content"][0]["toolCallId"],
+            Value::String("call1weir".to_string())
+        );
+    }
+
+    #[test]
+    fn stream_part_transform_sanitizes_tool_ids() {
+        let part = StreamPart::ToolCallComplete {
+            tool_call: AiToolCall {
+                id: "call_1:weird".to_string(),
+                name: "read".to_string(),
+                arguments: json!({}),
+            },
+        };
+
+        let transformed = apply_stream_part_transform(
+            part,
+            ProviderId::MiniMax,
+            ApiFormat::Anthropic,
+            "minimax-m2.5",
+        );
+
+        match transformed {
+            StreamPart::ToolCallComplete { tool_call } => {
+                assert_eq!(tool_call.id, "call1weir");
+            }
+            other => panic!("unexpected part: {other:?}"),
+        }
     }
 }

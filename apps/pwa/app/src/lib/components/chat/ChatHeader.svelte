@@ -656,8 +656,11 @@
 					{:else if branchStatus === 'error'}
 						<p class="text-sm text-red-500">{branchError}</p>
 					{:else if branchStatus === 'ready'}
-						<label class="block text-xs text-muted-foreground">Session branch behavior</label>
+						<label for="session-branch-behavior" class="block text-xs text-muted-foreground">
+							Session branch behavior
+						</label>
 						<select
+							id="session-branch-behavior"
 							class="w-full rounded border border-input bg-background px-2 py-1.5 text-sm"
 							bind:value={branchMode}
 						>

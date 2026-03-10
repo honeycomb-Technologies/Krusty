@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use tracing::info;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 16;
+const SCHEMA_VERSION: i32 = 19;
 
 /// Shared database handle for connection reuse
 ///
@@ -615,6 +615,59 @@ impl Database {
                 "#,
             )?;
             self.set_schema_version_tx(&tx, 16)?;
+        }
+
+        // Migration 17: Context ledger + continuation contract persistence
+        if current_version < 17 {
+            info!("Running migration 17: Context continuation state");
+            tx.execute_batch(
+                r#"
+                ALTER TABLE sessions ADD COLUMN context_ledger_json TEXT;
+                ALTER TABLE sessions ADD COLUMN continuation_json TEXT;
+                "#,
+            )?;
+            self.set_schema_version_tx(&tx, 17)?;
+        }
+
+        // Migration 18: Typed interrupted-turn recovery state
+        if current_version < 18 {
+            info!("Running migration 18: Session recovery state");
+            tx.execute_batch(
+                r#"
+                ALTER TABLE sessions ADD COLUMN recovery_json TEXT;
+                "#,
+            )?;
+            self.set_schema_version_tx(&tx, 18)?;
+        }
+
+        // Migration 19: Structured runtime traces
+        if current_version < 19 {
+            info!("Running migration 19: Runtime traces");
+            tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS runtime_traces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    turn INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    failure_category TEXT,
+                    stop_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                    UNIQUE(session_id, sequence)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_runtime_traces_session_sequence
+                    ON runtime_traces(session_id, sequence);
+
+                CREATE INDEX IF NOT EXISTS idx_runtime_traces_session_run
+                    ON runtime_traces(session_id, run_id, sequence);
+                "#,
+            )?;
+            self.set_schema_version_tx(&tx, 19)?;
         }
 
         tx.commit()?;

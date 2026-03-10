@@ -15,7 +15,7 @@ mod selection;
 mod ui_state;
 
 pub use blocks::BlockManager;
-pub use chat::ChatState;
+pub use chat::{ChatState, StreamDrainMode, StreamDrainTelemetry};
 pub use hover::{HoverState, HoveredLink};
 pub use indices::BlockIndices;
 pub use layout::LayoutState;

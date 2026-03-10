@@ -11,13 +11,18 @@ use serde::Deserialize;
 use krusty_core::agent::pinch_context::{PinchContext, PinchContextInput};
 use krusty_core::agent::summarizer::{generate_summary, SummarizationResult};
 use krusty_core::ai::types::{Content, ModelMessage, Role};
-use krusty_core::{storage::Database, SessionManager};
+use krusty_core::plan::PlanManager;
+use krusty_core::storage::{Database, SessionInfo};
+use krusty_core::SessionManager;
 
 use crate::auth::CurrentUser;
 use crate::error::AppError;
+use crate::presence::{remove_presence, snapshot_presence, upsert_presence, SessionPresenceRecord};
 use crate::types::{
-    CreateSessionRequest, MessageResponse, PinchRequest, PinchResponse, SessionResponse,
-    SessionStateResponse, SessionWithMessagesResponse, UpdateSessionRequest,
+    CreateSessionRequest, MessageResponse, PinchRequest, PinchResponse,
+    SessionPresenceClientResponse, SessionPresenceHeartbeatRequest, SessionPresenceResponse,
+    SessionResponse, SessionStateResponse, SessionTraceResponse, SessionWithMessagesResponse,
+    UpdateSessionRequest,
 };
 use crate::AppState;
 
@@ -37,6 +42,15 @@ pub struct GetSessionQuery {
     pub offset: Option<usize>,
 }
 
+/// Query params for retrieving a session trace.
+#[derive(Debug, Deserialize)]
+pub struct GetSessionTraceQuery {
+    /// Maximum number of trace events to return.
+    pub limit: Option<usize>,
+    /// Return only events strictly after this persisted sequence.
+    pub after_sequence: Option<i64>,
+}
+
 /// Build the sessions router
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -49,6 +63,15 @@ pub fn router() -> Router<AppState> {
                 .delete(delete_session),
         )
         .route("/:id/state", get(get_session_state))
+        .route("/:id/trace", get(get_session_trace))
+        .route(
+            "/:id/presence",
+            get(get_session_presence).put(heartbeat_session_presence),
+        )
+        .route(
+            "/:id/presence/:client_id",
+            axum::routing::delete(remove_session_presence),
+        )
         .route("/:id/pinch", post(pinch_session))
 }
 
@@ -58,8 +81,7 @@ async fn list_sessions(
     user: Option<CurrentUser>,
     Query(query): Query<ListSessionsQuery>,
 ) -> Result<Json<Vec<SessionResponse>>, AppError> {
-    let db = Database::new(&state.db_path)?;
-    let session_manager = SessionManager::new(db);
+    let session_manager = open_session_manager(&state)?;
 
     let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
     let sessions = session_manager.list_sessions_for_user(query.working_dir.as_deref(), user_id)?;
@@ -73,8 +95,7 @@ async fn list_directories(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
 ) -> Result<Json<Vec<String>>, AppError> {
-    let db = Database::new(&state.db_path)?;
-    let session_manager = SessionManager::new(db);
+    let session_manager = open_session_manager(&state)?;
 
     let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
     let directories = session_manager.list_session_directories_for_user(user_id)?;
@@ -85,10 +106,10 @@ async fn list_directories(
 /// Create a new session
 async fn create_session(
     State(state): State<AppState>,
+    user: Option<CurrentUser>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<(StatusCode, Json<SessionResponse>), AppError> {
-    let db = Database::new(&state.db_path)?;
-    let session_manager = SessionManager::new(db);
+    let session_manager = open_session_manager(&state)?;
 
     let title = req.title.as_deref().unwrap_or("New Session");
     let target_branch = req.target_branch.as_deref().map(str::trim).and_then(|b| {
@@ -98,10 +119,11 @@ async fn create_session(
             Some(b)
         }
     });
-    let session_id = session_manager.create_session_with_target_branch(
+    let session_id = session_manager.create_session_for_user_with_target_branch(
         title,
         req.model.as_deref(),
         req.working_dir.as_deref(),
+        current_user_id(user.as_ref()),
         target_branch,
     )?;
 
@@ -115,15 +137,12 @@ async fn create_session(
 /// Get a session with its messages, with optional pagination
 async fn get_session(
     State(state): State<AppState>,
+    user: Option<CurrentUser>,
     Path(id): Path<String>,
     Query(query): Query<GetSessionQuery>,
 ) -> Result<Json<SessionWithMessagesResponse>, AppError> {
-    let db = Database::new(&state.db_path)?;
-    let session_manager = SessionManager::new(db);
-
-    let session = session_manager
-        .get_session(&id)?
-        .ok_or_else(|| AppError::NotFound(format!("Session {} not found", id)))?;
+    let session_manager = open_session_manager(&state)?;
+    let session = load_owned_session(&session_manager, &id, user.as_ref())?;
 
     let raw_messages = session_manager.load_session_messages(&id)?;
     let offset = query.offset.unwrap_or(0);
@@ -161,19 +180,8 @@ async fn update_session(
     Path(id): Path<String>,
     Json(req): Json<UpdateSessionRequest>,
 ) -> Result<Json<SessionResponse>, AppError> {
-    let db = Database::new(&state.db_path)?;
-    let session_manager = SessionManager::new(db);
-
-    // Verify session exists
-    let _session = session_manager
-        .get_session(&id)?
-        .ok_or_else(|| AppError::NotFound(format!("Session {} not found", id)))?;
-
-    // Verify ownership in multi-tenant mode
-    let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
-    if !session_manager.verify_session_ownership(&id, user_id)? {
-        return Err(AppError::NotFound(format!("Session {} not found", id)));
-    }
+    let session_manager = open_session_manager(&state)?;
+    ensure_owned_session(&session_manager, &id, user.as_ref())?;
 
     if req.title.is_none()
         && req.working_dir.is_none()
@@ -233,19 +241,8 @@ async fn delete_session(
     user: Option<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    let db = Database::new(&state.db_path)?;
-    let session_manager = SessionManager::new(db);
-
-    // Verify session exists
-    let _session = session_manager
-        .get_session(&id)?
-        .ok_or_else(|| AppError::NotFound(format!("Session {} not found", id)))?;
-
-    // Verify ownership in multi-tenant mode
-    let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
-    if !session_manager.verify_session_ownership(&id, user_id)? {
-        return Err(AppError::NotFound(format!("Session {} not found", id)));
-    }
+    let session_manager = open_session_manager(&state)?;
+    ensure_owned_session(&session_manager, &id, user.as_ref())?;
 
     session_manager.delete_session(&id)?;
 
@@ -264,19 +261,8 @@ async fn get_session_state(
     user: Option<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<SessionStateResponse>, AppError> {
-    let db = Database::new(&state.db_path)?;
-    let session_manager = SessionManager::new(db);
-
-    // Verify session exists
-    let session = session_manager
-        .get_session(&id)?
-        .ok_or_else(|| AppError::NotFound(format!("Session {} not found", id)))?;
-
-    // Verify ownership in multi-tenant mode
-    let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
-    if !session_manager.verify_session_ownership(&id, user_id)? {
-        return Err(AppError::NotFound(format!("Session {} not found", id)));
-    }
+    let session_manager = open_session_manager(&state)?;
+    let session = load_owned_session(&session_manager, &id, user.as_ref())?;
 
     // Get agent state
     let agent_state =
@@ -287,6 +273,10 @@ async fn get_session_state(
                 started_at: None,
                 last_event_at: None,
             });
+    let recovery = session_manager.load_recovery_state(&id)?;
+    let live_partial_assistant =
+        live_partial_assistant_for_state(&agent_state.state, recovery.as_ref());
+    let last_event_sequence = session_manager.load_runtime_trace_latest_sequence(&id)?;
 
     Ok(Json(SessionStateResponse {
         id,
@@ -294,22 +284,148 @@ async fn get_session_state(
         started_at: agent_state.started_at,
         last_event_at: agent_state.last_event_at,
         mode: session.work_mode,
+        recovery,
+        live_partial_assistant,
+        last_event_sequence,
     }))
+}
+
+/// Get compact runtime trace summary and recent events for a session.
+async fn get_session_trace(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Path(id): Path<String>,
+    Query(query): Query<GetSessionTraceQuery>,
+) -> Result<Json<SessionTraceResponse>, AppError> {
+    let session_manager = open_session_manager(&state)?;
+    ensure_owned_session(&session_manager, &id, user.as_ref())?;
+
+    const DEFAULT_TRACE_LIMIT: usize = 200;
+    const MAX_TRACE_LIMIT: usize = 1_000;
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_TRACE_LIMIT)
+        .min(MAX_TRACE_LIMIT);
+    let summary = session_manager.load_runtime_trace_summary(&id)?;
+    let latest_sequence = session_manager.load_runtime_trace_latest_sequence(&id)?;
+    let events = match query.after_sequence {
+        Some(after_sequence) => {
+            session_manager.load_runtime_trace_events_after(&id, after_sequence, Some(limit))?
+        }
+        None => session_manager.load_runtime_trace_events(&id, Some(limit))?,
+    };
+
+    Ok(Json(SessionTraceResponse {
+        id,
+        summary,
+        events,
+        latest_sequence,
+    }))
+}
+
+async fn get_session_presence(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Path(id): Path<String>,
+) -> Result<Json<SessionPresenceResponse>, AppError> {
+    let session_manager = open_session_manager(&state)?;
+    ensure_owned_session(&session_manager, &id, user.as_ref())?;
+
+    let mut registry = state.session_presence.write().await;
+    Ok(Json(map_presence_snapshot(snapshot_presence(
+        &mut registry,
+        &id,
+    ))))
+}
+
+async fn heartbeat_session_presence(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Path(id): Path<String>,
+    Json(req): Json<SessionPresenceHeartbeatRequest>,
+) -> Result<Json<SessionPresenceResponse>, AppError> {
+    let session_manager = open_session_manager(&state)?;
+    ensure_owned_session(&session_manager, &id, user.as_ref())?;
+
+    let mut registry = state.session_presence.write().await;
+    let snapshot = upsert_presence(
+        &mut registry,
+        &id,
+        SessionPresenceRecord {
+            client_id: req.client_id,
+            surface: req.surface,
+            capability: req.capability,
+            user_id: current_user_id(user.as_ref()).map(ToOwned::to_owned),
+            last_seen_at: chrono::Utc::now(),
+            last_event_sequence: req.last_event_sequence,
+        },
+    );
+
+    Ok(Json(map_presence_snapshot(snapshot)))
+}
+
+async fn remove_session_presence(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Path((id, client_id)): Path<(String, String)>,
+) -> Result<Json<SessionPresenceResponse>, AppError> {
+    let session_manager = open_session_manager(&state)?;
+    ensure_owned_session(&session_manager, &id, user.as_ref())?;
+
+    let mut registry = state.session_presence.write().await;
+    Ok(Json(map_presence_snapshot(remove_presence(
+        &mut registry,
+        &id,
+        &client_id,
+    ))))
+}
+
+fn live_partial_assistant_for_state(
+    agent_state: &str,
+    recovery: Option<&krusty_core::storage::SessionRecoveryState>,
+) -> Option<krusty_core::storage::PartialAssistantState> {
+    if matches!(
+        agent_state,
+        "streaming" | "tool_executing" | "awaiting_input"
+    ) {
+        return recovery.map(|recovery| recovery.partial_assistant.clone());
+    }
+    None
+}
+
+fn map_presence_snapshot(
+    snapshot: crate::presence::SessionPresenceSnapshot,
+) -> SessionPresenceResponse {
+    SessionPresenceResponse {
+        session_id: snapshot.session_id,
+        active_viewers: snapshot.active_viewers,
+        active_controllers: snapshot.active_controllers,
+        stale_clients: snapshot.stale_clients,
+        clients: snapshot
+            .clients
+            .into_iter()
+            .map(|client| SessionPresenceClientResponse {
+                client_id: client.client_id,
+                surface: client.surface,
+                capability: client.capability,
+                user_id: client.user_id,
+                last_seen_at: client.last_seen_at,
+                last_event_sequence: client.last_event_sequence,
+                stale: client.stale,
+            })
+            .collect(),
+    }
 }
 
 /// Pinch a session - create a child session with summarized context
 async fn pinch_session(
     State(state): State<AppState>,
+    user: Option<CurrentUser>,
     Path(id): Path<String>,
     Json(req): Json<PinchRequest>,
 ) -> Result<Json<PinchResponse>, AppError> {
-    let db = Database::new(&state.db_path)?;
-    let session_manager = SessionManager::new(db);
-
-    // Get source session
-    let source_session = session_manager
-        .get_session(&id)?
-        .ok_or_else(|| AppError::NotFound(format!("Session {} not found", id)))?;
+    let session_manager = open_session_manager(&state)?;
+    let source_session = load_owned_session(&session_manager, &id, user.as_ref())?;
 
     // Load messages and convert to ModelMessage format
     let raw_messages = session_manager.load_session_messages(&id)?;
@@ -354,6 +470,11 @@ async fn pinch_session(
     };
 
     // Create pinch context
+    let active_plan = PlanManager::new((*state.db_path).clone())
+        .ok()
+        .and_then(|pm| pm.get_active_plan(&id).ok().flatten())
+        .map(|plan| plan.to_markdown());
+
     let pinch_ctx = PinchContext::from_input(PinchContextInput {
         source_session_id: id.clone(),
         source_session_title: source_session.title.clone(),
@@ -363,7 +484,7 @@ async fn pinch_session(
         direction: req.direction,
         project_context: None,     // No project context for now
         key_file_contents: vec![], // No key file contents for now
-        active_plan: None,         // No active plan for now
+        active_plan,
     });
 
     // Create the child session
@@ -401,4 +522,248 @@ async fn pinch_session(
         key_decisions: summary_result.key_decisions,
         pending_tasks: summary_result.pending_tasks,
     }))
+}
+
+fn open_session_manager(state: &AppState) -> Result<SessionManager, AppError> {
+    Ok(SessionManager::new(Database::new(&state.db_path)?))
+}
+
+fn current_user_id(user: Option<&CurrentUser>) -> Option<&str> {
+    user.and_then(|u| u.0.user_id.as_deref())
+}
+
+fn load_session_or_404(
+    session_manager: &SessionManager,
+    session_id: &str,
+) -> Result<SessionInfo, AppError> {
+    session_manager
+        .get_session(session_id)?
+        .ok_or_else(|| AppError::NotFound(format!("Session {} not found", session_id)))
+}
+
+fn ensure_owned_session(
+    session_manager: &SessionManager,
+    session_id: &str,
+    user: Option<&CurrentUser>,
+) -> Result<(), AppError> {
+    let _session = load_session_or_404(session_manager, session_id)?;
+    let user_id = current_user_id(user);
+    if !session_manager.verify_session_ownership(session_id, user_id)? {
+        return Err(AppError::NotFound(format!(
+            "Session {} not found",
+            session_id
+        )));
+    }
+    Ok(())
+}
+
+fn load_owned_session(
+    session_manager: &SessionManager,
+    session_id: &str,
+    user: Option<&CurrentUser>,
+) -> Result<SessionInfo, AppError> {
+    let session = load_session_or_404(session_manager, session_id)?;
+    let user_id = current_user_id(user);
+    if !session_manager.verify_session_ownership(session_id, user_id)? {
+        return Err(AppError::NotFound(format!(
+            "Session {} not found",
+            session_id
+        )));
+    }
+    Ok(session)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use axum::extract::{Path, Query, State};
+    use axum::Json;
+    use tokio::sync::{Mutex, RwLock};
+
+    use krusty_core::agent::{AgentCancellation, UserHookManager};
+    use krusty_core::ai::models::create_model_registry;
+    use krusty_core::mcp::McpManager;
+    use krusty_core::process::ProcessRegistry;
+    use krusty_core::skills::SkillsManager;
+    use krusty_core::storage::credentials::CredentialStore;
+    use krusty_core::storage::Database;
+    use krusty_core::tools::registry::ToolRegistry;
+
+    use super::*;
+    use crate::auth::{AuthenticatedUser, CurrentUser};
+    use crate::AppState;
+
+    fn create_test_state() -> (AppState, PathBuf) {
+        let temp_dir =
+            std::env::temp_dir().join(format!("krusty-server-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        let db_path = temp_dir.join("krusty.db");
+        Database::new(&db_path).expect("database should initialize");
+        let working_dir = temp_dir.join("workspace");
+        std::fs::create_dir_all(&working_dir).expect("workspace should exist");
+
+        (
+            AppState {
+                server_port: 3000,
+                db_path: Arc::new(db_path),
+                working_dir: Arc::new(working_dir.clone()),
+                ai_client: None,
+                tool_registry: Arc::new(ToolRegistry::new()),
+                process_registry: Arc::new(ProcessRegistry::new()),
+                model_registry: create_model_registry(),
+                credential_store: Arc::new(RwLock::new(CredentialStore::default())),
+                mcp_manager: Arc::new(McpManager::new(working_dir.clone())),
+                hook_manager: Arc::new(RwLock::new(UserHookManager::new())),
+                skills_manager: Arc::new(RwLock::new(SkillsManager::with_defaults(&working_dir))),
+                cancellation: AgentCancellation::new(),
+                session_locks: Arc::new(RwLock::new(HashMap::new())),
+                session_inputs: Arc::new(RwLock::new(HashMap::new())),
+                session_presence: Arc::new(RwLock::new(HashMap::new())),
+                remote_access: Arc::new(RwLock::new(crate::remote_access::RemoteAccessConfig {
+                    enabled: true,
+                    token: "test-token".to_string(),
+                })),
+                active_agent_streams: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                push_service: None,
+                oauth_flows: Arc::new(Mutex::new(HashMap::new())),
+            },
+            temp_dir,
+        )
+    }
+
+    fn create_test_user(state: &AppState, user_id: &str) {
+        let db = Database::new(&state.db_path).expect("database should open");
+        db.conn()
+            .execute(
+                "INSERT INTO users (id, email, license_tier) VALUES (?1, ?2, ?3)",
+                (user_id, format!("{user_id}@example.com"), "free"),
+            )
+            .expect("user should insert");
+    }
+
+    fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
+        CurrentUser(AuthenticatedUser {
+            user_id: Some(user_id.to_string()),
+            home_dir: Some(home_dir.to_path_buf()),
+        })
+    }
+
+    #[tokio::test]
+    async fn create_session_persists_user_ownership() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let result = create_session(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Json(CreateSessionRequest {
+                title: Some("Owned Session".to_string()),
+                model: None,
+                working_dir: None,
+                target_branch: None,
+            }),
+        )
+        .await;
+        let (_, Json(response)) = match result {
+            Ok(response) => response,
+            Err(_) => panic!("session creation should succeed"),
+        };
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let session = session_manager
+            .get_session(&response.id)
+            .expect("session lookup should succeed")
+            .expect("session should exist");
+
+        assert_eq!(session.user_id.as_deref(), Some("alice"));
+    }
+
+    #[tokio::test]
+    async fn get_session_rejects_foreign_owner() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        create_test_user(&state, "bob");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let session_id = session_manager
+            .create_session_for_user("Owned Session", None, None, Some("alice"))
+            .expect("session creation should succeed");
+        session_manager
+            .save_message(&session_id, "user", r#"[{"type":"text","text":"hello"}]"#)
+            .expect("message should save");
+
+        let result = get_session(
+            State(state),
+            Some(current_user("bob", std::path::Path::new("/tmp"))),
+            Path(session_id),
+            Query(GetSessionQuery {
+                limit: None,
+                offset: None,
+            }),
+        )
+        .await;
+
+        assert!(matches!(result, Err(AppError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn presence_heartbeat_tracks_active_controller_for_owned_session() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let session_id = session_manager
+            .create_session_for_user("Owned Session", None, None, Some("alice"))
+            .expect("session creation should succeed");
+
+        let Json(response) = heartbeat_session_presence(
+            State(state),
+            Some(current_user("alice", std::path::Path::new("/tmp"))),
+            Path(session_id),
+            Json(SessionPresenceHeartbeatRequest {
+                client_id: "client-1".to_string(),
+                surface: "pwa".to_string(),
+                capability: crate::presence::PresenceCapability::Controller,
+                last_event_sequence: Some(12),
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("presence heartbeat should succeed"));
+
+        assert_eq!(response.active_viewers, 1);
+        assert_eq!(response.active_controllers, 1);
+        assert_eq!(response.clients.len(), 1);
+        assert_eq!(response.clients[0].client_id, "client-1");
+        assert_eq!(response.clients[0].last_event_sequence, Some(12));
+    }
+
+    #[test]
+    fn live_partial_assistant_only_surfaces_for_active_states() {
+        let recovery = krusty_core::storage::SessionRecoveryState::new(
+            krusty_core::storage::RecoveryStatus::Streaming,
+            None,
+            None,
+            krusty_core::storage::PartialAssistantState {
+                text: "partial".to_string(),
+                thinking: "reasoning".to_string(),
+                tool_calls: Vec::new(),
+            },
+            krusty_core::storage::RecoveryDecision::Resumable {
+                latest_user_objective: "finish task".to_string(),
+            },
+        );
+
+        assert!(super::live_partial_assistant_for_state("idle", Some(&recovery)).is_none());
+
+        let live = super::live_partial_assistant_for_state("streaming", Some(&recovery))
+            .expect("active state should surface live partial");
+        assert_eq!(live.text, "partial");
+        assert_eq!(live.thinking, "reasoning");
+    }
 }

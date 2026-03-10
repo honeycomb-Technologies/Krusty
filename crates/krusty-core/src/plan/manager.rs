@@ -11,8 +11,9 @@ use chrono::Utc;
 use std::path::PathBuf;
 
 use super::file::{PlanFile, PlanStatus};
+use super::lifecycle::{is_active_plan, PlanLifecycleState};
 use crate::paths;
-use crate::storage::{Database, PlanStore, SharedDatabase};
+use crate::storage::{Database, PlanStore, SharedDatabase, WorkMode};
 
 /// Manages plans with SQLite storage
 pub struct PlanManager {
@@ -48,6 +49,23 @@ impl PlanManager {
             .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         let store = PlanStore::new(&db);
         store.get_plan_for_session(session_id)
+    }
+
+    /// Get the active in-progress plan for a session, filtering out archived plans.
+    pub fn get_active_plan(&self, session_id: &str) -> Result<Option<PlanFile>> {
+        Ok(self.get_plan(session_id)?.filter(is_active_plan))
+    }
+
+    /// Resolve canonical plan lifecycle state for a session.
+    pub fn get_lifecycle_state(
+        &self,
+        session_id: &str,
+        work_mode: WorkMode,
+    ) -> Result<PlanLifecycleState> {
+        Ok(PlanLifecycleState::from_session_mode(
+            work_mode,
+            self.get_plan(session_id)?,
+        ))
     }
 
     /// Save a plan (creates or updates in database)
@@ -426,5 +444,19 @@ mod tests {
 
         manager.abandon_plan("session-123").unwrap();
         assert!(!manager.has_plan("session-123"));
+    }
+
+    #[test]
+    fn test_get_active_plan_filters_completed_plan() {
+        let (manager, _temp) = setup_test_manager();
+
+        let mut plan = manager.create_plan("Test", "session-123", None).unwrap();
+        let phase = plan.add_phase("Phase 1");
+        phase.add_task("Done task");
+        plan.complete_task("1.1", "Implemented").unwrap();
+        manager.save_plan(&plan).unwrap();
+
+        assert!(manager.get_active_plan("session-123").unwrap().is_none());
+        assert!(manager.get_plan("session-123").unwrap().is_some());
     }
 }

@@ -2,12 +2,13 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
 use super::database::Database;
+use super::{RuntimeTraceEvent, RuntimeTraceStore, RuntimeTraceSummary, SessionRecoveryState};
 use crate::agent::PinchContext;
 
 const LIST_SESSIONS_SQL_ALL: &str =
@@ -415,6 +416,92 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Persist context-ledger and continuation contracts for deterministic resume.
+    pub fn update_context_continuation_state(
+        &self,
+        session_id: &str,
+        context_ledger_json: &str,
+        continuation_json: &str,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.db.conn().execute(
+            "UPDATE sessions
+             SET context_ledger_json = ?1, continuation_json = ?2, updated_at = ?3
+             WHERE id = ?4",
+            params![context_ledger_json, continuation_json, now, session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Load persisted continuation contracts.
+    pub fn load_context_continuation_state(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(String, String)>> {
+        let row = self.db.conn().query_row(
+            "SELECT context_ledger_json, continuation_json
+             FROM sessions
+             WHERE id = ?1",
+            [session_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )?;
+
+        Ok(match row {
+            (Some(ledger), Some(continuation)) => Some((ledger, continuation)),
+            _ => None,
+        })
+    }
+
+    /// Persist explicit interrupted-turn recovery state separately from conversation history.
+    pub fn update_recovery_state(
+        &self,
+        session_id: &str,
+        recovery_state: &SessionRecoveryState,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let recovery_json = serde_json::to_string(recovery_state)?;
+        self.db.conn().execute(
+            "UPDATE sessions
+             SET recovery_json = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![recovery_json, now, session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Load persisted interrupted-turn recovery state.
+    pub fn load_recovery_state(&self, session_id: &str) -> Result<Option<SessionRecoveryState>> {
+        let recovery_json = self.db.conn().query_row(
+            "SELECT recovery_json
+             FROM sessions
+             WHERE id = ?1",
+            [session_id],
+            |row| row.get::<_, Option<String>>(0),
+        )?;
+
+        recovery_json
+            .map(|json| serde_json::from_str(&json))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    /// Clear persisted recovery state once the interrupted turn has been finalized or superseded.
+    pub fn clear_recovery_state(&self, session_id: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.db.conn().execute(
+            "UPDATE sessions
+             SET recovery_json = NULL, updated_at = ?1
+             WHERE id = ?2",
+            params![now, session_id],
+        )?;
+        Ok(())
+    }
+
     /// Delete a session and all its messages
     pub fn delete_session(&self, session_id: &str) -> Result<()> {
         // First, clear parent_session_id references from children (orphan them)
@@ -455,6 +542,15 @@ impl SessionManager {
     /// The content field stores JSON-serialized Vec<Content> for full fidelity
     pub fn save_message(&self, session_id: &str, role: &str, content_json: &str) -> Result<()> {
         super::messages::MessageStore::new(&self.db).save_message(session_id, role, content_json)
+    }
+
+    /// Replace every persisted message for a session with a new ordered set.
+    pub fn replace_session_messages(
+        &self,
+        session_id: &str,
+        messages: &[(String, String)],
+    ) -> Result<()> {
+        super::messages::MessageStore::new(&self.db).replace_session_messages(session_id, messages)
     }
 
     /// Update the most recent message of a given role in a session
@@ -554,11 +650,21 @@ impl SessionManager {
     ) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
+        let parent_user_id = self
+            .db
+            .conn()
+            .query_row(
+                "SELECT user_id FROM sessions WHERE id = ?1",
+                [parent_session_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
 
         // Create new session with parent reference
         self.db.conn().execute(
-            "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, parent_session_id, target_branch)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, user_id, parent_session_id, target_branch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 id,
                 title,
@@ -566,6 +672,7 @@ impl SessionManager {
                 now,
                 model,
                 working_dir,
+                parent_user_id,
                 parent_session_id,
                 target_branch
             ],
@@ -618,6 +725,35 @@ impl SessionManager {
     pub fn list_active_sessions(&self) -> Result<Vec<(String, super::agent_state::AgentState)>> {
         super::agent_state::AgentStateStore::new(&self.db).list_active_sessions()
     }
+
+    /// Load compact runtime trace events for a session.
+    pub fn load_runtime_trace_events(
+        &self,
+        session_id: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<RuntimeTraceEvent>> {
+        RuntimeTraceStore::new(&self.db).list_events(session_id, limit)
+    }
+
+    /// Load compact runtime trace events after a known sequence.
+    pub fn load_runtime_trace_events_after(
+        &self,
+        session_id: &str,
+        after_sequence: i64,
+        limit: Option<usize>,
+    ) -> Result<Vec<RuntimeTraceEvent>> {
+        RuntimeTraceStore::new(&self.db).list_events_after(session_id, after_sequence, limit)
+    }
+
+    /// Load replay-friendly runtime trace summary for a session.
+    pub fn load_runtime_trace_summary(&self, session_id: &str) -> Result<RuntimeTraceSummary> {
+        RuntimeTraceStore::new(&self.db).summarize_session(session_id)
+    }
+
+    /// Load the most recent persisted runtime trace sequence for a session.
+    pub fn load_runtime_trace_latest_sequence(&self, session_id: &str) -> Result<Option<i64>> {
+        RuntimeTraceStore::new(&self.db).latest_sequence(session_id)
+    }
 }
 
 #[cfg(test)]
@@ -625,6 +761,8 @@ mod tests {
     use rusqlite::params;
     use tempfile::TempDir;
 
+    use crate::agent::pinch_context::PinchContext;
+    use crate::agent::summarizer::SummarizationResult;
     use crate::storage::sessions::SessionManager;
     use crate::storage::Database;
 
@@ -929,6 +1067,56 @@ mod tests {
     }
 
     #[test]
+    fn test_create_linked_session_preserves_parent_user_id() {
+        let (db, _temp) = create_test_db();
+        let user_id = "user-123";
+        create_test_user(&db, user_id);
+
+        let manager = SessionManager::new(db);
+        let parent_session_id = manager
+            .create_session_for_user(
+                "Parent Session",
+                Some("claude-3-5-sonnet"),
+                Some("/tmp"),
+                Some(user_id),
+            )
+            .expect("Failed to create parent session");
+        let pinch_ctx = PinchContext::new(
+            parent_session_id.clone(),
+            "Parent Session".to_string(),
+            SummarizationResult::default(),
+            vec![],
+            None,
+            None,
+            None,
+            vec![],
+            None,
+        );
+
+        let child_session_id = manager
+            .create_linked_session(
+                "Child Session",
+                &parent_session_id,
+                &pinch_ctx,
+                Some("claude-3-5-sonnet"),
+                Some("/tmp"),
+                None,
+            )
+            .expect("Failed to create child session");
+
+        let child_session = manager
+            .get_session(&child_session_id)
+            .expect("Failed to load child session")
+            .expect("Child session should exist");
+
+        assert_eq!(child_session.user_id.as_deref(), Some(user_id));
+        assert_eq!(
+            child_session.parent_session_id.as_deref(),
+            Some(parent_session_id.as_str())
+        );
+    }
+
+    #[test]
     fn test_get_session() {
         // Test retrieving a session by ID
         let (db, _temp) = create_test_db();
@@ -1141,5 +1329,84 @@ mod tests {
 
         let state = manager.get_agent_state(&session_id).unwrap();
         assert!(state.last_event_at.is_some(), "Should have last_event_at");
+    }
+
+    #[test]
+    fn test_context_continuation_state_round_trip() {
+        let (db, _temp) = create_test_db();
+        let manager = SessionManager::new(db);
+        let session_id = manager
+            .create_session("Test Session", Some("gpt-5"), Some("/tmp"))
+            .expect("Failed to create session");
+
+        manager
+            .update_context_continuation_state(
+                &session_id,
+                r#"{"schema_version":1,"canonical_messages":2}"#,
+                r#"{"schema_version":1,"decision":{"kind":"resumable","latest_user_objective":"ship fix"}}"#,
+            )
+            .expect("Failed to persist context continuation state");
+
+        let loaded = manager
+            .load_context_continuation_state(&session_id)
+            .expect("Failed to load context continuation state");
+
+        let (ledger, continuation) = loaded.expect("Expected persisted state");
+        assert!(ledger.contains("\"schema_version\":1"));
+        assert!(continuation.contains("\"kind\":\"resumable\""));
+    }
+
+    #[test]
+    fn test_recovery_state_round_trip() {
+        use crate::agent::loop_events::LoopStopReason;
+        use crate::storage::{
+            PartialAssistantState, RecoveryDecision, RecoveryStatus, RecoveryToolCall,
+            SessionRecoveryState,
+        };
+
+        let (db, _temp) = create_test_db();
+        let manager = SessionManager::new(db);
+        let session_id = manager
+            .create_session("Interrupted Session", Some("gpt-5"), Some("/tmp"))
+            .expect("Failed to create session");
+
+        let recovery = SessionRecoveryState::new(
+            RecoveryStatus::Interrupted,
+            Some(LoopStopReason::StreamIdleTimeout),
+            Some("stream timeout".to_string()),
+            PartialAssistantState {
+                text: "partial answer".to_string(),
+                thinking: String::new(),
+                tool_calls: vec![RecoveryToolCall {
+                    id: "call-1".to_string(),
+                    name: "read".to_string(),
+                }],
+            },
+            RecoveryDecision::NonResumable {
+                reason: crate::storage::RecoveryNonResumableReason::PendingToolCall,
+            },
+        );
+
+        manager
+            .update_recovery_state(&session_id, &recovery)
+            .expect("Failed to persist recovery state");
+
+        let loaded = manager
+            .load_recovery_state(&session_id)
+            .expect("Failed to load recovery state")
+            .expect("Expected persisted recovery state");
+
+        assert_eq!(loaded, recovery);
+
+        manager
+            .clear_recovery_state(&session_id)
+            .expect("Failed to clear recovery state");
+        assert!(
+            manager
+                .load_recovery_state(&session_id)
+                .expect("Failed to reload recovery state")
+                .is_none(),
+            "Expected recovery state to be cleared"
+        );
     }
 }

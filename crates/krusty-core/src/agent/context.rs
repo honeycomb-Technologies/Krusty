@@ -5,7 +5,7 @@
 //! This ensures the AI is always aware of the active plan, available skills,
 //! and project-specific instructions.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tokio::sync::RwLock;
 
@@ -78,7 +78,7 @@ pub fn build_plan_context(db_path: &Path, session_id: &str, work_mode: WorkMode)
         Err(_) => return String::new(),
     };
 
-    let plan = match plan_manager.get_plan(session_id) {
+    let plan = match plan_manager.get_active_plan(session_id) {
         Ok(Some(p)) => p,
         _ => {
             return if work_mode == WorkMode::Plan {
@@ -190,17 +190,102 @@ pub fn build_skills_context(skills_manager: &RwLock<SkillsManager>) -> String {
 
 /// Build project context from instruction files in the working directory.
 ///
-/// Searches for well-known instruction files (KRAB.md, CLAUDE.md, etc.)
-/// and returns the first one found wrapped in marker tags.
+/// Searches from the project root down to the working directory and
+/// concatenates the closest instruction file from each directory.
 pub fn build_project_context(working_dir: &Path) -> String {
-    for filename in PROJECT_FILES {
-        let path = working_dir.join(filename);
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            return format!(
-                "[PROJECT INSTRUCTIONS - {}]\n\n{}\n\n[END PROJECT INSTRUCTIONS]",
-                filename, content
-            );
+    let instruction_files = discover_instruction_files(working_dir);
+    if instruction_files.is_empty() {
+        return String::new();
+    }
+
+    let mut sections = Vec::new();
+    for path in instruction_files {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if content.trim().is_empty() {
+            continue;
+        }
+
+        let label = path
+            .strip_prefix(working_dir)
+            .ok()
+            .map(|p| p.display().to_string())
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| path.display().to_string());
+
+        sections.push(format!(
+            "[PROJECT INSTRUCTIONS - {}]\n\n{}\n\n[END PROJECT INSTRUCTIONS]",
+            label, content
+        ));
+    }
+
+    sections.join("\n\n")
+}
+
+fn discover_instruction_files(working_dir: &Path) -> Vec<PathBuf> {
+    let start = working_dir
+        .canonicalize()
+        .unwrap_or_else(|_| working_dir.to_path_buf());
+    let root = discover_project_root(&start);
+    let mut dirs = Vec::new();
+    let mut current = start.as_path();
+
+    loop {
+        dirs.push(current.to_path_buf());
+        if current == root {
+            break;
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+    }
+
+    dirs.reverse();
+
+    let mut files = Vec::new();
+    for dir in dirs {
+        if let Some(path) = PROJECT_FILES
+            .iter()
+            .map(|name| dir.join(name))
+            .find(|path| path.is_file())
+        {
+            files.push(path);
         }
     }
-    String::new()
+
+    files
+}
+
+fn discover_project_root(working_dir: &Path) -> &Path {
+    for ancestor in working_dir.ancestors() {
+        if ancestor.join(".git").exists() {
+            return ancestor;
+        }
+    }
+    working_dir
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_project_context;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn project_context_loads_hierarchical_instruction_files() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        let nested = repo.join("a").join("b");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(repo.join("AGENTS.md"), "root instructions").unwrap();
+        fs::write(repo.join("a").join("CLAUDE.md"), "nested instructions").unwrap();
+
+        let context = build_project_context(&nested);
+
+        assert!(context.contains("root instructions"));
+        assert!(context.contains("nested instructions"));
+    }
 }

@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 use crate::agent::subagent::{SubAgentPool, SubAgentTask};
 use crate::agent::{AgentCancellation, SharedBuildContext};
 use crate::ai::client::AiClient;
-use crate::tools::registry::Tool;
+use crate::tools::registry::{DelegationPolicy, Tool};
 use crate::tools::{parse_params, ToolContext, ToolResult};
 
 /// Build tool for spawning parallel Opus builder agents
@@ -133,6 +133,8 @@ impl Tool for BuildTool {
 
         // Build tasks - all use Opus for high-quality code generation
         let mut tasks: Vec<SubAgentTask> = Vec::new();
+        let delegation_policy =
+            DelegationPolicy::for_subagent_build(ctx.permission_mode, ctx.subagent_max_turns);
 
         if let Some(ref components) = params.components {
             let total = components.len();
@@ -174,7 +176,11 @@ impl Tool for BuildTool {
 
                 let mut task = SubAgentTask::new(format!("builder-{}", i), task_prompt)
                     .with_name(name)
-                    .with_working_dir(ctx.working_dir.clone());
+                    .with_working_dir(ctx.working_dir.clone())
+                    .with_delegation_policy(delegation_policy.clone());
+                if let Some(max_turns) = ctx.subagent_max_turns {
+                    task = task.with_max_turns(max_turns);
+                }
 
                 // Attach plan task ID if provided for auto-completion
                 if let Some(ref task_ids) = params.task_ids {
@@ -190,8 +196,14 @@ impl Tool for BuildTool {
             tasks.push(
                 SubAgentTask::new("builder-main", params.prompt.clone())
                     .with_name("main")
-                    .with_working_dir(ctx.working_dir.clone()),
+                    .with_working_dir(ctx.working_dir.clone())
+                    .with_delegation_policy(delegation_policy.clone()),
             );
+            if let Some(max_turns) = ctx.subagent_max_turns {
+                if let Some(last) = tasks.last_mut() {
+                    last.max_turns_override = Some(max_turns);
+                }
+            }
         }
 
         info!("Build tool: Created {} builder tasks", tasks.len());
@@ -199,8 +211,27 @@ impl Tool for BuildTool {
             debug!("Builder {}: id={}, name={}", i, task.id, task.name);
         }
 
+        // Use session-scoped AI client when available so provider/model switching
+        // immediately applies to builder sub-agents.
+        let client = if let Some(ref session_client) = ctx.ai_client {
+            if session_client.provider_id() != self.client.provider_id()
+                || session_client.config().model != self.client.config().model
+            {
+                info!(
+                    base_provider = %self.client.provider_id(),
+                    session_provider = %session_client.provider_id(),
+                    base_model = %self.client.config().model,
+                    session_model = %session_client.config().model,
+                    "Build tool using session AI client instead of registration-time client"
+                );
+            }
+            session_client.clone()
+        } else {
+            self.client.clone()
+        };
+
         // Create pool and execute with build context
-        let pool = SubAgentPool::new(self.client.clone(), self.cancellation.clone())
+        let pool = SubAgentPool::new(client, self.cancellation.clone())
             .with_concurrency(concurrency)
             .with_override_model(ctx.current_model.clone());
 
@@ -224,19 +255,16 @@ impl Tool for BuildTool {
         // Get final stats from context
         let stats = context.stats();
 
-        // Format results
-        let mut output = String::new();
         let mut all_files: Vec<String> = Vec::new();
         let mut total_turns = 0;
         let mut total_duration_ms = 0u64;
         let mut errors: Vec<String> = Vec::new();
+        let mut builders = Vec::new();
 
         for result in &results {
-            if result.success {
-                output.push_str(&format!("\n## Builder: {}\n", result.task_id));
-                output.push_str(&result.output);
-                output.push('\n');
-            } else if let Some(err) = &result.error {
+            builders.push(result.evidence_json());
+
+            if let Some(err) = &result.error {
                 errors.push(format!("{}: {}", result.task_id, err));
             }
 
@@ -245,50 +273,48 @@ impl Tool for BuildTool {
             total_duration_ms += result.duration_ms;
         }
 
-        // Add summary with build stats
-        let mut summary = format!(
-            "\n---\n**Build Complete**: {} builders, {} turns, {}ms\n\
-             **Changes**: +{} -{} lines, {} files\n\
-             **Locks**: {} contentions",
-            results.len(),
-            total_turns,
-            total_duration_ms,
-            stats.lines_added,
-            stats.lines_removed,
-            stats.files_modified,
-            stats.lock_contentions,
-        );
-
-        // Add lock wait time info if significant
-        if stats.total_lock_wait_ms > 0 {
-            summary.push_str(&format!(
-                ", {:.1}s total wait",
-                stats.total_lock_wait_ms as f64 / 1000.0
-            ));
-        }
-
-        // Report high contention files
-        if !stats.high_contention_files.is_empty() {
-            summary.push_str("\n**High Contention Files**:");
-            for (path, duration) in &stats.high_contention_files {
-                let filename = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.display().to_string());
-                summary.push_str(&format!(" {} ({:.1}s)", filename, duration.as_secs_f64()));
+        let mut unique_files = Vec::new();
+        for file in all_files {
+            if !unique_files.iter().any(|existing| existing == &file) {
+                unique_files.push(file);
             }
         }
 
-        output.push_str(&summary);
+        let message = format!(
+            "Build completed: {} builders, {} turns, +{} -{} lines across {} files",
+            results.len(),
+            total_turns,
+            stats.lines_added,
+            stats.lines_removed,
+            stats.files_modified,
+        );
 
-        if !errors.is_empty() {
-            output.push_str("\n**Errors**: ");
-            output.push_str(&errors.join(", "));
-        }
+        let high_contention_files = stats
+            .high_contention_files
+            .iter()
+            .map(|(path, duration)| {
+                json!({
+                    "file": path.display().to_string(),
+                    "wait_secs": duration.as_secs_f64(),
+                })
+            })
+            .collect::<Vec<_>>();
 
-        ToolResult {
-            output,
-            is_error: false,
-        }
+        ToolResult::success_data(json!({
+            "message": message,
+            "builder_count": results.len(),
+            "total_turns": total_turns,
+            "total_duration_ms": total_duration_ms,
+            "files_examined": unique_files,
+            "builders": builders,
+            "lines_added": stats.lines_added,
+            "lines_removed": stats.lines_removed,
+            "files_modified": stats.files_modified,
+            "lock_contentions": stats.lock_contentions,
+            "total_lock_wait_ms": stats.total_lock_wait_ms,
+            "high_contention_files": high_contention_files,
+            "errors": errors,
+            "delegation_policy": delegation_policy.audit_json(),
+        }))
     }
 }

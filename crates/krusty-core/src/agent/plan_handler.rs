@@ -153,7 +153,7 @@ pub fn handle_plan_task(call: &AiToolCall, session_id: &str, db_path: &Path) -> 
         }
     };
 
-    let mut plan = match plan_manager.get_plan(session_id) {
+    let mut plan = match plan_manager.get_active_plan(session_id) {
         Ok(Some(plan)) => plan,
         Ok(None) => {
             return ToolResult {

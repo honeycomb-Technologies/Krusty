@@ -10,7 +10,7 @@
 //! ## Custom Hooks
 //! Implement `PreToolHook` or `PostToolHook` traits for custom behavior.
 
-use crate::tools::registry::{tool_category, ToolCategory, ToolContext, ToolResult};
+use crate::tools::registry::{tool_policy, ToolContext, ToolResult};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -402,7 +402,7 @@ impl PlanModeHook {
     }
 
     fn is_write_tool(&self, name: &str) -> bool {
-        matches!(tool_category(name), ToolCategory::Write)
+        !tool_policy(name).allowed_in_plan_mode
     }
 
     fn is_modifying_bash(&self, command: &str) -> bool {

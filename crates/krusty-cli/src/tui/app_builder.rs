@@ -96,6 +96,13 @@ pub async fn init_services(
     let current_model = preferences
         .as_ref()
         .and_then(|p| p.get_current_model())
+        .filter(|model| !model.is_empty())
+        .or_else(|| {
+            builtin_providers()
+                .iter()
+                .find(|provider| provider.id == active_provider)
+                .map(|provider| provider.default_model().to_string())
+        })
         .unwrap_or_default();
 
     // Skills manager
@@ -260,16 +267,36 @@ fn init_model_registry(preferences: &Option<Preferences>) -> SharedModelRegistry
     }
     tracing::info!("Model registry initialized with static models");
 
-    // Load cached OpenRouter models
+    // Load cached models for dynamic providers
     if let Some(ref prefs) = preferences {
-        if let Some(cached_models) = prefs.get_cached_openrouter_models() {
-            futures::executor::block_on(
-                model_registry.set_models(ProviderId::OpenRouter, cached_models.clone()),
-            );
-            tracing::info!(
-                "Loaded {} cached OpenRouter models from preferences",
-                cached_models.len()
-            );
+        for provider in [ProviderId::OpenRouter, ProviderId::OpenAI] {
+            if let Some(cached_models) = prefs.get_cached_models(provider) {
+                futures::executor::block_on(
+                    model_registry.set_models(provider, cached_models.clone()),
+                );
+                tracing::info!(
+                    "Loaded {} cached {:?} models from preferences",
+                    cached_models.len(),
+                    provider
+                );
+            }
+        }
+    }
+
+    // Re-apply persisted custom/manual model metadata after catalog loads so
+    // free-form model IDs remain usable across restarts and provider refreshes.
+    if let Some(ref prefs) = preferences {
+        for provider in ProviderId::all() {
+            let custom_models = prefs.get_custom_models(*provider);
+            if custom_models.is_empty() {
+                continue;
+            }
+
+            futures::executor::block_on(async {
+                for metadata in custom_models {
+                    model_registry.upsert_model(metadata).await;
+                }
+            });
         }
     }
 

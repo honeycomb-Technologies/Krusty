@@ -6,7 +6,9 @@ use anyhow::Result;
 use serde_json::Value;
 use tracing::info;
 
+use super::config::CallOptions;
 use super::core::AiClient;
+use crate::ai::types::ThinkingConfig;
 
 impl AiClient {
     /// Call the API with extended thinking enabled (non-streaming)
@@ -22,31 +24,49 @@ impl AiClient {
     ) -> Result<String> {
         // For thinking, max_tokens must be > budget_tokens
         let max_tokens = thinking_budget + 16000;
+        let options = self.canonical_call_options(
+            model,
+            &CallOptions {
+                max_tokens: Some(max_tokens as usize),
+                system_prompt: Some(system_prompt.to_string()),
+                thinking: Some(ThinkingConfig::default()),
+                ..Default::default()
+            },
+        );
+        let prompt_sections =
+            self.system_prompt_sections(model, &[], options.system_prompt.as_deref());
+        let system_prompt = prompt_sections.combined();
 
         let mut body = serde_json::json!({
             "model": model,
-            "max_tokens": max_tokens,
+            "max_tokens": options.max_tokens.unwrap_or(max_tokens as usize),
             "messages": [{
                 "role": "user",
                 "content": user_message
             }],
             "system": system_prompt,
-            "thinking": {
-                "type": "enabled",
-                "budget_tokens": thinking_budget
-            }
         });
 
+        if options.thinking.is_some() {
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": thinking_budget
+            });
+        }
+
         // Effort parameter is ONLY supported by Opus 4.5
-        if model.contains("opus-4-5") {
+        if options.thinking.is_some() && model.contains("opus-4-5") {
             body["output_config"] = serde_json::json!({
                 "effort": "high"
             });
         }
 
         // Build beta headers for thinking
-        let mut beta_parts = vec!["interleaved-thinking-2025-05-14"];
-        if model.contains("opus-4-5") {
+        let mut beta_parts = Vec::new();
+        if options.thinking.is_some() {
+            beta_parts.push("interleaved-thinking-2025-05-14");
+        }
+        if options.thinking.is_some() && model.contains("opus-4-5") {
             beta_parts.push("effort-2025-11-24");
         }
 

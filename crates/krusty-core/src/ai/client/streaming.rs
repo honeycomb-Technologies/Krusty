@@ -12,11 +12,12 @@ use tracing::{debug, error, info, warn};
 use url::Url;
 
 use super::config::CallOptions;
-use super::core::{AiClient, KRUSTY_SYSTEM_PROMPT};
+use super::core::AiClient;
 use crate::ai::format::anthropic::AnthropicFormat;
 use crate::ai::format::google::GoogleFormat;
 use crate::ai::format::openai::OpenAIFormat;
 use crate::ai::format::FormatHandler;
+use crate::ai::model_profile::SystemPromptSections;
 use crate::ai::parsers::{AnthropicParser, GoogleParser, OpenAIParser};
 use crate::ai::providers::{ProviderCapabilities, ProviderId, ReasoningFormat};
 use crate::ai::reasoning::{ReasoningConfig, DEFAULT_THINKING_BUDGET};
@@ -24,7 +25,7 @@ use crate::ai::sse::{
     create_streaming_channels, spawn_buffer_processor, SseParser, SseStreamProcessor,
 };
 use crate::ai::streaming::StreamPart;
-use crate::ai::transform::build_provider_params;
+use crate::ai::transform::{apply_request_body_transform, build_provider_params};
 use crate::ai::types::{Content, ImageContent, ModelMessage, Role};
 
 /// Spawn a stream processing task for an HTTP SSE response.
@@ -77,43 +78,6 @@ fn spawn_sse_stream_task<S, P>(
         }
         processor.finish().await;
     });
-}
-
-pub(crate) fn first_text_block(content: &[Content]) -> Option<&str> {
-    content.iter().find_map(|block| match block {
-        Content::Text { text } => Some(text.as_str()),
-        _ => None,
-    })
-}
-
-/// Partition system messages into project-level (stable, cacheable) and
-/// session-level (dynamic, not cached) blocks.
-///
-/// Project context (CLAUDE.md, KRAB.md, etc.) is identified by its
-/// `[PROJECT INSTRUCTIONS` prefix and rarely changes within a session.
-/// Everything else (plan state, skills list) changes frequently and should
-/// NOT be included in the cached prefix.
-pub(crate) fn partition_system_messages(messages: &[ModelMessage]) -> (String, String) {
-    let mut project_context = String::new();
-    let mut session_context = String::new();
-
-    for message in messages.iter().filter(|m| m.role == Role::System) {
-        if let Some(text) = first_text_block(&message.content) {
-            if text.starts_with("[PROJECT INSTRUCTIONS") {
-                if !project_context.is_empty() {
-                    project_context.push_str("\n\n");
-                }
-                project_context.push_str(text);
-            } else {
-                if !session_context.is_empty() {
-                    session_context.push_str("\n\n");
-                }
-                session_context.push_str(text);
-            }
-        }
-    }
-
-    (project_context, session_context)
 }
 
 fn collect_message_text(content: &[Content], separator: &str) -> String {
@@ -185,31 +149,16 @@ fn build_codex_user_content(content: &[Content]) -> Vec<Value> {
     items
 }
 
-/// Build a combined system prompt for non-Anthropic providers (OpenAI, Google).
-///
-/// Orders content by stability for optimal automatic prefix caching:
-/// base prompt (static) → project context (stable) → session context (dynamic).
-/// OpenAI and Gemini 2.5+ use automatic prefix caching — putting stable content
-/// first maximizes the cacheable prefix without any explicit annotations.
-fn build_default_system_prompt(messages: &[ModelMessage], options: &CallOptions) -> String {
-    let base = if let Some(custom) = &options.system_prompt {
-        custom.clone()
-    } else {
-        KRUSTY_SYSTEM_PROMPT.to_string()
-    };
-
-    let (project_context, session_context) = partition_system_messages(messages);
-
-    let mut prompt = base;
-    if !project_context.is_empty() {
-        prompt.push_str("\n\n---\n\n");
-        prompt.push_str(&project_context);
-    }
-    if !session_context.is_empty() {
-        prompt.push_str("\n\n---\n\n");
-        prompt.push_str(&session_context);
-    }
-    prompt
+fn log_system_prompt_layers(label: &str, sections: &SystemPromptSections, custom_prompt: bool) {
+    debug!(
+        stream_kind = label,
+        prompt_family = ?sections.profile.prompt_family,
+        base_chars = sections.base_prompt.len(),
+        project_chars = sections.project_context.len(),
+        session_chars = sections.session_context.len(),
+        custom_prompt,
+        "Built system prompt layers"
+    );
 }
 
 async fn ensure_success_stream_response(
@@ -247,6 +196,9 @@ fn start_sse_stream<P>(
     response: reqwest::Response,
     parser: P,
     label: &'static str,
+    provider_id: ProviderId,
+    api_format: crate::ai::models::ApiFormat,
+    model_id: &str,
 ) -> mpsc::UnboundedReceiver<StreamPart>
 where
     P: SseParser + 'static,
@@ -254,7 +206,11 @@ where
     let (tx, rx, buffer_tx, buffer_rx) = create_streaming_channels();
     spawn_buffer_processor(buffer_rx, tx.clone());
 
-    let processor = SseStreamProcessor::new(tx.clone(), buffer_tx);
+    let processor = SseStreamProcessor::new(tx.clone(), buffer_tx).with_transform_context(
+        provider_id,
+        api_format,
+        model_id.to_string(),
+    );
     spawn_sse_stream_task(response.bytes_stream(), processor, parser, tx, label);
 
     rx
@@ -310,32 +266,37 @@ impl AiClient {
         messages: Vec<ModelMessage>,
         options: &CallOptions,
     ) -> Result<mpsc::UnboundedReceiver<StreamPart>> {
+        let canonical_options = self.canonical_call_options(&self.config().model, options);
         let call_start = Instant::now();
         info!("=== API CALL START ===");
         info!(
             "Model: {}, Messages: {}, Tools: {}, Thinking: {}, Format: {:?}",
             self.config().model,
             messages.len(),
-            options.tools.as_ref().map(|t| t.len()).unwrap_or(0),
-            options.thinking.is_some(),
+            canonical_options
+                .tools
+                .as_ref()
+                .map(|t| t.len())
+                .unwrap_or(0),
+            canonical_options.thinking.is_some(),
             self.config().api_format
         );
 
         // Route to appropriate format handler based on API format
         if self.config().uses_openai_format() {
             return self
-                .call_streaming_openai(messages, options, call_start)
+                .call_streaming_openai(messages, &canonical_options, call_start)
                 .await;
         }
 
         if self.config().uses_google_format() {
             return self
-                .call_streaming_google(messages, options, call_start)
+                .call_streaming_google(messages, &canonical_options, call_start)
                 .await;
         }
 
         // Anthropic format (default)
-        self.call_streaming_anthropic(messages, options, call_start)
+        self.call_streaming_anthropic(messages, &canonical_options, call_start)
             .await
     }
 
@@ -349,18 +310,16 @@ impl AiClient {
         let format_handler = AnthropicFormat::new();
         let anthropic_messages =
             format_handler.convert_messages(&messages, Some(self.provider_id()));
-
-        // Partition system messages into stable (project) and dynamic (session) parts.
-        // Project context (CLAUDE.md) rarely changes and should be cached.
-        // Session context (plan state, skills) changes frequently and goes last.
-        let (project_context, session_context) = partition_system_messages(&messages);
-
-        // Build base system prompt
-        let base_system = if let Some(custom) = &options.system_prompt {
-            custom.clone()
-        } else {
-            KRUSTY_SYSTEM_PROMPT.to_string()
-        };
+        let prompt_sections = self.system_prompt_sections(
+            &self.config().model,
+            &messages,
+            options.system_prompt.as_deref(),
+        );
+        log_system_prompt_layers(
+            "anthropic_stream",
+            &prompt_sections,
+            options.system_prompt.is_some(),
+        );
 
         // Determine max_tokens based on reasoning format
         let fallback_tokens = options.max_tokens.unwrap_or(self.config().max_tokens) as u32;
@@ -416,38 +375,38 @@ impl AiClient {
             }
 
             // Block 2: Base system prompt — globally cached, never changes
-            if !base_system.is_empty() {
+            if !prompt_sections.base_prompt.is_empty() {
                 system_blocks.push(serde_json::json!({
                     "type": "text",
-                    "text": base_system,
+                    "text": prompt_sections.base_prompt.as_str(),
                     "cache_control": {"type": "ephemeral"}
                 }));
             }
 
             // Block 3 (optional): Project context — cached per project, stable within session
-            if !project_context.is_empty() {
+            if !prompt_sections.project_context.is_empty() {
                 system_blocks.push(serde_json::json!({
                     "type": "text",
-                    "text": project_context,
+                    "text": prompt_sections.project_context.as_str(),
                     "cache_control": {"type": "ephemeral"}
                 }));
                 debug!(
                     "Project context block added ({} chars, cached)",
-                    project_context.len()
+                    prompt_sections.project_context.len()
                 );
             }
 
             // Block 4 (optional): Session context — dynamic, NO cache_control
             // Plan state and skills change frequently. Placing them last without
             // a cache breakpoint means they don't invalidate the static prefix.
-            if !session_context.is_empty() {
+            if !prompt_sections.session_context.is_empty() {
                 system_blocks.push(serde_json::json!({
                     "type": "text",
-                    "text": session_context
+                    "text": prompt_sections.session_context.as_str()
                 }));
                 debug!(
                     "Session context block added ({} chars, not cached)",
-                    session_context.len()
+                    prompt_sections.session_context.len()
                 );
             }
 
@@ -457,15 +416,7 @@ impl AiClient {
             debug!("System prompt split into cache-optimized blocks");
         } else {
             // No caching: combine everything into a single string
-            let mut system = base_system;
-            if !project_context.is_empty() {
-                system.push_str("\n\n---\n\n");
-                system.push_str(&project_context);
-            }
-            if !session_context.is_empty() {
-                system.push_str("\n\n---\n\n");
-                system.push_str(&session_context);
-            }
+            let system = prompt_sections.combined();
             if !system.is_empty() {
                 body["system"] = Value::String(system);
             }
@@ -523,6 +474,12 @@ impl AiClient {
 
         // Add provider-specific parameters
         self.add_provider_params(&mut body, reasoning_enabled);
+        let body = apply_request_body_transform(
+            body,
+            self.provider_id(),
+            self.config().api_format,
+            &self.config().model,
+        );
 
         debug!("Calling {} API with streaming", self.provider_id());
 
@@ -542,6 +499,9 @@ impl AiClient {
             response,
             AnthropicParser::new(),
             "Anthropic",
+            self.provider_id(),
+            self.config().api_format,
+            &self.config().model,
         ))
     }
 
@@ -576,8 +536,17 @@ impl AiClient {
         }
 
         let format_handler = OpenAIFormat::new(self.config().api_format);
-
-        let system_prompt = build_default_system_prompt(&messages, options);
+        let prompt_sections = self.system_prompt_sections(
+            &self.config().model,
+            &messages,
+            options.system_prompt.as_deref(),
+        );
+        log_system_prompt_layers(
+            "openai_stream",
+            &prompt_sections,
+            options.system_prompt.is_some(),
+        );
+        let system_prompt = prompt_sections.combined();
 
         let max_tokens = options.max_tokens.unwrap_or(self.config().max_tokens);
 
@@ -629,6 +598,12 @@ impl AiClient {
                 body["tools"] = serde_json::json!(openai_tools);
             }
         }
+        let body = apply_request_body_transform(
+            body,
+            self.provider_id(),
+            self.config().api_format,
+            &self.config().model,
+        );
 
         debug!("OpenAI request to: {}", self.config().api_url());
 
@@ -641,7 +616,14 @@ impl AiClient {
                 .await?;
 
         info!("Starting OpenAI stream processing task");
-        Ok(start_sse_stream(response, OpenAIParser::new(), "OpenAI"))
+        Ok(start_sse_stream(
+            response,
+            OpenAIParser::new(),
+            "OpenAI",
+            self.provider_id(),
+            self.config().api_format,
+            &self.config().model,
+        ))
     }
 
     /// Streaming call for ChatGPT Codex over WebSocket (no SSE fallback).
@@ -652,8 +634,17 @@ impl AiClient {
         call_start: Instant,
     ) -> Result<mpsc::UnboundedReceiver<StreamPart>> {
         let format_handler = OpenAIFormat::new(self.config().api_format);
-
-        let system_prompt = build_default_system_prompt(&messages, options);
+        let prompt_sections = self.system_prompt_sections(
+            &self.config().model,
+            &messages,
+            options.system_prompt.as_deref(),
+        );
+        log_system_prompt_layers(
+            "codex_stream",
+            &prompt_sections,
+            options.system_prompt.is_some(),
+        );
+        let system_prompt = prompt_sections.combined();
 
         let max_tokens = options.max_tokens.unwrap_or(self.config().max_tokens);
         let body = self.build_chatgpt_codex_body(
@@ -735,7 +726,11 @@ impl AiClient {
         spawn_buffer_processor(buffer_rx, tx.clone());
         let tx_err = tx.clone();
 
-        let mut processor = SseStreamProcessor::new(tx, buffer_tx);
+        let mut processor = SseStreamProcessor::new(tx, buffer_tx).with_transform_context(
+            self.provider_id(),
+            self.config().api_format,
+            self.config().model.clone(),
+        );
         let parser = OpenAIParser::new();
 
         tokio::spawn(async move {
@@ -838,6 +833,9 @@ impl AiClient {
             response,
             OpenAIParser::new(),
             "Codex HTTP",
+            self.provider_id(),
+            self.config().api_format,
+            &self.config().model,
         ))
     }
 
@@ -852,8 +850,17 @@ impl AiClient {
 
         let format_handler = GoogleFormat::new();
         let contents = format_handler.convert_messages(&messages, Some(self.provider_id()));
-
-        let system_instruction = build_default_system_prompt(&messages, options);
+        let prompt_sections = self.system_prompt_sections(
+            &self.config().model,
+            &messages,
+            options.system_prompt.as_deref(),
+        );
+        log_system_prompt_layers(
+            "google_stream",
+            &prompt_sections,
+            options.system_prompt.is_some(),
+        );
+        let system_instruction = prompt_sections.combined();
 
         let max_tokens = options.max_tokens.unwrap_or(self.config().max_tokens);
 
@@ -883,6 +890,12 @@ impl AiClient {
                 }]);
             }
         }
+        let body = apply_request_body_transform(
+            body,
+            self.provider_id(),
+            self.config().api_format,
+            &self.config().model,
+        );
 
         debug!("Google request to: {}", self.config().api_url());
 
@@ -895,7 +908,14 @@ impl AiClient {
                 .await?;
 
         info!("Starting Google stream processing task");
-        Ok(start_sse_stream(response, GoogleParser::new(), "Google"))
+        Ok(start_sse_stream(
+            response,
+            GoogleParser::new(),
+            "Google",
+            self.provider_id(),
+            self.config().api_format,
+            &self.config().model,
+        ))
     }
 
     /// Add server-executed tools (web search, web fetch) to the request
@@ -1429,6 +1449,11 @@ impl AiClient {
             options.tools.as_ref().map(|t| t.len()).unwrap_or(0)
         );
 
-        body
+        apply_request_body_transform(
+            body,
+            self.provider_id(),
+            self.config().api_format,
+            &self.config().model,
+        )
     }
 }

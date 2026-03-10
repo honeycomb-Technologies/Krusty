@@ -6,7 +6,6 @@ pub mod git_identity;
 pub mod image;
 pub mod implementations;
 pub mod matching;
-pub mod path_utils;
 pub mod registry;
 pub mod truncation;
 

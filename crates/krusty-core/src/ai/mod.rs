@@ -4,6 +4,7 @@
 //! Supports multiple API formats: Anthropic, OpenAI, and Google.
 
 // Modular architecture
+pub mod catalog;
 pub mod client;
 pub mod format;
 pub mod format_detection;
@@ -11,7 +12,9 @@ pub mod retry;
 
 // Provider-specific configuration
 pub mod glm;
+pub mod model_profile;
 pub mod models;
+pub mod openai;
 pub mod openrouter;
 
 // Shared infrastructure

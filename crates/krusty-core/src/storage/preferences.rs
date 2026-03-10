@@ -3,7 +3,10 @@
 use anyhow::Result;
 use rusqlite::params;
 
-use crate::ai::models::ModelMetadata;
+use crate::ai::models::{
+    dynamic_model_cache_ttl, model_catalog_fingerprint, DynamicModelCacheMetadata, ModelMetadata,
+};
+use crate::ai::providers::ProviderId;
 use crate::tools::git_identity::GitIdentity;
 
 use super::{database::Database, unix_timestamp};
@@ -131,24 +134,98 @@ impl Preferences {
 
     /// Get cached OpenRouter models
     pub fn get_cached_openrouter_models(&self) -> Option<Vec<ModelMetadata>> {
-        self.get("openrouter_models_cache")
-            .and_then(|s| serde_json::from_str(&s).ok())
+        self.get_cached_models(ProviderId::OpenRouter)
     }
 
     /// Cache OpenRouter models
     pub fn cache_openrouter_models(&self, models: &[ModelMetadata]) -> Result<()> {
-        let json = serde_json::to_string(models)?;
-        self.set("openrouter_models_cache", &json)?;
-        self.set("openrouter_models_cached_at", &unix_timestamp().to_string())
+        self.cache_models(ProviderId::OpenRouter, models)
     }
 
     /// Check if OpenRouter cache is stale (>24 hours old)
     pub fn is_openrouter_cache_stale(&self) -> bool {
+        self.is_model_cache_stale(ProviderId::OpenRouter)
+    }
+
+    /// Get cached models for any dynamic provider.
+    pub fn get_cached_models(&self, provider: ProviderId) -> Option<Vec<ModelMetadata>> {
+        self.get(&format!("{}_models_cache", provider.storage_key()))
+            .and_then(|s| serde_json::from_str(&s).ok())
+    }
+
+    /// Get cache policy metadata for a dynamic provider model catalog.
+    pub fn get_model_cache_metadata(
+        &self,
+        provider: ProviderId,
+    ) -> Option<DynamicModelCacheMetadata> {
+        self.get(&format!("{}_models_cache_meta", provider.storage_key()))
+            .and_then(|s| serde_json::from_str(&s).ok())
+    }
+
+    /// Cache models for a dynamic provider.
+    pub fn cache_models(&self, provider: ProviderId, models: &[ModelMetadata]) -> Result<()> {
+        let json = serde_json::to_string(models)?;
+        self.set(&format!("{}_models_cache", provider.storage_key()), &json)?;
+        let metadata = DynamicModelCacheMetadata {
+            fetched_at: unix_timestamp(),
+            ttl_seconds: dynamic_model_cache_ttl(provider),
+            model_count: models.len(),
+            fingerprint: model_catalog_fingerprint(models),
+        };
+        self.set(
+            &format!("{}_models_cache_meta", provider.storage_key()),
+            &serde_json::to_string(&metadata)?,
+        )?;
+        self.set(
+            &format!("{}_models_cached_at", provider.storage_key()),
+            &metadata.fetched_at.to_string(),
+        )
+    }
+
+    /// Get persisted custom/manual models for a provider.
+    pub fn get_custom_models(&self, provider: ProviderId) -> Vec<ModelMetadata> {
+        self.get(&format!("{}_custom_models", provider.storage_key()))
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Persist the full custom/manual model list for a provider.
+    pub fn set_custom_models(&self, provider: ProviderId, models: &[ModelMetadata]) -> Result<()> {
+        let json = serde_json::to_string(models)?;
+        self.set(&format!("{}_custom_models", provider.storage_key()), &json)
+    }
+
+    /// Save or replace a custom/manual model for its provider.
+    pub fn save_custom_model(&self, model: &ModelMetadata) -> Result<()> {
+        let mut models = self.get_custom_models(model.provider);
+        models.retain(|existing| existing.id != model.id);
+        models.insert(0, model.clone());
+        models.truncate(32);
+        self.set_custom_models(model.provider, &models)
+    }
+
+    /// Check if a provider's cached model list is stale (>24 hours old).
+    pub fn is_model_cache_stale(&self, provider: ProviderId) -> bool {
+        if let Some(metadata) = self.get_model_cache_metadata(provider) {
+            if metadata.fetched_at == 0
+                || metadata.ttl_seconds == 0
+                || (unix_timestamp() - metadata.fetched_at) > metadata.ttl_seconds
+            {
+                return true;
+            }
+
+            let Some(cached_models) = self.get_cached_models(provider) else {
+                return true;
+            };
+
+            return metadata.model_count != cached_models.len()
+                || metadata.fingerprint != model_catalog_fingerprint(&cached_models);
+        }
+
         let cached_at: u64 = self
-            .get("openrouter_models_cached_at")
+            .get(&format!("{}_models_cached_at", provider.storage_key()))
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-
         cached_at == 0 || (unix_timestamp() - cached_at) > 86400
     }
 
@@ -173,5 +250,67 @@ impl Preferences {
     pub fn set_git_identity(&self, identity: &GitIdentity) -> Result<()> {
         let json = serde_json::to_string(identity)?;
         self.set("git_identity", &json)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::storage::database::Database;
+
+    fn create_preferences() -> (Preferences, TempDir) {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path().join("prefs.db");
+        let db = Database::new(&db_path).expect("database");
+        (Preferences::new(db), temp_dir)
+    }
+
+    #[test]
+    fn caches_dynamic_model_metadata_with_provider_ttl() {
+        let (prefs, _temp) = create_preferences();
+        let models = vec![ModelMetadata::new(
+            "gpt-5-codex",
+            "GPT-5 Codex",
+            ProviderId::OpenAI,
+        )];
+
+        prefs.cache_models(ProviderId::OpenAI, &models).unwrap();
+
+        let metadata = prefs.get_model_cache_metadata(ProviderId::OpenAI).unwrap();
+        assert_eq!(
+            metadata.ttl_seconds,
+            dynamic_model_cache_ttl(ProviderId::OpenAI)
+        );
+        assert_eq!(metadata.model_count, 1);
+        assert_eq!(metadata.fingerprint, model_catalog_fingerprint(&models));
+    }
+
+    #[test]
+    fn invalid_cache_metadata_marks_model_cache_stale() {
+        let (prefs, _temp) = create_preferences();
+        let models = vec![ModelMetadata::new(
+            "gpt-5-codex",
+            "GPT-5 Codex",
+            ProviderId::OpenAI,
+        )];
+
+        prefs.cache_models(ProviderId::OpenAI, &models).unwrap();
+
+        let broken = DynamicModelCacheMetadata {
+            fetched_at: unix_timestamp(),
+            ttl_seconds: dynamic_model_cache_ttl(ProviderId::OpenAI),
+            model_count: 99,
+            fingerprint: 0,
+        };
+        prefs
+            .set(
+                "openai_models_cache_meta",
+                &serde_json::to_string(&broken).unwrap(),
+            )
+            .unwrap();
+
+        assert!(prefs.is_model_cache_stale(ProviderId::OpenAI));
     }
 }

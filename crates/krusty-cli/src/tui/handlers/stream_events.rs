@@ -4,12 +4,14 @@
 //! The core orchestrator handles the agentic cycle (stream -> tools -> repeat)
 //! and emits LoopEvents that this module translates to TUI visual state.
 
-use crate::agent::loop_events::LoopEvent;
+use crate::agent::loop_events::{LoopEvent, LoopStopReason};
 use crate::agent::AgentEvent;
 use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
-use crate::plan::PlanFile;
 use crate::tui::app::{App, WorkMode};
 use crate::tui::blocks::{StreamBlock, WebSearchBlock};
+use crate::tui::state::{StreamDrainMode, StreamDrainTelemetry};
+
+use super::sessions::storage_role_to_api_role;
 
 impl App {
     fn append_streaming_assistant_delta(&mut self, delta: String) {
@@ -60,35 +62,70 @@ impl App {
     ///
     /// Returns true if any events were processed.
     pub fn process_loop_events(&mut self) -> bool {
-        let Some(mut rx) = self.runtime.channels.loop_events.take() else {
+        if self.runtime.channels.loop_events.is_none() && !self.runtime.chat.has_stream_backlog() {
             return false;
-        };
+        }
 
         let mut processed_any = false;
-        let mut events = Vec::new();
         let mut disconnected = false;
 
-        // Drain available events into a local buffer (avoids borrow conflict)
-        loop {
-            match rx.try_recv() {
-                Ok(event) => events.push(event),
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    disconnected = true;
-                    break;
+        if let Some(mut rx) = self.runtime.channels.loop_events.take() {
+            loop {
+                match rx.try_recv() {
+                    Ok(event) => self.runtime.chat.stream_drain.enqueue(event),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
                 }
+            }
+
+            if !disconnected {
+                self.runtime.channels.loop_events = Some(rx);
             }
         }
 
-        // Put receiver back unless disconnected
-        if !disconnected {
-            self.runtime.channels.loop_events = Some(rx);
+        let backlog_before = self.runtime.chat.stream_drain.pending_len();
+        let oldest_age_ms = self.runtime.chat.stream_drain.oldest_age().as_millis() as u64;
+        let mode_before = self.runtime.chat.stream_drain.mode();
+        let batch_limit = self.runtime.chat.stream_drain.next_batch_limit();
+        let mode_after = self.runtime.chat.stream_drain.mode();
+
+        if backlog_before > 0 && mode_before != mode_after {
+            tracing::debug!(
+                pending_events = backlog_before,
+                oldest_age_ms,
+                mode = ?mode_after,
+                batch_limit,
+                "Switching stream drain mode"
+            );
         }
 
-        // Process all buffered events
-        for event in events {
+        for _ in 0..batch_limit {
+            let Some(event) = self.runtime.chat.stream_drain.pop_next() else {
+                break;
+            };
             processed_any = true;
             self.handle_loop_event(event);
+        }
+
+        if self.runtime.chat.has_stream_backlog() {
+            let pending_after = self.runtime.chat.stream_drain.pending_len();
+            let oldest_after_ms = self.runtime.chat.stream_drain.oldest_age().as_millis() as u64;
+            let mode = self.runtime.chat.stream_drain.mode();
+            let telemetry = self.runtime.chat.stream_drain.telemetry();
+
+            if matches!(mode, StreamDrainMode::CatchUp) {
+                tracing::trace!(
+                    pending_events = pending_after,
+                    oldest_age_ms = oldest_after_ms,
+                    batch_limit,
+                    coalesced_events = telemetry.coalesced_events,
+                    dropped_events = telemetry.dropped_events,
+                    "Continuing catch-up stream drain"
+                );
+            }
         }
 
         processed_any
@@ -258,6 +295,30 @@ impl App {
             }
             LoopEvent::PlanUpdate { tasks } => {
                 tracing::info!("Plan updated: {} tasks", tasks.len());
+                if let Some(session_id) = self.runtime.current_session_id.clone() {
+                    if let Some(ref pm) = self.services.plan_manager {
+                        let had_active_plan = self.runtime.active_plan.is_some();
+                        let stored_mode = self.ui.work_mode.into();
+                        match pm.get_lifecycle_state(&session_id, stored_mode) {
+                            Ok(lifecycle) => {
+                                self.ui.work_mode = WorkMode::from(lifecycle.effective_work_mode);
+                                if let Some(plan) = lifecycle.active_plan {
+                                    self.set_plan(plan);
+                                    if !self.ui.plan_sidebar.visible {
+                                        self.ui.plan_sidebar.toggle();
+                                    }
+                                } else if had_active_plan {
+                                    self.ui.plan_sidebar.start_collapse();
+                                } else {
+                                    self.clear_active_plan();
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!("Failed to reload plan after update: {}", err);
+                            }
+                        }
+                    }
+                }
             }
             LoopEvent::PlanComplete {
                 tool_call_id: _,
@@ -267,7 +328,7 @@ impl App {
                 // Reload plan from DB and show confirmation
                 if let Some(session_id) = self.runtime.current_session_id.clone() {
                     if let Some(ref pm) = self.services.plan_manager {
-                        if let Ok(Some(plan)) = pm.get_plan(&session_id) {
+                        if let Ok(Some(plan)) = pm.get_active_plan(&session_id) {
                             self.set_plan(plan);
                             self.ui.work_mode = WorkMode::Plan;
                             if !self.ui.plan_sidebar.visible {
@@ -295,18 +356,46 @@ impl App {
                 self.runtime.context_tokens_used = prompt_tokens + completion_tokens;
                 self.save_session_token_count();
             }
+            LoopEvent::ContextCompacted {
+                reason,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                replaced_messages,
+            } => {
+                self.runtime.context_tokens_used = estimated_tokens_after;
+                self.save_session_token_count();
+                self.runtime.chat.messages.push((
+                    "system".to_string(),
+                    format!(
+                        "Live compaction ({}) reduced context from ~{} to ~{} tokens by rewriting {} message(s).",
+                        reason, estimated_tokens_before, estimated_tokens_after, replaced_messages
+                    ),
+                ));
+            }
             LoopEvent::TitleGenerated { title } => {
                 self.runtime.session_title = Some(title);
             }
-            LoopEvent::Finished { session_id } => {
+            LoopEvent::Finished {
+                session_id,
+                stop_reason,
+            } => {
                 tracing::info!("Orchestrator finished for session {}", session_id);
+                let stream_telemetry = self.runtime.chat.stream_drain.telemetry();
                 self.reload_conversation_from_db();
                 self.stop_streaming();
                 self.stop_tool_execution();
                 self.runtime.channels.loop_events = None;
                 self.runtime.channels.loop_input = None;
                 self.runtime.pending_ask_user_calls.clear();
-                self.check_auto_pinch();
+                self.push_stream_recovery_banner(stop_reason.clone(), stream_telemetry);
+                match stop_reason {
+                    LoopStopReason::ContextCompactionFailed => {
+                        self.schedule_auto_pinch(
+                            "Live compaction could not keep this thread healthy.",
+                        );
+                    }
+                    _ => self.check_auto_pinch(),
+                }
             }
             LoopEvent::Error { error } => {
                 self.handle_stream_error(error);
@@ -330,19 +419,13 @@ impl App {
             Ok(messages) => {
                 self.runtime.chat.conversation.clear();
                 for (role, content_json) in messages {
-                    let api_role = match role.as_str() {
-                        "user" => Role::User,
-                        "assistant" => Role::Assistant,
-                        "system" => Role::System,
-                        _ => Role::User,
-                    };
                     let content: Vec<Content> = serde_json::from_str::<Vec<Content>>(&content_json)
                         .or_else(|_| {
                             serde_json::from_str::<Content>(&content_json).map(|c| vec![c])
                         })
                         .unwrap_or_else(|_| vec![Content::Text { text: content_json }]);
                     self.runtime.chat.conversation.push(ModelMessage {
-                        role: api_role,
+                        role: storage_role_to_api_role(role.as_str()),
                         content,
                     });
                 }
@@ -357,6 +440,54 @@ impl App {
         }
     }
 
+    fn push_stream_recovery_banner(
+        &mut self,
+        stop_reason: LoopStopReason,
+        telemetry: StreamDrainTelemetry,
+    ) {
+        let detail = if telemetry.dropped_events > 0 || telemetry.coalesced_events > 0 {
+            format!(
+                " TUI catch-up coalesced {} chunk(s) and dropped {} low-priority delta(s).",
+                telemetry.coalesced_events, telemetry.dropped_events
+            )
+        } else {
+            String::new()
+        };
+
+        if let Some(session_id) = self.runtime.current_session_id.clone() {
+            if let Some(recovery_state) = self.load_persisted_recovery_state(&session_id) {
+                self.push_recovery_notice(
+                    &recovery_state,
+                    if detail.is_empty() {
+                        None
+                    } else {
+                        Some(detail)
+                    },
+                );
+                return;
+            }
+        }
+
+        let fallback = match stop_reason {
+            LoopStopReason::StreamIdleTimeout => Some(format!(
+                "Stream interrupted: the provider stopped sending data before the idle timeout expired. Resume the turn manually if you want to continue.{}",
+                detail
+            )),
+            LoopStopReason::ProviderError => Some(format!(
+                "Stream interrupted by a provider error. Krusty stopped the turn instead of replaying it automatically.{}",
+                detail
+            )),
+            _ => None,
+        };
+
+        if let Some(message) = fallback {
+            self.runtime
+                .chat
+                .messages
+                .push(("system".to_string(), message));
+        }
+    }
+
     // =========================================================================
     // Text Handling
     // =========================================================================
@@ -366,40 +497,9 @@ impl App {
         // Mark all streaming blocks complete when AI starts responding
         self.complete_streaming_blocks();
 
-        // Check for task completion keywords in delta for real-time updates
-        const COMPLETION_KEYWORDS: &[&str] = &[
-            "complete", "Complete", "done", "Done", "finished", "Finished", "\u{2713}", "\u{2705}",
-        ];
-        let should_check_completion = self.runtime.active_plan.is_some()
-            && COMPLETION_KEYWORDS.iter().any(|kw| delta.contains(kw));
-
         // Cache is cleared at the start of each new streaming session (start_streaming),
         // so a None cache means this is the first text delta of a new turn.
         self.append_streaming_assistant_delta(delta);
-
-        // Real-time task completion detection
-        if should_check_completion {
-            // Clone last message content to avoid borrow issues
-            let check_text = self.runtime.chat.messages.last().map(|(_, content)| {
-                if content.len() > 500 {
-                    // Find a valid char boundary near the target position
-                    // to avoid panicking on multi-byte UTF-8 characters
-                    let target = content.len() - 500;
-                    let start = content
-                        .char_indices()
-                        .rev()
-                        .find(|(i, _)| *i <= target)
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    content[start..].to_string()
-                } else {
-                    content.clone()
-                }
-            });
-            if let Some(text) = check_text {
-                self.try_update_task_completions_realtime(&text);
-            }
-        }
 
         if self.ui.scroll_system.scroll.auto_scroll {
             self.ui.scroll_system.scroll.request_scroll_to_bottom();
@@ -656,75 +756,6 @@ impl App {
     // =========================================================================
     // Plan Tracking
     // =========================================================================
-
-    /// Real-time task completion detection during streaming
-    ///
-    /// Called when completion keywords are detected in text deltas.
-    /// Only updates tasks that haven't already been marked complete.
-    fn try_update_task_completions_realtime(&mut self, text: &str) {
-        let completed_ids = PlanFile::extract_completed_task_ids(text);
-        if completed_ids.is_empty() {
-            return;
-        }
-
-        let active_plan = match self.runtime.active_plan.as_mut() {
-            Some(plan) => plan,
-            None => return,
-        };
-
-        let mut updated_any = false;
-        let mut updated_tasks: Vec<String> = Vec::new();
-
-        for task_id in &completed_ids {
-            // Only update if task exists and isn't already complete
-            if let Some(task) = active_plan.find_task(task_id) {
-                if !task.completed && active_plan.check_task(task_id) {
-                    tracing::info!("Real-time: Marked task {} as complete", task_id);
-                    updated_tasks.push(task_id.clone());
-                    updated_any = true;
-                }
-            }
-        }
-
-        if updated_any {
-            let (completed, total) = active_plan.progress();
-            let plan_complete = active_plan.is_complete();
-            let plan_title = active_plan.title.clone();
-
-            if plan_complete {
-                active_plan.status = crate::plan::PlanStatus::Completed;
-            }
-
-            // Save immediately for real-time persistence
-            if let Some(ref pm) = self.services.plan_manager {
-                if let Err(e) = pm.save_plan(active_plan) {
-                    tracing::warn!("Failed to save plan after real-time task update: {}", e);
-                }
-            }
-
-            // Show inline feedback
-            let task_list = updated_tasks.join(", ");
-            self.runtime.chat.messages.push((
-                "system".to_string(),
-                format!(
-                    "\u{2713} Task {} complete ({}/{})",
-                    task_list, completed, total
-                ),
-            ));
-
-            if plan_complete {
-                tracing::info!("Plan '{}' completed (real-time detection)", plan_title);
-                self.runtime.chat.messages.push((
-                    "system".to_string(),
-                    format!(
-                        "\u{1f389} Plan '{}' complete! All {} tasks finished.",
-                        plan_title, total
-                    ),
-                ));
-                self.ui.plan_sidebar.start_collapse();
-            }
-        }
-    }
 
     // =========================================================================
     // Helpers

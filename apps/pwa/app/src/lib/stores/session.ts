@@ -1,14 +1,28 @@
 import { writable, get } from 'svelte/store';
-import { apiClient, streamChat, streamToolResult, type ContentBlock, type PlanItem, type StreamCallbacks } from '$api/client';
+import {
+	apiClient,
+	bootstrapRemoteAccess,
+	streamChat,
+	streamToolResult,
+	type ContentBlock,
+	type PlanItem,
+	type PartialAssistantState as ApiPartialAssistantState,
+	type SessionRecoveryState as ApiRecoveryState,
+	type SessionStateResponse as ApiSessionStateResponse,
+	type StreamCallbacks
+} from '$api/client';
 import { loadSessions } from './sessions';
 import { setPlanItems, setPlanVisible } from './plan';
 import { workspaceStore } from './workspace';
 
 // Background state polling interval (for reconnection)
 let statePollingInterval: ReturnType<typeof setInterval> | null = null;
+let presenceHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
 const STATE_POLL_INTERVAL = 3000; // 3 seconds
+const PRESENCE_HEARTBEAT_INTERVAL = 10_000; // 10 seconds
 const MAX_QUEUED_MESSAGES = 50;
 const MAX_MESSAGE_CONTENT_LENGTH = 500_000; // 500KB
+const PRESENCE_CLIENT_STORAGE_KEY = 'krusty:presence-client-id';
 
 export interface ToolCall {
 	id: string;
@@ -25,6 +39,7 @@ export interface ChatMessage {
 	thinking?: string;
 	toolCalls?: ToolCall[];
 	isQueued?: boolean;
+	kind?: 'recovery_notice' | 'live_partial';
 }
 
 export type SessionMode = 'build' | 'plan';
@@ -49,6 +64,7 @@ interface SessionState {
 	thinkingEnabled: boolean;
 	thinkingLevel: ThinkingLevel;
 	tokenCount: number;
+	lastEventSequence: number | null;
 	error: string | null;
 	model: string | null;
 }
@@ -117,6 +133,212 @@ function toErrorMessage(err: unknown, fallback = 'Unknown error'): string {
 	return err instanceof Error ? err.message : fallback;
 }
 
+function buildRecoveryNotice(recovery: ApiRecoveryState): string {
+	const headline = recovery.stop_reason === 'stream_idle_timeout'
+		? 'Previous turn stopped after the provider stream went idle.'
+		: recovery.stop_reason === 'provider_error'
+			? 'Previous turn stopped after a provider error.'
+			: recovery.stop_reason === 'user_abort'
+				? 'Previous turn was interrupted by user cancellation.'
+				: recovery.status === 'tool_executing'
+					? 'Previous turn ended while tool execution was in progress.'
+					: recovery.status === 'streaming'
+						? 'Previous turn ended while the assistant was still streaming.'
+						: 'Previous turn ended before Krusty could safely finalize it.';
+
+	const details: string[] = [];
+	if (recovery.partial_assistant.text.trim()) {
+		details.push(`Partial output: ${recovery.partial_assistant.text.trim()}`);
+	}
+	if (recovery.last_error?.trim()) {
+		details.push(`Last error: ${recovery.last_error.trim()}`);
+	}
+
+	return details.length > 0 ? `${headline}\n\n${details.join('\n')}` : headline;
+}
+
+function applyRecoveryParity(
+	messages: ChatMessage[],
+	recovery: ApiRecoveryState | null | undefined,
+	agentState: string
+): ChatMessage[] {
+	let nextMessages = messages.filter((message) => message.kind !== 'recovery_notice');
+
+	if (recovery && agentState === 'idle') {
+		nextMessages = nextMessages.map((message) => ({
+			...message,
+			toolCalls: message.toolCalls?.map((toolCall) => {
+				if ((toolCall.status === 'pending' || toolCall.status === 'running') && !toolCall.output) {
+					return {
+						...toolCall,
+						status: 'error' as const,
+						output: '[Session interrupted - tool execution was cancelled]'
+					};
+				}
+				return toolCall;
+			})
+		}));
+
+		nextMessages.unshift({
+			role: 'assistant',
+			content: `[Recovery Notice] ${buildRecoveryNotice(recovery)}`,
+			kind: 'recovery_notice'
+		});
+	}
+
+	return nextMessages;
+}
+
+function livePartialToolStatus(agentState: string): ToolCall['status'] {
+	switch (agentState) {
+		case 'tool_executing':
+			return 'running';
+		case 'awaiting_input':
+			return 'awaiting_approval';
+		default:
+			return 'pending';
+	}
+}
+
+function applyLivePartialAssistant(
+	messages: ChatMessage[],
+	livePartial: ApiPartialAssistantState | null | undefined,
+	agentState: string
+): ChatMessage[] {
+	const nextMessages = messages.filter((message) => message.kind !== 'live_partial');
+	if (!livePartial || !['streaming', 'tool_executing', 'awaiting_input'].includes(agentState)) {
+		return nextMessages;
+	}
+
+	const hasContent = livePartial.text.trim().length > 0;
+	const hasThinking = (livePartial.thinking?.trim().length ?? 0) > 0;
+	const toolCalls = livePartial.tool_calls.map((toolCall) => ({
+		id: toolCall.id,
+		name: toolCall.name,
+		status: livePartialToolStatus(agentState)
+	} satisfies ToolCall));
+
+	if (!hasContent && !hasThinking && toolCalls.length === 0) {
+		return nextMessages;
+	}
+
+	return [
+		...nextMessages,
+		{
+			role: 'assistant',
+			content: livePartial.text,
+			thinking: livePartial.thinking,
+			toolCalls,
+			kind: 'live_partial'
+		}
+	];
+}
+
+function applySessionSnapshot(
+	sessionId: string,
+	serverState: ApiSessionStateResponse | null,
+	isRefresh: boolean
+) {
+	if (!serverState) {
+		return;
+	}
+
+	const nextMode: SessionMode = serverState.mode ?? 'build';
+	sessionStore.update((s) => ({
+		...s,
+		mode: nextMode,
+		isStreaming:
+			serverState.agent_state === 'streaming'
+			|| serverState.agent_state === 'tool_executing',
+		isThinking:
+			serverState.agent_state === 'streaming'
+				? Boolean(serverState.live_partial_assistant?.thinking?.trim()) || s.isThinking
+				: false,
+		thinkingContent: serverState.live_partial_assistant?.thinking || '',
+		lastEventSequence: serverState.last_event_sequence ?? null,
+		messages: applyLivePartialAssistant(
+			applyRecoveryParity(s.messages, serverState.recovery, serverState.agent_state),
+			serverState.live_partial_assistant,
+			serverState.agent_state
+		)
+	}));
+	setPlanVisible(nextMode === 'plan');
+
+	if (
+		(serverState.agent_state === 'streaming' || serverState.agent_state === 'tool_executing')
+		&& !isRefresh
+	) {
+		startStatePolling(sessionId);
+	}
+}
+
+function getPresenceClientId(): string | null {
+	if (typeof window === 'undefined') {
+		return null;
+	}
+
+	try {
+		const existing = sessionStorage.getItem(PRESENCE_CLIENT_STORAGE_KEY);
+		if (existing) {
+			return existing;
+		}
+		const generated = crypto.randomUUID();
+		sessionStorage.setItem(PRESENCE_CLIENT_STORAGE_KEY, generated);
+		return generated;
+	} catch {
+		return null;
+	}
+}
+
+async function syncSessionPresence(sessionId: string) {
+	if (typeof document !== 'undefined' && document.hidden) {
+		return;
+	}
+
+	const clientId = getPresenceClientId();
+	if (!clientId) {
+		return;
+	}
+
+	const state = get(sessionStore);
+	try {
+		await apiClient.heartbeatSessionPresence(sessionId, {
+			client_id: clientId,
+			surface: 'pwa',
+			capability: 'controller',
+			last_event_sequence: state.lastEventSequence
+		});
+	} catch (err) {
+		console.warn('Presence heartbeat failed:', err);
+	}
+}
+
+function startPresenceHeartbeat(sessionId: string) {
+	stopPresenceHeartbeat();
+	void syncSessionPresence(sessionId);
+	presenceHeartbeatInterval = setInterval(() => {
+		void syncSessionPresence(sessionId);
+	}, PRESENCE_HEARTBEAT_INTERVAL);
+}
+
+function stopPresenceHeartbeat(sessionId?: string | null) {
+	if (presenceHeartbeatInterval) {
+		clearInterval(presenceHeartbeatInterval);
+		presenceHeartbeatInterval = null;
+	}
+
+	if (!sessionId) {
+		return;
+	}
+
+	const clientId = getPresenceClientId();
+	if (!clientId) {
+		return;
+	}
+
+	void apiClient.removeSessionPresence(sessionId, clientId).catch(() => {});
+}
+
 function loadPermissionMode(): PermissionMode {
 	try {
 		const stored = localStorage.getItem('krusty-permission-mode');
@@ -139,11 +361,16 @@ const initialState: SessionState = {
 	thinkingEnabled: true,
 	thinkingLevel: 'medium',
 	tokenCount: 0,
+	lastEventSequence: null,
 	error: null,
 	model: null
 };
 
 export const sessionStore = writable<SessionState>(initialState);
+
+if (typeof window !== 'undefined') {
+	void bootstrapRemoteAccess();
+}
 
 let abortController: AbortController | null = null;
 
@@ -314,7 +541,7 @@ function createStreamCallbacks(ref: AssistantMessageRef): StreamCallbacks {
 			mapToolCalls(id, (tc) => ({ ...tc, status: 'error', output: 'Denied by user' }));
 		},
 		onUsage: (promptTokens, _completionTokens) => {
-			sessionStore.update((s) => ({ ...s, tokenCount: promptTokens }));
+			sessionStore.update((s) => ({ ...s, tokenCount: promptTokens + _completionTokens }));
 		},
 		onTitleUpdate: (title) => {
 			sessionStore.update((s) => ({ ...s, title }));
@@ -466,31 +693,36 @@ export async function loadSession(sessionId: string, isRefresh = false) {
 	try {
 		const data = await apiClient.getSession(sessionId);
 		const processedMessages = processStoredMessages(data.messages);
+		let serverState: ApiSessionStateResponse | null = null;
+		try {
+			serverState = await apiClient.getSessionState(sessionId);
+		} catch {
+			// State endpoint may not exist or session deleted
+		}
+		const mode = serverState?.mode ?? data.session.mode ?? 'build';
 		sessionStore.update((s) => ({
 			...s,
 			sessionId: data.session.id,
 			title: data.session.title || 'Untitled',
-			mode: data.session.mode ?? 'build',
+			mode,
 			model: data.session.model ?? null,
-			messages: processedMessages,
+			messages: applyLivePartialAssistant(
+				applyRecoveryParity(
+					processedMessages,
+					serverState?.recovery,
+					serverState?.agent_state ?? 'idle'
+				),
+				serverState?.live_partial_assistant,
+				serverState?.agent_state ?? 'idle'
+			),
 			isLoading: false
 		}));
-		setPlanVisible((data.session.mode ?? 'build') === 'plan');
+		setPlanVisible(mode === 'plan');
 
 		workspaceStore.initFromSession(data.session.id, data.session.working_dir ?? null);
-
-		if (!isRefresh) {
-			try {
-				const state = await apiClient.getSessionState(sessionId);
-				sessionStore.update((s) => ({ ...s, mode: state.mode ?? s.mode }));
-				setPlanVisible((state.mode ?? 'build') === 'plan');
-				if (state.agent_state === 'streaming' || state.agent_state === 'tool_executing') {
-					sessionStore.update((s) => ({ ...s, isStreaming: true }));
-					startStatePolling(sessionId);
-				}
-			} catch {
-				// State endpoint may not exist or session deleted
-			}
+		applySessionSnapshot(sessionId, serverState, isRefresh);
+		if (typeof document === 'undefined' || !document.hidden) {
+			startPresenceHeartbeat(sessionId);
 		}
 	} catch (err) {
 		sessionStore.update((s) => ({
@@ -568,12 +800,15 @@ function parseStoredMessage(
 		} else if (block.type === 'tool_use' || ('id' in block && 'name' in block && 'input' in block)) {
 			msg.toolCalls = msg.toolCalls || [];
 			const toolResult = toolResults?.get(block.id);
+			const status: ToolCall['status'] = toolResult
+				? (toolResult.isError ? 'error' : 'success')
+				: 'pending';
 			msg.toolCalls.push({
 				id: block.id,
 				name: block.name,
 				arguments: block.input,
 				output: toolResult?.output,
-				status: toolResult?.isError ? 'error' : 'success' as const
+				status
 			});
 		}
 	}
@@ -586,16 +821,22 @@ function parseStoredMessage(
 }
 
 export function clearSession() {
+	const current = get(sessionStore);
+	stopPresenceHeartbeat(current.sessionId);
 	sessionStore.set(initialState);
 	workspaceStore.clear();
 }
 
 export function initSession(sessionId: string, title: string) {
+	stopPresenceHeartbeat(get(sessionStore).sessionId);
 	sessionStore.set({
 		...initialState,
 		sessionId,
 		title
 	});
+	if (typeof document === 'undefined' || !document.hidden) {
+		startPresenceHeartbeat(sessionId);
+	}
 }
 
 export function toggleThinking() {
@@ -716,10 +957,9 @@ export function startStatePolling(sessionId: string) {
 	statePollingInterval = setInterval(async () => {
 		try {
 			const state = await apiClient.getSessionState(sessionId);
-			sessionStore.update((s) => ({ ...s, mode: state.mode ?? s.mode }));
-			setPlanVisible((state.mode ?? 'build') === 'plan');
+			applySessionSnapshot(sessionId, state, true);
 
-			if (state.agent_state === 'idle') {
+			if (state.agent_state === 'idle' || state.agent_state === 'awaiting_input') {
 				stopStatePolling();
 				sessionStore.update((s) => ({ ...s, isStreaming: false, isThinking: false }));
 				await loadSession(sessionId, true);
@@ -754,11 +994,12 @@ if (typeof document !== 'undefined') {
 
 		if (document.hidden) {
 			stopStatePolling();
+			stopPresenceHeartbeat(state.sessionId);
 		} else {
+			startPresenceHeartbeat(state.sessionId);
 			// Foregrounded — immediately check session state
 			apiClient.getSessionState(state.sessionId).then((serverState) => {
-				sessionStore.update((s) => ({ ...s, mode: serverState.mode ?? s.mode }));
-				setPlanVisible((serverState.mode ?? 'build') === 'plan');
+				applySessionSnapshot(state.sessionId!, serverState, true);
 				if (serverState.agent_state === 'idle') {
 					sessionStore.update((s) => ({ ...s, isStreaming: false, isThinking: false }));
 					void loadSession(state.sessionId!, true);
@@ -774,16 +1015,26 @@ if (typeof document !== 'undefined') {
 			});
 		}
 	});
+
+	window.addEventListener('pagehide', () => {
+		const state = get(sessionStore);
+		if (!state.sessionId) return;
+		stopPresenceHeartbeat(state.sessionId);
+	});
 }
 
 export async function approveToolCall(toolCallId: string) {
 	const state = get(sessionStore);
 	if (!state.sessionId) return;
 	await apiClient.submitToolApproval(state.sessionId, toolCallId, true);
+	sessionStore.update((s) => ({ ...s, isStreaming: true, isLoading: true }));
+	startStatePolling(state.sessionId);
 }
 
 export async function denyToolCall(toolCallId: string) {
 	const state = get(sessionStore);
 	if (!state.sessionId) return;
 	await apiClient.submitToolApproval(state.sessionId, toolCallId, false);
+	sessionStore.update((s) => ({ ...s, isStreaming: true, isLoading: true }));
+	startStatePolling(state.sessionId);
 }

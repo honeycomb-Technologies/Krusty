@@ -206,10 +206,18 @@ impl App {
             });
             self.runtime.chat.messages.push((
                 "system".to_string(),
-                format!(
-                    "Max turns ({}) reached. Use /home to start a new session.",
-                    self.runtime.agent_config.max_turns.unwrap_or(0)
-                ),
+                self.runtime
+                    .agent_config
+                    .primary_max_turns()
+                    .map(|limit| {
+                        format!(
+                            "Max turns ({}) reached. Use /home to start a new session.",
+                            limit
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        "Agent turn budget reached. Use /home to start a new session.".to_string()
+                    }),
             ));
             return;
         }
@@ -304,11 +312,14 @@ impl App {
             session_id,
             working_dir: self.runtime.working_dir.clone(),
             permission_mode: self.runtime.permission_mode,
-            max_iterations: self.runtime.agent_config.max_turns.unwrap_or(50).min(50),
+            max_iterations: self.runtime.agent_config.primary_max_turns(),
+            stream_idle_timeout: self.runtime.agent_config.stream_idle_timeout(),
             user_id: None,
             initial_work_mode: self.ui.work_mode.into(),
             generate_title: is_new_session,
         };
+
+        self.persist_current_work_mode();
 
         let conversation = self.runtime.chat.conversation.clone();
         let orchestrator = crate::agent::AgenticOrchestrator::new(services, config);

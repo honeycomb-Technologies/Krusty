@@ -8,8 +8,11 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use super::models::ApiFormat;
+use super::providers::ProviderId;
 use super::stream_buffer::StreamBuffer;
 use super::streaming::StreamPart;
+use super::transform::apply_stream_part_transform;
 use super::types::{
     AiToolCall, Citation, ContextEditingMetrics, FinishReason, Usage, WebFetchContent,
     WebSearchResult,
@@ -33,6 +36,8 @@ pub struct SseStreamProcessor {
     event_count: usize,
     /// Bytes received counter
     bytes_received: usize,
+    /// Optional provider/model context for post-parse stream normalization.
+    transform_context: Option<(ProviderId, ApiFormat, String)>,
 }
 
 impl SseStreamProcessor {
@@ -85,7 +90,7 @@ impl SseStreamProcessor {
                 source, usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
             );
         }
-        let _ = self.tx.send(StreamPart::Usage { usage });
+        self.dispatch_part(StreamPart::Usage { usage });
     }
 
     /// Create a new SSE stream processor
@@ -101,7 +106,20 @@ impl SseStreamProcessor {
             stream_start: Instant::now(),
             event_count: 0,
             bytes_received: 0,
+            transform_context: None,
         }
+    }
+
+    /// Attach provider/model context so post-parse transforms can normalize
+    /// stream parts before they reach the orchestrator.
+    pub fn with_transform_context(
+        mut self,
+        provider_id: ProviderId,
+        api_format: ApiFormat,
+        model_id: impl Into<String>,
+    ) -> Self {
+        self.transform_context = Some((provider_id, api_format, model_id.into()));
+        self
     }
 
     /// Process a chunk of bytes from the SSE stream
@@ -175,7 +193,7 @@ impl SseStreamProcessor {
                 elapsed, self.event_count, self.bytes_received
             );
             self.stream_buffer.flush().await;
-            let _ = self.tx.send(StreamPart::Finish {
+            self.dispatch_part(StreamPart::Finish {
                 reason: FinishReason::Stop,
             });
             return Ok(());
@@ -204,7 +222,7 @@ impl SseStreamProcessor {
                         text.len(),
                         citations.len()
                     );
-                    let _ = self.tx.send(StreamPart::TextDeltaWithCitations {
+                    self.dispatch_part(StreamPart::TextDeltaWithCitations {
                         delta: text,
                         citations,
                     });
@@ -214,18 +232,18 @@ impl SseStreamProcessor {
                         "SSE ToolCallStart: id={}, name={} at {:?}",
                         id, name, elapsed
                     );
-                    let _ = self.tx.send(StreamPart::ToolCallStart { id, name });
+                    self.dispatch_part(StreamPart::ToolCallStart { id, name });
                 }
                 SseEvent::ToolCallDelta { id, delta } => {
                     debug!("  -> ToolCallDelta: id={}, {} chars", id, delta.len());
-                    let _ = self.tx.send(StreamPart::ToolCallDelta { id, delta });
+                    self.dispatch_part(StreamPart::ToolCallDelta { id, delta });
                 }
                 SseEvent::ToolCallComplete(tool_call) => {
                     info!(
                         "SSE ToolCallComplete: id={}, name={} at {:?}",
                         tool_call.id, tool_call.name, elapsed
                     );
-                    let _ = self.tx.send(StreamPart::ToolCallComplete { tool_call });
+                    self.dispatch_part(StreamPart::ToolCallComplete { tool_call });
                 }
                 // Server-executed tools
                 SseEvent::ServerToolStart { id, name } => {
@@ -233,20 +251,18 @@ impl SseStreamProcessor {
                         "SSE ServerToolStart: id={}, name={} at {:?}",
                         id, name, elapsed
                     );
-                    let _ = self.tx.send(StreamPart::ServerToolStart { id, name });
+                    self.dispatch_part(StreamPart::ServerToolStart { id, name });
                 }
                 SseEvent::ServerToolDelta { id, delta } => {
                     debug!("  -> ServerToolDelta: id={}, {} chars", id, delta.len());
-                    let _ = self.tx.send(StreamPart::ServerToolDelta { id, delta });
+                    self.dispatch_part(StreamPart::ServerToolDelta { id, delta });
                 }
                 SseEvent::ServerToolComplete { id, name, input } => {
                     info!(
                         "SSE ServerToolComplete: id={}, name={} at {:?}",
                         id, name, elapsed
                     );
-                    let _ = self
-                        .tx
-                        .send(StreamPart::ServerToolComplete { id, name, input });
+                    self.dispatch_part(StreamPart::ServerToolComplete { id, name, input });
                 }
                 SseEvent::WebSearchResults {
                     tool_use_id,
@@ -258,7 +274,7 @@ impl SseStreamProcessor {
                         tool_use_id,
                         elapsed
                     );
-                    let _ = self.tx.send(StreamPart::WebSearchResults {
+                    self.dispatch_part(StreamPart::WebSearchResults {
                         tool_use_id,
                         results,
                     });
@@ -271,7 +287,7 @@ impl SseStreamProcessor {
                         "SSE WebFetchResult: url={} for {} at {:?}",
                         content.url, tool_use_id, elapsed
                     );
-                    let _ = self.tx.send(StreamPart::WebFetchResult {
+                    self.dispatch_part(StreamPart::WebFetchResult {
                         tool_use_id,
                         content,
                     });
@@ -284,7 +300,7 @@ impl SseStreamProcessor {
                         "SSE ServerToolError: {} for {} at {:?}",
                         error_code, tool_use_id, elapsed
                     );
-                    let _ = self.tx.send(StreamPart::ServerToolError {
+                    self.dispatch_part(StreamPart::ServerToolError {
                         tool_use_id,
                         error_code,
                     });
@@ -292,7 +308,7 @@ impl SseStreamProcessor {
                 // Extended thinking
                 SseEvent::ThinkingStart { index } => {
                     info!("SSE ThinkingStart: index={} at {:?}", index, elapsed);
-                    let _ = self.tx.send(StreamPart::ThinkingStart { index });
+                    self.dispatch_part(StreamPart::ThinkingStart { index });
                 }
                 SseEvent::ThinkingDelta { index, thinking } => {
                     debug!(
@@ -300,7 +316,7 @@ impl SseStreamProcessor {
                         index,
                         thinking.len()
                     );
-                    let _ = self.tx.send(StreamPart::ThinkingDelta { index, thinking });
+                    self.dispatch_part(StreamPart::ThinkingDelta { index, thinking });
                 }
                 SseEvent::SignatureDelta { index, signature } => {
                     debug!(
@@ -308,9 +324,7 @@ impl SseStreamProcessor {
                         index,
                         signature.len()
                     );
-                    let _ = self
-                        .tx
-                        .send(StreamPart::SignatureDelta { index, signature });
+                    self.dispatch_part(StreamPart::SignatureDelta { index, signature });
                 }
                 SseEvent::ThinkingComplete {
                     index,
@@ -324,7 +338,7 @@ impl SseStreamProcessor {
                         signature.len(),
                         elapsed
                     );
-                    let _ = self.tx.send(StreamPart::ThinkingComplete {
+                    self.dispatch_part(StreamPart::ThinkingComplete {
                         index,
                         thinking,
                         signature,
@@ -340,7 +354,7 @@ impl SseStreamProcessor {
                     if let Some(usage) = usage {
                         self.emit_usage(usage, "from finish");
                     }
-                    let _ = self.tx.send(StreamPart::Finish { reason });
+                    self.dispatch_part(StreamPart::Finish { reason });
                 }
                 SseEvent::FinishWithToolCalls { tool_calls, usage } => {
                     info!(
@@ -357,14 +371,14 @@ impl SseStreamProcessor {
                             "  -> Completing tool call: id={}, name={}",
                             tool_call.id, tool_call.name
                         );
-                        let _ = self.tx.send(StreamPart::ToolCallComplete { tool_call });
+                        self.dispatch_part(StreamPart::ToolCallComplete { tool_call });
                     }
                     // Send usage before finish if present
                     if let Some(usage) = usage {
                         self.emit_usage(usage, "from finish");
                     }
                     // Then send the finish signal
-                    let _ = self.tx.send(StreamPart::Finish {
+                    self.dispatch_part(StreamPart::Finish {
                         reason: FinishReason::ToolCalls,
                     });
                 }
@@ -378,7 +392,7 @@ impl SseStreamProcessor {
                         metrics.cleared_tool_uses,
                         metrics.cleared_thinking_turns
                     );
-                    let _ = self.tx.send(StreamPart::ContextEdited { metrics });
+                    self.dispatch_part(StreamPart::ContextEdited { metrics });
                 }
                 SseEvent::Skip => {
                     // Event should be ignored
@@ -403,6 +417,15 @@ impl SseStreamProcessor {
             elapsed, self.event_count, self.bytes_received
         );
         self.stream_buffer.finish().await;
+    }
+
+    fn dispatch_part(&self, part: StreamPart) {
+        let part = if let Some((provider_id, api_format, model_id)) = &self.transform_context {
+            apply_stream_part_transform(part, *provider_id, *api_format, model_id)
+        } else {
+            part
+        };
+        let _ = self.tx.send(part);
     }
 }
 

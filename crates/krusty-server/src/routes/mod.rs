@@ -16,6 +16,7 @@ mod ports;
 mod preview_settings;
 mod processes;
 mod push;
+mod server;
 mod sessions;
 mod tools;
 
@@ -35,6 +36,7 @@ pub fn api_router() -> Router<AppState> {
         .nest("/settings/preview", preview_settings::router())
         .nest("/hooks", hooks::router())
         .nest("/push", push::router())
+        .nest("/server", server::router())
         .nest("/auth/oauth", oauth::router())
         .merge(Router::new())
 }

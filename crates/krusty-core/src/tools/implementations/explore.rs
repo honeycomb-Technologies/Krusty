@@ -7,12 +7,14 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::agent::subagent::{SubAgentPool, SubAgentTask};
 use crate::agent::AgentCancellation;
 use crate::ai::client::AiClient;
-use crate::tools::registry::Tool;
+use crate::ai::providers::ProviderId;
+use crate::tools::registry::{DelegationPolicy, Tool};
 use crate::tools::{parse_params, ToolContext, ToolResult};
 
 /// Explore tool for spawning parallel sub-agents
@@ -50,6 +52,24 @@ struct Params {
 
 fn default_concurrency() -> usize {
     10 // Balanced limit to prevent resource exhaustion while allowing parallelism
+}
+
+fn provider_concurrency_cap(provider: ProviderId) -> usize {
+    match provider {
+        // MiniMax rate-limits parallel sub-agent calls aggressively; keep this low
+        ProviderId::MiniMax => 3,
+        ProviderId::ZAi => 5,
+        _ => 10,
+    }
+}
+
+fn provider_stagger(provider: ProviderId) -> Duration {
+    match provider {
+        // Give MiniMax extra spacing between launches to reduce burst failures
+        ProviderId::MiniMax => Duration::from_millis(600),
+        ProviderId::ZAi => Duration::from_millis(250),
+        _ => Duration::from_millis(100),
+    }
 }
 
 #[async_trait]
@@ -105,41 +125,52 @@ impl Tool for ExploreTool {
 
         // Build tasks based on input - all use Haiku (fast, cheap, effective for exploration)
         let mut tasks: Vec<SubAgentTask> = Vec::new();
+        let delegation_policy =
+            DelegationPolicy::for_subagent_explore(ctx.permission_mode, ctx.subagent_max_turns);
 
         if let Some(dirs) = params.directories {
             // One agent per directory - derive name from last path component
             for (i, dir) in dirs.iter().enumerate() {
                 let name = dir.rsplit('/').find(|s| !s.is_empty()).unwrap_or("dir");
-                tasks.push(
-                    SubAgentTask::new(
-                        format!("dir-{}", i),
-                        format!("In directory '{}': {}", dir, params.prompt),
-                    )
-                    .with_name(name)
-                    .with_working_dir(ctx.working_dir.clone()),
-                );
+                let mut task = SubAgentTask::new(
+                    format!("dir-{}", i),
+                    format!("In directory '{}': {}", dir, params.prompt),
+                )
+                .with_name(name)
+                .with_working_dir(ctx.working_dir.clone())
+                .with_delegation_policy(delegation_policy.clone());
+                if let Some(max_turns) = ctx.subagent_max_turns {
+                    task = task.with_max_turns(max_turns);
+                }
+                tasks.push(task);
             }
         } else if let Some(files) = params.files {
             // One agent per file - derive name from filename without extension
             for (i, file) in files.iter().enumerate() {
                 let name = file.rsplit('/').next().unwrap_or("file");
                 let name = name.split('.').next().unwrap_or(name);
-                tasks.push(
-                    SubAgentTask::new(
-                        format!("file-{}", i),
-                        format!("Analyze file '{}': {}", file, params.prompt),
-                    )
-                    .with_name(name)
-                    .with_working_dir(ctx.working_dir.clone()),
-                );
+                let mut task = SubAgentTask::new(
+                    format!("file-{}", i),
+                    format!("Analyze file '{}': {}", file, params.prompt),
+                )
+                .with_name(name)
+                .with_working_dir(ctx.working_dir.clone())
+                .with_delegation_policy(delegation_policy.clone());
+                if let Some(max_turns) = ctx.subagent_max_turns {
+                    task = task.with_max_turns(max_turns);
+                }
+                tasks.push(task);
             }
         } else {
             // Single agent for general exploration
-            tasks.push(
-                SubAgentTask::new("main", params.prompt.clone())
-                    .with_name("explore")
-                    .with_working_dir(ctx.working_dir.clone()),
-            );
+            let mut task = SubAgentTask::new("main", params.prompt.clone())
+                .with_name("explore")
+                .with_working_dir(ctx.working_dir.clone())
+                .with_delegation_policy(delegation_policy.clone());
+            if let Some(max_turns) = ctx.subagent_max_turns {
+                task = task.with_max_turns(max_turns);
+            }
+            tasks.push(task);
         }
 
         info!("Explore tool: Created {} tasks", tasks.len());
@@ -153,14 +184,54 @@ impl Tool for ExploreTool {
             );
         }
 
+        // Use session-scoped AI client when available so provider/model switching
+        // immediately applies to explore sub-agents.
+        let client = if let Some(ref session_client) = ctx.ai_client {
+            if session_client.provider_id() != self.client.provider_id()
+                || session_client.config().model != self.client.config().model
+            {
+                info!(
+                    base_provider = %self.client.provider_id(),
+                    session_provider = %session_client.provider_id(),
+                    base_model = %self.client.config().model,
+                    session_model = %session_client.config().model,
+                    "Explore tool using session AI client instead of registration-time client"
+                );
+            }
+            session_client.clone()
+        } else {
+            self.client.clone()
+        };
+
+        // Provider-aware throttling: some Anthropic-compatible providers (MiniMax)
+        // are much less tolerant of parallel sub-agent bursts.
+        let provider = client.provider_id();
+        let cap = provider_concurrency_cap(provider);
+        let requested = params.max_concurrency.max(1);
+        let task_count = tasks.len().max(1);
+        let effective_concurrency = requested.min(cap).min(task_count);
+
+        if effective_concurrency < requested {
+            warn!(
+                provider = %provider,
+                requested,
+                effective = effective_concurrency,
+                cap,
+                "Explore tool concurrency clamped for provider stability"
+            );
+        }
+
         // Create pool and execute (with progress if channel available)
-        let pool = SubAgentPool::new(self.client.clone(), self.cancellation.clone())
-            .with_concurrency(params.max_concurrency)
+        let pool = SubAgentPool::new(client, self.cancellation.clone())
+            .with_concurrency(effective_concurrency)
+            .with_stagger_delay(provider_stagger(provider))
             .with_override_model(ctx.current_model.clone());
 
         info!(
-            "Explore tool: Starting pool execution with max_concurrency={}",
-            params.max_concurrency
+            "Explore tool: Starting pool execution provider={} requested_concurrency={} effective_concurrency={}",
+            provider,
+            requested,
+            effective_concurrency
         );
         let results = if let Some(ref progress_tx) = ctx.explore_progress_tx {
             pool.execute_with_progress(tasks, progress_tx.clone()).await
@@ -169,19 +240,16 @@ impl Tool for ExploreTool {
         };
         info!("Explore tool: Pool returned {} results", results.len());
 
-        // Format results
-        let mut output = String::new();
         let mut all_files: Vec<String> = Vec::new();
         let mut total_turns = 0;
         let mut total_duration_ms = 0u64;
         let mut errors: Vec<String> = Vec::new();
+        let mut agent_findings = Vec::new();
 
         for result in &results {
-            if result.success {
-                output.push_str(&format!("\n## Agent: {}\n", result.task_id));
-                output.push_str(&result.output);
-                output.push('\n');
-            } else if let Some(err) = &result.error {
+            agent_findings.push(result.evidence_json());
+
+            if let Some(err) = &result.error {
                 errors.push(format!("{}: {}", result.task_id, err));
             }
 
@@ -190,24 +258,29 @@ impl Tool for ExploreTool {
             total_duration_ms += result.duration_ms;
         }
 
-        // Add summary
-        let summary = format!(
-            "\n---\n**Summary**: {} agents, {} turns total, {}ms, {} files examined",
+        let mut unique_files = Vec::new();
+        for file in all_files {
+            if !unique_files.iter().any(|existing| existing == &file) {
+                unique_files.push(file);
+            }
+        }
+
+        let message = format!(
+            "Explore completed: {} agents, {} turns, {} files examined",
             results.len(),
             total_turns,
-            total_duration_ms,
-            all_files.len()
+            unique_files.len()
         );
-        output.push_str(&summary);
 
-        if !errors.is_empty() {
-            output.push_str("\n**Errors**: ");
-            output.push_str(&errors.join(", "));
-        }
-
-        ToolResult {
-            output,
-            is_error: false,
-        }
+        ToolResult::success_data(json!({
+            "message": message,
+            "agent_count": results.len(),
+            "total_turns": total_turns,
+            "total_duration_ms": total_duration_ms,
+            "files_examined": unique_files,
+            "agents": agent_findings,
+            "errors": errors,
+            "delegation_policy": delegation_policy.audit_json(),
+        }))
     }
 }

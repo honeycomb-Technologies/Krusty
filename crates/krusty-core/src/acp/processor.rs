@@ -9,7 +9,6 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use agent_client_protocol::{
     Client as AcpClient, ContentBlock as AcpContent, ContentChunk, EmbeddedResourceResource,
@@ -20,12 +19,14 @@ use tracing::{debug, error, info, warn};
 
 const ACP_DEFAULT_MAX_TOKENS: usize = 8192;
 
+use crate::agent::AgentConfig;
 use crate::ai::client::{AiClient, AiClientConfig, CallOptions};
 use crate::ai::format_detection::detect_api_format;
 use crate::ai::providers::{get_provider, AuthHeader, ProviderId};
 use crate::ai::streaming::StreamPart;
 use crate::ai::types::{AiToolCall, Content, FinishReason};
 use crate::tools::git_identity::{GitIdentity, GitIdentityMode};
+use crate::tools::registry::PermissionMode;
 use crate::tools::{ToolContext, ToolRegistry, ToolResult};
 
 use super::error::AcpError;
@@ -43,6 +44,8 @@ pub struct PromptProcessor {
     tools: Arc<ToolRegistry>,
     /// Git identity for commit attribution
     git_identity: Option<GitIdentity>,
+    /// Shared agent runtime config
+    agent_config: AgentConfig,
 }
 
 impl PromptProcessor {
@@ -52,6 +55,7 @@ impl PromptProcessor {
             ai_client: None,
             tools,
             git_identity: Some(GitIdentity::default()),
+            agent_config: AgentConfig::default(),
         }
     }
 
@@ -135,21 +139,42 @@ impl PromptProcessor {
                 .await;
         }
 
+        let recovery_notice = session.take_recovery_notice().await;
+
         // Get tool definitions for the AI
         let tool_defs = self.tools.get_ai_tools().await;
 
         // Agentic loop - continue until AI stops requesting tools
-        const MAX_ITERATIONS: usize = 50; // Safety limit
-        for iteration in 0..MAX_ITERATIONS {
+        let max_iterations = self.agent_config.acp_max_turns();
+        for iteration in 0.. {
             if session.is_cancelled() {
                 info!("Session cancelled");
                 return Ok(StopReason::Cancelled);
             }
 
+            if max_iterations.is_some_and(|max| iteration >= max) {
+                warn!(
+                    max_iterations = ?max_iterations,
+                    "ACP agentic loop hit configured turn budget"
+                );
+                return Ok(StopReason::EndTurn);
+            }
+
             info!("Agentic loop iteration {}", iteration + 1);
 
             // Get current conversation history
-            let messages = session.history().await;
+            let mut messages = session.history().await;
+            if iteration == 0 {
+                if let Some(recovery_notice) = recovery_notice.clone() {
+                    let insert_idx = messages
+                        .last()
+                        .map(|message| usize::from(message.role != crate::ai::types::Role::User))
+                        .filter(|insert_before_last| *insert_before_last == 0)
+                        .map(|_| messages.len().saturating_sub(1))
+                        .unwrap_or(messages.len());
+                    messages.insert(insert_idx, recovery_notice);
+                }
+            }
 
             // Set up call options
             let options = CallOptions {
@@ -175,18 +200,18 @@ impl PromptProcessor {
             let mut pending_tool_calls: Vec<AiToolCall> = Vec::new();
             let mut stop_reason = StopReason::EndTurn;
 
-            // Stream receive timeout: 3 minutes handles slow providers and large responses.
-            // Resets on every received event, so only triggers on true stalls.
-            const STREAM_TIMEOUT: Duration = Duration::from_secs(180);
+            // Shared idle timeout: resets on every received event, so it only
+            // triggers on true stalls.
+            let stream_timeout = self.agent_config.stream_idle_timeout();
 
             loop {
-                let part = match tokio::time::timeout(STREAM_TIMEOUT, rx.recv()).await {
+                let part = match tokio::time::timeout(stream_timeout, rx.recv()).await {
                     Ok(Some(part)) => part,
                     Ok(None) => break, // Channel closed, stream ended
                     Err(_) => {
                         warn!(
                             "Stream receive timed out after {}s",
-                            STREAM_TIMEOUT.as_secs()
+                            stream_timeout.as_secs()
                         );
                         return Err(AcpError::AiClientError(
                             "Stream timed out waiting for response".into(),
@@ -282,7 +307,7 @@ impl PromptProcessor {
             // Loop continues - AI will be called again with tool results in history
         }
 
-        warn!("Agentic loop hit maximum iterations ({})", MAX_ITERATIONS);
+        #[allow(unreachable_code)]
         Ok(StopReason::EndTurn)
     }
 
@@ -293,12 +318,19 @@ impl PromptProcessor {
         tool_calls: Vec<AiToolCall>,
         connection: &C,
     ) -> Result<StopReason, AcpError> {
+        let ai_client = self.ai_client.clone().ok_or_else(|| {
+            AcpError::NotAuthenticated("AI client not initialized - authenticate first".into())
+        })?;
+
         let mut ctx = ToolContext {
             // Always honor the session-specific working directory to prevent
             // cross-session cwd bleed when multiple ACP sessions are active.
             working_dir: session.cwd.clone(),
             ..Default::default()
-        };
+        }
+        .with_permission_mode(PermissionMode::Autonomous)
+        .with_subagent_max_turns(self.agent_config.subagent_max_turns)
+        .with_ai_client(ai_client.clone());
 
         if let Some(ref identity) = self.git_identity {
             if identity.mode != GitIdentityMode::Disabled {
