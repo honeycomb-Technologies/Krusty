@@ -6,13 +6,14 @@
 //! and project-specific instructions.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use tokio::sync::RwLock;
 
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::plan::PlanManager;
 use crate::skills::SkillsManager;
-use crate::storage::WorkMode;
+use crate::storage::{Database, DelegatedRunStore, WorkMode};
 
 /// Instruction files to search for in the working directory (priority order).
 const PROJECT_FILES: &[&str] = &[
@@ -39,15 +40,34 @@ pub fn inject_context(
     db_path: &Path,
     session_id: &str,
     working_dir: &Path,
+    project_dir: Option<&Path>,
     work_mode: WorkMode,
     skills_manager: &RwLock<SkillsManager>,
+    model_id: Option<&str>,
 ) -> Vec<ModelMessage> {
+    let workspace_ctx = build_workspace_context(working_dir, project_dir);
+    let env_ctx = build_environment_context(working_dir, model_id);
     let plan_ctx = build_plan_context(db_path, session_id, work_mode);
-    let skills_ctx = build_skills_context(skills_manager);
-    let project_ctx = build_project_context(working_dir);
+    let delegated_ctx = build_delegated_context(db_path, session_id);
+    let skills_ctx = build_skills_context(skills_manager, project_dir.is_some());
+    let project_ctx = project_dir.map(build_project_context).unwrap_or_default();
 
-    let mut injected = Vec::with_capacity(conversation.len() + 3);
+    let mut injected = Vec::with_capacity(conversation.len() + 6);
 
+    if !workspace_ctx.is_empty() {
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text {
+                text: workspace_ctx,
+            }],
+        });
+    }
+    if !env_ctx.is_empty() {
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text { text: env_ctx }],
+        });
+    }
     if !project_ctx.is_empty() {
         injected.push(ModelMessage {
             role: Role::System,
@@ -60,6 +80,14 @@ pub fn inject_context(
             content: vec![Content::Text { text: plan_ctx }],
         });
     }
+    if !delegated_ctx.is_empty() {
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text {
+                text: delegated_ctx,
+            }],
+        });
+    }
     if !skills_ctx.is_empty() {
         injected.push(ModelMessage {
             role: Role::System,
@@ -69,6 +97,112 @@ pub fn inject_context(
 
     injected.extend_from_slice(conversation);
     injected
+}
+
+fn build_delegated_context(db_path: &Path, session_id: &str) -> String {
+    let db = match Database::new(db_path) {
+        Ok(db) => db,
+        Err(_) => return String::new(),
+    };
+    let store = DelegatedRunStore::new(db);
+    let recent = match store.list_runs_for_session(session_id, 3) {
+        Ok(runs) => runs,
+        Err(_) => return String::new(),
+    };
+    if recent.is_empty() {
+        return String::new();
+    }
+
+    let mut lines = vec![
+        "[RECENT DELEGATED RUNS]".to_string(),
+        String::new(),
+        "Recent delegated investigations exist for this session.".to_string(),
+        "- If the user explicitly asks to use `explore` or continue/refine a prior architectural audit, prefer calling `explore` again over manual `glob`/`list`/`read` probing.".to_string(),
+        "- If a matching delegated scope already exists below, let the `explore` tool resume or deepen that work instead of remapping the directory from scratch.".to_string(),
+        "- Only fall back to manual probing if the user forbids delegation or the explore result was clearly unusable.".to_string(),
+        String::new(),
+        "Most recent delegated runs:".to_string(),
+    ];
+
+    for run in recent {
+        let scopes = if run.target_scope.is_empty() {
+            "(no scope)".to_string()
+        } else {
+            run.target_scope
+                .iter()
+                .map(|scope| scope.label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let role = match run.role {
+            crate::storage::DelegatedRunRole::Explore => "explore",
+            crate::storage::DelegatedRunRole::Build => "build",
+            crate::storage::DelegatedRunRole::Planner => "planner",
+            crate::storage::DelegatedRunRole::Verifier => "verifier",
+        };
+        let review = run
+            .human_review
+            .as_deref()
+            .unwrap_or("No finalized review was recorded.")
+            .lines()
+            .next()
+            .unwrap_or("No finalized review was recorded.");
+        lines.push(format!(
+            "- {} run {} on [{}]: stage={:?}, resumable={}, semantic_review=\"{}\"",
+            role, run.delegated_run_id, scopes, run.stage, run.resumable, review
+        ));
+    }
+
+    lines.join("\n")
+}
+
+/// Build combined workspace + project context for a subagent system prompt.
+pub fn build_subagent_project_context(working_dir: &Path, project_dir: Option<&Path>) -> String {
+    let workspace = build_workspace_context(working_dir, project_dir);
+    let project = project_dir.map(build_project_context).unwrap_or_default();
+
+    let mut ctx = String::new();
+    if !workspace.is_empty() {
+        ctx.push_str(&workspace);
+    }
+    if !project.is_empty() {
+        if !ctx.is_empty() {
+            ctx.push_str("\n\n");
+        }
+        ctx.push_str(&project);
+    }
+    ctx
+}
+
+fn build_workspace_context(working_dir: &Path, project_dir: Option<&Path>) -> String {
+    let execution_dir = working_dir.display();
+
+    if let Some(project_dir) = project_dir {
+        return format!(
+            "[WORKSPACE MODE: PROJECT]\n\n\
+             Execution directory: {}\n\
+             Project directory: {}\n\
+             - Treat the project directory above as the canonical repository root for this session\n\
+             - Prefer absolute paths rooted in that project directory when referring to files\n\
+             - Do not invent alternate workspace roots or mirror paths if tools already revealed the real filesystem layout",
+            execution_dir,
+            project_dir.display()
+        );
+    }
+
+    format!(
+        "[WORKSPACE MODE: NEUTRAL]\n\n\
+     Execution directory: {}\n\
+     Project directory: none selected\n\n\
+     No project directory is currently selected for this session.\n\
+     - Do not assume the user wants help with any repository just because files are accessible\n\
+     - Do not describe yourself as working on a named project unless the user explicitly selects or creates one\n\
+     - Use the execution directory above when running tools, and treat paths returned by tools as canonical\n\
+     - Do not invent alternate workspace roots, mount points, or mirrored directories when tools already returned absolute paths\n\
+     - Read-only system inspection, brainstorming, and machine-level tasks are valid in this mode\n\
+     - If the user chooses or creates a project directory, call `set_workspace_context` so future turns pivot into project-aware behavior",
+        execution_dir
+    )
 }
 
 /// Build plan context from the active plan for this session.
@@ -165,13 +299,20 @@ pub fn build_plan_context(db_path: &Path, session_id: &str, work_mode: WorkMode)
 }
 
 /// Build skills context listing available skills.
-pub fn build_skills_context(skills_manager: &RwLock<SkillsManager>) -> String {
+pub fn build_skills_context(
+    skills_manager: &RwLock<SkillsManager>,
+    include_project_skills: bool,
+) -> String {
     let mut guard = match skills_manager.try_write() {
         Ok(g) => g,
         Err(_) => return String::new(),
     };
 
-    let skills = guard.list_skills();
+    let skills = if include_project_skills {
+        guard.list_skills()
+    } else {
+        guard.list_global_skills()
+    };
     if skills.is_empty() {
         return String::new();
     }
@@ -186,6 +327,92 @@ pub fn build_skills_context(skills_manager: &RwLock<SkillsManager>) -> String {
     }
     context.push_str("\nTo use: `skill(skill: \"name\")`\n");
     context
+}
+
+/// Build environment context with runtime information.
+///
+/// Gathers working directory, git status, platform, shell, date, and model
+/// information. Git commands that fail are silently skipped.
+fn build_environment_context(working_dir: &Path, model_id: Option<&str>) -> String {
+    let mut lines = vec![
+        "[ENVIRONMENT]".to_string(),
+        format!("Working directory: {}", working_dir.display()),
+    ];
+
+    let is_git_repo = working_dir.join(".git").exists();
+    lines.push(format!(
+        "Git repository: {}",
+        if is_git_repo { "yes" } else { "no" }
+    ));
+
+    if is_git_repo {
+        if let Ok(output) = Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(working_dir)
+            .output()
+        {
+            if output.status.success() {
+                let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !branch.is_empty() {
+                    lines.push(format!("Git branch: {}", branch));
+                }
+            }
+        }
+
+        if let Ok(output) = Command::new("git")
+            .args(["status", "--short"])
+            .current_dir(working_dir)
+            .output()
+        {
+            if output.status.success() {
+                let status_text = String::from_utf8_lossy(&output.stdout);
+                let mut modified = 0usize;
+                let mut staged = 0usize;
+                let mut untracked = 0usize;
+
+                for line in status_text.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("??") {
+                        untracked += 1;
+                    } else if trimmed.starts_with('A') {
+                        staged += 1;
+                    } else if trimmed.starts_with('M') || trimmed.contains('M') {
+                        modified += 1;
+                    }
+                }
+
+                let mut parts = Vec::new();
+                if modified > 0 {
+                    parts.push(format!("{} modified", modified));
+                }
+                if staged > 0 {
+                    parts.push(format!("{} staged", staged));
+                }
+                if untracked > 0 {
+                    parts.push(format!("{} untracked", untracked));
+                }
+                if !parts.is_empty() {
+                    lines.push(format!("Git status: {}", parts.join(", ")));
+                }
+            }
+        }
+    }
+
+    lines.push(format!("Platform: {}", std::env::consts::OS));
+
+    if let Ok(shell) = std::env::var("SHELL") {
+        let shell_name = shell.rsplit('/').next().unwrap_or(&shell);
+        lines.push(format!("Shell: {}", shell_name));
+    }
+
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    lines.push(format!("Date: {}", date));
+
+    if let Some(model) = model_id {
+        lines.push(format!("Model: {}", model));
+    }
+
+    lines.join("\n")
 }
 
 /// Build project context from instruction files in the working directory.
@@ -269,9 +496,18 @@ fn discover_project_root(working_dir: &Path) -> &Path {
 
 #[cfg(test)]
 mod tests {
-    use super::build_project_context;
+    use super::{build_project_context, inject_context};
     use std::fs;
     use tempfile::TempDir;
+    use tokio::sync::RwLock;
+
+    use crate::agent::DelegatedRunStage;
+    use crate::ai::types::{Content, ModelMessage, Role};
+    use crate::skills::SkillsManager;
+    use crate::storage::{
+        Database, DelegatedRunRole, DelegatedRunScope, DelegatedRunStartInput, DelegatedRunStore,
+        SessionManager, WorkMode,
+    };
 
     #[test]
     fn project_context_loads_hierarchical_instruction_files() {
@@ -287,5 +523,116 @@ mod tests {
 
         assert!(context.contains("root instructions"));
         assert!(context.contains("nested instructions"));
+    }
+
+    #[test]
+    fn inject_context_skips_project_instructions_without_explicit_project_dir() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(repo.join("AGENTS.md"), "repo instructions").unwrap();
+
+        let skills = RwLock::new(SkillsManager::with_defaults(repo));
+        let conversation = vec![ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "hello".to_string(),
+            }],
+        }];
+
+        let injected = inject_context(
+            &conversation,
+            repo.join("krusty.db").as_path(),
+            "session-id",
+            repo,
+            None,
+            WorkMode::Build,
+            &skills,
+            None,
+        );
+
+        assert_eq!(injected.len(), 3);
+        assert_eq!(injected[0].role, Role::System);
+        assert!(matches!(
+            &injected[0].content[0],
+            Content::Text { text } if text.contains("[WORKSPACE MODE: NEUTRAL]")
+        ));
+        assert_eq!(injected[1].role, Role::System);
+        assert!(matches!(
+            &injected[1].content[0],
+            Content::Text { text } if text.contains("[ENVIRONMENT]")
+        ));
+        assert_eq!(injected[2].role, Role::User);
+    }
+
+    #[test]
+    fn inject_context_includes_recent_delegated_run_guidance() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        let db_path = repo.join("krusty.db");
+        let db = Database::new(&db_path).unwrap();
+        let session_manager = SessionManager::new(Database::new(&db_path).unwrap());
+        let session_id = session_manager
+            .create_session("test", None, Some(repo.to_string_lossy().as_ref()))
+            .unwrap();
+        let store = DelegatedRunStore::new(db);
+        store
+            .create_run(&DelegatedRunStartInput {
+                delegated_run_id: "run-1".to_string(),
+                parent_session_id: session_id.clone(),
+                parent_tool_call_id: Some("tool-1".to_string()),
+                role: DelegatedRunRole::Explore,
+                stage: DelegatedRunStage::Created,
+                provider: Some("MiniMax".to_string()),
+                model: Some("MiniMax-M2.5".to_string()),
+                resumable: true,
+                resumed_from_run_id: None,
+                target_scope: vec![DelegatedRunScope {
+                    label: "src/storage".to_string(),
+                    path: "crates/krusty-core/src/storage".to_string(),
+                    kind: "directory".to_string(),
+                }],
+            })
+            .unwrap();
+        store
+            .finalize_run(
+                "run-1",
+                DelegatedRunStage::Complete,
+                &serde_json::json!({"outcome":"success"}),
+                Some("Architecture review completed across 1 targets."),
+                true,
+            )
+            .unwrap();
+
+        let skills = RwLock::new(SkillsManager::with_defaults(repo));
+        let conversation = vec![ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "use explore again".to_string(),
+            }],
+        }];
+
+        let injected = inject_context(
+            &conversation,
+            db_path.as_path(),
+            &session_id,
+            repo,
+            Some(repo),
+            WorkMode::Build,
+            &skills,
+            None,
+        );
+
+        assert!(injected.iter().any(|message| {
+            matches!(
+                &message.content[0],
+                Content::Text { text }
+                    if text.contains("[RECENT DELEGATED RUNS]")
+                        && text.contains("prefer calling `explore` again")
+                        && text.contains("run-1")
+                        && text.contains("src/storage")
+            )
+        }));
     }
 }

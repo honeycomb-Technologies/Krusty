@@ -14,10 +14,11 @@ use serde::{Deserialize, Serialize};
 use crate::agent::hooks::{HookResult, PostToolHook, PreToolHook};
 use crate::agent::subagent::AgentProgress;
 use crate::ai::client::AiClient;
-use crate::ai::types::AiTool;
+use crate::ai::types::{AiTool, ModelMessage};
 use crate::mcp::McpManager;
 use crate::process::ProcessRegistry;
 use crate::skills::SkillsManager;
+use crate::storage::WorkspaceMode;
 use crate::tools::git_identity::GitIdentity;
 
 /// Tool category for permission checking.
@@ -38,6 +39,7 @@ pub struct ToolPolicy {
     pub requires_supervised_approval: bool,
     pub retry_timeout_once: bool,
     pub allowed_in_plan_mode: bool,
+    pub timeout_override: Option<Duration>,
 }
 
 impl ToolPolicy {
@@ -47,6 +49,17 @@ impl ToolPolicy {
             requires_supervised_approval: false,
             retry_timeout_once: true,
             allowed_in_plan_mode: true,
+            timeout_override: None,
+        }
+    }
+
+    const fn read_only_with_timeout(timeout_override: Duration) -> Self {
+        Self {
+            category: ToolCategory::ReadOnly,
+            requires_supervised_approval: false,
+            retry_timeout_once: true,
+            allowed_in_plan_mode: true,
+            timeout_override: Some(timeout_override),
         }
     }
 
@@ -56,6 +69,7 @@ impl ToolPolicy {
             requires_supervised_approval: false,
             retry_timeout_once: false,
             allowed_in_plan_mode: true,
+            timeout_override: None,
         }
     }
 
@@ -65,6 +79,7 @@ impl ToolPolicy {
             requires_supervised_approval: true,
             retry_timeout_once: false,
             allowed_in_plan_mode: false,
+            timeout_override: None,
         }
     }
 }
@@ -84,6 +99,8 @@ pub enum PermissionMode {
 pub enum DelegationSurface {
     SubagentExplore,
     SubagentBuild,
+    SubagentPlan,
+    SubagentVerify,
     McpRemote,
     Skill,
     Extension,
@@ -96,6 +113,7 @@ pub struct DelegationPolicy {
     pub inherited_permission_mode: PermissionMode,
     pub max_turns: Option<usize>,
     pub read_only_only: bool,
+    pub bash_allowed: bool,
 }
 
 impl DelegationPolicy {
@@ -108,6 +126,7 @@ impl DelegationPolicy {
             inherited_permission_mode,
             max_turns,
             read_only_only: true,
+            bash_allowed: false,
         }
     }
 
@@ -120,17 +139,46 @@ impl DelegationPolicy {
             inherited_permission_mode,
             max_turns,
             read_only_only: false,
+            bash_allowed: false,
+        }
+    }
+
+    pub fn for_subagent_plan(
+        inherited_permission_mode: PermissionMode,
+        max_turns: Option<usize>,
+    ) -> Self {
+        Self {
+            surface: DelegationSurface::SubagentPlan,
+            inherited_permission_mode,
+            max_turns,
+            read_only_only: true,
+            bash_allowed: false,
+        }
+    }
+
+    pub fn for_subagent_verify(
+        inherited_permission_mode: PermissionMode,
+        max_turns: Option<usize>,
+    ) -> Self {
+        Self {
+            surface: DelegationSurface::SubagentVerify,
+            inherited_permission_mode,
+            max_turns,
+            read_only_only: true,
+            bash_allowed: true,
         }
     }
 
     pub fn authorize_tool(&self, tool_name: &str, plan_mode: bool) -> Result<(), String> {
         let policy = tool_policy(tool_name);
         if self.read_only_only && policy.category != ToolCategory::ReadOnly {
-            return Err(format!(
-                "Delegated policy blocked tool '{}': {} only permits read-only tools",
-                tool_name,
-                self.surface_name()
-            ));
+            if !(self.bash_allowed && tool_name == "bash") {
+                return Err(format!(
+                    "Delegated policy blocked tool '{}': {} only permits read-only tools",
+                    tool_name,
+                    self.surface_name()
+                ));
+            }
         }
         if self.inherited_permission_mode == PermissionMode::Supervised
             && policy.requires_supervised_approval
@@ -153,6 +201,8 @@ impl DelegationPolicy {
         match self.surface {
             DelegationSurface::SubagentExplore => "subagent_explore",
             DelegationSurface::SubagentBuild => "subagent_build",
+            DelegationSurface::SubagentPlan => "subagent_plan",
+            DelegationSurface::SubagentVerify => "subagent_verify",
             DelegationSurface::McpRemote => "mcp_remote",
             DelegationSurface::Skill => "skill",
             DelegationSurface::Extension => "extension",
@@ -165,6 +215,7 @@ impl DelegationPolicy {
             "permission_mode": self.inherited_permission_mode,
             "max_turns": self.max_turns,
             "read_only_only": self.read_only_only,
+            "bash_allowed": self.bash_allowed,
         })
     }
 }
@@ -177,17 +228,27 @@ pub fn tool_category(name: &str) -> ToolCategory {
 /// Resolve the canonical policy for a tool.
 pub fn tool_policy(name: &str) -> ToolPolicy {
     match name {
-        "read" | "glob" | "grep" | "list" | "web_search" | "web_fetch" | "explore" | "skill" => {
+        "agent" => ToolPolicy::read_only_with_timeout(DELEGATED_TOOL_TIMEOUT),
+        "read" | "glob" | "grep" | "list" | "web_search" | "web_fetch" | "skill" => {
             ToolPolicy::read_only()
         }
-        "AskUserQuestion" | "PlanConfirm" | "enter_plan_mode" | "set_work_mode" | "task_start"
-        | "task_complete" | "add_subtask" | "set_dependency" => ToolPolicy::interactive(),
+        "AskUserQuestion"
+        | "PlanConfirm"
+        | "enter_plan_mode"
+        | "set_work_mode"
+        | "set_workspace_context"
+        | "task_start"
+        | "task_complete"
+        | "add_subtask"
+        | "set_dependency" => ToolPolicy::interactive(),
         _ => ToolPolicy::write(),
     }
 }
 
 /// Default tool execution timeout (2 minutes)
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Delegated audit/build tools can legitimately run much longer than generic reads.
+const DELEGATED_TOOL_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// Tool execution result
 #[derive(Debug, Clone)]
@@ -329,6 +390,10 @@ pub struct ToolOutputChunk {
 /// Context for tool execution
 pub struct ToolContext {
     pub working_dir: std::path::PathBuf,
+    pub project_dir: Option<std::path::PathBuf>,
+    pub workspace_mode: WorkspaceMode,
+    pub session_id: Option<String>,
+    pub db_path: Option<std::path::PathBuf>,
     /// Sandbox root for multi-tenant path isolation (e.g., /workspaces/{user_id})
     /// If set, all file operations must be within this directory.
     pub sandbox_root: Option<std::path::PathBuf>,
@@ -345,10 +410,8 @@ pub struct ToolContext {
     pub tool_use_id: Option<String>,
     /// Whether plan mode is active (restricts write tools)
     pub plan_mode: bool,
-    /// Channel for explore tool sub-agent progress updates
-    pub explore_progress_tx: Option<mpsc::UnboundedSender<AgentProgress>>,
-    /// Channel for build tool builder agent progress updates
-    pub build_progress_tx: Option<mpsc::UnboundedSender<AgentProgress>>,
+    /// Channel for delegated agent progress updates (explore, build, plan, verify)
+    pub agent_progress_tx: Option<mpsc::UnboundedSender<AgentProgress>>,
     /// Current user-selected model (for non-Anthropic providers, subagents use this)
     pub current_model: Option<String>,
     /// Session-scoped AI client (used by tools that spawn sub-agents)
@@ -361,12 +424,20 @@ pub struct ToolContext {
     pub subagent_max_turns: Option<usize>,
     /// Optional delegated execution policy contract for downstream calls.
     pub delegation_policy: Option<DelegationPolicy>,
+    /// Tool registry for subagent delegation (explore/build use this to give subagents real tools).
+    pub tool_registry: Option<Arc<ToolRegistry>>,
+    /// Parent conversation context for delegated agents that need upstream history.
+    pub parent_conversation: Option<Arc<Vec<ModelMessage>>>,
 }
 
 impl Default for ToolContext {
     fn default() -> Self {
         Self {
             working_dir: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            project_dir: None,
+            workspace_mode: WorkspaceMode::Neutral,
+            session_id: None,
+            db_path: None,
             sandbox_root: None,
             user_id: None,
             process_registry: None,
@@ -376,14 +447,15 @@ impl Default for ToolContext {
             output_tx: None,
             tool_use_id: None,
             plan_mode: false,
-            explore_progress_tx: None,
-            build_progress_tx: None,
+            agent_progress_tx: None,
             current_model: None,
             ai_client: None,
             git_identity: None,
             permission_mode: PermissionMode::Supervised,
             subagent_max_turns: None,
             delegation_policy: None,
+            tool_registry: None,
+            parent_conversation: None,
         }
     }
 }
@@ -399,6 +471,26 @@ impl ToolContext {
             process_registry: Some(process_registry),
             ..Default::default()
         }
+    }
+
+    pub fn with_workspace(
+        mut self,
+        project_dir: Option<std::path::PathBuf>,
+        workspace_mode: WorkspaceMode,
+    ) -> Self {
+        self.project_dir = project_dir;
+        self.workspace_mode = workspace_mode;
+        self
+    }
+
+    pub fn with_session_metadata(
+        mut self,
+        session_id: String,
+        db_path: std::path::PathBuf,
+    ) -> Self {
+        self.session_id = Some(session_id);
+        self.db_path = Some(db_path);
+        self
     }
 
     /// Set sandbox root for multi-tenant path isolation.
@@ -436,15 +528,9 @@ impl ToolContext {
         self
     }
 
-    /// Add explore progress channel to context
-    pub fn with_explore_progress(mut self, tx: mpsc::UnboundedSender<AgentProgress>) -> Self {
-        self.explore_progress_tx = Some(tx);
-        self
-    }
-
-    /// Add build progress channel to context
-    pub fn with_build_progress(mut self, tx: mpsc::UnboundedSender<AgentProgress>) -> Self {
-        self.build_progress_tx = Some(tx);
+    /// Add delegated agent progress channel to context
+    pub fn with_agent_progress(mut self, tx: mpsc::UnboundedSender<AgentProgress>) -> Self {
+        self.agent_progress_tx = Some(tx);
         self
     }
 
@@ -481,6 +567,18 @@ impl ToolContext {
     /// Attach delegated execution policy metadata.
     pub fn with_delegation_policy(mut self, policy: DelegationPolicy) -> Self {
         self.delegation_policy = Some(policy);
+        self
+    }
+
+    /// Set tool registry for subagent delegation.
+    pub fn with_tool_registry(mut self, registry: Arc<ToolRegistry>) -> Self {
+        self.tool_registry = Some(registry);
+        self
+    }
+
+    /// Set parent conversation context for delegated agents.
+    pub fn with_parent_conversation(mut self, conv: Arc<Vec<ModelMessage>>) -> Self {
+        self.parent_conversation = Some(conv);
         self
     }
 
@@ -610,6 +708,14 @@ pub trait Tool: Send + Sync {
     /// Tool description for AI
     fn description(&self) -> &str;
 
+    /// Extended usage guidance injected into the system prompt.
+    /// Unlike description() which goes in the tool schema,
+    /// this returns detailed instructions that become part of
+    /// the system prompt's tool guidance section.
+    fn prompt(&self) -> Option<&str> {
+        None
+    }
+
     /// JSON schema for parameters
     fn parameters_schema(&self) -> Value;
 
@@ -680,6 +786,31 @@ impl ToolRegistry {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
                 input_schema: t.parameters_schema(),
+                prompt: t.prompt().map(|s| s.to_string()),
+            })
+            .collect();
+        ai_tools.sort_by(|a, b| a.name.cmp(&b.name));
+        ai_tools
+    }
+
+    /// Get tools filtered by a delegation policy (excludes tools the policy denies + recursive delegation tools).
+    pub async fn get_ai_tools_filtered(&self, policy: &DelegationPolicy) -> Vec<AiTool> {
+        let tools = self.tools.read().await;
+        let mut ai_tools: Vec<AiTool> = tools
+            .values()
+            .filter(|t| {
+                let name = t.name();
+                // Subagents must not recursively spawn subagents or cause mode confusion
+                if matches!(name, "agent" | "skill" | "enter_plan_mode" | "set_work_mode" | "set_workspace_context") {
+                    return false;
+                }
+                policy.authorize_tool(name, false).is_ok()
+            })
+            .map(|t| AiTool {
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+                input_schema: t.parameters_schema(),
+                prompt: t.prompt().map(|s| s.to_string()),
             })
             .collect();
         ai_tools.sort_by(|a, b| a.name.cmp(&b.name));
@@ -711,7 +842,10 @@ impl ToolRegistry {
         tracing::info!(tool = name, "ToolRegistry: execute called");
         let tool = self.get(name).await?;
         tracing::info!(tool = name, "ToolRegistry: tool found, executing");
-        let timeout = ctx.timeout.unwrap_or(self.default_timeout);
+        let timeout = ctx
+            .timeout
+            .or(tool_policy(name).timeout_override)
+            .unwrap_or(self.default_timeout);
         let start = Instant::now();
 
         // Run pre-hooks - they can block execution
@@ -821,6 +955,14 @@ mod tests {
         assert!(read_policy.retry_timeout_once);
         assert!(read_policy.allowed_in_plan_mode);
         assert!(!read_policy.requires_supervised_approval);
+        assert_eq!(read_policy.timeout_override, None);
+
+        let delegated_read_policy = tool_policy("agent");
+        assert_eq!(delegated_read_policy.category, ToolCategory::ReadOnly);
+        assert_eq!(
+            delegated_read_policy.timeout_override,
+            Some(DELEGATED_TOOL_TIMEOUT)
+        );
 
         let write_policy = tool_policy("apply_patch");
         assert_eq!(write_policy.category, ToolCategory::Write);

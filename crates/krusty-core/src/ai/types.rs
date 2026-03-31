@@ -13,6 +13,9 @@ pub struct AiTool {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    /// Extended prompt for system prompt injection (internal only, not sent to providers)
+    #[serde(skip)]
+    pub prompt: Option<String>,
 }
 
 /// AI SDK Tool call (for provider communication only)

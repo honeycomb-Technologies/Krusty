@@ -27,6 +27,20 @@ impl Tool for GlobTool {
         "Find files by glob pattern (e.g., '**/*.rs', 'src/**/*.ts'). Returns up to 100 paths sorted by modification time (newest first). For large codebases, use specific patterns to narrow results."
     }
 
+    fn prompt(&self) -> Option<&str> {
+        Some(r#"Use this for all file discovery instead of find or ls via bash.
+
+Returns up to 100 paths sorted by modification time (newest first). In large codebases, use specific subdirectory patterns to avoid hitting the cap.
+
+Common patterns:
+- "**/*.rs" — all Rust files recursively
+- "src/**/*.ts" — TypeScript under src/
+- "*.{js,jsx}" — JS and JSX in current directory
+- "tests/**/test_*.py" — Python test files
+
+To search file contents (not names), use Grep instead. To see directory structure, use List instead."#)
+    }
+
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",

@@ -57,7 +57,7 @@ impl AiClient {
             },
         );
         let prompt_sections =
-            self.system_prompt_sections(model, &[], options.system_prompt.as_deref());
+            self.system_prompt_sections(model, &[], options.system_prompt.as_deref(), None);
         let system_prompt = prompt_sections.combined();
         let max_tokens = options.max_tokens.unwrap_or(max_tokens);
 
@@ -393,7 +393,7 @@ impl AiClient {
         let capabilities = ProviderCapabilities::for_provider(self.provider_id());
         let format_handler = AnthropicFormat::new();
         let prompt_sections =
-            self.system_prompt_sections(model, conversation, Some(base_system_prompt));
+            self.system_prompt_sections(model, conversation, Some(base_system_prompt), None);
 
         // Convert parent conversation messages (System role filtered by format handler)
         let mut api_messages =
@@ -491,7 +491,7 @@ impl AiClient {
     ) -> Result<String> {
         let format_handler = OpenAIFormat::new(self.config().api_format);
         let prompt_sections =
-            self.system_prompt_sections(model, conversation, Some(base_system_prompt));
+            self.system_prompt_sections(model, conversation, Some(base_system_prompt), None);
 
         let mut api_messages =
             format_handler.convert_messages(conversation, Some(self.provider_id()));
@@ -549,7 +549,7 @@ impl AiClient {
     ) -> Result<String> {
         let format_handler = GoogleFormat::new();
         let prompt_sections =
-            self.system_prompt_sections(model, conversation, Some(base_system_prompt));
+            self.system_prompt_sections(model, conversation, Some(base_system_prompt), None);
 
         let mut contents = format_handler.convert_messages(conversation, Some(self.provider_id()));
 

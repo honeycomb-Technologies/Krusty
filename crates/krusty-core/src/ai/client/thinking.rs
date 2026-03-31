@@ -34,7 +34,7 @@ impl AiClient {
             },
         );
         let prompt_sections =
-            self.system_prompt_sections(model, &[], options.system_prompt.as_deref());
+            self.system_prompt_sections(model, &[], options.system_prompt.as_deref(), None);
         let system_prompt = prompt_sections.combined();
 
         let mut body = serde_json::json!({

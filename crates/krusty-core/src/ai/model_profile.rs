@@ -301,21 +301,46 @@ pub fn build_system_prompt_sections(
     model_id: &str,
     messages: &[ModelMessage],
     custom_system_prompt: Option<&str>,
+    tool_prompts: &[(String, String)],
 ) -> SystemPromptSections {
     let profile = ModelProfile::resolve(provider, api_format, model_id);
     let (project_context, session_context) = partition_system_messages(messages);
 
+    let mut base = profile.layered_system_prompt(
+        provider,
+        api_format,
+        model_id,
+        custom_system_prompt,
+    );
+    let tool_guidance = build_tool_guidance_section(tool_prompts);
+    if !tool_guidance.is_empty() {
+        base.push_str("\n\n");
+        base.push_str(&tool_guidance);
+    }
+
     SystemPromptSections {
         profile,
-        base_prompt: profile.layered_system_prompt(
-            provider,
-            api_format,
-            model_id,
-            custom_system_prompt,
-        ),
+        base_prompt: base,
         project_context,
         session_context,
     }
+}
+
+fn build_tool_guidance_section(tool_prompts: &[(String, String)]) -> String {
+    let prompts: Vec<_> = tool_prompts
+        .iter()
+        .filter(|(_, prompt)| !prompt.is_empty())
+        .collect();
+
+    if prompts.is_empty() {
+        return String::new();
+    }
+
+    let mut section = String::from("# Tool Guidance\n\n");
+    for (name, prompt) in &prompts {
+        section.push_str(&format!("## {}\n{}\n\n", name, prompt));
+    }
+    section
 }
 
 pub fn partition_system_messages(messages: &[ModelMessage]) -> (String, String) {
@@ -480,9 +505,10 @@ mod tests {
         let sections = build_system_prompt_sections(
             ProviderId::OpenAI,
             ApiFormat::OpenAIResponses,
-            "gpt-5-codex",
+            "gpt-5.3-codex",
             &[],
             None,
+            &[],
         );
 
         assert!(sections.base_prompt.contains("## Model Guidance"));
@@ -496,7 +522,7 @@ mod tests {
         let codex = ModelProfile::resolve(
             ProviderId::OpenAI,
             ApiFormat::OpenAIResponses,
-            "gpt-5-codex",
+            "gpt-5.3-codex",
         )
         .stream_drain_policy();
         let generic = ModelProfile::resolve(
@@ -518,6 +544,7 @@ mod tests {
             "claude-sonnet-4.5",
             &[],
             Some("Summarize only."),
+            &[],
         );
 
         assert_eq!(sections.base_prompt, "Summarize only.");

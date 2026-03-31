@@ -46,6 +46,7 @@ use super::failure;
 use super::loop_events::{LoopEvent, LoopInput, LoopStopReason, PlanTaskInfo};
 use super::plan_handler;
 use super::stream::{self, ThinkingBlock};
+use super::DelegatedProgressEvent;
 
 const EXPLORATION_BUDGET_SOFT: usize = 15;
 const EXPLORATION_BUDGET_HARD: usize = 30;
@@ -54,6 +55,7 @@ const EXPLORATION_BUDGET_HARD: usize = 30;
 pub struct OrchestratorConfig {
     pub session_id: String,
     pub working_dir: PathBuf,
+    pub project_dir: Option<PathBuf>,
     pub permission_mode: PermissionMode,
     pub max_iterations: Option<usize>,
     pub stream_idle_timeout: std::time::Duration,
@@ -62,6 +64,8 @@ pub struct OrchestratorConfig {
     /// Whether to generate a title on first AI response.
     /// Set to true for new sessions, false for resumed conversations.
     pub generate_title: bool,
+    /// Optional explore delegated progress channel for external surfaces.
+    pub delegated_progress_tx: Option<mpsc::UnboundedSender<DelegatedProgressEvent>>,
 }
 
 impl Default for OrchestratorConfig {
@@ -69,12 +73,14 @@ impl Default for OrchestratorConfig {
         Self {
             session_id: String::new(),
             working_dir: PathBuf::new(),
+            project_dir: None,
             permission_mode: PermissionMode::default(),
             max_iterations: None,
             stream_idle_timeout: constants::http::STREAM_TIMEOUT,
             user_id: None,
             initial_work_mode: WorkMode::default(),
             generate_title: false,
+            delegated_progress_tx: None,
         }
     }
 }
@@ -157,12 +163,14 @@ impl AgenticOrchestrator {
         let OrchestratorConfig {
             session_id,
             working_dir,
+            project_dir,
             permission_mode,
             max_iterations,
             stream_idle_timeout,
             user_id,
             initial_work_mode,
             generate_title,
+            delegated_progress_tx,
         } = self.config;
 
         let mut work_mode = initial_work_mode;
@@ -214,8 +222,10 @@ impl AgenticOrchestrator {
                 &db_path,
                 &session_id,
                 &working_dir,
+                project_dir.as_deref(),
                 work_mode,
                 &skills_manager,
+                Some(ai_client.config().model.as_str()),
             );
             let estimated_tokens_before =
                 super::estimate_conversation_tokens(&conversation_with_context);
@@ -271,8 +281,10 @@ impl AgenticOrchestrator {
                     &db_path,
                     &session_id,
                     &working_dir,
+                    project_dir.as_deref(),
                     work_mode,
                     &skills_manager,
+                    Some(ai_client.config().model.as_str()),
                 );
                 let estimated_tokens_after =
                     super::estimate_conversation_tokens(&conversation_with_context);
@@ -408,33 +420,7 @@ impl AgenticOrchestrator {
             // Title generation on first response
             if !title_generated && !result.text.is_empty() {
                 title_generated = true;
-                let first_user_msg = conversation
-                    .iter()
-                    .find(|m| m.role == Role::User)
-                    .and_then(|m| {
-                        m.content.iter().find_map(|c| {
-                            if let Content::Text { text } = c {
-                                Some(text.clone())
-                            } else {
-                                None
-                            }
-                        })
-                    })
-                    .unwrap_or_default();
-
-                if !first_user_msg.is_empty() {
-                    let title_client = ai_client.clone();
-                    let title_tx = event_tx.clone();
-                    let title_session_id = session_id.clone();
-                    let title_db_path = db_path.clone();
-                    tokio::spawn(async move {
-                        let title = ai_generate_title(&title_client, &first_user_msg).await;
-                        if !title.is_empty() {
-                            save_title(&title_db_path, &title_session_id, &title);
-                            let _ = title_tx.send(LoopEvent::TitleGenerated { title });
-                        }
-                    });
-                }
+                maybe_generate_title(&conversation, &ai_client, &event_tx, &session_id, &db_path);
             }
 
             // No tool calls → check plan detection → finish turn
@@ -497,12 +483,14 @@ impl AgenticOrchestrator {
                         &tool_registry,
                         &ai_client,
                         &working_dir,
+                        project_dir.as_deref(),
                         &process_registry,
                         &session_id,
                         &db_path,
                         user_id.as_deref(),
                         permission_mode,
                         work_mode,
+                        delegated_progress_tx.as_ref(),
                         &event_tx,
                         &mut input_rx,
                     )
@@ -618,12 +606,14 @@ impl AgenticOrchestrator {
                 &tool_registry,
                 &ai_client,
                 &working_dir,
+                project_dir.as_deref(),
                 &process_registry,
                 &session_id,
                 &db_path,
                 user_id.as_deref(),
                 permission_mode,
                 work_mode,
+                delegated_progress_tx.as_ref(),
                 &event_tx,
                 &mut input_rx,
             )
@@ -636,6 +626,8 @@ impl AgenticOrchestrator {
                 &result.tool_calls,
                 &tool_results,
             );
+            let explore_diagnostic =
+                failure::detect_terminal_explore_failure(&result.tool_calls, &tool_results);
 
             // Exploration budget warnings
             if exploration_budget_count >= EXPLORATION_BUDGET_HARD {
@@ -662,7 +654,7 @@ impl AgenticOrchestrator {
             clear_recovery_state(&db_path, &session_id);
 
             // Check fail-fast
-            if let Some(diagnostic) = fail_diagnostic {
+            if let Some(diagnostic) = fail_diagnostic.or(explore_diagnostic) {
                 tracing::warn!(
                     iteration,
                     session_id = %session_id,
@@ -679,6 +671,50 @@ impl AgenticOrchestrator {
                 let _ = event_tx.send(LoopEvent::Finished {
                     session_id: session_id.clone(),
                     stop_reason: LoopStopReason::LoopGuardTriggered,
+                });
+                return;
+            }
+
+            if let Some(explore_summary) =
+                finalize_explore_only_turn(&result.tool_calls, &tool_msg.content)
+            {
+                let _ = event_tx.send(LoopEvent::TextDelta {
+                    delta: explore_summary.clone(),
+                });
+
+                let assistant_msg = ModelMessage {
+                    role: Role::Assistant,
+                    content: vec![Content::Text {
+                        text: explore_summary,
+                    }],
+                };
+                conversation.push(assistant_msg.clone());
+                context_ledger.update_from_conversation(&conversation);
+                persist_context_state(&db_path, &session_id, &context_ledger);
+                save_message(&db_path, &session_id, &assistant_msg);
+
+                if !title_generated {
+                    maybe_generate_title(
+                        &conversation,
+                        &ai_client,
+                        &event_tx,
+                        &session_id,
+                        &db_path,
+                    );
+                }
+
+                if last_token_count > 0 {
+                    update_token_count(&db_path, &session_id, last_token_count);
+                }
+                clear_recovery_state(&db_path, &session_id);
+                set_agent_state(&db_path, &session_id, "idle");
+                let _ = event_tx.send(LoopEvent::TurnComplete {
+                    turn: iteration,
+                    has_more: false,
+                });
+                let _ = event_tx.send(LoopEvent::Finished {
+                    session_id: session_id.clone(),
+                    stop_reason: LoopStopReason::Completed,
                 });
                 return;
             }
@@ -790,6 +826,106 @@ fn build_assistant_message(
         role: Role::Assistant,
         content,
     }
+}
+
+fn finalize_explore_only_turn(
+    tool_calls: &[crate::ai::types::AiToolCall],
+    tool_results: &[Content],
+) -> Option<String> {
+    if tool_calls.len() != 1 || tool_calls.first()?.name != "explore" {
+        return None;
+    }
+
+    let Content::ToolResult {
+        tool_use_id,
+        output,
+        is_error,
+    } = tool_results.first()?
+    else {
+        return None;
+    };
+
+    if tool_use_id != &tool_calls.first()?.id || is_error.unwrap_or(false) {
+        return None;
+    }
+
+    let parsed = match output {
+        serde_json::Value::String(text) => serde_json::from_str::<serde_json::Value>(text).ok()?,
+        other => other.clone(),
+    };
+    let payload = parsed.get("result").unwrap_or(&parsed);
+    let outcome = payload
+        .get("outcome")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let usable_agents = payload
+        .get("usable_agents")
+        .or_else(|| payload.get("successful_agents"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    if !matches!(outcome, "success" | "partial") || usable_agents == 0 {
+        return None;
+    }
+
+    let message = payload
+        .get("message")
+        .and_then(|value| value.as_str())
+        .unwrap_or("Explore completed.");
+    if let Some(human_review) = payload
+        .get("human_review")
+        .and_then(|value| value.as_str())
+        .filter(|review| !review.trim().is_empty())
+    {
+        return Some(human_review.to_string());
+    }
+    payload
+        .get("investigation_summary")
+        .and_then(|value| value.as_str())
+        .filter(|summary| !summary.trim().is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            Some(message)
+                .filter(|message| !message.trim().is_empty())
+                .map(ToString::to_string)
+        })
+}
+
+fn maybe_generate_title(
+    conversation: &[ModelMessage],
+    ai_client: &Arc<AiClient>,
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+    session_id: &str,
+    db_path: &Path,
+) {
+    let first_user_msg = conversation
+        .iter()
+        .find(|m| m.role == Role::User)
+        .and_then(|m| {
+            m.content.iter().find_map(|c| {
+                if let Content::Text { text } = c {
+                    Some(text.clone())
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_default();
+
+    if first_user_msg.is_empty() {
+        return;
+    }
+
+    let title_client = ai_client.clone();
+    let title_tx = event_tx.clone();
+    let title_session_id = session_id.to_string();
+    let title_db_path = db_path.to_path_buf();
+    tokio::spawn(async move {
+        let title = ai_generate_title(&title_client, &first_user_msg).await;
+        if !title.is_empty() {
+            save_title(&title_db_path, &title_session_id, &title);
+            let _ = title_tx.send(LoopEvent::TitleGenerated { title });
+        }
+    });
 }
 
 fn save_message(db_path: &Path, session_id: &str, message: &ModelMessage) {
@@ -1044,5 +1180,66 @@ fn recovery_decision(
                 }
             },
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::finalize_explore_only_turn;
+    use crate::ai::types::{AiToolCall, Content};
+    use serde_json::json;
+
+    #[test]
+    fn finalize_explore_only_turn_returns_summary_for_successful_explore() {
+        let tool_calls = vec![AiToolCall {
+            id: "call-1".to_string(),
+            name: "explore".to_string(),
+            arguments: json!({}),
+        }];
+        let tool_results = vec![Content::ToolResult {
+            tool_use_id: "call-1".to_string(),
+            output: json!({
+                "tool": "explore",
+                "result": {
+                    "outcome": "success",
+                    "usable_agents": 2,
+                    "message": "Explore completed: 2 agents",
+                    "human_review": "Architecture review completed across 2 targets.\n\nTarget reviews:\n- agent: Owns orchestration.\n- ai: Owns providers.",
+                    "investigation_summary": "Delegated exploration gathered usable evidence for dir-0, dir-1.",
+                    "confidence": "high",
+                    "paths_examined_count": 15
+                }
+            }),
+            is_error: None,
+        }];
+
+        let summary = finalize_explore_only_turn(&tool_calls, &tool_results)
+            .expect("explore should finalize");
+
+        assert!(summary.contains("Architecture review completed across 2 targets."));
+        assert!(summary.contains("agent: Owns orchestration."));
+        assert!(!summary.contains("Evidence examined: 15 tracked paths/files."));
+    }
+
+    #[test]
+    fn finalize_explore_only_turn_skips_failed_or_non_explore_results() {
+        let tool_calls = vec![AiToolCall {
+            id: "call-1".to_string(),
+            name: "explore".to_string(),
+            arguments: json!({}),
+        }];
+        let tool_results = vec![Content::ToolResult {
+            tool_use_id: "call-1".to_string(),
+            output: json!({
+                "tool": "explore",
+                "result": {
+                    "outcome": "failed",
+                    "usable_agents": 0
+                }
+            }),
+            is_error: None,
+        }];
+
+        assert!(finalize_explore_only_turn(&tool_calls, &tool_results).is_none());
     }
 }

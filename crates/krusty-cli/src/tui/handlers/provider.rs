@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use crate::ai::client::AiClient;
 use crate::ai::providers::ProviderId;
-use crate::tools::{register_build_tool, register_explore_tool};
+use crate::tools::register_agent_tool;
 use crate::tui::app::App;
 
 impl App {
@@ -48,40 +48,32 @@ impl App {
             let config = self.create_client_config();
             self.runtime.ai_client = Some(AiClient::with_api_key(config, key.clone()));
             self.runtime.api_key = Some(key);
-            self.register_explore_tool_if_client().await;
+            self.register_agent_tool_if_client().await;
             return Ok(());
         }
 
         Ok(())
     }
 
-    /// Register explore and build tools if client is available
-    pub(crate) async fn register_explore_tool_if_client(&mut self) {
+    /// Register the unified agent tool if client is available
+    pub(crate) async fn register_agent_tool_if_client(&mut self) {
         let client = self.create_ai_client();
 
         if let Some(client) = client {
             let client = Arc::new(client);
 
-            // Register explore tool
-            register_explore_tool(
-                &self.services.tool_registry,
-                client.clone(),
-                self.runtime.cancellation.clone(),
-            )
-            .await;
-
-            // Register build tool (The Kraken)
-            register_build_tool(
+            // Register unified agent tool (explore, plan, verify, build)
+            register_agent_tool(
                 &self.services.tool_registry,
                 client,
                 self.runtime.cancellation.clone(),
             )
             .await;
 
-            // Update cached tools so API knows about explore and build
+            // Update cached tools so API knows about the agent tool
             self.services.cached_ai_tools = self.services.tool_registry.get_ai_tools().await;
             tracing::info!(
-                "Registered explore and build tools, total tools: {}",
+                "Registered agent tool, total tools: {}",
                 self.services.cached_ai_tools.len()
             );
         }

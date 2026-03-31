@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::{sleep, timeout};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Timeout for acquiring semaphore permit (prevents deadlock on hung agents)
 const SEMAPHORE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -31,7 +31,6 @@ const SEMAPHORE_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_STAGGER_MS: u64 = 100;
 
 use crate::agent::build_context::SharedBuildContext;
-use crate::agent::cache::SharedExploreCache;
 use crate::agent::AgentCancellation;
 use crate::ai::client::AiClient;
 
@@ -41,17 +40,18 @@ pub use types::{
     AgentProgress, AgentProgressStatus, SubAgentApiError, SubAgentResult, SubAgentTask,
 };
 
-// Internal execution functions
-use execution::{
-    execute_builder_with_progress, execute_subagent_with_progress, execute_subagent_with_tools,
-};
+// Re-export single agent entry points
+pub use execution::execute_single_explorer;
+pub(crate) use execution::{execute_single_agent, AgentConfig};
 
-/// Pool for managing concurrent sub-agent execution
+// Internal execution functions
+use execution::execute_builder_with_progress;
+
+/// Pool for managing concurrent sub-agent execution (used by the Build tool)
 pub struct SubAgentPool {
     client: Arc<AiClient>,
     cancellation: AgentCancellation,
     max_concurrency: usize,
-    cache: Arc<SharedExploreCache>,
     /// Override model for non-Anthropic providers (uses user's selected model)
     override_model: Option<String>,
     /// Delay between spawning agents (prevents rate limit storms)
@@ -66,7 +66,6 @@ impl SubAgentPool {
             client,
             cancellation,
             max_concurrency: concurrency::MAX_PARALLEL_TOOLS,
-            cache: Arc::new(SharedExploreCache::new()),
             override_model: None,
             stagger_delay: Duration::from_millis(DEFAULT_STAGGER_MS),
         }
@@ -103,144 +102,18 @@ impl SubAgentPool {
             .unwrap_or_else(|| self.client.config().model.clone())
     }
 
-    /// Execute multiple sub-agent tasks concurrently with staggered spawning
+    /// Execute exploration tasks concurrently using the single-agent model
     ///
-    /// Agents are spawned with small delays between them to avoid rate limit storms.
-    /// The stagger delay is provider-specific (lower for Anthropic, higher for others).
-    pub async fn execute(&self, tasks: Vec<SubAgentTask>) -> Vec<SubAgentResult> {
-        let semaphore = Arc::new(Semaphore::new(self.max_concurrency));
-        let client = self.client.clone();
-        let cancellation = self.cancellation.clone();
-        let cache = self.cache.clone();
-        let task_count = tasks.len();
-        let stagger = self.stagger_delay;
-
-        info!(
-            count = task_count,
-            concurrency = self.max_concurrency,
-            stagger_ms = stagger.as_millis() as u64,
-            "SubAgentPool: Spawning sub-agents with stagger"
-        );
-
-        // Spawn tasks with staggered delays to avoid rate limit storms
-        let mut handles = Vec::with_capacity(task_count);
-
-        for (idx, task) in tasks.into_iter().enumerate() {
-            // Stagger delay between spawns (skip first)
-            if idx > 0 && !stagger.is_zero() {
-                sleep(stagger).await;
-            }
-
-            let sem = semaphore.clone();
-            let client = client.clone();
-            let cancel = cancellation.child_token();
-            let cache = cache.clone();
-            let task_id = task.id.clone();
-            let resolved_model = self.resolve_model();
-
-            let handle = tokio::spawn(async move {
-                debug!(task_id = %task_id, "SubAgent: Acquiring semaphore permit");
-                let _permit = match timeout(SEMAPHORE_TIMEOUT, sem.acquire()).await {
-                    Ok(Ok(p)) => p,
-                    Ok(Err(e)) => {
-                        warn!(task_id = %task_id, error = %e, "SubAgent: Failed to acquire semaphore");
-                        return SubAgentResult {
-                            task_id,
-                            success: false,
-                            output: String::new(),
-                            files_examined: vec![],
-                            duration_ms: 0,
-                            turns_used: 0,
-                            error: Some(format!("Semaphore error: {}", e)),
-                            policy_violations: vec![],
-                        };
-                    }
-                    Err(_) => {
-                        warn!(task_id = %task_id, "SubAgent: Semaphore acquire timed out after {:?}", SEMAPHORE_TIMEOUT);
-                        return SubAgentResult {
-                            task_id,
-                            success: false,
-                            output: String::new(),
-                            files_examined: vec![],
-                            duration_ms: 0,
-                            turns_used: 0,
-                            error: Some(format!(
-                                "Semaphore acquire timed out after {:?}",
-                                SEMAPHORE_TIMEOUT
-                            )),
-                            policy_violations: vec![],
-                        };
-                    }
-                };
-                debug!(task_id = %task_id, "SubAgent: Got permit, checking cancellation");
-
-                if cancel.is_cancelled() {
-                    info!(task_id = %task_id, "SubAgent: Cancelled before execution");
-                    return SubAgentResult {
-                        task_id,
-                        success: false,
-                        output: String::new(),
-                        files_examined: vec![],
-                        duration_ms: 0,
-                        turns_used: 0,
-                        error: Some("Cancelled".to_string()),
-                        policy_violations: vec![],
-                    };
-                }
-
-                info!(task_id = %task_id, model = %resolved_model, "SubAgent: Starting execution");
-                let result =
-                    execute_subagent_with_tools(&client, task, &resolved_model, cancel, cache)
-                        .await;
-                info!(task_id = %result.task_id, success = result.success, "SubAgent: Execution complete");
-                result
-            });
-
-            handles.push(handle);
-        }
-
-        info!("SubAgentPool: Waiting for {} spawned tasks", handles.len());
-
-        // Collect results from all spawned tasks
-        let mut results = Vec::with_capacity(handles.len());
-        for handle in handles {
-            match handle.await {
-                Ok(result) => results.push(result),
-                Err(e) => {
-                    warn!("SubAgent task panicked: {}", e);
-                    results.push(SubAgentResult {
-                        task_id: "unknown".to_string(),
-                        success: false,
-                        output: String::new(),
-                        files_examined: vec![],
-                        duration_ms: 0,
-                        turns_used: 0,
-                        error: Some(format!("Task panicked: {}", e)),
-                        policy_violations: vec![],
-                    });
-                }
-            }
-        }
-
-        let stats = cache.stats();
-        info!(
-            "SubAgentPool: All futures complete, {} results | {}",
-            results.len(),
-            stats
-        );
-        results
-    }
-
-    /// Execute with real-time progress updates and staggered spawning
+    /// Each task runs as an independent single explorer agent with read-only tools.
     pub async fn execute_with_progress(
         &self,
         tasks: Vec<SubAgentTask>,
         progress_tx: mpsc::UnboundedSender<AgentProgress>,
     ) -> Vec<SubAgentResult> {
-        let semaphore = Arc::new(Semaphore::new(self.max_concurrency));
-        let client = self.client.clone();
-        let cancellation = self.cancellation.clone();
-        let cache = self.cache.clone();
+        use crate::tools::registry::{DelegationPolicy, PermissionMode, ToolRegistry};
+
+        let registry = Arc::new(ToolRegistry::new());
+        let policy = DelegationPolicy::for_subagent_explore(PermissionMode::Autonomous, Some(20));
         let task_count = tasks.len();
         let stagger = self.stagger_delay;
 
@@ -248,33 +121,35 @@ impl SubAgentPool {
             count = task_count,
             concurrency = self.max_concurrency,
             stagger_ms = stagger.as_millis() as u64,
-            "SubAgentPool: Spawning sub-agents with progress and stagger"
+            "SubAgentPool: Spawning explorer agents with stagger"
         );
 
-        // Spawn tasks with staggered delays
+        let semaphore = Arc::new(Semaphore::new(self.max_concurrency));
         let mut handles = Vec::with_capacity(task_count);
 
         for (idx, task) in tasks.into_iter().enumerate() {
-            // Stagger delay between spawns (skip first)
             if idx > 0 && !stagger.is_zero() {
                 sleep(stagger).await;
             }
 
             let sem = semaphore.clone();
-            let client = client.clone();
-            let cancel = cancellation.child_token();
-            let cache = cache.clone();
+            let client = self.client.clone();
+            let cancel = self.cancellation.child_token();
+            let resolved_model = self.resolve_model();
+            let registry = registry.clone();
+            let policy = policy.clone();
             let task_id = task.id.clone();
             let progress_tx = progress_tx.clone();
-            let resolved_model = self.resolve_model();
 
             let handle = tokio::spawn(async move {
                 let _permit = match timeout(SEMAPHORE_TIMEOUT, sem.acquire()).await {
                     Ok(Ok(p)) => p,
                     Ok(Err(e)) => {
-                        warn!(task_id = %task_id, error = %e, "SubAgent: Failed to acquire semaphore");
+                        warn!(task_id = %task_id, error = %e, "Explorer: Failed to acquire semaphore");
                         return SubAgentResult {
                             task_id,
+                            agent_name: task.name.clone(),
+                            delegated_run_id: task.delegated_run_id.clone(),
                             success: false,
                             output: String::new(),
                             files_examined: vec![],
@@ -285,9 +160,11 @@ impl SubAgentPool {
                         };
                     }
                     Err(_) => {
-                        warn!(task_id = %task_id, "SubAgent: Semaphore acquire timed out after {:?}", SEMAPHORE_TIMEOUT);
+                        warn!(task_id = %task_id, "Explorer: Semaphore acquire timed out");
                         return SubAgentResult {
                             task_id,
+                            agent_name: task.name.clone(),
+                            delegated_run_id: task.delegated_run_id.clone(),
                             success: false,
                             output: String::new(),
                             files_examined: vec![],
@@ -305,6 +182,8 @@ impl SubAgentPool {
                 if cancel.is_cancelled() {
                     return SubAgentResult {
                         task_id,
+                        agent_name: task.name.clone(),
+                        delegated_run_id: task.delegated_run_id.clone(),
                         success: false,
                         output: String::new(),
                         files_examined: vec![],
@@ -315,13 +194,15 @@ impl SubAgentPool {
                     };
                 }
 
-                execute_subagent_with_progress(
-                    &client,
+                execute_single_explorer(
+                    client,
                     task,
-                    &resolved_model,
+                    registry,
+                    policy,
+                    String::new(),
+                    resolved_model,
                     cancel,
-                    cache,
-                    progress_tx,
+                    Some(progress_tx),
                 )
                 .await
             });
@@ -329,15 +210,16 @@ impl SubAgentPool {
             handles.push(handle);
         }
 
-        // Collect results
         let mut results = Vec::with_capacity(handles.len());
         for handle in handles {
             match handle.await {
                 Ok(result) => results.push(result),
                 Err(e) => {
-                    warn!("SubAgent task panicked: {}", e);
+                    warn!("Explorer task panicked: {}", e);
                     results.push(SubAgentResult {
                         task_id: "unknown".to_string(),
+                        agent_name: "unknown".to_string(),
+                        delegated_run_id: None,
                         success: false,
                         output: String::new(),
                         files_examined: vec![],
@@ -350,8 +232,10 @@ impl SubAgentPool {
             }
         }
 
-        let stats = cache.stats();
-        info!("SubAgentPool: Complete | {}", stats);
+        info!(
+            "SubAgentPool: All explorers complete, {} results",
+            results.len()
+        );
         results
     }
 
@@ -399,6 +283,8 @@ impl SubAgentPool {
                         warn!(task_id = %task_id, error = %e, "Builder: Failed to acquire semaphore");
                         return SubAgentResult {
                             task_id,
+                            agent_name: task.name.clone(),
+                            delegated_run_id: task.delegated_run_id.clone(),
                             success: false,
                             output: String::new(),
                             files_examined: vec![],
@@ -412,6 +298,8 @@ impl SubAgentPool {
                         warn!(task_id = %task_id, "Builder: Semaphore acquire timed out after {:?}", SEMAPHORE_TIMEOUT);
                         return SubAgentResult {
                             task_id,
+                            agent_name: task.name.clone(),
+                            delegated_run_id: task.delegated_run_id.clone(),
                             success: false,
                             output: String::new(),
                             files_examined: vec![],
@@ -429,6 +317,8 @@ impl SubAgentPool {
                 if cancel.is_cancelled() {
                     return SubAgentResult {
                         task_id,
+                        agent_name: task.name.clone(),
+                        delegated_run_id: task.delegated_run_id.clone(),
                         success: false,
                         output: String::new(),
                         files_examined: vec![],
@@ -462,6 +352,8 @@ impl SubAgentPool {
                     warn!("Builder task panicked: {}", e);
                     results.push(SubAgentResult {
                         task_id: "unknown".to_string(),
+                        agent_name: "unknown".to_string(),
+                        delegated_run_id: None,
                         success: false,
                         output: String::new(),
                         files_examined: vec![],

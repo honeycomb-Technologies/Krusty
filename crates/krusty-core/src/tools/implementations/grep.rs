@@ -103,6 +103,16 @@ impl Tool for GrepTool {
         "Search file contents with regex (ripgrep). Supports output_mode: content/files_with_matches/count. Use glob or type params to filter files."
     }
 
+    fn prompt(&self) -> Option<&str> {
+        Some(r#"ALWAYS use this instead of running grep/rg via bash. Uses ripgrep with full regex syntax.
+
+Three output modes: "content" shows matching lines with file/line info, "files_with_matches" returns file paths only (default), "count" shows per-file match counts. Use head_limit to cap results (default 100).
+
+Filter files with glob param ("*.rs", "*.{ts,tsx}") or type param ("rust", "py", "js") — type is more efficient for standard file types. Literal braces need escaping: use `\{` and `\}` to match `{` and `}` in source code.
+
+For patterns spanning multiple lines, set multiline:true. Use -C for context lines around matches. Use -i for case-insensitive search."#)
+    }
+
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",

@@ -35,6 +35,14 @@ impl Tool for ReadTool {
         "Read file contents. Supports line offset/limit for large files. Detects binary files. Suggests similar filenames when file not found."
     }
 
+    fn prompt(&self) -> Option<&str> {
+        Some(r#"Use absolute paths only — relative paths will fail. Default reads 2000 lines from the start. Use offset/limit when you know which section you need or when the file is large.
+
+Results include 1-indexed line numbers in `cat -n` format. Binary files are detected and rejected. Images and PDFs can be read for multimodal analysis.
+
+Always read a file before editing it — the Edit tool will reject blind edits. When re-reading after an edit, use offset/limit to read just the changed region instead of the whole file."#)
+    }
+
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",

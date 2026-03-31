@@ -20,23 +20,25 @@ impl Tool for AskUserQuestionTool {
     }
 
     fn description(&self) -> &str {
-        r#"Ask the user a question to clarify requirements or get their preference.
+        "Ask the user a question to clarify requirements or choose between approaches. Provide 2-4 clear options when applicable."
+    }
 
-Use this tool when:
-- Requirements are ambiguous and you need clarification
+    fn prompt(&self) -> Option<&str> {
+        Some(r#"Use sparingly — only when you genuinely cannot proceed without user input. If you can make a reasonable judgment call, do so instead of asking.
+
+When to ask:
+- Requirements are ambiguous and guessing wrong wastes significant effort
 - Multiple valid approaches exist and user preference matters
-- You need to confirm before making significant changes
-- The user should choose between specific options
+- You need confirmation before a destructive or irreversible action
 
-Guidelines:
-- Use sparingly - only when you genuinely can't proceed without input
-- Provide clear, distinct options (2-4 is ideal)
-- Include a brief description for each option explaining trade-offs
-- For yes/no questions, just ask directly in chat instead
-- Keep question text under 500 characters, option labels under 50 characters
-- Questions may timeout after 5 minutes if the user doesn't respond
+When NOT to ask:
+- Routine decisions (file naming, import ordering, formatting)
+- Questions you could answer by reading the codebase
+- Confirmation of actions the user already requested
 
-The user can select an option by number, click, or type a custom response."#
+Keep questions under 500 characters. Provide 2-4 distinct options with brief trade-off descriptions. For simple yes/no, just ask in chat text instead.
+
+Questions timeout after 5 minutes if the user doesn't respond."#)
     }
 
     fn parameters_schema(&self) -> Value {

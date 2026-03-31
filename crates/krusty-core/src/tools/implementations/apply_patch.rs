@@ -61,6 +61,19 @@ impl Tool for ApplyPatchTool {
         "Apply a multi-file patch. Supports Update/Add/Delete operations with fuzzy line matching. Use the standard patch format with '*** Begin Patch' and '*** End Patch' markers."
     }
 
+    fn prompt(&self) -> Option<&str> {
+        Some(r#"Use for coordinated multi-file changes when you have a complete patch ready.
+
+Format: Wrap in *** Begin Patch / *** End Patch markers. Each file operation starts with:
+- *** Update File: path/to/file — modify existing file
+- *** Add File: path/to/file — create new file
+- *** Delete File: path/to/file — remove file
+
+Lines prefixed with - (remove), + (add), or space (unchanged context). Fuzzy matching handles minor line differences.
+
+Prefer edit/multiedit for targeted changes to 1-2 files. Use apply_patch when changes span many files or you want atomic multi-file application."#)
+    }
+
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",

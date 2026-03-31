@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use crate::ai::types::{AiToolCall, Content};
+use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
 use crate::tools::registry::{tool_policy, ToolCategory};
 
 /// Default threshold: stop after this many identical failures.
@@ -126,6 +126,165 @@ pub fn detect_repeated_read_only_sequence(
     }
 
     None
+}
+
+/// Stop immediately when top-level exploration produced no usable evidence.
+pub fn detect_terminal_explore_failure(
+    tool_calls: &[AiToolCall],
+    tool_results: &[Content],
+) -> Option<String> {
+    let explore_ids = tool_calls
+        .iter()
+        .filter(|call| {
+            call.name == "agent"
+                && call
+                    .arguments
+                    .get("agent_type")
+                    .and_then(|v| v.as_str())
+                    .map_or(false, |t| t == "explore")
+        })
+        .map(|call| call.id.as_str())
+        .collect::<Vec<_>>();
+
+    if explore_ids.is_empty() {
+        return None;
+    }
+
+    for result in tool_results {
+        let Content::ToolResult {
+            tool_use_id,
+            output,
+            ..
+        } = result
+        else {
+            continue;
+        };
+
+        if !explore_ids.contains(&tool_use_id.as_str()) {
+            continue;
+        }
+
+        let parsed = match output {
+            serde_json::Value::String(text) => serde_json::from_str::<serde_json::Value>(text).ok(),
+            other => Some(other.clone()),
+        }?;
+
+        let summary = parsed
+            .get("summary")
+            .and_then(|value| value.as_str())
+            .unwrap_or("explore returned degraded results");
+        let result_payload = parsed.get("result").unwrap_or(&parsed);
+        let outcome = result_payload
+            .get("outcome")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let success = result_payload
+            .get("success")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+        let usable_agents = result_payload
+            .get("usable_agents")
+            .or_else(|| result_payload.get("successful_agents"))
+            .and_then(|value| value.as_u64());
+        let files_examined_count = result_payload
+            .get("files_examined_count")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+
+        // New single-agent format: check success bool directly
+        // Legacy multi-agent format: check usable_agents count
+        let is_terminal = outcome == "failed"
+            || !success
+            || usable_agents.is_some_and(|count| count == 0)
+            || files_examined_count == 0;
+
+        if is_terminal {
+            return Some(format!(
+                "Stopping after degraded exploration: {} Summarize the failed investigation and ask the user to narrow scope before more reads.",
+                summary
+            ));
+        }
+    }
+
+    None
+}
+
+/// Stop broad manual read-only probing when a prior explore already returned
+/// usable delegated coverage and explicitly told the parent to summarize.
+pub fn detect_post_explore_manual_fallback(
+    conversation: &[ModelMessage],
+    tool_calls: &[AiToolCall],
+) -> Option<String> {
+    if tool_calls.is_empty() {
+        return None;
+    }
+
+    let read_only_probe = tool_calls
+        .iter()
+        .all(|call| matches!(call.name.as_str(), "read" | "glob" | "grep" | "list"));
+    if !read_only_probe {
+        return None;
+    }
+
+    let last_explore_result = conversation.iter().rev().find_map(|message| {
+        if message.role != Role::User {
+            return None;
+        }
+
+        message.content.iter().find_map(|content| {
+            let Content::ToolResult { output, .. } = content else {
+                return None;
+            };
+
+            let parsed = match output {
+                serde_json::Value::String(text) => {
+                    serde_json::from_str::<serde_json::Value>(text).ok()
+                }
+                other => Some(other.clone()),
+            }?;
+
+            let result_payload = parsed.get("result").unwrap_or(&parsed);
+            let tool_name = parsed
+                .get("tool")
+                .and_then(|value| value.as_str())
+                .or_else(|| result_payload.get("tool").and_then(|value| value.as_str()));
+            if tool_name != Some("explore") {
+                return None;
+            }
+
+            Some(result_payload.clone())
+        })
+    })?;
+
+    let outcome = last_explore_result
+        .get("outcome")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let usable_agents = last_explore_result
+        .get("usable_agents")
+        .or_else(|| last_explore_result.get("successful_agents"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let next_action_hint = last_explore_result
+        .get("next_action_hint")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+
+    if usable_agents == 0 {
+        return None;
+    }
+
+    if !matches!(outcome, "partial" | "success") {
+        return None;
+    }
+
+    if next_action_hint.is_empty() {
+        return None;
+    }
+
+    Some(
+        "Stopping broad manual probing after delegated exploration: usable delegated coverage already exists. Summarize the gathered evidence, call out incomplete targets, and only continue if the user narrows scope.".to_string(),
+    )
 }
 
 fn hash_arguments(arguments: &serde_json::Value) -> u64 {
@@ -395,5 +554,138 @@ mod tests {
 
         assert!(detect_repeated_read_only_sequence(&mut counters, &write).is_none());
         assert!(counters.is_empty());
+    }
+
+    #[test]
+    fn terminal_explore_failure_stops_after_zero_success_run() {
+        let tool_calls = vec![AiToolCall {
+            id: "tool-1".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({"agent_type":"explore","prompt":"audit"}),
+        }];
+        let tool_results = vec![Content::ToolResult {
+            tool_use_id: "tool-1".to_string(),
+            output: json!({
+                "summary": "Explore completed: 2 agents (0 succeeded, 2 failed), 0 turns, 0 files examined",
+                "result": {
+                    "outcome": "failed",
+                    "successful_agents": 0,
+                    "failed_agents": 2,
+                    "files_examined_count": 0
+                }
+            }),
+            is_error: None,
+        }];
+
+        let diagnostic = detect_terminal_explore_failure(&tool_calls, &tool_results)
+            .expect("failed explore should stop");
+        assert!(diagnostic.contains("degraded exploration"));
+    }
+
+    #[test]
+    fn terminal_explore_failure_stops_after_zero_evidence_partial_run() {
+        let tool_calls = vec![AiToolCall {
+            id: "tool-1".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({"agent_type":"explore","prompt":"audit"}),
+        }];
+        let tool_results = vec![Content::ToolResult {
+            tool_use_id: "tool-1".to_string(),
+            output: json!({
+                "summary": "Explore completed: 2 agents (1 usable, 1 degraded, 0 failed), 8 turns, 0 files examined",
+                "result": {
+                    "outcome": "partial",
+                    "usable_agents": 1,
+                    "failed_agents": 0,
+                    "files_examined_count": 0
+                }
+            }),
+            is_error: None,
+        }];
+
+        let diagnostic = detect_terminal_explore_failure(&tool_calls, &tool_results)
+            .expect("zero-evidence explore should stop");
+        assert!(diagnostic.contains("degraded exploration"));
+    }
+
+    #[test]
+    fn terminal_explore_failure_does_not_stop_successful_usable_run() {
+        let tool_calls = vec![AiToolCall {
+            id: "tool-1".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({"agent_type":"explore","prompt":"audit"}),
+        }];
+        let tool_results = vec![Content::ToolResult {
+            tool_use_id: "tool-1".to_string(),
+            output: json!({
+                "summary": "Explore completed: 2 agents (2 usable, 0 degraded, 0 failed), 10 turns, 24 files examined",
+                "result": {
+                    "outcome": "success",
+                    "usable_agents": 2,
+                    "successful_agents": 2,
+                    "failed_agents": 0,
+                    "files_examined_count": 24
+                }
+            }),
+            is_error: None,
+        }];
+
+        let diagnostic = detect_terminal_explore_failure(&tool_calls, &tool_results);
+        assert!(diagnostic.is_none());
+    }
+
+    #[test]
+    fn post_explore_manual_fallback_stops_read_only_probe_after_partial_usable_run() {
+        let conversation = vec![ModelMessage {
+            role: Role::User,
+            content: vec![Content::ToolResult {
+                tool_use_id: "explore-1".to_string(),
+                output: serde_json::json!({
+                    "tool": "explore",
+                    "result": {
+                        "outcome": "partial",
+                        "usable_agents": 1,
+                        "next_action_hint": "Use the evidence already gathered."
+                    }
+                }),
+                is_error: Some(false),
+            }],
+        }];
+        let tool_calls = vec![AiToolCall {
+            id: "read-1".to_string(),
+            name: "read".to_string(),
+            arguments: serde_json::json!({"file_path":"src/main.rs"}),
+        }];
+
+        let diagnostic = detect_post_explore_manual_fallback(&conversation, &tool_calls)
+            .expect("manual fallback should stop");
+        assert!(diagnostic.contains("usable delegated coverage already exists"));
+    }
+
+    #[test]
+    fn post_explore_manual_fallback_allows_non_probe_actions() {
+        let conversation = vec![ModelMessage {
+            role: Role::User,
+            content: vec![Content::ToolResult {
+                tool_use_id: "explore-1".to_string(),
+                output: serde_json::json!({
+                    "tool": "explore",
+                    "result": {
+                        "outcome": "partial",
+                        "usable_agents": 1,
+                        "next_action_hint": "Use the evidence already gathered."
+                    }
+                }),
+                is_error: Some(false),
+            }],
+        }];
+        let tool_calls = vec![AiToolCall {
+            id: "bash-1".to_string(),
+            name: "bash".to_string(),
+            arguments: serde_json::json!({"command":"cargo test"}),
+        }];
+
+        let diagnostic = detect_post_explore_manual_fallback(&conversation, &tool_calls);
+        assert!(diagnostic.is_none());
     }
 }

@@ -1,6 +1,6 @@
 //! Sub-agent tool implementations
 //!
-//! Read-only tools for explorers, read-write tools for builders.
+//! Read-write tools for builder agents with file locking.
 
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -8,40 +8,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::agent::build_context::{BuilderInterface, SharedBuildContext};
-use crate::agent::cache::SharedExploreCache;
 use crate::ai::types::AiTool;
 use crate::tools::implementations::{BashTool, EditTool, GlobTool, GrepTool, ReadTool, WriteTool};
 use crate::tools::registry::{Tool, ToolContext, ToolResult};
-
-fn parse_tool_payload(output: &str) -> Option<Value> {
-    let parsed = serde_json::from_str::<Value>(output).ok()?;
-    Some(parsed.get("data").cloned().unwrap_or(parsed))
-}
-
-fn extract_glob_matches(output: &str) -> Vec<PathBuf> {
-    if let Some(payload) = parse_tool_payload(output) {
-        if let Some(matches) = payload.get("matches").and_then(|v| v.as_array()) {
-            return matches
-                .iter()
-                .filter_map(|v| v.as_str().map(PathBuf::from))
-                .collect();
-        }
-    }
-
-    // Legacy fallback: newline-delimited paths.
-    output
-        .lines()
-        .filter(|l| !l.is_empty() && *l != "No matches found")
-        .map(PathBuf::from)
-        .collect()
-}
-
-fn extract_read_content(output: &str) -> Option<String> {
-    parse_tool_payload(output)?
-        .get("content")
-        .and_then(|v| v.as_str())
-        .map(ToString::to_string)
-}
 
 /// RAII guard for builder file locks
 ///
@@ -119,125 +88,6 @@ impl Drop for FileLockGuard {
     }
 }
 
-/// Sub-agent tools - read-only access with shared cache
-pub(crate) struct SubAgentTools {
-    glob: GlobTool,
-    grep: GrepTool,
-    read: ReadTool,
-    cache: Arc<SharedExploreCache>,
-}
-
-impl SubAgentTools {
-    pub fn new(cache: Arc<SharedExploreCache>) -> Self {
-        Self {
-            glob: GlobTool,
-            grep: GrepTool,
-            read: ReadTool,
-            cache,
-        }
-    }
-
-    pub fn get_ai_tools(&self) -> Vec<AiTool> {
-        vec![
-            AiTool {
-                name: "glob".to_string(),
-                description: self.glob.description().to_string(),
-                input_schema: self.glob.parameters_schema(),
-            },
-            AiTool {
-                name: "grep".to_string(),
-                description: self.grep.description().to_string(),
-                input_schema: self.grep.parameters_schema(),
-            },
-            AiTool {
-                name: "read".to_string(),
-                description: self.read.description().to_string(),
-                input_schema: self.read.parameters_schema(),
-            },
-        ]
-    }
-
-    pub async fn execute(
-        &self,
-        name: &str,
-        params: Value,
-        ctx: &ToolContext,
-    ) -> Option<ToolResult> {
-        match name {
-            "glob" => {
-                // Check cache for glob results
-                let pattern = params
-                    .get("pattern")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let base_dir = ctx.working_dir.clone();
-
-                if let Some(cached_paths) = self.cache.get_glob(&pattern, &base_dir) {
-                    return Some(ToolResult::success_data(json!({
-                        "matches": cached_paths
-                            .iter()
-                            .map(|p| p.display().to_string())
-                            .collect::<Vec<_>>(),
-                        "count": cached_paths.len(),
-                        "search_path": base_dir.display().to_string()
-                    })));
-                }
-
-                // Execute and cache
-                let result = self.glob.execute(params, ctx).await;
-                if !result.is_error {
-                    let paths = extract_glob_matches(&result.output);
-                    self.cache.put_glob(pattern, base_dir, paths);
-                }
-                Some(result)
-            }
-            "grep" => {
-                // Grep caching is trickier due to many parameters
-                // For now, just execute without caching (grep results vary by flags)
-                Some(self.grep.execute(params, ctx).await)
-            }
-            "read" => {
-                // Check cache for file content
-                let file_path = params
-                    .get("file_path")
-                    .and_then(|v| v.as_str())
-                    .map(PathBuf::from);
-
-                if let Some(path) = file_path {
-                    // Only cache full file reads (no offset/limit)
-                    let has_offset = params.get("offset").is_some();
-                    let has_limit = params.get("limit").is_some();
-
-                    if !has_offset && !has_limit {
-                        if let Some(cached) = self.cache.get_file(&path) {
-                            let total_lines = cached.content.lines().count();
-                            return Some(ToolResult::success_data(json!({
-                                "content": cached.content,
-                                "total_lines": total_lines,
-                                "lines_returned": total_lines,
-                                "start_line": 1
-                            })));
-                        }
-                    }
-
-                    // Execute and cache (only full reads)
-                    let result = self.read.execute(params, ctx).await;
-                    if !result.is_error && !has_offset && !has_limit {
-                        if let Some(content) = extract_read_content(&result.output) {
-                            self.cache.put_file(path, content);
-                        }
-                    }
-                    Some(result)
-                } else {
-                    Some(self.read.execute(params, ctx).await)
-                }
-            }
-            _ => None,
-        }
-    }
-}
-
 /// Builder agent tools - read/write access with shared build context
 pub struct BuilderTools {
     glob: GlobTool,
@@ -270,31 +120,37 @@ impl BuilderTools {
                 name: "glob".to_string(),
                 description: self.glob.description().to_string(),
                 input_schema: self.glob.parameters_schema(),
+                prompt: self.glob.prompt().map(|s| s.to_string()),
             },
             AiTool {
                 name: "grep".to_string(),
                 description: self.grep.description().to_string(),
                 input_schema: self.grep.parameters_schema(),
+                prompt: self.grep.prompt().map(|s| s.to_string()),
             },
             AiTool {
                 name: "read".to_string(),
                 description: self.read.description().to_string(),
                 input_schema: self.read.parameters_schema(),
+                prompt: self.read.prompt().map(|s| s.to_string()),
             },
             AiTool {
                 name: "write".to_string(),
                 description: self.write.description().to_string(),
                 input_schema: self.write.parameters_schema(),
+                prompt: self.write.prompt().map(|s| s.to_string()),
             },
             AiTool {
                 name: "edit".to_string(),
                 description: self.edit.description().to_string(),
                 input_schema: self.edit.parameters_schema(),
+                prompt: self.edit.prompt().map(|s| s.to_string()),
             },
             AiTool {
                 name: "bash".to_string(),
                 description: self.bash.description().to_string(),
                 input_schema: self.bash.parameters_schema(),
+                prompt: self.bash.prompt().map(|s| s.to_string()),
             },
             AiTool {
                 name: "register_interface".to_string(),
@@ -320,6 +176,7 @@ impl BuilderTools {
                     },
                     "required": ["file_path", "exports", "description"]
                 }),
+                prompt: None,
             },
         ]
     }

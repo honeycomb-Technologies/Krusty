@@ -314,6 +314,7 @@ impl AiClient {
             &self.config().model,
             &messages,
             options.system_prompt.as_deref(),
+            options.tools.as_deref(),
         );
         log_system_prompt_layers(
             "anthropic_stream",
@@ -540,6 +541,7 @@ impl AiClient {
             &self.config().model,
             &messages,
             options.system_prompt.as_deref(),
+            options.tools.as_deref(),
         );
         log_system_prompt_layers(
             "openai_stream",
@@ -638,6 +640,7 @@ impl AiClient {
             &self.config().model,
             &messages,
             options.system_prompt.as_deref(),
+            options.tools.as_deref(),
         );
         log_system_prompt_layers(
             "codex_stream",
@@ -854,6 +857,7 @@ impl AiClient {
             &self.config().model,
             &messages,
             options.system_prompt.as_deref(),
+            options.tools.as_deref(),
         );
         log_system_prompt_layers(
             "google_stream",
@@ -1264,7 +1268,7 @@ impl AiClient {
     /// Build request body for ChatGPT Codex API
     ///
     /// ChatGPT Codex has a completely different format than standard OpenAI APIs.
-    /// Based on reverse-engineering from: https://simonwillison.net/2025/Nov/9/gpt-5-codex-mini/
+    /// Based on reverse-engineering from: https://simonwillison.net/2025/Nov/9/gpt-5.3-codex/
     ///
     /// Key differences:
     /// - Uses "instructions" field for system prompt (required, not a message)

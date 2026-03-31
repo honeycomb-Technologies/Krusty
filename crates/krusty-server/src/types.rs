@@ -1,12 +1,18 @@
 //! Request and response types for the API
 
+use krusty_core::agent::subagent::AgentProgressStatus;
+use krusty_core::agent::{
+    DelegatedProgressEvent, DelegatedRunStage as CoreDelegatedRunStage,
+    DelegatedToolKind as CoreDelegatedToolKind,
+};
 use krusty_core::ai::types::{Citation, WebFetchContent, WebSearchResult};
 use krusty_core::storage::{
-    PartialAssistantState, RuntimeTraceEvent, RuntimeTraceSummary, SessionInfo,
-    SessionRecoveryState, WorkMode,
+    DelegatedRunRecord, DelegatedRunScope, PartialAssistantState, RuntimeTraceEvent,
+    RuntimeTraceSummary, SessionInfo, SessionRecoveryState, WorkMode, WorkspaceMode,
 };
 use krusty_core::tools::registry::PermissionMode;
 use serde::{de, Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 // ============================================================================
 // Session Types
@@ -16,14 +22,18 @@ use serde::{de, Deserialize, Deserializer, Serialize};
 pub struct CreateSessionRequest {
     pub title: Option<String>,
     pub model: Option<String>,
+    pub project_dir: Option<String>,
     pub working_dir: Option<String>,
+    pub workspace_mode: Option<WorkspaceMode>,
     pub target_branch: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct UpdateSessionRequest {
     pub title: Option<String>,
+    pub project_dir: Option<String>,
     pub working_dir: Option<String>,
+    pub workspace_mode: Option<WorkspaceMode>,
     pub mode: Option<WorkMode>,
     pub model: Option<String>,
     pub target_branch: Option<String>,
@@ -57,6 +67,8 @@ pub struct SessionResponse {
     pub token_count: Option<usize>,
     pub parent_session_id: Option<String>,
     pub working_dir: Option<String>,
+    pub project_dir: Option<String>,
+    pub workspace_mode: WorkspaceMode,
     pub mode: WorkMode,
     pub model: Option<String>,
     pub target_branch: Option<String>,
@@ -71,6 +83,8 @@ impl From<SessionInfo> for SessionResponse {
             token_count: s.token_count,
             parent_session_id: s.parent_session_id,
             working_dir: s.working_dir,
+            project_dir: s.project_dir,
+            workspace_mode: s.workspace_mode,
             mode: s.work_mode,
             model: s.model,
             target_branch: s.target_branch,
@@ -101,8 +115,103 @@ pub struct SessionStateResponse {
     pub recovery: Option<SessionRecoveryState>,
     /// Authoritative in-flight partial assistant state for active sessions.
     pub live_partial_assistant: Option<PartialAssistantState>,
+    /// Active delegated tool snapshots for this session, keyed by top-level tool call.
+    pub delegated_tools: Vec<DelegatedToolStateResponse>,
+    /// Recent persisted delegated runs for this session.
+    pub recent_delegated_runs: Vec<DelegatedRunResponse>,
     /// Latest persisted runtime trace sequence observed for this session.
     pub last_event_sequence: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DelegatedAgentStateResponse {
+    pub task_id: String,
+    pub agent_name: String,
+    pub status: DelegatedProgressStatus,
+    pub tool_count: usize,
+    pub tokens: usize,
+    pub current_action: Option<String>,
+    pub completion_summary: Option<String>,
+    pub lines_added: usize,
+    pub lines_removed: usize,
+    pub completed_plan_task: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DelegatedToolStateResponse {
+    pub delegated_run_id: String,
+    pub tool_call_id: String,
+    pub kind: DelegatedToolKind,
+    pub stage: DelegatedRunStage,
+    pub parent_session_id: Option<String>,
+    pub agents: Vec<DelegatedAgentStateResponse>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DelegatedRunScopeResponse {
+    pub label: String,
+    pub path: String,
+    pub kind: String,
+}
+
+impl From<DelegatedRunScope> for DelegatedRunScopeResponse {
+    fn from(value: DelegatedRunScope) -> Self {
+        Self {
+            label: value.label,
+            path: value.path,
+            kind: value.kind,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DelegatedRunResponse {
+    pub delegated_run_id: String,
+    pub parent_tool_call_id: Option<String>,
+    pub kind: DelegatedToolKind,
+    pub stage: DelegatedRunStage,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub resumable: bool,
+    pub resumed_from_run_id: Option<String>,
+    pub target_scope: Vec<DelegatedRunScopeResponse>,
+    pub human_review: Option<String>,
+    pub artifact: Option<Value>,
+    pub updated_at: String,
+}
+
+impl From<DelegatedRunRecord> for DelegatedRunResponse {
+    fn from(value: DelegatedRunRecord) -> Self {
+        Self {
+            delegated_run_id: value.delegated_run_id,
+            parent_tool_call_id: value.parent_tool_call_id,
+            kind: match value.role {
+                krusty_core::storage::DelegatedRunRole::Explore => DelegatedToolKind::Explore,
+                krusty_core::storage::DelegatedRunRole::Planner => DelegatedToolKind::Plan,
+                krusty_core::storage::DelegatedRunRole::Verifier => DelegatedToolKind::Verify,
+                krusty_core::storage::DelegatedRunRole::Build => DelegatedToolKind::Build,
+            },
+            stage: match value.stage {
+                krusty_core::agent::DelegatedRunStage::Created => DelegatedRunStage::Created,
+                krusty_core::agent::DelegatedRunStage::Running => DelegatedRunStage::Running,
+                krusty_core::agent::DelegatedRunStage::Synthesizing => {
+                    DelegatedRunStage::Synthesizing
+                }
+                krusty_core::agent::DelegatedRunStage::Complete => DelegatedRunStage::Complete,
+                krusty_core::agent::DelegatedRunStage::Degraded => DelegatedRunStage::Degraded,
+                krusty_core::agent::DelegatedRunStage::Failed => DelegatedRunStage::Failed,
+                krusty_core::agent::DelegatedRunStage::Cancelled => DelegatedRunStage::Cancelled,
+            },
+            provider: value.provider,
+            model: value.model,
+            resumable: value.resumable,
+            resumed_from_run_id: value.resumed_from_run_id,
+            target_scope: value.target_scope.into_iter().map(Into::into).collect(),
+            human_review: value.human_review,
+            artifact: value.artifact,
+            updated_at: value.updated_at.to_rfc3339(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -151,6 +260,16 @@ pub struct ServerAccessResponse {
 }
 
 #[derive(Deserialize)]
+pub struct RemoteAuthBootstrapRequest {
+    pub token: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct RemoteAuthStatusResponse {
+    pub authenticated: bool,
+}
+
+#[derive(Deserialize)]
 pub struct UpdateServerAccessRequest {
     pub enabled: Option<bool>,
     pub rotate_token: Option<bool>,
@@ -171,6 +290,8 @@ pub struct ActiveSessionStatusResponse {
     pub started_at: Option<String>,
     pub last_event_at: Option<String>,
     pub working_dir: Option<String>,
+    pub project_dir: Option<String>,
+    pub workspace_mode: WorkspaceMode,
     pub active_viewers: usize,
     pub active_controllers: usize,
     pub stale_clients: usize,
@@ -180,7 +301,16 @@ pub struct ActiveSessionStatusResponse {
 pub struct ServerStatusResponse {
     pub active_agent_streams: usize,
     pub active_sessions: Vec<ActiveSessionStatusResponse>,
+    pub memory: ServerMemoryStatusResponse,
     pub tailscale: TailscaleAccessResponse,
+}
+
+#[derive(Serialize)]
+pub struct ServerMemoryStatusResponse {
+    pub rss_bytes: Option<u64>,
+    pub virtual_bytes: Option<u64>,
+    pub peak_rss_bytes: Option<u64>,
+    pub peak_virtual_bytes: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -271,6 +401,13 @@ pub struct ChatRequest {
     /// Multi-modal content blocks (text + images)
     #[serde(default)]
     pub content: Vec<ContentBlock>,
+    /// Explicit project directory for newly created sessions.
+    pub project_dir: Option<String>,
+    /// Explicit workspace directory for newly created sessions. `None` means no project selected.
+    /// Legacy alias for `project_dir`.
+    pub working_dir: Option<String>,
+    /// Explicit semantic workspace mode for newly created sessions.
+    pub workspace_mode: Option<WorkspaceMode>,
     /// Model override
     pub model: Option<String>,
     /// Enable extended thinking
@@ -287,6 +424,7 @@ pub struct ChatRequest {
 mod tests {
     use super::{AgenticEvent, ChatRequest, ThinkingLevel};
     use krusty_core::agent::LoopEvent;
+    use krusty_core::storage::WorkspaceMode;
     use serde_json::json;
 
     #[test]
@@ -316,6 +454,30 @@ mod tests {
         }))
         .expect("request should deserialize");
         assert_eq!(req.thinking_enabled, ThinkingLevel::Off);
+    }
+
+    #[test]
+    fn chat_request_accepts_explicit_no_project_working_dir() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "message": "hello",
+            "working_dir": null
+        }))
+        .expect("request should deserialize");
+        assert_eq!(req.working_dir, None);
+        assert_eq!(req.project_dir, None);
+        assert_eq!(req.workspace_mode, None);
+    }
+
+    #[test]
+    fn chat_request_accepts_explicit_workspace_contract() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "message": "hello",
+            "project_dir": "/tmp/demo",
+            "workspace_mode": "created"
+        }))
+        .expect("request should deserialize");
+        assert_eq!(req.project_dir.as_deref(), Some("/tmp/demo"));
+        assert_eq!(req.workspace_mode, Some(WorkspaceMode::Created));
     }
 
     #[test]
@@ -610,6 +772,70 @@ pub struct PlanItem {
     pub completed: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedToolKind {
+    Explore,
+    Plan,
+    Verify,
+    Build,
+}
+
+impl From<CoreDelegatedToolKind> for DelegatedToolKind {
+    fn from(value: CoreDelegatedToolKind) -> Self {
+        match value {
+            CoreDelegatedToolKind::Explore => Self::Explore,
+            CoreDelegatedToolKind::Plan => Self::Plan,
+            CoreDelegatedToolKind::Verify => Self::Verify,
+            CoreDelegatedToolKind::Build => Self::Build,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedProgressStatus {
+    Running,
+    Complete,
+    Failed,
+}
+
+impl From<&AgentProgressStatus> for DelegatedProgressStatus {
+    fn from(value: &AgentProgressStatus) -> Self {
+        match value {
+            AgentProgressStatus::Running => Self::Running,
+            AgentProgressStatus::Complete => Self::Complete,
+            AgentProgressStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedRunStage {
+    Created,
+    Running,
+    Synthesizing,
+    Complete,
+    Degraded,
+    Failed,
+    Cancelled,
+}
+
+impl From<CoreDelegatedRunStage> for DelegatedRunStage {
+    fn from(value: CoreDelegatedRunStage) -> Self {
+        match value {
+            CoreDelegatedRunStage::Created => Self::Created,
+            CoreDelegatedRunStage::Running => Self::Running,
+            CoreDelegatedRunStage::Synthesizing => Self::Synthesizing,
+            CoreDelegatedRunStage::Complete => Self::Complete,
+            CoreDelegatedRunStage::Degraded => Self::Degraded,
+            CoreDelegatedRunStage::Failed => Self::Failed,
+            CoreDelegatedRunStage::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
 // ============================================================================
 // Agentic SSE Events
 // ============================================================================
@@ -641,6 +867,24 @@ pub enum AgenticEvent {
     ToolExecuting { id: String, name: String },
     /// Streaming output delta from a tool (e.g., bash)
     ToolOutputDelta { id: String, delta: String },
+    /// Live delegated progress from explore/build sub-agents.
+    DelegatedProgress {
+        delegated_run_id: String,
+        tool_call_id: String,
+        kind: DelegatedToolKind,
+        stage: DelegatedRunStage,
+        parent_session_id: String,
+        task_id: String,
+        agent_name: String,
+        status: DelegatedProgressStatus,
+        tool_count: usize,
+        tokens: usize,
+        current_action: Option<String>,
+        completion_summary: Option<String>,
+        lines_added: usize,
+        lines_removed: usize,
+        completed_plan_task: Option<String>,
+    },
     /// Tool execution result
     ToolResult {
         id: String,
@@ -719,6 +963,29 @@ pub enum AgenticEvent {
     ToolDenied { id: String },
     /// Error occurred
     Error { error: String },
+}
+
+impl AgenticEvent {
+    pub fn delegated_progress(event: DelegatedProgressEvent) -> Self {
+        let progress = event.progress;
+        Self::DelegatedProgress {
+            delegated_run_id: event.delegated_run_id,
+            tool_call_id: event.tool_call_id,
+            kind: DelegatedToolKind::from(event.kind),
+            stage: DelegatedRunStage::from(event.stage),
+            parent_session_id: event.parent_session_id,
+            task_id: progress.task_id,
+            agent_name: progress.name,
+            status: DelegatedProgressStatus::from(&progress.status),
+            tool_count: progress.tool_count,
+            tokens: progress.tokens,
+            current_action: progress.current_action,
+            completion_summary: progress.completion_summary,
+            lines_added: progress.lines_added,
+            lines_removed: progress.lines_removed,
+            completed_plan_task: progress.completed_plan_task,
+        }
+    }
 }
 
 impl From<krusty_core::agent::LoopEvent> for AgenticEvent {

@@ -222,14 +222,19 @@ async fn collect_pipe_output<R>(
 }
 
 async fn join_reader_with_timeout(mut handle: tokio::task::JoinHandle<()>) {
-    if timeout(Duration::from_millis(READER_JOIN_TIMEOUT_MS), &mut handle)
-        .await
-        .is_err()
+    match timeout(Duration::from_millis(READER_JOIN_TIMEOUT_MS), async {
+        (&mut handle).await
+    })
+    .await
     {
-        handle.abort();
+        Ok(join_result) => {
+            let _ = join_result;
+        }
+        Err(_) => {
+            handle.abort();
+            let _ = handle.await;
+        }
     }
-
-    let _ = handle.await;
 }
 
 #[cfg(unix)]
@@ -421,6 +426,20 @@ impl Tool for BashTool {
         "Execute shell commands for git, build tools (cargo/bun/make), and system utilities. \
          For file operations use specialized tools: Read, Write, Edit, Glob, Grep. \
          Set run_in_background:true for servers/watchers."
+    }
+
+    fn prompt(&self) -> Option<&str> {
+        Some(r#"Do not use bash for file reading (cat/head/tail), editing (sed/awk), or searching (grep/find/rg) — use the dedicated Read, Edit, Grep, and Glob tools instead. Bash is for git, build systems, package managers, compilers, and system utilities.
+
+Chain dependent commands with `&&`. For independent commands, make parallel tool calls instead of chaining. Never use trailing `&` for background processes — set `run_in_background:true` instead.
+
+Default timeout is 30 seconds. Set `timeout` explicitly for long-running commands (max 600000ms / 10 minutes). For servers, watchers, and long builds, use `run_in_background:true`.
+
+Always include a `description` parameter with a clear 5-10 word summary of what the command does (e.g., "Install npm dependencies", "Run test suite"). This is used for logging and progress display.
+
+Use absolute paths for file arguments. The working directory resets between calls, so `cd` is unreliable — prefer absolute paths or chain `cd dir && command`.
+
+Avoid interactive commands (requiring stdin). Avoid `sudo` unless the user explicitly requests it. Prefer `--yes`/`-y` flags for package managers to avoid interactive prompts."#)
     }
 
     fn parameters_schema(&self) -> Value {
@@ -668,5 +687,11 @@ mod tests {
         let text = buffer.into_text();
         assert!(text.len() <= 200); // Includes optional omission notice.
         assert!(text.contains("abcdef") || text.contains("bcdef"));
+    }
+
+    #[tokio::test]
+    async fn join_reader_with_timeout_does_not_double_poll_completed_handle() {
+        let handle = tokio::spawn(async {});
+        join_reader_with_timeout(handle).await;
     }
 }

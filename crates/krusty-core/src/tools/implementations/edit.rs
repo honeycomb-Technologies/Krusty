@@ -32,6 +32,16 @@ impl Tool for EditTool {
         "String replacement in files with fuzzy matching. Handles whitespace and unicode differences automatically. Requires unique old_string match (or use replace_all:true for bulk rename)."
     }
 
+    fn prompt(&self) -> Option<&str> {
+        Some(r#"ALWAYS read the file first — never edit blind. The tool will reject edits on files you haven't read.
+
+old_string must uniquely match one location in the file. If it matches multiple times, include more surrounding context lines to disambiguate. Preserve exact indentation (tabs vs spaces) from the file when constructing old_string and new_string.
+
+Prefer Edit over Write for modifying existing files — Write destroys the entire file content. Use replace_all:true ONLY for bulk rename operations (variable/function renaming across a file).
+
+Keep changes minimal. Don't add comments, docstrings, or type annotations to lines you didn't change."#)
+    }
+
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",

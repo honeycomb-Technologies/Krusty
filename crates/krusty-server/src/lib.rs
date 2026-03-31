@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -41,9 +41,7 @@ use krusty_core::process::ProcessRegistry;
 use krusty_core::skills::SkillsManager;
 use krusty_core::storage::credentials::CredentialStore;
 use krusty_core::storage::Database;
-use krusty_core::tools::implementations::{
-    register_all_tools, register_build_tool, register_explore_tool,
-};
+use krusty_core::tools::implementations::{register_agent_tool, register_all_tools};
 use krusty_core::tools::registry::ToolRegistry;
 
 type SessionGuard = Arc<Mutex<()>>;
@@ -51,6 +49,7 @@ type SessionLockMap = HashMap<String, (SessionGuard, Instant)>;
 type SessionInputMap =
     HashMap<String, tokio::sync::mpsc::UnboundedSender<krusty_core::agent::LoopInput>>;
 type SessionPresenceMap = presence::SessionPresenceMap;
+type DelegatedStateMap = HashMap<String, Vec<types::DelegatedToolStateResponse>>;
 pub mod auth;
 pub mod error;
 pub mod presence;
@@ -110,10 +109,16 @@ pub struct AppState {
     pub session_inputs: Arc<RwLock<SessionInputMap>>,
     /// Presence registry for active viewers/controllers per session.
     pub session_presence: Arc<RwLock<SessionPresenceMap>>,
+    /// Active delegated tool snapshots per session for reconnect/reload parity.
+    pub delegated_state: Arc<RwLock<DelegatedStateMap>>,
     /// Cached remote-access authority configuration.
     pub remote_access: Arc<RwLock<remote_access::RemoteAccessConfig>>,
     /// Count of currently active agent SSE streams.
     pub active_agent_streams: Arc<AtomicUsize>,
+    /// Peak observed RSS bytes for this server process.
+    pub peak_rss_bytes: Arc<AtomicU64>,
+    /// Peak observed virtual bytes for this server process.
+    pub peak_virtual_bytes: Arc<AtomicU64>,
     /// Web Push notification service (None if VAPID init failed).
     pub push_service: Option<Arc<push::PushService>>,
     /// Active OAuth flows keyed by provider storage key.
@@ -290,12 +295,23 @@ async fn initialize_models(registry: &SharedModelRegistry, credentials: &Credent
             Err(e) => tracing::warn!("Failed to fetch OpenRouter models: {}", e),
         }
     }
+
+    if let Some(api_key) = krusty_core::auth::resolve_openai_catalog_credential(credentials) {
+        match krusty_core::ai::openai::fetch_models(&api_key).await {
+            Ok(models) => {
+                tracing::info!("Fetched {} OpenAI models", models.len());
+                registry.set_models(ProviderId::OpenAI, models).await;
+            }
+            Err(e) => tracing::warn!("Failed to fetch OpenAI models: {}", e),
+        }
+    }
 }
 
 /// Build the Axum router with all routes and embedded PWA assets.
 pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppState)> {
     let db_path = paths::config_dir().join("krusty.db");
     let _db = Database::new(&db_path)?;
+    reconcile_transient_agent_states(&db_path)?;
 
     let credential_store_inner = CredentialStore::load().unwrap_or_default();
     let credential_store = Arc::new(RwLock::new(credential_store_inner.clone()));
@@ -323,11 +339,10 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
     let tool_registry = Arc::new(tool_registry_inner);
     register_all_tools(&tool_registry).await;
 
-    // Register sub-agent tools (explore + build) if AI client is available
+    // Register unified agent tool (explore, plan, verify, build) if AI client is available
     if let Some(ref client) = ai_client {
-        register_explore_tool(&tool_registry, client.clone(), cancellation.clone()).await;
-        register_build_tool(&tool_registry, client.clone(), cancellation.clone()).await;
-        tracing::info!("Registered explore and build sub-agent tools");
+        register_agent_tool(&tool_registry, client.clone(), cancellation.clone()).await;
+        tracing::info!("Registered unified agent sub-agent tool");
     }
 
     let model_registry = create_model_registry();
@@ -378,8 +393,11 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
         session_locks: Arc::new(RwLock::new(HashMap::new())),
         session_inputs: Arc::new(RwLock::new(HashMap::new())),
         session_presence: Arc::new(RwLock::new(HashMap::new())),
+        delegated_state: Arc::new(RwLock::new(HashMap::new())),
         remote_access,
         active_agent_streams: Arc::new(AtomicUsize::new(0)),
+        peak_rss_bytes: Arc::new(AtomicU64::new(0)),
+        peak_virtual_bytes: Arc::new(AtomicU64::new(0)),
         push_service,
         oauth_flows: Arc::new(Mutex::new(HashMap::new())),
     };
@@ -406,6 +424,7 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
     let app = Router::new()
         .route("/health", get(health))
         .merge(routes::oauth::callback_router())
+        .merge(routes::remote_auth::public_router())
         .merge(protected_routes)
         .fallback(serve_pwa)
         .layer(cors)
@@ -417,12 +436,80 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
     Ok((app, state))
 }
 
+fn reconcile_transient_agent_states(db_path: &std::path::Path) -> anyhow::Result<()> {
+    let session_manager = krusty_core::SessionManager::new(Database::new(db_path)?);
+    let repaired = session_manager.reset_transient_agent_states()?;
+    let cleared_recovery = session_manager.clear_stale_transient_recovery_states()?;
+    if repaired > 0 {
+        tracing::info!(
+            repaired_sessions = repaired,
+            "Cleared transient agent execution states during server startup"
+        );
+    }
+    if cleared_recovery > 0 {
+        tracing::info!(
+            cleared_sessions = cleared_recovery,
+            "Cleared stale non-resumable recovery state during server startup"
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ProcessMemorySample {
+    pub rss_bytes: Option<u64>,
+    pub virtual_bytes: Option<u64>,
+}
+
+pub(crate) fn read_process_memory_status() -> ProcessMemorySample {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return ProcessMemorySample::default();
+    };
+
+    let mut rss_bytes = None;
+    let mut virtual_bytes = None;
+
+    for line in status.lines() {
+        if line.starts_with("VmRSS:") {
+            rss_bytes = parse_proc_status_kib_line(line).map(|value| value * 1024);
+        } else if line.starts_with("VmSize:") {
+            virtual_bytes = parse_proc_status_kib_line(line).map(|value| value * 1024);
+        }
+    }
+
+    ProcessMemorySample {
+        rss_bytes,
+        virtual_bytes,
+    }
+}
+
+pub(crate) fn observe_process_memory(state: &AppState) -> ProcessMemorySample {
+    let sample = read_process_memory_status();
+    if let Some(rss_bytes) = sample.rss_bytes {
+        state.peak_rss_bytes.fetch_max(rss_bytes, Ordering::Relaxed);
+    }
+    if let Some(virtual_bytes) = sample.virtual_bytes {
+        state
+            .peak_virtual_bytes
+            .fetch_max(virtual_bytes, Ordering::Relaxed);
+    }
+    sample
+}
+
+fn parse_proc_status_kib_line(line: &str) -> Option<u64> {
+    line.split_whitespace().nth(1)?.parse::<u64>().ok()
+}
+
 /// Start the Krusty server and block until shutdown.
 pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     let addr: SocketAddr = format!("0.0.0.0:{}", config.port).parse()?;
     let (app, _state) = build_router(&config).await?;
 
-    tracing::info!("Krusty server listening on http://{}", addr);
+    tracing::info!(
+        bind_address = %addr,
+        local_url = %format!("http://localhost:{}", config.port),
+        "Krusty server listening"
+    );
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(

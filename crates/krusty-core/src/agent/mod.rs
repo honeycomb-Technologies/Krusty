@@ -27,8 +27,8 @@
 //! - `SharedBuildContext` - Coordination for builder agents
 //! - Type registry, file locks, conventions
 
+pub mod agent_types;
 pub mod build_context;
-pub mod cache;
 pub mod cancellation;
 pub mod compaction;
 pub mod constants;
@@ -52,6 +52,8 @@ pub mod summarizer;
 mod tool_control;
 pub mod user_hooks;
 
+use serde::{Deserialize, Serialize};
+
 pub use build_context::SharedBuildContext;
 pub use cancellation::AgentCancellation;
 pub(crate) use compaction::estimate_tokens as estimate_conversation_tokens;
@@ -70,3 +72,34 @@ pub use user_hooks::{
     UserHook, UserHookExecutor, UserHookManager, UserHookResult, UserHookType, UserPostToolHook,
     UserPreToolHook,
 };
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedToolKind {
+    Explore,
+    Build,
+    Plan,
+    Verify,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedRunStage {
+    Created,
+    Running,
+    Synthesizing,
+    Complete,
+    Degraded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DelegatedProgressEvent {
+    pub delegated_run_id: String,
+    pub parent_session_id: String,
+    pub tool_call_id: String,
+    pub kind: DelegatedToolKind,
+    pub stage: DelegatedRunStage,
+    pub progress: subagent::AgentProgress,
+}
