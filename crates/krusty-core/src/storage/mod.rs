@@ -21,6 +21,7 @@ mod memories;
 mod messages;
 mod plans;
 mod preferences;
+mod project_settings;
 pub mod push_delivery_attempts;
 pub mod push_subscriptions;
 mod recovery;
@@ -40,6 +41,7 @@ pub use memories::{AgentMemory, MemoryStore, MemoryType};
 pub use messages::MessageStore;
 pub use plans::{PlanStore, PlanSummary};
 pub use preferences::Preferences;
+pub use project_settings::ProjectSettings;
 pub use push_delivery_attempts::{
     PushDeliveryAttempt, PushDeliveryAttemptInput, PushDeliveryAttemptStore, PushDeliverySummary,
 };

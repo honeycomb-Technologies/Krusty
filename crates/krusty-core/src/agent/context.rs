@@ -13,7 +13,7 @@ use tokio::sync::RwLock;
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::plan::PlanManager;
 use crate::skills::SkillsManager;
-use crate::storage::{Database, DelegatedRunStore, MemoryStore, MemoryType, WorkMode};
+use crate::storage::{Database, DelegatedRunStore, MemoryStore, MemoryType, ProjectSettings, WorkMode};
 
 /// Instruction files to search for in the working directory (priority order).
 const PROJECT_FILES: &[&str] = &[
@@ -56,8 +56,11 @@ pub fn inject_context(
     let delegated_ctx = build_delegated_context(db_path, session_id);
     let skills_ctx = build_skills_context(skills_manager, project_dir.is_some());
     let project_ctx = project_dir.map(build_project_context).unwrap_or_default();
+    let project_settings = project_dir
+        .map(ProjectSettings::load)
+        .unwrap_or_default();
 
-    let mut injected = Vec::with_capacity(conversation.len() + 7);
+    let mut injected = Vec::with_capacity(conversation.len() + 8);
 
     if !workspace_ctx.is_empty() {
         injected.push(ModelMessage {
@@ -84,6 +87,16 @@ pub fn inject_context(
             role: Role::System,
             content: vec![Content::Text { text: project_ctx }],
         });
+    }
+    if let Some(ref append) = project_settings.system_prompt_append {
+        if !append.is_empty() {
+            injected.push(ModelMessage {
+                role: Role::System,
+                content: vec![Content::Text {
+                    text: format!("[PROJECT SETTINGS]\n{}", append),
+                }],
+            });
+        }
     }
     if !plan_ctx.is_empty() {
         injected.push(ModelMessage {
@@ -226,6 +239,9 @@ fn build_delegated_context(db_path: &Path, session_id: &str) -> String {
 pub fn build_subagent_project_context(working_dir: &Path, project_dir: Option<&Path>) -> String {
     let workspace = build_workspace_context(working_dir, project_dir);
     let project = project_dir.map(build_project_context).unwrap_or_default();
+    let project_settings = project_dir
+        .map(ProjectSettings::load)
+        .unwrap_or_default();
 
     let mut ctx = String::new();
     if !workspace.is_empty() {
@@ -236,6 +252,14 @@ pub fn build_subagent_project_context(working_dir: &Path, project_dir: Option<&P
             ctx.push_str("\n\n");
         }
         ctx.push_str(&project);
+    }
+    if let Some(ref append) = project_settings.system_prompt_append {
+        if !append.is_empty() {
+            if !ctx.is_empty() {
+                ctx.push_str("\n\n");
+            }
+            ctx.push_str(&format!("[PROJECT SETTINGS]\n{}", append));
+        }
     }
     ctx
 }

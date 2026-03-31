@@ -33,8 +33,9 @@ use crate::plan::PlanManager;
 use crate::process::ProcessRegistry;
 use crate::skills::SkillsManager;
 use crate::storage::{
-    Database, PartialAssistantState, RecoveryDecision, RecoveryNonResumableReason, RecoveryStatus,
-    RecoveryToolCall, SessionManager, SessionRecoveryState, WorkMode,
+    Database, PartialAssistantState, ProjectSettings, RecoveryDecision,
+    RecoveryNonResumableReason, RecoveryStatus, RecoveryToolCall, SessionManager,
+    SessionRecoveryState, WorkMode,
 };
 use crate::tools::registry::{PermissionMode, ToolRegistry};
 
@@ -172,6 +173,44 @@ impl AgenticOrchestrator {
             generate_title,
             delegated_progress_tx,
         } = self.config;
+
+        // Load per-project settings from .krusty/settings.json
+        let project_settings = project_dir
+            .as_deref()
+            .map(ProjectSettings::load)
+            .unwrap_or_default();
+
+        // Apply permission_mode override from project settings
+        let permission_mode = if let Some(ref mode_str) = project_settings.permission_mode {
+            match mode_str.as_str() {
+                "autonomous" => {
+                    tracing::info!("Project settings override: permission_mode = autonomous");
+                    PermissionMode::Autonomous
+                }
+                "supervised" => {
+                    tracing::info!("Project settings override: permission_mode = supervised");
+                    PermissionMode::Supervised
+                }
+                other => {
+                    tracing::warn!(
+                        "Unknown permission_mode in project settings: {:?}, keeping default",
+                        other
+                    );
+                    permission_mode
+                }
+            }
+        } else {
+            permission_mode
+        };
+
+        // Log model override (consumed by the presentation layer that constructs AiClient)
+        if let Some(ref model) = project_settings.model {
+            tracing::info!(
+                "Project settings specify model override: {} (active client model: {})",
+                model,
+                ai_client.config().model,
+            );
+        }
 
         let mut work_mode = initial_work_mode;
         let mut last_token_count = 0usize;
@@ -493,6 +532,7 @@ impl AgenticOrchestrator {
                         delegated_progress_tx.as_ref(),
                         &event_tx,
                         &mut input_rx,
+                        project_settings.subagent_max_turns,
                     )
                     .await;
                     all_results.extend(other_results);
@@ -616,6 +656,7 @@ impl AgenticOrchestrator {
                 delegated_progress_tx.as_ref(),
                 &event_tx,
                 &mut input_rx,
+                project_settings.subagent_max_turns,
             )
             .await;
             work_mode = next_work_mode;

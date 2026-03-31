@@ -48,6 +48,7 @@ pub(crate) async fn execute_tools(
     delegated_progress_tx: Option<&mpsc::UnboundedSender<DelegatedProgressEvent>>,
     event_tx: &mpsc::UnboundedSender<LoopEvent>,
     input_rx: &mut mpsc::UnboundedReceiver<LoopInput>,
+    subagent_max_turns_override: Option<usize>,
 ) -> (Vec<Content>, WorkMode) {
     let mut work_mode = current_mode;
     let mut results = Vec::new();
@@ -114,6 +115,7 @@ pub(crate) async fn execute_tools(
                 work_mode,
                 delegated_progress_tx,
                 event_tx,
+                subagent_max_turns_override,
             )
             .await;
 
@@ -171,6 +173,7 @@ async fn execute_regular_tool(
     work_mode: WorkMode,
     delegated_progress_tx: Option<&mpsc::UnboundedSender<DelegatedProgressEvent>>,
     event_tx: &mpsc::UnboundedSender<LoopEvent>,
+    subagent_max_turns_override: Option<usize>,
 ) -> ToolResult {
     let (output_tx, mut output_rx) =
         mpsc::unbounded_channel::<crate::tools::registry::ToolOutputChunk>();
@@ -227,7 +230,9 @@ async fn execute_regular_tool(
         ..Default::default()
     }
     .with_permission_mode(permission_mode)
-    .with_subagent_max_turns(RuntimeAgentConfig::default().subagent_max_turns)
+    .with_subagent_max_turns(
+        subagent_max_turns_override.or(RuntimeAgentConfig::default().subagent_max_turns),
+    )
     .with_ai_client(ai_client.clone())
     .with_tool_registry(Arc::clone(tool_registry))
     .with_output_stream(output_tx, call.id.clone());
