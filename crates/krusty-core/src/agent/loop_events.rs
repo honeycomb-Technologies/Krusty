@@ -163,6 +163,22 @@ pub enum LoopEvent {
 
     /// Error occurred.
     Error { error: String },
+
+    // ── Background agent lifecycle ────────────────────────────────────
+    /// A background agent was started. Parent can continue immediately.
+    AgentBackgroundStarted {
+        delegated_run_id: String,
+        agent_type: String,
+        description: String,
+    },
+
+    /// A background agent completed. Result is in the delegated run store.
+    AgentBackgroundCompleted {
+        delegated_run_id: String,
+        agent_type: String,
+        success: bool,
+        summary: String,
+    },
 }
 
 /// Simple plan task info for event transport.

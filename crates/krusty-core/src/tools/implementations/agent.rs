@@ -66,6 +66,10 @@ struct Params {
     /// Plan task IDs corresponding to each component (build only, for auto-marking)
     #[serde(default)]
     task_ids: Option<Vec<String>>,
+
+    /// Run the agent in the background. Returns immediately with delegated_run_id.
+    #[serde(default)]
+    run_in_background: Option<bool>,
 }
 
 #[async_trait]
@@ -88,6 +92,8 @@ impl Tool for AgentTool {
 - **plan**: Generate implementation plans — steps, critical files, trade-offs, dependencies. Read-only. Fresh context.
 - **verify**: Run tests, builds, linters and validate changes. Outputs VERDICT: PASS|FAIL|PARTIAL. Fresh context.
 - **build**: Parallel code implementation. Pass 'components' array and optionally 'conventions'. Fresh context.
+
+**Background mode:** Pass `run_in_background: true` to spawn the agent asynchronously. You get back a `delegated_run_id` immediately and can continue working. The agent writes its result to the delegated run store when finished — you will see it in your delegated context on the next turn. Use this for long-running tasks where you don't need the result right away.
 
 For simple file lookups, use Glob/Grep/Read directly — agent is for deeper multi-step work."#,
         )
@@ -125,6 +131,10 @@ For simple file lookups, use Glob/Grep/Read directly — agent is for deeper mul
                     "description": "Max parallel builders. Default: component count. Use 2-3 for tightly coupled code, 5-10 for independent modules. (build only)",
                     "minimum": 1,
                     "maximum": 20
+                },
+                "run_in_background": {
+                    "type": "boolean",
+                    "description": "Run agent in background. Returns immediately with delegated_run_id. Check status via delegated run store. You will see results in the delegated context on your next turn."
                 }
             },
             "required": ["agent_type", "prompt"],
@@ -157,6 +167,24 @@ For simple file lookups, use Glob/Grep/Read directly — agent is for deeper mul
             ),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Background dispatch helper
+// ---------------------------------------------------------------------------
+
+/// Build the immediate response for a background agent launch.
+fn background_started_result(delegated_run_id: &str, agent_type: &str) -> ToolResult {
+    ToolResult::success_data(json!({
+        "status": "background_started",
+        "delegated_run_id": delegated_run_id,
+        "agent_type": agent_type,
+        "message": format!(
+            "{} agent started in background. You will see the result in your delegated context on the next turn. \
+             Use delegated_run_id '{}' to track status.",
+            agent_type, delegated_run_id
+        ),
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -316,13 +344,77 @@ impl AgentTool {
             }
         }
 
+        let cancellation_token = self.cancellation.child_token();
+        let progress_tx = ctx.agent_progress_tx.clone();
+
         info!(
             delegated_run_id = %delegated_run_id,
             model = %model,
             scope = %scope_label,
+            background = params.run_in_background.unwrap_or(false),
             "Agent tool (explore): starting single-agent exploration"
         );
 
+        // ── Background mode ──────────────────────────────────────────
+        if params.run_in_background.unwrap_or(false) {
+            let bg_delegation_policy = delegation_policy.clone();
+            let bg_delegated_run_id = delegated_run_id.clone();
+            let bg_db_path = ctx.db_path.clone();
+
+            tokio::spawn(async move {
+                let result = execute_single_explorer(
+                    client,
+                    task,
+                    registry,
+                    bg_delegation_policy.clone(),
+                    project_context,
+                    model,
+                    cancellation_token,
+                    progress_tx,
+                )
+                .await;
+
+                // Finalize the delegated run in DB
+                if let Some(ref db_path) = bg_db_path {
+                    if let Some(store) = Database::new(db_path).ok().map(DelegatedRunStore::new) {
+                        let human_review = truncate_utf8(&result.output, 500).to_string();
+                        let payload = json!({
+                            "delegated_run_id": bg_delegated_run_id,
+                            "findings": result.output,
+                            "files_examined": result.files_examined,
+                            "files_examined_count": result.files_examined.len(),
+                            "duration_ms": result.duration_ms,
+                            "turns_used": result.turns_used,
+                            "success": result.success,
+                            "outcome": if result.success { "success" } else { "failed" },
+                            "delegation_policy": bg_delegation_policy.audit_json(),
+                        });
+                        let final_stage = if result.success {
+                            DelegatedRunStage::Complete
+                        } else {
+                            DelegatedRunStage::Failed
+                        };
+                        if let Err(err) = store.finalize_run(
+                            &bg_delegated_run_id,
+                            final_stage,
+                            &payload,
+                            Some(&human_review),
+                            true,
+                        ) {
+                            warn!(
+                                delegated_run_id = %bg_delegated_run_id,
+                                error = %err,
+                                "Background explore: failed to persist final artifact"
+                            );
+                        }
+                    }
+                }
+            });
+
+            return background_started_result(&delegated_run_id, "explore");
+        }
+
+        // ── Synchronous mode (existing behavior) ─────────────────────
         let result = execute_single_explorer(
             client,
             task,
@@ -330,8 +422,8 @@ impl AgentTool {
             delegation_policy.clone(),
             project_context,
             model,
-            self.cancellation.child_token(),
-            ctx.agent_progress_tx.clone(),
+            cancellation_token,
+            progress_tx,
         )
         .await;
 
@@ -453,12 +545,76 @@ impl AgentTool {
         let project_context =
             build_subagent_project_context(&ctx.working_dir, ctx.project_dir.as_deref());
 
+        let cancellation_token = self.cancellation.child_token();
+        let progress_tx = ctx.agent_progress_tx.clone();
+
         info!(
             delegated_run_id = %delegated_run_id,
             model = %model,
+            background = params.run_in_background.unwrap_or(false),
             "Agent tool (plan): starting planning agent"
         );
 
+        // ── Background mode ──────────────────────────────────────────
+        if params.run_in_background.unwrap_or(false) {
+            let bg_delegation_policy = delegation_policy.clone();
+            let bg_delegated_run_id = delegated_run_id.clone();
+            let bg_db_path = ctx.db_path.clone();
+
+            tokio::spawn(async move {
+                let config =
+                    PlanConfig::new(registry, bg_delegation_policy.clone(), project_context).await;
+
+                let result = execute_single_agent(
+                    &client,
+                    task,
+                    config,
+                    &model,
+                    cancellation_token,
+                    progress_tx,
+                )
+                .await;
+
+                if let Some(ref db_path) = bg_db_path {
+                    if let Some(store) = Database::new(db_path).ok().map(DelegatedRunStore::new) {
+                        let human_review = truncate_utf8(&result.output, 500).to_string();
+                        let payload = json!({
+                            "delegated_run_id": bg_delegated_run_id,
+                            "findings": result.output,
+                            "files_examined": result.files_examined,
+                            "files_examined_count": result.files_examined.len(),
+                            "duration_ms": result.duration_ms,
+                            "turns_used": result.turns_used,
+                            "success": result.success,
+                            "outcome": if result.success { "success" } else { "failed" },
+                            "delegation_policy": bg_delegation_policy.audit_json(),
+                        });
+                        let final_stage = if result.success {
+                            DelegatedRunStage::Complete
+                        } else {
+                            DelegatedRunStage::Failed
+                        };
+                        if let Err(err) = store.finalize_run(
+                            &bg_delegated_run_id,
+                            final_stage,
+                            &payload,
+                            Some(&human_review),
+                            false,
+                        ) {
+                            warn!(
+                                delegated_run_id = %bg_delegated_run_id,
+                                error = %err,
+                                "Background plan: failed to persist final artifact"
+                            );
+                        }
+                    }
+                }
+            });
+
+            return background_started_result(&delegated_run_id, "plan");
+        }
+
+        // ── Synchronous mode (existing behavior) ─────────────────────
         let config =
             PlanConfig::new(registry, delegation_policy.clone(), project_context).await;
 
@@ -467,8 +623,8 @@ impl AgentTool {
             task,
             config,
             &model,
-            self.cancellation.child_token(),
-            ctx.agent_progress_tx.clone(),
+            cancellation_token,
+            progress_tx,
         )
         .await;
 
@@ -589,12 +745,77 @@ impl AgentTool {
         let project_context =
             build_subagent_project_context(&ctx.working_dir, ctx.project_dir.as_deref());
 
+        let cancellation_token = self.cancellation.child_token();
+        let progress_tx = ctx.agent_progress_tx.clone();
+
         info!(
             delegated_run_id = %delegated_run_id,
             model = %model,
+            background = params.run_in_background.unwrap_or(false),
             "Agent tool (verify): starting verification agent"
         );
 
+        // ── Background mode ──────────────────────────────────────────
+        if params.run_in_background.unwrap_or(false) {
+            let bg_delegation_policy = delegation_policy.clone();
+            let bg_delegated_run_id = delegated_run_id.clone();
+            let bg_db_path = ctx.db_path.clone();
+
+            tokio::spawn(async move {
+                let config =
+                    VerifyConfig::new(registry, bg_delegation_policy.clone(), project_context)
+                        .await;
+
+                let result = execute_single_agent(
+                    &client,
+                    task,
+                    config,
+                    &model,
+                    cancellation_token,
+                    progress_tx,
+                )
+                .await;
+
+                if let Some(ref db_path) = bg_db_path {
+                    if let Some(store) = Database::new(db_path).ok().map(DelegatedRunStore::new) {
+                        let human_review = truncate_utf8(&result.output, 500).to_string();
+                        let payload = json!({
+                            "delegated_run_id": bg_delegated_run_id,
+                            "findings": result.output,
+                            "files_examined": result.files_examined,
+                            "files_examined_count": result.files_examined.len(),
+                            "duration_ms": result.duration_ms,
+                            "turns_used": result.turns_used,
+                            "success": result.success,
+                            "outcome": if result.success { "success" } else { "failed" },
+                            "delegation_policy": bg_delegation_policy.audit_json(),
+                        });
+                        let final_stage = if result.success {
+                            DelegatedRunStage::Complete
+                        } else {
+                            DelegatedRunStage::Failed
+                        };
+                        if let Err(err) = store.finalize_run(
+                            &bg_delegated_run_id,
+                            final_stage,
+                            &payload,
+                            Some(&human_review),
+                            false,
+                        ) {
+                            warn!(
+                                delegated_run_id = %bg_delegated_run_id,
+                                error = %err,
+                                "Background verify: failed to persist final artifact"
+                            );
+                        }
+                    }
+                }
+            });
+
+            return background_started_result(&delegated_run_id, "verify");
+        }
+
+        // ── Synchronous mode (existing behavior) ─────────────────────
         let config =
             VerifyConfig::new(registry, delegation_policy.clone(), project_context).await;
 
@@ -603,8 +824,8 @@ impl AgentTool {
             task,
             config,
             &model,
-            self.cancellation.child_token(),
-            ctx.agent_progress_tx.clone(),
+            cancellation_token,
+            progress_tx,
         )
         .await;
 
@@ -802,9 +1023,113 @@ impl AgentTool {
             .with_override_model(ctx.current_model.clone());
 
         info!(
-            "Agent tool (build): Starting builder pool with max_concurrency={} (components={})",
-            concurrency, num_components
+            "Agent tool (build): Starting builder pool with max_concurrency={} (components={}), background={}",
+            concurrency, num_components, params.run_in_background.unwrap_or(false)
         );
+
+        // ── Background mode ──────────────────────────────────────────
+        if params.run_in_background.unwrap_or(false) {
+            let bg_delegated_run_id = delegated_run_id.clone();
+            let bg_db_path = ctx.db_path.clone();
+            let bg_delegation_policy = delegation_policy.clone();
+            let progress_tx = ctx.agent_progress_tx.clone();
+
+            tokio::spawn(async move {
+                let results = if let Some(progress_tx) = progress_tx {
+                    pool.execute_builders(tasks, context.clone(), progress_tx)
+                        .await
+                } else {
+                    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+                    pool.execute_builders(tasks, context.clone(), tx).await
+                };
+
+                // Build the finalization payload (same logic as synchronous path)
+                let stats = context.stats();
+                let mut all_files: Vec<String> = Vec::new();
+                let mut total_turns = 0;
+                let mut total_duration_ms = 0u64;
+                let mut errors: Vec<String> = Vec::new();
+                let mut builders = Vec::new();
+
+                for result in &results {
+                    builders.push(result.evidence_json());
+                    if let Some(err) = &result.error {
+                        errors.push(format!("{}: {}", result.task_id, err));
+                    }
+                    all_files.extend(result.files_examined.clone());
+                    total_turns += result.turns_used;
+                    total_duration_ms += result.duration_ms;
+                }
+
+                let mut unique_files = Vec::new();
+                for file in all_files {
+                    if !unique_files.iter().any(|existing| existing == &file) {
+                        unique_files.push(file);
+                    }
+                }
+
+                let failed_builders = errors.len();
+                let successful_builders = results.len().saturating_sub(failed_builders);
+                let outcome =
+                    classify_build_outcome(results.len(), failed_builders, stats.files_modified);
+                let investigation_summary = build_investigation_summary(
+                    successful_builders,
+                    failed_builders,
+                    stats.files_modified,
+                    stats.lines_added,
+                    stats.lines_removed,
+                );
+
+                let payload = json!({
+                    "delegated_run_id": bg_delegated_run_id,
+                    "message": format!(
+                        "Build completed: {} builders, {} turns, +{} -{} lines across {} files",
+                        results.len(), total_turns, stats.lines_added, stats.lines_removed, stats.files_modified,
+                    ),
+                    "investigation_summary": investigation_summary,
+                    "outcome": outcome,
+                    "builder_count": results.len(),
+                    "successful_agents": successful_builders,
+                    "failed_agents": failed_builders,
+                    "total_turns": total_turns,
+                    "total_duration_ms": total_duration_ms,
+                    "files_examined": unique_files,
+                    "builders": builders,
+                    "lines_added": stats.lines_added,
+                    "lines_removed": stats.lines_removed,
+                    "files_modified": stats.files_modified,
+                    "errors": errors,
+                    "delegation_policy": bg_delegation_policy.audit_json(),
+                });
+
+                if let Some(ref db_path) = bg_db_path {
+                    if let Some(store) = Database::new(db_path).ok().map(DelegatedRunStore::new) {
+                        let final_stage = match outcome {
+                            "success" => DelegatedRunStage::Complete,
+                            "partial" => DelegatedRunStage::Degraded,
+                            _ => DelegatedRunStage::Failed,
+                        };
+                        if let Err(err) = store.finalize_run(
+                            &bg_delegated_run_id,
+                            final_stage,
+                            &payload,
+                            Some(&investigation_summary),
+                            failed_builders > 0,
+                        ) {
+                            warn!(
+                                delegated_run_id = %bg_delegated_run_id,
+                                error = %err,
+                                "Background build: failed to persist final artifact"
+                            );
+                        }
+                    }
+                }
+            });
+
+            return background_started_result(&delegated_run_id, "build");
+        }
+
+        // ── Synchronous mode (existing behavior) ─────────────────────
 
         // Execute builders with progress channel if available
         let results = if let Some(ref progress_tx) = ctx.agent_progress_tx {

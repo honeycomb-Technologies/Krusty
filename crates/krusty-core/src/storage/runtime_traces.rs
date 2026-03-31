@@ -532,6 +532,8 @@ fn loop_event_type(event: &LoopEvent) -> &'static str {
         LoopEvent::TitleGenerated { .. } => "title_generated",
         LoopEvent::Finished { .. } => "finished",
         LoopEvent::Error { .. } => "error",
+        LoopEvent::AgentBackgroundStarted { .. } => "agent_background_started",
+        LoopEvent::AgentBackgroundCompleted { .. } => "agent_background_completed",
     }
 }
 
@@ -645,6 +647,26 @@ fn summarize_loop_event(event: &LoopEvent) -> Value {
             stop_reason,
         } => json!({ "session_id": session_id, "stop_reason": stop_reason }),
         LoopEvent::Error { error } => json!({ "error": error }),
+        LoopEvent::AgentBackgroundStarted {
+            delegated_run_id,
+            agent_type,
+            description,
+        } => json!({
+            "delegated_run_id": delegated_run_id,
+            "agent_type": agent_type,
+            "description": description,
+        }),
+        LoopEvent::AgentBackgroundCompleted {
+            delegated_run_id,
+            agent_type,
+            success,
+            summary,
+        } => json!({
+            "delegated_run_id": delegated_run_id,
+            "agent_type": agent_type,
+            "success": success,
+            "summary": summary,
+        }),
     }
 }
 

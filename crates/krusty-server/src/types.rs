@@ -963,6 +963,19 @@ pub enum AgenticEvent {
     ToolDenied { id: String },
     /// Error occurred
     Error { error: String },
+    /// A background agent was started
+    AgentBackgroundStarted {
+        delegated_run_id: String,
+        agent_type: String,
+        description: String,
+    },
+    /// A background agent completed
+    AgentBackgroundCompleted {
+        delegated_run_id: String,
+        agent_type: String,
+        success: bool,
+        summary: String,
+    },
 }
 
 impl AgenticEvent {
@@ -1116,6 +1129,26 @@ impl From<krusty_core::agent::LoopEvent> for AgenticEvent {
                     .unwrap_or_else(|| "completed".to_string()),
             },
             LoopEvent::Error { error } => Self::Error { error },
+            LoopEvent::AgentBackgroundStarted {
+                delegated_run_id,
+                agent_type,
+                description,
+            } => Self::AgentBackgroundStarted {
+                delegated_run_id,
+                agent_type,
+                description,
+            },
+            LoopEvent::AgentBackgroundCompleted {
+                delegated_run_id,
+                agent_type,
+                success,
+                summary,
+            } => Self::AgentBackgroundCompleted {
+                delegated_run_id,
+                agent_type,
+                success,
+                summary,
+            },
         }
     }
 }

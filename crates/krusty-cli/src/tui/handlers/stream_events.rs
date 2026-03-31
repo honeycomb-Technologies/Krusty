@@ -400,6 +400,34 @@ impl App {
             LoopEvent::Error { error } => {
                 self.handle_stream_error(error);
             }
+
+            // -- Background agent lifecycle --------------------------------
+            LoopEvent::AgentBackgroundStarted {
+                delegated_run_id,
+                agent_type,
+                description,
+            } => {
+                tracing::info!(
+                    delegated_run_id = %delegated_run_id,
+                    agent_type = %agent_type,
+                    "Background agent started: {}",
+                    description,
+                );
+            }
+            LoopEvent::AgentBackgroundCompleted {
+                delegated_run_id,
+                agent_type,
+                success,
+                summary,
+            } => {
+                tracing::info!(
+                    delegated_run_id = %delegated_run_id,
+                    agent_type = %agent_type,
+                    success = success,
+                    "Background agent completed: {}",
+                    summary,
+                );
+            }
         }
     }
 
