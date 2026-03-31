@@ -533,6 +533,7 @@ impl AgenticOrchestrator {
                         &event_tx,
                         &mut input_rx,
                         project_settings.subagent_max_turns,
+                        project_settings.disabled_tools.as_deref(),
                     )
                     .await;
                     all_results.extend(other_results);
@@ -657,6 +658,7 @@ impl AgenticOrchestrator {
                 &event_tx,
                 &mut input_rx,
                 project_settings.subagent_max_turns,
+                project_settings.disabled_tools.as_deref(),
             )
             .await;
             work_mode = next_work_mode;

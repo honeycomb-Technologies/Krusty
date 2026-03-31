@@ -49,12 +49,28 @@ pub(crate) async fn execute_tools(
     event_tx: &mpsc::UnboundedSender<LoopEvent>,
     input_rx: &mut mpsc::UnboundedReceiver<LoopInput>,
     subagent_max_turns_override: Option<usize>,
+    disabled_tools: Option<&[String]>,
 ) -> (Vec<Content>, WorkMode) {
     let mut work_mode = current_mode;
     let mut results = Vec::new();
     let tool_control = ToolControl::new(permission_mode);
 
     for call in tool_calls {
+        // Check project-level disabled_tools before any execution
+        if let Some(disabled) = disabled_tools {
+            if disabled.iter().any(|d| d == call.name.as_str()) {
+                let denied = ToolResult::error_with_code(
+                    "disabled_by_project",
+                    format!(
+                        "Tool '{}' is disabled in .krusty/settings.json",
+                        call.name
+                    ),
+                );
+                results.push(tool_control.publish_result(call, &denied, event_tx));
+                continue;
+            }
+        }
+
         match tool_control.authorize(call, event_tx, input_rx).await {
             AuthorizationDecision::Execute => {}
             AuthorizationDecision::Deny(denial) => {

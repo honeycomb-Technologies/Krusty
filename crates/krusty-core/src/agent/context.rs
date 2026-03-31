@@ -123,10 +123,29 @@ pub fn inject_context(
     injected
 }
 
+/// Maximum number of memories injected per type (most recent first).
+const MAX_MEMORIES_PER_TYPE: usize = 15;
+/// Maximum character length for a single memory's content in the injection.
+const MAX_MEMORY_CONTENT_CHARS: usize = 300;
+/// Approximate upper bound on total memory context output size.
+const MAX_MEMORY_CONTEXT_BYTES: usize = 8 * 1024;
+
+/// Truncate a string to at most `max_chars` characters on a valid UTF-8
+/// boundary, appending "..." when truncation occurs.
+fn truncate_utf8(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(max_chars).collect();
+    format!("{}...", truncated)
+}
+
 /// Build persistent memory context from the agent memory store.
 ///
 /// Returns an empty string when no memories exist, keeping the system
-/// prompt lean for fresh sessions.
+/// prompt lean for fresh sessions.  Caps per-type count, individual
+/// content length, and total output size to prevent memory injection
+/// from consuming too much context budget.
 fn build_memory_context(
     db_path: &Path,
     project_dir: Option<&str>,
@@ -148,6 +167,8 @@ fn build_memory_context(
         "These memories persist across sessions. Use them as context but verify against current state before acting.".to_string(),
     );
 
+    let mut total_len: usize = sections.iter().map(|s| s.len()).sum();
+
     for memory_type in &[
         MemoryType::User,
         MemoryType::Feedback,
@@ -157,6 +178,7 @@ fn build_memory_context(
         let typed: Vec<_> = memories
             .iter()
             .filter(|m| m.memory_type == *memory_type)
+            .take(MAX_MEMORIES_PER_TYPE)
             .collect();
         if typed.is_empty() {
             continue;
@@ -169,8 +191,20 @@ fn build_memory_context(
             MemoryType::Reference => "## External References",
         };
         sections.push(header.to_string());
+        total_len += header.len();
+
         for m in typed {
-            sections.push(format!("- **{}**: {}", m.title, m.content));
+            let content = truncate_utf8(&m.content, MAX_MEMORY_CONTENT_CHARS);
+            let line = format!("- **{}**: {}", m.title, content);
+            total_len += line.len() + 1; // +1 for newline join
+            if total_len > MAX_MEMORY_CONTEXT_BYTES {
+                break;
+            }
+            sections.push(line);
+        }
+
+        if total_len > MAX_MEMORY_CONTEXT_BYTES {
+            break;
         }
     }
 

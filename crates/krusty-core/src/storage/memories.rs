@@ -206,13 +206,19 @@ impl MemoryStore {
     fn query_memories(&self, sql: &str, bound: &[String]) -> Vec<AgentMemory> {
         let mut stmt = match self.db.conn().prepare(sql) {
             Ok(s) => s,
-            Err(_) => return Vec::new(),
+            Err(e) => {
+                tracing::warn!("Memory query failed (prepare): {}", e);
+                return Vec::new();
+            }
         };
         let params: Vec<&dyn rusqlite::types::ToSql> =
             bound.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
         let rows = match stmt.query_map(params.as_slice(), |row| Ok(row_to_memory(row))) {
             Ok(r) => r,
-            Err(_) => return Vec::new(),
+            Err(e) => {
+                tracing::warn!("Memory query failed (execute): {}", e);
+                return Vec::new();
+            }
         };
         rows.filter_map(|r| r.ok()).collect()
     }
