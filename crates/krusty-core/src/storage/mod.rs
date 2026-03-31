@@ -15,7 +15,9 @@ pub mod credentials;
 mod database;
 #[cfg(test)]
 mod database_tests;
+mod delegated_runs;
 mod file_activity;
+mod memories;
 mod messages;
 mod plans;
 mod preferences;
@@ -29,7 +31,12 @@ pub use agent_state::AgentState;
 pub use block_ui::BlockUiState;
 pub use credentials::CredentialStore;
 pub use database::{Database, SharedDatabase};
+pub use delegated_runs::{
+    normalize_scope_key, DelegatedRunAgentSnapshot, DelegatedRunRecord, DelegatedRunRole,
+    DelegatedRunScope, DelegatedRunSnapshot, DelegatedRunStartInput, DelegatedRunStore,
+};
 pub use file_activity::{FileActivityTracker, RankedFile};
+pub use memories::{AgentMemory, MemoryStore, MemoryType};
 pub use messages::MessageStore;
 pub use plans::{PlanStore, PlanSummary};
 pub use preferences::Preferences;
@@ -45,7 +52,7 @@ pub use runtime_traces::{
     ReplayExpectations, ReplayGateResult, RuntimeTraceEvent, RuntimeTraceStore,
     RuntimeTraceSummary, TraceEventCount, TraceFailureCategory,
 };
-pub use sessions::{SessionInfo, SessionManager, WorkMode};
+pub use sessions::{SessionInfo, SessionManager, WorkMode, WorkspaceMode};
 
 /// Get current Unix timestamp in seconds
 #[inline]

@@ -13,7 +13,7 @@ use tokio::sync::RwLock;
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::plan::PlanManager;
 use crate::skills::SkillsManager;
-use crate::storage::{Database, DelegatedRunStore, WorkMode};
+use crate::storage::{Database, DelegatedRunStore, MemoryStore, MemoryType, WorkMode};
 
 /// Instruction files to search for in the working directory (priority order).
 const PROJECT_FILES: &[&str] = &[
@@ -47,12 +47,17 @@ pub fn inject_context(
 ) -> Vec<ModelMessage> {
     let workspace_ctx = build_workspace_context(working_dir, project_dir);
     let env_ctx = build_environment_context(working_dir, model_id);
+    let memory_ctx = build_memory_context(
+        db_path,
+        project_dir.map(|p| p.to_string_lossy().to_string()).as_deref(),
+        None, // user_id — single-tenant for now
+    );
     let plan_ctx = build_plan_context(db_path, session_id, work_mode);
     let delegated_ctx = build_delegated_context(db_path, session_id);
     let skills_ctx = build_skills_context(skills_manager, project_dir.is_some());
     let project_ctx = project_dir.map(build_project_context).unwrap_or_default();
 
-    let mut injected = Vec::with_capacity(conversation.len() + 6);
+    let mut injected = Vec::with_capacity(conversation.len() + 7);
 
     if !workspace_ctx.is_empty() {
         injected.push(ModelMessage {
@@ -66,6 +71,12 @@ pub fn inject_context(
         injected.push(ModelMessage {
             role: Role::System,
             content: vec![Content::Text { text: env_ctx }],
+        });
+    }
+    if !memory_ctx.is_empty() {
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text { text: memory_ctx }],
         });
     }
     if !project_ctx.is_empty() {
@@ -97,6 +108,61 @@ pub fn inject_context(
 
     injected.extend_from_slice(conversation);
     injected
+}
+
+/// Build persistent memory context from the agent memory store.
+///
+/// Returns an empty string when no memories exist, keeping the system
+/// prompt lean for fresh sessions.
+fn build_memory_context(
+    db_path: &Path,
+    project_dir: Option<&str>,
+    user_id: Option<&str>,
+) -> String {
+    let db = match Database::new(db_path) {
+        Ok(db) => db,
+        Err(_) => return String::new(),
+    };
+    let store = MemoryStore::new(db);
+    let memories = store.list(project_dir, user_id);
+    if memories.is_empty() {
+        return String::new();
+    }
+
+    let mut sections: Vec<String> = Vec::new();
+    sections.push("[PERSISTENT MEMORY]".to_string());
+    sections.push(
+        "These memories persist across sessions. Use them as context but verify against current state before acting.".to_string(),
+    );
+
+    for memory_type in &[
+        MemoryType::User,
+        MemoryType::Feedback,
+        MemoryType::Project,
+        MemoryType::Reference,
+    ] {
+        let typed: Vec<_> = memories
+            .iter()
+            .filter(|m| m.memory_type == *memory_type)
+            .collect();
+        if typed.is_empty() {
+            continue;
+        }
+
+        let header = match memory_type {
+            MemoryType::User => "## User Context",
+            MemoryType::Feedback => "## Feedback & Guidance",
+            MemoryType::Project => "## Project Context",
+            MemoryType::Reference => "## External References",
+        };
+        sections.push(header.to_string());
+        for m in typed {
+            sections.push(format!("- **{}**: {}", m.title, m.content));
+        }
+    }
+
+    sections.push("[/PERSISTENT MEMORY]".to_string());
+    sections.join("\n")
 }
 
 fn build_delegated_context(db_path: &Path, session_id: &str) -> String {
