@@ -21,15 +21,19 @@ pub fn anthropic_oauth_config() -> OAuthConfig {
     OAuthConfig {
         provider_id: ProviderId::Anthropic,
         client_id: ANTHROPIC_CLIENT_ID.to_string(),
-        authorization_url: "https://claude.ai/oauth/authorize".to_string(),
-        token_url: "https://console.anthropic.com/v1/oauth/token".to_string(),
+        // Anthropic migrated to platform.claude.com (2025)
+        authorization_url: "https://platform.claude.com/oauth/authorize".to_string(),
+        token_url: "https://platform.claude.com/v1/oauth/token".to_string(),
         // Anthropic doesn't support device code flow
         device_auth_url: None,
-        // Anthropic OAuth scopes
+        // All Claude Code OAuth scopes — union of Console + Claude.ai scopes
         scopes: vec![
             "org:create_api_key".to_string(),
             "user:profile".to_string(),
             "user:inference".to_string(),
+            "user:sessions:claude_code".to_string(),
+            "user:mcp_servers".to_string(),
+            "user:file_upload".to_string(),
         ],
         // Refresh tokens after 28 days
         refresh_days: 28,
