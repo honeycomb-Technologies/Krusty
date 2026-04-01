@@ -1331,12 +1331,20 @@ pub(crate) async fn call_subagent_api(
                         tool_use_id,
                         output,
                         is_error,
-                    } => json!({
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": output,
-                        "is_error": is_error.unwrap_or(false)
-                    }),
+                    } => {
+                        // Anthropic API requires tool_result content to be a string
+                        // or array of content blocks — never a raw JSON object.
+                        let content_str = match output {
+                            Value::String(s) => Value::String(s.clone()),
+                            other => Value::String(other.to_string()),
+                        };
+                        json!({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": content_str,
+                            "is_error": is_error.unwrap_or(false)
+                        })
+                    }
                     _ => json!({"type": "text", "text": "[unsupported content]"}),
                 })
                 .collect();
