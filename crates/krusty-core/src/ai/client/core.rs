@@ -17,6 +17,9 @@ use crate::constants;
 /// API version header for Anthropic
 const API_VERSION: &str = "2023-06-01";
 
+/// OAuth beta header required for Bearer token auth on Anthropic
+const OAUTH_BETA_HEADER: &str = "claude-code-20250219,oauth-2025-04-20";
+
 /// Krusty's core philosophy and behavioral guidance
 pub const KRUSTY_SYSTEM_PROMPT: &str = r#"You are Krusty, an AI coding assistant. You finish real software tasks cleanly and completely. You do not waste the user's time.
 
@@ -229,6 +232,13 @@ impl AiClient {
         // Add Anthropic API headers if using Anthropic-compatible API
         if self.config.uses_anthropic_api() {
             request = request.header("anthropic-version", API_VERSION);
+
+            // OAuth requires beta headers on all requests (not just streaming)
+            if self.config.auth_header == AuthHeader::Bearer
+                && self.config.provider_id() == ProviderId::Anthropic
+            {
+                request = request.header("anthropic-beta", OAUTH_BETA_HEADER);
+            }
         }
 
         // Common headers
@@ -296,10 +306,21 @@ impl AiClient {
 
         // Beta headers for native Anthropic API (direct provider)
         // Third-party Anthropic-compatible providers (Z.ai, MiniMax, etc.) don't need them
-        if self.config.provider_id == ProviderId::Anthropic && !beta_headers.is_empty() {
-            let combined = beta_headers.join(",");
-            request = request.header("anthropic-beta", combined);
-            info!("Added anthropic-beta headers for Anthropic provider");
+        if self.config.provider_id == ProviderId::Anthropic {
+            let mut all_betas: Vec<&str> = Vec::new();
+
+            // OAuth requires claude-code identity + oauth beta headers
+            if self.config.auth_header == AuthHeader::Bearer {
+                all_betas.push(OAUTH_BETA_HEADER);
+            }
+
+            // Add caller-specified betas
+            all_betas.extend_from_slice(beta_headers);
+
+            if !all_betas.is_empty() {
+                let combined = all_betas.join(",");
+                request = request.header("anthropic-beta", combined);
+            }
         }
 
         request
