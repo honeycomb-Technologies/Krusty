@@ -71,11 +71,9 @@ impl App {
             }
             KeyCode::Backspace => self.ui.popups.auth.backspace_api_key(),
             KeyCode::Char('v') if modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                    if let Ok(text) = clipboard.get_text() {
-                        for c in text.trim().chars() {
-                            self.ui.popups.auth.add_api_key_char(c);
-                        }
+                if let Some(text) = crate::tui::utils::clipboard::read_clipboard_text() {
+                    for c in text.trim().chars() {
+                        self.ui.popups.auth.add_api_key_char(c);
                     }
                 }
             }
@@ -127,11 +125,9 @@ impl App {
             }
             KeyCode::Backspace => self.ui.popups.auth.backspace_paste_code(),
             KeyCode::Char('v') if modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                    if let Ok(text) = clipboard.get_text() {
-                        for c in text.trim().chars() {
-                            self.ui.popups.auth.add_paste_code_char(c);
-                        }
+                if let Some(text) = crate::tui::utils::clipboard::read_clipboard_text() {
+                    for c in text.trim().chars() {
+                        self.ui.popups.auth.add_paste_code_char(c);
                     }
                 }
             }

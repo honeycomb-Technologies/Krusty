@@ -75,8 +75,8 @@ impl MultiLineInput {
             }
             // Ctrl+V - paste from clipboard (image or text)
             KeyCode::Char('v') if modifiers.contains(KeyModifiers::CONTROL) => {
+                // Try image paste via arboard first (native tools can't do images)
                 if let Ok(mut clipboard) = Clipboard::new() {
-                    // Try image first
                     if let Ok(image_data) = clipboard.get_image() {
                         let placeholder_id = uuid::Uuid::new_v4().to_string();
                         let placeholder = format!("[clipboard:{}]", placeholder_id);
@@ -88,11 +88,11 @@ impl MultiLineInput {
                             placeholder_id,
                         };
                     }
-                    // Fall back to text
-                    if let Ok(text) = clipboard.get_text() {
-                        self.insert_text(&text);
-                        return InputAction::ContentChanged;
-                    }
+                }
+                // Text paste: use platform-aware helper (wl-paste/xclip on Linux)
+                if let Some(text) = crate::tui::utils::clipboard::read_clipboard_text() {
+                    self.insert_text(&text);
+                    return InputAction::ContentChanged;
                 }
                 InputAction::Continue
             }

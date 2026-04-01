@@ -3,6 +3,7 @@
 //! Common helper functions and types used throughout the TUI.
 
 mod channels;
+pub mod clipboard;
 mod syntax;
 mod text;
 mod title;
