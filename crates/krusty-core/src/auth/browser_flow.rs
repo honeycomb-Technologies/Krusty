@@ -210,7 +210,7 @@ impl PasteCodeOAuthFlow {
 
     /// Get the redirect URI for paste-code flow (Anthropic's code callback)
     fn redirect_uri(&self) -> &str {
-        "https://platform.claude.com/oauth/code/callback"
+        "https://console.anthropic.com/oauth/code/callback"
     }
 
     /// Build the authorization URL with PKCE challenge
