@@ -319,6 +319,63 @@ impl McpManager {
         Ok(McpToolResult::from(result))
     }
 
+    /// List resources from a specific server
+    pub async fn list_resources(&self, server: &str) -> Result<Vec<rmcp::model::Resource>> {
+        let clients = self.clients.read().await;
+        let client = clients
+            .get(server)
+            .ok_or_else(|| anyhow::anyhow!("Server not connected: {}", server))?;
+        client
+            .list_resources()
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))
+    }
+
+    /// Read a resource from a specific server
+    pub async fn read_resource(
+        &self,
+        server: &str,
+        uri: &str,
+    ) -> Result<rmcp::model::ReadResourceResult> {
+        let clients = self.clients.read().await;
+        let client = clients
+            .get(server)
+            .ok_or_else(|| anyhow::anyhow!("Server not connected: {}", server))?;
+        client
+            .read_resource(uri)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))
+    }
+
+    /// List prompts from a specific server
+    pub async fn list_prompts(&self, server: &str) -> Result<Vec<rmcp::model::Prompt>> {
+        let clients = self.clients.read().await;
+        let client = clients
+            .get(server)
+            .ok_or_else(|| anyhow::anyhow!("Server not connected: {}", server))?;
+        client
+            .list_prompts()
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))
+    }
+
+    /// Get a prompt from a specific server
+    pub async fn get_prompt(
+        &self,
+        server: &str,
+        name: &str,
+        arguments: Option<Value>,
+    ) -> Result<rmcp::model::GetPromptResult> {
+        let clients = self.clients.read().await;
+        let client = clients
+            .get(server)
+            .ok_or_else(|| anyhow::anyhow!("Server not connected: {}", server))?;
+        client
+            .get_prompt(name, arguments)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))
+    }
+
     /// Get server info for UI
     pub async fn list_servers(&self) -> Vec<McpServerInfo> {
         let configs = self.configs.read().await;

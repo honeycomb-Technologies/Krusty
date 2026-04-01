@@ -228,9 +228,21 @@ impl McpClient {
         *self.status.read().await
     }
 
-    /// Check if this client is connected
+    /// Check if this client is connected by testing the actual connection.
+    /// Sends a lightweight ping if supported, otherwise checks cached status.
     pub async fn is_alive(&self) -> bool {
-        *self.status.read().await == McpClientStatus::Connected
+        if *self.status.read().await != McpClientStatus::Connected {
+            return false;
+        }
+        // Try a lightweight operation to verify the connection is still live.
+        // list_tools is cached on the server side so it's cheap.
+        match self.service.peer().list_tools(None).await {
+            Ok(_) => true,
+            Err(_) => {
+                *self.status.write().await = McpClientStatus::Error;
+                false
+            }
+        }
     }
 }
 
