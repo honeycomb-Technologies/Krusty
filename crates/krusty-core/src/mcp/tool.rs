@@ -10,8 +10,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::warn;
 
-use super::manager::McpManager;
-use super::protocol::{format_mcp_result, McpToolDef};
+use super::manager::{format_mcp_result, McpManager, McpToolDef};
 use crate::tools::registry::{Tool, ToolContext, ToolResult};
 
 fn sanitize_schema(schema: &Value) -> Value {

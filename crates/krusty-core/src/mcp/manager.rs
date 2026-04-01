@@ -1,7 +1,8 @@
-//! MCP Manager - manages local MCP server connections
+//! MCP Manager - manages MCP server connections
 //!
-//! Simple manager for local stdio servers. Remote servers are handled
-//! by passing them to the Anthropic API's MCP Connector.
+//! Manages both local stdio servers and remote HTTP/SSE servers using
+//! the rmcp SDK. Remote servers can also be passed to the Anthropic
+//! API's MCP Connector.
 
 use anyhow::Result;
 use serde_json::Value;
@@ -9,11 +10,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use super::client::McpClient;
 use super::config::{McpConfig, McpServerConfig, RemoteMcpServer};
-use super::protocol::{McpToolDef, McpToolResult};
 
 /// Server status
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +33,113 @@ impl std::fmt::Display for McpServerStatus {
     }
 }
 
+/// Tool definition exposed to callers (bridge from rmcp::model::Tool)
+#[derive(Debug, Clone)]
+pub struct McpToolDef {
+    pub name: String,
+    pub description: Option<String>,
+    pub input_schema: Value,
+}
+
+impl From<rmcp::model::Tool> for McpToolDef {
+    fn from(tool: rmcp::model::Tool) -> Self {
+        Self {
+            name: tool.name.to_string(),
+            description: tool.description.as_deref().map(|s| s.to_string()),
+            input_schema: serde_json::to_value(&*tool.input_schema).unwrap_or(Value::Object(
+                serde_json::Map::new(),
+            )),
+        }
+    }
+}
+
+/// Tool result exposed to callers (bridge from rmcp::model::CallToolResult)
+#[derive(Debug, Clone)]
+pub struct McpToolResult {
+    pub content: Vec<McpContent>,
+    pub is_error: bool,
+}
+
+/// Content types returned by MCP tools
+#[derive(Debug, Clone)]
+pub enum McpContent {
+    Text { text: String },
+    Image { data: String, mime_type: String },
+    Resource { uri: String, text: Option<String> },
+}
+
+impl std::fmt::Display for McpContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            McpContent::Text { text } => write!(f, "{}", text),
+            McpContent::Image { mime_type, .. } => write!(f, "[Image: {}]", mime_type),
+            McpContent::Resource { uri, text } => {
+                if let Some(t) = text {
+                    write!(f, "{}\n{}", uri, t)
+                } else {
+                    write!(f, "{}", uri)
+                }
+            }
+        }
+    }
+}
+
+/// Format MCP tool result for display
+pub fn format_mcp_result(result: &McpToolResult) -> String {
+    let mut formatted = String::new();
+    for (idx, content) in result.content.iter().enumerate() {
+        if idx > 0 {
+            formatted.push('\n');
+        }
+        formatted.push_str(&content.to_string());
+    }
+    formatted
+}
+
+impl From<rmcp::model::CallToolResult> for McpToolResult {
+    fn from(result: rmcp::model::CallToolResult) -> Self {
+        let content = result
+            .content
+            .into_iter()
+            .filter_map(|c| {
+                use rmcp::model::RawContent;
+                match c.raw {
+                    RawContent::Text(text_content) => Some(McpContent::Text {
+                        text: text_content.text,
+                    }),
+                    RawContent::Image(image_content) => Some(McpContent::Image {
+                        data: image_content.data,
+                        mime_type: image_content.mime_type,
+                    }),
+                    RawContent::Resource(embedded) => {
+                        use rmcp::model::ResourceContents;
+                        match embedded.resource {
+                            ResourceContents::TextResourceContents { uri, text, .. } => {
+                                Some(McpContent::Resource {
+                                    uri: uri.to_string(),
+                                    text: Some(text),
+                                })
+                            }
+                            ResourceContents::BlobResourceContents { uri, .. } => {
+                                Some(McpContent::Resource {
+                                    uri: uri.to_string(),
+                                    text: None,
+                                })
+                            }
+                        }
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+
+        Self {
+            content,
+            is_error: result.is_error.unwrap_or(false),
+        }
+    }
+}
+
 /// Server info for UI
 #[derive(Debug, Clone)]
 pub struct McpServerInfo {
@@ -46,11 +153,11 @@ pub struct McpServerInfo {
 
 /// MCP Manager
 pub struct McpManager {
-    /// Connected local clients
+    /// Connected clients (both local and remote)
     clients: RwLock<HashMap<String, Arc<McpClient>>>,
     /// Server configurations
     configs: RwLock<HashMap<String, McpServerConfig>>,
-    /// Remote servers (for API)
+    /// Remote servers (for API passthrough)
     remote_servers: RwLock<Vec<RemoteMcpServer>>,
     /// Working directory
     working_dir: PathBuf,
@@ -73,7 +180,7 @@ impl McpManager {
         let mut configs = self.configs.write().await;
         *configs = config.servers().await;
 
-        // Store remote servers for API
+        // Store remote servers for API passthrough
         *self.remote_servers.write().await = config.remote_servers_for_api().await;
 
         let local_count = configs.values().filter(|c| c.is_local()).count();
@@ -87,13 +194,12 @@ impl McpManager {
         Ok(())
     }
 
-    /// Connect to all local servers in parallel
+    /// Connect to all configured servers in parallel
     pub async fn connect_all(&self) -> Result<()> {
         let configs: Vec<_> = {
             let configs = self.configs.read().await;
             configs
                 .iter()
-                .filter(|(_, c)| c.is_local())
                 .map(|(n, c)| (n.clone(), c.clone()))
                 .collect()
         };
@@ -103,7 +209,7 @@ impl McpManager {
         }
 
         info!(
-            "Connecting to {} local MCP servers in parallel",
+            "Connecting to {} MCP servers in parallel",
             configs.len()
         );
 
@@ -130,7 +236,7 @@ impl McpManager {
         Ok(())
     }
 
-    /// Connect to a specific local server
+    /// Connect to a specific server
     pub async fn connect(&self, name: &str) -> Result<()> {
         let config = {
             let configs = self.configs.read().await;
@@ -141,24 +247,29 @@ impl McpManager {
             return Err(anyhow::anyhow!("Unknown server: {}", name));
         };
 
-        if config.is_remote() {
-            return Err(anyhow::anyhow!(
-                "Server {} is remote - handled by Anthropic API",
-                name
-            ));
-        }
-
         // Disconnect first if already connected
         self.disconnect(name).await;
 
-        // Connect
-        let client = McpClient::connect(name, &config, &self.working_dir).await?;
+        // Connect based on server type
+        let client = match &config {
+            McpServerConfig::Local { command, args, env } => {
+                McpClient::connect_local(name, command, args, env, &self.working_dir)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?
+            }
+            McpServerConfig::Remote {
+                url,
+                authorization_token,
+                ..
+            } => McpClient::connect_remote(name, url, authorization_token.as_deref())
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?,
+        };
 
-        // Initialize
-        client.initialize().await?;
-
-        // Get tools
-        client.list_tools().await?;
+        // List tools to populate cache
+        if let Err(e) = client.list_tools().await {
+            error!("Failed to list tools from MCP server {}: {}", name, e);
+        }
 
         let client = Arc::new(client);
         self.clients.write().await.insert(name.to_string(), client);
@@ -174,21 +285,21 @@ impl McpManager {
         }
     }
 
-    /// Get all tools from connected local servers
+    /// Get all tools from connected servers
     pub async fn get_all_tools(&self) -> Vec<(String, McpToolDef)> {
         let clients = self.clients.read().await;
         let mut tools = Vec::new();
 
         for (name, client) in clients.iter() {
-            for tool in client.get_tools().await {
-                tools.push((name.clone(), tool));
+            for tool in client.get_cached_tools().await {
+                tools.push((name.clone(), McpToolDef::from(tool)));
             }
         }
 
         tools
     }
 
-    /// Call a tool on a local server
+    /// Call a tool on a specific server
     pub async fn call_tool(
         &self,
         server: &str,
@@ -200,7 +311,12 @@ impl McpManager {
             .get(server)
             .ok_or_else(|| anyhow::anyhow!("Server not connected: {}", server))?;
 
-        client.call_tool(tool, arguments).await
+        let result = client
+            .call_tool(tool, arguments)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        Ok(McpToolResult::from(result))
     }
 
     /// Get server info for UI
@@ -211,25 +327,23 @@ impl McpManager {
         let mut servers = Vec::new();
 
         for (name, config) in configs.iter() {
-            let (status, tool_count, tools, error) = if config.is_local() {
-                if let Some(client) = clients.get(name) {
-                    let t = client.get_tools().await;
-                    if client.is_alive().await {
-                        (McpServerStatus::Connected, t.len(), t, None)
-                    } else {
-                        (
-                            McpServerStatus::Error("Process died".to_string()),
-                            0,
-                            Vec::new(),
-                            Some("Process died".to_string()),
-                        )
-                    }
+            let (status, tool_count, tools, error) = if let Some(client) = clients.get(name) {
+                let cached = client.get_cached_tools().await;
+                let tool_defs: Vec<McpToolDef> =
+                    cached.into_iter().map(McpToolDef::from).collect();
+                if client.is_alive().await {
+                    let count = tool_defs.len();
+                    (McpServerStatus::Connected, count, tool_defs, None)
                 } else {
-                    (McpServerStatus::Disconnected, 0, Vec::new(), None)
+                    (
+                        McpServerStatus::Error("Process died".to_string()),
+                        0,
+                        Vec::new(),
+                        Some("Process died".to_string()),
+                    )
                 }
             } else {
-                // Remote servers are always "connected" (handled by API)
-                (McpServerStatus::Connected, 0, Vec::new(), None)
+                (McpServerStatus::Disconnected, 0, Vec::new(), None)
             };
 
             servers.push(McpServerInfo {
@@ -246,7 +360,7 @@ impl McpManager {
         servers
     }
 
-    /// Get remote servers for Anthropic API
+    /// Get remote servers for Anthropic API passthrough
     pub async fn get_remote_servers(&self) -> Vec<RemoteMcpServer> {
         self.remote_servers.read().await.clone()
     }

@@ -60,7 +60,7 @@ impl App {
                     Ok(()) => {
                         register_mcp_tools(mcp.clone(), &registry).await;
                         let tool_count = if let Some(client) = mcp.get_client(&name).await {
-                            client.get_tools().await.len()
+                            client.get_cached_tools().await.len()
                         } else {
                             0
                         };

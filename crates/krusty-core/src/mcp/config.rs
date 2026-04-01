@@ -35,6 +35,8 @@ pub enum McpServerConfigRaw {
         server_type: String, // Must be "url"
         url: String,
         #[serde(default)]
+        transport: Option<String>, // "sse", "http", "streamable-http" — default "streamable-http"
+        #[serde(default)]
         authorization_token: Option<String>,
     },
 }
@@ -48,9 +50,10 @@ pub enum McpServerConfig {
         args: Vec<String>,
         env: HashMap<String, String>,
     },
-    /// Remote server - passed to Anthropic API's MCP Connector
+    /// Remote server - we connect directly via HTTP/SSE, or pass to Anthropic API
     Remote {
         url: String,
+        transport: Option<String>, // "sse", "http", "streamable-http" — default "streamable-http"
         authorization_token: Option<String>,
     },
 }
@@ -155,6 +158,7 @@ impl McpConfig {
                 }
                 McpServerConfigRaw::Remote {
                     url,
+                    transport,
                     authorization_token,
                     ..
                 } => {
@@ -164,6 +168,7 @@ impl McpConfig {
                     };
                     McpServerConfig::Remote {
                         url: url.clone(),
+                        transport: transport.clone(),
                         authorization_token: token,
                     }
                 }

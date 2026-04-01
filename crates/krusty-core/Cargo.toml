@@ -97,6 +97,19 @@ ignore = "0.4"
 # Agent Client Protocol (ACP)
 agent-client-protocol = { version = "0.9", features = ["unstable_session_model"] }
 
+# Model Context Protocol (MCP) - official Rust SDK
+rmcp = { version = "1.3", default-features = false, features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client",
+    "client-side-sse",
+    "auth",
+    "elicitation",
+] }
+# Required by our StreamableHttpClient trait impl (same versions rmcp uses)
+http = "1"
+sse-stream = "0.2"
+
 # Version Control (vendored for cross-compilation)
 git2 = { version = "0.19", features = ["vendored-libgit2", "vendored-openssl"] }
 
