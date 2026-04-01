@@ -190,8 +190,8 @@ fn build_commands_for_width<'a>(width: usize, theme: &'a Theme) -> Vec<Span<'a>>
 /// Shorten model name for display
 fn shorten_model_name(model: &str) -> String {
     [
-        ("opus", "opus 4.5"),
-        ("sonnet", "sonnet 4.5"),
+        ("opus", "opus 4.6"),
+        ("sonnet", "sonnet 4.6"),
         ("haiku", "haiku 4.5"),
     ]
     .iter()
