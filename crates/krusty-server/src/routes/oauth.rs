@@ -287,6 +287,8 @@ async fn start_anthropic_oauth(
 struct OAuthExchangeRequest {
     provider: String,
     code: String,
+    #[serde(default)]
+    state: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -318,7 +320,7 @@ async fn exchange_code(
     let verifier = PkceVerifier::from_string(verifier_str);
     let flow = PasteCodeOAuthFlow::new(anthropic_oauth_config());
     let token_data = flow
-        .exchange_code(&req.code, &verifier)
+        .exchange_code(&req.code, req.state.as_deref(), &verifier)
         .await
         .map_err(|error| {
             tracing::error!("OAuth token exchange failed for {}: {}", provider_id, error);

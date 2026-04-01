@@ -21,26 +21,22 @@ pub fn anthropic_oauth_config() -> OAuthConfig {
     OAuthConfig {
         provider_id: ProviderId::Anthropic,
         client_id: ANTHROPIC_CLIENT_ID.to_string(),
-        // Anthropic migrated to platform.claude.com (2025)
-        authorization_url: "https://platform.claude.com/oauth/authorize".to_string(),
-        token_url: "https://platform.claude.com/v1/oauth/token".to_string(),
+        // Anthropic OAuth endpoints (confirmed working via pi-mono reference)
+        authorization_url: "https://claude.ai/oauth/authorize".to_string(),
+        token_url: "https://console.anthropic.com/v1/oauth/token".to_string(),
         // Anthropic doesn't support device code flow
         device_auth_url: None,
-        // All Claude Code OAuth scopes — union of Console + Claude.ai scopes
+        // Anthropic OAuth scopes (matches pi-mono working implementation)
         scopes: vec![
             "org:create_api_key".to_string(),
             "user:profile".to_string(),
             "user:inference".to_string(),
-            "user:sessions:claude_code".to_string(),
-            "user:mcp_servers".to_string(),
-            "user:file_upload".to_string(),
         ],
         // Refresh tokens after 28 days
         refresh_days: 28,
         // Anthropic-specific: use code callback redirect and S256 challenge
         extra_auth_params: vec![
             ("code".to_string(), "true".to_string()),
-            ("code_challenge_method".to_string(), "S256".to_string()),
         ],
     }
 }

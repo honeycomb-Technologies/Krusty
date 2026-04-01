@@ -251,16 +251,17 @@ impl PasteCodeOAuthFlow {
 
     /// Exchange the pasted authorization code for tokens
     ///
-    /// Anthropic uses JSON body (not form-encoded) for token exchange,
-    /// and requires the `anthropic-beta` header.
+    /// Anthropic uses JSON body (not form-encoded) for token exchange.
+    /// The `state` parameter from the `code#state` paste must be included.
     pub async fn exchange_code(
         &self,
         code: &str,
+        state: Option<&str>,
         verifier: &PkceVerifier,
     ) -> Result<OAuthTokenData> {
         let client = reqwest::Client::new();
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "grant_type": "authorization_code",
             "client_id": self.config.client_id,
             "code": code,
@@ -268,9 +269,16 @@ impl PasteCodeOAuthFlow {
             "code_verifier": verifier.as_str(),
         });
 
+        // Include state if present (required by Anthropic's token endpoint)
+        if let Some(state) = state {
+            body.as_object_mut()
+                .unwrap()
+                .insert("state".to_string(), serde_json::Value::String(state.to_string()));
+        }
+
         let response = client
             .post(&self.config.token_url)
-            .header("anthropic-beta", "oauth-2025-04-20")
+            .header("Content-Type", "application/json")
             .json(&body)
             .send()
             .await

@@ -150,11 +150,11 @@ impl App {
     fn exchange_anthropic_paste_code(&mut self, provider: ProviderId, code_str: String) {
         let status_tx = self.services.oauth_status_tx.clone();
 
-        // Parse `code#state` format
-        let auth_code = if let Some(idx) = code_str.find('#') {
-            code_str[..idx].to_string()
+        // Parse `code#state` format — both parts needed for token exchange
+        let (auth_code, auth_state) = if let Some(idx) = code_str.find('#') {
+            (code_str[..idx].to_string(), Some(code_str[idx + 1..].to_string()))
         } else {
-            code_str.clone()
+            (code_str.clone(), None)
         };
 
         // Retrieve the stored PKCE verifier from when we opened the browser
@@ -186,7 +186,7 @@ impl App {
 
             let config = anthropic_oauth_config();
             let flow = PasteCodeOAuthFlow::new(config);
-            match flow.exchange_code(&auth_code, &verifier).await {
+            match flow.exchange_code(&auth_code, auth_state.as_deref(), &verifier).await {
                 Ok(token) => {
                     // Save token to OAuth store
                     if let Ok(mut store) = OAuthTokenStore::load() {
