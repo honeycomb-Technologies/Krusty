@@ -35,18 +35,30 @@ const TOAST_GAP: u16 = 1;
 pub enum ToastType {
     /// Positive confirmation (copied, saved, updated)
     Success,
+    /// Non-fatal caution
+    Warning,
+    /// Error or failed operation
+    Error,
+    /// Neutral informational message
+    Info,
 }
 
 impl ToastType {
     fn color(&self, theme: &Theme) -> Color {
         match self {
             ToastType::Success => theme.success_color,
+            ToastType::Warning => theme.warning_color,
+            ToastType::Error => theme.error_color,
+            ToastType::Info => theme.info_color,
         }
     }
 
     fn icon(&self) -> &'static str {
         match self {
             ToastType::Success => "✓",
+            ToastType::Warning => "!",
+            ToastType::Error => "✗",
+            ToastType::Info => "i",
         }
     }
 }
@@ -68,6 +80,21 @@ impl Toast {
     /// Create a new success toast
     pub fn success(message: impl Into<String>) -> Self {
         Self::new(message, ToastType::Success)
+    }
+
+    /// Create a new warning toast
+    pub fn warning(message: impl Into<String>) -> Self {
+        Self::new(message, ToastType::Warning)
+    }
+
+    /// Create a new error toast
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::new(message, ToastType::Error)
+    }
+
+    /// Create a new informational toast
+    pub fn info(message: impl Into<String>) -> Self {
+        Self::new(message, ToastType::Info)
     }
 
     fn new(message: impl Into<String>, toast_type: ToastType) -> Self {

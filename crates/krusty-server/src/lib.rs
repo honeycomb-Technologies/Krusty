@@ -296,7 +296,7 @@ async fn initialize_models(registry: &SharedModelRegistry, credentials: &Credent
         }
     }
 
-    if let Some(api_key) = krusty_core::auth::resolve_openai_catalog_credential(credentials) {
+    if let Some(api_key) = credentials.get(&ProviderId::OpenAI).cloned() {
         match krusty_core::ai::openai::fetch_models(&api_key).await {
             Ok(models) => {
                 tracing::info!("Fetched {} OpenAI models", models.len());
@@ -424,7 +424,6 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
     let app = Router::new()
         .route("/health", get(health))
         .merge(routes::oauth::callback_router())
-        .merge(routes::remote_auth::public_router())
         .merge(protected_routes)
         .fallback(serve_pwa)
         .layer(cors)

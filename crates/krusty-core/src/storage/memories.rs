@@ -34,21 +34,25 @@ impl MemoryType {
             Self::Reference => "reference",
         }
     }
-
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "user" => Some(Self::User),
-            "feedback" => Some(Self::Feedback),
-            "project" => Some(Self::Project),
-            "reference" => Some(Self::Reference),
-            _ => None,
-        }
-    }
 }
 
 impl std::fmt::Display for MemoryType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for MemoryType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "user" => Ok(Self::User),
+            "feedback" => Ok(Self::Feedback),
+            "project" => Ok(Self::Project),
+            "reference" => Ok(Self::Reference),
+            _ => Err(format!("Unknown memory type: {s}")),
+        }
     }
 }
 
@@ -109,11 +113,19 @@ impl MemoryStore {
         self.db.conn().execute(
             "INSERT INTO agent_memories (id, memory_type, title, content, project_dir, user_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, memory_type.as_str(), title, content, project_dir, user_id],
+            params![
+                id,
+                memory_type.as_str(),
+                title,
+                content,
+                project_dir,
+                user_id
+            ],
         )?;
 
         // Read back the created record to get server-side defaults
-        self.get(&id)?.ok_or_else(|| anyhow::anyhow!("memory not found after insert"))
+        self.get(&id)?
+            .ok_or_else(|| anyhow::anyhow!("memory not found after insert"))
     }
 
     /// Get a single memory by id.
@@ -123,9 +135,7 @@ impl MemoryStore {
              FROM agent_memories WHERE id = ?1",
         )?;
         let memory = stmt
-            .query_row(params![id], |row| {
-                Ok(row_to_memory(row))
-            })
+            .query_row(params![id], |row| Ok(row_to_memory(row)))
             .ok();
         Ok(memory)
     }
@@ -158,10 +168,9 @@ impl MemoryStore {
 
     /// Delete a memory by id.
     pub fn delete(&self, id: &str) -> Result<()> {
-        self.db.conn().execute(
-            "DELETE FROM agent_memories WHERE id = ?1",
-            params![id],
-        )?;
+        self.db
+            .conn()
+            .execute("DELETE FROM agent_memories WHERE id = ?1", params![id])?;
         Ok(())
     }
 
@@ -192,14 +201,16 @@ impl MemoryStore {
                  FROM agent_memories WHERE title = ?1 AND (project_dir = ?2 OR project_dir IS NULL)
                  ORDER BY updated_at DESC LIMIT 1",
             ).ok()?;
-            stmt.query_row(params![title, pd], |row| Ok(row_to_memory(row))).ok()
+            stmt.query_row(params![title, pd], |row| Ok(row_to_memory(row)))
+                .ok()
         } else {
             let mut stmt = self.db.conn().prepare(
                 "SELECT id, memory_type, title, content, project_dir, user_id, created_at, updated_at
                  FROM agent_memories WHERE title = ?1 AND project_dir IS NULL
                  ORDER BY updated_at DESC LIMIT 1",
             ).ok()?;
-            stmt.query_row(params![title], |row| Ok(row_to_memory(row))).ok()
+            stmt.query_row(params![title], |row| Ok(row_to_memory(row)))
+                .ok()
         }
     }
 
@@ -211,8 +222,10 @@ impl MemoryStore {
                 return Vec::new();
             }
         };
-        let params: Vec<&dyn rusqlite::types::ToSql> =
-            bound.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+        let params: Vec<&dyn rusqlite::types::ToSql> = bound
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
         let rows = match stmt.query_map(params.as_slice(), |row| Ok(row_to_memory(row))) {
             Ok(r) => r,
             Err(e) => {
@@ -228,7 +241,7 @@ fn row_to_memory(row: &rusqlite::Row) -> AgentMemory {
     let type_str: String = row.get(1).unwrap_or_default();
     AgentMemory {
         id: row.get(0).unwrap_or_default(),
-        memory_type: MemoryType::from_str(&type_str).unwrap_or(MemoryType::Project),
+        memory_type: type_str.parse().unwrap_or(MemoryType::Project),
         title: row.get(2).unwrap_or_default(),
         content: row.get(3).unwrap_or_default(),
         project_dir: row.get(4).ok(),
@@ -300,7 +313,13 @@ mod tests {
             .save(MemoryType::User, "Role", "Backend developer", None, None)
             .unwrap();
         store
-            .save(MemoryType::Feedback, "Testing", "Use integration tests", None, None)
+            .save(
+                MemoryType::Feedback,
+                "Testing",
+                "Use integration tests",
+                None,
+                None,
+            )
             .unwrap();
 
         let all = store.list(None, None);
@@ -317,7 +336,9 @@ mod tests {
         let mem = store
             .save(MemoryType::Project, "Sprint", "Sprint 4", None, None)
             .unwrap();
-        store.update(&mem.id, Some("Sprint goal"), Some("Ship auth")).unwrap();
+        store
+            .update(&mem.id, Some("Sprint goal"), Some("Ship auth"))
+            .unwrap();
 
         let updated = store.get(&mem.id).unwrap().unwrap();
         assert_eq!(updated.title, "Sprint goal");
@@ -328,7 +349,13 @@ mod tests {
     fn delete_memory() {
         let (store, _tmp) = create_store();
         let mem = store
-            .save(MemoryType::Reference, "Tracker", "Linear INGEST", None, None)
+            .save(
+                MemoryType::Reference,
+                "Tracker",
+                "Linear INGEST",
+                None,
+                None,
+            )
             .unwrap();
         assert!(store.get(&mem.id).unwrap().is_some());
         store.delete(&mem.id).unwrap();
@@ -339,7 +366,13 @@ mod tests {
     fn project_scoped_memories() {
         let (store, _tmp) = create_store();
         store
-            .save(MemoryType::Project, "Global", "applies everywhere", None, None)
+            .save(
+                MemoryType::Project,
+                "Global",
+                "applies everywhere",
+                None,
+                None,
+            )
             .unwrap();
         store
             .save(

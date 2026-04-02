@@ -2,7 +2,7 @@
 //!
 //! Poll operations and animation ticks extracted from app.rs.
 
-use crate::tui::app::{App, View};
+use crate::tui::app::{App, Popup, View};
 use crate::tui::polling::{
     poll_bash_output, poll_build_progress, poll_explore_progress, PollAction, PollResult,
 };
@@ -125,7 +125,14 @@ impl App {
             self.ui.popups.pinch.stage,
             PinchStage::Summarizing { .. } | PinchStage::Creating
         );
+        let auth_browser_waiting =
+            self.ui.popup == Popup::Auth && self.ui.popups.auth.is_browser_waiting();
 
-        blocks || sidebar || plugin_window || pinch_active || self.ui.view == View::StartMenu
+        blocks
+            || sidebar
+            || plugin_window
+            || pinch_active
+            || auth_browser_waiting
+            || self.ui.view == View::StartMenu
     }
 }

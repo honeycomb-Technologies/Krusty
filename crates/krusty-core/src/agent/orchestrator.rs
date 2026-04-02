@@ -33,9 +33,8 @@ use crate::plan::PlanManager;
 use crate::process::ProcessRegistry;
 use crate::skills::SkillsManager;
 use crate::storage::{
-    Database, PartialAssistantState, ProjectSettings, RecoveryDecision,
-    RecoveryNonResumableReason, RecoveryStatus, RecoveryToolCall, SessionManager,
-    SessionRecoveryState, WorkMode,
+    Database, PartialAssistantState, ProjectSettings, RecoveryDecision, RecoveryNonResumableReason,
+    RecoveryStatus, RecoveryToolCall, SessionManager, SessionRecoveryState, WorkMode,
 };
 use crate::tools::registry::{PermissionMode, ToolRegistry};
 

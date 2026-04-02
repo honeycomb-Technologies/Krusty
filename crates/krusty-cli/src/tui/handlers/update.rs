@@ -113,7 +113,7 @@ impl App {
                     // Silent - don't spam user with progress
                 }
                 UpdateStatus::Ready { version } => {
-                    self.show_toast(Toast::success(format!(
+                    self.show_toast(Toast::warning(format!(
                         "v{} ready — restart to install",
                         version
                     )));

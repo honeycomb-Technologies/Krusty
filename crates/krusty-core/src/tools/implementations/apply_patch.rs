@@ -62,7 +62,8 @@ impl Tool for ApplyPatchTool {
     }
 
     fn prompt(&self) -> Option<&str> {
-        Some(r#"Use for coordinated multi-file changes when you have a complete patch ready.
+        Some(
+            r#"Use for coordinated multi-file changes when you have a complete patch ready.
 
 Format: Wrap in *** Begin Patch / *** End Patch markers. Each file operation starts with:
 - *** Update File: path/to/file — modify existing file
@@ -71,7 +72,8 @@ Format: Wrap in *** Begin Patch / *** End Patch markers. Each file operation sta
 
 Lines prefixed with - (remove), + (add), or space (unchanged context). Fuzzy matching handles minor line differences.
 
-Prefer edit/multiedit for targeted changes to 1-2 files. Use apply_patch when changes span many files or you want atomic multi-file application."#)
+Prefer edit/multiedit for targeted changes to 1-2 files. Use apply_patch when changes span many files or you want atomic multi-file application."#,
+        )
     }
 
     fn parameters_schema(&self) -> Value {

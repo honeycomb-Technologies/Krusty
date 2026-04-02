@@ -12,6 +12,7 @@ use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
 use crate::tui::themes::Theme;
+use crate::tui::utils::truncate_ellipsis;
 
 pub struct StatusBarProps<'a> {
     pub theme: &'a Theme,
@@ -56,8 +57,8 @@ pub fn render_status_bar(f: &mut Frame, area: Rect, props: StatusBarProps<'_>) {
     // Git branch name
     if let Some(git) = git_status {
         if let Some(ref branch) = git.branch {
-            let branch_display = if branch.len() > 20 {
-                format!("{}...", &branch[..17])
+            let branch_display = if branch.width() > 20 {
+                truncate_ellipsis(branch, 20).into_owned()
             } else {
                 branch.clone()
             };

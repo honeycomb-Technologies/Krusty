@@ -19,6 +19,7 @@ use unicode_width::UnicodeWidthStr;
 use super::{ClipContext, EventResult, StreamBlock};
 use crate::agent::subagent::{AgentProgress, AgentProgressStatus};
 use crate::tui::themes::Theme;
+use crate::tui::utils::truncate_ellipsis;
 
 /// Rolling sine wave frames - travels left to right like audio equalizer
 const WAVE_FRAMES: &[&str] = &[
@@ -470,8 +471,8 @@ impl BuildBlock {
                     }
                     buf.set_string(area.x, y, "│   ", border_style);
                     let max_len = (area.width as usize).saturating_sub(5);
-                    let truncated = if line.len() > max_len && max_len > 3 {
-                        format!("{}...", &line[..max_len - 3])
+                    let truncated = if UnicodeWidthStr::width(line) > max_len {
+                        truncate_ellipsis(line, max_len).into_owned()
                     } else {
                         line.to_string()
                     };
@@ -623,8 +624,13 @@ impl StreamBlock for BuildBlock {
                 buf.set_string(area.x, y, "│", border_style);
                 if row == 0 {
                     let prompt_max = (width as usize).saturating_sub(4);
-                    let prompt_display = if self.prompt.len() > prompt_max && prompt_max > 3 {
-                        format!(" {}...", &self.prompt[..prompt_max - 4])
+                    let prompt_display = if UnicodeWidthStr::width(self.prompt.as_str())
+                        > prompt_max.saturating_sub(1)
+                    {
+                        format!(
+                            " {}",
+                            truncate_ellipsis(&self.prompt, prompt_max.saturating_sub(1))
+                        )
                     } else {
                         format!(" {}", self.prompt)
                     };

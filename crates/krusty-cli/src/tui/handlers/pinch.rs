@@ -7,12 +7,15 @@
 //! 4. New linked session is created
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::agent::{generate_summary, PinchContext, PinchContextInput, SummarizationResult};
 use crate::ai::client::AiClient;
 use crate::storage::{FileActivityTracker, RankedFile};
 use crate::tui::app::App;
 use crate::tui::utils::{SummarizationUpdate, TitleUpdate};
+
+const SUMMARIZATION_TIMEOUT: Duration = Duration::from_secs(600);
 
 impl App {
     /// Start the summarization phase of pinch
@@ -64,6 +67,7 @@ impl App {
         // Set up channel for results
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.runtime.channels.summarization = Some(rx);
+        self.runtime.summarization_started_at = Some(std::time::Instant::now());
 
         // Log before moving into async block
         let msg_count = conversation.len();
@@ -152,16 +156,29 @@ impl App {
             None => return,
         };
 
+        if self
+            .runtime
+            .summarization_started_at
+            .is_some_and(|started_at| started_at.elapsed() > SUMMARIZATION_TIMEOUT)
+        {
+            self.runtime.channels.summarization = None;
+            self.runtime.summarization_started_at = None;
+            self.ui.popups.pinch.set_error(format!(
+                "Summarization timed out after {} minutes",
+                SUMMARIZATION_TIMEOUT.as_secs() / 60
+            ));
+            return;
+        }
+
         match rx.try_recv() {
             Ok(update) => {
                 self.runtime.channels.summarization = None;
+                self.runtime.summarization_started_at = None;
 
                 match update.result {
                     Ok(summary) => {
-                        tracing::info!(
-                            "Summarization complete: {}",
-                            &summary.work_summary[..100.min(summary.work_summary.len())]
-                        );
+                        let preview: String = summary.work_summary.chars().take(100).collect();
+                        tracing::info!("Summarization complete: {}", preview);
 
                         // Show summary in popup and move to direction input
                         self.ui.popups.pinch.show_summary(
@@ -187,6 +204,7 @@ impl App {
             Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                 // Task failed/cancelled
                 self.runtime.channels.summarization = None;
+                self.runtime.summarization_started_at = None;
                 self.ui
                     .popups
                     .pinch
@@ -224,12 +242,14 @@ impl App {
             None => {
                 tracing::error!("Auto-pinch: no AI client for summarization");
                 self.runtime.auto_pinch_in_progress = false;
+                self.runtime.summarization_started_at = None;
                 return;
             }
         };
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.runtime.channels.summarization = Some(rx);
+        self.runtime.summarization_started_at = Some(std::time::Instant::now());
 
         let msg_count = conversation.len();
         let file_count = file_contents.len();
@@ -270,15 +290,32 @@ impl App {
             None => return,
         };
 
+        if self
+            .runtime
+            .summarization_started_at
+            .is_some_and(|started_at| started_at.elapsed() > SUMMARIZATION_TIMEOUT)
+        {
+            self.runtime.channels.summarization = None;
+            self.runtime.summarization_started_at = None;
+            self.runtime.auto_pinch_in_progress = false;
+            self.runtime.chat.messages.push((
+                "system".to_string(),
+                format!(
+                    "Auto-pinch timed out after {} minutes.",
+                    SUMMARIZATION_TIMEOUT.as_secs() / 60
+                ),
+            ));
+            return;
+        }
+
         match rx.try_recv() {
             Ok(update) => {
                 self.runtime.channels.summarization = None;
+                self.runtime.summarization_started_at = None;
                 match update.result {
                     Ok(summary) => {
-                        tracing::info!(
-                            "Auto-pinch: summarization complete: {}",
-                            &summary.work_summary[..100.min(summary.work_summary.len())]
-                        );
+                        let preview: String = summary.work_summary.chars().take(100).collect();
+                        tracing::info!("Auto-pinch: summarization complete: {}", preview);
                         self.complete_auto_pinch(summary);
                     }
                     Err(e) => {
@@ -296,6 +333,7 @@ impl App {
             }
             Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                 self.runtime.channels.summarization = None;
+                self.runtime.summarization_started_at = None;
                 self.runtime.auto_pinch_in_progress = false;
                 tracing::error!("Auto-pinch: summarization task cancelled");
             }

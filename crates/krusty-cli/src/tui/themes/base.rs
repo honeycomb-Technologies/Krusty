@@ -3,6 +3,8 @@
 use super::Theme;
 use ratatui::style::Color;
 
+const UNSET_COLOR: Color = Color::Reset;
+
 /// Builder pattern for creating themes with sensible defaults
 pub struct ThemeBuilder {
     theme: Theme,
@@ -48,70 +50,69 @@ impl ThemeBuilder {
             theme: Theme {
                 name: name.into(),
                 display_name: display_name.into(),
-                // Initialize with black - will be overridden
-                bg_color: Color::Rgb(0, 0, 0),
-                border_color: Color::Rgb(0, 0, 0),
-                title_color: Color::Rgb(0, 0, 0),
-                accent_color: Color::Rgb(0, 0, 0),
-                text_color: Color::Rgb(0, 0, 0),
-                success_color: Color::Rgb(0, 0, 0),
-                dim_color: Color::Rgb(0, 0, 0),
-                mode_view_color: Color::Rgb(0, 0, 0),
-                mode_chat_color: Color::Rgb(0, 0, 0),
-                mode_plan_color: Color::Rgb(0, 0, 0),
-                mode_bash_color: Color::Rgb(0, 0, 0),
-                mode_leader_color: Color::Rgb(0, 0, 0),
-                warning_color: Color::Rgb(0, 0, 0),
-                error_color: Color::Rgb(0, 0, 0),
-                code_bg_color: Color::Rgb(0, 0, 0),
-                cursor_color: Color::Rgb(0, 0, 0),
-                selection_bg_color: Color::Rgb(0, 0, 0),
-                selection_fg_color: Color::Rgb(0, 0, 0),
-                user_msg_color: Color::Rgb(0, 0, 0),
-                assistant_msg_color: Color::Rgb(0, 0, 0),
-                system_msg_color: Color::Rgb(0, 0, 0),
-                tool_msg_color: Color::Rgb(0, 0, 0),
-                info_color: Color::Rgb(0, 0, 0),
-                progress_color: Color::Rgb(0, 0, 0),
-                input_bg_color: Color::Rgb(0, 0, 0),
-                input_placeholder_color: Color::Rgb(0, 0, 0),
-                input_border_color: Color::Rgb(0, 0, 0),
-                user_msg_bg_color: Color::Rgb(0, 0, 0),
-                assistant_msg_bg_color: Color::Rgb(0, 0, 0),
-                system_msg_bg_color: Color::Rgb(0, 0, 0),
-                tool_msg_bg_color: Color::Rgb(0, 0, 0),
-                status_bar_bg_color: Color::Rgb(0, 0, 0),
-                scrollbar_bg_color: Color::Rgb(0, 0, 0),
-                scrollbar_fg_color: Color::Rgb(0, 0, 0),
-                scrollbar_hover_color: Color::Rgb(0, 0, 0),
-                logo_primary_color: Color::Rgb(0, 0, 0),
-                logo_secondary_color: Color::Rgb(0, 0, 0),
-                animation_color: Color::Rgb(0, 0, 0),
-                processing_color: Color::Rgb(0, 0, 0),
-                highlight_color: Color::Rgb(0, 0, 0),
-                bubble_color: Color::Rgb(0, 0, 0),
-                token_low_color: Color::Rgb(0, 0, 0),
-                token_medium_color: Color::Rgb(0, 0, 0),
-                token_high_color: Color::Rgb(0, 0, 0),
-                token_critical_color: Color::Rgb(0, 0, 0),
-                syntax_keyword_color: Color::Rgb(0, 0, 0),
-                syntax_function_color: Color::Rgb(0, 0, 0),
-                syntax_string_color: Color::Rgb(0, 0, 0),
-                syntax_number_color: Color::Rgb(0, 0, 0),
-                syntax_comment_color: Color::Rgb(0, 0, 0),
-                syntax_type_color: Color::Rgb(0, 0, 0),
-                syntax_variable_color: Color::Rgb(0, 0, 0),
-                syntax_operator_color: Color::Rgb(0, 0, 0),
-                syntax_punctuation_color: Color::Rgb(0, 0, 0),
+                bg_color: UNSET_COLOR,
+                border_color: UNSET_COLOR,
+                title_color: UNSET_COLOR,
+                accent_color: UNSET_COLOR,
+                text_color: UNSET_COLOR,
+                success_color: UNSET_COLOR,
+                dim_color: UNSET_COLOR,
+                mode_view_color: UNSET_COLOR,
+                mode_chat_color: UNSET_COLOR,
+                mode_plan_color: UNSET_COLOR,
+                mode_bash_color: UNSET_COLOR,
+                mode_leader_color: UNSET_COLOR,
+                warning_color: UNSET_COLOR,
+                error_color: UNSET_COLOR,
+                code_bg_color: UNSET_COLOR,
+                cursor_color: UNSET_COLOR,
+                selection_bg_color: UNSET_COLOR,
+                selection_fg_color: UNSET_COLOR,
+                user_msg_color: UNSET_COLOR,
+                assistant_msg_color: UNSET_COLOR,
+                system_msg_color: UNSET_COLOR,
+                tool_msg_color: UNSET_COLOR,
+                info_color: UNSET_COLOR,
+                progress_color: UNSET_COLOR,
+                input_bg_color: UNSET_COLOR,
+                input_placeholder_color: UNSET_COLOR,
+                input_border_color: UNSET_COLOR,
+                user_msg_bg_color: UNSET_COLOR,
+                assistant_msg_bg_color: UNSET_COLOR,
+                system_msg_bg_color: UNSET_COLOR,
+                tool_msg_bg_color: UNSET_COLOR,
+                status_bar_bg_color: UNSET_COLOR,
+                scrollbar_bg_color: UNSET_COLOR,
+                scrollbar_fg_color: UNSET_COLOR,
+                scrollbar_hover_color: UNSET_COLOR,
+                logo_primary_color: UNSET_COLOR,
+                logo_secondary_color: UNSET_COLOR,
+                animation_color: UNSET_COLOR,
+                processing_color: UNSET_COLOR,
+                highlight_color: UNSET_COLOR,
+                bubble_color: UNSET_COLOR,
+                token_low_color: UNSET_COLOR,
+                token_medium_color: UNSET_COLOR,
+                token_high_color: UNSET_COLOR,
+                token_critical_color: UNSET_COLOR,
+                syntax_keyword_color: UNSET_COLOR,
+                syntax_function_color: UNSET_COLOR,
+                syntax_string_color: UNSET_COLOR,
+                syntax_number_color: UNSET_COLOR,
+                syntax_comment_color: UNSET_COLOR,
+                syntax_type_color: UNSET_COLOR,
+                syntax_variable_color: UNSET_COLOR,
+                syntax_operator_color: UNSET_COLOR,
+                syntax_punctuation_color: UNSET_COLOR,
                 // Diff & code display colors
-                diff_add_color: Color::Rgb(0, 0, 0),
-                diff_add_bg_color: Color::Rgb(0, 0, 0),
-                diff_remove_color: Color::Rgb(0, 0, 0),
-                diff_remove_bg_color: Color::Rgb(0, 0, 0),
-                diff_context_color: Color::Rgb(0, 0, 0),
-                line_number_color: Color::Rgb(0, 0, 0),
-                link_color: Color::Rgb(0, 0, 0),
-                running_color: Color::Rgb(0, 0, 0),
+                diff_add_color: UNSET_COLOR,
+                diff_add_bg_color: UNSET_COLOR,
+                diff_remove_color: UNSET_COLOR,
+                diff_remove_bg_color: UNSET_COLOR,
+                diff_context_color: UNSET_COLOR,
+                line_number_color: UNSET_COLOR,
+                link_color: UNSET_COLOR,
+                running_color: UNSET_COLOR,
             },
         }
     }
@@ -192,114 +193,114 @@ impl ThemeBuilder {
     /// Build the theme with intelligent defaults for any unset fields
     pub fn build(mut self) -> Theme {
         // Apply intelligent defaults for extended fields if not set
-        if matches!(self.theme.input_bg_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.input_bg_color, UNSET_COLOR) {
             self.theme.input_bg_color = self.theme.code_bg_color;
         }
-        if matches!(self.theme.input_placeholder_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.input_placeholder_color, UNSET_COLOR) {
             self.theme.input_placeholder_color = self.theme.dim_color;
         }
-        if matches!(self.theme.input_border_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.input_border_color, UNSET_COLOR) {
             self.theme.input_border_color = self.theme.border_color;
         }
 
         // Message backgrounds default to code_bg
-        if matches!(self.theme.user_msg_bg_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.user_msg_bg_color, UNSET_COLOR) {
             self.theme.user_msg_bg_color = self.theme.code_bg_color;
         }
-        if matches!(self.theme.assistant_msg_bg_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.assistant_msg_bg_color, UNSET_COLOR) {
             self.theme.assistant_msg_bg_color = self.theme.code_bg_color;
         }
-        if matches!(self.theme.system_msg_bg_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.system_msg_bg_color, UNSET_COLOR) {
             self.theme.system_msg_bg_color = self.theme.code_bg_color;
         }
-        if matches!(self.theme.tool_msg_bg_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.tool_msg_bg_color, UNSET_COLOR) {
             self.theme.tool_msg_bg_color = self.theme.code_bg_color;
         }
 
         // Status bar and scrollbar
-        if matches!(self.theme.status_bar_bg_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.status_bar_bg_color, UNSET_COLOR) {
             self.theme.status_bar_bg_color = self.theme.code_bg_color;
         }
-        if matches!(self.theme.scrollbar_bg_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.scrollbar_bg_color, UNSET_COLOR) {
             self.theme.scrollbar_bg_color = self.theme.code_bg_color;
         }
-        if matches!(self.theme.scrollbar_fg_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.scrollbar_fg_color, UNSET_COLOR) {
             self.theme.scrollbar_fg_color = self.theme.border_color;
         }
-        if matches!(self.theme.scrollbar_hover_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.scrollbar_hover_color, UNSET_COLOR) {
             self.theme.scrollbar_hover_color = self.theme.accent_color;
         }
 
         // Logo colors
-        if matches!(self.theme.logo_primary_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.logo_primary_color, UNSET_COLOR) {
             self.theme.logo_primary_color = self.theme.title_color;
         }
-        if matches!(self.theme.logo_secondary_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.logo_secondary_color, UNSET_COLOR) {
             self.theme.logo_secondary_color = self.theme.accent_color;
         }
 
         // Animation colors
-        if matches!(self.theme.animation_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.animation_color, UNSET_COLOR) {
             self.theme.animation_color = self.theme.title_color;
         }
-        if matches!(self.theme.processing_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.processing_color, UNSET_COLOR) {
             self.theme.processing_color = self.theme.warning_color;
         }
-        if matches!(self.theme.highlight_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.highlight_color, UNSET_COLOR) {
             self.theme.highlight_color = self.theme.warning_color;
         }
-        if matches!(self.theme.bubble_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.bubble_color, UNSET_COLOR) {
             self.theme.bubble_color = self.theme.title_color;
         }
 
         // Token usage colors
-        if matches!(self.theme.token_low_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.token_low_color, UNSET_COLOR) {
             self.theme.token_low_color = self.theme.success_color;
         }
-        if matches!(self.theme.token_medium_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.token_medium_color, UNSET_COLOR) {
             self.theme.token_medium_color = self.theme.warning_color;
         }
-        if matches!(self.theme.token_high_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.token_high_color, UNSET_COLOR) {
             self.theme.token_high_color = self.theme.mode_chat_color;
         }
-        if matches!(self.theme.token_critical_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.token_critical_color, UNSET_COLOR) {
             self.theme.token_critical_color = self.theme.error_color;
         }
 
         // Syntax highlighting colors (with sensible defaults)
-        if matches!(self.theme.syntax_keyword_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.syntax_keyword_color, UNSET_COLOR) {
             self.theme.syntax_keyword_color = self.theme.mode_chat_color;
         }
-        if matches!(self.theme.syntax_function_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.syntax_function_color, UNSET_COLOR) {
             self.theme.syntax_function_color = self.theme.title_color;
         }
-        if matches!(self.theme.syntax_string_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.syntax_string_color, UNSET_COLOR) {
             self.theme.syntax_string_color = self.theme.success_color;
         }
-        if matches!(self.theme.syntax_number_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.syntax_number_color, UNSET_COLOR) {
             self.theme.syntax_number_color = self.theme.warning_color;
         }
-        if matches!(self.theme.syntax_comment_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.syntax_comment_color, UNSET_COLOR) {
             self.theme.syntax_comment_color = self.theme.dim_color;
         }
-        if matches!(self.theme.syntax_type_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.syntax_type_color, UNSET_COLOR) {
             self.theme.syntax_type_color = self.theme.accent_color;
         }
-        if matches!(self.theme.syntax_variable_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.syntax_variable_color, UNSET_COLOR) {
             self.theme.syntax_variable_color = self.theme.text_color;
         }
-        if matches!(self.theme.syntax_operator_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.syntax_operator_color, UNSET_COLOR) {
             self.theme.syntax_operator_color = self.theme.text_color;
         }
-        if matches!(self.theme.syntax_punctuation_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.syntax_punctuation_color, UNSET_COLOR) {
             self.theme.syntax_punctuation_color = self.theme.dim_color;
         }
 
         // Diff & code display colors (with sensible defaults)
-        if matches!(self.theme.diff_add_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.diff_add_color, UNSET_COLOR) {
             self.theme.diff_add_color = self.theme.success_color;
         }
-        if matches!(self.theme.diff_add_bg_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.diff_add_bg_color, UNSET_COLOR) {
             // Derive a subtle background from success color
             if let Color::Rgb(r, g, b) = self.theme.success_color {
                 self.theme.diff_add_bg_color = Color::Rgb(r / 6, g / 6, b / 6);
@@ -307,10 +308,10 @@ impl ThemeBuilder {
                 self.theme.diff_add_bg_color = Color::Rgb(20, 40, 20);
             }
         }
-        if matches!(self.theme.diff_remove_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.diff_remove_color, UNSET_COLOR) {
             self.theme.diff_remove_color = self.theme.error_color;
         }
-        if matches!(self.theme.diff_remove_bg_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.diff_remove_bg_color, UNSET_COLOR) {
             // Derive a subtle background from error color
             if let Color::Rgb(r, g, b) = self.theme.error_color {
                 self.theme.diff_remove_bg_color = Color::Rgb(r / 6, g / 6, b / 6);
@@ -318,16 +319,16 @@ impl ThemeBuilder {
                 self.theme.diff_remove_bg_color = Color::Rgb(40, 20, 20);
             }
         }
-        if matches!(self.theme.diff_context_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.diff_context_color, UNSET_COLOR) {
             self.theme.diff_context_color = self.theme.dim_color;
         }
-        if matches!(self.theme.line_number_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.line_number_color, UNSET_COLOR) {
             self.theme.line_number_color = self.theme.dim_color;
         }
-        if matches!(self.theme.link_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.link_color, UNSET_COLOR) {
             self.theme.link_color = self.theme.accent_color;
         }
-        if matches!(self.theme.running_color, Color::Rgb(0, 0, 0)) {
+        if matches!(self.theme.running_color, UNSET_COLOR) {
             self.theme.running_color = self.theme.accent_color;
         }
 
@@ -529,4 +530,56 @@ fn relative_luminance(color: Color) -> Option<f32> {
     };
 
     Some(0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CoreColors, ThemeBuilder};
+    use ratatui::style::Color;
+
+    #[test]
+    fn build_preserves_explicit_black_extended_colors() {
+        let theme = ThemeBuilder::new("test", "Test")
+            .core_colors(CoreColors::new(
+                Color::Rgb(20, 20, 20),
+                Color::Rgb(40, 40, 40),
+                Color::Rgb(220, 220, 220),
+                Color::Rgb(120, 160, 220),
+                Color::Rgb(230, 230, 230),
+                Color::Rgb(80, 200, 120),
+                Color::Rgb(150, 150, 150),
+            ))
+            .mode_colors(
+                Color::Rgb(100, 100, 200),
+                Color::Rgb(110, 110, 210),
+                Color::Rgb(120, 120, 220),
+                Color::Rgb(130, 130, 230),
+                Color::Rgb(140, 140, 240),
+            )
+            .special_colors(
+                Color::Rgb(240, 180, 80),
+                Color::Rgb(220, 80, 80),
+                Color::Rgb(15, 15, 15),
+            )
+            .ui_colors(
+                Color::Rgb(255, 255, 255),
+                Color::Rgb(60, 60, 60),
+                Color::Rgb(255, 255, 255),
+            )
+            .message_colors(
+                Color::Rgb(240, 240, 240),
+                Color::Rgb(240, 240, 240),
+                Color::Rgb(220, 220, 220),
+                Color::Rgb(220, 220, 220),
+            )
+            .status_colors(Color::Rgb(120, 160, 220), Color::Rgb(80, 200, 120))
+            .extended_colors(|theme| {
+                theme.input_bg_color = Color::Rgb(0, 0, 0);
+                theme.logo_primary_color = Color::Rgb(0, 0, 0);
+            })
+            .build();
+
+        assert_eq!(theme.input_bg_color, Color::Rgb(0, 0, 0));
+        assert_eq!(theme.logo_primary_color, Color::Rgb(0, 0, 0));
+    }
 }

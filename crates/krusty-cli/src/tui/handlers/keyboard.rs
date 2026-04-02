@@ -10,6 +10,33 @@ use crate::tui::input::InputAction;
 use crate::tui::utils::TitleAction;
 
 impl App {
+    fn interrupt_active_task(&mut self) {
+        if !self.is_busy() {
+            return;
+        }
+
+        self.runtime.cancellation.cancel();
+
+        if let Some(ref tx) = self.runtime.channels.loop_input {
+            let _ = tx.send(crate::agent::loop_events::LoopInput::Cancel);
+        }
+
+        self.runtime.event_bus.emit(AgentEvent::Interrupt {
+            turn: self.runtime.agent_state.current_turn,
+            reason: InterruptReason::UserRequested,
+        });
+
+        self.runtime.agent_state.interrupt();
+        self.stop_streaming();
+        self.stop_tool_execution();
+        self.runtime.channels.loop_events = None;
+        self.runtime.channels.loop_input = None;
+        self.runtime
+            .chat
+            .messages
+            .push(("system".to_string(), "Interrupted.".to_string()));
+    }
+
     /// Main keyboard event dispatcher
     pub fn handle_key(&mut self, key_event: KeyEvent) {
         let code = key_event.code;
@@ -299,6 +326,11 @@ impl App {
                     .insert(placeholder_id, (width, height, rgba_bytes));
                 self.update_autocomplete();
             }
+            InputAction::PasteFailed(message) => {
+                self.show_toast(crate::tui::components::Toast::error(message));
+                self.update_autocomplete();
+            }
+            InputAction::Cancel => {}
             InputAction::Continue | InputAction::ContentChanged => {
                 self.update_autocomplete();
                 // Escape clears input on start menu
@@ -322,32 +354,7 @@ impl App {
         // Only if decision prompt is NOT visible (handled above)
         if code == KeyCode::Esc && !self.ui.autocomplete.visible && !self.ui.decision_prompt.visible
         {
-            if self.is_busy() {
-                // Cancel the background task
-                self.runtime.cancellation.cancel();
-
-                // Cancel the core orchestrator if active
-                if let Some(ref tx) = self.runtime.channels.loop_input {
-                    let _ = tx.send(crate::agent::loop_events::LoopInput::Cancel);
-                }
-
-                // Emit interrupt event
-                self.runtime.event_bus.emit(AgentEvent::Interrupt {
-                    turn: self.runtime.agent_state.current_turn,
-                    reason: InterruptReason::UserRequested,
-                });
-
-                // Update state
-                self.runtime.agent_state.interrupt();
-                self.stop_streaming();
-                self.stop_tool_execution();
-                self.runtime.channels.loop_events = None;
-                self.runtime.channels.loop_input = None;
-                self.runtime
-                    .chat
-                    .messages
-                    .push(("system".to_string(), "Interrupted.".to_string()));
-            }
+            self.interrupt_active_task();
             return;
         }
 
@@ -428,6 +435,13 @@ impl App {
                     .pending_clipboard_images
                     .insert(placeholder_id, (width, height, rgba_bytes));
                 self.update_autocomplete();
+            }
+            InputAction::PasteFailed(message) => {
+                self.show_toast(crate::tui::components::Toast::error(message));
+                self.update_autocomplete();
+            }
+            InputAction::Cancel => {
+                self.interrupt_active_task();
             }
             InputAction::Continue | InputAction::ContentChanged => {
                 self.update_autocomplete();

@@ -311,12 +311,14 @@ impl App {
         let config = OrchestratorConfig {
             session_id,
             working_dir: self.runtime.working_dir.clone(),
+            project_dir: Some(self.runtime.working_dir.clone()),
             permission_mode: self.runtime.permission_mode,
             max_iterations: self.runtime.agent_config.primary_max_turns(),
             stream_idle_timeout: self.runtime.agent_config.stream_idle_timeout(),
             user_id: None,
             initial_work_mode: self.ui.work_mode.into(),
             generate_title: is_new_session,
+            delegated_progress_tx: None,
         };
 
         self.persist_current_work_mode();

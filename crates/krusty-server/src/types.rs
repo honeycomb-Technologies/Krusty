@@ -76,6 +76,13 @@ pub struct SessionResponse {
 
 impl From<SessionInfo> for SessionResponse {
     fn from(s: SessionInfo) -> Self {
+        let project_dir = s.working_dir.clone();
+        let workspace_mode = if project_dir.is_some() {
+            WorkspaceMode::Selected
+        } else {
+            WorkspaceMode::Neutral
+        };
+
         Self {
             id: s.id,
             title: s.title,
@@ -83,8 +90,8 @@ impl From<SessionInfo> for SessionResponse {
             token_count: s.token_count,
             parent_session_id: s.parent_session_id,
             working_dir: s.working_dir,
-            project_dir: s.project_dir,
-            workspace_mode: s.workspace_mode,
+            project_dir,
+            workspace_mode,
             mode: s.work_mode,
             model: s.model,
             target_branch: s.target_branch,

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use tracing::info;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 19;
+const SCHEMA_VERSION: i32 = 20;
 
 /// Shared database handle for connection reuse
 ///
@@ -668,6 +668,42 @@ impl Database {
                 "#,
             )?;
             self.set_schema_version_tx(&tx, 19)?;
+        }
+
+        // Migration 20: Persisted delegated run tracking
+        if current_version < 20 {
+            info!("Running migration 20: Delegated runs");
+            tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS delegated_runs (
+                    delegated_run_id TEXT PRIMARY KEY,
+                    parent_session_id TEXT NOT NULL,
+                    parent_tool_call_id TEXT,
+                    role TEXT NOT NULL,
+                    stage TEXT NOT NULL,
+                    provider TEXT,
+                    model TEXT,
+                    resumable INTEGER NOT NULL DEFAULT 0,
+                    resumed_from_run_id TEXT,
+                    target_scope_key TEXT NOT NULL,
+                    target_scope_json TEXT NOT NULL,
+                    snapshot_json TEXT,
+                    artifact_json TEXT,
+                    human_review TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    FOREIGN KEY (parent_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_delegated_runs_parent_session
+                    ON delegated_runs(parent_session_id, updated_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_delegated_runs_scope
+                    ON delegated_runs(parent_session_id, role, target_scope_key);
+                "#,
+            )?;
+            self.set_schema_version_tx(&tx, 20)?;
         }
 
         tx.commit()?;

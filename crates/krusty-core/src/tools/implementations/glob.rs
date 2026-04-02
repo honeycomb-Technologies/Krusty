@@ -28,7 +28,8 @@ impl Tool for GlobTool {
     }
 
     fn prompt(&self) -> Option<&str> {
-        Some(r#"Use this for all file discovery instead of find or ls via bash.
+        Some(
+            r#"Use this for all file discovery instead of find or ls via bash.
 
 Returns up to 100 paths sorted by modification time (newest first). In large codebases, use specific subdirectory patterns to avoid hitting the cap.
 
@@ -38,7 +39,8 @@ Common patterns:
 - "*.{js,jsx}" — JS and JSX in current directory
 - "tests/**/test_*.py" — Python test files
 
-To search file contents (not names), use Grep instead. To see directory structure, use List instead."#)
+To search file contents (not names), use Grep instead. To see directory structure, use List instead."#,
+        )
     }
 
     fn parameters_schema(&self) -> Value {

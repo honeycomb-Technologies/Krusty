@@ -17,6 +17,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::{BlockEvent, ClipContext, EventResult, StreamBlock};
 use crate::tui::components::scrollbars::render_scrollbar;
 use crate::tui::themes::Theme;
+use crate::tui::utils::truncate_ellipsis;
 
 /// Cursor blink interval
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(530);
@@ -406,8 +407,8 @@ impl BashBlock {
         // Truncate command if needed - use only first line for multi-line commands
         let first_line = self.command.lines().next().unwrap_or(&self.command);
         let max_cmd_len = area.width.saturating_sub(20) as usize;
-        let cmd_display = if first_line.len() > max_cmd_len {
-            format!("{}...", &first_line[..max_cmd_len.saturating_sub(3)])
+        let cmd_display = if UnicodeWidthStr::width(first_line) > max_cmd_len {
+            truncate_ellipsis(first_line, max_cmd_len).into_owned()
         } else if self.command.contains('\n') {
             format!("{}...", first_line)
         } else {

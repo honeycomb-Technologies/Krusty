@@ -15,6 +15,7 @@ use super::common::{
     scroll_indicator, PopupSize,
 };
 use crate::tui::themes::Theme;
+use crate::tui::utils::truncate_ellipsis;
 use krusty_core::mcp::{McpServerInfo, McpServerStatus, McpToolDef};
 
 /// MCP browser popup state
@@ -276,8 +277,8 @@ fn render_server_line<'a>(server: &McpServerInfo, is_selected: bool, theme: &The
         McpServerStatus::Disconnected => "disconnected".to_string(),
         McpServerStatus::Error(e) => {
             let msg = server.error.as_deref().unwrap_or(e);
-            if msg.len() > 35 {
-                format!("error: {}...", &msg[..32])
+            if msg.chars().count() > 35 {
+                format!("error: {}", truncate_ellipsis(msg, 35))
             } else {
                 format!("error: {}", msg)
             }
@@ -311,8 +312,8 @@ fn render_tool_line<'a>(tool: &McpToolDef, is_last: bool, theme: &Theme) -> Line
         .description
         .as_deref()
         .map(|d| {
-            if d.len() > 40 {
-                format!(" - {}...", &d[..37])
+            if d.chars().count() > 40 {
+                format!(" - {}", truncate_ellipsis(d, 40))
             } else {
                 format!(" - {}", d)
             }

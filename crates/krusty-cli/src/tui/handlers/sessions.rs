@@ -45,6 +45,8 @@ impl App {
                 self.runtime.current_session_id = Some(id.clone());
                 self.runtime.session_title = Some(fallback_title);
                 self.runtime.agent_state.reset();
+                self.runtime.pending_clipboard_images.clear();
+                self.runtime.attached_files.clear();
 
                 // Clear any active plan when starting a new session
                 self.clear_active_plan();
@@ -208,6 +210,8 @@ impl App {
         self.ui.block_ui.clear();
         self.runtime.tool_results.clear();
         self.runtime.chat.streaming_assistant_idx = None;
+        self.runtime.pending_clipboard_images.clear();
+        self.runtime.attached_files.clear();
         self.runtime.current_session_id = Some(session_id.to_string());
         self.runtime.agent_state.reset();
 

@@ -44,11 +44,11 @@ pub enum McpClientStatus {
 #[derive(Debug, thiserror::Error)]
 pub enum McpClientError {
     #[error("Failed to spawn MCP server: {0}")]
-    SpawnFailed(String),
+    Spawn(String),
     #[error("Failed to initialize MCP connection: {0}")]
-    InitFailed(String),
+    Init(String),
     #[error("MCP request failed: {0}")]
-    RequestFailed(String),
+    Request(String),
 }
 
 impl McpClient {
@@ -60,7 +60,10 @@ impl McpClient {
         env: &HashMap<String, String>,
         working_dir: &Path,
     ) -> Result<Self, McpClientError> {
-        info!("Connecting to local MCP server: {} (cmd: {})", name, command);
+        info!(
+            "Connecting to local MCP server: {} (cmd: {})",
+            name, command
+        );
 
         let mut cmd = tokio::process::Command::new(command);
         cmd.args(args);
@@ -69,14 +72,14 @@ impl McpClient {
         }
         cmd.current_dir(working_dir);
 
-        let process = TokioChildProcess::new(cmd)
-            .map_err(|e| McpClientError::SpawnFailed(e.to_string()))?;
+        let process =
+            TokioChildProcess::new(cmd).map_err(|e| McpClientError::Spawn(e.to_string()))?;
 
         let client_info = client_info(name);
 
         let service = rmcp::serve_client(client_info, process)
             .await
-            .map_err(|e| McpClientError::InitFailed(e.to_string()))?;
+            .map_err(|e| McpClientError::Init(e.to_string()))?;
 
         info!("Connected to local MCP server: {}", name);
 
@@ -110,7 +113,7 @@ impl McpClient {
 
         let service = rmcp::serve_client(client_info, worker)
             .await
-            .map_err(|e| McpClientError::InitFailed(e.to_string()))?;
+            .map_err(|e| McpClientError::Init(e.to_string()))?;
 
         info!("Connected to remote MCP server: {}", name);
 
@@ -134,7 +137,7 @@ impl McpClient {
             .peer()
             .list_all_tools()
             .await
-            .map_err(|e| McpClientError::RequestFailed(e.to_string()))?;
+            .map_err(|e| McpClientError::Request(e.to_string()))?;
 
         info!("MCP {} has {} tools", self.name, tools.len());
         for tool in &tools {
@@ -142,9 +145,7 @@ impl McpClient {
                 "MCP {} tool '{}': {}",
                 self.name,
                 tool.name,
-                tool.description
-                    .as_deref()
-                    .unwrap_or("<no description>")
+                tool.description.as_deref().unwrap_or("<no description>")
             );
         }
 
@@ -160,14 +161,14 @@ impl McpClient {
     ) -> Result<CallToolResult, McpClientError> {
         let mut params = CallToolRequestParams::new(name.to_string());
         if let Some(obj) = arguments.as_object() {
-            params = params.with_arguments(obj.clone().into());
+            params = params.with_arguments(obj.clone());
         }
 
         self.service
             .peer()
             .call_tool(params)
             .await
-            .map_err(|e| McpClientError::RequestFailed(e.to_string()))
+            .map_err(|e| McpClientError::Request(e.to_string()))
     }
 
     /// List all available resources from this server
@@ -176,19 +177,16 @@ impl McpClient {
             .peer()
             .list_all_resources()
             .await
-            .map_err(|e| McpClientError::RequestFailed(e.to_string()))
+            .map_err(|e| McpClientError::Request(e.to_string()))
     }
 
     /// Read a specific resource from this server
-    pub async fn read_resource(
-        &self,
-        uri: &str,
-    ) -> Result<ReadResourceResult, McpClientError> {
+    pub async fn read_resource(&self, uri: &str) -> Result<ReadResourceResult, McpClientError> {
         self.service
             .peer()
             .read_resource(ReadResourceRequestParams::new(uri))
             .await
-            .map_err(|e| McpClientError::RequestFailed(e.to_string()))
+            .map_err(|e| McpClientError::Request(e.to_string()))
     }
 
     /// List all available prompts from this server
@@ -197,7 +195,7 @@ impl McpClient {
             .peer()
             .list_all_prompts()
             .await
-            .map_err(|e| McpClientError::RequestFailed(e.to_string()))
+            .map_err(|e| McpClientError::Request(e.to_string()))
     }
 
     /// Get a specific prompt from this server
@@ -208,14 +206,14 @@ impl McpClient {
     ) -> Result<GetPromptResult, McpClientError> {
         let mut params = GetPromptRequestParams::new(name);
         if let Some(args) = arguments.and_then(|v| v.as_object().cloned()) {
-            params = params.with_arguments(args.into());
+            params = params.with_arguments(args);
         }
 
         self.service
             .peer()
             .get_prompt(params)
             .await
-            .map_err(|e| McpClientError::RequestFailed(e.to_string()))
+            .map_err(|e| McpClientError::Request(e.to_string()))
     }
 
     /// Get cached tools from last list_tools call
@@ -250,9 +248,6 @@ impl McpClient {
 fn client_info(name: &str) -> InitializeRequestParams {
     InitializeRequestParams::new(
         ClientCapabilities::default(),
-        Implementation::new(
-            format!("krusty-mcp-{}", name),
-            env!("CARGO_PKG_VERSION"),
-        ),
+        Implementation::new(format!("krusty-mcp-{}", name), env!("CARGO_PKG_VERSION")),
     )
 }

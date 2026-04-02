@@ -171,14 +171,15 @@ impl DelegationPolicy {
 
     pub fn authorize_tool(&self, tool_name: &str, plan_mode: bool) -> Result<(), String> {
         let policy = tool_policy(tool_name);
-        if self.read_only_only && policy.category != ToolCategory::ReadOnly {
-            if !(self.bash_allowed && tool_name == "bash") {
-                return Err(format!(
-                    "Delegated policy blocked tool '{}': {} only permits read-only tools",
-                    tool_name,
-                    self.surface_name()
-                ));
-            }
+        if self.read_only_only
+            && policy.category != ToolCategory::ReadOnly
+            && !(self.bash_allowed && tool_name == "bash")
+        {
+            return Err(format!(
+                "Delegated policy blocked tool '{}': {} only permits read-only tools",
+                tool_name,
+                self.surface_name()
+            ));
         }
         if self.inherited_permission_mode == PermissionMode::Supervised
             && policy.requires_supervised_approval
@@ -802,7 +803,14 @@ impl ToolRegistry {
             .filter(|t| {
                 let name = t.name();
                 // Subagents must not recursively spawn subagents or cause mode confusion
-                if matches!(name, "agent" | "skill" | "enter_plan_mode" | "set_work_mode" | "set_workspace_context") {
+                if matches!(
+                    name,
+                    "agent"
+                        | "skill"
+                        | "enter_plan_mode"
+                        | "set_work_mode"
+                        | "set_workspace_context"
+                ) {
                     return false;
                 }
                 policy.authorize_tool(name, false).is_ok()

@@ -2,6 +2,8 @@
 //!
 //! Handles status updates from background OAuth authentication tasks.
 
+use std::time::Duration;
+
 use krusty_core::ai::providers::ProviderId;
 use krusty_core::auth::{OAuthTokenData, OAuthTokenStore};
 
@@ -9,6 +11,8 @@ use crate::tui::popups::auth::AuthPopup;
 use crate::tui::utils::AsyncChannels;
 
 use super::{PollAction, PollResult};
+
+const OAUTH_BROWSER_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Poll OAuth status updates from background authentication tasks
 ///
@@ -63,10 +67,28 @@ pub fn poll_oauth_status(
                 }
             }
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                if auth_popup.expire_oauth_browser_waiting(OAUTH_BROWSER_TIMEOUT) {
+                    result.needs_redraw = true;
+                    result = result.with_message(
+                        "system",
+                        "OAuth timed out before the browser callback arrived. Retry authentication if you still want to connect this provider.".to_string(),
+                    );
+                }
                 channels.oauth_status = Some(rx);
                 break;
             }
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                if auth_popup.is_browser_waiting() {
+                    auth_popup.set_oauth_error(
+                        "OAuth flow ended unexpectedly before authentication completed.",
+                    );
+                    result.needs_redraw = true;
+                    result = result.with_message(
+                        "system",
+                        "OAuth flow ended unexpectedly before authentication completed."
+                            .to_string(),
+                    );
+                }
                 break;
             }
         }

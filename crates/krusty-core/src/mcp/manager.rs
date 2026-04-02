@@ -46,9 +46,8 @@ impl From<rmcp::model::Tool> for McpToolDef {
         Self {
             name: tool.name.to_string(),
             description: tool.description.as_deref().map(|s| s.to_string()),
-            input_schema: serde_json::to_value(&*tool.input_schema).unwrap_or(Value::Object(
-                serde_json::Map::new(),
-            )),
+            input_schema: serde_json::to_value(&*tool.input_schema)
+                .unwrap_or(Value::Object(serde_json::Map::new())),
         }
     }
 }
@@ -116,15 +115,12 @@ impl From<rmcp::model::CallToolResult> for McpToolResult {
                         match embedded.resource {
                             ResourceContents::TextResourceContents { uri, text, .. } => {
                                 Some(McpContent::Resource {
-                                    uri: uri.to_string(),
+                                    uri,
                                     text: Some(text),
                                 })
                             }
                             ResourceContents::BlobResourceContents { uri, .. } => {
-                                Some(McpContent::Resource {
-                                    uri: uri.to_string(),
-                                    text: None,
-                                })
+                                Some(McpContent::Resource { uri, text: None })
                             }
                         }
                     }
@@ -208,10 +204,7 @@ impl McpManager {
             return Ok(());
         }
 
-        info!(
-            "Connecting to {} MCP servers in parallel",
-            configs.len()
-        );
+        info!("Connecting to {} MCP servers in parallel", configs.len());
 
         // Connect to all servers in parallel
         let connect_futures: Vec<_> = configs
@@ -386,8 +379,7 @@ impl McpManager {
         for (name, config) in configs.iter() {
             let (status, tool_count, tools, error) = if let Some(client) = clients.get(name) {
                 let cached = client.get_cached_tools().await;
-                let tool_defs: Vec<McpToolDef> =
-                    cached.into_iter().map(McpToolDef::from).collect();
+                let tool_defs: Vec<McpToolDef> = cached.into_iter().map(McpToolDef::from).collect();
                 if client.is_alive().await {
                     let count = tool_defs.len();
                     (McpServerStatus::Connected, count, tool_defs, None)

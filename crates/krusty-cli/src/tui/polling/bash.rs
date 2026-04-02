@@ -50,6 +50,10 @@ pub fn poll_bash_output(
 
                 if let Some(block) = block {
                     if chunk.is_complete {
+                        if !block.is_streaming() {
+                            continue;
+                        }
+
                         // Mark block as complete with exit code
                         let exit_code = chunk.exit_code.unwrap_or(0);
                         tracing::info!(
@@ -101,18 +105,19 @@ pub fn poll_bash_output(
                         continue;
                     }
                     if block.is_streaming() {
-                        tracing::info!(
-                            "Completing bash block on channel disconnect (assuming success)"
+                        tracing::warn!(
+                            "Completing bash block on channel disconnect without exit status"
                         );
-                        block.complete(0); // Assume success - channel disconnect usually means clean exit
+                        block.complete(-1);
 
                         // Update ProcessRegistry if we have a tool_use_id
                         if let Some(tool_id) = block.tool_use_id() {
                             let registry = process_registry.clone();
                             let tool_id = tool_id.to_string();
                             tokio::spawn(async move {
-                                let status = crate::process::ProcessStatus::Completed {
-                                    exit_code: 0,
+                                let status = crate::process::ProcessStatus::Failed {
+                                    error: "Output channel disconnected before exit status arrived"
+                                        .to_string(),
                                     duration_ms: 0,
                                 };
                                 registry.update_status(&tool_id, status).await;

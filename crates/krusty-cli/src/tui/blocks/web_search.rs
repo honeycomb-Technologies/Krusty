@@ -17,6 +17,7 @@ use super::{BlockEvent, ClipContext, EventResult, SimpleScrollable, StreamBlock}
 use crate::ai::types::WebSearchResult;
 use crate::tui::components::scrollbars::render_scrollbar;
 use crate::tui::themes::Theme;
+use crate::tui::utils::truncate_ellipsis;
 
 /// Spinner frames
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -157,8 +158,8 @@ impl WebSearchBlock {
 
         // Truncate query if needed
         let max_query = 40;
-        let query_display = if self.query.len() > max_query {
-            format!("{}...", &self.query[..max_query.saturating_sub(3)])
+        let query_display = if UnicodeWidthStr::width(self.query.as_str()) > max_query {
+            truncate_ellipsis(&self.query, max_query).into_owned()
         } else {
             self.query.clone()
         };
@@ -226,8 +227,8 @@ impl WebSearchBlock {
 
         // Truncate query if needed
         let max_query = 30;
-        let query_display = if self.query.len() > max_query {
-            format!("{}...", &self.query[..max_query.saturating_sub(3)])
+        let query_display = if UnicodeWidthStr::width(self.query.as_str()) > max_query {
+            truncate_ellipsis(&self.query, max_query).into_owned()
         } else {
             self.query.clone()
         };

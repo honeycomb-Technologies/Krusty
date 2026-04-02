@@ -2,17 +2,17 @@ use std::sync::atomic::Ordering;
 
 use axum::{extract::State, routing::get, Json, Router};
 
-use krusty_core::storage::Database;
+use krusty_core::storage::{Database, WorkspaceMode};
 use krusty_core::SessionManager;
 
 use crate::auth::CurrentUser;
 use crate::error::AppError;
 use crate::presence::snapshot_presence;
 use crate::types::{
-    ActiveSessionStatusResponse, ServerAccessResponse, ServerStatusResponse,
-    TailscaleAccessResponse, UpdateServerAccessRequest,
+    ActiveSessionStatusResponse, ServerAccessResponse, ServerMemoryStatusResponse,
+    ServerStatusResponse, TailscaleAccessResponse, UpdateServerAccessRequest,
 };
-use crate::AppState;
+use crate::{observe_process_memory, AppState};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -91,6 +91,12 @@ async fn get_server_status(
 
             let session = session_manager.get_session(&session_id).ok().flatten()?;
             let presence_snapshot = snapshot_presence(&mut presence, &session_id);
+            let project_dir = session.working_dir.clone();
+            let workspace_mode = if project_dir.is_some() {
+                WorkspaceMode::Selected
+            } else {
+                WorkspaceMode::Neutral
+            };
 
             Some(ActiveSessionStatusResponse {
                 id: session_id,
@@ -99,6 +105,8 @@ async fn get_server_status(
                 started_at: agent_state.started_at,
                 last_event_at: agent_state.last_event_at,
                 working_dir: session.working_dir,
+                project_dir,
+                workspace_mode,
                 active_viewers: presence_snapshot.active_viewers,
                 active_controllers: presence_snapshot.active_controllers,
                 stale_clients: presence_snapshot.stale_clients,
@@ -106,10 +114,17 @@ async fn get_server_status(
         })
         .collect::<Vec<_>>();
     active_sessions.sort_by(|left, right| left.id.cmp(&right.id));
+    let memory = observe_process_memory(&state);
 
     Ok(Json(ServerStatusResponse {
         active_agent_streams: state.active_agent_streams.load(Ordering::Relaxed),
         active_sessions,
+        memory: ServerMemoryStatusResponse {
+            rss_bytes: memory.rss_bytes,
+            virtual_bytes: memory.virtual_bytes,
+            peak_rss_bytes: Some(state.peak_rss_bytes.load(Ordering::Relaxed)),
+            peak_virtual_bytes: Some(state.peak_virtual_bytes.load(Ordering::Relaxed)),
+        },
         tailscale: tailscale_status(state.server_port),
     }))
 }
@@ -188,11 +203,14 @@ mod tests {
                 session_locks: Arc::new(RwLock::new(HashMap::new())),
                 session_inputs: Arc::new(RwLock::new(HashMap::new())),
                 session_presence: Arc::new(RwLock::new(HashMap::new())),
+                delegated_state: Arc::new(RwLock::new(HashMap::new())),
                 remote_access: Arc::new(RwLock::new(crate::remote_access::RemoteAccessConfig {
                     enabled: true,
                     token: "test-token".to_string(),
                 })),
                 active_agent_streams: Arc::new(AtomicUsize::new(0)),
+                peak_rss_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                peak_virtual_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 push_service: None,
                 oauth_flows: Arc::new(Mutex::new(HashMap::new())),
             },

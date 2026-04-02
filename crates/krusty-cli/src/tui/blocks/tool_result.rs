@@ -16,6 +16,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::{BlockEvent, ClipContext, EventResult, SimpleScrollable, StreamBlock};
 use crate::tui::components::scrollbars::render_scrollbar;
 use crate::tui::themes::Theme;
+use crate::tui::utils::truncate_ellipsis;
 
 /// Spinner frames
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -206,8 +207,8 @@ impl ToolResultBlock {
 
         // Truncate pattern if needed
         let max_pat = 30;
-        let pat_display = if self.pattern.len() > max_pat {
-            format!("{}...", &self.pattern[..max_pat.saturating_sub(3)])
+        let pat_display = if UnicodeWidthStr::width(self.pattern.as_str()) > max_pat {
+            truncate_ellipsis(&self.pattern, max_pat).into_owned()
         } else {
             self.pattern.clone()
         };
@@ -270,8 +271,8 @@ impl ToolResultBlock {
 
         // Truncate pattern if needed
         let max_pat = 30;
-        let pat_display = if self.pattern.len() > max_pat {
-            format!("{}...", &self.pattern[..max_pat.saturating_sub(3)])
+        let pat_display = if UnicodeWidthStr::width(self.pattern.as_str()) > max_pat {
+            truncate_ellipsis(&self.pattern, max_pat).into_owned()
         } else {
             self.pattern.clone()
         };

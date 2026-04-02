@@ -10,6 +10,8 @@ pub enum InputAction {
     Continue,
     Submit(String),
     ContentChanged,
+    Cancel,
+    PasteFailed(String),
     /// Clipboard image pasted: (width, height, rgba_bytes, placeholder_id)
     ImagePasted {
         width: usize,
@@ -94,13 +96,10 @@ impl MultiLineInput {
                     self.insert_text(&text);
                     return InputAction::ContentChanged;
                 }
-                InputAction::Continue
+                InputAction::PasteFailed("Clipboard paste failed".to_string())
             }
-            // Ctrl+C - clear input
-            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.clear();
-                InputAction::ContentChanged
-            }
+            // Ctrl+C - interrupt current work instead of clearing input
+            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => InputAction::Cancel,
             // Ctrl+K - delete to end of line
             KeyCode::Char('k') if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.delete_to_end_of_line();

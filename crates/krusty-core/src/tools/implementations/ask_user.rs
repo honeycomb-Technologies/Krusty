@@ -24,7 +24,8 @@ impl Tool for AskUserQuestionTool {
     }
 
     fn prompt(&self) -> Option<&str> {
-        Some(r#"Use sparingly — only when you genuinely cannot proceed without user input. If you can make a reasonable judgment call, do so instead of asking.
+        Some(
+            r#"Use sparingly — only when you genuinely cannot proceed without user input. If you can make a reasonable judgment call, do so instead of asking.
 
 When to ask:
 - Requirements are ambiguous and guessing wrong wastes significant effort
@@ -38,7 +39,8 @@ When NOT to ask:
 
 Keep questions under 500 characters. Provide 2-4 distinct options with brief trade-off descriptions. For simple yes/no, just ask in chat text instead.
 
-Questions timeout after 5 minutes if the user doesn't respond."#)
+Questions timeout after 5 minutes if the user doesn't respond."#,
+        )
     }
 
     fn parameters_schema(&self) -> Value {

@@ -35,9 +35,7 @@ pub fn anthropic_oauth_config() -> OAuthConfig {
         // Refresh tokens after 28 days
         refresh_days: 28,
         // Anthropic-specific: use code callback redirect and S256 challenge
-        extra_auth_params: vec![
-            ("code".to_string(), "true".to_string()),
-        ],
+        extra_auth_params: vec![("code".to_string(), "true".to_string())],
     }
 }
 
