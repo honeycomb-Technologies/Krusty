@@ -61,10 +61,7 @@ pub(crate) async fn execute_tools(
             if disabled.iter().any(|d| d == call.name.as_str()) {
                 let denied = ToolResult::error_with_code(
                     "disabled_by_project",
-                    format!(
-                        "Tool '{}' is disabled in .krusty/settings.json",
-                        call.name
-                    ),
+                    format!("Tool '{}' is disabled in .krusty/settings.json", call.name),
                 );
                 results.push(tool_control.publish_result(call, &denied, event_tx));
                 continue;

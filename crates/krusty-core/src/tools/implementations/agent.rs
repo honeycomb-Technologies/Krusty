@@ -448,7 +448,9 @@ impl AgentTool {
                         })
                         .is_err()
                     {
-                        debug!("Background explore progress channel disconnected (parent returned)");
+                        debug!(
+                            "Background explore progress channel disconnected (parent returned)"
+                        );
                     }
                 }
             });
@@ -696,8 +698,7 @@ impl AgentTool {
         }
 
         // ── Synchronous mode (existing behavior) ─────────────────────
-        let config =
-            PlanConfig::new(registry, delegation_policy.clone(), project_context).await;
+        let config = PlanConfig::new(registry, delegation_policy.clone(), project_context).await;
 
         let result = execute_single_agent(
             &client,
@@ -936,8 +937,7 @@ impl AgentTool {
         }
 
         // ── Synchronous mode (existing behavior) ─────────────────────
-        let config =
-            VerifyConfig::new(registry, delegation_policy.clone(), project_context).await;
+        let config = VerifyConfig::new(registry, delegation_policy.clone(), project_context).await;
 
         let result = execute_single_agent(
             &client,
@@ -1284,7 +1284,7 @@ impl AgentTool {
                             tool_count: 0,
                             tokens: 0,
                             current_action: None,
-                            completion_summary: Some(investigation_summary.clone()),
+                            completion_summary: Some(investigation_summary),
                             lines_added: stats.lines_added,
                             lines_removed: stats.lines_removed,
                             completed_plan_task: None,
@@ -1311,7 +1311,10 @@ impl AgentTool {
             pool.execute_builders(tasks, context.clone(), tx).await
         };
 
-        info!("Agent tool (build): Builder pool returned {} results", results.len());
+        info!(
+            "Agent tool (build): Builder pool returned {} results",
+            results.len()
+        );
 
         // Get final stats from context
         let stats = context.stats();
@@ -1707,7 +1710,9 @@ fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_parent_context_brief, concise_target_label, resolve_explore_target, truncate_utf8};
+    use super::{
+        build_parent_context_brief, concise_target_label, resolve_explore_target, truncate_utf8,
+    };
     use crate::ai::types::{Content, ModelMessage, Role};
     use std::fs;
 
@@ -1801,7 +1806,7 @@ mod tests {
         assert_eq!(truncate_utf8(s, 10), s); // within budget
         assert_eq!(truncate_utf8(s, 4), "caf"); // byte 4 is mid-char, backs up to 3
         assert_eq!(truncate_utf8(s, 5), "caf\u{00e9}"); // byte 5 is right after the char
-        // Empty and zero budget
+                                                        // Empty and zero budget
         assert_eq!(truncate_utf8("", 0), "");
         assert_eq!(truncate_utf8("abc", 0), "");
     }

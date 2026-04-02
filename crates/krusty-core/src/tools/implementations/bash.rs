@@ -429,7 +429,8 @@ impl Tool for BashTool {
     }
 
     fn prompt(&self) -> Option<&str> {
-        Some(r#"Do not use bash for file reading (cat/head/tail), editing (sed/awk), or searching (grep/find/rg) — use the dedicated Read, Edit, Grep, and Glob tools instead. Bash is for git, build systems, package managers, compilers, and system utilities.
+        Some(
+            r#"Do not use bash for file reading (cat/head/tail), editing (sed/awk), or searching (grep/find/rg) — use the dedicated Read, Edit, Grep, and Glob tools instead. Bash is for git, build systems, package managers, compilers, and system utilities.
 
 Chain dependent commands with `&&`. For independent commands, make parallel tool calls instead of chaining. Never use trailing `&` for background processes — set `run_in_background:true` instead.
 
@@ -439,7 +440,8 @@ Always include a `description` parameter with a clear 5-10 word summary of what 
 
 Use absolute paths for file arguments. The working directory resets between calls, so `cd` is unreliable — prefer absolute paths or chain `cd dir && command`.
 
-Avoid interactive commands (requiring stdin). Avoid `sudo` unless the user explicitly requests it. Prefer `--yes`/`-y` flags for package managers to avoid interactive prompts."#)
+Avoid interactive commands (requiring stdin). Avoid `sudo` unless the user explicitly requests it. Prefer `--yes`/`-y` flags for package managers to avoid interactive prompts."#,
+        )
     }
 
     fn parameters_schema(&self) -> Value {

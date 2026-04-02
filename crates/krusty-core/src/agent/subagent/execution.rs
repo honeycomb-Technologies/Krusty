@@ -797,19 +797,28 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     "Sub-agent API call timed out"
                 );
                 // If we have evidence but no text output yet, produce a fallback summary
-                let output = if final_output.trim().is_empty() && !files_examined.is_empty() {
-                    format!(
+                let output =
+                    if final_output.trim().is_empty() && !files_examined.is_empty() {
+                        format!(
                         "Explorer timed out before producing findings. {} files were examined: {}",
                         files_examined.len(),
                         files_examined.iter().take(20).cloned().collect::<Vec<_>>().join(", ")
                     )
-                } else {
-                    final_output
-                };
+                    } else {
+                        final_output
+                    };
                 let has_evidence = !files_examined.is_empty();
                 send_progress(
-                    if has_evidence { AgentProgressStatus::Complete } else { AgentProgressStatus::Failed },
-                    if has_evidence { "timeout (partial)" } else { "timeout" },
+                    if has_evidence {
+                        AgentProgressStatus::Complete
+                    } else {
+                        AgentProgressStatus::Failed
+                    },
+                    if has_evidence {
+                        "timeout (partial)"
+                    } else {
+                        "timeout"
+                    },
                     total_tool_calls,
                     estimated_tokens,
                     completion_summary_preview(&output),

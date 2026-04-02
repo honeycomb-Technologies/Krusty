@@ -279,11 +279,14 @@ mod tests {
             session_locks: Arc::new(RwLock::new(HashMap::new())),
             session_inputs: Arc::new(RwLock::new(HashMap::new())),
             session_presence: Arc::new(RwLock::new(HashMap::new())),
+            delegated_state: Arc::new(RwLock::new(HashMap::new())),
             remote_access: Arc::new(RwLock::new(RemoteAccessConfig {
                 enabled: true,
                 token: "secret".to_string(),
             })),
             active_agent_streams: Arc::new(AtomicUsize::new(0)),
+            peak_rss_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            peak_virtual_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             push_service: None,
             oauth_flows: Arc::new(Mutex::new(HashMap::new())),
         }

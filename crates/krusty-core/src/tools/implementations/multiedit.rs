@@ -35,11 +35,13 @@ impl Tool for MultiEditTool {
     }
 
     fn prompt(&self) -> Option<&str> {
-        Some(r#"Use when you need multiple edits to the same file. Reads and writes the file once instead of per-edit, so it's faster and avoids intermediate state issues.
+        Some(
+            r#"Use when you need multiple edits to the same file. Reads and writes the file once instead of per-edit, so it's faster and avoids intermediate state issues.
 
 Edits are applied sequentially — later edits see changes from earlier ones in the same call. Each edit still requires a unique old_string match. Read the file first, same as with the edit tool.
 
-Prefer this over multiple separate edit calls when you have 3+ changes to one file."#)
+Prefer this over multiple separate edit calls when you have 3+ changes to one file."#,
+        )
     }
 
     fn parameters_schema(&self) -> Value {

@@ -133,7 +133,7 @@ fn execute_save(
     let Some(type_str) = params.memory_type.as_deref() else {
         return ToolResult::invalid_parameters("'save' requires memory_type");
     };
-    let Some(memory_type) = MemoryType::from_str(type_str) else {
+    let Ok(memory_type) = type_str.parse::<MemoryType>() else {
         return ToolResult::invalid_parameters(format!(
             "Invalid memory_type '{}'. Valid types: user, feedback, project, reference",
             type_str
@@ -168,7 +168,9 @@ fn execute_update(store: &MemoryStore, params: &Params) -> ToolResult {
     let content = params.content.as_deref().filter(|c| !c.is_empty());
 
     if title.is_none() && content.is_none() {
-        return ToolResult::invalid_parameters("'update' requires at least one of title or content");
+        return ToolResult::invalid_parameters(
+            "'update' requires at least one of title or content",
+        );
     }
 
     match store.update(id, title, content) {
@@ -201,7 +203,7 @@ fn execute_list(
     user_id: Option<&str>,
 ) -> ToolResult {
     let memories = if let Some(type_str) = params.memory_type.as_deref() {
-        if let Some(memory_type) = MemoryType::from_str(type_str) {
+        if let Ok(memory_type) = type_str.parse::<MemoryType>() {
             store.list_by_type(memory_type, project_dir, user_id)
         } else {
             return ToolResult::invalid_parameters(format!(
@@ -268,9 +270,7 @@ mod tests {
             .await;
         assert!(!save_result.is_error, "save failed: {}", save_result.output);
 
-        let list_result = MemoryTool
-            .execute(json!({ "action": "list" }), &ctx)
-            .await;
+        let list_result = MemoryTool.execute(json!({ "action": "list" }), &ctx).await;
         assert!(!list_result.is_error);
         let parsed: Value = serde_json::from_str(&list_result.output).unwrap();
         assert_eq!(parsed["data"]["count"], 1);
@@ -337,16 +337,11 @@ mod tests {
         assert!(!update_result.is_error);
 
         let delete_result = MemoryTool
-            .execute(
-                json!({ "action": "delete", "memory_id": id }),
-                &ctx,
-            )
+            .execute(json!({ "action": "delete", "memory_id": id }), &ctx)
             .await;
         assert!(!delete_result.is_error);
 
-        let list_result = MemoryTool
-            .execute(json!({ "action": "list" }), &ctx)
-            .await;
+        let list_result = MemoryTool.execute(json!({ "action": "list" }), &ctx).await;
         let parsed: Value = serde_json::from_str(&list_result.output).unwrap();
         assert_eq!(parsed["data"]["count"], 0);
     }

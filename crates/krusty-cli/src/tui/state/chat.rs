@@ -201,7 +201,6 @@ fn is_low_priority_event(event: &LoopEvent) -> bool {
         event,
         LoopEvent::TextDelta { .. }
             | LoopEvent::ThinkingDelta { .. }
-            | LoopEvent::ToolOutputDelta { .. }
             | LoopEvent::ToolExecuting { .. }
     )
 }
@@ -342,5 +341,33 @@ mod tests {
 
         assert!(drain.pending_len() <= 2);
         assert!(drain.telemetry().dropped_events >= 1);
+    }
+
+    #[test]
+    fn keeps_tool_output_when_queue_overflows() {
+        let mut drain = StreamDrainState::default();
+        drain.set_policy(StreamDrainPolicy {
+            hard_queue_limit: 1,
+            ..Default::default()
+        });
+
+        drain.enqueue(LoopEvent::TextDelta {
+            delta: "summary".to_string(),
+        });
+        drain.enqueue(LoopEvent::ToolOutputDelta {
+            id: "call_1".to_string(),
+            delta: "stdout".to_string(),
+        });
+
+        assert_eq!(drain.pending_len(), 1);
+        assert_eq!(drain.telemetry().dropped_events, 1);
+
+        match drain.pop_next() {
+            Some(LoopEvent::ToolOutputDelta { id, delta }) => {
+                assert_eq!(id, "call_1");
+                assert_eq!(delta, "stdout");
+            }
+            other => panic!("expected tool output delta, got {:?}", other),
+        }
     }
 }

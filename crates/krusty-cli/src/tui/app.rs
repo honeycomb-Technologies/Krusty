@@ -280,6 +280,8 @@ pub struct AppRuntime {
     pub pending_auto_pinch_reason: Option<String>,
     /// Auto-pinch in progress (bypasses popup when AI is busy)
     pub auto_pinch_in_progress: bool,
+    /// When the current pinch summarization started
+    pub summarization_started_at: Option<Instant>,
     /// AI client
     pub ai_client: Option<AiClient>,
     /// API key
@@ -363,6 +365,7 @@ impl AppRuntime {
             pending_auto_pinch: false,
             pending_auto_pinch_reason: None,
             auto_pinch_in_progress: false,
+            summarization_started_at: None,
             ai_client: None,
             api_key: None,
             active_provider,
@@ -811,7 +814,7 @@ impl App {
 
         // Check if we just applied an update (marker file written by apply_pending_update)
         if let Some(version) = krusty_core::updater::read_update_marker() {
-            self.show_toast(crate::tui::components::Toast::success(format!(
+            self.show_toast(crate::tui::components::Toast::info(format!(
                 "Updated to v{}",
                 version
             )));

@@ -32,11 +32,13 @@ impl Tool for WriteTool {
     }
 
     fn prompt(&self) -> Option<&str> {
-        Some(r#"Use Write for creating new files. For modifying existing files, prefer Edit — Write replaces the entire file content.
+        Some(
+            r#"Use Write for creating new files. For modifying existing files, prefer Edit — Write replaces the entire file content.
 
 If the file already exists, read it first to avoid accidental data loss. Parent directories are created automatically. Max content size is 10MB.
 
-Don't create documentation files (README.md, CHANGELOG.md, etc.) unless the user explicitly asks for them."#)
+Don't create documentation files (README.md, CHANGELOG.md, etc.) unless the user explicitly asks for them."#,
+        )
     }
 
     fn parameters_schema(&self) -> Value {

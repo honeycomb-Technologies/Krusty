@@ -12,7 +12,7 @@ use krusty_core::agent::pinch_context::{PinchContext, PinchContextInput};
 use krusty_core::agent::summarizer::{generate_summary, SummarizationResult};
 use krusty_core::ai::types::{Content, ModelMessage, Role};
 use krusty_core::plan::PlanManager;
-use krusty_core::storage::{Database, SessionInfo};
+use krusty_core::storage::{Database, DelegatedRunStore, SessionInfo};
 use krusty_core::SessionManager;
 
 use crate::auth::CurrentUser;
@@ -277,6 +277,18 @@ async fn get_session_state(
     let live_partial_assistant =
         live_partial_assistant_for_state(&agent_state.state, recovery.as_ref());
     let last_event_sequence = session_manager.load_runtime_trace_latest_sequence(&id)?;
+    let delegated_tools = state
+        .delegated_state
+        .read()
+        .await
+        .get(&id)
+        .cloned()
+        .unwrap_or_default();
+    let recent_delegated_runs = DelegatedRunStore::new(Database::new(&state.db_path)?)
+        .list_runs_for_session(&id, 20)?
+        .into_iter()
+        .map(Into::into)
+        .collect();
 
     Ok(Json(SessionStateResponse {
         id,
@@ -286,6 +298,8 @@ async fn get_session_state(
         mode: session.work_mode,
         recovery,
         live_partial_assistant,
+        delegated_tools,
+        recent_delegated_runs,
         last_event_sequence,
     }))
 }
@@ -622,11 +636,14 @@ mod tests {
                 session_locks: Arc::new(RwLock::new(HashMap::new())),
                 session_inputs: Arc::new(RwLock::new(HashMap::new())),
                 session_presence: Arc::new(RwLock::new(HashMap::new())),
+                delegated_state: Arc::new(RwLock::new(HashMap::new())),
                 remote_access: Arc::new(RwLock::new(crate::remote_access::RemoteAccessConfig {
                     enabled: true,
                     token: "test-token".to_string(),
                 })),
                 active_agent_streams: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                peak_rss_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                peak_virtual_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 push_service: None,
                 oauth_flows: Arc::new(Mutex::new(HashMap::new())),
             },
@@ -662,7 +679,9 @@ mod tests {
             Json(CreateSessionRequest {
                 title: Some("Owned Session".to_string()),
                 model: None,
+                project_dir: None,
                 working_dir: None,
+                workspace_mode: None,
                 target_branch: None,
             }),
         )

@@ -306,12 +306,8 @@ pub fn build_system_prompt_sections(
     let profile = ModelProfile::resolve(provider, api_format, model_id);
     let (project_context, session_context) = partition_system_messages(messages);
 
-    let mut base = profile.layered_system_prompt(
-        provider,
-        api_format,
-        model_id,
-        custom_system_prompt,
-    );
+    let mut base =
+        profile.layered_system_prompt(provider, api_format, model_id, custom_system_prompt);
     let tool_guidance = build_tool_guidance_section(tool_prompts);
     if !tool_guidance.is_empty() {
         base.push_str("\n\n");

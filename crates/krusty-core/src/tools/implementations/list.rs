@@ -40,11 +40,13 @@ impl Tool for ListTool {
     }
 
     fn prompt(&self) -> Option<&str> {
-        Some(r#"Shows directory tree structure. Default depth is 2 levels, max 200 entries.
+        Some(
+            r#"Shows directory tree structure. Default depth is 2 levels, max 200 entries.
 
 Use depth:1 for a broad overview of top-level structure. Use depth:3+ for detailed exploration of a specific subtree. In large repos, expect to hit the 200-entry limit — narrow the path or reduce depth.
 
-For finding specific files by name pattern, use Glob instead. For searching file contents, use Grep."#)
+For finding specific files by name pattern, use Glob instead. For searching file contents, use Grep."#,
+        )
     }
 
     fn parameters_schema(&self) -> Value {

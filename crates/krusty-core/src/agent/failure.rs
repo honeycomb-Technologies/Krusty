@@ -137,11 +137,7 @@ pub fn detect_terminal_explore_failure(
         .iter()
         .filter(|call| {
             call.name == "agent"
-                && call
-                    .arguments
-                    .get("agent_type")
-                    .and_then(|v| v.as_str())
-                    .map_or(false, |t| t == "explore")
+                && (call.arguments.get("agent_type").and_then(|v| v.as_str()) == Some("explore"))
         })
         .map(|call| call.id.as_str())
         .collect::<Vec<_>>();

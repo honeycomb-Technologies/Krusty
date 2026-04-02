@@ -21,6 +21,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::{BlockEvent, ClipContext, EventResult, StreamBlock};
 use crate::tui::components::scrollbars::render_scrollbar;
 use crate::tui::themes::Theme;
+use crate::tui::utils::truncate_ellipsis;
 
 /// Default scrollback lines (reduced from 10000)
 const DEFAULT_SCROLLBACK: usize = 2000;
@@ -459,8 +460,8 @@ impl TerminalPane {
 
         // Truncate title if needed
         let max_len = area.width.saturating_sub(20) as usize;
-        let title_display = if self.title.len() > max_len {
-            format!("{}...", &self.title[..max_len.saturating_sub(3)])
+        let title_display = if UnicodeWidthStr::width(self.title.as_str()) > max_len {
+            truncate_ellipsis(&self.title, max_len).into_owned()
         } else {
             self.title.clone()
         };

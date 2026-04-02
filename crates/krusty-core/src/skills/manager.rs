@@ -118,6 +118,19 @@ impl SkillsManager {
         skills
     }
 
+    /// List only globally-installed skills.
+    pub fn list_global_skills(&mut self) -> Vec<SkillInfo> {
+        self.ensure_cache();
+        let mut skills: Vec<SkillInfo> = self
+            .cache
+            .values()
+            .filter(|skill| skill.source == SkillSource::Global)
+            .map(|skill| skill.to_info())
+            .collect();
+        skills.sort_by(|a, b| a.name.cmp(&b.name));
+        skills
+    }
+
     /// Get a skill by name
     ///
     /// Returns reference to cached skill if it exists.

@@ -76,8 +76,7 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
         auth_header: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
-        let body = serde_json::to_string(&message)
-            .map_err(StreamableHttpError::Deserialize)?;
+        let body = serde_json::to_string(&message).map_err(StreamableHttpError::Deserialize)?;
 
         let response = self
             .build_request(

@@ -992,7 +992,7 @@ impl App {
                     self.runtime.plugin_versions.get(&active_id),
                 ) {
                     if previous != current {
-                        self.show_toast(crate::tui::components::Toast::success(format!(
+                        self.show_toast(crate::tui::components::Toast::info(format!(
                             "Plugin update ready: {} {} -> {}",
                             active_id, previous, current
                         )));

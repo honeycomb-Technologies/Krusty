@@ -18,6 +18,7 @@ impl App {
         // Use cached streaming assistant index (O(1)) instead of O(n) scan per delta.
         let append_idx = if let Some(idx) = self.runtime.chat.streaming_assistant_idx {
             if idx < self.runtime.chat.messages.len()
+                && idx + 1 == self.runtime.chat.messages.len()
                 && self
                     .runtime
                     .chat
@@ -126,6 +127,22 @@ impl App {
                     "Continuing catch-up stream drain"
                 );
             }
+        }
+
+        if disconnected
+            && !self.runtime.chat.has_stream_backlog()
+            && (self.runtime.chat.is_streaming || self.runtime.chat.is_executing_tools)
+        {
+            tracing::warn!("Orchestrator event channel disconnected before completion");
+            self.stop_streaming();
+            self.stop_tool_execution();
+            self.runtime.channels.loop_events = None;
+            self.runtime.channels.loop_input = None;
+            self.runtime.chat.messages.push((
+                "system".to_string(),
+                "Stream interrupted before the orchestrator finalized the turn.".to_string(),
+            ));
+            self.ui.scroll_system.scroll.request_scroll_to_bottom();
         }
 
         processed_any
@@ -238,13 +255,13 @@ impl App {
                 tool_name,
             } => {
                 if tool_name == "AskUserQuestion" {
-                    if let Some(call) = self
+                    if let Some(call_idx) = self
                         .runtime
                         .pending_ask_user_calls
                         .iter()
-                        .find(|c| c.id == tool_call_id)
-                        .cloned()
+                        .position(|c| c.id == tool_call_id)
                     {
+                        let call = self.runtime.pending_ask_user_calls.remove(call_idx);
                         self.handle_ask_user_question_tools(vec![call]);
                     }
                 } else if tool_name == "PlanConfirm" {

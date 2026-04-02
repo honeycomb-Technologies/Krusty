@@ -75,6 +75,10 @@ impl App {
                     for c in text.trim().chars() {
                         self.ui.popups.auth.add_api_key_char(c);
                     }
+                } else {
+                    self.show_toast(crate::tui::components::Toast::error(
+                        "Clipboard paste failed",
+                    ));
                 }
             }
             KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
@@ -129,6 +133,10 @@ impl App {
                     for c in text.trim().chars() {
                         self.ui.popups.auth.add_paste_code_char(c);
                     }
+                } else {
+                    self.show_toast(crate::tui::components::Toast::error(
+                        "Clipboard paste failed",
+                    ));
                 }
             }
             KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
@@ -152,7 +160,10 @@ impl App {
 
         // Parse `code#state` format — both parts needed for token exchange
         let (auth_code, auth_state) = if let Some(idx) = code_str.find('#') {
-            (code_str[..idx].to_string(), Some(code_str[idx + 1..].to_string()))
+            (
+                code_str[..idx].to_string(),
+                Some(code_str[idx + 1..].to_string()),
+            )
         } else {
             (code_str.clone(), None)
         };
@@ -186,7 +197,10 @@ impl App {
 
             let config = anthropic_oauth_config();
             let flow = PasteCodeOAuthFlow::new(config);
-            match flow.exchange_code(&auth_code, auth_state.as_deref(), &verifier).await {
+            match flow
+                .exchange_code(&auth_code, auth_state.as_deref(), &verifier)
+                .await
+            {
                 Ok(token) => {
                     // Save token to OAuth store
                     if let Ok(mut store) = OAuthTokenStore::load() {

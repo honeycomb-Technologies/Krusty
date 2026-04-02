@@ -32,7 +32,7 @@ pub enum PinchStage {
     },
 
     /// Summarization in progress
-    Summarizing { dots: usize },
+    Summarizing { started_at: Instant },
 
     /// Stage 2: User reviews summary and provides direction
     DirectionInput {
@@ -132,7 +132,9 @@ impl PinchPopup {
                 self.preservation_input = Some(input.clone());
             }
         }
-        self.stage = PinchStage::Summarizing { dots: 0 };
+        self.stage = PinchStage::Summarizing {
+            started_at: Instant::now(),
+        };
     }
 
     /// Show summary and move to direction input
@@ -236,7 +238,9 @@ impl PinchPopup {
                 context_usage_percent,
                 top_files,
             } => self.render_preservation_input(f, theme, input, *context_usage_percent, top_files),
-            PinchStage::Summarizing { dots } => self.render_summarizing(f, theme, *dots),
+            PinchStage::Summarizing { started_at } => {
+                self.render_summarizing(f, theme, *started_at)
+            }
             PinchStage::DirectionInput {
                 summary,
                 key_files,
@@ -409,7 +413,7 @@ impl PinchPopup {
         f.render_widget(footer, chunks[6]);
     }
 
-    fn render_summarizing(&self, f: &mut Frame, theme: &Theme, _dots: usize) {
+    fn render_summarizing(&self, f: &mut Frame, theme: &Theme, started_at: Instant) {
         let (w, h) = PopupSize::Medium.dimensions();
         let area = center_rect(w, h, f.area());
         render_popup_background(f, area, theme);
@@ -457,11 +461,15 @@ impl PinchPopup {
         f.render_widget(crab_widget, chunks[2]);
 
         // Status text - render in chunks[3]
+        let elapsed = started_at.elapsed().as_secs();
         let status = vec![
-            Line::from(""),
             Line::from(Span::styled(
                 "Summarizing conversation...",
                 Style::default().fg(theme.text_color),
+            )),
+            Line::from(Span::styled(
+                format!("{}s elapsed", elapsed),
+                Style::default().fg(theme.dim_color),
             )),
         ];
         let status_widget = Paragraph::new(status).alignment(Alignment::Center);

@@ -271,9 +271,10 @@ impl PasteCodeOAuthFlow {
 
         // Include state if present (required by Anthropic's token endpoint)
         if let Some(state) = state {
-            body.as_object_mut()
-                .unwrap()
-                .insert("state".to_string(), serde_json::Value::String(state.to_string()));
+            body.as_object_mut().unwrap().insert(
+                "state".to_string(),
+                serde_json::Value::String(state.to_string()),
+            );
         }
 
         let response = client

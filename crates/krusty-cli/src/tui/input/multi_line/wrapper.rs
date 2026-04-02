@@ -51,7 +51,7 @@ impl MultiLineInput {
         }
 
         // Push the last line
-        if !current_line.is_empty() || self.content.ends_with('\n') {
+        if !current_line.is_empty() {
             lines.push(current_line);
         }
 

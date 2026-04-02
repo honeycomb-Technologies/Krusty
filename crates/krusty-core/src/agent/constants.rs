@@ -28,6 +28,8 @@ pub mod timeouts {
     pub const STREAMING: Duration = Duration::from_secs(600);
     /// Explorer sub-agent per-turn API call timeout
     pub const EXPLORER_API_CALL: Duration = Duration::from_secs(90);
+    /// Backward-compatible alias for older explorer call sites.
+    pub const SINGLE_EXPLORER_API_CALL: Duration = EXPLORER_API_CALL;
     /// Builder sub-agent per-turn API call timeout
     pub const BUILDER_API_CALL: Duration = Duration::from_secs(180);
 }

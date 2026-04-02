@@ -13,7 +13,9 @@ use tokio::sync::RwLock;
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::plan::PlanManager;
 use crate::skills::SkillsManager;
-use crate::storage::{Database, DelegatedRunStore, MemoryStore, MemoryType, ProjectSettings, WorkMode};
+use crate::storage::{
+    Database, DelegatedRunStore, MemoryStore, MemoryType, ProjectSettings, WorkMode,
+};
 
 /// Instruction files to search for in the working directory (priority order).
 const PROJECT_FILES: &[&str] = &[
@@ -49,16 +51,16 @@ pub fn inject_context(
     let env_ctx = build_environment_context(working_dir, model_id);
     let memory_ctx = build_memory_context(
         db_path,
-        project_dir.map(|p| p.to_string_lossy().to_string()).as_deref(),
+        project_dir
+            .map(|p| p.to_string_lossy().to_string())
+            .as_deref(),
         None, // user_id — single-tenant for now
     );
     let plan_ctx = build_plan_context(db_path, session_id, work_mode);
     let delegated_ctx = build_delegated_context(db_path, session_id);
     let skills_ctx = build_skills_context(skills_manager, project_dir.is_some());
     let project_ctx = project_dir.map(build_project_context).unwrap_or_default();
-    let project_settings = project_dir
-        .map(ProjectSettings::load)
-        .unwrap_or_default();
+    let project_settings = project_dir.map(ProjectSettings::load).unwrap_or_default();
 
     let mut injected = Vec::with_capacity(conversation.len() + 8);
 
@@ -273,9 +275,7 @@ fn build_delegated_context(db_path: &Path, session_id: &str) -> String {
 pub fn build_subagent_project_context(working_dir: &Path, project_dir: Option<&Path>) -> String {
     let workspace = build_workspace_context(working_dir, project_dir);
     let project = project_dir.map(build_project_context).unwrap_or_default();
-    let project_settings = project_dir
-        .map(ProjectSettings::load)
-        .unwrap_or_default();
+    let project_settings = project_dir.map(ProjectSettings::load).unwrap_or_default();
 
     let mut ctx = String::new();
     if !workspace.is_empty() {

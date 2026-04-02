@@ -26,7 +26,7 @@ mod tests {
 
         // Database should initialize with schema_version table
         let version = db.get_schema_version();
-        assert_eq!(version, 19, "Expected current schema version to be 19");
+        assert_eq!(version, 20, "Expected current schema version to be 20");
     }
 
     #[test]
@@ -109,6 +109,42 @@ mod tests {
     }
 
     #[test]
+    fn test_delegated_runs_table_exists() {
+        let (db, _temp) = create_test_db();
+
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='delegated_runs'")
+            .expect("Failed to prepare query");
+
+        let tables: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .expect("Failed to query tables")
+            .filter_map(Result::ok)
+            .collect();
+
+        assert!(tables.contains(&"delegated_runs".to_string()));
+
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(delegated_runs)")
+            .expect("Failed to prepare PRAGMA");
+
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("Failed to get columns")
+            .filter_map(Result::ok)
+            .collect();
+
+        assert!(columns.contains(&"delegated_run_id".to_string()));
+        assert!(columns.contains(&"parent_session_id".to_string()));
+        assert!(columns.contains(&"role".to_string()));
+        assert!(columns.contains(&"stage".to_string()));
+        assert!(columns.contains(&"target_scope_json".to_string()));
+        assert!(columns.contains(&"snapshot_json".to_string()));
+        assert!(columns.contains(&"artifact_json".to_string()));
+    }
+
+    #[test]
     fn test_messages_table_exists() {
         let (db, _temp) = create_test_db();
 
@@ -187,7 +223,7 @@ mod tests {
         let version = db.get_schema_version();
 
         // After all migrations, version should be current
-        assert_eq!(version, 19, "Expected final schema version");
+        assert_eq!(version, 20, "Expected final schema version");
     }
 
     #[test]

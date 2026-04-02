@@ -468,6 +468,26 @@ async fn refresh_anthropic_oauth_token() -> Result<OAuthTokenData> {
 
 /// Sync wrapper for refreshing an OAuth token from non-async code paths
 pub fn try_refresh_oauth_token_blocking(provider_id: ProviderId) -> Option<OAuthTokenData> {
-    let handle = tokio::runtime::Handle::try_current().ok()?;
-    tokio::task::block_in_place(|| handle.block_on(refresh_oauth_token(provider_id)).ok())
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(refresh_oauth_token(provider_id)).ok())
+        }
+        Ok(_) => std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            runtime.block_on(refresh_oauth_token(provider_id)).ok()
+        })
+        .join()
+        .ok()
+        .flatten(),
+        Err(_) => {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            runtime.block_on(refresh_oauth_token(provider_id)).ok()
+        }
+    }
 }

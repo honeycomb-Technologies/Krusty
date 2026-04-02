@@ -1,5 +1,7 @@
 //! Authentication popups (provider selection, API key input, OAuth flows)
 
+use std::time::{Duration, Instant};
+
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Modifier, Style},
@@ -13,7 +15,11 @@ use super::common::{
 };
 use crate::ai::providers::{builtin_providers, ProviderId};
 use crate::tui::themes::Theme;
+use crate::tui::utils::truncate_ellipsis;
 use krusty_core::auth::AuthMethod;
+
+const OAUTH_BROWSER_TIMEOUT: Duration = Duration::from_secs(300);
+const OAUTH_SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Auth popup states
 #[derive(Debug, Clone)]
@@ -38,6 +44,7 @@ pub enum AuthState {
     OAuthBrowserWaiting {
         provider: ProviderId,
         status: String,
+        started_at: Instant,
     },
     /// OAuth device code flow - showing code to user
     OAuthDeviceCode {
@@ -204,6 +211,7 @@ impl AuthPopup {
                         self.state = AuthState::OAuthBrowserWaiting {
                             provider,
                             status: "Opening browser...".to_string(),
+                            started_at: Instant::now(),
                         };
                         Some((provider, method))
                     }
@@ -233,6 +241,32 @@ impl AuthPopup {
         {
             *current_status = status.to_string();
         }
+    }
+
+    /// Time out browser-based OAuth if the callback never arrives.
+    pub fn expire_oauth_browser_waiting(&mut self, timeout: Duration) -> bool {
+        let provider = match &self.state {
+            AuthState::OAuthBrowserWaiting {
+                provider,
+                started_at,
+                ..
+            } if started_at.elapsed() >= timeout => *provider,
+            _ => return false,
+        };
+
+        self.state = AuthState::ApiKeyInput {
+            provider,
+            input: String::new(),
+            error: Some(format!(
+                "OAuth timed out after {} minutes. Retry the browser flow if you still want to connect this provider.",
+                timeout.as_secs() / 60
+            )),
+        };
+        true
+    }
+
+    pub fn is_browser_waiting(&self) -> bool {
+        matches!(self.state, AuthState::OAuthBrowserWaiting { .. })
     }
 
     /// Set device code info for display
@@ -402,9 +436,11 @@ impl AuthPopup {
                 input,
                 error,
             } => self.render_api_key_input(f, theme, *provider, input, error.as_deref()),
-            AuthState::OAuthBrowserWaiting { provider, status } => {
-                self.render_oauth_browser_waiting(f, theme, *provider, status)
-            }
+            AuthState::OAuthBrowserWaiting {
+                provider,
+                status,
+                started_at,
+            } => self.render_oauth_browser_waiting(f, theme, *provider, status, *started_at),
             AuthState::OAuthDeviceCode {
                 provider,
                 user_code,
@@ -639,6 +675,7 @@ impl AuthPopup {
         theme: &Theme,
         provider: ProviderId,
         status: &str,
+        started_at: Instant,
     ) {
         let (w, h) = PopupSize::Medium.dimensions();
         let area = center_rect(w, h, f.area());
@@ -665,10 +702,14 @@ impl AuthPopup {
         f.render_widget(title, chunks[0]);
 
         // Content
+        let elapsed = started_at.elapsed().as_secs();
+        let remaining = OAUTH_BROWSER_TIMEOUT.as_secs().saturating_sub(elapsed);
+        let frame = OAUTH_SPINNER_FRAMES
+            [((started_at.elapsed().as_millis() / 100) as usize) % OAUTH_SPINNER_FRAMES.len()];
         let content = vec![
             Line::from(""),
             Line::from(Span::styled(
-                status,
+                format!("{} {}", frame, status),
                 Style::default()
                     .fg(theme.accent_color)
                     .add_modifier(Modifier::BOLD),
@@ -676,6 +717,14 @@ impl AuthPopup {
             Line::from(""),
             Line::from("Complete authentication in your browser."),
             Line::from("This window will update automatically."),
+            Line::from(Span::styled(
+                format!("Elapsed: {}s", elapsed),
+                Style::default().fg(theme.dim_color),
+            )),
+            Line::from(Span::styled(
+                format!("Timeout: {}s remaining", remaining),
+                Style::default().fg(theme.dim_color),
+            )),
         ];
         let status_widget = Paragraph::new(content)
             .style(Style::default().fg(theme.text_color))
@@ -946,7 +995,7 @@ impl AuthPopup {
         } else {
             let len = input.len();
             if len > 40 {
-                format!("{}...({} chars)", &input[..37], len)
+                format!("{} ({} chars)", truncate_ellipsis(input, 40), len)
             } else {
                 input.to_string()
             }
