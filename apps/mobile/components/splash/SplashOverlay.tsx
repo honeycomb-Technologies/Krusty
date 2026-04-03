@@ -16,7 +16,7 @@ SplashScreen.preventAutoHideAsync();
 
 const BG = '#0b1119';
 
-// Exact same text + styles as KrustyLogo
+// Identical to KrustyLogo
 const LINES = [
   '▄ •▄ ▄▄▄  ▄• ▄▌.▄▄ · ▄▄▄▄▄ ▄· ▄▌',
   '█▌▄▌▪▀▄ █·█▪██▌▐█ ▀. •██  ▐█▪██▌',
@@ -33,7 +33,6 @@ const GRADIENT_COLORS = [
   '#ff6b35', '#cd853f', '#8b4513',
 ] as const;
 
-// Same as KrustyLogo
 const GRADIENT_W = 500;
 const GRADIENT_H = 80;
 
@@ -43,58 +42,58 @@ interface Props {
 }
 
 /**
- * Animation flow:
- * 1. K appears CENTERED on screen (same Y as KrustyLogo empty state)
- * 2. K slides left to its final position (first letter of KRUSTY)
- * 3. A clip on the full KRUSTY text widens from K-width to full-width
- *    (the "unfold" — remaining letters appear left-to-right)
- * 4. Overlay fades out — KrustyLogo underneath is at exact same position,
- *    so logo stays while the rest of the UI (top bar, chat bar) appears
+ * Approach: the full KRUSTY text is ALWAYS rendered identically to KrustyLogo
+ * (same MaskedView, same gradient, same alignment). It's never clipped or split.
  *
- * Key insight: we use ONE MaskedView with the FULL text at all times,
- * clipped by an animated width. The whole thing translates from center
- * to its final left-aligned position. This way the gradient, text size,
- * and rendering match KrustyLogo exactly.
+ * To create the animation:
+ * 1. A BG-colored "cover" rectangle sits ON TOP of the text, hiding everything
+ *    to the right of the K. The whole assembly is shifted right so the visible
+ *    K appears centered on screen.
+ * 2. The assembly slides left to its final position while the cover slides
+ *    right (revealing RUSTY) — the letters appear to emerge from behind the K.
+ * 3. The solid overlay fades out, revealing the app with KrustyLogo in the
+ *    exact same position underneath.
  */
 export function SplashOverlay({ children, onComplete }: Props) {
   const [done, setDone] = useState(false);
 
-  // Measure real text widths via onLayout
+  // Measure the K portion to know where the cover starts
   const [kWidth, setKWidth] = useState(0);
   const [fullWidth, setFullWidth] = useState(0);
-  const measured = kWidth > 0 && fullWidth > 0;
-  const restWidth = fullWidth - kWidth;
+  const [textHeight, setTextHeight] = useState(0);
+  const measured = kWidth > 0 && fullWidth > 0 && textHeight > 0;
 
-  // Clip width: starts at K-width, expands to full KRUSTY width
-  const clipW = useSharedValue(0);
-  // The whole text block translates: starts offset right (to center the K),
-  // then slides to 0 (natural centered position of full text)
-  const blockTranslateX = useSharedValue(0);
-
+  // The whole text block shifts right (to center K) then back to 0
+  const blockX = useSharedValue(0);
+  // The cover slides right to reveal RUSTY
+  const coverX = useSharedValue(0);
   // Shimmer
   const shimmer = useSharedValue(-80);
-
-  // Overlay fades out
+  // Overlay fades out at the end
   const overlayOpacity = useSharedValue(1);
 
   const onKLayout = useCallback((e: { nativeEvent: { layout: { width: number } } }) => {
     if (kWidth === 0) setKWidth(e.nativeEvent.layout.width);
   }, [kWidth]);
 
-  const onFullLayout = useCallback((e: { nativeEvent: { layout: { width: number } } }) => {
-    if (fullWidth === 0) setFullWidth(e.nativeEvent.layout.width);
+  const onFullLayout = useCallback((e: { nativeEvent: { layout: { width: number; height: number } } }) => {
+    if (fullWidth === 0) {
+      setFullWidth(e.nativeEvent.layout.width);
+      setTextHeight(e.nativeEvent.layout.height);
+    }
   }, [fullWidth]);
 
   useEffect(() => {
     if (!measured) return;
 
-    // Initial state: clip to K-width, offset right so K appears centered
-    // The full text is centered by the container. If we clip to K-width,
-    // the visible K would be at the left edge of where KRUSTY would be.
-    // To center just the K, we offset right by (fullWidth - kWidth) / 2.
+    const restWidth = fullWidth - kWidth;
+    // Offset to center just the K: shift right by half the RUSTY width
     const centerOffset = restWidth / 2;
-    clipW.value = kWidth;
-    blockTranslateX.value = centerOffset;
+
+    // Set initial positions
+    blockX.value = centerOffset;
+    // Cover starts at the K's right edge (hides everything to the right)
+    coverX.value = 0;
 
     const finish = () => {
       setDone(true);
@@ -105,7 +104,6 @@ export function SplashOverlay({ children, onComplete }: Props) {
       await new Promise(r => setTimeout(r, 300));
       await SplashScreen.hideAsync();
 
-      // Shimmer
       shimmer.value = withTiming(80, {
         duration: 2500,
         easing: Easing.inOut(Easing.ease),
@@ -114,19 +112,20 @@ export function SplashOverlay({ children, onComplete }: Props) {
       // Hold the centered K
       await new Promise(r => setTimeout(r, 600));
 
-      // Slide left (offset → 0) while widening clip (K → full)
-      blockTranslateX.value = withTiming(0, {
+      // Slide the whole block left to final position
+      blockX.value = withTiming(0, {
         duration: 700,
         easing: Easing.inOut(Easing.cubic),
       });
 
-      clipW.value = withDelay(150, withTiming(fullWidth, {
+      // Slide the cover right to reveal RUSTY (emerging from behind K)
+      coverX.value = withDelay(100, withTiming(restWidth + 20, {
         duration: 700,
         easing: Easing.out(Easing.cubic),
       }));
 
-      // Wait for unfold
-      await new Promise(r => setTimeout(r, 1100));
+      // Wait for animation to settle
+      await new Promise(r => setTimeout(r, 1000));
 
       // Fade overlay out
       overlayOpacity.value = withTiming(0, {
@@ -140,13 +139,12 @@ export function SplashOverlay({ children, onComplete }: Props) {
     run();
   }, [measured]);
 
-  const clipStyle = useAnimatedStyle(() => ({
-    width: clipW.value,
-    overflow: 'hidden' as const,
+  const blockStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: blockX.value }],
   }));
 
-  const translateStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: blockTranslateX.value }],
+  const coverStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: coverX.value }],
   }));
 
   const shimmerStyle = useAnimatedStyle(() => ({
@@ -161,7 +159,6 @@ export function SplashOverlay({ children, onComplete }: Props) {
 
   return (
     <View style={styles.root}>
-      {/* App underneath */}
       <View style={StyleSheet.absoluteFill}>
         {children}
       </View>
@@ -182,13 +179,11 @@ export function SplashOverlay({ children, onComplete }: Props) {
 
       {/* Splash overlay */}
       <Animated.View style={[styles.solidOverlay, fadeStyle]} pointerEvents="none">
-        {/* Same layout as ChatScreen empty state: flex-start, paddingTop 35%, center */}
         <View style={styles.logoPosition}>
-          {/* Translate: centers the K initially, animates to 0 for final position */}
-          <Animated.View style={translateStyle}>
-            {/* Clip: starts at K-width, expands to full KRUSTY width */}
-            <Animated.View style={clipStyle}>
-              {/* Single MaskedView with FULL text — identical to KrustyLogo */}
+          {/* Block translates from centered-K position to final position */}
+          <Animated.View style={blockStyle}>
+            <View style={{ position: 'relative' }}>
+              {/* Full KRUSTY text — identical rendering to KrustyLogo */}
               <MaskedView
                 maskElement={
                   <View style={styles.maskAlign}>
@@ -207,7 +202,22 @@ export function SplashOverlay({ children, onComplete }: Props) {
                   />
                 </Animated.View>
               </MaskedView>
-            </Animated.View>
+
+              {/* Cover rectangle — hides RUSTY, slides right to reveal */}
+              <Animated.View
+                style={[
+                  {
+                    position: 'absolute',
+                    top: -5,
+                    left: kWidth,
+                    width: fullWidth,
+                    height: textHeight + 10,
+                    backgroundColor: BG,
+                  },
+                  coverStyle,
+                ]}
+              />
+            </View>
           </Animated.View>
         </View>
       </Animated.View>
@@ -224,7 +234,6 @@ const styles = StyleSheet.create({
     backgroundColor: BG,
     zIndex: 10,
   },
-  // Matches ChatScreen's empty state layout exactly
   logoPosition: {
     flex: 1,
     justifyContent: 'flex-start',
