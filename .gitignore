@@ -35,3 +35,17 @@ frontend/build
 # Never publish archive snapshots from this repo
 apps/**/legacy*/
 apps/**/legacy-*/
+
+# Secrets, credentials, and keys — never commit these
+.env
+.env.*
+!.env.example
+credentials.json
+oauth.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+.krusty/
