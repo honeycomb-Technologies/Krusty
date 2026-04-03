@@ -19,12 +19,7 @@ const BG = '#0b1119';
 const SCREEN_H = Dimensions.get('window').height;
 const SCREEN_W = Dimensions.get('window').width;
 
-// paddingTop '35%' in RN = 35% of container WIDTH
-const LOGO_PADDING_TOP = SCREEN_W * 0.35;
-// Where 50% of screen is, relative to the logo's resting position
-const CENTER_OFFSET_Y = (SCREEN_H / 2 - 40) - LOGO_PADDING_TOP; // -40 for text height center
-
-// Same text/gradient as KrustyLogo — MUST stay in sync
+// Same text as KrustyLogo
 const LINES = [
   '▄ •▄ ▄▄▄  ▄• ▄▌.▄▄ · ▄▄▄▄▄ ▄· ▄▌',
   '█▌▄▌▪▀▄ █·█▪██▌▐█ ▀. •██  ▐█▪██▌',
@@ -39,6 +34,11 @@ const GRADIENT_COLORS = [
   '#ff6b35', '#cd853f', '#8b4513',
 ] as const;
 
+// RN paddingTop '35%' = 35% of container WIDTH
+const PADDING_TOP = SCREEN_W * 0.35;
+// Distance from 35% position down to screen center
+const DROP_DISTANCE = (SCREEN_H / 2 - 40) - PADDING_TOP;
+
 interface Props {
   children: React.ReactNode;
   onComplete?: () => void;
@@ -47,19 +47,25 @@ interface Props {
 export function SplashOverlay({ children, onComplete }: Props) {
   const [done, setDone] = useState(false);
 
-  // Measure real text widths
+  // Measure text widths with flex-start alignment (no centering offset)
   const [kWidth, setKWidth] = useState(0);
   const [fullWidth, setFullWidth] = useState(0);
   const [textHeight, setTextHeight] = useState(0);
   const measured = kWidth > 0 && fullWidth > 0 && textHeight > 0;
+  const restWidth = fullWidth - kWidth;
 
-  // Animated values
-  const translateX = useSharedValue(0);  // horizontal: centers K, then slides to 0
-  const translateY = useSharedValue(CENTER_OFFSET_Y); // vertical: starts at screen center, snaps to 0 (35%)
-  const scale = useSharedValue(1.08);    // slight scale at center, settles to 1
-  const coverX = useSharedValue(0);      // cover slides right to reveal RUSTY
-  const shimmer = useSharedValue(-80);   // gradient shimmer
-  const overlayOpacity = useSharedValue(1); // fades out at end
+  // ---- Animated values ----
+  // Phase 1: K at screen center
+  const posY = useSharedValue(DROP_DISTANCE);    // positive = below 35%, at screen center
+  const posScale = useSharedValue(1.08);
+
+  // Phase 2: Unfold — K slides left, cover reveals RUSTY
+  const offsetX = useSharedValue(0);             // shifts whole block right to center K
+  const coverX = useSharedValue(0);              // cover slides right
+
+  // Ambient
+  const shimmer = useSharedValue(-80);
+  const overlayOpacity = useSharedValue(1);
 
   const onKLayout = useCallback((e: { nativeEvent: { layout: { width: number } } }) => {
     if (kWidth === 0) setKWidth(e.nativeEvent.layout.width);
@@ -75,13 +81,10 @@ export function SplashOverlay({ children, onComplete }: Props) {
   useEffect(() => {
     if (!measured) return;
 
-    const restWidth = fullWidth - kWidth;
-    const centerOffsetX = restWidth / 2;
-
-    // Initial state: K centered on screen
-    translateX.value = centerOffsetX; // shift right so K (not full text) is centered
-    translateY.value = CENTER_OFFSET_Y; // positive = further down = screen center
-    scale.value = 1.08;
+    // Initial state: K centered horizontally and at screen center vertically
+    offsetX.value = restWidth / 2;
+    posY.value = DROP_DISTANCE;
+    posScale.value = 1.08;
     coverX.value = 0;
 
     const finish = () => {
@@ -90,46 +93,38 @@ export function SplashOverlay({ children, onComplete }: Props) {
     };
 
     const run = async () => {
-      // Hide native splash — our overlay matches it
+      // ===== PHASE 0: Hide native splash (300ms) =====
       await new Promise(r => setTimeout(r, 300));
       await SplashScreen.hideAsync();
 
-      // Shimmer across K while holding at center
-      shimmer.value = withTiming(80, {
-        duration: 2500,
-        easing: Easing.inOut(Easing.ease),
-      });
+      // Start shimmer (runs throughout)
+      shimmer.value = withTiming(80, { duration: 2500, easing: Easing.inOut(Easing.ease) });
 
-      // Hold at screen center
+      // ===== PHASE 1: Hold K at screen center (500ms) =====
       await new Promise(r => setTimeout(r, 500));
 
-      // SNAP: K moves up from 50% to 35%, scale pulses 1.08 → 0.97 → 1.0
-      translateY.value = withTiming(0, {
-        duration: 250,
-        easing: Easing.out(Easing.cubic),
-      });
-      scale.value = withSequence(
+      // ===== PHASE 2: Quick snap up to 35% with scale pulse (350ms total) =====
+      posY.value = withTiming(0, { duration: 250, easing: Easing.out(Easing.cubic) });
+      posScale.value = withSequence(
         withTiming(0.97, { duration: 200, easing: Easing.in(Easing.cubic) }),
         withTiming(1.0, { duration: 150, easing: Easing.out(Easing.cubic) }),
       );
 
-      // Brief settle
-      await new Promise(r => setTimeout(r, 400));
+      // Wait for snap to fully complete before unfold
+      await new Promise(r => setTimeout(r, 500));
 
-      // UNFOLD: K slides left, cover reveals RUSTY
-      translateX.value = withTiming(0, {
-        duration: 600,
-        easing: Easing.inOut(Easing.cubic),
-      });
-      coverX.value = withDelay(100, withTiming(restWidth + 20, {
+      // ===== PHASE 3: K slides left + RUSTY unfolds (700ms) =====
+      offsetX.value = withTiming(0, { duration: 600, easing: Easing.inOut(Easing.cubic) });
+      // Cover starts sliding 150ms after K starts moving
+      coverX.value = withDelay(150, withTiming(restWidth + 50, {
         duration: 600,
         easing: Easing.out(Easing.cubic),
       }));
 
-      // Wait for unfold
-      await new Promise(r => setTimeout(r, 800));
+      // Wait for unfold to fully complete
+      await new Promise(r => setTimeout(r, 900));
 
-      // FADE: overlay disappears, app underneath (with KrustyLogo) is revealed
+      // ===== PHASE 4: Fade out overlay (350ms) =====
       overlayOpacity.value = withTiming(0, {
         duration: 350,
         easing: Easing.out(Easing.cubic),
@@ -141,11 +136,12 @@ export function SplashOverlay({ children, onComplete }: Props) {
     run();
   }, [measured]);
 
+  // ---- Animated styles ----
   const blockStyle = useAnimatedStyle(() => ({
     transform: [
-      { translateX: translateX.value },
-      { translateY: translateY.value },
-      { scale: scale.value },
+      { translateX: offsetX.value },
+      { translateY: posY.value },
+      { scale: posScale.value },
     ],
   }));
 
@@ -166,41 +162,44 @@ export function SplashOverlay({ children, onComplete }: Props) {
   return (
     <View style={styles.root}>
       {/* App content underneath */}
-      <View style={StyleSheet.absoluteFill}>
-        {children}
-      </View>
+      <View style={StyleSheet.absoluteFill}>{children}</View>
 
-      {/* Hidden measurement views */}
+      {/* Hidden measurement — uses flex-start so widths are accurate */}
       <View style={styles.measureContainer} pointerEvents="none">
-        <View onLayout={onKLayout}>
+        <View onLayout={onKLayout} style={styles.measureRow}>
           {K_LINES.map((line, i) => (
             <Text key={`mk${i}`} style={styles.line}>{line}</Text>
           ))}
         </View>
-        <View onLayout={onFullLayout}>
+        <View onLayout={onFullLayout} style={styles.measureRow}>
           {LINES.map((line, i) => (
             <Text key={`mf${i}`} style={styles.line}>{line}</Text>
           ))}
         </View>
       </View>
 
-      {/* Splash overlay — solid BG with animated logo */}
+      {/* Splash overlay */}
       <Animated.View style={[styles.solidOverlay, fadeStyle]} pointerEvents="none">
-        {/* logoPosition matches ChatScreen empty state exactly */}
+        {/* Position matches ChatScreen empty state: paddingTop 35%, center, flex-start */}
         <View style={styles.logoPosition}>
           <Animated.View style={blockStyle}>
-            <View style={styles.relative}>
-              {/* Full KRUSTY text — single MaskedView, same as KrustyLogo */}
+            <View style={styles.textContainer}>
+              {/*
+                MaskedView renders the full KRUSTY text.
+                The mask uses flex-start alignment so text starts at x=0.
+                The gradient is positioned to cover just the text width.
+                This means cover left:kWidth correctly sits at the K's right edge.
+              */}
               <MaskedView
                 maskElement={
-                  <View style={styles.maskAlign}>
+                  <View>
                     {LINES.map((line, i) => (
                       <Text key={i} style={styles.line}>{line}</Text>
                     ))}
                   </View>
                 }
               >
-                <Animated.View style={[styles.gradientWrap, shimmerStyle]}>
+                <Animated.View style={[{ width: fullWidth || 500, height: textHeight || 80 }, shimmerStyle]}>
                   <LinearGradient
                     colors={[...GRADIENT_COLORS]}
                     start={{ x: 0, y: 0 }}
@@ -210,15 +209,15 @@ export function SplashOverlay({ children, onComplete }: Props) {
                 </Animated.View>
               </MaskedView>
 
-              {/* Cover — BG-colored rect hiding RUSTY, slides right to reveal */}
-              {kWidth > 0 && (
+              {/* Cover — same color as BG, hides RUSTY, slides right to reveal */}
+              {measured && (
                 <Animated.View
                   style={[
                     {
                       position: 'absolute',
                       top: -5,
                       left: kWidth,
-                      width: fullWidth + 50,
+                      width: restWidth + 60,
                       height: textHeight + 10,
                       backgroundColor: BG,
                     },
@@ -243,18 +242,14 @@ const styles = StyleSheet.create({
     backgroundColor: BG,
     zIndex: 10,
   },
-  // Must match ChatScreen's empty state: flex-start, center, paddingTop 35%
   logoPosition: {
     flex: 1,
     justifyContent: 'flex-start',
     alignItems: 'center',
     paddingTop: '35%',
   },
-  relative: {
+  textContainer: {
     position: 'relative',
-  },
-  maskAlign: {
-    alignItems: 'center',
   },
   line: {
     fontFamily: 'Courier',
@@ -262,10 +257,6 @@ const styles = StyleSheet.create({
     lineHeight: 14,
     letterSpacing: 0,
     color: '#000',
-  },
-  gradientWrap: {
-    width: 500,
-    height: 80,
   },
   gradient: {
     width: '100%',
@@ -276,5 +267,8 @@ const styles = StyleSheet.create({
     top: -9999,
     left: -9999,
     opacity: 0,
+  },
+  measureRow: {
+    alignItems: 'flex-start',
   },
 });
