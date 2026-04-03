@@ -6,13 +6,14 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StyleSheet } from 'react-native';
 import { ThemeProvider, useThemeContext } from '../hooks/useTheme';
 import { ConnectionProvider, useConnection } from '../hooks/useConnection';
+import { StoresProvider } from '../hooks/useStores';
 import { useDeepLink } from '../hooks/useDeepLink';
 import { SplashProvider, useSplashState } from '../hooks/useSplashState';
 import { SplashOverlay } from '../components/splash/SplashOverlay';
 
 function RootNavigator() {
   const { theme } = useThemeContext();
-  const { isConfigured } = useConnection();
+  const { client, isConfigured } = useConnection();
   useDeepLink();
   const router = useRouter();
   const segments = useSegments();
@@ -27,7 +28,7 @@ function RootNavigator() {
     }
   }, [isConfigured, segments]);
 
-  return (
+  const content = (
     <>
       <StatusBar style={theme.scheme === 'dark' ? 'light' : 'dark'} />
       <Stack
@@ -42,6 +43,12 @@ function RootNavigator() {
       </Stack>
     </>
   );
+
+  // Wrap in StoresProvider only when connected (client available)
+  if (client) {
+    return <StoresProvider client={client}>{content}</StoresProvider>;
+  }
+  return content;
 }
 
 function SplashWrapper({ children }: { children: React.ReactNode }) {

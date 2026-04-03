@@ -16,6 +16,7 @@ import * as SecureStore from '../../platform/secure-store';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
 import { useBreakpoint } from '../../hooks/useBreakpoint';
+import { useSessionsStore, useStores } from '../../hooks/useStores';
 import { MessageBubble } from '../../components/chat/MessageBubble';
 import { KrustyLogo } from '../../components/ui/KrustyLogo';
 import { ChatBar } from '../../components/chat/ChatBar';
@@ -55,8 +56,9 @@ export default function ChatScreen() {
   const { splashDone } = useSplashState();
   const entrance = useEntranceAnimation(splashDone);
 
-  // Session state
-  const [sessions, setSessions] = useState<SessionResponse[]>([]);
+  // Session state — sessions list from shared store
+  const sessions = useSessionsStore(s => s.sessions) as SessionResponse[];
+  const { sessions: sessionsStore } = useStores();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionTitle, setSessionTitle] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -115,7 +117,7 @@ export default function ChatScreen() {
   // Load sessions + models on connect, restore persisted model
   useEffect(() => {
     if (client && isConnected) {
-      client.getSessions().then(setSessions).catch(() => {});
+      sessionsStore.getState().loadSessions();
       client.getModels().then(async (res) => {
         setModels(res.models);
         if (!model) {
@@ -176,7 +178,7 @@ export default function ChatScreen() {
     // Code/Mako use the inline directory picker in the SessionDrawer.
     try {
       const session = await client.createSession(undefined, undefined, undefined, undefined, 'chat');
-      setSessions(prev => [session, ...prev]);
+      sessionsStore.getState().loadSessions();
       setSessionId(session.id);
       setSessionTitle(session.title || '');
       setMessages([]);
@@ -192,7 +194,7 @@ export default function ChatScreen() {
     try {
       const type = sessionTypeForTab(activeTab);
       const session = await client.createSession(undefined, path, undefined, 'selected', type);
-      setSessions(prev => [session, ...prev]);
+      sessionsStore.getState().loadSessions();
       setSessionId(session.id);
       setSessionTitle(session.title || '');
       setMessages([]);
@@ -213,7 +215,7 @@ export default function ChatScreen() {
         onPress: async () => {
           try {
             await client.deleteSession(id);
-            setSessions(prev => prev.filter(s => s.id !== id));
+            sessionsStore.getState().loadSessions();
             if (sessionId === id) {
               setSessionId(null);
               setSessionTitle('');
@@ -306,7 +308,7 @@ export default function ChatScreen() {
         currentSessionId = session.id;
         setSessionId(session.id);
         setSessionTitle('');
-        setSessions(prev => [session, ...prev]);
+        sessionsStore.getState().loadSessions();
       }
 
       await client.streamChat(
@@ -407,7 +409,7 @@ export default function ChatScreen() {
           },
           onTitleUpdate: (title: string) => {
             setSessionTitle(title);
-            setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, title } : s));
+            sessionsStore.getState().loadSessions();
             liveActivity.updateActivity({ chatTitle: title });
           },
           onFinish: () => {
@@ -488,7 +490,7 @@ export default function ChatScreen() {
                 if (newTitle && newTitle.trim()) {
                   setSessionTitle(newTitle.trim());
                   await client.updateSession(sessionId, { title: newTitle.trim() });
-                  setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, title: newTitle.trim() } : s));
+                  sessionsStore.getState().loadSessions();
                 }
               },
               'plain-text',
