@@ -65,6 +65,11 @@ export function SplashOverlay({ children, onComplete }: Props) {
 
   // The whole text block shifts right (to center K) then back to 0
   const blockX = useSharedValue(0);
+  // Drop: K starts higher (50% of screen) and snaps down to 35%
+  // The container already has paddingTop 35%, so we offset up by ~15% of screen height
+  const dropY = useSharedValue(0);
+  // Quick scale pulse when K lands
+  const landScale = useSharedValue(1);
   // The cover slides right to reveal RUSTY
   const coverX = useSharedValue(0);
   // Shimmer
@@ -92,8 +97,11 @@ export function SplashOverlay({ children, onComplete }: Props) {
 
     // Set initial positions
     blockX.value = centerOffset;
-    // Cover starts at the K's right edge (hides everything to the right)
     coverX.value = 0;
+    // Start K at ~50% screen (offset up from the 35% paddingTop position)
+    // 15% of screen height ≈ the difference between 50% and 35%
+    dropY.value = -120;
+    landScale.value = 1.05;
 
     const finish = () => {
       setDone(true);
@@ -109,8 +117,21 @@ export function SplashOverlay({ children, onComplete }: Props) {
         easing: Easing.inOut(Easing.ease),
       });
 
-      // Hold the centered K
-      await new Promise(r => setTimeout(r, 600));
+      // Hold at 50% briefly
+      await new Promise(r => setTimeout(r, 400));
+
+      // Quick snap down to 35% with scale pulse
+      dropY.value = withTiming(0, {
+        duration: 250,
+        easing: Easing.in(Easing.cubic),
+      });
+      landScale.value = withDelay(200, withTiming(1, {
+        duration: 150,
+        easing: Easing.out(Easing.cubic),
+      }));
+
+      // Brief hold after landing
+      await new Promise(r => setTimeout(r, 450));
 
       // Slide the whole block left to final position
       blockX.value = withTiming(0, {
@@ -140,7 +161,11 @@ export function SplashOverlay({ children, onComplete }: Props) {
   }, [measured]);
 
   const blockStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: blockX.value }],
+    transform: [
+      { translateX: blockX.value },
+      { translateY: dropY.value },
+      { scale: landScale.value },
+    ],
   }));
 
   const coverStyle = useAnimatedStyle(() => ({
