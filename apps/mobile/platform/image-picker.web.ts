@@ -9,7 +9,10 @@ function pickFile(accept: string): Promise<PickerResult> {
     input.type = 'file';
     input.accept = accept;
     input.style.display = 'none';
+    document.body.appendChild(input);
+    const cleanup = () => { if (input.parentNode) input.parentNode.removeChild(input); };
     input.onchange = async () => {
+      cleanup();
       const file = input.files?.[0];
       if (!file) { resolve({ canceled: true, assets: [] }); return; }
       const base64 = await fileToBase64(file);
@@ -18,11 +21,8 @@ function pickFile(accept: string): Promise<PickerResult> {
         assets: [{ uri: URL.createObjectURL(file), fileName: file.name, mimeType: file.type, base64 }],
       });
     };
-    // User cancelled the picker
-    input.oncancel = () => resolve({ canceled: true, assets: [] });
-    document.body.appendChild(input);
+    input.oncancel = () => { cleanup(); resolve({ canceled: true, assets: [] }); };
     input.click();
-    document.body.removeChild(input);
   });
 }
 

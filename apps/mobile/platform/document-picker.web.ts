@@ -8,7 +8,10 @@ export async function getDocumentAsync(_options?: any): Promise<DocumentResult> 
     const input = document.createElement('input');
     input.type = 'file';
     input.style.display = 'none';
+    document.body.appendChild(input);
+    const cleanup = () => { if (input.parentNode) input.parentNode.removeChild(input); };
     input.onchange = () => {
+      cleanup();
       const file = input.files?.[0];
       if (!file) { resolve({ canceled: true, assets: [] }); return; }
       resolve({
@@ -16,9 +19,7 @@ export async function getDocumentAsync(_options?: any): Promise<DocumentResult> 
         assets: [{ uri: URL.createObjectURL(file), name: file.name, mimeType: file.type || 'application/octet-stream' }],
       });
     };
-    input.oncancel = () => resolve({ canceled: true, assets: [] });
-    document.body.appendChild(input);
+    input.oncancel = () => { cleanup(); resolve({ canceled: true, assets: [] }); };
     input.click();
-    document.body.removeChild(input);
   });
 }

@@ -1,7 +1,7 @@
 import * as SecureStore from './secure-store';
 import type { KrustyStorage } from '@krusty/state';
 
-export class NativeStorage implements KrustyStorage {
+class NativeStorage implements KrustyStorage {
   get(key: string): string | null {
     // SecureStore is async but KrustyStorage interface is sync.
     // Use a sync cache with async hydration for stored values.

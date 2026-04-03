@@ -20,3 +20,5 @@ export function LinearGradient({ colors, start, end, style, children }: LinearGr
     </View>
   );
 }
+
+export type { LinearGradientProps };
