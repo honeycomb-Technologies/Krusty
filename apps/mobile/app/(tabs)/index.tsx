@@ -69,6 +69,8 @@ export default function ChatScreen() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [reportsOpen, setReportsOpen] = useState(false);
   const flatListRef = useRef<FlatList>(null);
+  const listHeightRef = useRef(0);
+  const contentHeightRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
 
   // Mutable ref for the current assistant message being streamed.
@@ -205,16 +207,27 @@ export default function ChatScreen() {
     });
   }, []);
 
-  // Auto-scroll: runs after each render when messages change during streaming
+  // Auto-scroll: positions last text above the ChatBar overlay zone.
+  // scrollToEnd goes to the absolute bottom (behind ChatBar).
+  // We stop 130px short so text lands above the input bar.
+  const CHAT_BAR_ZONE = 130;
   const msgLen = messages.length;
   const lastMsgContent = messages[msgLen - 1]?.content?.length ?? 0;
+
+  const scrollToBottom = useCallback(() => {
+    const content = contentHeightRef.current;
+    const viewport = listHeightRef.current;
+    if (!content || !viewport || content <= viewport) return;
+    const maxOffset = content - viewport;
+    const targetOffset = Math.max(0, maxOffset - CHAT_BAR_ZONE);
+    flatListRef.current?.scrollToOffset({ offset: targetOffset, animated: !isStreaming });
+  }, [isStreaming]);
+
   useEffect(() => {
     if (msgLen > 0) {
-      requestAnimationFrame(() => {
-        flatListRef.current?.scrollToEnd({ animated: !isStreaming });
-      });
+      requestAnimationFrame(scrollToBottom);
     }
-  }, [msgLen, lastMsgContent, isStreaming]);
+  }, [msgLen, lastMsgContent, scrollToBottom]);
 
   const startFlushTimer = useCallback(() => {
     if (flushTimerRef.current) return;
@@ -436,7 +449,7 @@ export default function ChatScreen() {
           <KrustyLogo />
         </Pressable>
       ) : (
-        <View style={styles.messagesWrap}>
+        <View style={styles.flex}>
           <FlatList
             ref={flatListRef}
             data={messages}
@@ -452,6 +465,8 @@ export default function ChatScreen() {
             )}
             style={styles.flex}
             contentContainerStyle={[styles.list, isDesktop && styles.listDesktop]}
+            onLayout={(e) => { listHeightRef.current = e.nativeEvent.layout.height; }}
+            onContentSizeChange={(_w, h) => { contentHeightRef.current = h; }}
             keyboardDismissMode="interactive"
             keyboardShouldPersistTaps="handled"
           />
@@ -530,7 +545,6 @@ export default function ChatScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   flex: { flex: 1 },
-  messagesWrap: { flex: 1, minHeight: 0 },
   topBar: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -557,7 +571,7 @@ const styles = StyleSheet.create({
   list: {
     paddingHorizontal: 16,
     paddingTop: 8,
-    paddingBottom: 8,
+    paddingBottom: 16,
   },
   listDesktop: {
     maxWidth: 800,
