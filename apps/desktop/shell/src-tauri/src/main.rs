@@ -21,8 +21,12 @@ fn main() {
     tauri::Builder::default()
         .setup(move |app| {
             if let Some(window) = app.webview_windows().values().next() {
-                let url = format!("http://localhost:{}", port);
-                let _ = window.navigate(url.parse().unwrap());
+                // Inject server URL so the Expo web app can auto-connect
+                let js = format!(
+                    "window.__KRUSTY_SERVER_URL='http://localhost:{}';window.__KRUSTY_SERVER_TOKEN='local';",
+                    port
+                );
+                let _ = window.eval(&js);
             }
             Ok(())
         })

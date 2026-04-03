@@ -4,13 +4,13 @@
   "version": "0.5.4",
   "identifier": "io.krusty.desktop",
   "build": {
-    "beforeDevCommand": "cd ../../pwa/app && bun run dev --host --port 5173",
+    "beforeDevCommand": "cd ../../mobile && npx expo start --web --port 5173",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "cd ../../pwa/app && bun install && bun run build",
-    "frontendDist": "../../../pwa/app/build"
+    "beforeBuildCommand": "cd ../../mobile && npx expo export --platform web",
+    "frontendDist": "../../mobile/dist"
   },
   "app": {
-    "withGlobalTauri": false,
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "Krusty Desktop",
@@ -37,7 +37,7 @@
     "homepage": "https://github.com/honeycomb-Technologies/Krusty",
     "category": "DeveloperTool",
     "shortDescription": "Native Linux desktop shell for the Krusty coding assistant.",
-    "longDescription": "Krusty Desktop packages the Krusty PWA in a native Linux app and starts the embedded local server runtime for coding, chat, and project operations.",
+    "longDescription": "Krusty Desktop packages the Krusty app in a native Linux shell and starts the embedded local server runtime for coding, chat, and project operations.",
     "license": "MIT",
     "licenseFile": "../../../../LICENSE",
     "linux": {

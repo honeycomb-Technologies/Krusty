@@ -1,0 +1,76 @@
+{
+  "expo": {
+    "name": "Krusty",
+    "slug": "krusty",
+    "version": "0.9.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "scheme": "krusty",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0b1119"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "io.krusty.mobile",
+      "buildNumber": "12",
+      "backgroundColor": "#0b1119",
+      "config": {
+        "usesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "io.krusty.mobile",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0b1119"
+      },
+      "edgeToEdgeEnabled": true
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single",
+      "favicon": "./assets/icon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#0b1119",
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 200
+        }
+      ],
+      "expo-font",
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "Allow Krusty to take photos for attachments",
+          "photosPermission": "Allow Krusty to access photos for attachments"
+        }
+      ],
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Allow Krusty to use the microphone for voice input",
+          "speechRecognitionPermission": "Allow Krusty to use speech recognition for voice input"
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "6e327449-af3c-4138-b1c4-7ceca2baf243"
+      }
+    },
+    "owner": "j-burgess"
+  }
+}
