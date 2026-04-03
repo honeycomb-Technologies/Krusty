@@ -65,6 +65,49 @@
           "microphonePermission": "Allow Krusty to use the microphone for voice input",
           "speechRecognitionPermission": "Allow Krusty to use speech recognition for voice input"
         }
+      ],
+      [
+        "expo-widgets",
+        {
+          "groupIdentifier": "group.io.krusty.mobile",
+          "enablePushNotifications": true,
+          "frequentUpdates": true,
+          "widgets": [
+            {
+              "name": "MakoWidget",
+              "displayName": "Mako Status",
+              "description": "Daily updates and status from your Mako agent",
+              "supportedFamilies": [
+                "systemSmall",
+                "systemMedium",
+                "systemLarge",
+                "accessoryCircular",
+                "accessoryRectangular",
+                "accessoryInline"
+              ],
+              "contentMarginsDisabled": false
+            },
+            {
+              "name": "ChatWidget",
+              "displayName": "Krusty Chat",
+              "description": "Active chat status and quick launch",
+              "supportedFamilies": [
+                "systemSmall",
+                "systemMedium",
+                "accessoryCircular",
+                "accessoryRectangular"
+              ],
+              "contentMarginsDisabled": false
+            },
+            {
+              "name": "ChatStreamActivity",
+              "displayName": "Chat Stream",
+              "description": "Live streaming chat activity",
+              "supportedFamilies": [],
+              "contentMarginsDisabled": false
+            }
+          ]
+        }
       ]
     ],
     "experiments": {
