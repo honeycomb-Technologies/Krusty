@@ -10,6 +10,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod agent_state;
+pub mod apns_devices;
 pub mod autonomous_tasks;
 mod block_ui;
 pub mod credentials;
@@ -31,6 +32,7 @@ mod runtime_traces;
 mod sessions;
 
 pub use agent_state::AgentState;
+pub use apns_devices::{ApnsDevice, ApnsDeviceStore};
 pub use autonomous_tasks::{AutonomousTask, AutonomousTaskStore, TaskStatus};
 pub use block_ui::BlockUiState;
 pub use credentials::CredentialStore;

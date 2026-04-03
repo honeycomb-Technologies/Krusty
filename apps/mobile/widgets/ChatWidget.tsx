@@ -1,0 +1,188 @@
+import { createWidget } from 'expo-widgets';
+import {
+  Text,
+  VStack,
+  HStack,
+  Spacer,
+  Image,
+  AccessoryWidgetBackground,
+} from '@expo/ui/swift-ui';
+import {
+  font,
+  foregroundStyle,
+  padding,
+  cornerRadius,
+  background,
+  opacity,
+  lineLimit,
+  widgetURL,
+} from '@expo/ui/swift-ui/modifiers';
+import type { WidgetEnvironment } from 'expo-widgets';
+
+interface ChatProps {
+  hasActiveSession: boolean;
+  sessionTitle: string;
+  lastMessage: string;
+  model: string;
+  isStreaming: boolean;
+  tokenCount: number;
+  serverConnected: boolean;
+}
+
+function ChatWidget(props: ChatProps, env: WidgetEnvironment) {
+  'widget';
+
+  const { hasActiveSession, sessionTitle, lastMessage, model, isStreaming, tokenCount, serverConnected } = props;
+  const family = env.widgetFamily;
+
+  // Lock screen — circular: tap to launch
+  if (family === 'accessoryCircular') {
+    return (
+      <AccessoryWidgetBackground modifiers={[widgetURL('krusty://chat')]}>
+        <VStack alignment="center">
+          <Image
+            systemName={isStreaming ? 'ellipsis.bubble.fill' : 'bubble.left.fill'}
+            modifiers={[font({ size: 16 })]}
+          />
+          <Text modifiers={[font({ size: 8 })]}>
+            {isStreaming ? 'Live' : 'Chat'}
+          </Text>
+        </VStack>
+      </AccessoryWidgetBackground>
+    );
+  }
+
+  // Lock screen — rectangular
+  if (family === 'accessoryRectangular') {
+    return (
+      <VStack alignment="leading" modifiers={[widgetURL('krusty://chat')]}>
+        <HStack>
+          <Image systemName="bubble.left.fill" modifiers={[font({ size: 10 })]} />
+          <Text modifiers={[font({ size: 12, weight: 'semibold' })]}>
+            {hasActiveSession ? sessionTitle : 'Krusty'}
+          </Text>
+        </HStack>
+        <Text modifiers={[font({ size: 11 }), lineLimit(2), opacity(0.7)]}>
+          {hasActiveSession
+            ? (isStreaming ? 'Streaming response...' : lastMessage || 'No messages yet')
+            : 'Tap to start a new chat'}
+        </Text>
+      </VStack>
+    );
+  }
+
+  // Home screen — small (2x2)
+  if (family === 'systemSmall') {
+    return (
+      <VStack alignment="leading" modifiers={[
+        padding({ all: 14 }),
+        background('#0b1119'),
+        foregroundStyle('#ffffff'),
+        widgetURL('krusty://chat'),
+      ]}>
+        <HStack>
+          <Image
+            systemName={serverConnected ? 'circle.fill' : 'circle'}
+            modifiers={[foregroundStyle(serverConnected ? '#4ade80' : '#ef4444'), font({ size: 8 })]}
+          />
+          <Text modifiers={[font({ size: 11 }), opacity(0.5)]}>Krusty</Text>
+          <Spacer />
+          {isStreaming && (
+            <Image
+              systemName="ellipsis.bubble.fill"
+              modifiers={[foregroundStyle('#ff6b35'), font({ size: 12 })]}
+            />
+          )}
+        </HStack>
+
+        <Spacer />
+
+        {hasActiveSession ? (
+          <VStack alignment="leading" spacing={4}>
+            <Text modifiers={[font({ size: 13, weight: 'semibold' }), lineLimit(1)]}>
+              {sessionTitle}
+            </Text>
+            <Text modifiers={[font({ size: 11 }), lineLimit(3), opacity(0.7)]}>
+              {isStreaming ? 'Generating response...' : lastMessage || 'No messages'}
+            </Text>
+          </VStack>
+        ) : (
+          <VStack alignment="center" spacing={6}>
+            <Image systemName="plus.bubble.fill" modifiers={[foregroundStyle('#ff6b35'), font({ size: 24 })]} />
+            <Text modifiers={[font({ size: 12 }), opacity(0.6)]}>New Chat</Text>
+          </VStack>
+        )}
+
+        <Spacer />
+
+        {hasActiveSession && (
+          <HStack>
+            <Text modifiers={[font({ size: 9 }), opacity(0.4)]}>{model}</Text>
+            <Spacer />
+            <Text modifiers={[font({ size: 9 }), opacity(0.4)]}>{tokenCount.toLocaleString()} tokens</Text>
+          </HStack>
+        )}
+      </VStack>
+    );
+  }
+
+  // Home screen — medium (4x2)
+  return (
+    <VStack alignment="leading" modifiers={[
+      padding({ all: 14 }),
+      background('#0b1119'),
+      foregroundStyle('#ffffff'),
+      widgetURL('krusty://chat'),
+    ]}>
+      <HStack>
+        <Image
+          systemName={serverConnected ? 'circle.fill' : 'circle'}
+          modifiers={[foregroundStyle(serverConnected ? '#4ade80' : '#ef4444'), font({ size: 8 })]}
+        />
+        <Text modifiers={[font({ size: 13, weight: 'bold' })]}>Krusty Chat</Text>
+        <Spacer />
+        {isStreaming && (
+          <HStack spacing={4}>
+            <Image systemName="ellipsis.bubble.fill" modifiers={[foregroundStyle('#ff6b35'), font({ size: 12 })]} />
+            <Text modifiers={[font({ size: 11 }), foregroundStyle('#ff6b35')]}>Streaming</Text>
+          </HStack>
+        )}
+      </HStack>
+
+      <Spacer />
+
+      {hasActiveSession ? (
+        <VStack alignment="leading" spacing={4}>
+          <Text modifiers={[font({ size: 14, weight: 'semibold' }), lineLimit(1)]}>
+            {sessionTitle}
+          </Text>
+          <Text modifiers={[font({ size: 12 }), lineLimit(2), opacity(0.7)]}>
+            {isStreaming ? 'Generating response...' : lastMessage || 'No messages yet'}
+          </Text>
+        </VStack>
+      ) : (
+        <HStack alignment="center" spacing={8}>
+          <Image systemName="plus.bubble.fill" modifiers={[foregroundStyle('#ff6b35'), font({ size: 28 })]} />
+          <VStack alignment="leading">
+            <Text modifiers={[font({ size: 14, weight: 'medium' })]}>Start a New Chat</Text>
+            <Text modifiers={[font({ size: 11 }), opacity(0.5)]}>Tap to open Krusty</Text>
+          </VStack>
+        </HStack>
+      )}
+
+      <Spacer />
+
+      <HStack>
+        <Text modifiers={[font({ size: 10 }), opacity(0.4)]}>
+          {hasActiveSession ? model : (serverConnected ? 'Connected' : 'Disconnected')}
+        </Text>
+        <Spacer />
+        {hasActiveSession && (
+          <Text modifiers={[font({ size: 10 }), opacity(0.4)]}>{tokenCount.toLocaleString()} tokens</Text>
+        )}
+      </HStack>
+    </VStack>
+  );
+}
+
+export default createWidget('ChatWidget', ChatWidget);

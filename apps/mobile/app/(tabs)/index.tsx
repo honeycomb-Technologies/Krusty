@@ -23,6 +23,12 @@ import { SessionDrawer } from '../../components/chat/SessionDrawer';
 import { DesktopShell } from '../../components/layout/DesktopShell';
 import { ReportsViewer } from '../../components/ReportsViewer';
 import { LinearGradient } from '../../platform/linear-gradient';
+import { useSplashState } from '../../hooks/useSplashState';
+import { useEntranceAnimation } from '../../hooks/useEntranceAnimation';
+import { useLiveActivity } from '../../hooks/useLiveActivity';
+import { useWidgetSync } from '../../hooks/useWidgetSync';
+import { useNotifications } from '../../hooks/useNotifications';
+import Animated from 'react-native-reanimated';
 import type { ChatMessage, ModelInfo, SessionResponse, SessionType, ThinkingLevel } from '@krusty/api';
 
 const TAB_TYPES: SessionType[] = ['chat', 'code', 'mako'];
@@ -46,6 +52,8 @@ export default function ChatScreen() {
   const { theme } = useThemeContext();
   const { client, isConnected } = useConnection();
   const { isDesktop } = useBreakpoint();
+  const { splashDone } = useSplashState();
+  const entrance = useEntranceAnimation(splashDone);
 
   // Session state
   const [sessions, setSessions] = useState<SessionResponse[]>([]);
@@ -64,10 +72,34 @@ export default function ChatScreen() {
   const [tokenCount, setTokenCount] = useState(0);
   const [pendingApproval, setPendingApproval] = useState<{id: string; name: string; args: Record<string, unknown>} | null>(null);
 
+  // Tool approval handler shared by Live Activity + Notifications
+  const toolApprovalHandler = useCallback((id: string, approved: boolean) => {
+    if (client && sessionId) {
+      client.submitToolApproval(sessionId, id, approved).catch(() => {});
+      setPendingApproval(null);
+    }
+  }, [client, sessionId]);
+
+  const liveActivity = useLiveActivity({ onToolApproval: toolApprovalHandler });
+  const notifications = useNotifications({ onToolApproval: toolApprovalHandler });
+
   // UI state
   const [activeTab, setActiveTab] = useState(1); // 0=Chat, 1=Code, 2=Mako
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [reportsOpen, setReportsOpen] = useState(false);
+
+  // Sync widget state
+  const lastMsg = messages[messages.length - 1];
+  useWidgetSync({
+    hasActiveSession: !!sessionId,
+    sessionTitle: sessionTitle || 'Untitled',
+    lastMessage: lastMsg?.role === 'assistant' ? (lastMsg.content?.slice(0, 200) || '') : '',
+    model: model || '',
+    isStreaming,
+    tokenCount,
+    serverConnected: isConnected,
+  });
+
   const flatListRef = useRef<FlatList>(null);
   const listHeightRef = useRef(0);
   const contentHeightRef = useRef(0);
@@ -253,6 +285,9 @@ export default function ChatScreen() {
     setIsStreaming(true);
     setIsThinking(false);
 
+    // Start Live Activity for Dynamic Island / Lock Screen
+    liveActivity.startActivity(sessionTitle || 'Chat', model || 'unknown');
+
     const abort = new AbortController();
     abortRef.current = abort;
     startFlushTimer();
@@ -287,17 +322,23 @@ export default function ChatScreen() {
           onTextDelta: (delta: string) => {
             assistantRef.current.content += delta;
             setIsThinking(false);
+            liveActivity.updateActivity({
+              status: 'streaming',
+              currentText: assistantRef.current.content.slice(-200),
+            });
           },
           onThinkingDelta: (thinking: string) => {
             assistantRef.current.thinking = (assistantRef.current.thinking ?? '') + thinking;
             setIsThinking(true);
+            liveActivity.updateActivity({ status: 'thinking', currentText: 'Thinking...' });
           },
           onToolCallStart: (id: string, name: string) => {
             setIsThinking(false);
             const toolCalls = assistantRef.current.toolCalls ?? [];
             toolCalls.push({ id, name, status: 'running' as const });
             assistantRef.current.toolCalls = toolCalls;
-            flushAssistantRef(); // immediate flush for tool visibility
+            flushAssistantRef();
+            liveActivity.updateActivity({ status: 'tool_call', currentTool: name });
           },
           onToolCallComplete: (id: string, _name: string, args: Record<string, unknown>) => {
             const toolCalls = assistantRef.current.toolCalls ?? [];
@@ -321,6 +362,13 @@ export default function ChatScreen() {
           onDelegatedProgress: () => {},
           onToolApprovalRequired: (id: string, name: string, _args: Record<string, unknown>) => {
             setPendingApproval({ id, name, args: _args });
+            liveActivity.updateActivity({
+              status: 'awaiting_approval',
+              toolApprovalId: id,
+              toolApprovalName: name,
+            });
+            // Send notification for lock screen approval when backgrounded
+            notifications.notifyToolApproval(id, name, currentSessionId!);
             Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
             Alert.alert(
               'Tool Approval',
@@ -352,13 +400,34 @@ export default function ChatScreen() {
             if (newMode === 'build' || newMode === 'plan') setMode(newMode);
           },
           onPlanComplete: () => {},
-          onUsage: (prompt: number, completion: number) => { setTokenCount(prompt + completion); },
+          onUsage: (prompt: number, completion: number) => {
+            const total = prompt + completion;
+            setTokenCount(total);
+            liveActivity.updateActivity({ tokenCount: total });
+          },
           onTitleUpdate: (title: string) => {
             setSessionTitle(title);
             setSessions(prev => prev.map(s => s.id === currentSessionId ? { ...s, title } : s));
+            liveActivity.updateActivity({ chatTitle: title });
           },
-          onFinish: () => { stopFlushTimer(); setIsStreaming(false); setIsThinking(false); },
-          onError: () => { stopFlushTimer(); setIsStreaming(false); setIsThinking(false); },
+          onFinish: () => {
+            stopFlushTimer();
+            setIsStreaming(false);
+            setIsThinking(false);
+            liveActivity.endActivity();
+            notifications.notifyStreamComplete(
+              currentSessionId!,
+              sessionTitle || 'Chat',
+              tokenCount,
+              0,
+            );
+          },
+          onError: () => {
+            stopFlushTimer();
+            setIsStreaming(false);
+            setIsThinking(false);
+            liveActivity.endActivity();
+          },
         },
         abort.signal,
       );
@@ -366,13 +435,15 @@ export default function ChatScreen() {
       stopFlushTimer();
       setIsStreaming(false);
       setIsThinking(false);
+      liveActivity.endActivity();
     }
-  }, [activeTab, client, sessionId, model, thinkingLevel, mode, startFlushTimer, stopFlushTimer, flushAssistantRef]);
+  }, [activeTab, client, sessionId, model, thinkingLevel, mode, startFlushTimer, stopFlushTimer, flushAssistantRef, liveActivity]);
 
   const handleStop = useCallback(() => {
     abortRef.current?.abort();
     setIsStreaming(false);
-  }, []);
+    liveActivity.endActivity();
+  }, [liveActivity]);
 
   const handleModelSelect = (modelId: string) => {
     setModel(modelId);
@@ -394,7 +465,7 @@ export default function ChatScreen() {
   const chatContent = (
     <SafeAreaView style={[styles.container, { backgroundColor: t.background }]} edges={isDesktop ? [] : ['top']}>
       {/* Top bar */}
-      <View style={styles.topBar}>
+      <Animated.View style={[styles.topBar, entrance.topBarStyle]}>
         {!isDesktop && (
           <Pressable
             onPress={() => {
@@ -441,50 +512,53 @@ export default function ChatScreen() {
         >
           <FileSearch size={20} color={t.mutedForeground} strokeWidth={1.8} />
         </Pressable>
-      </View>
+      </Animated.View>
 
       {/* Messages */}
-      {messages.length === 0 ? (
-        <Pressable style={styles.empty} onPress={Keyboard.dismiss}>
-          <KrustyLogo />
-        </Pressable>
-      ) : (
-        <View style={styles.flex}>
-          <FlatList
-            ref={flatListRef}
-            data={messages}
-            keyExtractor={(_, i) => String(i)}
-            onScrollBeginDrag={Keyboard.dismiss}
-            renderItem={({ item, index }: { item: ChatMessage; index: number }) => (
-              <MessageBubble
-                message={item}
-                isLast={index === messages.length - 1}
-                isStreaming={isStreaming && index === messages.length - 1}
-                isThinking={isThinking && index === messages.length - 1}
-              />
-            )}
-            style={styles.flex}
-            contentContainerStyle={[styles.list, isDesktop && styles.listDesktop]}
-            onLayout={(e) => { listHeightRef.current = e.nativeEvent.layout.height; }}
-            onContentSizeChange={(_w, h) => { contentHeightRef.current = h; }}
-            keyboardDismissMode="interactive"
-            keyboardShouldPersistTaps="handled"
-          />
-          {/* Fade edges */}
-          <LinearGradient
-            colors={[t.background, t.background + '00']}
-            style={styles.fadeTop}
-            pointerEvents="none"
-          />
-          <LinearGradient
-            colors={[t.background + '00', t.background]}
-            style={styles.fadeBottom}
-            pointerEvents="none"
-          />
-        </View>
-      )}
+      <Animated.View style={[styles.flex, entrance.contentStyle]}>
+        {messages.length === 0 ? (
+          <Pressable style={styles.empty} onPress={Keyboard.dismiss}>
+            <KrustyLogo />
+          </Pressable>
+        ) : (
+          <View style={styles.flex}>
+            <FlatList
+              ref={flatListRef}
+              data={messages}
+              keyExtractor={(_, i) => String(i)}
+              onScrollBeginDrag={Keyboard.dismiss}
+              renderItem={({ item, index }: { item: ChatMessage; index: number }) => (
+                <MessageBubble
+                  message={item}
+                  isLast={index === messages.length - 1}
+                  isStreaming={isStreaming && index === messages.length - 1}
+                  isThinking={isThinking && index === messages.length - 1}
+                />
+              )}
+              style={styles.flex}
+              contentContainerStyle={[styles.list, isDesktop && styles.listDesktop]}
+              onLayout={(e) => { listHeightRef.current = e.nativeEvent.layout.height; }}
+              onContentSizeChange={(_w, h) => { contentHeightRef.current = h; }}
+              keyboardDismissMode="interactive"
+              keyboardShouldPersistTaps="handled"
+            />
+            {/* Fade edges */}
+            <LinearGradient
+              colors={[t.background, t.background + '00']}
+              style={styles.fadeTop}
+              pointerEvents="none"
+            />
+            <LinearGradient
+              colors={[t.background + '00', t.background]}
+              style={styles.fadeBottom}
+              pointerEvents="none"
+            />
+          </View>
+        )}
+      </Animated.View>
 
       {/* Chat bar */}
+      <Animated.View style={entrance.bottomBarStyle}>
       <ChatBar
         onSend={handleSend}
         onStop={handleStop}
@@ -502,6 +576,7 @@ export default function ChatScreen() {
         onResearchToggle={() => setResearchEnabled(r => !r)}
         tokenCount={tokenCount}
       />
+      </Animated.View>
 
       {/* Reports viewer */}
       <ReportsViewer visible={reportsOpen} onClose={() => setReportsOpen(false)} />
