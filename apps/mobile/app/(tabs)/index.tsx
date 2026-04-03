@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect } from "react";
 import {
   View,
   FlatList,
@@ -7,42 +7,48 @@ import {
   Pressable,
   Alert,
   Keyboard,
-} from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
-import { Menu, FileSearch } from 'lucide-react-native';
-import * as Haptics from '../../platform/haptics';
-import * as SecureStore from '../../platform/secure-store';
-import { useThemeContext } from '../../hooks/useTheme';
-import { useConnection } from '../../hooks/useConnection';
-import { useBreakpoint } from '../../hooks/useBreakpoint';
-import { useSessionsStore, useStores } from '../../hooks/useStores';
-import { MessageBubble } from '../../components/chat/MessageBubble';
-import { KrustyLogo } from '../../components/ui/KrustyLogo';
-import { ChatBar } from '../../components/chat/ChatBar';
-import { SessionDrawer } from '../../components/chat/SessionDrawer';
-import { DesktopShell } from '../../components/layout/DesktopShell';
-import { ReportsViewer } from '../../components/ReportsViewer';
-import { LinearGradient } from '../../platform/linear-gradient';
-import { useSplashState } from '../../hooks/useSplashState';
-import { useEntranceAnimation } from '../../hooks/useEntranceAnimation';
-import { useLiveActivity } from '../../hooks/useLiveActivity';
-import { useWidgetSync } from '../../hooks/useWidgetSync';
-import { useNotifications } from '../../hooks/useNotifications';
-import Animated from 'react-native-reanimated';
-import type { ChatMessage, ModelInfo, SessionResponse, SessionType, ThinkingLevel } from '@krusty/api';
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { router } from "expo-router";
+import { Menu, FileSearch } from "lucide-react-native";
+import * as Haptics from "../../platform/haptics";
+import * as SecureStore from "../../platform/secure-store";
+import { useThemeContext } from "../../hooks/useTheme";
+import { useConnection } from "../../hooks/useConnection";
+import { useBreakpoint } from "../../hooks/useBreakpoint";
+import { useSessionsStore, useStores } from "../../hooks/useStores";
+import { MessageBubble } from "../../components/chat/MessageBubble";
+import { KrustyLogo } from "../../components/ui/KrustyLogo";
+import { ChatBar } from "../../components/chat/ChatBar";
+import { SessionDrawer } from "../../components/chat/SessionDrawer";
+import { DesktopShell } from "../../components/layout/DesktopShell";
+import { ReportsViewer } from "../../components/ReportsViewer";
+import { LinearGradient } from "../../platform/linear-gradient";
+import { useSplashState } from "../../hooks/useSplashState";
+import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
+import { useLiveActivity } from "../../hooks/useLiveActivity";
+import { useWidgetSync } from "../../hooks/useWidgetSync";
+import { useNotifications } from "../../hooks/useNotifications";
+import Animated from "react-native-reanimated";
+import type {
+  ChatMessage,
+  ModelInfo,
+  SessionResponse,
+  SessionType,
+  ThinkingLevel,
+} from "@krusty/api";
 
-const TAB_TYPES: SessionType[] = ['chat', 'code', 'mako'];
+const TAB_TYPES: SessionType[] = ["chat", "code", "mako"];
 
 function sessionTypeForTab(index: number): SessionType {
-  return TAB_TYPES[index] ?? 'code';
+  return TAB_TYPES[index] ?? "code";
 }
 
 function tabForSessionType(type: SessionType): number {
   switch (type) {
-    case 'chat':
+    case "chat":
       return 0;
-    case 'mako':
+    case "mako":
       return 2;
     default:
       return 1;
@@ -57,10 +63,10 @@ export default function ChatScreen() {
   const entrance = useEntranceAnimation(splashDone);
 
   // Session state — sessions list from shared store
-  const sessions = useSessionsStore(s => s.sessions) as SessionResponse[];
+  const sessions = useSessionsStore((s) => s.sessions) as SessionResponse[];
   const { sessions: sessionsStore } = useStores();
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [sessionTitle, setSessionTitle] = useState('');
+  const [sessionTitle, setSessionTitle] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
 
   // Chat state
@@ -68,22 +74,33 @@ export default function ChatScreen() {
   const [isThinking, setIsThinking] = useState(false);
   const [model, setModel] = useState<string | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>('off');
-  const [mode, setMode] = useState<'build' | 'plan'>('build');
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>("off");
+  const [mode, setMode] = useState<"build" | "plan">("build");
   const [researchEnabled, setResearchEnabled] = useState(false);
   const [tokenCount, setTokenCount] = useState(0);
-  const [pendingApproval, setPendingApproval] = useState<{id: string; name: string; args: Record<string, unknown>} | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<{
+    id: string;
+    name: string;
+    args: Record<string, unknown>;
+  } | null>(null);
 
   // Tool approval handler shared by Live Activity + Notifications
-  const toolApprovalHandler = useCallback((id: string, approved: boolean) => {
-    if (client && sessionId) {
-      client.submitToolApproval(sessionId, id, approved).catch(() => {});
-      setPendingApproval(null);
-    }
-  }, [client, sessionId]);
+  const toolApprovalHandler = useCallback(
+    (id: string, approved: boolean) => {
+      if (client && sessionId) {
+        client.submitToolApproval(sessionId, id, approved).catch(() => {});
+        setPendingApproval(null);
+      }
+    },
+    [client, sessionId],
+  );
 
-  const liveActivity = useLiveActivity({ onToolApproval: toolApprovalHandler });
-  const notifications = useNotifications({ onToolApproval: toolApprovalHandler });
+  const { startActivity, updateActivity, endActivity } = useLiveActivity({
+    onToolApproval: toolApprovalHandler,
+  });
+  const { notifyToolApproval, notifyStreamComplete } = useNotifications({
+    onToolApproval: toolApprovalHandler,
+  });
 
   // UI state
   const [activeTab, setActiveTab] = useState(1); // 0=Chat, 1=Code, 2=Mako
@@ -94,9 +111,10 @@ export default function ChatScreen() {
   const lastMsg = messages[messages.length - 1];
   useWidgetSync({
     hasActiveSession: !!sessionId,
-    sessionTitle: sessionTitle || 'Untitled',
-    lastMessage: lastMsg?.role === 'assistant' ? (lastMsg.content?.slice(0, 200) || '') : '',
-    model: model || '',
+    sessionTitle: sessionTitle || "Untitled",
+    lastMessage:
+      lastMsg?.role === "assistant" ? lastMsg.content?.slice(0, 200) || "" : "",
+    model: model || "",
     isStreaming,
     tokenCount,
     serverConnected: isConnected,
@@ -109,7 +127,11 @@ export default function ChatScreen() {
 
   // Mutable ref for the current assistant message being streamed.
   // Avoids recreating the entire messages array on every delta.
-  const assistantRef = useRef<ChatMessage>({ role: 'assistant', content: '', toolCalls: [] });
+  const assistantRef = useRef<ChatMessage>({
+    role: "assistant",
+    content: "",
+    toolCalls: [],
+  });
   const flushTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const t = theme.colors;
@@ -118,69 +140,94 @@ export default function ChatScreen() {
   useEffect(() => {
     if (client && isConnected) {
       sessionsStore.getState().loadSessions();
-      client.getModels().then(async (res) => {
-        setModels(res.models);
-        if (!model) {
-          const saved = await SecureStore.getItemAsync('krusty_selected_model');
-          const validSaved = saved && res.models.some((m: { id: string }) => m.id === saved);
-          setModel(validSaved ? saved : res.default_model);
-        }
-      }).catch(() => {});
+      client
+        .getModels()
+        .then(async (res) => {
+          setModels(res.models);
+          if (!model) {
+            const saved = await SecureStore.getItemAsync(
+              "krusty_selected_model",
+            );
+            const validSaved =
+              saved && res.models.some((m: { id: string }) => m.id === saved);
+            setModel(validSaved ? saved : res.default_model);
+          }
+        })
+        .catch(() => {});
     }
   }, [client, isConnected]);
 
   // Load session messages
-  const loadSession = useCallback(async (session: SessionResponse) => {
-    if (!client) return;
-    setSessionId(session.id);
-    setSessionTitle(session.title || 'Untitled');
-    setModel(session.model ?? null);
-    setMode(session.mode ?? 'build');
-    setTokenCount(session.token_count ?? 0);
-    setActiveTab(tabForSessionType(session.session_type));
-    setDrawerOpen(false);
+  const loadSession = useCallback(
+    async (session: SessionResponse) => {
+      if (!client) return;
+      setSessionId(session.id);
+      setSessionTitle(session.title || "Untitled");
+      setModel(session.model ?? null);
+      setMode(session.mode ?? "build");
+      setTokenCount(session.token_count ?? 0);
+      setActiveTab(tabForSessionType(session.session_type));
+      setDrawerOpen(false);
 
-    try {
-      const data = await client.getSession(session.id);
-      const loaded: ChatMessage[] = [];
+      try {
+        const data = await client.getSession(session.id);
+        const loaded: ChatMessage[] = [];
 
-      for (const msg of data.messages) {
-        const textParts = msg.content.filter(c => c.type === 'text').map(c => c.text ?? '').join('');
-        const thinkingParts = msg.content.filter(c => c.type === 'thinking').map(c => c.thinking ?? '').join('');
-        const toolUses = msg.content.filter(c => c.type === 'tool_use');
-        const toolResults = new Map(
-          msg.content.filter(c => c.type === 'tool_result').map(c => [c.tool_use_id, c.content ?? ''])
-        );
+        for (const msg of data.messages) {
+          const textParts = msg.content
+            .filter((c) => c.type === "text")
+            .map((c) => c.text ?? "")
+            .join("");
+          const thinkingParts = msg.content
+            .filter((c) => c.type === "thinking")
+            .map((c) => c.thinking ?? "")
+            .join("");
+          const toolUses = msg.content.filter((c) => c.type === "tool_use");
+          const toolResults = new Map(
+            msg.content
+              .filter((c) => c.type === "tool_result")
+              .map((c) => [c.tool_use_id, c.content ?? ""]),
+          );
 
-        loaded.push({
-          role: msg.role,
-          content: textParts,
-          thinking: thinkingParts || undefined,
-          toolCalls: toolUses.map(tu => ({
-            id: tu.id!,
-            name: tu.name!,
-            arguments: tu.input,
-            output: toolResults.get(tu.id!) ?? undefined,
-            status: toolResults.has(tu.id!) ? 'success' as const : 'pending' as const,
-          })),
-        });
+          loaded.push({
+            role: msg.role,
+            content: textParts,
+            thinking: thinkingParts || undefined,
+            toolCalls: toolUses.map((tu) => ({
+              id: tu.id!,
+              name: tu.name!,
+              arguments: tu.input,
+              output: toolResults.get(tu.id!) ?? undefined,
+              status: toolResults.has(tu.id!)
+                ? ("success" as const)
+                : ("pending" as const),
+            })),
+          });
+        }
+
+        setMessages(loaded);
+      } catch {
+        setMessages([]);
       }
-
-      setMessages(loaded);
-    } catch {
-      setMessages([]);
-    }
-  }, [client]);
+    },
+    [client],
+  );
 
   const handleNewSession = useCallback(async () => {
     if (!client) return;
     // Chat sessions start immediately with no directory.
     // Code/Mako use the inline directory picker in the SessionDrawer.
     try {
-      const session = await client.createSession(undefined, undefined, undefined, undefined, 'chat');
+      const session = await client.createSession(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        "chat",
+      );
       sessionsStore.getState().loadSessions();
       setSessionId(session.id);
-      setSessionTitle(session.title || '');
+      setSessionTitle(session.title || "");
       setMessages([]);
       setDrawerOpen(false);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -189,52 +236,72 @@ export default function ChatScreen() {
     }
   }, [client]);
 
-  const handleDirectorySelected = useCallback(async (path: string) => {
-    if (!client) return;
-    try {
-      const type = sessionTypeForTab(activeTab);
-      const session = await client.createSession(undefined, path, undefined, 'selected', type);
-      sessionsStore.getState().loadSessions();
-      setSessionId(session.id);
-      setSessionTitle(session.title || '');
-      setMessages([]);
-      setDrawerOpen(false);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    } catch {
-      // silent
-    }
-  }, [activeTab, client]);
+  const handleDirectorySelected = useCallback(
+    async (path: string) => {
+      if (!client) return;
+      try {
+        const type = sessionTypeForTab(activeTab);
+        const session = await client.createSession(
+          undefined,
+          path,
+          undefined,
+          "selected",
+          type,
+        );
+        sessionsStore.getState().loadSessions();
+        setSessionId(session.id);
+        setSessionTitle(session.title || "");
+        setMessages([]);
+        setDrawerOpen(false);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      } catch {
+        // silent
+      }
+    },
+    [activeTab, client],
+  );
 
-  const handleDeleteSession = useCallback(async (id: string) => {
-    if (!client) return;
-    Alert.alert('Delete Session', 'Delete this session?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            await client.deleteSession(id);
-            sessionsStore.getState().loadSessions();
-            if (sessionId === id) {
-              setSessionId(null);
-              setSessionTitle('');
-              setMessages([]);
+  const handleDeleteSession = useCallback(
+    async (id: string) => {
+      if (!client) return;
+      Alert.alert("Delete Session", "Delete this session?", [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await client.deleteSession(id);
+              sessionsStore.getState().loadSessions();
+              if (sessionId === id) {
+                setSessionId(null);
+                setSessionTitle("");
+                setMessages([]);
+              }
+            } catch {
+              /* silent */
             }
-          } catch { /* silent */ }
+          },
         },
-      },
-    ]);
-  }, [client, sessionId]);
+      ]);
+    },
+    [client, sessionId],
+  );
 
   // Flush the mutable assistant ref into React state.
   // Called on a 50ms interval during streaming (throttled re-renders)
   // and once on stream end for the final state.
   const flushAssistantRef = useCallback(() => {
-    const snapshot = { ...assistantRef.current, toolCalls: [...(assistantRef.current.toolCalls ?? [])] };
-    setMessages(prev => {
+    const snapshot = {
+      ...assistantRef.current,
+      toolCalls: [...(assistantRef.current.toolCalls ?? [])],
+    };
+    setMessages((prev) => {
       const updated = [...prev];
-      if (updated.length > 0 && updated[updated.length - 1].role === 'assistant') {
+      if (
+        updated.length > 0 &&
+        updated[updated.length - 1].role === "assistant"
+      ) {
         updated[updated.length - 1] = snapshot;
       }
       return updated;
@@ -254,7 +321,10 @@ export default function ChatScreen() {
     if (!content || !viewport || content <= viewport) return;
     const maxOffset = content - viewport;
     const targetOffset = Math.max(0, maxOffset - CHAT_BAR_ZONE);
-    flatListRef.current?.scrollToOffset({ offset: targetOffset, animated: !isStreaming });
+    flatListRef.current?.scrollToOffset({
+      offset: targetOffset,
+      animated: !isStreaming,
+    });
   }, [isStreaming]);
 
   useEffect(() => {
@@ -276,196 +346,264 @@ export default function ChatScreen() {
     flushAssistantRef(); // final flush
   }, [flushAssistantRef]);
 
-  const handleSend = useCallback(async (content: string) => {
-    if (!client || !content.trim()) return;
+  const handleSend = useCallback(
+    async (content: string) => {
+      if (!client || !content.trim()) return;
 
-    // Reset assistant ref for new message
-    assistantRef.current = { role: 'assistant', content: '', toolCalls: [] };
+      // Reset assistant ref for new message
+      assistantRef.current = { role: "assistant", content: "", toolCalls: [] };
 
-    const userMessage: ChatMessage = { role: 'user', content: content.trim(), toolCalls: [] };
-    setMessages(prev => [...prev, userMessage, assistantRef.current]);
-    setIsStreaming(true);
-    setIsThinking(false);
-
-    // Start Live Activity for Dynamic Island / Lock Screen
-    liveActivity.startActivity(sessionTitle || 'Chat', model || 'unknown');
-
-    const abort = new AbortController();
-    abortRef.current = abort;
-    startFlushTimer();
-
-    try {
-      let currentSessionId = sessionId;
-
-      if (!currentSessionId) {
-        const session = await client.createSession(
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          sessionTypeForTab(activeTab),
-        );
-        currentSessionId = session.id;
-        setSessionId(session.id);
-        setSessionTitle('');
-        sessionsStore.getState().loadSessions();
-      }
-
-      await client.streamChat(
-        {
-          session_id: currentSessionId!,
-          message: content.trim(),
-          model: model ?? undefined,
-          thinking_enabled: thinkingLevel !== 'off' ? thinkingLevel : undefined,
-          mode,
-          research_enabled: researchEnabled || undefined,
-        },
-        {
-          onTextDelta: (delta: string) => {
-            assistantRef.current.content += delta;
-            setIsThinking(false);
-            liveActivity.updateActivity({
-              status: 'streaming',
-              currentText: assistantRef.current.content.slice(-200),
-            });
-          },
-          onThinkingDelta: (thinking: string) => {
-            assistantRef.current.thinking = (assistantRef.current.thinking ?? '') + thinking;
-            setIsThinking(true);
-            liveActivity.updateActivity({ status: 'thinking', currentText: 'Thinking...' });
-          },
-          onToolCallStart: (id: string, name: string) => {
-            setIsThinking(false);
-            const toolCalls = assistantRef.current.toolCalls ?? [];
-            toolCalls.push({ id, name, status: 'running' as const });
-            assistantRef.current.toolCalls = toolCalls;
-            flushAssistantRef();
-            liveActivity.updateActivity({ status: 'tool_call', currentTool: name });
-          },
-          onToolCallComplete: (id: string, _name: string, args: Record<string, unknown>) => {
-            const toolCalls = assistantRef.current.toolCalls ?? [];
-            const tc = toolCalls.find(t => t.id === id);
-            if (tc) tc.arguments = args;
-          },
-          onToolResult: (id: string, output: string, isError: boolean) => {
-            const toolCalls = assistantRef.current.toolCalls ?? [];
-            const tc = toolCalls.find(t => t.id === id);
-            if (tc) {
-              tc.output = output;
-              tc.status = isError ? 'error' as const : 'success' as const;
-            }
-            flushAssistantRef(); // immediate flush for result visibility
-          },
-          onToolOutputDelta: (id: string, delta: string) => {
-            const toolCalls = assistantRef.current.toolCalls ?? [];
-            const tc = toolCalls.find(t => t.id === id);
-            if (tc) tc.output = (tc.output ?? '') + delta;
-          },
-          onDelegatedProgress: () => {},
-          onToolApprovalRequired: (id: string, name: string, _args: Record<string, unknown>) => {
-            setPendingApproval({ id, name, args: _args });
-            liveActivity.updateActivity({
-              status: 'awaiting_approval',
-              toolApprovalId: id,
-              toolApprovalName: name,
-            });
-            // Send notification for lock screen approval when backgrounded
-            notifications.notifyToolApproval(id, name, currentSessionId!);
-            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-            Alert.alert(
-              'Tool Approval',
-              `Allow "${name}" to execute?`,
-              [
-                { text: 'Deny', style: 'destructive', onPress: () => {
-                  client.submitToolApproval(currentSessionId!, id, false).catch(() => {});
-                  setPendingApproval(null);
-                }},
-                { text: 'Allow', onPress: () => {
-                  client.submitToolApproval(currentSessionId!, id, true).catch(() => {});
-                  setPendingApproval(null);
-                }},
-              ],
-            );
-          },
-          onToolApproved: () => setPendingApproval(null),
-          onToolDenied: () => setPendingApproval(null),
-          onTurnComplete: (_turn: number, hasMore: boolean) => {
-            if (hasMore) {
-              // New turn — snapshot current message and start fresh
-              flushAssistantRef();
-              assistantRef.current = { role: 'assistant', content: '', toolCalls: [] };
-              setMessages(prev => [...prev, assistantRef.current]);
-            }
-          },
-          onPlanUpdate: () => {},
-          onModeChange: (newMode: string) => {
-            if (newMode === 'build' || newMode === 'plan') setMode(newMode);
-          },
-          onPlanComplete: () => {},
-          onUsage: (prompt: number, completion: number) => {
-            const total = prompt + completion;
-            setTokenCount(total);
-            liveActivity.updateActivity({ tokenCount: total });
-          },
-          onTitleUpdate: (title: string) => {
-            setSessionTitle(title);
-            sessionsStore.getState().loadSessions();
-            liveActivity.updateActivity({ chatTitle: title });
-          },
-          onFinish: () => {
-            stopFlushTimer();
-            setIsStreaming(false);
-            setIsThinking(false);
-            liveActivity.endActivity();
-            notifications.notifyStreamComplete(
-              currentSessionId!,
-              sessionTitle || 'Chat',
-              tokenCount,
-              0,
-            );
-          },
-          onError: () => {
-            stopFlushTimer();
-            setIsStreaming(false);
-            setIsThinking(false);
-            liveActivity.endActivity();
-          },
-        },
-        abort.signal,
-      );
-    } catch {
-      stopFlushTimer();
-      setIsStreaming(false);
+      const userMessage: ChatMessage = {
+        role: "user",
+        content: content.trim(),
+        toolCalls: [],
+      };
+      setMessages((prev) => [...prev, userMessage, assistantRef.current]);
+      setIsStreaming(true);
       setIsThinking(false);
-      liveActivity.endActivity();
-    }
-  }, [activeTab, client, sessionId, model, thinkingLevel, mode, startFlushTimer, stopFlushTimer, flushAssistantRef, liveActivity]);
+
+      // Start Live Activity for Dynamic Island / Lock Screen
+      const streamStartedAt = Date.now();
+      let latestChatTitle = sessionTitle || "Chat";
+      let latestTokenCount = tokenCount;
+      startActivity(sessionTitle || "Chat", model || "unknown");
+
+      const abort = new AbortController();
+      abortRef.current = abort;
+      startFlushTimer();
+
+      try {
+        let currentSessionId = sessionId;
+
+        if (!currentSessionId) {
+          const session = await client.createSession(
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            sessionTypeForTab(activeTab),
+          );
+          currentSessionId = session.id;
+          setSessionId(session.id);
+          setSessionTitle("");
+          sessionsStore.getState().loadSessions();
+        }
+
+        await client.streamChat(
+          {
+            session_id: currentSessionId!,
+            message: content.trim(),
+            model: model ?? undefined,
+            thinking_enabled:
+              thinkingLevel !== "off" ? thinkingLevel : undefined,
+            mode,
+          },
+          {
+            onTextDelta: (delta: string) => {
+              assistantRef.current.content += delta;
+              setIsThinking(false);
+              updateActivity({
+                status: "streaming",
+                currentText: assistantRef.current.content.slice(-200),
+              });
+            },
+            onThinkingDelta: (thinking: string) => {
+              assistantRef.current.thinking =
+                (assistantRef.current.thinking ?? "") + thinking;
+              setIsThinking(true);
+              updateActivity({
+                status: "thinking",
+                currentText: "Thinking...",
+              });
+            },
+            onToolCallStart: (id: string, name: string) => {
+              setIsThinking(false);
+              const toolCalls = assistantRef.current.toolCalls ?? [];
+              toolCalls.push({ id, name, status: "running" as const });
+              assistantRef.current.toolCalls = toolCalls;
+              flushAssistantRef();
+              updateActivity({ status: "tool_call", currentTool: name });
+            },
+            onToolCallComplete: (
+              id: string,
+              _name: string,
+              args: Record<string, unknown>,
+            ) => {
+              const toolCalls = assistantRef.current.toolCalls ?? [];
+              const tc = toolCalls.find((t) => t.id === id);
+              if (tc) tc.arguments = args;
+            },
+            onToolResult: (id: string, output: string, isError: boolean) => {
+              const toolCalls = assistantRef.current.toolCalls ?? [];
+              const tc = toolCalls.find((t) => t.id === id);
+              if (tc) {
+                tc.output = output;
+                tc.status = isError ? ("error" as const) : ("success" as const);
+              }
+              flushAssistantRef(); // immediate flush for result visibility
+            },
+            onToolOutputDelta: (id: string, delta: string) => {
+              const toolCalls = assistantRef.current.toolCalls ?? [];
+              const tc = toolCalls.find((t) => t.id === id);
+              if (tc) tc.output = (tc.output ?? "") + delta;
+            },
+            onDelegatedProgress: () => {},
+            onToolApprovalRequired: (
+              id: string,
+              name: string,
+              _args: Record<string, unknown>,
+            ) => {
+              setPendingApproval({ id, name, args: _args });
+              updateActivity({
+                status: "awaiting_approval",
+                toolApprovalId: id,
+                toolApprovalName: name,
+              });
+              // Send notification for lock screen approval when backgrounded
+              notifyToolApproval(id, name, currentSessionId!);
+              Haptics.notificationAsync(
+                Haptics.NotificationFeedbackType.Warning,
+              );
+              Alert.alert("Tool Approval", `Allow "${name}" to execute?`, [
+                {
+                  text: "Deny",
+                  style: "destructive",
+                  onPress: () => {
+                    client
+                      .submitToolApproval(currentSessionId!, id, false)
+                      .catch(() => {});
+                    setPendingApproval(null);
+                  },
+                },
+                {
+                  text: "Allow",
+                  onPress: () => {
+                    client
+                      .submitToolApproval(currentSessionId!, id, true)
+                      .catch(() => {});
+                    setPendingApproval(null);
+                  },
+                },
+              ]);
+            },
+            onToolApproved: () => setPendingApproval(null),
+            onToolDenied: () => setPendingApproval(null),
+            onTurnComplete: (_turn: number, hasMore: boolean) => {
+              if (hasMore) {
+                // New turn — snapshot current message and start fresh
+                flushAssistantRef();
+                assistantRef.current = {
+                  role: "assistant",
+                  content: "",
+                  toolCalls: [],
+                };
+                setMessages((prev) => [...prev, assistantRef.current]);
+              }
+            },
+            onPlanUpdate: () => {},
+            onModeChange: (newMode: string) => {
+              if (newMode === "build" || newMode === "plan") setMode(newMode);
+            },
+            onPlanComplete: () => {},
+            onUsage: (prompt: number, completion: number) => {
+              const total = prompt + completion;
+              latestTokenCount = total;
+              setTokenCount(total);
+              updateActivity({ tokenCount: total });
+            },
+            onTitleUpdate: (title: string) => {
+              latestChatTitle = title;
+              setSessionTitle(title);
+              sessionsStore.getState().loadSessions();
+              updateActivity({ chatTitle: title });
+            },
+            onFinish: () => {
+              stopFlushTimer();
+              setIsStreaming(false);
+              setIsThinking(false);
+              endActivity();
+              const elapsedSeconds = Math.floor(
+                (Date.now() - streamStartedAt) / 1000,
+              );
+              notifyStreamComplete(
+                currentSessionId!,
+                latestChatTitle,
+                latestTokenCount,
+                elapsedSeconds,
+              );
+            },
+            onError: () => {
+              stopFlushTimer();
+              setIsStreaming(false);
+              setIsThinking(false);
+              endActivity();
+            },
+          },
+          abort.signal,
+        );
+      } catch {
+        stopFlushTimer();
+        setIsStreaming(false);
+        setIsThinking(false);
+        endActivity();
+      }
+    },
+    [
+      activeTab,
+      client,
+      sessionId,
+      sessionTitle,
+      model,
+      thinkingLevel,
+      mode,
+      tokenCount,
+      sessionsStore,
+      notifyToolApproval,
+      notifyStreamComplete,
+      startFlushTimer,
+      stopFlushTimer,
+      flushAssistantRef,
+      startActivity,
+      updateActivity,
+      endActivity,
+    ],
+  );
 
   const handleStop = useCallback(() => {
     abortRef.current?.abort();
     setIsStreaming(false);
-    liveActivity.endActivity();
-  }, [liveActivity]);
+    endActivity();
+  }, [endActivity]);
 
   const handleModelSelect = (modelId: string) => {
     setModel(modelId);
-    SecureStore.setItemAsync('krusty_selected_model', modelId).catch(() => {});
+    SecureStore.setItemAsync("krusty_selected_model", modelId).catch(() => {});
   };
 
-  const handleTabChange = useCallback((index: number) => {
-    setActiveTab(index);
-    const currentSession = sessions.find(session => session.id === sessionId);
-    if (currentSession && currentSession.session_type !== sessionTypeForTab(index)) {
-      setSessionId(null);
-      setSessionTitle('');
-      setMessages([]);
-      setMode('build');
-    }
-  }, [sessionId, sessions]);
-
+  const handleTabChange = useCallback(
+    (index: number) => {
+      setActiveTab(index);
+      const currentSession = sessions.find(
+        (session) => session.id === sessionId,
+      );
+      if (
+        currentSession &&
+        currentSession.session_type !== sessionTypeForTab(index)
+      ) {
+        setSessionId(null);
+        setSessionTitle("");
+        setMessages([]);
+        setMode("build");
+      }
+    },
+    [sessionId, sessions],
+  );
 
   const chatContent = (
-    <SafeAreaView style={[styles.container, { backgroundColor: t.background }]} edges={isDesktop ? [] : ['top']}>
+    <SafeAreaView
+      style={[styles.container, { backgroundColor: t.background }]}
+      edges={isDesktop ? [] : ["top"]}
+    >
       {/* Top bar */}
       <Animated.View style={[styles.topBar, entrance.topBarStyle]}>
         {!isDesktop && (
@@ -484,24 +622,32 @@ export default function ChatScreen() {
           onPress={() => {
             if (!sessionId || !client || !sessionTitle) return;
             Alert.prompt(
-              'Rename Session',
+              "Rename Session",
               undefined,
               async (newTitle: string) => {
                 if (newTitle && newTitle.trim()) {
                   setSessionTitle(newTitle.trim());
-                  await client.updateSession(sessionId, { title: newTitle.trim() });
+                  await client.updateSession(sessionId, {
+                    title: newTitle.trim(),
+                  });
                   sessionsStore.getState().loadSessions();
                 }
               },
-              'plain-text',
+              "plain-text",
               sessionTitle,
             );
           }}
           style={styles.titleBtn}
           disabled={!sessionTitle}
         >
-          <Text style={[styles.title, { color: sessionTitle ? t.foreground : 'transparent' }]} numberOfLines={1}>
-            {sessionTitle || ' '}
+          <Text
+            style={[
+              styles.title,
+              { color: sessionTitle ? t.foreground : "transparent" },
+            ]}
+            numberOfLines={1}
+          >
+            {sessionTitle || " "}
           </Text>
         </Pressable>
 
@@ -529,7 +675,13 @@ export default function ChatScreen() {
               data={messages}
               keyExtractor={(_, i) => String(i)}
               onScrollBeginDrag={Keyboard.dismiss}
-              renderItem={({ item, index }: { item: ChatMessage; index: number }) => (
+              renderItem={({
+                item,
+                index,
+              }: {
+                item: ChatMessage;
+                index: number;
+              }) => (
                 <MessageBubble
                   message={item}
                   isLast={index === messages.length - 1}
@@ -538,20 +690,27 @@ export default function ChatScreen() {
                 />
               )}
               style={styles.flex}
-              contentContainerStyle={[styles.list, isDesktop && styles.listDesktop]}
-              onLayout={(e) => { listHeightRef.current = e.nativeEvent.layout.height; }}
-              onContentSizeChange={(_w, h) => { contentHeightRef.current = h; }}
+              contentContainerStyle={[
+                styles.list,
+                isDesktop && styles.listDesktop,
+              ]}
+              onLayout={(e) => {
+                listHeightRef.current = e.nativeEvent.layout.height;
+              }}
+              onContentSizeChange={(_w, h) => {
+                contentHeightRef.current = h;
+              }}
               keyboardDismissMode="interactive"
               keyboardShouldPersistTaps="handled"
             />
             {/* Fade edges */}
             <LinearGradient
-              colors={[t.background, t.background + '00']}
+              colors={[t.background, t.background + "00"]}
               style={styles.fadeTop}
               pointerEvents="none"
             />
             <LinearGradient
-              colors={[t.background + '00', t.background]}
+              colors={[t.background + "00", t.background]}
               style={styles.fadeBottom}
               pointerEvents="none"
             />
@@ -561,27 +720,32 @@ export default function ChatScreen() {
 
       {/* Chat bar */}
       <Animated.View style={entrance.bottomBarStyle}>
-      <ChatBar
-        onSend={handleSend}
-        onStop={handleStop}
-        isStreaming={isStreaming}
-        disabled={!isConnected}
-        thinkingLevel={thinkingLevel}
-        onThinkingChange={setThinkingLevel}
-        mode={mode}
-        onModeToggle={() => setMode(m => m === 'build' ? 'plan' : 'build')}
-        onModelSelect={handleModelSelect}
-        model={model}
-        models={models}
-        sessionType={sessionTypeForTab(activeTab)}
-        researchEnabled={researchEnabled}
-        onResearchToggle={() => setResearchEnabled(r => !r)}
-        tokenCount={tokenCount}
-      />
+        <ChatBar
+          onSend={handleSend}
+          onStop={handleStop}
+          isStreaming={isStreaming}
+          disabled={!isConnected}
+          thinkingLevel={thinkingLevel}
+          onThinkingChange={setThinkingLevel}
+          mode={mode}
+          onModeToggle={() =>
+            setMode((m) => (m === "build" ? "plan" : "build"))
+          }
+          onModelSelect={handleModelSelect}
+          model={model}
+          models={models}
+          sessionType={sessionTypeForTab(activeTab)}
+          researchEnabled={researchEnabled}
+          onResearchToggle={() => setResearchEnabled((r) => !r)}
+          tokenCount={tokenCount}
+        />
       </Animated.View>
 
       {/* Reports viewer */}
-      <ReportsViewer visible={reportsOpen} onClose={() => setReportsOpen(false)} />
+      <ReportsViewer
+        visible={reportsOpen}
+        onClose={() => setReportsOpen(false)}
+      />
     </SafeAreaView>
   );
 
@@ -593,7 +757,7 @@ export default function ChatScreen() {
       onNewSession={handleNewSession}
       onNewSessionWithDir={handleDirectorySelected}
       onDeleteSession={handleDeleteSession}
-      onOpenSettings={() => router.push('/(tabs)/settings')}
+      onOpenSettings={() => router.push("/(tabs)/settings")}
       activeTab={activeTab}
       onTabChange={handleTabChange}
     >
@@ -610,7 +774,10 @@ export default function ChatScreen() {
           onNewSession={handleNewSession}
           onNewSessionWithDir={handleDirectorySelected}
           onDeleteSession={handleDeleteSession}
-          onOpenSettings={() => { setDrawerOpen(false); router.push('/(tabs)/settings'); }}
+          onOpenSettings={() => {
+            setDrawerOpen(false);
+            router.push("/(tabs)/settings");
+          }}
           activeTab={activeTab}
           onTabChange={handleTabChange}
         />
@@ -623,8 +790,8 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   flex: { flex: 1 },
   topBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     paddingHorizontal: 16,
     paddingVertical: 10,
     gap: 12,
@@ -637,8 +804,8 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: 17,
-    fontWeight: '600',
-    textAlign: 'center',
+    fontWeight: "600",
+    textAlign: "center",
   },
   statusDot: {
     width: 8,
@@ -652,18 +819,18 @@ const styles = StyleSheet.create({
   },
   listDesktop: {
     maxWidth: 800,
-    alignSelf: 'center',
-    width: '100%',
+    alignSelf: "center",
+    width: "100%",
   },
   fadeTop: {
-    position: 'absolute',
+    position: "absolute",
     top: 0,
     left: 0,
     right: 0,
     height: 64,
   },
   fadeBottom: {
-    position: 'absolute',
+    position: "absolute",
     bottom: 0,
     left: 0,
     right: 0,
@@ -671,14 +838,14 @@ const styles = StyleSheet.create({
   },
   empty: {
     flex: 1,
-    justifyContent: 'flex-start',
-    alignItems: 'center',
-    paddingTop: '35%',
+    justifyContent: "flex-start",
+    alignItems: "center",
+    paddingTop: "35%",
     gap: 16,
   },
   emptyTitle: {
     fontSize: 28,
-    fontWeight: '700',
+    fontWeight: "700",
     letterSpacing: -0.5,
   },
   emptyHint: {
@@ -686,7 +853,7 @@ const styles = StyleSheet.create({
   },
   stubTitle: {
     fontSize: 24,
-    fontWeight: '700',
+    fontWeight: "700",
     letterSpacing: -0.3,
   },
   stubText: {
@@ -695,24 +862,24 @@ const styles = StyleSheet.create({
   },
   modalBackdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'flex-end',
+    backgroundColor: "rgba(0,0,0,0.6)",
+    justifyContent: "flex-end",
     zIndex: 200,
   },
   modelPicker: {
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
-    maxHeight: '60%',
+    maxHeight: "60%",
     paddingTop: 20,
     paddingBottom: 40,
-    backgroundColor: '#1a1f2e',
+    backgroundColor: "#1a1f2e",
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: 'rgba(255,255,255,0.1)',
+    borderTopColor: "rgba(255,255,255,0.1)",
   },
   modelPickerTitle: {
     fontSize: 18,
-    fontWeight: '700',
-    textAlign: 'center',
+    fontWeight: "700",
+    textAlign: "center",
     marginBottom: 16,
   },
   modelList: {
@@ -727,7 +894,7 @@ const styles = StyleSheet.create({
   },
   modelName: {
     fontSize: 16,
-    fontWeight: '500',
+    fontWeight: "500",
   },
   modelProvider: {
     fontSize: 13,
