@@ -23,6 +23,9 @@ import { SessionDrawer } from '../../components/chat/SessionDrawer';
 import { DesktopShell } from '../../components/layout/DesktopShell';
 import { ReportsViewer } from '../../components/ReportsViewer';
 import { LinearGradient } from '../../platform/linear-gradient';
+import { useSplashState } from '../../hooks/useSplashState';
+import { useEntranceAnimation } from '../../hooks/useEntranceAnimation';
+import Animated from 'react-native-reanimated';
 import type { ChatMessage, ModelInfo, SessionResponse, SessionType, ThinkingLevel } from '@krusty/api';
 
 const TAB_TYPES: SessionType[] = ['chat', 'code', 'mako'];
@@ -46,6 +49,8 @@ export default function ChatScreen() {
   const { theme } = useThemeContext();
   const { client, isConnected } = useConnection();
   const { isDesktop } = useBreakpoint();
+  const { splashDone } = useSplashState();
+  const entrance = useEntranceAnimation(splashDone);
 
   // Session state
   const [sessions, setSessions] = useState<SessionResponse[]>([]);
@@ -394,7 +399,7 @@ export default function ChatScreen() {
   const chatContent = (
     <SafeAreaView style={[styles.container, { backgroundColor: t.background }]} edges={isDesktop ? [] : ['top']}>
       {/* Top bar */}
-      <View style={styles.topBar}>
+      <Animated.View style={[styles.topBar, entrance.topBarStyle]}>
         {!isDesktop && (
           <Pressable
             onPress={() => {
@@ -441,50 +446,53 @@ export default function ChatScreen() {
         >
           <FileSearch size={20} color={t.mutedForeground} strokeWidth={1.8} />
         </Pressable>
-      </View>
+      </Animated.View>
 
       {/* Messages */}
-      {messages.length === 0 ? (
-        <Pressable style={styles.empty} onPress={Keyboard.dismiss}>
-          <KrustyLogo />
-        </Pressable>
-      ) : (
-        <View style={styles.flex}>
-          <FlatList
-            ref={flatListRef}
-            data={messages}
-            keyExtractor={(_, i) => String(i)}
-            onScrollBeginDrag={Keyboard.dismiss}
-            renderItem={({ item, index }: { item: ChatMessage; index: number }) => (
-              <MessageBubble
-                message={item}
-                isLast={index === messages.length - 1}
-                isStreaming={isStreaming && index === messages.length - 1}
-                isThinking={isThinking && index === messages.length - 1}
-              />
-            )}
-            style={styles.flex}
-            contentContainerStyle={[styles.list, isDesktop && styles.listDesktop]}
-            onLayout={(e) => { listHeightRef.current = e.nativeEvent.layout.height; }}
-            onContentSizeChange={(_w, h) => { contentHeightRef.current = h; }}
-            keyboardDismissMode="interactive"
-            keyboardShouldPersistTaps="handled"
-          />
-          {/* Fade edges */}
-          <LinearGradient
-            colors={[t.background, t.background + '00']}
-            style={styles.fadeTop}
-            pointerEvents="none"
-          />
-          <LinearGradient
-            colors={[t.background + '00', t.background]}
-            style={styles.fadeBottom}
-            pointerEvents="none"
-          />
-        </View>
-      )}
+      <Animated.View style={[styles.flex, entrance.contentStyle]}>
+        {messages.length === 0 ? (
+          <Pressable style={styles.empty} onPress={Keyboard.dismiss}>
+            <KrustyLogo />
+          </Pressable>
+        ) : (
+          <View style={styles.flex}>
+            <FlatList
+              ref={flatListRef}
+              data={messages}
+              keyExtractor={(_, i) => String(i)}
+              onScrollBeginDrag={Keyboard.dismiss}
+              renderItem={({ item, index }: { item: ChatMessage; index: number }) => (
+                <MessageBubble
+                  message={item}
+                  isLast={index === messages.length - 1}
+                  isStreaming={isStreaming && index === messages.length - 1}
+                  isThinking={isThinking && index === messages.length - 1}
+                />
+              )}
+              style={styles.flex}
+              contentContainerStyle={[styles.list, isDesktop && styles.listDesktop]}
+              onLayout={(e) => { listHeightRef.current = e.nativeEvent.layout.height; }}
+              onContentSizeChange={(_w, h) => { contentHeightRef.current = h; }}
+              keyboardDismissMode="interactive"
+              keyboardShouldPersistTaps="handled"
+            />
+            {/* Fade edges */}
+            <LinearGradient
+              colors={[t.background, t.background + '00']}
+              style={styles.fadeTop}
+              pointerEvents="none"
+            />
+            <LinearGradient
+              colors={[t.background + '00', t.background]}
+              style={styles.fadeBottom}
+              pointerEvents="none"
+            />
+          </View>
+        )}
+      </Animated.View>
 
       {/* Chat bar */}
+      <Animated.View style={entrance.bottomBarStyle}>
       <ChatBar
         onSend={handleSend}
         onStop={handleStop}
@@ -502,6 +510,7 @@ export default function ChatScreen() {
         onResearchToggle={() => setResearchEnabled(r => !r)}
         tokenCount={tokenCount}
       />
+      </Animated.View>
 
       {/* Reports viewer */}
       <ReportsViewer visible={reportsOpen} onClose={() => setReportsOpen(false)} />

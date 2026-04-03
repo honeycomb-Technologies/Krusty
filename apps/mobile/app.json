@@ -4,7 +4,7 @@
     "slug": "krusty",
     "version": "0.9.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/icons/ios-light.png",
     "userInterfaceStyle": "automatic",
     "scheme": "krusty",
     "newArchEnabled": true,
@@ -18,6 +18,11 @@
       "bundleIdentifier": "io.krusty.mobile",
       "buildNumber": "12",
       "backgroundColor": "#0b1119",
+      "icon": {
+        "light": "./assets/icons/ios-light.png",
+        "dark": "./assets/icons/ios-dark.png",
+        "tinted": "./assets/icons/ios-tinted.png"
+      },
       "config": {
         "usesNonExemptEncryption": false
       }
@@ -33,7 +38,7 @@
     "web": {
       "bundler": "metro",
       "output": "single",
-      "favicon": "./assets/icon.png"
+      "favicon": "./assets/favicon.png"
     },
     "plugins": [
       "expo-router",

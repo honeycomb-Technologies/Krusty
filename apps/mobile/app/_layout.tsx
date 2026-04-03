@@ -7,6 +7,8 @@ import { StyleSheet } from 'react-native';
 import { ThemeProvider, useThemeContext } from '../hooks/useTheme';
 import { ConnectionProvider, useConnection } from '../hooks/useConnection';
 import { useDeepLink } from '../hooks/useDeepLink';
+import { SplashProvider, useSplashState } from '../hooks/useSplashState';
+import { SplashOverlay } from '../components/splash/SplashOverlay';
 
 function RootNavigator() {
   const { theme } = useThemeContext();
@@ -42,15 +44,29 @@ function RootNavigator() {
   );
 }
 
+function SplashWrapper({ children }: { children: React.ReactNode }) {
+  const { markSplashDone } = useSplashState();
+
+  return (
+    <SplashOverlay onComplete={markSplashDone}>
+      {children}
+    </SplashOverlay>
+  );
+}
+
 export default function RootLayout() {
   return (
     <GestureHandlerRootView style={styles.root}>
       <SafeAreaProvider>
-        <ThemeProvider>
-          <ConnectionProvider>
-            <RootNavigator />
-          </ConnectionProvider>
-        </ThemeProvider>
+        <SplashProvider>
+          <SplashWrapper>
+            <ThemeProvider>
+              <ConnectionProvider>
+                <RootNavigator />
+              </ConnectionProvider>
+            </ThemeProvider>
+          </SplashWrapper>
+        </SplashProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );
