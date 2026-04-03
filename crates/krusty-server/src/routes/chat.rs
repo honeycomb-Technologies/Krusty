@@ -31,6 +31,7 @@ use krusty_core::storage::{Database, SessionType, WorkMode, WorkspaceMode};
 use krusty_core::tools::registry::PermissionMode;
 use krusty_core::SessionManager;
 
+use crate::apns::{ApnsEventType, ApnsPayload, ApnsService};
 use crate::auth::CurrentUser;
 use crate::error::AppError;
 use crate::push::{PushEventType, PushPayload, PushService};
@@ -684,6 +685,7 @@ async fn start_orchestrator_sse(
     let session_inputs = Arc::clone(&state.session_inputs);
     let active_agent_streams = Arc::clone(&state.active_agent_streams);
     let push_service = state.push_service.clone();
+    let apns_service = state.apns_service.clone();
     let user_id = ctx.user_id;
     let db_path = Arc::clone(&state.db_path);
     let guard = ctx.guard;
@@ -710,6 +712,41 @@ async fn start_orchestrator_sse(
                         tag: None,
                     },
                     PushEventType::AwaitingInput,
+                );
+                fire_apns(
+                    &apns_service,
+                    user_id.as_deref(),
+                    ApnsPayload {
+                        title: "Krusty".into(),
+                        body: "Krusty needs your input".into(),
+                        session_id: Some(session_id.clone()),
+                        category: Some("TOOL_APPROVAL".into()),
+                        data: None,
+                    },
+                    ApnsEventType::AwaitingInput,
+                );
+            }
+
+            // APNs: tool approval required (not triggered by Web Push currently)
+            if let LoopEvent::ToolApprovalRequired {
+                ref id, ref name, ..
+            } = loop_event
+            {
+                fire_apns(
+                    &apns_service,
+                    user_id.as_deref(),
+                    ApnsPayload {
+                        title: "Tool Approval Required".into(),
+                        body: format!("\"{name}\" is requesting permission to execute."),
+                        session_id: Some(session_id.clone()),
+                        category: Some("TOOL_APPROVAL".into()),
+                        data: Some(serde_json::json!({
+                            "requestId": id,
+                            "toolName": name,
+                            "type": "tool_approval",
+                        })),
+                    },
+                    ApnsEventType::ToolApproval,
                 );
             }
 
@@ -740,6 +777,18 @@ async fn start_orchestrator_sse(
                     },
                     PushEventType::Error,
                 );
+                fire_apns(
+                    &apns_service,
+                    user_id.as_deref(),
+                    ApnsPayload {
+                        title: "Krusty".into(),
+                        body: "Session encountered an error".into(),
+                        session_id: Some(session_id.clone()),
+                        category: None,
+                        data: None,
+                    },
+                    ApnsEventType::Error,
+                );
             } else {
                 let title = session_title(&db_path, &session_id);
                 fire_push(
@@ -752,6 +801,20 @@ async fn start_orchestrator_sse(
                         tag: Some(format!("session-{session_id}")),
                     },
                     PushEventType::Completion,
+                );
+                fire_apns(
+                    &apns_service,
+                    user_id.as_deref(),
+                    ApnsPayload {
+                        title: format!("{title} — Complete"),
+                        body: "Response finished".into(),
+                        session_id: Some(session_id.clone()),
+                        category: Some("STREAM_COMPLETE".into()),
+                        data: Some(serde_json::json!({
+                            "type": "stream_complete",
+                        })),
+                    },
+                    ApnsEventType::Completion,
                 );
             }
         }
@@ -919,6 +982,28 @@ fn fire_push(
     }
 }
 
+fn fire_apns(
+    apns_service: &Option<Arc<ApnsService>>,
+    user_id: Option<&str>,
+    payload: ApnsPayload,
+    event_type: ApnsEventType,
+) {
+    if let Some(svc) = apns_service.clone() {
+        let uid = user_id.map(String::from);
+        tokio::spawn(async move {
+            let stats = svc.notify_user(uid.as_deref(), payload, event_type).await;
+            tracing::info!(
+                event_type = event_type.as_str(),
+                attempted = stats.attempted,
+                sent = stats.sent,
+                stale_removed = stats.stale_removed,
+                failed = stats.failed,
+                "APNs event dispatched"
+            );
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -982,6 +1067,7 @@ mod tests {
                 peak_rss_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 peak_virtual_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 push_service: None,
+                apns_service: None,
                 oauth_flows: Arc::new(Mutex::new(HashMap::new())),
             },
             temp_dir,

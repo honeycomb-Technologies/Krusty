@@ -35,6 +35,9 @@ portable-pty = "0.8"
 web-push-native = "0.4"
 base64ct = { version = "1", features = ["alloc"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# APNs (Apple Push Notification service) — JWT auth via ES256
+jsonwebtoken = "9"
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["rustls-tls-webpki-roots", "connect"] }
 
 [lints]

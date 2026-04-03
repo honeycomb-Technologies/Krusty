@@ -52,6 +52,7 @@ type SessionInputMap =
     HashMap<String, tokio::sync::mpsc::UnboundedSender<krusty_core::agent::LoopInput>>;
 type SessionPresenceMap = presence::SessionPresenceMap;
 type DelegatedStateMap = HashMap<String, Vec<types::DelegatedToolStateResponse>>;
+pub mod apns;
 pub mod auth;
 pub mod error;
 pub mod presence;
@@ -123,6 +124,8 @@ pub struct AppState {
     pub peak_virtual_bytes: Arc<AtomicU64>,
     /// Web Push notification service (None if VAPID init failed).
     pub push_service: Option<Arc<push::PushService>>,
+    /// APNs (Apple Push Notification service) for iOS devices.
+    pub apns_service: Option<Arc<apns::ApnsService>>,
     /// Active OAuth flows keyed by provider storage key.
     pub oauth_flows: Arc<Mutex<HashMap<String, routes::oauth::OAuthFlowState>>>,
 }
@@ -381,6 +384,10 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
                 None
             }
         };
+    let apns_service = apns::ApnsService::from_env(Arc::new(db_path.clone())).map(Arc::new);
+    if apns_service.is_some() {
+        tracing::info!("APNs service initialized");
+    }
     let remote_access = Arc::new(RwLock::new(
         remote_access::RemoteAccessConfig::load_or_create(&db_path)?,
     ));
@@ -409,6 +416,7 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
         peak_rss_bytes: Arc::new(AtomicU64::new(0)),
         peak_virtual_bytes: Arc::new(AtomicU64::new(0)),
         push_service,
+        apns_service,
         oauth_flows: Arc::new(Mutex::new(HashMap::new())),
     };
 

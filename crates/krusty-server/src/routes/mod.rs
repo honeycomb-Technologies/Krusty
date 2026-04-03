@@ -4,6 +4,7 @@ use axum::Router;
 
 use crate::AppState;
 
+mod apns;
 mod chat;
 mod credentials;
 mod files;
@@ -40,6 +41,7 @@ pub fn api_router() -> Router<AppState> {
         .nest("/settings/preview", preview_settings::router())
         .nest("/hooks", hooks::router())
         .nest("/push", push::router())
+        .nest("/apns", apns::router())
         .nest("/reports", reports::router())
         .nest("/server", server::router())
         .nest("/auth/oauth", oauth::router())

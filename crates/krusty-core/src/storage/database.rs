@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use tracing::info;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 25;
+const SCHEMA_VERSION: i32 = 26;
 
 /// Shared database handle for connection reuse
 ///
@@ -860,6 +860,28 @@ impl Database {
             )
             .context("Migration 25: autonomous_tasks + reports tables")?;
             self.set_schema_version_tx(&tx, 25)?;
+        }
+
+        // Migration 26: APNs device tokens for iOS push notifications
+        if current_version < 26 {
+            info!("Running migration 26: APNs device tokens");
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS apns_devices (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT,
+                    device_token TEXT NOT NULL UNIQUE,
+                    bundle_id TEXT NOT NULL DEFAULT 'io.krusty.mobile',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    last_used_at TEXT,
+                    last_success_at TEXT,
+                    last_failure_at TEXT,
+                    last_failure_reason TEXT,
+                    failure_count INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_apns_devices_user ON apns_devices(user_id);",
+            )
+            .context("Migration 26: APNs device tokens")?;
+            self.set_schema_version_tx(&tx, 26)?;
         }
 
         tx.commit()?;
