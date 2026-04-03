@@ -106,13 +106,6 @@
                 "accessoryRectangular"
               ],
               "contentMarginsDisabled": false
-            },
-            {
-              "name": "ChatStreamActivity",
-              "displayName": "Chat Stream",
-              "description": "Live streaming chat activity",
-              "supportedFamilies": [],
-              "contentMarginsDisabled": false
             }
           ]
         }
