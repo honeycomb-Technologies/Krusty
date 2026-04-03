@@ -133,7 +133,7 @@ export function useNotifications(options?: UseNotificationsOptions) {
     return () => {
       responseListenerRef.current?.remove();
     };
-  }, []);
+  }, [options?.onNavigate, options?.onToolApproval]);
 
   const changeNotificationLevel = useCallback(
     async (level: NotificationLevel) => {
