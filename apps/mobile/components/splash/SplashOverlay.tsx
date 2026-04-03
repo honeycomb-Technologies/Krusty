@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, Dimensions } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native';
 import MaskedView from '@react-native-masked-view/masked-view';
 import { LinearGradient } from '../../platform/linear-gradient';
 import * as SplashScreen from 'expo-splash-screen';
@@ -14,10 +14,8 @@ import Animated, {
 
 SplashScreen.preventAutoHideAsync();
 
-const { width: SCREEN_W } = Dimensions.get('window');
 const BG = '#0b1119';
 
-// Full KRUSTY ASCII art
 const LINES = [
   '▄ •▄ ▄▄▄  ▄• ▄▌.▄▄ · ▄▄▄▄▄ ▄· ▄▌',
   '█▌▄▌▪▀▄ █·█▪██▌▐█ ▀. •██  ▐█▪██▌',
@@ -26,7 +24,6 @@ const LINES = [
   '·▀  ▀.▀  ▀ ▀▀▀  ▀▀▀▀  ▀▀▀   ▀ • ',
 ];
 
-// Split: K portion (first 6 chars) vs the rest
 const K_CHARS = 6;
 const K_LINES = LINES.map(l => l.slice(0, K_CHARS));
 const REST_LINES = LINES.map(l => l.slice(K_CHARS));
@@ -40,10 +37,6 @@ const CHAR_W = 7.2;
 const FULL_TEXT_W = LINES[0].length * CHAR_W;
 const K_TEXT_W = K_CHARS * CHAR_W;
 const REST_TEXT_W = FULL_TEXT_W - K_TEXT_W;
-
-// How far the K needs to slide left from center to its final position
-// In the final layout, the full text is centered, so K starts at center
-// and needs to move left by half the rest-of-text width
 const K_SLIDE_X = REST_TEXT_W / 2;
 
 interface Props {
@@ -52,86 +45,74 @@ interface Props {
 }
 
 export function SplashOverlay({ children, onComplete }: Props) {
-  const [phase, setPhase] = useState<'k-center' | 'unfold' | 'reveal' | 'done'>('k-center');
+  const [done, setDone] = useState(false);
 
-  // K starts centered, then slides left
+  // K slides left from center
   const kTranslateX = useSharedValue(0);
 
-  // Rest of letters clip from 0 → full width (unfold from K)
+  // RUSTY unfolds from K
   const restClipW = useSharedValue(0);
-  // Rest opacity fades in
   const restOpacity = useSharedValue(0);
 
-  // Shimmer across the gradient
+  // Shimmer
   const shimmer = useSharedValue(-80);
 
-  // Mask expand (Twitter/X reveal)
-  const maskScale = useSharedValue(1);
-  const appScale = useSharedValue(1.05);
-  const appOpacity = useSharedValue(0);
+  // Overlay fades out to reveal app UI around the logo
+  const overlayOpacity = useSharedValue(1);
 
   useEffect(() => {
-    const setDone = () => {
-      setPhase('done');
+    const finish = () => {
+      setDone(true);
       onComplete?.();
     };
 
     const run = async () => {
-      // Brief pause, then hide native splash (our overlay matches it)
       await new Promise(r => setTimeout(r, 300));
       await SplashScreen.hideAsync();
 
-      // Start shimmer on the K
+      // Shimmer across K
       shimmer.value = withTiming(80, {
         duration: 2500,
         easing: Easing.inOut(Easing.ease),
       });
 
-      // Hold the centered K for a moment
+      // Hold centered K
       await new Promise(r => setTimeout(r, 600));
 
-      // Phase 2: K slides left, letters unfold
-      setPhase('unfold');
-
+      // K slides left
       kTranslateX.value = withTiming(-K_SLIDE_X, {
         duration: 600,
         easing: Easing.inOut(Easing.cubic),
       });
 
-      // Letters unfold from K with a slight delay
+      // RUSTY unfolds from K
       restOpacity.value = withDelay(200, withTiming(1, { duration: 300 }));
       restClipW.value = withDelay(200, withTiming(REST_TEXT_W, {
         duration: 700,
         easing: Easing.out(Easing.cubic),
       }));
 
-      // Wait for unfold to complete, then mask reveal
-      await new Promise(r => setTimeout(r, 1200));
-      setPhase('reveal');
+      // Wait for unfold to finish
+      await new Promise(r => setTimeout(r, 1100));
 
-      appOpacity.value = withDelay(100, withTiming(1, { duration: 350 }));
-      appScale.value = withDelay(100, withTiming(1, {
-        duration: 500,
+      // Fade out the overlay — the logo stays because KrustyLogo
+      // in the app's empty state is in the same position underneath.
+      // The UI components (top bar, chat bar) appear via entrance animations.
+      overlayOpacity.value = withTiming(0, {
+        duration: 400,
         easing: Easing.out(Easing.cubic),
-      }));
-
-      maskScale.value = withTiming(70, {
-        duration: 800,
-        easing: Easing.in(Easing.cubic),
       }, () => {
-        runOnJS(setDone)();
+        runOnJS(finish)();
       });
     };
 
     run();
   }, []);
 
-  // K slides left from center
   const kSlideStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: kTranslateX.value }],
   }));
 
-  // Rest of letters clip-reveal from left edge
   const restClipStyle = useAnimatedStyle(() => ({
     width: restClipW.value,
     opacity: restOpacity.value,
@@ -142,54 +123,24 @@ export function SplashOverlay({ children, onComplete }: Props) {
     transform: [{ translateX: shimmer.value }],
   }));
 
-  const maskExpandStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: maskScale.value }],
+  const fadeStyle = useAnimatedStyle(() => ({
+    opacity: overlayOpacity.value,
   }));
 
-  const appRevealStyle = useAnimatedStyle(() => ({
-    opacity: appOpacity.value,
-    transform: [{ scale: appScale.value }],
-  }));
+  if (done) return <>{children}</>;
 
-  if (phase === 'done') return <>{children}</>;
-
-  if (phase === 'reveal') {
-    return (
-      <View style={[styles.root, { backgroundColor: BG }]}>
-        <MaskedView
-          style={StyleSheet.absoluteFill}
-          maskElement={
-            <View style={styles.center}>
-              <Animated.View style={maskExpandStyle}>
-                <View style={styles.logoBlock}>
-                  {LINES.map((line, i) => (
-                    <Text key={i} style={styles.maskText}>{line}</Text>
-                  ))}
-                </View>
-              </Animated.View>
-            </View>
-          }
-        >
-          <Animated.View style={[StyleSheet.absoluteFill, appRevealStyle]}>
-            {children}
-          </Animated.View>
-        </MaskedView>
-      </View>
-    );
-  }
-
-  // Phases 'k-center' and 'unfold':
-  // K is centered, then slides left while rest unfolds from it
   return (
     <View style={styles.root}>
+      {/* App content underneath — visible as overlay fades */}
       <View style={StyleSheet.absoluteFill}>
         {children}
       </View>
-      <View style={styles.solidOverlay} pointerEvents="none">
+
+      {/* Splash overlay: BG + animated logo, fades out at end */}
+      <Animated.View style={[styles.solidOverlay, fadeStyle]} pointerEvents="none">
         <View style={styles.center}>
-          {/* Container that holds K + rest in a row, animated as a group */}
           <Animated.View style={[styles.logoRow, kSlideStyle]}>
-            {/* The K portion — always visible */}
+            {/* K portion */}
             <MaskedView
               maskElement={
                 <View>
@@ -209,7 +160,7 @@ export function SplashOverlay({ children, onComplete }: Props) {
               </Animated.View>
             </MaskedView>
 
-            {/* The rest (RUSTY) — clips open from left */}
+            {/* RUSTY — unfolds from K */}
             <Animated.View style={restClipStyle}>
               <MaskedView
                 maskElement={
@@ -232,7 +183,7 @@ export function SplashOverlay({ children, onComplete }: Props) {
             </Animated.View>
           </Animated.View>
         </View>
-      </View>
+      </Animated.View>
     </View>
   );
 }
@@ -274,15 +225,5 @@ const styles = StyleSheet.create({
   gradient: {
     width: '100%',
     height: '100%',
-  },
-  logoBlock: {
-    alignItems: 'center',
-  },
-  maskText: {
-    fontFamily: 'Courier',
-    fontSize: 12,
-    lineHeight: 14,
-    letterSpacing: 0,
-    color: 'black',
   },
 });
