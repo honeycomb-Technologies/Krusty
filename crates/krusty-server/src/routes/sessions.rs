@@ -693,6 +693,7 @@ mod tests {
                 peak_rss_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 peak_virtual_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 push_service: None,
+                apns_service: None,
                 oauth_flows: Arc::new(Mutex::new(HashMap::new())),
             },
             temp_dir,

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-use krusty_core::storage::{ApnsDeviceStore, Database};
+use krusty_core::storage::{ApnsDevice, ApnsDeviceStore, Database};
 
 const APNS_PRODUCTION_URL: &str = "https://api.push.apple.com";
 const APNS_SANDBOX_URL: &str = "https://api.sandbox.push.apple.com";
@@ -78,7 +78,7 @@ struct CachedToken {
 }
 
 /// APNs configuration loaded from environment or config file.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ApnsConfig {
     pub key_id: String,
     pub team_id: String,
@@ -110,7 +110,6 @@ impl ApnsService {
             .context("Failed to parse APNs .p8 key as EC private key")?;
 
         let client = Client::builder()
-            .http2_prior_knowledge()
             .timeout(Duration::from_secs(10))
             .build()
             .context("Failed to build HTTP/2 client for APNs")?;
@@ -210,6 +209,30 @@ impl ApnsService {
         }
     }
 
+    fn load_devices(&self, user_id: Option<&str>) -> Result<Vec<ApnsDevice>> {
+        let db = Database::new(self.db_path.as_ref()).context("Failed to open DB for APNs")?;
+        let store = ApnsDeviceStore::new(&db);
+        store.get_for_user(user_id)
+    }
+
+    fn mark_success(&self, device_token: &str) -> Result<()> {
+        let db = Database::new(self.db_path.as_ref()).context("Failed to open DB for APNs")?;
+        let store = ApnsDeviceStore::new(&db);
+        store.mark_success(device_token)
+    }
+
+    fn mark_failure(&self, device_token: &str, reason: &str) -> Result<()> {
+        let db = Database::new(self.db_path.as_ref()).context("Failed to open DB for APNs")?;
+        let store = ApnsDeviceStore::new(&db);
+        store.mark_failure(device_token, reason)
+    }
+
+    fn remove_stale(&self) -> Result<usize> {
+        let db = Database::new(self.db_path.as_ref()).context("Failed to open DB for APNs")?;
+        let store = ApnsDeviceStore::new(&db);
+        store.remove_stale(MAX_STALE_FAILURES)
+    }
+
     /// Send a push notification to a single device.
     async fn send_to_device(
         &self,
@@ -261,22 +284,8 @@ impl ApnsService {
         payload: ApnsPayload,
         event_type: ApnsEventType,
     ) -> ApnsStats {
-        let db = match Database::new(&self.db_path) {
-            Ok(db) => db,
-            Err(e) => {
-                error!("Failed to open DB for APNs: {e:#}");
-                return ApnsStats {
-                    attempted: 0,
-                    sent: 0,
-                    failed: 0,
-                    stale_removed: 0,
-                };
-            }
-        };
-
-        let store = ApnsDeviceStore::new(&db);
-        let devices = match store.get_for_user(user_id) {
-            Ok(d) => d,
+        let devices = match self.load_devices(user_id) {
+            Ok(devices) => devices,
             Err(e) => {
                 error!("Failed to load APNs devices: {e:#}");
                 return ApnsStats {
@@ -304,7 +313,9 @@ impl ApnsService {
                     .await
                 {
                     Ok(()) => {
-                        let _ = store.mark_success(&device.device_token);
+                        if let Err(err) = self.mark_success(&device.device_token) {
+                            warn!(device_token = device.device_token, error = %err, "Failed to record APNs success");
+                        }
                         stats.sent += 1;
                         delivered = true;
                         break;
@@ -319,7 +330,11 @@ impl ApnsService {
                                 error = %e,
                                 "APNs delivery failed after {MAX_APNS_ATTEMPTS} attempts"
                             );
-                            let _ = store.mark_failure(&device.device_token, &e.to_string());
+                            if let Err(err) =
+                                self.mark_failure(&device.device_token, &e.to_string())
+                            {
+                                warn!(device_token = device.device_token, error = %err, "Failed to record APNs failure");
+                            }
                         }
                     }
                 }
@@ -330,8 +345,7 @@ impl ApnsService {
             }
         }
 
-        // Clean up stale devices
-        if let Ok(removed) = store.remove_stale(MAX_STALE_FAILURES) {
+        if let Ok(removed) = self.remove_stale() {
             stats.stale_removed = removed;
         }
 

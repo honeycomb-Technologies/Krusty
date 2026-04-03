@@ -157,39 +157,6 @@ impl fmt::Display for WorkMode {
     }
 }
 
-/// Session workspace scope used by tool execution context.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum WorkspaceMode {
-    #[default]
-    Neutral,
-    Selected,
-    Created,
-}
-
-impl fmt::Display for WorkspaceMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            WorkspaceMode::Neutral => write!(f, "neutral"),
-            WorkspaceMode::Selected => write!(f, "selected"),
-            WorkspaceMode::Created => write!(f, "created"),
-        }
-    }
-}
-
-impl FromStr for WorkspaceMode {
-    type Err = String;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "neutral" => Ok(WorkspaceMode::Neutral),
-            "selected" => Ok(WorkspaceMode::Selected),
-            "created" => Ok(WorkspaceMode::Created),
-            other => Err(format!("Unknown workspace mode: {}", other)),
-        }
-    }
-}
-
 impl FromStr for WorkMode {
     type Err = String;
 
@@ -752,31 +719,6 @@ impl SessionManager {
             params![now, session_id],
         )?;
         Ok(())
-    }
-
-    /// Reset any in-flight agent states left behind by a crashed process.
-    pub fn reset_transient_agent_states(&self) -> Result<usize> {
-        let repaired = self.db.conn().execute(
-            "UPDATE sessions
-             SET agent_state = 'idle',
-                 agent_started_at = NULL,
-                 agent_last_event_at = NULL
-             WHERE agent_state != 'idle'",
-            [],
-        )?;
-        Ok(repaired)
-    }
-
-    /// Clear recovery payloads that cannot be resumed because the session is no longer active.
-    pub fn clear_stale_transient_recovery_states(&self) -> Result<usize> {
-        let now = Utc::now().to_rfc3339();
-        let cleared = self.db.conn().execute(
-            "UPDATE sessions
-             SET recovery_json = NULL, updated_at = ?1
-             WHERE recovery_json IS NOT NULL AND agent_state = 'idle'",
-            params![now],
-        )?;
-        Ok(cleared)
     }
 
     /// Delete a session and all its messages
