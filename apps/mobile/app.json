@@ -23,6 +23,9 @@
         "dark": "./assets/icons/ios-dark.png",
         "tinted": "./assets/icons/ios-tinted.png"
       },
+      "infoPlist": {
+        "UIBackgroundModes": ["remote-notification", "fetch"]
+      },
       "config": {
         "usesNonExemptEncryption": false
       }
@@ -52,6 +55,13 @@
         }
       ],
       "expo-font",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icons/ios-light.png",
+          "color": "#ff6b35"
+        }
+      ],
       [
         "expo-image-picker",
         {

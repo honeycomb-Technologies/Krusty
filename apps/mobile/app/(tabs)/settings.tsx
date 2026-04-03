@@ -21,11 +21,15 @@ import {
   Cpu,
   Link,
   X,
+  Bell,
+  BellOff,
+  BellRing,
 } from 'lucide-react-native';
 import * as Haptics from '../../platform/haptics';
 import { useRouter } from 'expo-router';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
+import { useNotifications, type NotificationLevel } from '../../hooks/useNotifications';
 import { GlassCard } from '../../components/ui/GlassCard';
 import type { ColorScheme } from '@krusty/ui';
 
@@ -33,6 +37,7 @@ export default function SettingsScreen() {
   const router = useRouter();
   const { theme, colorScheme, setColorScheme } = useThemeContext();
   const { isConnected, isConfigured, serverUrl, status, connect, disconnect, reconnect } = useConnection();
+  const { notificationLevel, changeNotificationLevel, pushToken } = useNotifications();
   const [inputUrl, setInputUrl] = useState('');
   const [inputToken, setInputToken] = useState('');
   const [isConnecting, setIsConnecting] = useState(false);
@@ -79,6 +84,12 @@ export default function SettingsScreen() {
     { key: 'dark', label: 'Dark', icon: Moon },
     { key: 'light', label: 'Light', icon: Sun },
     { key: 'system', label: 'System', icon: Monitor },
+  ];
+
+  const notifOptions: { key: NotificationLevel; label: string; icon: typeof Bell }[] = [
+    { key: 'all', label: 'All', icon: BellRing },
+    { key: 'important', label: 'Important', icon: Bell },
+    { key: 'silent', label: 'Silent', icon: BellOff },
   ];
 
   return (
@@ -240,6 +251,67 @@ export default function SettingsScreen() {
               );
             })}
           </View>
+        </GlassCard>
+
+        {/* Notifications */}
+        <Text style={[styles.sectionLabel, { color: t.mutedForeground }]}>NOTIFICATIONS</Text>
+        <GlassCard>
+          <View style={styles.row}>
+            <Bell size={20} color={t.mutedForeground} strokeWidth={1.8} />
+            <View style={styles.rowContent}>
+              <Text style={[styles.rowTitle, { color: t.foreground }]}>Notification Level</Text>
+              <Text style={[styles.rowSubtitle, { color: t.mutedForeground }]}>
+                {notificationLevel === 'all' ? 'All events including Mako updates'
+                  : notificationLevel === 'important' ? 'Tool approvals and completions only'
+                  : 'No notifications'}
+              </Text>
+            </View>
+          </View>
+          <View style={[styles.separator, { backgroundColor: t.border }]} />
+          <View style={styles.schemeRow}>
+            {notifOptions.map(opt => {
+              const Icon = opt.icon;
+              const active = notificationLevel === opt.key;
+              return (
+                <Pressable
+                  key={opt.key}
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    changeNotificationLevel(opt.key);
+                  }}
+                  style={[
+                    styles.schemeBtn,
+                    {
+                      backgroundColor: active ? t.userMessage + '20' : 'transparent',
+                      borderColor: active ? t.userMessage : t.border,
+                    },
+                  ]}
+                >
+                  <Icon
+                    size={18}
+                    color={active ? t.userMessage : t.mutedForeground}
+                    strokeWidth={1.8}
+                  />
+                  <Text
+                    style={[
+                      styles.schemeBtnText,
+                      { color: active ? t.userMessage : t.mutedForeground },
+                    ]}
+                  >
+                    {opt.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          {pushToken && (
+            <>
+              <View style={[styles.separator, { backgroundColor: t.border }]} />
+              <Text style={[styles.rowSubtitle, { color: t.mutedForeground }]} numberOfLines={1}>
+                Push: registered
+              </Text>
+            </>
+          )}
         </GlassCard>
 
         {/* About */}

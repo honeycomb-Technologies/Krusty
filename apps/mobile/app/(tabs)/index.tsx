@@ -27,6 +27,7 @@ import { useSplashState } from '../../hooks/useSplashState';
 import { useEntranceAnimation } from '../../hooks/useEntranceAnimation';
 import { useLiveActivity } from '../../hooks/useLiveActivity';
 import { useWidgetSync } from '../../hooks/useWidgetSync';
+import { useNotifications } from '../../hooks/useNotifications';
 import Animated from 'react-native-reanimated';
 import type { ChatMessage, ModelInfo, SessionResponse, SessionType, ThinkingLevel } from '@krusty/api';
 
@@ -53,14 +54,6 @@ export default function ChatScreen() {
   const { isDesktop } = useBreakpoint();
   const { splashDone } = useSplashState();
   const entrance = useEntranceAnimation(splashDone);
-  const liveActivity = useLiveActivity({
-    onToolApproval: (id, approved) => {
-      if (client && sessionId) {
-        client.submitToolApproval(sessionId, id, approved).catch(() => {});
-        setPendingApproval(null);
-      }
-    },
-  });
 
   // Session state
   const [sessions, setSessions] = useState<SessionResponse[]>([]);
@@ -78,6 +71,17 @@ export default function ChatScreen() {
   const [researchEnabled, setResearchEnabled] = useState(false);
   const [tokenCount, setTokenCount] = useState(0);
   const [pendingApproval, setPendingApproval] = useState<{id: string; name: string; args: Record<string, unknown>} | null>(null);
+
+  // Tool approval handler shared by Live Activity + Notifications
+  const toolApprovalHandler = useCallback((id: string, approved: boolean) => {
+    if (client && sessionId) {
+      client.submitToolApproval(sessionId, id, approved).catch(() => {});
+      setPendingApproval(null);
+    }
+  }, [client, sessionId]);
+
+  const liveActivity = useLiveActivity({ onToolApproval: toolApprovalHandler });
+  const notifications = useNotifications({ onToolApproval: toolApprovalHandler });
 
   // UI state
   const [activeTab, setActiveTab] = useState(1); // 0=Chat, 1=Code, 2=Mako
@@ -363,6 +367,8 @@ export default function ChatScreen() {
               toolApprovalId: id,
               toolApprovalName: name,
             });
+            // Send notification for lock screen approval when backgrounded
+            notifications.notifyToolApproval(id, name, currentSessionId!);
             Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
             Alert.alert(
               'Tool Approval',
@@ -409,6 +415,12 @@ export default function ChatScreen() {
             setIsStreaming(false);
             setIsThinking(false);
             liveActivity.endActivity();
+            notifications.notifyStreamComplete(
+              currentSessionId!,
+              sessionTitle || 'Chat',
+              tokenCount,
+              0,
+            );
           },
           onError: () => {
             stopFlushTimer();
