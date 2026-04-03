@@ -719,7 +719,7 @@ export default function ChatScreen() {
       </Animated.View>
 
       {/* Chat bar */}
-      <Animated.View style={entrance.bottomBarStyle}>
+      <Animated.View style={[entrance.bottomBarStyle, { overflow: 'visible' }]}>
         <ChatBar
           onSend={handleSend}
           onStop={handleStop}
