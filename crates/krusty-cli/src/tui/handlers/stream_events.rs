@@ -358,6 +358,16 @@ impl App {
                     }
                 }
             }
+            LoopEvent::AgentSleeping {
+                duration_secs,
+                reason,
+            } => {
+                tracing::info!(
+                    duration_secs = duration_secs,
+                    "Agent sleeping between ticks: {}",
+                    reason
+                );
+            }
 
             // -- Turn lifecycle -------------------------------------------
             LoopEvent::TurnComplete { turn, has_more } => {
@@ -365,6 +375,9 @@ impl App {
                 if !has_more {
                     self.stop_tool_execution();
                 }
+            }
+            LoopEvent::TickInjected { tick_number } => {
+                tracing::info!(tick_number = tick_number, "Injected autonomous tick");
             }
             LoopEvent::Usage {
                 prompt_tokens,
@@ -444,6 +457,64 @@ impl App {
                     "Background agent completed: {}",
                     summary,
                 );
+            }
+
+            // -- Mako autonomous agent events -----------------------------
+            LoopEvent::UserMessage {
+                title,
+                message,
+                level,
+            } => {
+                tracing::info!(
+                    level = %level,
+                    title = ?title,
+                    "User message: {}",
+                    message,
+                );
+            }
+            LoopEvent::ClassifierDecision {
+                tool_name,
+                decision,
+                reason,
+                stage,
+            } => {
+                tracing::debug!(
+                    tool_name = %tool_name,
+                    decision = %decision,
+                    stage = stage,
+                    "Classifier decision: {}",
+                    reason,
+                );
+            }
+            LoopEvent::TeammateSpawned { name, role } => {
+                tracing::info!(name = %name, role = %role, "Teammate spawned");
+            }
+            LoopEvent::TeammateTaskCompleted {
+                name,
+                task_id,
+                result,
+            } => {
+                tracing::info!(
+                    name = %name,
+                    task_id = %task_id,
+                    "Teammate task completed: {}",
+                    result,
+                );
+            }
+            LoopEvent::TeammateTaskFailed {
+                name,
+                task_id,
+                error,
+            } => {
+                tracing::warn!(
+                    name = %name,
+                    task_id = %task_id,
+                    "Teammate task failed: {}",
+                    error,
+                );
+            }
+            LoopEvent::TeammateCancelled { name } => {
+                tracing::info!(name = %name, "Teammate cancelled");
             }
         }
     }

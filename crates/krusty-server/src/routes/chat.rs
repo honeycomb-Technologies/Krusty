@@ -25,9 +25,9 @@ use krusty_core::ai::client::{
     AiClient, AnthropicAdaptiveEffort, CallOptions, CodexReasoningEffort,
 };
 use krusty_core::ai::providers::ProviderId;
-use krusty_core::ai::types::{Content, ImageContent, ModelMessage, Role, ThinkingConfig};
+use krusty_core::ai::types::{AiTool, Content, ImageContent, ModelMessage, Role, ThinkingConfig};
 use krusty_core::plan::PlanManager;
-use krusty_core::storage::{Database, WorkMode};
+use krusty_core::storage::{Database, SessionType, WorkMode, WorkspaceMode};
 use krusty_core::tools::registry::PermissionMode;
 use krusty_core::SessionManager;
 
@@ -58,6 +58,7 @@ struct ChatSessionContext {
     session_manager: SessionManager,
     working_dir: PathBuf,
     work_mode: WorkMode,
+    session_type: SessionType,
     user_id: Option<String>,
     guard: OwnedMutexGuard<()>,
 }
@@ -160,6 +161,7 @@ async fn setup_chat_session(
     session_id: &str,
     model_override: Option<&str>,
     thinking_level: ThinkingLevel,
+    research_enabled: bool,
 ) -> Result<ChatSessionContext, AppError> {
     let user_id = user.and_then(|u| u.0.user_id.clone());
     let user_home_dir = user.and_then(|u| u.0.home_dir.clone());
@@ -224,11 +226,36 @@ async fn setup_chat_session(
         })
         .collect();
 
-    let ai_tools = state.tool_registry.get_ai_tools().await;
+    tracing::info!(
+        session_type = ?session.session_type,
+        session_id = %session_id,
+        "Filtering tools for session type"
+    );
+    let ai_tools = filter_tools_for_session_type(
+        state.tool_registry.get_ai_tools().await,
+        session.session_type,
+        research_enabled,
+    );
     let mut options = CallOptions {
-        tools: Some(ai_tools),
+        tools: if ai_tools.is_empty() { None } else { Some(ai_tools) },
         session_id: Some(session_id.to_string()),
         codex_parallel_tool_calls: true,
+        system_prompt: match session.session_type {
+            SessionType::Chat => Some(
+                "You are Krusty, a friendly conversational assistant. This is a chat session. \
+                 You do NOT have access to any tools, files, or code. Do not mention or list tools. \
+                 If the user needs coding help, suggest they switch to Code mode. \
+                 Be helpful, natural, and conversational.".to_string()
+            ),
+            SessionType::Mako => Some(
+                "You are Mako, an autonomous project coordinator. You manage teams of agents, \
+                 break work into tasks, delegate to specialized teammates, and verify results. \
+                 Use create_task to define work, agent with name + run_in_background to spawn teammates, \
+                 list_tasks to monitor progress, send_user_message for user communication, \
+                 and sleep when waiting. Never fabricate results. Verify before declaring success.".to_string()
+            ),
+            SessionType::Code => None, // uses default Krusty coding assistant prompt
+        },
         ..Default::default()
     };
     if thinking_level.is_enabled() {
@@ -249,6 +276,7 @@ async fn setup_chat_session(
         session_manager,
         working_dir,
         work_mode: effective_work_mode,
+        session_type: session.session_type,
         user_id,
         guard,
     })
@@ -267,6 +295,7 @@ async fn chat(
         .and_then(|u| u.0.home_dir.clone())
         .unwrap_or_else(|| (*state.working_dir).clone());
     let model_override = resolve_model_override(req.model.as_deref(), None);
+    let requested_session_type = req.session_type.unwrap_or(SessionType::Code);
 
     let (session_id, is_first_message) = match req.session_id {
         Some(id) => {
@@ -290,12 +319,54 @@ async fn chat(
             let db = Database::new(&state.db_path)?;
             let sm = SessionManager::new(db);
             let title = SessionManager::generate_title_from_content(&req.message);
-            let working_dir_str = default_working_dir.to_string_lossy().to_string();
-            let id = sm.create_session_for_user(
+            let requested_working_dir = req
+                .working_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|dir| !dir.is_empty())
+                .map(ToOwned::to_owned);
+            let requested_project_dir = req
+                .project_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|dir| !dir.is_empty())
+                .map(ToOwned::to_owned);
+            let workspace_mode = req.workspace_mode.unwrap_or_else(|| {
+                if requested_project_dir.is_some() || requested_working_dir.is_some() {
+                    WorkspaceMode::Selected
+                } else if requested_session_type == SessionType::Chat {
+                    WorkspaceMode::Neutral
+                } else {
+                    WorkspaceMode::Selected
+                }
+            });
+            let default_workspace = if workspace_mode == WorkspaceMode::Neutral {
+                None
+            } else {
+                Some(default_working_dir.to_string_lossy().to_string())
+            };
+            let working_dir = match workspace_mode {
+                WorkspaceMode::Neutral => requested_working_dir.clone(),
+                WorkspaceMode::Selected | WorkspaceMode::Created => requested_project_dir
+                    .clone()
+                    .or(requested_working_dir.clone())
+                    .or(default_workspace.clone()),
+            };
+            let project_dir = match workspace_mode {
+                WorkspaceMode::Neutral => None,
+                WorkspaceMode::Selected | WorkspaceMode::Created => requested_project_dir
+                    .or(requested_working_dir)
+                    .or(default_workspace),
+            };
+            let id = sm.create_session_for_user_with_config(
                 &title,
                 model_override,
-                Some(working_dir_str.as_str()),
+                working_dir.as_deref(),
+                project_dir.as_deref(),
+                workspace_mode,
                 user_id.as_deref(),
+                None,
+                requested_session_type,
             )?;
             (id, true)
         }
@@ -307,6 +378,7 @@ async fn chat(
         &session_id,
         model_override,
         req.thinking_enabled,
+        req.research_enabled.unwrap_or(false),
     )
     .await?;
 
@@ -329,14 +401,14 @@ async fn chat(
     ctx.session_manager
         .save_message(&session_id, "user", &user_content_json)?;
 
-    start_orchestrator_sse(
-        &state,
-        ctx,
-        work_mode,
-        req.permission_mode,
-        is_first_message,
-    )
-    .await
+    // Mako sessions always run in autonomous mode (classifier provides safety gate)
+    let permission_mode = if ctx.session_type == SessionType::Mako {
+        PermissionMode::Autonomous
+    } else {
+        req.permission_mode
+    };
+
+    start_orchestrator_sse(&state, ctx, work_mode, permission_mode, is_first_message).await
 }
 
 async fn tool_result(
@@ -350,6 +422,7 @@ async fn tool_result(
         &req.session_id,
         None,
         ThinkingLevel::Off,
+        false,
     )
     .await?;
 
@@ -588,8 +661,18 @@ async fn start_orchestrator_sse(
         ..Default::default()
     };
 
-    let orchestrator = AgenticOrchestrator::new(services, config);
-    let (mut event_rx, input_tx) = orchestrator.run(ctx.conversation, ctx.options);
+    let (mut event_rx, input_tx) = if ctx.session_type == SessionType::Mako {
+        use krusty_core::agent::tick_engine::{TickEngine, TickEngineConfig};
+        let tick_config = TickEngineConfig {
+            tick_interval: std::time::Duration::from_secs(30),
+            max_ticks: 1000,
+            enabled: true,
+        };
+        TickEngine::run(services, config, tick_config, ctx.conversation, ctx.options)
+    } else {
+        let orchestrator = AgenticOrchestrator::new(services, config);
+        orchestrator.run(ctx.conversation, ctx.options)
+    };
 
     // Store input channel for tool approvals
     let session_id = ctx.session_id;
@@ -684,6 +767,77 @@ async fn start_orchestrator_sse(
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
+
+/// Tools allowed in Chat sessions — conversation only, no file/bash/code tools.
+/// Web search/fetch are the only tools. Research mode adds agent + report tools.
+const CHAT_ALLOWED_TOOLS: &[&str] = &["web_search", "web_fetch"];
+
+/// Additional tools unlocked for Chat sessions when research mode is enabled.
+const CHAT_RESEARCH_TOOLS: &[&str] = &["agent", "create_report", "list_reports", "read_report"];
+
+/// Tools exclusive to Mako sessions -- excluded from Code sessions.
+const MAKO_ONLY_TOOLS: &[&str] = &[
+    "send_user_message",
+    "sleep",
+    "create_task",
+    "update_task",
+    "list_tasks",
+    "create_report",
+    "list_reports",
+    "read_report",
+];
+
+/// Filter tools based on the session type.
+///
+/// - **Code**: all registered tools except Mako-only tools.
+/// - **Chat**: only a minimal subset (no file/bash tools). When
+///   `research_enabled` is true, the agent and report tools are included.
+/// - **Mako**: all registered tools (Code tools + Mako extensions).
+///
+/// TODO: Mako sessions should use the TickEngine instead of the bare
+/// orchestrator. The tool set is wired here; TickEngine integration is
+/// deferred.
+fn filter_tools_for_session_type(
+    tools: Vec<AiTool>,
+    session_type: SessionType,
+    research_enabled: bool,
+) -> Vec<AiTool> {
+    let before = tools.len();
+    let result = filter_tools_inner(tools, session_type, research_enabled);
+    tracing::info!(
+        session_type = ?session_type,
+        before_count = before,
+        after_count = result.len(),
+        tool_names = ?result.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        "Tool filter applied"
+    );
+    result
+}
+
+fn filter_tools_inner(
+    tools: Vec<AiTool>,
+    session_type: SessionType,
+    research_enabled: bool,
+) -> Vec<AiTool> {
+    match session_type {
+        SessionType::Code => tools
+            .into_iter()
+            .filter(|t| !MAKO_ONLY_TOOLS.contains(&t.name.as_str()))
+            .collect(),
+        SessionType::Chat => tools
+            .into_iter()
+            .filter(|t| {
+                CHAT_ALLOWED_TOOLS.contains(&t.name.as_str())
+                    || (research_enabled && CHAT_RESEARCH_TOOLS.contains(&t.name.as_str()))
+            })
+            .collect(),
+        SessionType::Mako => {
+            // Mako gets everything: Code tools plus Mako-specific tools.
+            // All tools are registered globally; here we just pass them through.
+            tools
+        }
+    }
+}
 
 fn apply_thinking_config(
     ai_client: &AiClient,

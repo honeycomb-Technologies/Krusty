@@ -20,11 +20,14 @@
 //! - set_dependency: Create task dependencies (handled by UI)
 //! - set_work_mode: Switch between build and plan modes (handled by UI/server)
 //! - enter_plan_mode: Switch to plan mode (handled by UI)
+//! - send_user_message: Send prominent messages to user (Mako autonomous mode)
+//! - sleep: Idle signal for autonomous tick engine
 
 pub mod add_subtask;
 pub mod agent;
 pub mod apply_patch;
 pub mod ask_user;
+pub mod autonomous_task;
 pub mod bash;
 pub mod edit;
 pub mod glob;
@@ -35,12 +38,17 @@ pub mod multiedit;
 pub mod plan_mode;
 pub mod processes;
 pub mod read;
+pub mod report;
+pub mod send_message;
+pub mod send_user_message;
 pub mod set_dependency;
 pub mod set_work_mode;
 pub mod set_workspace_context;
 pub mod skill;
+pub mod sleep;
 pub mod task_complete;
 pub mod task_start;
+pub mod teammate;
 pub mod write;
 
 pub use add_subtask::AddSubtaskTool;
@@ -57,13 +65,20 @@ pub use multiedit::MultiEditTool;
 pub use plan_mode::EnterPlanModeTool;
 pub use processes::ProcessesTool;
 pub use read::ReadTool;
+pub use send_message::SendMessageTool;
+pub use send_user_message::SendUserMessageTool;
 pub use set_dependency::SetDependencyTool;
 pub use set_work_mode::SetWorkModeTool;
 pub use set_workspace_context::SetWorkspaceContextTool;
 pub use skill::SkillTool;
+pub use sleep::SleepTool;
 pub use task_complete::TaskCompleteTool;
 pub use task_start::TaskStartTool;
 pub use write::WriteTool;
+
+pub use autonomous_task::{CreateTaskTool, ListTasksTool, UpdateTaskTool};
+pub use report::{CreateReportTool, ListReportsTool, ReadReportTool};
+// teammate tool retired — teammates managed through `agent` tool with `name` param
 
 use std::sync::Arc;
 
@@ -93,6 +108,8 @@ pub async fn register_all_tools(registry: &ToolRegistry) {
     registry.register(Arc::new(SetWorkspaceContextTool)).await;
     registry.register(Arc::new(SetWorkModeTool)).await;
     registry.register(Arc::new(EnterPlanModeTool)).await;
+    registry.register(Arc::new(SendUserMessageTool)).await;
+    registry.register(Arc::new(SleepTool)).await;
 }
 
 /// Register tools for ACP (excludes TUI-only tools)
@@ -126,4 +143,19 @@ pub async fn register_agent_tool(
     registry
         .register(Arc::new(AgentTool::new(client, cancellation)))
         .await;
+}
+
+/// Register Mako-specific tools (autonomous tasks, reports).
+///
+/// These are additive — call after `register_all_tools` so Mako sessions
+/// get both the standard Code tools and the Mako extensions. Teammates
+/// are managed through the `agent` tool with the `name` parameter.
+pub async fn register_mako_tools(registry: &ToolRegistry) {
+    registry.register(Arc::new(CreateTaskTool)).await;
+    registry.register(Arc::new(UpdateTaskTool)).await;
+    registry.register(Arc::new(ListTasksTool)).await;
+    registry.register(Arc::new(CreateReportTool)).await;
+    registry.register(Arc::new(ListReportsTool)).await;
+    registry.register(Arc::new(ReadReportTool)).await;
+    registry.register(Arc::new(SendMessageTool)).await;
 }

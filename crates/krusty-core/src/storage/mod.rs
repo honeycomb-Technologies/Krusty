@@ -10,6 +10,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod agent_state;
+pub mod autonomous_tasks;
 mod block_ui;
 pub mod credentials;
 mod database;
@@ -25,10 +26,12 @@ mod project_settings;
 pub mod push_delivery_attempts;
 pub mod push_subscriptions;
 mod recovery;
+pub mod reports;
 mod runtime_traces;
 mod sessions;
 
 pub use agent_state::AgentState;
+pub use autonomous_tasks::{AutonomousTask, AutonomousTaskStore, TaskStatus};
 pub use block_ui::BlockUiState;
 pub use credentials::CredentialStore;
 pub use database::{Database, SharedDatabase};
@@ -50,11 +53,12 @@ pub use recovery::{
     PartialAssistantState, RecoveryDecision, RecoveryNonResumableReason, RecoveryStatus,
     RecoveryToolCall, SessionRecoveryState,
 };
+pub use reports::{Report, ReportStore};
 pub use runtime_traces::{
     ReplayExpectations, ReplayGateResult, RuntimeTraceEvent, RuntimeTraceStore,
     RuntimeTraceSummary, TraceEventCount, TraceFailureCategory,
 };
-pub use sessions::{SessionInfo, SessionManager, WorkMode, WorkspaceMode};
+pub use sessions::{SessionInfo, SessionManager, SessionType, WorkMode, WorkspaceMode};
 
 /// Get current Unix timestamp in seconds
 #[inline]

@@ -63,9 +63,18 @@ async fn list_models(State(state): State<AppState>) -> Result<Json<ModelsListRes
         }
     }
 
+    // Pick the best default: active provider's model, or first available, or hardcoded fallback
+    let default_model = if let Some(ref client) = state.ai_client {
+        client.config().model.clone()
+    } else if let Some(first) = models.first() {
+        first.id.clone()
+    } else {
+        constants::ai::DEFAULT_MODEL.to_string()
+    };
+
     Ok(Json(ModelsListResponse {
         models,
-        default_model: constants::ai::DEFAULT_MODEL.to_string(),
+        default_model,
     }))
 }
 

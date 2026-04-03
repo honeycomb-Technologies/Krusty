@@ -73,6 +73,15 @@ struct Params {
     /// Run the agent in the background. Returns immediately with delegated_run_id.
     #[serde(default)]
     run_in_background: Option<bool>,
+
+    /// Optional: give the agent a persistent name (Mako teammate).
+    /// Named agents auto-claim tasks from the autonomous task list.
+    #[serde(default)]
+    name: Option<String>,
+
+    /// Short description of what this agent does (for status display).
+    #[serde(default)]
+    description: Option<String>,
 }
 
 #[async_trait]
@@ -97,6 +106,8 @@ impl Tool for AgentTool {
 - **build**: Parallel code implementation. Pass 'components' array and optionally 'conventions'. Fresh context.
 
 **Background mode:** Pass `run_in_background: true` to spawn the agent asynchronously. You get back a `delegated_run_id` immediately and can continue working. The agent writes its result to the delegated run store when finished — you will see it in your delegated context on the next turn. Use this for long-running tasks where you don't need the result right away.
+
+**Named agents (Mako teammates):** Pass `name` to create a persistent named agent. Named agents auto-claim tasks from the autonomous task list (create_task). Use with `run_in_background: true`. Example: `agent(agent_type: "build", prompt: "Work through pending tasks", name: "builder-1", run_in_background: true)`.
 
 For simple file lookups, use Glob/Grep/Read directly — agent is for deeper multi-step work."#,
         )
@@ -138,6 +149,14 @@ For simple file lookups, use Glob/Grep/Read directly — agent is for deeper mul
                 "run_in_background": {
                     "type": "boolean",
                     "description": "Run agent in background. Returns immediately with delegated_run_id. Check status via delegated run store. You will see results in the delegated context on your next turn."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Give the agent a persistent name (Mako teammate). Named agents auto-claim tasks from the task list and can be addressed via send_message. Use with run_in_background: true."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Short description of what this agent does (3-5 words, for status display)."
                 }
             },
             "required": ["agent_type", "prompt"],
@@ -155,6 +174,15 @@ For simple file lookups, use Glob/Grep/Read directly — agent is for deeper mul
                 return e;
             }
         };
+
+        if let Some(ref name) = params.name {
+            info!(
+                name = %name,
+                description = ?params.description,
+                agent_type = %params.agent_type,
+                "Named agent (Mako teammate) requested"
+            );
+        }
 
         match params.agent_type.as_str() {
             "explore" => self.execute_explore(params, ctx).await,
@@ -177,8 +205,12 @@ For simple file lookups, use Glob/Grep/Read directly — agent is for deeper mul
 // ---------------------------------------------------------------------------
 
 /// Build the immediate response for a background agent launch.
-fn background_started_result(delegated_run_id: &str, agent_type: &str) -> ToolResult {
-    ToolResult::success_data(json!({
+fn background_started_result(
+    delegated_run_id: &str,
+    agent_type: &str,
+    name: Option<&str>,
+) -> ToolResult {
+    let mut result = json!({
         "status": "background_started",
         "delegated_run_id": delegated_run_id,
         "agent_type": agent_type,
@@ -187,7 +219,16 @@ fn background_started_result(delegated_run_id: &str, agent_type: &str) -> ToolRe
              Use delegated_run_id '{}' to track status.",
             agent_type, delegated_run_id
         ),
-    }))
+    });
+    if let Some(name) = name {
+        result["name"] = json!(name);
+        result["message"] = json!(format!(
+            "Named agent '{}' ({}) started in background. Use send_message to communicate. \
+             delegated_run_id: '{}'",
+            name, agent_type, delegated_run_id
+        ));
+    }
+    ToolResult::success_data(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -455,7 +496,7 @@ impl AgentTool {
                 }
             });
 
-            return background_started_result(&delegated_run_id, "explore");
+            return background_started_result(&delegated_run_id, "explore", params.name.as_deref());
         }
 
         // ── Synchronous mode (existing behavior) ─────────────────────
@@ -694,7 +735,7 @@ impl AgentTool {
                 }
             });
 
-            return background_started_result(&delegated_run_id, "plan");
+            return background_started_result(&delegated_run_id, "plan", params.name.as_deref());
         }
 
         // ── Synchronous mode (existing behavior) ─────────────────────
@@ -933,7 +974,7 @@ impl AgentTool {
                 }
             });
 
-            return background_started_result(&delegated_run_id, "verify");
+            return background_started_result(&delegated_run_id, "verify", params.name.as_deref());
         }
 
         // ── Synchronous mode (existing behavior) ─────────────────────
@@ -1296,7 +1337,7 @@ impl AgentTool {
                 }
             });
 
-            return background_started_result(&delegated_run_id, "build");
+            return background_started_result(&delegated_run_id, "build", params.name.as_deref());
         }
 
         // ── Synchronous mode (existing behavior) ─────────────────────

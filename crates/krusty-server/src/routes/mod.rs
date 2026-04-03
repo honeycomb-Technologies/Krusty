@@ -9,6 +9,7 @@ mod credentials;
 mod files;
 mod git;
 mod hooks;
+mod mako;
 mod mcp;
 mod models;
 pub mod oauth;
@@ -16,6 +17,8 @@ mod ports;
 mod preview_settings;
 mod processes;
 mod push;
+pub(crate) mod remote_auth;
+mod reports;
 mod server;
 mod sessions;
 mod tools;
@@ -30,12 +33,14 @@ pub fn api_router() -> Router<AppState> {
         .nest("/git", git::router())
         .nest("/files", files::router())
         .nest("/credentials", credentials::router())
+        .nest("/mako", mako::router())
         .nest("/mcp", mcp::router())
         .nest("/processes", processes::router())
         .nest("/ports", ports::router())
         .nest("/settings/preview", preview_settings::router())
         .nest("/hooks", hooks::router())
         .nest("/push", push::router())
+        .nest("/reports", reports::router())
         .nest("/server", server::router())
         .nest("/auth/oauth", oauth::router())
         .merge(Router::new())

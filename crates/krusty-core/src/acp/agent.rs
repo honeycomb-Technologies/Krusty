@@ -827,7 +827,7 @@ mod tests {
         assert_eq!(agent.sessions().session_count(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_new_session() -> anyhow::Result<()> {
         let agent = KrustyAgent::new();
 

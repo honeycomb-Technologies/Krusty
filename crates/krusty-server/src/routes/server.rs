@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 
 use axum::{extract::State, routing::get, Json, Router};
 
-use krusty_core::storage::{Database, WorkspaceMode};
+use krusty_core::storage::Database;
 use krusty_core::SessionManager;
 
 use crate::auth::CurrentUser;
@@ -91,12 +91,6 @@ async fn get_server_status(
 
             let session = session_manager.get_session(&session_id).ok().flatten()?;
             let presence_snapshot = snapshot_presence(&mut presence, &session_id);
-            let project_dir = session.working_dir.clone();
-            let workspace_mode = if project_dir.is_some() {
-                WorkspaceMode::Selected
-            } else {
-                WorkspaceMode::Neutral
-            };
 
             Some(ActiveSessionStatusResponse {
                 id: session_id,
@@ -105,8 +99,8 @@ async fn get_server_status(
                 started_at: agent_state.started_at,
                 last_event_at: agent_state.last_event_at,
                 working_dir: session.working_dir,
-                project_dir,
-                workspace_mode,
+                project_dir: session.project_dir,
+                workspace_mode: session.workspace_mode,
                 active_viewers: presence_snapshot.active_viewers,
                 active_controllers: presence_snapshot.active_controllers,
                 stale_clients: presence_snapshot.stale_clients,

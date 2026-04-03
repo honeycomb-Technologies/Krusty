@@ -14,7 +14,8 @@ use crate::ai::types::{Content, ModelMessage, Role};
 use crate::plan::PlanManager;
 use crate::skills::SkillsManager;
 use crate::storage::{
-    Database, DelegatedRunStore, MemoryStore, MemoryType, ProjectSettings, WorkMode,
+    AutonomousTaskStore, Database, DelegatedRunStore, MemoryStore, MemoryType, ProjectSettings,
+    ReportStore, TaskStatus, WorkMode,
 };
 
 /// Instruction files to search for in the working directory (priority order).
@@ -46,7 +47,30 @@ pub fn inject_context(
     work_mode: WorkMode,
     skills_manager: &RwLock<SkillsManager>,
     model_id: Option<&str>,
+    session_type: Option<&str>,
 ) -> Vec<ModelMessage> {
+    let is_chat = session_type == Some("chat");
+
+    // Chat sessions get minimal context — no workspace, tools, plans, or project data.
+    if is_chat {
+        let mut injected = Vec::with_capacity(conversation.len() + 2);
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text {
+                text: "You are Krusty, a helpful conversational assistant. This is a chat session — you are having a natural conversation with the user.\n\nIMPORTANT: You do NOT have access to any tools in this session. Do not mention, list, or describe any tools. You cannot read files, run commands, or edit code. If the user asks about tools, explain that this is a chat-only session and suggest they switch to Code mode for coding tasks.\n\nBe friendly, helpful, and conversational.".to_string(),
+            }],
+        });
+        let memory_ctx = build_memory_context(db_path, None, None);
+        if !memory_ctx.is_empty() {
+            injected.push(ModelMessage {
+                role: Role::System,
+                content: vec![Content::Text { text: memory_ctx }],
+            });
+        }
+        injected.extend_from_slice(conversation);
+        return injected;
+    }
+
     let workspace_ctx = build_workspace_context(working_dir, project_dir);
     let env_ctx = build_environment_context(working_dir, model_id);
     let memory_ctx = build_memory_context(
@@ -58,6 +82,14 @@ pub fn inject_context(
     );
     let plan_ctx = build_plan_context(db_path, session_id, work_mode);
     let delegated_ctx = build_delegated_context(db_path, session_id);
+    let task_ctx = build_autonomous_task_context(db_path, session_id);
+    let report_ctx = build_report_context(
+        db_path,
+        project_dir
+            .map(|p| p.to_string_lossy().to_string())
+            .as_deref(),
+    );
+    let coordinator_ctx = build_coordinator_context(session_type.unwrap_or("code"));
     let skills_ctx = build_skills_context(skills_manager, project_dir.is_some());
     let project_ctx = project_dir.map(build_project_context).unwrap_or_default();
     let project_settings = project_dir.map(ProjectSettings::load).unwrap_or_default();
@@ -111,6 +143,26 @@ pub fn inject_context(
             role: Role::System,
             content: vec![Content::Text {
                 text: delegated_ctx,
+            }],
+        });
+    }
+    if !task_ctx.is_empty() {
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text { text: task_ctx }],
+        });
+    }
+    if !report_ctx.is_empty() {
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text { text: report_ctx }],
+        });
+    }
+    if !coordinator_ctx.is_empty() {
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text {
+                text: coordinator_ctx,
             }],
         });
     }
@@ -269,6 +321,100 @@ fn build_delegated_context(db_path: &Path, session_id: &str) -> String {
     }
 
     lines.join("\n")
+}
+
+/// Build context for autonomous tasks in this session.
+fn build_autonomous_task_context(db_path: &Path, session_id: &str) -> String {
+    let db = match Database::new(db_path) {
+        Ok(db) => db,
+        Err(_) => return String::new(),
+    };
+    let store = AutonomousTaskStore::new(db);
+    let tasks = match store.list_tasks(session_id) {
+        Ok(t) => t,
+        Err(_) => return String::new(),
+    };
+    if tasks.is_empty() {
+        return String::new();
+    }
+
+    let mut lines = vec!["[AUTONOMOUS TASKS]".to_string()];
+
+    let pending: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Pending)
+        .collect();
+    let in_progress: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::InProgress)
+        .collect();
+    let completed: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Completed)
+        .collect();
+
+    if !pending.is_empty() {
+        lines.push("Pending:".to_string());
+        for t in &pending {
+            lines.push(format!("  - {}: {}", t.id, t.subject));
+        }
+    }
+    if !in_progress.is_empty() {
+        lines.push("In Progress:".to_string());
+        for t in &in_progress {
+            let owner = t
+                .owner
+                .as_deref()
+                .map(|o| format!(" (owner: {})", o))
+                .unwrap_or_default();
+            lines.push(format!("  - {}: {}{}", t.id, t.subject, owner));
+        }
+    }
+    if !completed.is_empty() {
+        lines.push("Completed:".to_string());
+        for t in &completed {
+            lines.push(format!("  - {}: {}", t.id, t.subject));
+        }
+    }
+
+    lines.join("\n")
+}
+
+/// Build context for recent reports in this project.
+fn build_report_context(db_path: &Path, project_dir: Option<&str>) -> String {
+    let db = match Database::new(db_path) {
+        Ok(db) => db,
+        Err(_) => return String::new(),
+    };
+    let store = ReportStore::new(db);
+    let reports = match store.list_reports(project_dir) {
+        Ok(r) => r,
+        Err(_) => return String::new(),
+    };
+    if reports.is_empty() {
+        return String::new();
+    }
+
+    let mut lines = vec!["[RECENT REPORTS]".to_string()];
+    for report in reports.iter().take(5) {
+        let summary = truncate_utf8(&report.summary, 200);
+        lines.push(format!(
+            "- \"{}\" ({}): {}",
+            report.title, report.created_at, summary
+        ));
+    }
+    lines.push("Use `ReadReport` tool to access full content.".to_string());
+
+    lines.join("\n")
+}
+
+/// Build coordinator prompt for Mako sessions.
+fn build_coordinator_context(session_type: &str) -> String {
+    if session_type == "mako" {
+        crate::agent::coordinator_prompt::COORDINATOR_SYSTEM_PROMPT.to_string()
+    } else {
+        String::new()
+    }
 }
 
 /// Build combined workspace + project context for a subagent system prompt.
@@ -673,6 +819,7 @@ mod tests {
             WorkMode::Build,
             &skills,
             None,
+            None,
         );
 
         assert_eq!(injected.len(), 3);
@@ -745,6 +892,7 @@ mod tests {
             Some(repo),
             WorkMode::Build,
             &skills,
+            None,
             None,
         );
 

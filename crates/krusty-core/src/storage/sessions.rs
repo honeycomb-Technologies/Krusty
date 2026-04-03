@@ -12,21 +12,21 @@ use super::{RuntimeTraceEvent, RuntimeTraceStore, RuntimeTraceSummary, SessionRe
 use crate::agent::PinchContext;
 
 const LIST_SESSIONS_SQL_ALL: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type
              FROM sessions
              ORDER BY updated_at DESC";
 const LIST_SESSIONS_SQL_BY_DIR: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type
              FROM sessions
              WHERE working_dir = ?1
              ORDER BY updated_at DESC";
 const LIST_SESSIONS_SQL_BY_USER: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type
              FROM sessions
              WHERE user_id = ?1
              ORDER BY updated_at DESC";
 const LIST_SESSIONS_SQL_BY_DIR_AND_USER: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type
              FROM sessions
              WHERE working_dir = ?1 AND user_id = ?2
              ORDER BY updated_at DESC";
@@ -37,12 +37,12 @@ const LIST_SESSION_DIRS_SQL_BY_USER: &str = "SELECT DISTINCT working_dir FROM se
                  WHERE working_dir IS NOT NULL AND user_id = ?1
                  ORDER BY working_dir";
 const LIST_SESSIONS_BY_DIRECTORY_SQL: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type
              FROM sessions
              WHERE working_dir IS NOT NULL
              ORDER BY working_dir, updated_at DESC";
 const GET_SESSION_SQL: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type
              FROM sessions
              WHERE id = ?1";
 
@@ -57,6 +57,12 @@ pub struct SessionInfo {
     pub parent_session_id: Option<String>,
     /// Working directory for this session
     pub working_dir: Option<String>,
+    /// Explicit active project directory, when different from the session root.
+    pub project_dir: Option<String>,
+    /// Whether the session is operating without a project or within an explicit project.
+    pub workspace_mode: WorkspaceMode,
+    /// High-level session surface type.
+    pub session_type: SessionType,
     /// User ID for multi-tenant isolation
     pub user_id: Option<String>,
     /// Current work mode for this session
@@ -65,6 +71,72 @@ pub struct SessionInfo {
     pub model: Option<String>,
     /// Optional target branch selected for this session
     pub target_branch: Option<String>,
+}
+
+/// Session type for high-level product surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionType {
+    Chat,
+    #[default]
+    Code,
+    Mako,
+}
+
+impl fmt::Display for SessionType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SessionType::Chat => write!(f, "chat"),
+            SessionType::Code => write!(f, "code"),
+            SessionType::Mako => write!(f, "mako"),
+        }
+    }
+}
+
+impl FromStr for SessionType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "chat" => Ok(SessionType::Chat),
+            "code" => Ok(SessionType::Code),
+            "mako" => Ok(SessionType::Mako),
+            other => Err(format!("Unknown session type: {}", other)),
+        }
+    }
+}
+
+/// Session workspace mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceMode {
+    #[default]
+    Neutral,
+    Selected,
+    Created,
+}
+
+impl fmt::Display for WorkspaceMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WorkspaceMode::Neutral => write!(f, "neutral"),
+            WorkspaceMode::Selected => write!(f, "selected"),
+            WorkspaceMode::Created => write!(f, "created"),
+        }
+    }
+}
+
+impl FromStr for WorkspaceMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "neutral" => Ok(WorkspaceMode::Neutral),
+            "selected" => Ok(WorkspaceMode::Selected),
+            "created" => Ok(WorkspaceMode::Created),
+            other => Err(format!("Unknown workspace mode: {}", other)),
+        }
+    }
 }
 
 /// Session work mode
@@ -184,6 +256,42 @@ impl SessionManager {
         self.create_session_for_user_with_target_branch(title, model, working_dir, user_id, None)
     }
 
+    /// Create a new session with explicit workspace and surface metadata.
+    pub fn create_session_for_user_with_config(
+        &self,
+        title: &str,
+        model: Option<&str>,
+        working_dir: Option<&str>,
+        project_dir: Option<&str>,
+        workspace_mode: WorkspaceMode,
+        user_id: Option<&str>,
+        target_branch: Option<&str>,
+        session_type: SessionType,
+    ) -> Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+
+        self.db.conn().execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, project_dir, workspace_mode, session_type, user_id, target_branch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                id,
+                title,
+                now,
+                now,
+                model,
+                working_dir,
+                project_dir,
+                workspace_mode.to_string(),
+                session_type.to_string(),
+                user_id,
+                target_branch
+            ],
+        )?;
+
+        Ok(id)
+    }
+
     /// Create a new session with user ownership and optional target branch.
     pub fn create_session_for_user_with_target_branch(
         &self,
@@ -193,16 +301,22 @@ impl SessionManager {
         user_id: Option<&str>,
         target_branch: Option<&str>,
     ) -> Result<String> {
-        let id = uuid::Uuid::new_v4().to_string();
-        let now = Utc::now().to_rfc3339();
-
-        self.db.conn().execute(
-            "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, user_id, target_branch)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![id, title, now, now, model, working_dir, user_id, target_branch],
-        )?;
-
-        Ok(id)
+        let project_dir = working_dir;
+        let workspace_mode = if working_dir.is_some() {
+            WorkspaceMode::Selected
+        } else {
+            WorkspaceMode::Neutral
+        };
+        self.create_session_for_user_with_config(
+            title,
+            model,
+            working_dir,
+            project_dir,
+            workspace_mode,
+            user_id,
+            target_branch,
+            SessionType::Code,
+        )
     }
 
     /// List sessions, optionally filtered by working directory
@@ -261,6 +375,18 @@ impl SessionManager {
         let work_mode_raw: String = row.get(7)?;
         let model: Option<String> = row.get(8)?;
         let target_branch: Option<String> = row.get(9)?;
+        let project_dir: Option<String> = row.get(10)?;
+        let workspace_mode_raw: String = row.get(11)?;
+        let session_type_raw: String = row.get(12)?;
+        let working_dir: Option<String> = row.get(5)?;
+        let workspace_mode = workspace_mode_raw.parse().unwrap_or_else(|_| {
+            if project_dir.is_some() || working_dir.is_some() {
+                WorkspaceMode::Selected
+            } else {
+                WorkspaceMode::Neutral
+            }
+        });
+        let session_type = session_type_raw.parse().unwrap_or_default();
 
         Ok(SessionInfo {
             id: row.get(0)?,
@@ -270,7 +396,10 @@ impl SessionManager {
                 .unwrap_or_else(|_| Utc::now()),
             token_count: token_count.map(|t| t as usize),
             parent_session_id: row.get(4)?,
-            working_dir: row.get(5)?,
+            working_dir,
+            project_dir,
+            workspace_mode,
+            session_type,
             user_id: row.get(6)?,
             work_mode: work_mode_raw.parse().unwrap_or_default(),
             model,
@@ -400,6 +529,41 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Update the session workspace mode and active project directory.
+    ///
+    /// For explicit project modes we also align `working_dir` to the chosen
+    /// project root so subsequent file tools execute within the active project.
+    pub fn update_session_workspace(
+        &self,
+        session_id: &str,
+        project_dir: Option<&str>,
+        workspace_mode: WorkspaceMode,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let working_dir = match workspace_mode {
+            WorkspaceMode::Neutral => None,
+            WorkspaceMode::Selected | WorkspaceMode::Created => project_dir,
+        };
+
+        self.db.conn().execute(
+            "UPDATE sessions
+             SET project_dir = ?1,
+                 workspace_mode = ?2,
+                 working_dir = COALESCE(?3, working_dir),
+                 updated_at = ?4
+             WHERE id = ?5",
+            params![
+                project_dir,
+                workspace_mode.to_string(),
+                working_dir,
+                now,
+                session_id
+            ],
+        )?;
+
+        Ok(())
+    }
+
     /// Update session work mode
     pub fn update_session_work_mode(&self, session_id: &str, work_mode: WorkMode) -> Result<()> {
         let now = Utc::now().to_rfc3339();
@@ -521,6 +685,61 @@ impl SessionManager {
             .map(|json| serde_json::from_str(&json))
             .transpose()
             .map_err(Into::into)
+    }
+
+    /// Reset any non-idle agent execution state after an unclean shutdown.
+    pub fn reset_transient_agent_states(&self) -> Result<usize> {
+        let repaired = self.db.conn().execute(
+            "UPDATE sessions
+             SET agent_state = 'idle',
+                 agent_started_at = NULL,
+                 agent_last_event_at = NULL
+             WHERE agent_state != 'idle'",
+            [],
+        )?;
+        Ok(repaired)
+    }
+
+    /// Clear persisted non-resumable recovery snapshots that should not survive
+    /// a fresh server start.
+    pub fn clear_stale_transient_recovery_states(&self) -> Result<usize> {
+        let mut stmt = self.db.conn().prepare(
+            "SELECT id, recovery_json
+             FROM sessions
+             WHERE recovery_json IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+
+        let stale_ids = rows
+            .filter_map(|row| row.ok())
+            .filter_map(|(session_id, recovery_json)| {
+                let recovery_json = recovery_json?;
+                let state: SessionRecoveryState = serde_json::from_str(&recovery_json).ok()?;
+                if state.is_resumable() {
+                    None
+                } else {
+                    Some(session_id)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if stale_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let tx = self.db.conn().unchecked_transaction()?;
+        for session_id in &stale_ids {
+            tx.execute(
+                "UPDATE sessions
+                 SET recovery_json = NULL
+                 WHERE id = ?1",
+                params![session_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(stale_ids.len())
     }
 
     /// Clear persisted recovery state once the interrupted turn has been finalized or superseded.
@@ -708,21 +927,24 @@ impl SessionManager {
     ) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        let parent_user_id = self
+        let (parent_user_id, parent_session_type) = self
             .db
             .conn()
             .query_row(
-                "SELECT user_id FROM sessions WHERE id = ?1",
+                "SELECT user_id, session_type FROM sessions WHERE id = ?1",
                 [parent_session_id],
-                |row| row.get::<_, Option<String>>(0),
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?
-            .flatten();
+            .map(|(user_id, session_type)| {
+                (user_id, session_type.parse().unwrap_or(SessionType::Code))
+            })
+            .unwrap_or((None, SessionType::Code));
 
         // Create new session with parent reference
         self.db.conn().execute(
-            "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, user_id, parent_session_id, target_branch)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, project_dir, workspace_mode, session_type, user_id, parent_session_id, target_branch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 id,
                 title,
@@ -730,6 +952,13 @@ impl SessionManager {
                 now,
                 model,
                 working_dir,
+                working_dir,
+                if working_dir.is_some() {
+                    WorkspaceMode::Selected.to_string()
+                } else {
+                    WorkspaceMode::Neutral.to_string()
+                },
+                parent_session_type.to_string(),
                 parent_user_id,
                 parent_session_id,
                 target_branch
@@ -822,7 +1051,7 @@ mod tests {
     use crate::agent::pinch_context::PinchContext;
     use crate::agent::summarizer::SummarizationResult;
     use crate::storage::sessions::SessionManager;
-    use crate::storage::Database;
+    use crate::storage::{Database, SessionType, WorkspaceMode};
 
     /// Helper to create a temporary database for testing
     fn create_test_db() -> (Database, TempDir) {
@@ -1194,7 +1423,37 @@ mod tests {
         assert_eq!(session.id, session_id);
         assert_eq!(session.title, "Test Session");
         assert_eq!(session.working_dir, Some("/tmp".to_string()));
+        assert_eq!(session.session_type, SessionType::Code);
         assert_eq!(session.target_branch, None);
+    }
+
+    #[test]
+    fn test_create_session_with_explicit_type_and_workspace() {
+        let (db, _temp) = create_test_db();
+        let manager = SessionManager::new(db);
+
+        let session_id = manager
+            .create_session_for_user_with_config(
+                "Chat Session",
+                Some("gpt-5"),
+                None,
+                None,
+                WorkspaceMode::Neutral,
+                None,
+                None,
+                SessionType::Chat,
+            )
+            .expect("Failed to create session");
+
+        let session = manager
+            .get_session(&session_id)
+            .expect("Failed to get session")
+            .expect("Session should exist");
+
+        assert_eq!(session.session_type, SessionType::Chat);
+        assert_eq!(session.workspace_mode, WorkspaceMode::Neutral);
+        assert_eq!(session.working_dir, None);
+        assert_eq!(session.project_dir, None);
     }
 
     #[test]

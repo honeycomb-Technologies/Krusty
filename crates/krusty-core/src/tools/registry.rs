@@ -242,7 +242,16 @@ pub fn tool_policy(name: &str) -> ToolPolicy {
         | "task_start"
         | "task_complete"
         | "add_subtask"
-        | "set_dependency" => ToolPolicy::interactive(),
+        | "set_dependency"
+        | "send_message"
+        | "send_user_message"
+        | "sleep"
+        | "create_task"
+        | "update_task"
+        | "list_tasks"
+        | "create_report"
+        | "list_reports"
+        | "read_report" => ToolPolicy::interactive(),
         _ => ToolPolicy::write(),
     }
 }

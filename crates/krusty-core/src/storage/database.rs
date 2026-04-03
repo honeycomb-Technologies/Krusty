@@ -1,13 +1,13 @@
 //! SQLite database wrapper with versioned migrations
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 20;
+const SCHEMA_VERSION: i32 = 25;
 
 /// Shared database handle for connection reuse
 ///
@@ -100,6 +100,12 @@ impl Database {
         Ok(())
     }
 
+    /// Check if a column exists in a table (for safe ALTER TABLE migrations).
+    fn column_exists(tx: &rusqlite::Transaction, table: &str, column: &str) -> bool {
+        tx.prepare(&format!("SELECT {} FROM {} LIMIT 0", column, table))
+            .is_ok()
+    }
+
     /// Run database migrations incrementally
     pub(crate) fn run_migrations(&self) -> Result<()> {
         let current_version = self.get_schema_version();
@@ -127,7 +133,9 @@ impl Database {
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     model TEXT,
-                    working_dir TEXT
+                    working_dir TEXT,
+                    session_type TEXT NOT NULL DEFAULT 'code'
+                        CHECK (session_type IN ('chat', 'code', 'mako'))
                 );
 
                 -- Messages table
@@ -670,17 +678,105 @@ impl Database {
             self.set_schema_version_tx(&tx, 19)?;
         }
 
-        // Migration 20: Persisted delegated run tracking
+        // Migration 20: Autonomous tasks for Mako agent coordination
         if current_version < 20 {
-            info!("Running migration 20: Delegated runs");
+            info!("Running migration 20: Autonomous tasks");
+            tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS autonomous_tasks (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    owner TEXT,
+                    blocked_by TEXT DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TEXT,
+                    result TEXT,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_autonomous_tasks_session
+                    ON autonomous_tasks(session_id);
+                CREATE INDEX IF NOT EXISTS idx_autonomous_tasks_status
+                    ON autonomous_tasks(session_id, status);
+                "#,
+            )?;
+            self.set_schema_version_tx(&tx, 20)?;
+        }
+
+        // Migration 21: Research reports
+        if current_version < 21 {
+            info!("Running migration 21: Reports");
+            tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS reports (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    project_dir TEXT,
+                    content TEXT NOT NULL,
+                    summary TEXT NOT NULL DEFAULT '',
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    sources TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_reports_session
+                    ON reports(session_id);
+                CREATE INDEX IF NOT EXISTS idx_reports_project
+                    ON reports(project_dir);
+                "#,
+            )?;
+            self.set_schema_version_tx(&tx, 21)?;
+        }
+
+        // Migration 22: Explicit workspace context on sessions
+        if current_version < 22 {
+            info!("Running migration 22: Session workspace context");
+            if !Self::column_exists(&tx, "sessions", "project_dir") {
+                tx.execute_batch("ALTER TABLE sessions ADD COLUMN project_dir TEXT;")?;
+            }
+            if !Self::column_exists(&tx, "sessions", "workspace_mode") {
+                tx.execute_batch(
+                    r#"ALTER TABLE sessions ADD COLUMN workspace_mode TEXT NOT NULL DEFAULT 'neutral'
+                        CHECK (workspace_mode IN ('neutral', 'selected', 'created'));"#,
+                )?;
+            }
+            tx.execute_batch(
+                r#"
+
+                UPDATE sessions
+                   SET project_dir = COALESCE(project_dir, working_dir),
+                       workspace_mode = CASE
+                           WHEN COALESCE(project_dir, working_dir) IS NULL THEN 'neutral'
+                           ELSE 'selected'
+                       END;
+
+                CREATE INDEX IF NOT EXISTS idx_sessions_project_dir
+                    ON sessions(project_dir);
+                CREATE INDEX IF NOT EXISTS idx_sessions_workspace_mode
+                    ON sessions(workspace_mode);
+                "#,
+            )?;
+            self.set_schema_version_tx(&tx, 22)?;
+        }
+
+        // Migration 23: First-class delegated run persistence
+        if current_version < 23 {
+            info!("Running migration 23: Delegated runs");
             tx.execute_batch(
                 r#"
                 CREATE TABLE IF NOT EXISTS delegated_runs (
                     delegated_run_id TEXT PRIMARY KEY,
                     parent_session_id TEXT NOT NULL,
                     parent_tool_call_id TEXT,
-                    role TEXT NOT NULL,
-                    stage TEXT NOT NULL,
+                    role TEXT NOT NULL
+                        CHECK (role IN ('explore', 'build', 'planner', 'verifier')),
+                    stage TEXT NOT NULL
+                        CHECK (stage IN ('created', 'running', 'synthesizing', 'complete', 'degraded', 'failed', 'cancelled')),
                     provider TEXT,
                     model TEXT,
                     resumable INTEGER NOT NULL DEFAULT 0,
@@ -696,14 +792,74 @@ impl Database {
                     FOREIGN KEY (parent_session_id) REFERENCES sessions(id) ON DELETE CASCADE
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_delegated_runs_parent_session
+                CREATE INDEX IF NOT EXISTS idx_delegated_runs_session_updated
                     ON delegated_runs(parent_session_id, updated_at DESC);
-
-                CREATE INDEX IF NOT EXISTS idx_delegated_runs_scope
-                    ON delegated_runs(parent_session_id, role, target_scope_key);
+                CREATE INDEX IF NOT EXISTS idx_delegated_runs_session_scope
+                    ON delegated_runs(parent_session_id, role, target_scope_key, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_delegated_runs_parent_tool
+                    ON delegated_runs(parent_tool_call_id);
                 "#,
             )?;
-            self.set_schema_version_tx(&tx, 20)?;
+            self.set_schema_version_tx(&tx, 23)?;
+        }
+
+        // Migration 24: First-class session types
+        if current_version < 24 {
+            info!("Running migration 24: Session types");
+            if current_version > 0 && !Self::column_exists(&tx, "sessions", "session_type") {
+                tx.execute_batch(
+                    r#"
+                    ALTER TABLE sessions ADD COLUMN session_type TEXT NOT NULL DEFAULT 'code'
+                        CHECK (session_type IN ('chat', 'code', 'mako'));
+                    "#,
+                )?;
+            }
+            tx.execute_batch(
+                r#"
+                CREATE INDEX IF NOT EXISTS idx_sessions_session_type
+                    ON sessions(session_type);
+                "#,
+            )?;
+            self.set_schema_version_tx(&tx, 24)?;
+        }
+
+        // Migration 25: Autonomous tasks + reports tables (datetime defaults)
+        if current_version < 25 {
+            info!("Running migration 25: autonomous_tasks + reports tables");
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS autonomous_tasks (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    owner TEXT,
+                    blocked_by TEXT DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    completed_at TEXT,
+                    result TEXT,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_autonomous_tasks_session ON autonomous_tasks(session_id);
+                CREATE INDEX IF NOT EXISTS idx_autonomous_tasks_status ON autonomous_tasks(session_id, status);
+
+                CREATE TABLE IF NOT EXISTS reports (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    project_dir TEXT,
+                    content TEXT NOT NULL,
+                    summary TEXT NOT NULL DEFAULT '',
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    sources TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_reports_session ON reports(session_id);
+                CREATE INDEX IF NOT EXISTS idx_reports_project ON reports(project_dir);",
+            )
+            .context("Migration 25: autonomous_tasks + reports tables")?;
+            self.set_schema_version_tx(&tx, 25)?;
         }
 
         tx.commit()?;

@@ -24,8 +24,8 @@ pub mod ai {
     /// Default maximum output tokens (16K for large file writes)
     pub const MAX_OUTPUT_TOKENS: usize = 16384;
 
-    /// Default model ID
-    pub const DEFAULT_MODEL: &str = "MiniMax-M2.5";
+    /// Default model ID (fallback when no model is selected)
+    pub const DEFAULT_MODEL: &str = "claude-haiku-4-5-20251001";
 }
 
 /// UI configuration

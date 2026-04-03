@@ -342,6 +342,7 @@ impl<'a> RuntimeTraceStore<'a> {
         let stop_reason = event.stop_reason.as_ref().map(|reason| match reason {
             LoopStopReason::Completed => "completed",
             LoopStopReason::AwaitingInput => "awaiting_input",
+            LoopStopReason::Sleeping => "sleeping",
             LoopStopReason::BudgetExhausted => "budget_exhausted",
             LoopStopReason::ProviderError => "provider_error",
             LoopStopReason::LoopGuardTriggered => "loop_guard_triggered",
@@ -482,6 +483,7 @@ fn map_trace_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeTraceEvent>
         .and_then(|raw| match raw.as_str() {
             "completed" => Some(LoopStopReason::Completed),
             "awaiting_input" => Some(LoopStopReason::AwaitingInput),
+            "sleeping" => Some(LoopStopReason::Sleeping),
             "budget_exhausted" => Some(LoopStopReason::BudgetExhausted),
             "provider_error" => Some(LoopStopReason::ProviderError),
             "loop_guard_triggered" => Some(LoopStopReason::LoopGuardTriggered),
@@ -526,7 +528,9 @@ fn loop_event_type(event: &LoopEvent) -> &'static str {
         LoopEvent::ModeChange { .. } => "mode_change",
         LoopEvent::PlanUpdate { .. } => "plan_update",
         LoopEvent::PlanComplete { .. } => "plan_complete",
+        LoopEvent::AgentSleeping { .. } => "agent_sleeping",
         LoopEvent::TurnComplete { .. } => "turn_complete",
+        LoopEvent::TickInjected { .. } => "tick_injected",
         LoopEvent::Usage { .. } => "usage",
         LoopEvent::ContextCompacted { .. } => "context_compacted",
         LoopEvent::TitleGenerated { .. } => "title_generated",
@@ -534,6 +538,12 @@ fn loop_event_type(event: &LoopEvent) -> &'static str {
         LoopEvent::Error { .. } => "error",
         LoopEvent::AgentBackgroundStarted { .. } => "agent_background_started",
         LoopEvent::AgentBackgroundCompleted { .. } => "agent_background_completed",
+        LoopEvent::UserMessage { .. } => "user_message",
+        LoopEvent::ClassifierDecision { .. } => "classifier_decision",
+        LoopEvent::TeammateSpawned { .. } => "teammate_spawned",
+        LoopEvent::TeammateTaskCompleted { .. } => "teammate_task_completed",
+        LoopEvent::TeammateTaskFailed { .. } => "teammate_task_failed",
+        LoopEvent::TeammateCancelled { .. } => "teammate_cancelled",
     }
 }
 
@@ -620,9 +630,17 @@ fn summarize_loop_event(event: &LoopEvent) -> Value {
             "title": title,
             "task_count": task_count,
         }),
+        LoopEvent::AgentSleeping {
+            duration_secs,
+            reason,
+        } => json!({
+            "duration_secs": duration_secs,
+            "reason": reason,
+        }),
         LoopEvent::TurnComplete { turn, has_more } => {
             json!({ "turn": turn, "has_more": has_more })
         }
+        LoopEvent::TickInjected { tick_number } => json!({ "tick_number": tick_number }),
         LoopEvent::Usage {
             prompt_tokens,
             completion_tokens,
@@ -667,6 +685,31 @@ fn summarize_loop_event(event: &LoopEvent) -> Value {
             "success": success,
             "summary": summary,
         }),
+        LoopEvent::UserMessage {
+            title,
+            message,
+            level,
+        } => json!({ "title": title, "message_len": message.len(), "level": level }),
+        LoopEvent::ClassifierDecision {
+            tool_name,
+            decision,
+            reason,
+            stage,
+        } => {
+            json!({ "tool_name": tool_name, "decision": decision, "reason": reason, "stage": stage })
+        }
+        LoopEvent::TeammateSpawned { name, role } => json!({ "name": name, "role": role }),
+        LoopEvent::TeammateTaskCompleted {
+            name,
+            task_id,
+            result,
+        } => json!({ "name": name, "task_id": task_id, "result_len": result.len() }),
+        LoopEvent::TeammateTaskFailed {
+            name,
+            task_id,
+            error,
+        } => json!({ "name": name, "task_id": task_id, "error": error }),
+        LoopEvent::TeammateCancelled { name } => json!({ "name": name }),
     }
 }
 
@@ -693,7 +736,9 @@ fn failure_category_for_event(event: &LoopEvent) -> Option<TraceFailureCategory>
         LoopEvent::ToolDenied { .. } => Some(TraceFailureCategory::ToolDenied),
         LoopEvent::ServerToolError { .. } => Some(TraceFailureCategory::ServerToolError),
         LoopEvent::Finished { stop_reason, .. } => match stop_reason {
-            LoopStopReason::Completed | LoopStopReason::AwaitingInput => None,
+            LoopStopReason::Completed
+            | LoopStopReason::AwaitingInput
+            | LoopStopReason::Sleeping => None,
             LoopStopReason::ProviderError => Some(TraceFailureCategory::ProviderError),
             LoopStopReason::BudgetExhausted => Some(TraceFailureCategory::BudgetExhausted),
             LoopStopReason::LoopGuardTriggered => Some(TraceFailureCategory::LoopGuardTriggered),

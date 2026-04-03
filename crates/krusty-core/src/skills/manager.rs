@@ -118,7 +118,7 @@ impl SkillsManager {
         skills
     }
 
-    /// List only globally-installed skills.
+    /// List only globally-installed skills, excluding project overrides.
     pub fn list_global_skills(&mut self) -> Vec<SkillInfo> {
         self.ensure_cache();
         let mut skills: Vec<SkillInfo> = self

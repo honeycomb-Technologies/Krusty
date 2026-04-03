@@ -7,6 +7,7 @@
 use anyhow::Result;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use uuid::Uuid;
 
 use super::database::Database;
@@ -42,7 +43,7 @@ impl std::fmt::Display for MemoryType {
     }
 }
 
-impl std::str::FromStr for MemoryType {
+impl FromStr for MemoryType {
     type Err = String;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {

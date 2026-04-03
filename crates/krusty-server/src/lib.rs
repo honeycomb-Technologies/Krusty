@@ -41,7 +41,9 @@ use krusty_core::process::ProcessRegistry;
 use krusty_core::skills::SkillsManager;
 use krusty_core::storage::credentials::CredentialStore;
 use krusty_core::storage::Database;
-use krusty_core::tools::implementations::{register_agent_tool, register_all_tools};
+use krusty_core::tools::implementations::{
+    register_agent_tool, register_all_tools, register_mako_tools,
+};
 use krusty_core::tools::registry::ToolRegistry;
 
 type SessionGuard = Arc<Mutex<()>>;
@@ -296,7 +298,9 @@ async fn initialize_models(registry: &SharedModelRegistry, credentials: &Credent
         }
     }
 
-    if let Some(api_key) = credentials.get(&ProviderId::OpenAI).cloned() {
+    let openai_credential =
+        krusty_core::auth::resolve_openai_auth(credentials, "gpt-5.3-codex").credential;
+    if let Some(api_key) = openai_credential {
         match krusty_core::ai::openai::fetch_models(&api_key).await {
             Ok(models) => {
                 tracing::info!("Fetched {} OpenAI models", models.len());
@@ -333,11 +337,17 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
     let mut tool_registry_inner = ToolRegistry::new();
     tool_registry_inner.add_pre_hook(Arc::new(SafetyHook::new()));
     tool_registry_inner.add_pre_hook(Arc::new(PlanModeHook::new()));
+    // Auto-classifier for Mako autonomous sessions (no-op when permission_mode != Autonomous)
+    if let Some(ref client) = ai_client {
+        use krusty_core::agent::auto_classifier::AutoClassifierHook;
+        tool_registry_inner.add_pre_hook(Arc::new(AutoClassifierHook::new(client.clone())));
+    }
     tool_registry_inner.add_post_hook(Arc::new(LoggingHook::new()));
     tool_registry_inner.add_pre_hook(Arc::new(UserPreToolHook::new(hook_manager.clone())));
     tool_registry_inner.add_post_hook(Arc::new(UserPostToolHook::new(hook_manager.clone())));
     let tool_registry = Arc::new(tool_registry_inner);
     register_all_tools(&tool_registry).await;
+    register_mako_tools(&tool_registry).await;
 
     // Register unified agent tool (explore, plan, verify, build) if AI client is available
     if let Some(ref client) = ai_client {

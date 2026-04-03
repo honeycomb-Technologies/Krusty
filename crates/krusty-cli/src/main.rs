@@ -6,7 +6,7 @@
 //! - `krusty serve` — unified server + PWA + Tailscale
 //! - Clean architecture from day one
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 // Re-export core modules for TUI usage
@@ -49,6 +49,108 @@ enum Commands {
         #[arg(short, long, default_value_t = 3000)]
         port: u16,
     },
+
+    /// Mako autonomous agent
+    Mako {
+        #[command(subcommand)]
+        command: MakoCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum MakoCommand {
+    /// Submit a task to Mako
+    Run {
+        /// The task to perform
+        task: String,
+        /// Project directory (defaults to current)
+        #[arg(long)]
+        project_dir: Option<String>,
+    },
+    /// Show status of Mako sessions
+    Status,
+}
+
+fn mako_server_url() -> String {
+    std::env::var("KRUSTY_SERVER_URL").unwrap_or_else(|_| "http://localhost:3001".to_string())
+}
+
+async fn run_mako_command(command: MakoCommand) -> Result<()> {
+    let base = mako_server_url();
+    let client = reqwest::Client::new();
+
+    match command {
+        MakoCommand::Run { task, project_dir } => {
+            let mut body = serde_json::json!({ "task": task });
+            if let Some(dir) = &project_dir {
+                body["project_dir"] = serde_json::json!(dir);
+            }
+
+            let resp = client
+                .post(format!("{base}/api/mako/dispatch"))
+                .json(&body)
+                .send()
+                .await
+                .context("Failed to reach Krusty server")?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                anyhow::bail!("Server returned {status}: {text}");
+            }
+
+            let data: serde_json::Value = resp
+                .json()
+                .await
+                .context("Failed to parse dispatch response")?;
+
+            let session_id = data["session_id"].as_str().unwrap_or("unknown");
+
+            println!("Mako task dispatched");
+            println!("  Session: {session_id}");
+            println!("  Observe: {base}/session/{session_id}");
+        }
+        MakoCommand::Status => {
+            let resp = client
+                .get(format!("{base}/api/mako/sessions"))
+                .send()
+                .await
+                .context("Failed to reach Krusty server")?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                anyhow::bail!("Server returned {status}: {text}");
+            }
+
+            let sessions: Vec<serde_json::Value> = resp
+                .json()
+                .await
+                .context("Failed to parse sessions response")?;
+
+            if sessions.is_empty() {
+                println!("No active Mako sessions.");
+            } else {
+                println!("{:<38} {:<12} {:<30}", "SESSION ID", "STATUS", "TASK");
+                println!("{}", "-".repeat(80));
+                for s in &sessions {
+                    let id = s["id"].as_str().unwrap_or("-");
+                    let status = s["status"].as_str().unwrap_or("-");
+                    let task = s["task"]
+                        .as_str()
+                        .unwrap_or(s["title"].as_str().unwrap_or("-"));
+                    let task_display = if task.len() > 28 {
+                        format!("{}...", &task[..25])
+                    } else {
+                        task.to_string()
+                    };
+                    println!("{:<38} {:<12} {:<30}", id, status, task_display);
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Restore terminal state - called on panic or unexpected exit
@@ -74,6 +176,11 @@ async fn main() -> Result<()> {
         if let Some(Commands::Serve { port }) = cli.command {
             return serve::run(port).await;
         }
+    }
+
+    // Mako subcommand runs HTTP requests and exits, no TUI needed
+    if let Some(Commands::Mako { command }) = cli.command {
+        return run_mako_command(command).await;
     }
 
     // Set up panic hook to restore terminal state (TUI/ACP modes)
@@ -134,7 +241,7 @@ async fn main() -> Result<()> {
             let server = acp::AcpServer::new()?;
             server.run().await?;
         }
-        Some(Commands::Serve { .. }) => unreachable!(),
+        Some(Commands::Serve { .. } | Commands::Mako { .. }) => unreachable!(),
         None => {
             let mut app = tui::App::new().await;
             app.run().await?;

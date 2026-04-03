@@ -8,7 +8,7 @@ use krusty_core::agent::{
 use krusty_core::ai::types::{Citation, WebFetchContent, WebSearchResult};
 use krusty_core::storage::{
     DelegatedRunRecord, DelegatedRunScope, PartialAssistantState, RuntimeTraceEvent,
-    RuntimeTraceSummary, SessionInfo, SessionRecoveryState, WorkMode, WorkspaceMode,
+    RuntimeTraceSummary, SessionInfo, SessionRecoveryState, SessionType, WorkMode, WorkspaceMode,
 };
 use krusty_core::tools::registry::PermissionMode;
 use serde::{de, Deserialize, Deserializer, Serialize};
@@ -26,6 +26,7 @@ pub struct CreateSessionRequest {
     pub working_dir: Option<String>,
     pub workspace_mode: Option<WorkspaceMode>,
     pub target_branch: Option<String>,
+    pub session_type: Option<SessionType>,
 }
 
 #[derive(Deserialize)]
@@ -69,6 +70,7 @@ pub struct SessionResponse {
     pub working_dir: Option<String>,
     pub project_dir: Option<String>,
     pub workspace_mode: WorkspaceMode,
+    pub session_type: SessionType,
     pub mode: WorkMode,
     pub model: Option<String>,
     pub target_branch: Option<String>,
@@ -76,13 +78,6 @@ pub struct SessionResponse {
 
 impl From<SessionInfo> for SessionResponse {
     fn from(s: SessionInfo) -> Self {
-        let project_dir = s.working_dir.clone();
-        let workspace_mode = if project_dir.is_some() {
-            WorkspaceMode::Selected
-        } else {
-            WorkspaceMode::Neutral
-        };
-
         Self {
             id: s.id,
             title: s.title,
@@ -90,8 +85,9 @@ impl From<SessionInfo> for SessionResponse {
             token_count: s.token_count,
             parent_session_id: s.parent_session_id,
             working_dir: s.working_dir,
-            project_dir,
-            workspace_mode,
+            project_dir: s.project_dir,
+            workspace_mode: s.workspace_mode,
+            session_type: s.session_type,
             mode: s.work_mode,
             model: s.model,
             target_branch: s.target_branch,
@@ -415,6 +411,8 @@ pub struct ChatRequest {
     pub working_dir: Option<String>,
     /// Explicit semantic workspace mode for newly created sessions.
     pub workspace_mode: Option<WorkspaceMode>,
+    /// High-level session surface for newly created sessions.
+    pub session_type: Option<SessionType>,
     /// Model override
     pub model: Option<String>,
     /// Enable extended thinking
@@ -425,6 +423,9 @@ pub struct ChatRequest {
     /// Permission mode for tool execution
     #[serde(default)]
     pub permission_mode: PermissionMode,
+    /// Enable research tools (agent, reports) in Chat sessions
+    #[serde(default)]
+    pub research_enabled: Option<bool>,
 }
 
 #[cfg(test)]
@@ -935,8 +936,12 @@ pub enum AgenticEvent {
         title: String,
         task_count: usize,
     },
+    /// The autonomous agent is sleeping between ticks.
+    AgentSleeping { duration_secs: u64, reason: String },
     /// An agentic turn completed
     TurnComplete { turn: usize, has_more: bool },
+    /// The server injected a synthetic tick to continue autonomous work.
+    TickInjected { tick_number: usize },
     /// Token usage information
     Usage {
         prompt_tokens: usize,
@@ -983,6 +988,36 @@ pub enum AgenticEvent {
         success: bool,
         summary: String,
     },
+    // ── Mako autonomous agent events ─────────────────────────────────
+    /// A user-visible message emitted by the SendUserMessage tool
+    UserMessage {
+        title: Option<String>,
+        message: String,
+        level: String,
+    },
+    /// Auto-classifier evaluated a tool call
+    ClassifierDecision {
+        tool_name: String,
+        decision: String,
+        reason: String,
+        stage: u8,
+    },
+    /// A teammate was spawned
+    TeammateSpawned { name: String, role: String },
+    /// A teammate completed a task
+    TeammateTaskCompleted {
+        name: String,
+        task_id: String,
+        result: String,
+    },
+    /// A teammate failed a task
+    TeammateTaskFailed {
+        name: String,
+        task_id: String,
+        error: String,
+    },
+    /// A teammate was cancelled
+    TeammateCancelled { name: String },
 }
 
 impl AgenticEvent {
@@ -1105,7 +1140,15 @@ impl From<krusty_core::agent::LoopEvent> for AgenticEvent {
                 title,
                 task_count,
             },
+            LoopEvent::AgentSleeping {
+                duration_secs,
+                reason,
+            } => Self::AgentSleeping {
+                duration_secs,
+                reason,
+            },
             LoopEvent::TurnComplete { turn, has_more } => Self::TurnComplete { turn, has_more },
+            LoopEvent::TickInjected { tick_number } => Self::TickInjected { tick_number },
             LoopEvent::Usage {
                 prompt_tokens,
                 completion_tokens,
@@ -1156,6 +1199,46 @@ impl From<krusty_core::agent::LoopEvent> for AgenticEvent {
                 success,
                 summary,
             },
+            LoopEvent::UserMessage {
+                title,
+                message,
+                level,
+            } => Self::UserMessage {
+                title,
+                message,
+                level,
+            },
+            LoopEvent::ClassifierDecision {
+                tool_name,
+                decision,
+                reason,
+                stage,
+            } => Self::ClassifierDecision {
+                tool_name,
+                decision,
+                reason,
+                stage,
+            },
+            LoopEvent::TeammateSpawned { name, role } => Self::TeammateSpawned { name, role },
+            LoopEvent::TeammateTaskCompleted {
+                name,
+                task_id,
+                result,
+            } => Self::TeammateTaskCompleted {
+                name,
+                task_id,
+                result,
+            },
+            LoopEvent::TeammateTaskFailed {
+                name,
+                task_id,
+                error,
+            } => Self::TeammateTaskFailed {
+                name,
+                task_id,
+                error,
+            },
+            LoopEvent::TeammateCancelled { name } => Self::TeammateCancelled { name },
         }
     }
 }

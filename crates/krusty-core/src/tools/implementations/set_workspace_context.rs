@@ -109,11 +109,9 @@ Do not switch to neutral unless the user explicitly wants to leave project conte
             }
         };
         let manager = SessionManager::new(db);
-        let working_dir = match params.mode {
-            WorkspaceMode::Neutral => None,
-            WorkspaceMode::Selected | WorkspaceMode::Created => normalized_project_dir,
-        };
-        if let Err(err) = manager.update_session_working_dir(session_id, working_dir) {
+        if let Err(err) =
+            manager.update_session_workspace(session_id, normalized_project_dir, params.mode)
+        {
             return ToolResult::error(format!("failed to update workspace context: {err}"));
         }
 
@@ -168,7 +166,8 @@ mod tests {
             .get_session(&session_id)
             .expect("session should load")
             .expect("session should exist");
-        assert_eq!(session.working_dir.as_deref(), Some("/tmp/demo-app"));
+        assert_eq!(session.project_dir.as_deref(), Some("/tmp/demo-app"));
+        assert_eq!(session.workspace_mode, WorkspaceMode::Created);
     }
 
     #[tokio::test]

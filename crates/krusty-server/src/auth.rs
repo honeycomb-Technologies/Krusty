@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 
 use crate::AppState;
 
+pub(crate) const REMOTE_AUTH_COOKIE_NAME: &str = "krusty_remote_access";
+
 /// User context attached to request extensions by middleware.
 #[derive(Debug, Clone)]
 pub struct AuthenticatedUser {
@@ -145,7 +147,32 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
-fn is_local_host(host: &str) -> bool {
+pub(crate) fn request_remote_access_token(headers: &HeaderMap) -> Option<String> {
+    cookie_token(headers).or_else(|| bearer_token(headers).map(ToString::to_string))
+}
+
+fn cookie_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|raw| {
+            raw.split(';').find_map(|cookie| {
+                let (name, value) = cookie.trim().split_once('=')?;
+                if name.trim() == REMOTE_AUTH_COOKIE_NAME {
+                    let token = value.trim();
+                    if token.is_empty() {
+                        None
+                    } else {
+                        Some(token.to_string())
+                    }
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+pub(crate) fn is_local_host(host: &str) -> bool {
     let host = host.trim().trim_end_matches('.');
     if host.is_empty() {
         return true;

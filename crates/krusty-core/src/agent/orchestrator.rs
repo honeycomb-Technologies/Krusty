@@ -264,6 +264,7 @@ impl AgenticOrchestrator {
                 work_mode,
                 &skills_manager,
                 Some(ai_client.config().model.as_str()),
+                None,
             );
             let estimated_tokens_before =
                 super::estimate_conversation_tokens(&conversation_with_context);
@@ -323,6 +324,7 @@ impl AgenticOrchestrator {
                     work_mode,
                     &skills_manager,
                     Some(ai_client.config().model.as_str()),
+                    None,
                 );
                 let estimated_tokens_after =
                     super::estimate_conversation_tokens(&conversation_with_context);

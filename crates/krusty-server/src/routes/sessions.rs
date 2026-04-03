@@ -12,7 +12,7 @@ use krusty_core::agent::pinch_context::{PinchContext, PinchContextInput};
 use krusty_core::agent::summarizer::{generate_summary, SummarizationResult};
 use krusty_core::ai::types::{Content, ModelMessage, Role};
 use krusty_core::plan::PlanManager;
-use krusty_core::storage::{Database, DelegatedRunStore, SessionInfo};
+use krusty_core::storage::{Database, DelegatedRunStore, SessionInfo, SessionType, WorkspaceMode};
 use krusty_core::SessionManager;
 
 use crate::auth::CurrentUser;
@@ -75,6 +75,46 @@ pub fn router() -> Router<AppState> {
         .route("/:id/pinch", post(pinch_session))
 }
 
+fn normalize_requested_workspace(
+    working_dir: Option<&str>,
+    project_dir: Option<&str>,
+    workspace_mode: Option<WorkspaceMode>,
+) -> (Option<String>, Option<String>, WorkspaceMode) {
+    let normalized_working_dir = working_dir
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+        .map(ToOwned::to_owned);
+    let normalized_project_dir = project_dir
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+        .map(ToOwned::to_owned);
+
+    let workspace_mode = workspace_mode.unwrap_or_else(|| {
+        if normalized_project_dir.is_some() || normalized_working_dir.is_some() {
+            WorkspaceMode::Selected
+        } else {
+            WorkspaceMode::Neutral
+        }
+    });
+
+    let runtime_dir = match workspace_mode {
+        WorkspaceMode::Neutral => normalized_working_dir
+            .clone()
+            .or(normalized_project_dir.clone()),
+        WorkspaceMode::Selected | WorkspaceMode::Created => normalized_project_dir
+            .clone()
+            .or(normalized_working_dir.clone()),
+    };
+    let project_dir = match workspace_mode {
+        WorkspaceMode::Neutral => None,
+        WorkspaceMode::Selected | WorkspaceMode::Created => {
+            normalized_project_dir.or(normalized_working_dir)
+        }
+    };
+
+    (runtime_dir, project_dir, workspace_mode)
+}
+
 /// List all sessions, optionally filtered by working directory
 async fn list_sessions(
     State(state): State<AppState>,
@@ -112,6 +152,11 @@ async fn create_session(
     let session_manager = open_session_manager(&state)?;
 
     let title = req.title.as_deref().unwrap_or("New Session");
+    let (working_dir, project_dir, workspace_mode) = normalize_requested_workspace(
+        req.working_dir.as_deref(),
+        req.project_dir.as_deref(),
+        req.workspace_mode,
+    );
     let target_branch = req.target_branch.as_deref().map(str::trim).and_then(|b| {
         if b.is_empty() {
             None
@@ -119,12 +164,15 @@ async fn create_session(
             Some(b)
         }
     });
-    let session_id = session_manager.create_session_for_user_with_target_branch(
+    let session_id = session_manager.create_session_for_user_with_config(
         title,
         req.model.as_deref(),
-        req.working_dir.as_deref(),
+        working_dir.as_deref(),
+        project_dir.as_deref(),
+        workspace_mode,
         current_user_id(user.as_ref()),
         target_branch,
+        req.session_type.unwrap_or(SessionType::Code),
     )?;
 
     let session = session_manager
@@ -683,6 +731,7 @@ mod tests {
                 working_dir: None,
                 workspace_mode: None,
                 target_branch: None,
+                session_type: None,
             }),
         )
         .await;

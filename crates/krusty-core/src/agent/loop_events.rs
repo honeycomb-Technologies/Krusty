@@ -17,6 +17,7 @@ use crate::ai::types::{Citation, WebFetchContent, WebSearchResult};
 pub enum LoopStopReason {
     Completed,
     AwaitingInput,
+    Sleeping,
     BudgetExhausted,
     ProviderError,
     LoopGuardTriggered,
@@ -134,9 +135,15 @@ pub enum LoopEvent {
         task_count: usize,
     },
 
+    /// The autonomous agent is intentionally sleeping between ticks.
+    AgentSleeping { duration_secs: u64, reason: String },
+
     // ── Turn lifecycle ─────────────────────────────────────────────────
     /// An agentic turn completed.
     TurnComplete { turn: usize, has_more: bool },
+
+    /// Tick engine injected a synthetic tick message to continue autonomous work.
+    TickInjected { tick_number: usize },
 
     /// Token usage for this turn.
     Usage {
@@ -179,6 +186,42 @@ pub enum LoopEvent {
         success: bool,
         summary: String,
     },
+
+    // ── Mako autonomous agent events ─────────────────────────────────
+    /// Explicit user-facing message from the autonomous agent.
+    UserMessage {
+        title: Option<String>,
+        message: String,
+        level: String,
+    },
+
+    /// Auto-classifier evaluated a tool call.
+    ClassifierDecision {
+        tool_name: String,
+        decision: String,
+        reason: String,
+        stage: u8,
+    },
+
+    /// A teammate was spawned.
+    TeammateSpawned { name: String, role: String },
+
+    /// A teammate completed a task.
+    TeammateTaskCompleted {
+        name: String,
+        task_id: String,
+        result: String,
+    },
+
+    /// A teammate failed a task.
+    TeammateTaskFailed {
+        name: String,
+        task_id: String,
+        error: String,
+    },
+
+    /// A teammate was cancelled.
+    TeammateCancelled { name: String },
 }
 
 /// Simple plan task info for event transport.

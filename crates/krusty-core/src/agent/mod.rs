@@ -28,12 +28,14 @@
 //! - Type registry, file locks, conventions
 
 pub mod agent_types;
+pub mod auto_classifier;
 pub mod build_context;
 pub mod cancellation;
 pub mod compaction;
 pub mod constants;
 pub mod context;
 pub mod context_ledger;
+pub mod coordinator_prompt;
 pub mod event_bus;
 pub mod events;
 pub mod executor;
@@ -49,11 +51,14 @@ pub mod state;
 pub mod stream;
 pub mod subagent;
 pub mod summarizer;
+pub mod team;
+pub mod tick_engine;
 mod tool_control;
 pub mod user_hooks;
 
 use serde::{Deserialize, Serialize};
 
+pub use auto_classifier::AutoClassifierHook;
 pub use build_context::SharedBuildContext;
 pub use cancellation::AgentCancellation;
 pub(crate) use compaction::estimate_tokens as estimate_conversation_tokens;

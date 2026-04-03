@@ -42,7 +42,7 @@ pub use types::{
 
 // Re-export single agent entry points
 pub use execution::execute_single_explorer;
-pub(crate) use execution::{execute_single_agent, AgentConfig};
+pub(crate) use execution::{execute_single_agent, AgentConfig, SingleExplorerConfig};
 
 // Internal execution functions
 use execution::execute_builder_with_progress;

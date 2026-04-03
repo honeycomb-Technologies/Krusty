@@ -221,12 +221,20 @@ fn convert_content(
             tool_use_id,
             output,
             is_error,
-        } => Some(serde_json::json!({
-            "type": "tool_result",
-            "tool_use_id": tool_use_id,
-            "content": output,
-            "is_error": is_error.unwrap_or(false)
-        })),
+        } => {
+            // Anthropic requires tool_result content to be a string or content block array.
+            // Tools may return structured JSON objects — convert to string.
+            let content_str = match output {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            Some(serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content_str,
+                "is_error": is_error.unwrap_or(false)
+            }))
+        }
         Content::Image { image, detail: _ } => {
             if strip_images {
                 return Some(serde_json::json!({
