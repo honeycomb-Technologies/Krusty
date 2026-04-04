@@ -116,11 +116,20 @@ export default function ChatScreen() {
   const { isDesktop } = useBreakpoint();
   const { splashDone } = useSplashState();
   const entrance = useEntranceAnimation(splashDone);
-  const {
-    sessions: sessionsStore,
-    session: sessionStore,
-    workspace,
-  } = useStores();
+  const stores = useStores();
+
+  // Stores not ready yet (before connection)
+  if (!stores) {
+    return (
+      <SafeAreaView style={[{ flex: 1, backgroundColor: theme.colors.background }]}>
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <KrustyLogo />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  const { sessions: sessionsStore, session: sessionStore, workspace } = stores;
 
   const sessions = useSessionsStore(
     (state) => state.sessions,
