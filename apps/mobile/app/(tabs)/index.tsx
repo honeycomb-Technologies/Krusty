@@ -9,7 +9,10 @@ import {
   Alert,
   Keyboard,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import {
+  SafeAreaView,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
 import { router } from "expo-router";
 import { Menu, FileSearch } from "lucide-react-native";
 import * as Haptics from "../../platform/haptics";
@@ -204,6 +207,7 @@ export default function ChatScreen() {
     serverConnected: isConnected,
   });
 
+  const insets = useSafeAreaInsets();
   const t = theme.colors;
   const msgLen = messages.length;
   const lastMsgContent = messages[msgLen - 1]?.content?.length ?? 0;
@@ -215,12 +219,7 @@ export default function ChatScreen() {
       return;
     }
 
-    const maxOffset = content - viewport;
-    const targetOffset = Math.max(0, maxOffset - CHAT_BAR_ZONE);
-    flatListRef.current?.scrollToOffset({
-      offset: targetOffset,
-      animated: !isStreaming,
-    });
+    flatListRef.current?.scrollToEnd({ animated: !isStreaming });
   }, [isStreaming]);
 
   useEffect(() => {
@@ -735,6 +734,7 @@ export default function ChatScreen() {
               contentContainerStyle={[
                 styles.list,
                 isDesktop && styles.listDesktop,
+                { paddingBottom: CHAT_BAR_ZONE + insets.bottom },
               ]}
               onLayout={(event) => {
                 listHeightRef.current = event.nativeEvent.layout.height;
@@ -856,7 +856,6 @@ const styles = StyleSheet.create({
   list: {
     paddingHorizontal: 16,
     paddingTop: 8,
-    paddingBottom: 16,
   },
   listDesktop: {
     maxWidth: 800,
