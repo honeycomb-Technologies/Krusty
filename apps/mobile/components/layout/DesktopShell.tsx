@@ -7,6 +7,8 @@ import { useBreakpoint } from '../../hooks/useBreakpoint';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
 import { SessionList, type SessionListProps } from '../chat/SessionList';
+import { PlanTracker } from '../chat/PlanTracker';
+import { SettingsModal } from '../SettingsModal';
 
 const SIDEBAR_WIDTH = 280;
 
@@ -30,6 +32,7 @@ export function DesktopShell({
   const isDark = theme.scheme === 'dark';
 
   const [pickerVisible, setPickerVisible] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const handleNew = useCallback(() => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -71,10 +74,12 @@ export function DesktopShell({
             onPickerDone={() => setPickerVisible(false)}
           />
 
+          <PlanTracker />
+
           {/* Bottom bar */}
           <View style={[styles.bottomBar, { borderTopColor: t.border }]}>
             <Pressable
-              onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); onOpenSettings(); }}
+              onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setSettingsOpen(true); }}
               style={styles.iconBtn}
             >
               <Settings size={20} color={t.mutedForeground} strokeWidth={1.8} />
@@ -102,6 +107,8 @@ export function DesktopShell({
       <View style={styles.main}>
         {children}
       </View>
+
+      <SettingsModal visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </View>
   );
 }

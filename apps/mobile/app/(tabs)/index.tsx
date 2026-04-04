@@ -31,6 +31,7 @@ import {
 import { SessionDrawer } from "../../components/chat/SessionDrawer";
 import { DesktopShell } from "../../components/layout/DesktopShell";
 import { ReportsViewer } from "../../components/ReportsViewer";
+import { PlanTracker } from "../../components/chat/PlanTracker";
 import { LinearGradient } from "../../platform/linear-gradient";
 import { useSplashState } from "../../hooks/useSplashState";
 import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
@@ -749,6 +750,7 @@ export default function ChatScreen() {
               style={styles.fadeTop}
               pointerEvents="none"
             />
+            {!isDesktop && <PlanTracker />}
             <LinearGradient
               colors={[t.background + "00", t.background]}
               style={styles.fadeBottom}
