@@ -689,7 +689,7 @@ fn summarize_loop_event(event: &LoopEvent) -> Value {
             title,
             message,
             level,
-        } => json!({ "title": title, "message_len": message.len(), "level": level }),
+        } => json!({ "title": title, "message": message, "level": level }),
         LoopEvent::ClassifierDecision {
             tool_name,
             decision,

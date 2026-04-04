@@ -1,19 +1,27 @@
 //! Mako dispatch and session management endpoints
 
+use std::convert::Infallible;
+
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
+    response::sse::{Event, KeepAlive, Sse},
     routing::{delete, get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::{broadcast, mpsc};
+use tokio_stream::wrappers::ReceiverStream;
 
-use krusty_core::storage::{AutonomousTaskStore, Database, SessionType, WorkspaceMode};
+use krusty_core::storage::{
+    AutonomousTask, AutonomousTaskStore, Database, MakoRuntimeState, MakoRuntimeStateStore,
+    SessionInfo, SessionType, WorkspaceMode,
+};
 use krusty_core::SessionManager;
 
 use crate::auth::CurrentUser;
 use crate::error::AppError;
-use crate::types::SessionResponse;
+use crate::types::AgenticEvent;
 use crate::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -21,6 +29,8 @@ pub fn router() -> Router<AppState> {
         .route("/dispatch", post(dispatch))
         .route("/sessions", get(list_sessions))
         .route("/sessions/:id/status", get(session_status))
+        .route("/sessions/:id/events", get(observe_events))
+        .route("/sessions/:id/message", post(send_message))
         .route("/sessions/:id/pause", post(pause_session))
         .route("/sessions/:id/resume", post(resume_session))
         .route("/sessions/:id", delete(cancel_session))
@@ -33,6 +43,21 @@ struct DispatchRequest {
     model: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct MessageRequest {
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ObserveEventsQuery {
+    replay_limit: Option<usize>,
+    after_sequence: Option<i64>,
+}
+
+const DEFAULT_MAKO_REPLAY_LIMIT: usize = 50;
+const MAX_MAKO_REPLAY_LIMIT: usize = 200;
+const MAKO_EVENT_STREAM_BUFFER: usize = 256;
+
 #[derive(Debug, Serialize)]
 struct DispatchResponse {
     session_id: String,
@@ -40,12 +65,23 @@ struct DispatchResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct MakoSessionSummary {
+    session_id: String,
+    title: String,
+    updated_at: String,
+    project_dir: Option<String>,
+    agent_state: String,
+    runtime: Option<MakoRuntimeState>,
+}
+
+#[derive(Debug, Serialize)]
 struct MakoSessionStatus {
     session_id: String,
     session_type: SessionType,
     title: String,
-    tasks: Vec<krusty_core::storage::AutonomousTask>,
+    tasks: Vec<AutonomousTask>,
     agent_state: String,
+    runtime: Option<MakoRuntimeState>,
 }
 
 #[derive(Debug, Serialize)]
@@ -53,11 +89,6 @@ struct OkResponse {
     ok: bool,
 }
 
-/// Submit a task to Mako.
-///
-/// Creates a Mako session, saves the task as the first user message,
-/// and returns the session_id. The client connects via `/api/chat` SSE
-/// to start execution.
 async fn dispatch(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
@@ -83,9 +114,12 @@ async fn dispatch(
         SessionType::Mako,
     )?;
 
-    // Save the task as the first user message so the chat SSE stream picks it up
     let content_json = serde_json::json!([{ "type": "text", "text": req.task }]).to_string();
     session_manager.save_message(&session_id, "user", &content_json)?;
+    state
+        .mako_runtime
+        .start_or_restart_session(state.clone(), session_id.clone(), "dispatch")
+        .await?;
 
     Ok((
         StatusCode::CREATED,
@@ -96,25 +130,41 @@ async fn dispatch(
     ))
 }
 
-/// List all active Mako sessions.
 async fn list_sessions(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
-) -> Result<Json<Vec<SessionResponse>>, AppError> {
+) -> Result<Json<Vec<MakoSessionSummary>>, AppError> {
     let session_manager = open_session_manager(&state)?;
+    let runtime_store = MakoRuntimeStateStore::new(Database::new(&state.db_path)?);
 
     let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
     let all_sessions = session_manager.list_sessions_for_user(None, user_id)?;
-    let mako_sessions: Vec<SessionResponse> = all_sessions
-        .into_iter()
-        .filter(|s| s.session_type == SessionType::Mako)
-        .map(Into::into)
-        .collect();
+    let mut mako_sessions = Vec::new();
+
+    for session in all_sessions {
+        if session.session_type != SessionType::Mako {
+            continue;
+        }
+
+        let agent_state = session_manager
+            .get_agent_state(&session.id)
+            .map(|s| s.state)
+            .unwrap_or_else(|| "idle".to_string());
+        let runtime = runtime_store.get_state(&session.id)?;
+
+        mako_sessions.push(MakoSessionSummary {
+            session_id: session.id,
+            title: session.title,
+            updated_at: session.updated_at.to_rfc3339(),
+            project_dir: session.project_dir,
+            agent_state,
+            runtime,
+        });
+    }
 
     Ok(Json(mako_sessions))
 }
 
-/// Get Mako session status including tasks and agent state.
 async fn session_status(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
@@ -130,6 +180,7 @@ async fn session_status(
 
     let task_store = AutonomousTaskStore::new(Database::new(&state.db_path)?);
     let tasks = task_store.list_tasks(&id)?;
+    let runtime = MakoRuntimeStateStore::new(Database::new(&state.db_path)?).get_state(&id)?;
 
     Ok(Json(MakoSessionStatus {
         session_id: id,
@@ -137,10 +188,79 @@ async fn session_status(
         title: session.title,
         tasks,
         agent_state,
+        runtime,
     }))
 }
 
-/// Pause a Mako session (stub -- updates state but does not yet control the tick engine).
+async fn observe_events(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Path(id): Path<String>,
+    Query(query): Query<ObserveEventsQuery>,
+) -> Result<Sse<ReceiverStream<std::result::Result<Event, Infallible>>>, AppError> {
+    let session_manager = open_session_manager(&state)?;
+    ensure_owned_mako_session(&session_manager, &id, user.as_ref())?;
+
+    let mut receiver = state.mako_runtime.subscribe(&id).await;
+    let replay_events = load_mako_replay_events(&session_manager, &id, &query)?;
+    let (tx, rx) =
+        mpsc::channel::<std::result::Result<Event, Infallible>>(MAKO_EVENT_STREAM_BUFFER);
+
+    tokio::spawn(async move {
+        for event in replay_events {
+            let Ok(sse_event) = Event::default().json_data(event) else {
+                continue;
+            };
+            if tx.send(Ok(sse_event)).await.is_err() {
+                return;
+            }
+        }
+
+        loop {
+            match receiver.recv().await {
+                Ok(event) => {
+                    let Ok(sse_event) = Event::default().json_data(event) else {
+                        continue;
+                    };
+                    if tx.send(Ok(sse_event)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    Ok(Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default()))
+}
+
+async fn send_message(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Path(id): Path<String>,
+    Json(req): Json<MessageRequest>,
+) -> Result<Json<OkResponse>, AppError> {
+    let session_manager = open_session_manager(&state)?;
+    ensure_owned_mako_session(&session_manager, &id, user.as_ref())?;
+
+    let message = req.message.trim();
+    if message.is_empty() {
+        return Err(AppError::BadRequest(
+            "message must not be empty".to_string(),
+        ));
+    }
+
+    let content_json = serde_json::json!([{ "type": "text", "text": message }]).to_string();
+    session_manager.save_message(&id, "user", &content_json)?;
+    state
+        .mako_runtime
+        .start_or_restart_session(state.clone(), id.clone(), "user_message")
+        .await?;
+
+    Ok(Json(OkResponse { ok: true }))
+}
+
 async fn pause_session(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
@@ -148,11 +268,10 @@ async fn pause_session(
 ) -> Result<Json<OkResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
     ensure_owned_mako_session(&session_manager, &id, user.as_ref())?;
-
+    state.mako_runtime.pause_session(&state, &id).await?;
     Ok(Json(OkResponse { ok: true }))
 }
 
-/// Resume a paused Mako session (stub).
 async fn resume_session(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
@@ -160,11 +279,13 @@ async fn resume_session(
 ) -> Result<Json<OkResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
     ensure_owned_mako_session(&session_manager, &id, user.as_ref())?;
-
+    state
+        .mako_runtime
+        .start_or_restart_session(state.clone(), id.clone(), "resume")
+        .await?;
     Ok(Json(OkResponse { ok: true }))
 }
 
-/// Cancel a Mako session.
 async fn cancel_session(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
@@ -173,6 +294,8 @@ async fn cancel_session(
     let session_manager = open_session_manager(&state)?;
     ensure_owned_mako_session(&session_manager, &id, user.as_ref())?;
 
+    state.mako_runtime.stop_active_run(&state, &id).await;
+    state.mako_runtime.forget_session(&id).await;
     session_manager.delete_session(&id)?;
 
     let mut locks = state.session_locks.write().await;
@@ -193,7 +316,7 @@ fn load_owned_mako_session(
     session_manager: &SessionManager,
     session_id: &str,
     user: Option<&CurrentUser>,
-) -> Result<krusty_core::storage::SessionInfo, AppError> {
+) -> Result<SessionInfo, AppError> {
     let session = session_manager
         .get_session(session_id)?
         .ok_or_else(|| AppError::NotFound(format!("Mako session {} not found", session_id)))?;
@@ -223,4 +346,30 @@ fn ensure_owned_mako_session(
 ) -> Result<(), AppError> {
     load_owned_mako_session(session_manager, session_id, user)?;
     Ok(())
+}
+
+fn load_mako_replay_events(
+    session_manager: &SessionManager,
+    session_id: &str,
+    query: &ObserveEventsQuery,
+) -> Result<Vec<AgenticEvent>, AppError> {
+    let limit = query
+        .replay_limit
+        .unwrap_or(DEFAULT_MAKO_REPLAY_LIMIT)
+        .min(MAX_MAKO_REPLAY_LIMIT);
+
+    let trace_events = match query.after_sequence {
+        Some(after_sequence) => session_manager.load_runtime_trace_events_after(
+            session_id,
+            after_sequence,
+            Some(limit),
+        )?,
+        None if limit == 0 => Vec::new(),
+        None => session_manager.load_runtime_trace_events(session_id, Some(limit))?,
+    };
+
+    Ok(trace_events
+        .into_iter()
+        .filter_map(AgenticEvent::from_runtime_trace)
+        .collect())
 }

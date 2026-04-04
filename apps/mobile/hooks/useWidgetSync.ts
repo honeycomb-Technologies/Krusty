@@ -1,9 +1,8 @@
-import { useEffect } from 'react';
-import { Platform } from 'react-native';
+import { useEffect } from "react";
+import { Platform } from "react-native";
 
-// Import widget instances
-import MakoWidgetInstance from '../widgets/MakoWidget';
-import ChatWidgetInstance from '../widgets/ChatWidget';
+import MakoWidgetInstance from "../widgets/MakoWidget";
+import ChatWidgetInstance from "../widgets/ChatWidget";
 
 interface ChatState {
   hasActiveSession: boolean;
@@ -17,7 +16,7 @@ interface ChatState {
 
 export function useWidgetSync(chatState: ChatState) {
   useEffect(() => {
-    if (Platform.OS !== 'ios') return;
+    if (Platform.OS !== "ios") return;
 
     try {
       ChatWidgetInstance.updateSnapshot(chatState);
@@ -36,7 +35,7 @@ export function useWidgetSync(chatState: ChatState) {
 }
 
 interface MakoState {
-  status: 'active' | 'idle' | 'running' | 'offline';
+  status: "active" | "idle" | "running" | "offline";
   lastUpdate: string;
   briefing: string;
   taskName?: string;
@@ -48,12 +47,21 @@ interface MakoState {
 
 export function useMakoWidgetSync(state: MakoState) {
   useEffect(() => {
-    if (Platform.OS !== 'ios') return;
+    if (Platform.OS !== "ios") return;
 
     try {
       MakoWidgetInstance.updateSnapshot(state);
     } catch {
       // Widget may not be configured yet
     }
-  }, [state.status, state.lastUpdate, state.briefing, state.taskProgress, state.serverConnected]);
+  }, [
+    state.status,
+    state.lastUpdate,
+    state.briefing,
+    state.taskName,
+    state.taskProgress,
+    state.completedTasks,
+    state.totalTasks,
+    state.serverConnected,
+  ]);
 }

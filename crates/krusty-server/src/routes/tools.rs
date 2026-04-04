@@ -179,6 +179,7 @@ mod tests {
                 push_service: None,
                 apns_service: None,
                 oauth_flows: Arc::new(Mutex::new(HashMap::new())),
+                mako_runtime: crate::mako_runtime::MakoRuntimeManager::new(),
             },
             temp_dir,
         )
@@ -191,8 +192,8 @@ mod tests {
         })
     }
 
-    #[test]
-    fn resolve_tool_working_dir_rejects_paths_outside_user_root() {
+    #[tokio::test]
+    async fn resolve_tool_working_dir_rejects_paths_outside_user_root() {
         let (state, temp_dir) = create_test_state();
         let user_root = temp_dir.join("user");
         let outside_root = temp_dir.join("outside");
@@ -208,8 +209,8 @@ mod tests {
         assert!(matches!(result, Err(AppError::BadRequest(_))));
     }
 
-    #[test]
-    fn resolve_tool_working_dir_allows_relative_paths_within_user_root() {
+    #[tokio::test]
+    async fn resolve_tool_working_dir_allows_relative_paths_within_user_root() {
         let (state, temp_dir) = create_test_state();
         let user_root = temp_dir.join("user");
         let repo_dir = user_root.join("repo");

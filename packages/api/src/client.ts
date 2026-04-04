@@ -21,6 +21,10 @@ import type {
   WorkspaceMode,
   Report,
   ReportSummary,
+  MakoDispatchResponse,
+  MakoSessionSummary,
+  MakoSessionStatus,
+  SimpleOkResponse,
 } from './types';
 
 const STREAM_ACTIVITY_TIMEOUT = 30_000;
@@ -302,6 +306,53 @@ export class KrustyClient {
     return this.request(`/reports/${id}`);
   }
 
+  // Mako
+  async dispatchMako(task: string, options?: { projectDir?: string; model?: string }): Promise<MakoDispatchResponse> {
+    return this.request('/mako/dispatch', {
+      method: 'POST',
+      body: JSON.stringify({
+        task,
+        project_dir: options?.projectDir ?? undefined,
+        model: options?.model ?? undefined,
+      }),
+    });
+  }
+
+  async listMakoSessions(): Promise<MakoSessionSummary[]> {
+    return this.request('/mako/sessions');
+  }
+
+  async getMakoSessionStatus(id: string): Promise<MakoSessionStatus> {
+    return this.request(`/mako/sessions/${id}/status`);
+  }
+
+  async sendMakoMessage(id: string, message: string): Promise<SimpleOkResponse> {
+    return this.request(`/mako/sessions/${id}/message`, {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    });
+  }
+
+  async pauseMakoSession(id: string): Promise<SimpleOkResponse> {
+    return this.request(`/mako/sessions/${id}/pause`, { method: 'POST' });
+  }
+
+  async resumeMakoSession(id: string): Promise<SimpleOkResponse> {
+    return this.request(`/mako/sessions/${id}/resume`, { method: 'POST' });
+  }
+
+  async cancelMakoSession(id: string): Promise<void> {
+    await this.request(`/mako/sessions/${id}`, { method: 'DELETE' });
+  }
+
+  async observeMakoSession(
+    id: string,
+    callbacks: StreamCallbacks,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    return this.streamSSERequest(`/mako/sessions/${id}/events`, 'GET', undefined, callbacks, signal);
+  }
+
   // ============================================================================
   // Streaming
   // ============================================================================
@@ -311,7 +362,7 @@ export class KrustyClient {
     callbacks: StreamCallbacks,
     signal?: AbortSignal,
   ): Promise<void> {
-    return this.streamSSE('/chat', request, callbacks, signal);
+    return this.streamSSERequest('/chat', 'POST', request, callbacks, signal);
   }
 
   async streamToolResult(
@@ -319,23 +370,24 @@ export class KrustyClient {
     callbacks: StreamCallbacks,
     signal?: AbortSignal,
   ): Promise<void> {
-    return this.streamSSE('/chat/tool-result', request, callbacks, signal);
+    return this.streamSSERequest('/chat/tool-result', 'POST', request, callbacks, signal);
   }
 
-  private async streamSSE(
+  private async streamSSERequest(
     path: string,
-    body: object,
+    method: 'GET' | 'POST',
+    body: object | undefined,
     callbacks: StreamCallbacks,
     signal?: AbortSignal,
   ): Promise<void> {
     const url = `${this.baseUrl}/api${path}`;
     const response = await this.fetchFn(url, {
-      method: 'POST',
+      method,
       headers: {
         ...this.headers(),
         Accept: 'text/event-stream',
       },
-      body: JSON.stringify(body),
+      body: body ? JSON.stringify(body) : undefined,
       signal,
     });
 
@@ -355,7 +407,6 @@ export class KrustyClient {
     let buffer = '';
     let lastActivity = Date.now();
 
-    // Activity timeout checker
     const activityCheck = setInterval(() => {
       if (Date.now() - lastActivity > STREAM_ACTIVITY_TIMEOUT) {
         callbacks.onError('Stream timeout — no activity for 30s');
@@ -391,14 +442,15 @@ export class KrustyClient {
         }
       }
 
-      // Process remaining buffer
       if (buffer.trim()) {
         const trimmed = buffer.trim();
         if (trimmed.startsWith('data: ')) {
           try {
             const event = JSON.parse(trimmed.slice(6)) as StreamEvent;
             this.handleEvent(event, callbacks);
-          } catch { /* skip */ }
+          } catch {
+            // Skip malformed events
+          }
         }
       }
     } catch (err) {

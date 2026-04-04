@@ -263,16 +263,6 @@ pub struct ServerAccessResponse {
 }
 
 #[derive(Deserialize)]
-pub struct RemoteAuthBootstrapRequest {
-    pub token: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct RemoteAuthStatusResponse {
-    pub authenticated: bool,
-}
-
-#[derive(Deserialize)]
 pub struct UpdateServerAccessRequest {
     pub enabled: Option<bool>,
     pub rotate_token: Option<bool>,
@@ -432,7 +422,7 @@ pub struct ChatRequest {
 mod tests {
     use super::{AgenticEvent, ChatRequest, ThinkingLevel};
     use krusty_core::agent::LoopEvent;
-    use krusty_core::storage::WorkspaceMode;
+    use krusty_core::storage::{RuntimeTraceEvent, WorkspaceMode};
     use serde_json::json;
 
     #[test]
@@ -555,6 +545,52 @@ mod tests {
             }
             other => panic!("unexpected mapping: {other:?}"),
         }
+    }
+    #[test]
+    fn agentic_event_replays_user_message_trace() {
+        let event = RuntimeTraceEvent {
+            run_id: "run-1".to_string(),
+            sequence: 7,
+            turn: 1,
+            event_type: "user_message".to_string(),
+            payload: json!({
+                "title": "Milestone",
+                "message": "Indexing finished",
+                "level": "success"
+            }),
+            failure_category: None,
+            stop_reason: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        match AgenticEvent::from_runtime_trace(event) {
+            Some(AgenticEvent::UserMessage {
+                title,
+                message,
+                level,
+            }) => {
+                assert_eq!(title.as_deref(), Some("Milestone"));
+                assert_eq!(message, "Indexing finished");
+                assert_eq!(level, "success");
+            }
+            other => panic!("unexpected replay mapping: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agentic_event_skips_unreplayable_trace_shapes() {
+        let event = RuntimeTraceEvent {
+            run_id: "run-1".to_string(),
+            sequence: 8,
+            turn: 1,
+            event_type: "plan_update".to_string(),
+            payload: json!({ "task_count": 3 }),
+            failure_category: None,
+            stop_reason: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        assert!(AgenticEvent::from_runtime_trace(event).is_none());
     }
 }
 
@@ -1039,6 +1075,55 @@ impl AgenticEvent {
             lines_added: progress.lines_added,
             lines_removed: progress.lines_removed,
             completed_plan_task: progress.completed_plan_task,
+        }
+    }
+
+    pub fn from_runtime_trace(event: RuntimeTraceEvent) -> Option<Self> {
+        let payload = event.payload;
+        match event.event_type.as_str() {
+            "agent_sleeping" => Some(Self::AgentSleeping {
+                duration_secs: payload.get("duration_secs")?.as_u64()?,
+                reason: payload.get("reason")?.as_str()?.to_string(),
+            }),
+            "finished" => Some(Self::Finish {
+                session_id: payload.get("session_id")?.as_str()?.to_string(),
+                stop_reason: payload.get("stop_reason")?.as_str()?.to_string(),
+            }),
+            "error" => Some(Self::Error {
+                error: payload.get("error")?.as_str()?.to_string(),
+            }),
+            "user_message" => Some(Self::UserMessage {
+                title: payload
+                    .get("title")
+                    .and_then(|value| value.as_str().map(ToString::to_string)),
+                message: payload.get("message")?.as_str()?.to_string(),
+                level: payload
+                    .get("level")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("info")
+                    .to_string(),
+            }),
+            "classifier_decision" => Some(Self::ClassifierDecision {
+                tool_name: payload.get("tool_name")?.as_str()?.to_string(),
+                decision: payload.get("decision")?.as_str()?.to_string(),
+                reason: payload.get("reason")?.as_str()?.to_string(),
+                stage: payload.get("stage")?.as_u64()? as u8,
+            }),
+            "title_generated" => Some(Self::TitleUpdate {
+                title: payload.get("title")?.as_str()?.to_string(),
+            }),
+            "agent_background_started" => Some(Self::AgentBackgroundStarted {
+                delegated_run_id: payload.get("delegated_run_id")?.as_str()?.to_string(),
+                agent_type: payload.get("agent_type")?.as_str()?.to_string(),
+                description: payload.get("description")?.as_str()?.to_string(),
+            }),
+            "agent_background_completed" => Some(Self::AgentBackgroundCompleted {
+                delegated_run_id: payload.get("delegated_run_id")?.as_str()?.to_string(),
+                agent_type: payload.get("agent_type")?.as_str()?.to_string(),
+                success: payload.get("success")?.as_bool()?,
+                summary: payload.get("summary")?.as_str()?.to_string(),
+            }),
+            _ => None,
         }
     }
 }

@@ -36,7 +36,7 @@ impl Tool for CreateReportTool {
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            r#"Create reports to persist research findings, architecture analyses, or investigation results. Reports are stored in the database and also written as Markdown files to ~/.krusty/reports/.
+            r#"Create reports to persist research findings, architecture analyses, or investigation results. Reports are stored in the database and also written as Markdown files to .krusty/reports/ inside the active workspace.
 
 When to create a report:
 - After a deep investigation that produced reusable findings
@@ -109,6 +109,10 @@ Structure:
 
         let store = ReportStore::new(db);
         let project_dir = ctx.project_dir.as_ref().map(|p| p.to_string_lossy());
+        let report_root = ctx
+            .project_dir
+            .as_deref()
+            .unwrap_or(ctx.working_dir.as_path());
         let summary = params.summary.as_deref().unwrap_or("");
         let tags = params.tags.unwrap_or_default();
         let sources = params.sources.unwrap_or_default();
@@ -117,6 +121,7 @@ Structure:
             &params.title,
             session_id,
             project_dir.as_deref(),
+            Some(report_root),
             &params.content,
             summary,
             &tags,

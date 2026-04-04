@@ -1,5 +1,6 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import {
+  AppState,
   View,
   FlatList,
   StyleSheet,
@@ -7,46 +8,103 @@ import {
   Pressable,
   Alert,
   Keyboard,
-} from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { router } from 'expo-router';
-import { Menu, FileSearch } from 'lucide-react-native';
-import * as Haptics from '../../platform/haptics';
-import * as SecureStore from '../../platform/secure-store';
-import { useThemeContext } from '../../hooks/useTheme';
-import { useConnection } from '../../hooks/useConnection';
-import { useBreakpoint } from '../../hooks/useBreakpoint';
-import { useSessionsStore, useStores } from '../../hooks/useStores';
-import { MessageBubble } from '../../components/chat/MessageBubble';
-import { KrustyLogo } from '../../components/ui/KrustyLogo';
-import { ChatBar } from '../../components/chat/ChatBar';
-import { SessionDrawer } from '../../components/chat/SessionDrawer';
-import { DesktopShell } from '../../components/layout/DesktopShell';
-import { ReportsViewer } from '../../components/ReportsViewer';
-import { LinearGradient } from '../../platform/linear-gradient';
-import { useSplashState } from '../../hooks/useSplashState';
-import { useEntranceAnimation } from '../../hooks/useEntranceAnimation';
-import { useLiveActivity } from '../../hooks/useLiveActivity';
-import { useWidgetSync } from '../../hooks/useWidgetSync';
-import { useNotifications } from '../../hooks/useNotifications';
-import Animated from 'react-native-reanimated';
-import type { ChatMessage, ModelInfo, SessionResponse, SessionType, ThinkingLevel } from '@krusty/api';
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { router } from "expo-router";
+import { Menu, FileSearch } from "lucide-react-native";
+import * as Haptics from "../../platform/haptics";
+import * as SecureStore from "../../platform/secure-store";
+import { useThemeContext } from "../../hooks/useTheme";
+import { useConnection } from "../../hooks/useConnection";
+import { useBreakpoint } from "../../hooks/useBreakpoint";
+import {
+  useSessionStore,
+  useSessionsStore,
+  useStores,
+} from "../../hooks/useStores";
+import { MessageBubble } from "../../components/chat/MessageBubble";
+import { KrustyLogo } from "../../components/ui/KrustyLogo";
+import {
+  ChatBar,
+  type Attachment as ChatBarAttachment,
+} from "../../components/chat/ChatBar";
+import { SessionDrawer } from "../../components/chat/SessionDrawer";
+import { DesktopShell } from "../../components/layout/DesktopShell";
+import { ReportsViewer } from "../../components/ReportsViewer";
+import { PlanTracker } from "../../components/chat/PlanTracker";
+import { LinearGradient } from "../../platform/linear-gradient";
+import { useSplashState } from "../../hooks/useSplashState";
+import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
+import { useLiveActivity } from "../../hooks/useLiveActivity";
+import { useWidgetSync } from "../../hooks/useWidgetSync";
+import { useNotifications } from "../../hooks/useNotifications";
+import Animated from "react-native-reanimated";
+import type { ModelInfo, SessionResponse, SessionType } from "@krusty/api";
+import type {
+  Attachment as SessionAttachment,
+  ChatMessage,
+  ThinkingLevel,
+  ToolCall,
+} from "@krusty/state";
 
-const TAB_TYPES: SessionType[] = ['chat', 'code', 'mako'];
+const TAB_TYPES: SessionType[] = ["chat", "code", "mako"];
+const CHAT_BAR_ZONE = 130;
+const SELECTED_MODEL_KEY = "krusty_selected_model";
+
+type WorkspaceMode = "neutral" | "selected" | "created";
 
 function sessionTypeForTab(index: number): SessionType {
-  return TAB_TYPES[index] ?? 'code';
+  return TAB_TYPES[index] ?? "code";
 }
 
 function tabForSessionType(type: SessionType): number {
   switch (type) {
-    case 'chat':
+    case "chat":
       return 0;
-    case 'mako':
+    case "mako":
       return 2;
     default:
       return 1;
   }
+}
+
+function getLastAssistantMessage(messages: ChatMessage[]): ChatMessage | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === "assistant") {
+      return message;
+    }
+  }
+  return null;
+}
+
+function flattenToolCalls(messages: ChatMessage[]): ToolCall[] {
+  const toolCalls: ToolCall[] = [];
+  for (const message of messages) {
+    if (message.toolCalls?.length) {
+      toolCalls.push(...message.toolCalls);
+    }
+  }
+  return toolCalls;
+}
+
+function getActiveToolCall(toolCalls: ToolCall[]): ToolCall | null {
+  for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
+    const toolCall = toolCalls[index];
+    if (
+      toolCall &&
+      (toolCall.status === "awaiting_approval" ||
+        toolCall.status === "running" ||
+        toolCall.status === "pending")
+    ) {
+      return toolCall;
+    }
+  }
+  return null;
+}
+
+function getWorkspaceMode(path: string | null): WorkspaceMode {
+  return path ? "selected" : "neutral";
 }
 
 export default function ChatScreen() {
@@ -55,423 +113,545 @@ export default function ChatScreen() {
   const { isDesktop } = useBreakpoint();
   const { splashDone } = useSplashState();
   const entrance = useEntranceAnimation(splashDone);
+  const {
+    sessions: sessionsStore,
+    session: sessionStore,
+    workspace,
+  } = useStores();
 
-  // Session state — sessions list from shared store
-  const sessions = useSessionsStore(s => s.sessions) as SessionResponse[];
-  const { sessions: sessionsStore } = useStores();
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [sessionTitle, setSessionTitle] = useState('');
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const sessions = useSessionsStore(
+    (state) => state.sessions,
+  ) as SessionResponse[];
+  const sessionId = useSessionStore((state) => state.sessionId);
+  const sessionTitle = useSessionStore((state) => state.title);
+  const messages = useSessionStore((state) => state.messages);
+  const isStreaming = useSessionStore((state) => state.isStreaming);
+  const isThinking = useSessionStore((state) => state.isThinking);
+  const model = useSessionStore((state) => state.model);
+  const thinkingLevel = useSessionStore((state) => state.thinkingLevel);
+  const mode = useSessionStore((state) => state.mode);
+  const tokenCount = useSessionStore((state) => state.tokenCount);
+  const error = useSessionStore((state) => state.error);
 
-  // Chat state
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [isThinking, setIsThinking] = useState(false);
-  const [model, setModel] = useState<string | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>('off');
-  const [mode, setMode] = useState<'build' | 'plan'>('build');
-  const [researchEnabled, setResearchEnabled] = useState(false);
-  const [tokenCount, setTokenCount] = useState(0);
-  const [pendingApproval, setPendingApproval] = useState<{id: string; name: string; args: Record<string, unknown>} | null>(null);
-
-  // Tool approval handler shared by Live Activity + Notifications
-  const toolApprovalHandler = useCallback((id: string, approved: boolean) => {
-    if (client && sessionId) {
-      client.submitToolApproval(sessionId, id, approved).catch(() => {});
-      setPendingApproval(null);
-    }
-  }, [client, sessionId]);
-
-  const liveActivity = useLiveActivity({ onToolApproval: toolApprovalHandler });
-  const notifications = useNotifications({ onToolApproval: toolApprovalHandler });
-
-  // UI state
-  const [activeTab, setActiveTab] = useState(1); // 0=Chat, 1=Code, 2=Mako
+  const [activeToolCallId, setActiveToolCallId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState(1);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [reportsOpen, setReportsOpen] = useState(false);
+  const [researchEnabled, setResearchEnabled] = useState(false);
 
-  // Sync widget state
-  const lastMsg = messages[messages.length - 1];
+  const flatListRef = useRef<FlatList>(null);
+  const listHeightRef = useRef(0);
+  const contentHeightRef = useRef(0);
+  const previousStreamingRef = useRef(false);
+  const currentStreamSessionIdRef = useRef<string | null>(null);
+  const streamStartedAtRef = useRef<number | null>(null);
+  const liveActivityOpenRef = useRef(false);
+  const notifiedApprovalIdsRef = useRef<Set<string>>(new Set());
+  const suppressCompletionRef = useRef(false);
+
+  const lastAssistantMessage = useMemo(
+    () => getLastAssistantMessage(messages),
+    [messages],
+  );
+  const toolCalls = useMemo(() => flattenToolCalls(messages), [messages]);
+  const awaitingApprovalCalls = useMemo(
+    () =>
+      toolCalls.filter((toolCall) => toolCall.status === "awaiting_approval"),
+    [toolCalls],
+  );
+  const activeToolCall = useMemo(
+    () => getActiveToolCall(toolCalls),
+    [toolCalls],
+  );
+
+  const lastAssistantSnippet =
+    lastAssistantMessage?.content?.slice(0, 200) ?? "";
+
+  const handleToolApprovalAction = useCallback(
+    async (toolCallId: string, approved: boolean) => {
+      const currentSessionId = sessionStore.getState().sessionId;
+      if (!currentSessionId || activeToolCallId) {
+        return;
+      }
+
+      setActiveToolCallId(toolCallId);
+      try {
+        await sessionStore.getState().submitToolApproval(toolCallId, approved);
+      } catch {
+        await sessionStore.getState().loadSession(currentSessionId, true);
+      } finally {
+        setActiveToolCallId(null);
+      }
+    },
+    [activeToolCallId, sessionStore],
+  );
+
+  const { startActivity, updateActivity, endActivity } = useLiveActivity({
+    onToolApproval: handleToolApprovalAction,
+  });
+  const { notifyToolApproval, notifyStreamComplete } = useNotifications({
+    onToolApproval: handleToolApprovalAction,
+  });
+
   useWidgetSync({
-    hasActiveSession: !!sessionId,
-    sessionTitle: sessionTitle || 'Untitled',
-    lastMessage: lastMsg?.role === 'assistant' ? (lastMsg.content?.slice(0, 200) || '') : '',
-    model: model || '',
+    hasActiveSession: Boolean(sessionId),
+    sessionTitle: sessionTitle || "Untitled",
+    lastMessage: lastAssistantSnippet,
+    model: model || "",
     isStreaming,
     tokenCount,
     serverConnected: isConnected,
   });
 
-  const flatListRef = useRef<FlatList>(null);
-  const listHeightRef = useRef(0);
-  const contentHeightRef = useRef(0);
-  const abortRef = useRef<AbortController | null>(null);
-
-  // Mutable ref for the current assistant message being streamed.
-  // Avoids recreating the entire messages array on every delta.
-  const assistantRef = useRef<ChatMessage>({ role: 'assistant', content: '', toolCalls: [] });
-  const flushTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
   const t = theme.colors;
-
-  // Load sessions + models on connect, restore persisted model
-  useEffect(() => {
-    if (client && isConnected) {
-      sessionsStore.getState().loadSessions();
-      client.getModels().then(async (res) => {
-        setModels(res.models);
-        if (!model) {
-          const saved = await SecureStore.getItemAsync('krusty_selected_model');
-          const validSaved = saved && res.models.some((m: { id: string }) => m.id === saved);
-          setModel(validSaved ? saved : res.default_model);
-        }
-      }).catch(() => {});
-    }
-  }, [client, isConnected]);
-
-  // Load session messages
-  const loadSession = useCallback(async (session: SessionResponse) => {
-    if (!client) return;
-    setSessionId(session.id);
-    setSessionTitle(session.title || 'Untitled');
-    setModel(session.model ?? null);
-    setMode(session.mode ?? 'build');
-    setTokenCount(session.token_count ?? 0);
-    setActiveTab(tabForSessionType(session.session_type));
-    setDrawerOpen(false);
-
-    try {
-      const data = await client.getSession(session.id);
-      const loaded: ChatMessage[] = [];
-
-      for (const msg of data.messages) {
-        const textParts = msg.content.filter(c => c.type === 'text').map(c => c.text ?? '').join('');
-        const thinkingParts = msg.content.filter(c => c.type === 'thinking').map(c => c.thinking ?? '').join('');
-        const toolUses = msg.content.filter(c => c.type === 'tool_use');
-        const toolResults = new Map(
-          msg.content.filter(c => c.type === 'tool_result').map(c => [c.tool_use_id, c.content ?? ''])
-        );
-
-        loaded.push({
-          role: msg.role,
-          content: textParts,
-          thinking: thinkingParts || undefined,
-          toolCalls: toolUses.map(tu => ({
-            id: tu.id!,
-            name: tu.name!,
-            arguments: tu.input,
-            output: toolResults.get(tu.id!) ?? undefined,
-            status: toolResults.has(tu.id!) ? 'success' as const : 'pending' as const,
-          })),
-        });
-      }
-
-      setMessages(loaded);
-    } catch {
-      setMessages([]);
-    }
-  }, [client]);
-
-  const handleNewSession = useCallback(async () => {
-    if (!client) return;
-    // Chat sessions start immediately with no directory.
-    // Code/Mako use the inline directory picker in the SessionDrawer.
-    try {
-      const session = await client.createSession(undefined, undefined, undefined, undefined, 'chat');
-      sessionsStore.getState().loadSessions();
-      setSessionId(session.id);
-      setSessionTitle(session.title || '');
-      setMessages([]);
-      setDrawerOpen(false);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    } catch {
-      // silent
-    }
-  }, [client]);
-
-  const handleDirectorySelected = useCallback(async (path: string) => {
-    if (!client) return;
-    try {
-      const type = sessionTypeForTab(activeTab);
-      const session = await client.createSession(undefined, path, undefined, 'selected', type);
-      sessionsStore.getState().loadSessions();
-      setSessionId(session.id);
-      setSessionTitle(session.title || '');
-      setMessages([]);
-      setDrawerOpen(false);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    } catch {
-      // silent
-    }
-  }, [activeTab, client]);
-
-  const handleDeleteSession = useCallback(async (id: string) => {
-    if (!client) return;
-    Alert.alert('Delete Session', 'Delete this session?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            await client.deleteSession(id);
-            sessionsStore.getState().loadSessions();
-            if (sessionId === id) {
-              setSessionId(null);
-              setSessionTitle('');
-              setMessages([]);
-            }
-          } catch { /* silent */ }
-        },
-      },
-    ]);
-  }, [client, sessionId]);
-
-  // Flush the mutable assistant ref into React state.
-  // Called on a 50ms interval during streaming (throttled re-renders)
-  // and once on stream end for the final state.
-  const flushAssistantRef = useCallback(() => {
-    const snapshot = { ...assistantRef.current, toolCalls: [...(assistantRef.current.toolCalls ?? [])] };
-    setMessages(prev => {
-      const updated = [...prev];
-      if (updated.length > 0 && updated[updated.length - 1].role === 'assistant') {
-        updated[updated.length - 1] = snapshot;
-      }
-      return updated;
-    });
-  }, []);
-
-  // Auto-scroll: positions last text above the ChatBar overlay zone.
-  // scrollToEnd goes to the absolute bottom (behind ChatBar).
-  // We stop 130px short so text lands above the input bar.
-  const CHAT_BAR_ZONE = 130;
   const msgLen = messages.length;
   const lastMsgContent = messages[msgLen - 1]?.content?.length ?? 0;
 
   const scrollToBottom = useCallback(() => {
     const content = contentHeightRef.current;
     const viewport = listHeightRef.current;
-    if (!content || !viewport || content <= viewport) return;
+    if (!content || !viewport || content <= viewport) {
+      return;
+    }
+
     const maxOffset = content - viewport;
     const targetOffset = Math.max(0, maxOffset - CHAT_BAR_ZONE);
-    flatListRef.current?.scrollToOffset({ offset: targetOffset, animated: !isStreaming });
+    flatListRef.current?.scrollToOffset({
+      offset: targetOffset,
+      animated: !isStreaming,
+    });
   }, [isStreaming]);
 
   useEffect(() => {
     if (msgLen > 0) {
       requestAnimationFrame(scrollToBottom);
     }
-  }, [msgLen, lastMsgContent, scrollToBottom]);
+  }, [lastMsgContent, msgLen, scrollToBottom]);
 
-  const startFlushTimer = useCallback(() => {
-    if (flushTimerRef.current) return;
-    flushTimerRef.current = setInterval(flushAssistantRef, 50);
-  }, [flushAssistantRef]);
-
-  const stopFlushTimer = useCallback(() => {
-    if (flushTimerRef.current) {
-      clearInterval(flushTimerRef.current);
-      flushTimerRef.current = null;
+  useEffect(() => {
+    if (!client || !isConnected) {
+      return;
     }
-    flushAssistantRef(); // final flush
-  }, [flushAssistantRef]);
 
-  const handleSend = useCallback(async (content: string) => {
-    if (!client || !content.trim()) return;
+    void sessionsStore.getState().loadSessions();
+    void client
+      .getModels()
+      .then(async (response) => {
+        setModels(response.models);
+        if (!sessionStore.getState().model) {
+          const saved = await SecureStore.getItemAsync(SELECTED_MODEL_KEY);
+          const selectedModel =
+            saved && response.models.some((candidate) => candidate.id === saved)
+              ? saved
+              : response.default_model;
 
-    // Reset assistant ref for new message
-    assistantRef.current = { role: 'assistant', content: '', toolCalls: [] };
+          if (selectedModel) {
+            sessionStore.getState().setModel(selectedModel);
+          }
+        }
+      })
+      .catch(() => {});
+  }, [client, isConnected, model, sessionStore, sessionsStore]);
 
-    const userMessage: ChatMessage = { role: 'user', content: content.trim(), toolCalls: [] };
-    setMessages(prev => [...prev, userMessage, assistantRef.current]);
-    setIsStreaming(true);
-    setIsThinking(false);
-
-    // Start Live Activity for Dynamic Island / Lock Screen
-    liveActivity.startActivity(sessionTitle || 'Chat', model || 'unknown');
-
-    const abort = new AbortController();
-    abortRef.current = abort;
-    startFlushTimer();
-
-    try {
-      let currentSessionId = sessionId;
-
-      if (!currentSessionId) {
-        const session = await client.createSession(
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          sessionTypeForTab(activeTab),
-        );
-        currentSessionId = session.id;
-        setSessionId(session.id);
-        setSessionTitle('');
-        sessionsStore.getState().loadSessions();
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState !== "active") {
+        return;
       }
 
-      await client.streamChat(
-        {
-          session_id: currentSessionId!,
-          message: content.trim(),
-          model: model ?? undefined,
-          thinking_enabled: thinkingLevel !== 'off' ? thinkingLevel : undefined,
-          mode,
-          research_enabled: researchEnabled || undefined,
-        },
-        {
-          onTextDelta: (delta: string) => {
-            assistantRef.current.content += delta;
-            setIsThinking(false);
-            liveActivity.updateActivity({
-              status: 'streaming',
-              currentText: assistantRef.current.content.slice(-200),
-            });
-          },
-          onThinkingDelta: (thinking: string) => {
-            assistantRef.current.thinking = (assistantRef.current.thinking ?? '') + thinking;
-            setIsThinking(true);
-            liveActivity.updateActivity({ status: 'thinking', currentText: 'Thinking...' });
-          },
-          onToolCallStart: (id: string, name: string) => {
-            setIsThinking(false);
-            const toolCalls = assistantRef.current.toolCalls ?? [];
-            toolCalls.push({ id, name, status: 'running' as const });
-            assistantRef.current.toolCalls = toolCalls;
-            flushAssistantRef();
-            liveActivity.updateActivity({ status: 'tool_call', currentTool: name });
-          },
-          onToolCallComplete: (id: string, _name: string, args: Record<string, unknown>) => {
-            const toolCalls = assistantRef.current.toolCalls ?? [];
-            const tc = toolCalls.find(t => t.id === id);
-            if (tc) tc.arguments = args;
-          },
-          onToolResult: (id: string, output: string, isError: boolean) => {
-            const toolCalls = assistantRef.current.toolCalls ?? [];
-            const tc = toolCalls.find(t => t.id === id);
-            if (tc) {
-              tc.output = output;
-              tc.status = isError ? 'error' as const : 'success' as const;
-            }
-            flushAssistantRef(); // immediate flush for result visibility
-          },
-          onToolOutputDelta: (id: string, delta: string) => {
-            const toolCalls = assistantRef.current.toolCalls ?? [];
-            const tc = toolCalls.find(t => t.id === id);
-            if (tc) tc.output = (tc.output ?? '') + delta;
-          },
-          onDelegatedProgress: () => {},
-          onToolApprovalRequired: (id: string, name: string, _args: Record<string, unknown>) => {
-            setPendingApproval({ id, name, args: _args });
-            liveActivity.updateActivity({
-              status: 'awaiting_approval',
-              toolApprovalId: id,
-              toolApprovalName: name,
-            });
-            // Send notification for lock screen approval when backgrounded
-            notifications.notifyToolApproval(id, name, currentSessionId!);
-            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-            Alert.alert(
-              'Tool Approval',
-              `Allow "${name}" to execute?`,
-              [
-                { text: 'Deny', style: 'destructive', onPress: () => {
-                  client.submitToolApproval(currentSessionId!, id, false).catch(() => {});
-                  setPendingApproval(null);
-                }},
-                { text: 'Allow', onPress: () => {
-                  client.submitToolApproval(currentSessionId!, id, true).catch(() => {});
-                  setPendingApproval(null);
-                }},
-              ],
-            );
-          },
-          onToolApproved: () => setPendingApproval(null),
-          onToolDenied: () => setPendingApproval(null),
-          onTurnComplete: (_turn: number, hasMore: boolean) => {
-            if (hasMore) {
-              // New turn — snapshot current message and start fresh
-              flushAssistantRef();
-              assistantRef.current = { role: 'assistant', content: '', toolCalls: [] };
-              setMessages(prev => [...prev, assistantRef.current]);
-            }
-          },
-          onPlanUpdate: () => {},
-          onModeChange: (newMode: string) => {
-            if (newMode === 'build' || newMode === 'plan') setMode(newMode);
-          },
-          onPlanComplete: () => {},
-          onUsage: (prompt: number, completion: number) => {
-            const total = prompt + completion;
-            setTokenCount(total);
-            liveActivity.updateActivity({ tokenCount: total });
-          },
-          onTitleUpdate: (title: string) => {
-            setSessionTitle(title);
-            sessionsStore.getState().loadSessions();
-            liveActivity.updateActivity({ chatTitle: title });
-          },
-          onFinish: () => {
-            stopFlushTimer();
-            setIsStreaming(false);
-            setIsThinking(false);
-            liveActivity.endActivity();
-            notifications.notifyStreamComplete(
-              currentSessionId!,
-              sessionTitle || 'Chat',
-              tokenCount,
-              0,
-            );
-          },
-          onError: () => {
-            stopFlushTimer();
-            setIsStreaming(false);
-            setIsThinking(false);
-            liveActivity.endActivity();
-          },
-        },
-        abort.signal,
-      );
-    } catch {
-      stopFlushTimer();
-      setIsStreaming(false);
-      setIsThinking(false);
-      liveActivity.endActivity();
+      const currentSessionId = sessionStore.getState().sessionId;
+      if (currentSessionId) {
+        void sessionStore.getState().loadSession(currentSessionId, true);
+      }
+    });
+
+    return () => subscription.remove();
+  }, [sessionStore]);
+
+  useEffect(() => {
+    if (!sessionId) {
+      return;
     }
-  }, [activeTab, client, sessionId, model, thinkingLevel, mode, startFlushTimer, stopFlushTimer, flushAssistantRef, liveActivity]);
 
-  const handleStop = useCallback(() => {
-    abortRef.current?.abort();
-    setIsStreaming(false);
-    liveActivity.endActivity();
-  }, [liveActivity]);
-
-  const handleModelSelect = (modelId: string) => {
-    setModel(modelId);
-    SecureStore.setItemAsync('krusty_selected_model', modelId).catch(() => {});
-  };
-
-  const handleTabChange = useCallback((index: number) => {
-    setActiveTab(index);
-    const currentSession = sessions.find(session => session.id === sessionId);
-    if (currentSession && currentSession.session_type !== sessionTypeForTab(index)) {
-      setSessionId(null);
-      setSessionTitle('');
-      setMessages([]);
-      setMode('build');
+    const activeSession = sessions.find((session) => session.id === sessionId);
+    if (!activeSession) {
+      return;
     }
+
+    const nextTab = tabForSessionType(activeSession.session_type);
+    setActiveTab((currentTab) =>
+      currentTab === nextTab ? currentTab : nextTab,
+    );
   }, [sessionId, sessions]);
 
+  useEffect(() => {
+    const nextNotifiedIds = new Set<string>();
+    if (!sessionId) {
+      notifiedApprovalIdsRef.current = nextNotifiedIds;
+      return;
+    }
+
+    for (const toolCall of awaitingApprovalCalls) {
+      nextNotifiedIds.add(toolCall.id);
+      if (notifiedApprovalIdsRef.current.has(toolCall.id)) {
+        continue;
+      }
+
+      void notifyToolApproval(toolCall.id, toolCall.name, sessionId);
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    }
+
+    notifiedApprovalIdsRef.current = nextNotifiedIds;
+  }, [awaitingApprovalCalls, notifyToolApproval, sessionId]);
+
+  useEffect(() => {
+    const awaitingApproval =
+      awaitingApprovalCalls[awaitingApprovalCalls.length - 1] ?? null;
+    const shouldKeepActivity =
+      Boolean(sessionId) && (isStreaming || Boolean(awaitingApproval));
+
+    if (isStreaming && !previousStreamingRef.current) {
+      suppressCompletionRef.current = false;
+      currentStreamSessionIdRef.current = sessionId;
+      streamStartedAtRef.current = Date.now();
+    }
+
+    if (shouldKeepActivity && !liveActivityOpenRef.current) {
+      startActivity(sessionTitle || "Chat", model || "unknown");
+      liveActivityOpenRef.current = true;
+    }
+
+    if (shouldKeepActivity) {
+      updateActivity({
+        chatTitle: sessionTitle || "Chat",
+        model: model || "unknown",
+        status: awaitingApproval
+          ? "awaiting_approval"
+          : isThinking
+            ? "thinking"
+            : activeToolCall
+              ? "tool_call"
+              : "streaming",
+        currentText: isThinking
+          ? "Thinking..."
+          : (lastAssistantMessage?.content?.slice(-200) ?? ""),
+        currentTool: awaitingApproval?.name || activeToolCall?.name || "",
+        tokenCount,
+        progress: awaitingApproval ? 0.85 : isStreaming ? 0.5 : 1,
+        toolApprovalId: awaitingApproval?.id,
+        toolApprovalName: awaitingApproval?.name,
+      });
+    } else if (liveActivityOpenRef.current) {
+      endActivity();
+      liveActivityOpenRef.current = false;
+    }
+
+    if (
+      previousStreamingRef.current &&
+      !isStreaming &&
+      !awaitingApproval &&
+      !suppressCompletionRef.current &&
+      currentStreamSessionIdRef.current &&
+      currentStreamSessionIdRef.current === sessionId
+    ) {
+      const startedAt = streamStartedAtRef.current ?? Date.now();
+      const elapsedSeconds = Math.max(
+        0,
+        Math.floor((Date.now() - startedAt) / 1000),
+      );
+      void notifyStreamComplete(
+        currentStreamSessionIdRef.current,
+        sessionTitle || "Chat",
+        tokenCount,
+        elapsedSeconds,
+      );
+      currentStreamSessionIdRef.current = null;
+      streamStartedAtRef.current = null;
+    }
+
+    if (!shouldKeepActivity && !isStreaming) {
+      suppressCompletionRef.current = false;
+      currentStreamSessionIdRef.current = null;
+      streamStartedAtRef.current = null;
+    }
+
+    previousStreamingRef.current = isStreaming;
+  }, [
+    activeToolCall,
+    awaitingApprovalCalls,
+    endActivity,
+    isStreaming,
+    isThinking,
+    lastAssistantMessage,
+    model,
+    notifyStreamComplete,
+    sessionId,
+    sessionTitle,
+    startActivity,
+    tokenCount,
+    updateActivity,
+  ]);
+
+  const stopCurrentStream = useCallback(
+    (suppressCompletion = true) => {
+      if (sessionStore.getState().isStreaming) {
+        suppressCompletionRef.current = suppressCompletion;
+        sessionStore.getState().stopStreaming();
+      }
+      setActiveToolCallId(null);
+    },
+    [sessionStore],
+  );
+
+  const bootstrapSession = useCallback(
+    async (session: SessionResponse) => {
+      const currentModel = sessionStore.getState().model;
+      const currentThinkingLevel = sessionStore.getState().thinkingLevel;
+      const directory = session.project_dir ?? session.working_dir ?? null;
+      const workspaceMode = (session.workspace_mode ??
+        getWorkspaceMode(directory)) as WorkspaceMode;
+
+      sessionStore.getState().initSession(session.id, session.title || "");
+      workspace
+        .getState()
+        .initFromSession(session.id, directory, workspaceMode);
+
+      if (currentModel) {
+        sessionStore.getState().setModel(currentModel);
+      }
+      if (sessionStore.getState().thinkingLevel !== currentThinkingLevel) {
+        sessionStore.getState().setThinkingLevel(currentThinkingLevel);
+      }
+
+      await sessionsStore.getState().loadSessions();
+    },
+    [sessionStore, sessionsStore, workspace],
+  );
+
+  const createSessionForCurrentTab = useCallback(
+    async (directory?: string) => {
+      if (!client) {
+        return null;
+      }
+
+      stopCurrentStream();
+
+      try {
+        const session = await client.createSession(
+          undefined,
+          directory,
+          undefined,
+          directory ? "selected" : undefined,
+          sessionTypeForTab(activeTab),
+        );
+        await bootstrapSession(session);
+        setActiveToolCallId(null);
+        setDrawerOpen(false);
+        void Haptics.notificationAsync(
+          Haptics.NotificationFeedbackType.Success,
+        );
+        return session;
+      } catch {
+        return null;
+      }
+    },
+    [activeTab, bootstrapSession, client, stopCurrentStream],
+  );
+
+  const ensureSessionForSend = useCallback(async () => {
+    const currentSessionId = sessionStore.getState().sessionId;
+    if (currentSessionId) {
+      return currentSessionId;
+    }
+
+    if (!client) {
+      return null;
+    }
+
+    try {
+      const session = await client.createSession(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        sessionTypeForTab(activeTab),
+      );
+      await bootstrapSession(session);
+      return session.id;
+    } catch {
+      return null;
+    }
+  }, [activeTab, bootstrapSession, client, sessionStore]);
+
+  const loadSession = useCallback(
+    async (session: SessionResponse) => {
+      stopCurrentStream();
+      setDrawerOpen(false);
+      setActiveTab(tabForSessionType(session.session_type));
+      await sessionStore.getState().loadSession(session.id);
+    },
+    [sessionStore, stopCurrentStream],
+  );
+
+  const handleNewSession = useCallback(async () => {
+    await createSessionForCurrentTab();
+  }, [createSessionForCurrentTab]);
+
+  const handleDirectorySelected = useCallback(
+    async (path: string) => {
+      await createSessionForCurrentTab(path);
+    },
+    [createSessionForCurrentTab],
+  );
+
+  const handleDeleteSession = useCallback(
+    (id: string) => {
+      if (!client) {
+        return;
+      }
+
+      Alert.alert("Delete Session", "Delete this session?", [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              if (sessionStore.getState().sessionId === id) {
+                stopCurrentStream();
+              }
+              await client.deleteSession(id);
+              await sessionsStore.getState().loadSessions();
+              if (sessionStore.getState().sessionId === id) {
+                sessionStore.getState().clearSession();
+                setActiveToolCallId(null);
+              }
+            } catch {
+              // silent
+            }
+          },
+        },
+      ]);
+    },
+    [client, sessionsStore, stopCurrentStream, sessionStore],
+  );
+
+  const handleInteractiveToolResult = useCallback(
+    async (toolCallId: string, result: string) => {
+      const currentSessionId = sessionStore.getState().sessionId;
+      if (!currentSessionId || activeToolCallId) {
+        return;
+      }
+
+      setActiveToolCallId(toolCallId);
+      try {
+        await sessionStore.getState().submitToolResult(toolCallId, result);
+      } catch {
+        await sessionStore.getState().loadSession(currentSessionId, true);
+      } finally {
+        setActiveToolCallId(null);
+      }
+    },
+    [activeToolCallId, sessionStore],
+  );
+
+  const handlePlanConfirm = useCallback(
+    async (toolCallId: string, choice: "execute" | "abandon") => {
+      if (choice === "execute") {
+        sessionStore.getState().setMode("build");
+      }
+      await handleInteractiveToolResult(toolCallId, JSON.stringify({ choice }));
+    },
+    [handleInteractiveToolResult, sessionStore],
+  );
+
+  const handleSend = useCallback(
+    async (content: string, attachments: ChatBarAttachment[] = []) => {
+      const trimmed = content.trim();
+      if (!client || (!trimmed && attachments.length === 0)) {
+        return;
+      }
+
+      const ensuredSessionId = await ensureSessionForSend();
+      if (!ensuredSessionId) {
+        return;
+      }
+
+      await sessionStore
+        .getState()
+        .sendMessage(trimmed, attachments as SessionAttachment[]);
+    },
+    [client, ensureSessionForSend, sessionStore],
+  );
+
+  const handleStop = useCallback(() => {
+    stopCurrentStream();
+  }, [stopCurrentStream]);
+
+  const handleModelSelect = useCallback(
+    (modelId: string) => {
+      sessionStore.getState().setModel(modelId);
+      void SecureStore.setItemAsync(SELECTED_MODEL_KEY, modelId);
+    },
+    [sessionStore],
+  );
+
+  const handleTabChange = useCallback(
+    (index: number) => {
+      setActiveTab(index);
+
+      const currentSessionId = sessionStore.getState().sessionId;
+      if (!currentSessionId) {
+        return;
+      }
+
+      const currentSession = sessions.find(
+        (session) => session.id === currentSessionId,
+      );
+      if (
+        !currentSession ||
+        currentSession.session_type !== sessionTypeForTab(index)
+      ) {
+        stopCurrentStream();
+        sessionStore.getState().clearSession();
+      }
+    },
+    [sessionStore, sessions, stopCurrentStream],
+  );
+
+  const handleRenameSession = useCallback(() => {
+    if (!sessionId || !sessionTitle) {
+      return;
+    }
+
+    Alert.prompt(
+      "Rename Session",
+      undefined,
+      async (newTitle?: string) => {
+        const nextTitle = newTitle?.trim();
+        if (!nextTitle) {
+          return;
+        }
+
+        sessionStore.getState().setTitle(nextTitle);
+        await sessionStore.getState().updateTitle(sessionId, nextTitle);
+      },
+      "plain-text",
+      sessionTitle,
+    );
+  }, [sessionId, sessionStore, sessionTitle]);
 
   const chatContent = (
-    <SafeAreaView style={[styles.container, { backgroundColor: t.background }]} edges={isDesktop ? [] : ['top']}>
-      {/* Top bar */}
+    <SafeAreaView
+      style={[styles.container, { backgroundColor: t.background }]}
+      edges={isDesktop ? [] : ["top"]}
+    >
       <Animated.View style={[styles.topBar, entrance.topBarStyle]}>
         {!isDesktop && (
           <Pressable
             onPress={() => {
-              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
               setDrawerOpen(true);
             }}
             style={styles.menuBtn}
@@ -481,33 +661,24 @@ export default function ChatScreen() {
         )}
 
         <Pressable
-          onPress={() => {
-            if (!sessionId || !client || !sessionTitle) return;
-            Alert.prompt(
-              'Rename Session',
-              undefined,
-              async (newTitle: string) => {
-                if (newTitle && newTitle.trim()) {
-                  setSessionTitle(newTitle.trim());
-                  await client.updateSession(sessionId, { title: newTitle.trim() });
-                  sessionsStore.getState().loadSessions();
-                }
-              },
-              'plain-text',
-              sessionTitle,
-            );
-          }}
+          onPress={handleRenameSession}
           style={styles.titleBtn}
           disabled={!sessionTitle}
         >
-          <Text style={[styles.title, { color: sessionTitle ? t.foreground : 'transparent' }]} numberOfLines={1}>
-            {sessionTitle || ' '}
+          <Text
+            style={[
+              styles.title,
+              { color: sessionTitle ? t.foreground : "transparent" },
+            ]}
+            numberOfLines={1}
+          >
+            {sessionTitle || " "}
           </Text>
         </Pressable>
 
         <Pressable
           onPress={() => {
-            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
             setReportsOpen(true);
           }}
           style={styles.menuBtn}
@@ -516,42 +687,72 @@ export default function ChatScreen() {
         </Pressable>
       </Animated.View>
 
-      {/* Messages */}
       <Animated.View style={[styles.flex, entrance.contentStyle]}>
         {messages.length === 0 ? (
           <Pressable style={styles.empty} onPress={Keyboard.dismiss}>
             <KrustyLogo />
+            {error ? (
+              <Text style={[styles.emptyHint, { color: t.error }]}>
+                {error}
+              </Text>
+            ) : null}
           </Pressable>
         ) : (
           <View style={styles.flex}>
             <FlatList
               ref={flatListRef}
               data={messages}
-              keyExtractor={(_, i) => String(i)}
+              keyExtractor={(_, index) => String(index)}
               onScrollBeginDrag={Keyboard.dismiss}
-              renderItem={({ item, index }: { item: ChatMessage; index: number }) => (
+              renderItem={({
+                item,
+                index,
+              }: {
+                item: ChatMessage;
+                index: number;
+              }) => (
                 <MessageBubble
                   message={item}
                   isLast={index === messages.length - 1}
                   isStreaming={isStreaming && index === messages.length - 1}
                   isThinking={isThinking && index === messages.length - 1}
+                  activeToolCallId={activeToolCallId}
+                  onApproveTool={(toolCallId) =>
+                    void handleToolApprovalAction(toolCallId, true)
+                  }
+                  onDenyTool={(toolCallId) =>
+                    void handleToolApprovalAction(toolCallId, false)
+                  }
+                  onSubmitToolResult={(toolCallId, result) =>
+                    void handleInteractiveToolResult(toolCallId, result)
+                  }
+                  onPlanConfirm={(toolCallId, choice) =>
+                    void handlePlanConfirm(toolCallId, choice)
+                  }
                 />
               )}
               style={styles.flex}
-              contentContainerStyle={[styles.list, isDesktop && styles.listDesktop]}
-              onLayout={(e) => { listHeightRef.current = e.nativeEvent.layout.height; }}
-              onContentSizeChange={(_w, h) => { contentHeightRef.current = h; }}
+              contentContainerStyle={[
+                styles.list,
+                isDesktop && styles.listDesktop,
+              ]}
+              onLayout={(event) => {
+                listHeightRef.current = event.nativeEvent.layout.height;
+              }}
+              onContentSizeChange={(_width, height) => {
+                contentHeightRef.current = height;
+              }}
               keyboardDismissMode="interactive"
               keyboardShouldPersistTaps="handled"
             />
-            {/* Fade edges */}
             <LinearGradient
-              colors={[t.background, t.background + '00']}
+              colors={[t.background, t.background + "00"]}
               style={styles.fadeTop}
               pointerEvents="none"
             />
+            {!isDesktop && <PlanTracker />}
             <LinearGradient
-              colors={[t.background + '00', t.background]}
+              colors={[t.background + "00", t.background]}
               style={styles.fadeBottom}
               pointerEvents="none"
             />
@@ -559,29 +760,34 @@ export default function ChatScreen() {
         )}
       </Animated.View>
 
-      {/* Chat bar */}
-      <Animated.View style={entrance.bottomBarStyle}>
-      <ChatBar
-        onSend={handleSend}
-        onStop={handleStop}
-        isStreaming={isStreaming}
-        disabled={!isConnected}
-        thinkingLevel={thinkingLevel}
-        onThinkingChange={setThinkingLevel}
-        mode={mode}
-        onModeToggle={() => setMode(m => m === 'build' ? 'plan' : 'build')}
-        onModelSelect={handleModelSelect}
-        model={model}
-        models={models}
-        sessionType={sessionTypeForTab(activeTab)}
-        researchEnabled={researchEnabled}
-        onResearchToggle={() => setResearchEnabled(r => !r)}
-        tokenCount={tokenCount}
-      />
+      <Animated.View style={[entrance.bottomBarStyle, { overflow: "visible" }]}>
+        <ChatBar
+          onSend={handleSend}
+          onStop={handleStop}
+          isStreaming={isStreaming}
+          disabled={!isConnected}
+          thinkingLevel={thinkingLevel as ThinkingLevel}
+          onThinkingChange={(level) =>
+            sessionStore.getState().setThinkingLevel(level)
+          }
+          mode={mode}
+          onModeToggle={() =>
+            sessionStore.getState().setMode(mode === "build" ? "plan" : "build")
+          }
+          onModelSelect={handleModelSelect}
+          model={model}
+          models={models}
+          sessionType={sessionTypeForTab(activeTab)}
+          researchEnabled={researchEnabled}
+          onResearchToggle={() => setResearchEnabled((current) => !current)}
+          tokenCount={tokenCount}
+        />
       </Animated.View>
 
-      {/* Reports viewer */}
-      <ReportsViewer visible={reportsOpen} onClose={() => setReportsOpen(false)} />
+      <ReportsViewer
+        visible={reportsOpen}
+        onClose={() => setReportsOpen(false)}
+      />
     </SafeAreaView>
   );
 
@@ -589,28 +795,30 @@ export default function ChatScreen() {
     <DesktopShell
       sessions={sessions}
       activeSessionId={sessionId}
-      onSelectSession={loadSession}
-      onNewSession={handleNewSession}
-      onNewSessionWithDir={handleDirectorySelected}
+      onSelectSession={(session) => void loadSession(session)}
+      onNewSession={() => void handleNewSession()}
+      onNewSessionWithDir={(path) => void handleDirectorySelected(path)}
       onDeleteSession={handleDeleteSession}
-      onOpenSettings={() => router.push('/(tabs)/settings')}
+      onOpenSettings={() => router.push("/(tabs)/settings")}
       activeTab={activeTab}
       onTabChange={handleTabChange}
     >
       {chatContent}
 
-      {/* Session drawer — mobile only */}
       {!isDesktop && (
         <SessionDrawer
           isOpen={drawerOpen}
           onClose={() => setDrawerOpen(false)}
           sessions={sessions}
           activeSessionId={sessionId}
-          onSelectSession={loadSession}
-          onNewSession={handleNewSession}
-          onNewSessionWithDir={handleDirectorySelected}
+          onSelectSession={(session) => void loadSession(session)}
+          onNewSession={() => void handleNewSession()}
+          onNewSessionWithDir={(path) => void handleDirectorySelected(path)}
           onDeleteSession={handleDeleteSession}
-          onOpenSettings={() => { setDrawerOpen(false); router.push('/(tabs)/settings'); }}
+          onOpenSettings={() => {
+            setDrawerOpen(false);
+            router.push("/(tabs)/settings");
+          }}
           activeTab={activeTab}
           onTabChange={handleTabChange}
         />
@@ -623,8 +831,8 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   flex: { flex: 1 },
   topBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     paddingHorizontal: 16,
     paddingVertical: 10,
     gap: 12,
@@ -637,8 +845,8 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: 17,
-    fontWeight: '600',
-    textAlign: 'center',
+    fontWeight: "600",
+    textAlign: "center",
   },
   statusDot: {
     width: 8,
@@ -652,18 +860,18 @@ const styles = StyleSheet.create({
   },
   listDesktop: {
     maxWidth: 800,
-    alignSelf: 'center',
-    width: '100%',
+    alignSelf: "center",
+    width: "100%",
   },
   fadeTop: {
-    position: 'absolute',
+    position: "absolute",
     top: 0,
     left: 0,
     right: 0,
     height: 64,
   },
   fadeBottom: {
-    position: 'absolute',
+    position: "absolute",
     bottom: 0,
     left: 0,
     right: 0,
@@ -671,14 +879,14 @@ const styles = StyleSheet.create({
   },
   empty: {
     flex: 1,
-    justifyContent: 'flex-start',
-    alignItems: 'center',
-    paddingTop: '35%',
+    justifyContent: "flex-start",
+    alignItems: "center",
+    paddingTop: "35%",
     gap: 16,
   },
   emptyTitle: {
     fontSize: 28,
-    fontWeight: '700',
+    fontWeight: "700",
     letterSpacing: -0.5,
   },
   emptyHint: {
@@ -686,7 +894,7 @@ const styles = StyleSheet.create({
   },
   stubTitle: {
     fontSize: 24,
-    fontWeight: '700',
+    fontWeight: "700",
     letterSpacing: -0.3,
   },
   stubText: {
@@ -695,24 +903,24 @@ const styles = StyleSheet.create({
   },
   modalBackdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'flex-end',
+    backgroundColor: "rgba(0,0,0,0.6)",
+    justifyContent: "flex-end",
     zIndex: 200,
   },
   modelPicker: {
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
-    maxHeight: '60%',
+    maxHeight: "60%",
     paddingTop: 20,
     paddingBottom: 40,
-    backgroundColor: '#1a1f2e',
+    backgroundColor: "#1a1f2e",
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: 'rgba(255,255,255,0.1)',
+    borderTopColor: "rgba(255,255,255,0.1)",
   },
   modelPickerTitle: {
     fontSize: 18,
-    fontWeight: '700',
-    textAlign: 'center',
+    fontWeight: "700",
+    textAlign: "center",
     marginBottom: 16,
   },
   modelList: {
@@ -727,7 +935,7 @@ const styles = StyleSheet.create({
   },
   modelName: {
     fontSize: 16,
-    fontWeight: '500',
+    fontWeight: "500",
   },
   modelProvider: {
     fontSize: 13,

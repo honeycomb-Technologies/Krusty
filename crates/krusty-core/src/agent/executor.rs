@@ -298,6 +298,7 @@ async fn execute_regular_tool(
     )
     .with_ai_client(ai_client.clone())
     .with_tool_registry(Arc::clone(tool_registry))
+    .with_loop_event_tx(event_tx.clone())
     .with_output_stream(output_tx, call.id.clone());
 
     let mut delegated_forwarder_handle = None;

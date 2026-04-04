@@ -21,7 +21,7 @@
 //! - set_work_mode: Switch between build and plan modes (handled by UI/server)
 //! - enter_plan_mode: Switch to plan mode (handled by UI)
 //! - send_user_message: Send prominent messages to user (Mako autonomous mode)
-//! - sleep: Idle signal for autonomous tick engine
+//! - sleep: Idle signal for autonomous runtime scheduling
 
 pub mod add_subtask;
 pub mod agent;
@@ -145,11 +145,12 @@ pub async fn register_agent_tool(
         .await;
 }
 
-/// Register Mako-specific tools (autonomous tasks, reports).
+/// Register Mako-specific tools (autonomous tasks and reports).
 ///
 /// These are additive — call after `register_all_tools` so Mako sessions
-/// get both the standard Code tools and the Mako extensions. Teammates
-/// are managed through the `agent` tool with the `name` parameter.
+/// get both the standard Code tools and the Mako extensions. Mako delegates
+/// through the `agent` tool; the legacy mailbox `send_message` path is not
+/// part of the autonomous contract.
 pub async fn register_mako_tools(registry: &ToolRegistry) {
     registry.register(Arc::new(CreateTaskTool)).await;
     registry.register(Arc::new(UpdateTaskTool)).await;
@@ -157,5 +158,4 @@ pub async fn register_mako_tools(registry: &ToolRegistry) {
     registry.register(Arc::new(CreateReportTool)).await;
     registry.register(Arc::new(ListReportsTool)).await;
     registry.register(Arc::new(ReadReportTool)).await;
-    registry.register(Arc::new(SendMessageTool)).await;
 }

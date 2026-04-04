@@ -2,11 +2,12 @@
 //!
 //! Stores reports produced by Chat (with research toggle) and Mako sessions.
 //! Each report is persisted in SQLite and also written to disk as a Markdown
-//! file under `~/.krusty/reports/`.
+//! file under `.krusty/reports/` within the active workspace when one exists.
 
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use uuid::Uuid;
 
 use super::database::Database;
@@ -40,6 +41,7 @@ impl ReportStore {
         title: &str,
         session_id: &str,
         project_dir: Option<&str>,
+        report_root: Option<&Path>,
         content: &str,
         summary: &str,
         tags: &[String],
@@ -55,7 +57,7 @@ impl ReportStore {
             params![id, title, session_id, project_dir, content, summary, tags_json, sources_json],
         )?;
 
-        if let Err(e) = write_report_to_disk(title, content) {
+        if let Err(e) = write_report_to_disk(title, content, report_root) {
             tracing::warn!("Failed to write report to disk: {e}");
         }
 
@@ -168,8 +170,10 @@ fn slugify(title: &str) -> String {
         .join("-")
 }
 
-fn write_report_to_disk(title: &str, content: &str) -> Result<()> {
-    let reports_dir = paths::config_dir().join("reports");
+fn write_report_to_disk(title: &str, content: &str, report_root: Option<&Path>) -> Result<()> {
+    let reports_dir = report_root
+        .map(paths::project_reports_dir)
+        .unwrap_or_else(|| paths::config_dir().join("reports"));
     std::fs::create_dir_all(&reports_dir).context("creating reports directory")?;
 
     let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
@@ -210,6 +214,7 @@ mod tests {
                 "Auth Analysis",
                 "sess-1",
                 Some("/home/user/project"),
+                None,
                 "# Auth\nDetailed analysis...",
                 "OAuth2 flow review",
                 &["auth".into(), "security".into()],
@@ -233,6 +238,7 @@ mod tests {
                 "Report A",
                 "sess-1",
                 Some("/proj-a"),
+                None,
                 "content a",
                 "",
                 &[],
@@ -244,6 +250,7 @@ mod tests {
                 "Report B",
                 "sess-1",
                 Some("/proj-b"),
+                None,
                 "content b",
                 "",
                 &[],
@@ -255,6 +262,7 @@ mod tests {
                 "Report C",
                 "sess-1",
                 Some("/proj-a"),
+                None,
                 "content c",
                 "",
                 &[],
@@ -277,6 +285,7 @@ mod tests {
                 "Database Migration Guide",
                 "sess-1",
                 None,
+                None,
                 "content",
                 "",
                 &["database".into(), "migration".into()],
@@ -287,6 +296,7 @@ mod tests {
             .create_report(
                 "API Design",
                 "sess-1",
+                None,
                 None,
                 "content",
                 "",
@@ -308,12 +318,39 @@ mod tests {
     fn delete_report() {
         let (store, _tmp) = create_store();
         let id = store
-            .create_report("Temporary", "sess-1", None, "content", "", &[], &[])
+            .create_report("Temporary", "sess-1", None, None, "content", "", &[], &[])
             .unwrap();
         assert!(store.get_report(&id).unwrap().is_some());
 
         store.delete_report(&id).unwrap();
         assert!(store.get_report(&id).unwrap().is_none());
+    }
+
+    #[test]
+    fn writes_reports_to_project_local_directory() {
+        let (store, tmp) = create_store();
+        let project_root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&project_root).unwrap();
+
+        store
+            .create_report(
+                "Workspace Report",
+                "sess-1",
+                Some(project_root.to_str().unwrap()),
+                Some(&project_root),
+                "content",
+                "",
+                &[],
+                &[],
+            )
+            .unwrap();
+
+        let reports_dir = crate::paths::project_reports_dir(&project_root);
+        let entries = std::fs::read_dir(reports_dir)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
     }
 
     #[test]

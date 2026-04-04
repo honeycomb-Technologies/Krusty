@@ -15,7 +15,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "io.krusty.mobile",
-      "buildNumber": "15",
+      "buildNumber": "22",
       "backgroundColor": "#0b1119",
       "icon": {
         "light": "./assets/icons/ios-light.png",
@@ -23,7 +23,10 @@
         "tinted": "./assets/icons/ios-tinted.png"
       },
       "infoPlist": {
-        "UIBackgroundModes": ["remote-notification", "fetch"]
+        "UIBackgroundModes": [
+          "remote-notification",
+          "fetch"
+        ]
       },
       "config": {
         "usesNonExemptEncryption": false
