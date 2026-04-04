@@ -1,6 +1,9 @@
 import { useState, useCallback } from 'react';
 import { View, Text, Pressable, StyleSheet } from 'react-native';
-import { Settings, SquarePlus, FolderPlus, Wifi, WifiOff } from 'lucide-react-native';
+import {
+  Settings, SquarePlus, FolderPlus, Wifi, WifiOff,
+  PanelLeftClose, PanelLeftOpen, TerminalSquare, Globe,
+} from 'lucide-react-native';
 import * as Haptics from '../../platform/haptics';
 import { BlurView } from '../../platform/blur';
 import { useBreakpoint } from '../../hooks/useBreakpoint';
@@ -9,6 +12,8 @@ import { useConnection } from '../../hooks/useConnection';
 import { SessionList, type SessionListProps } from '../chat/SessionList';
 import { PlanTracker } from '../chat/PlanTracker';
 import { SettingsModal } from '../SettingsModal';
+import { Terminal } from '../desktop/Terminal';
+import { WorkspacePreview } from '../desktop/WorkspacePreview';
 
 const SIDEBAR_WIDTH = 280;
 
@@ -31,8 +36,16 @@ export function DesktopShell({
   const t = theme.colors;
   const isDark = theme.scheme === 'dark';
 
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [pickerVisible, setPickerVisible] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [terminalVisible, setTerminalVisible] = useState(false);
+  const [previewVisible, setPreviewVisible] = useState(false);
+
+  // Match the mobile drawer's blur/overlay values
+  const blurIntensity = 40;
+  const bgOverlay = isDark ? 'rgba(11,17,25,0.88)' : 'rgba(255,255,255,0.88)';
+  const blurTint = isDark ? 'systemChromeMaterialDark' : 'systemChromeMaterialLight';
 
   const handleNew = useCallback(() => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -43,69 +56,107 @@ export function DesktopShell({
     }
   }, [activeTab, onNewSession]);
 
+  const toggleSidebar = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setSidebarOpen(prev => !prev);
+  }, []);
+
   if (!isDesktop) {
     return <>{children}</>;
   }
 
   return (
     <View style={styles.shell}>
-      {/* Sidebar */}
-      <View style={[styles.sidebar, { borderRightColor: t.border }]}>
-        <BlurView
-          intensity={30}
-          tint={isDark ? 'systemChromeMaterialDark' : 'systemChromeMaterialLight'}
-          style={StyleSheet.absoluteFill}
-        />
-        <View style={[StyleSheet.absoluteFill, {
-          backgroundColor: isDark ? 'rgba(11,17,25,0.92)' : 'rgba(255,255,255,0.92)',
-        }]} />
+      {/* Sidebar — collapsible */}
+      {sidebarOpen && (
+        <View style={[styles.sidebar, { borderRightColor: t.border }]}>
+          <BlurView intensity={blurIntensity} tint={blurTint} style={StyleSheet.absoluteFill} />
+          <View style={[StyleSheet.absoluteFill, { backgroundColor: bgOverlay }]} />
 
-        <View style={styles.sidebarContent}>
-          <View style={styles.sidebarHeader}>
-            <Text style={[styles.sidebarTitle, { color: t.foreground }]}>Krusty</Text>
-          </View>
-
-          <SessionList
-            {...sessionListProps}
-            activeTab={activeTab}
-            onNewSession={onNewSession}
-            onNewSessionWithDir={(path) => { setPickerVisible(false); onNewSessionWithDir(path); }}
-            showPicker={pickerVisible}
-            onPickerDone={() => setPickerVisible(false)}
-          />
-
-          <PlanTracker />
-
-          {/* Bottom bar */}
-          <View style={[styles.bottomBar, { borderTopColor: t.border }]}>
-            <Pressable
-              onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setSettingsOpen(true); }}
-              style={styles.iconBtn}
-            >
-              <Settings size={20} color={t.mutedForeground} strokeWidth={1.8} />
-            </Pressable>
-
-            <View style={styles.statusIcon}>
-              {status === 'connected'
-                ? <Wifi size={16} color="#22c55e" strokeWidth={2} />
-                : <WifiOff size={16} color={status === 'connecting' ? '#f59e0b' : '#ef4444'} strokeWidth={2} />
-              }
+          <View style={styles.sidebarContent}>
+            {/* Header with collapse button */}
+            <View style={styles.sidebarHeader}>
+              <Text style={[styles.sidebarTitle, { color: t.foreground }]}>Krusty</Text>
+              <Pressable onPress={toggleSidebar} style={styles.iconBtn}>
+                <PanelLeftClose size={18} color={t.mutedForeground} strokeWidth={1.8} />
+              </Pressable>
             </View>
 
-            <View style={{ flex: 1 }} />
+            <SessionList
+              {...sessionListProps}
+              activeTab={activeTab}
+              onNewSession={onNewSession}
+              onNewSessionWithDir={(path) => { setPickerVisible(false); onNewSessionWithDir(path); }}
+              showPicker={pickerVisible}
+              onPickerDone={() => setPickerVisible(false)}
+            />
 
-            <Pressable onPress={handleNew} style={styles.iconBtn}>
-              {activeTab === 0
-                ? <SquarePlus size={20} color={t.mutedForeground} strokeWidth={1.8} />
-                : <FolderPlus size={20} color={t.mutedForeground} strokeWidth={1.8} />}
-            </Pressable>
+            <PlanTracker />
+
+            {/* Bottom bar — matches mobile drawer */}
+            <View style={[styles.bottomBar, { borderTopColor: t.border }]}>
+              <Pressable
+                onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setSettingsOpen(true); }}
+                style={styles.iconBtn}
+              >
+                <Settings size={22} color={t.mutedForeground} strokeWidth={1.8} />
+              </Pressable>
+
+              <View style={styles.statusIcon}>
+                {status === 'connected'
+                  ? <Wifi size={16} color={t.success} strokeWidth={2} />
+                  : <WifiOff size={16} color={status === 'connecting' ? t.warning : t.error} strokeWidth={2} />
+                }
+              </View>
+
+              <View style={{ flex: 1 }} />
+
+              {/* Terminal toggle */}
+              <Pressable
+                onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setTerminalVisible(v => !v); }}
+                style={styles.iconBtn}
+              >
+                <TerminalSquare size={18} color={terminalVisible ? t.userMessage : t.mutedForeground} strokeWidth={1.8} />
+              </Pressable>
+
+              {/* Preview toggle */}
+              <Pressable
+                onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setPreviewVisible(v => !v); }}
+                style={styles.iconBtn}
+              >
+                <Globe size={18} color={previewVisible ? t.userMessage : t.mutedForeground} strokeWidth={1.8} />
+              </Pressable>
+
+              <Pressable onPress={handleNew} style={styles.iconBtn}>
+                {activeTab === 0
+                  ? <SquarePlus size={22} color={t.mutedForeground} strokeWidth={1.8} />
+                  : <FolderPlus size={22} color={t.mutedForeground} strokeWidth={1.8} />}
+              </Pressable>
+            </View>
           </View>
         </View>
-      </View>
+      )}
 
-      {/* Main content */}
+      {/* Main area */}
       <View style={styles.main}>
-        {children}
+        {/* Sidebar open button when collapsed */}
+        {!sidebarOpen && (
+          <Pressable
+            onPress={toggleSidebar}
+            style={[styles.openSidebarBtn, { borderColor: t.border }]}
+          >
+            <PanelLeftOpen size={18} color={t.mutedForeground} strokeWidth={1.8} />
+          </Pressable>
+        )}
+
+        {/* Chat content */}
+        <View style={styles.flex}>
+          {children}
+        </View>
+
+        {/* Bottom panels — terminal and preview */}
+        <Terminal visible={terminalVisible} />
+        <WorkspacePreview visible={previewVisible} />
       </View>
 
       <SettingsModal visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
@@ -128,6 +179,9 @@ const styles = StyleSheet.create({
     paddingTop: 16,
   },
   sidebarHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     paddingHorizontal: 20,
     paddingBottom: 16,
   },
@@ -142,14 +196,27 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderTopWidth: StyleSheet.hairlineWidth,
+    gap: 4,
   },
   iconBtn: {
     padding: 6,
   },
   statusIcon: {
-    marginLeft: 6,
+    marginLeft: 4,
   },
   main: {
     flex: 1,
+  },
+  flex: {
+    flex: 1,
+  },
+  openSidebarBtn: {
+    position: 'absolute',
+    top: 12,
+    left: 12,
+    zIndex: 10,
+    padding: 8,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
   },
 });

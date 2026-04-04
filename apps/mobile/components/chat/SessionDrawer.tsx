@@ -359,8 +359,8 @@ export function SessionDrawer({
 
               <View style={styles.statusIcon}>
                 {status === 'connected'
-                  ? <Wifi size={16} color="#22c55e" strokeWidth={2} />
-                  : <WifiOff size={16} color={status === 'connecting' ? '#f59e0b' : '#ef4444'} strokeWidth={2} />
+                  ? <Wifi size={16} color={t.success} strokeWidth={2} />
+                  : <WifiOff size={16} color={status === 'connecting' ? t.warning : t.error} strokeWidth={2} />
                 }
               </View>
 
