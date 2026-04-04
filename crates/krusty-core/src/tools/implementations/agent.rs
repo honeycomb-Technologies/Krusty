@@ -74,8 +74,8 @@ struct Params {
     #[serde(default)]
     run_in_background: Option<bool>,
 
-    /// Optional: give the agent a persistent name (Mako teammate).
-    /// Named agents auto-claim tasks from the autonomous task list.
+    /// Optional stable label for a background agent run in Mako mode.
+    /// This is used for progress/status visibility, not mailbox routing.
     #[serde(default)]
     name: Option<String>,
 
@@ -107,7 +107,7 @@ impl Tool for AgentTool {
 
 **Background mode:** Pass `run_in_background: true` to spawn the agent asynchronously. You get back a `delegated_run_id` immediately and can continue working. The agent writes its result to the delegated run store when finished — you will see it in your delegated context on the next turn. Use this for long-running tasks where you don't need the result right away.
 
-**Named agents (Mako teammates):** Pass `name` to create a persistent named agent. Named agents auto-claim tasks from the autonomous task list (create_task). Use with `run_in_background: true`. Example: `agent(agent_type: "build", prompt: "Work through pending tasks", name: "builder-1", run_in_background: true)`.
+**Named background agents:** Pass `name` to give a background run a stable label in status/progress views. Use with `run_in_background: true`. Example: `agent(agent_type: "build", prompt: "Implement task T-12", name: "builder-1", run_in_background: true)`.
 
 For simple file lookups, use Glob/Grep/Read directly — agent is for deeper multi-step work."#,
         )
@@ -152,7 +152,7 @@ For simple file lookups, use Glob/Grep/Read directly — agent is for deeper mul
                 },
                 "name": {
                     "type": "string",
-                    "description": "Give the agent a persistent name (Mako teammate). Named agents auto-claim tasks from the task list and can be addressed via send_message. Use with run_in_background: true."
+                    "description": "Optional stable label for a background agent run. Use with run_in_background: true so progress is easier to track."
                 },
                 "description": {
                     "type": "string",
@@ -180,7 +180,7 @@ For simple file lookups, use Glob/Grep/Read directly — agent is for deeper mul
                 name = %name,
                 description = ?params.description,
                 agent_type = %params.agent_type,
-                "Named agent (Mako teammate) requested"
+                "Named background agent requested"
             );
         }
 
@@ -223,8 +223,7 @@ fn background_started_result(
     if let Some(name) = name {
         result["name"] = json!(name);
         result["message"] = json!(format!(
-            "Named agent '{}' ({}) started in background. Use send_message to communicate. \
-             delegated_run_id: '{}'",
+            "Named agent '{}' ({}) started in background. Track it via delegated progress and delegated_run_id '{}'.",
             name, agent_type, delegated_run_id
         ));
     }

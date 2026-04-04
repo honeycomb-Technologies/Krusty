@@ -55,6 +55,7 @@ type DelegatedStateMap = HashMap<String, Vec<types::DelegatedToolStateResponse>>
 pub mod apns;
 pub mod auth;
 pub mod error;
+pub mod mako_runtime;
 pub mod presence;
 pub mod push;
 pub mod remote_access;
@@ -128,6 +129,8 @@ pub struct AppState {
     pub apns_service: Option<Arc<apns::ApnsService>>,
     /// Active OAuth flows keyed by provider storage key.
     pub oauth_flows: Arc<Mutex<HashMap<String, routes::oauth::OAuthFlowState>>>,
+    /// Background runtime owner for autonomous Mako sessions.
+    pub mako_runtime: Arc<mako_runtime::MakoRuntimeManager>,
 }
 
 impl AppState {
@@ -418,7 +421,13 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
         push_service,
         apns_service,
         oauth_flows: Arc::new(Mutex::new(HashMap::new())),
+        mako_runtime: mako_runtime::MakoRuntimeManager::new(),
     };
+
+    state
+        .mako_runtime
+        .restore_persisted_sessions(state.clone())
+        .await?;
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

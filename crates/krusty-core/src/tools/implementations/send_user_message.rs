@@ -29,12 +29,14 @@ impl Tool for SendUserMessageTool {
     }
 
     fn description(&self) -> &str {
-        "Send a prominent message to the user. In autonomous mode, regular AI text is dimmed — use this tool to deliver highlighted, user-facing communication."
+        "Send a prominent message to the user. In Mako mode, treat this as the primary guaranteed user-facing communication channel."
     }
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            r#"Use this to communicate important information directly to the user during autonomous execution. Regular assistant text is dimmed in Mako mode — only SendUserMessage content is highlighted and prominent.
+            r#"Use this to communicate information the user must reliably see during autonomous execution.
+
+Treat regular assistant text as secondary coordination output. Some Mako surfaces may collapse, dim, or otherwise de-emphasize ordinary assistant prose. If the user needs to notice something, use SendUserMessage.
 
 When to use:
 - Reporting completion of a significant milestone or task
@@ -43,8 +45,8 @@ When to use:
 - Errors that need user awareness but don't require stopping
 
 When NOT to use:
-- Routine progress updates (use regular text)
-- Every tool result or minor step
+- Every minor step or tool result
+- High-frequency heartbeat updates
 - Asking questions (use AskUserQuestion instead)
 
 Levels:

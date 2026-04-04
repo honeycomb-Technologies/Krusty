@@ -1,10 +1,9 @@
-use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 
 use crate::ai::client::CallOptions;
-use crate::ai::types::{Content, ModelMessage, Role};
+use crate::ai::types::ModelMessage;
 
 use super::loop_events::{LoopEvent, LoopInput, LoopStopReason};
 use super::orchestrator::{AgenticOrchestrator, OrchestratorConfig, OrchestratorServices};
@@ -58,82 +57,48 @@ impl TickEngine {
         services: OrchestratorServices,
         config: OrchestratorConfig,
         tick_config: TickEngineConfig,
-        mut conversation: Vec<ModelMessage>,
+        initial_conversation: Vec<ModelMessage>,
         options: CallOptions,
         outer_tx: mpsc::UnboundedSender<LoopEvent>,
         mut outer_input_rx: mpsc::UnboundedReceiver<LoopInput>,
     ) {
-        let shared = SharedServices::from_orchestrator_services(&services);
-        let mut tick_count: usize = 0;
-        let mut last_tool_output: Option<String> = None;
-
-        // First run uses the provided services directly
+        let session_id = config.session_id.clone();
         let (mut inner_rx, mut inner_input_tx) =
             AgenticOrchestrator::new(services, config.clone_for_tick())
-                .run(conversation.clone(), options.clone());
+                .run(initial_conversation, options);
 
-        loop {
-            let stop_reason = Self::forward_events(
-                &mut inner_rx,
-                &mut inner_input_tx,
-                &mut outer_input_rx,
-                &outer_tx,
-                &mut last_tool_output,
-            )
-            .await;
+        let mut last_tool_output: Option<String> = None;
+        let stop_reason = Self::forward_events(
+            &mut inner_rx,
+            &mut inner_input_tx,
+            &mut outer_input_rx,
+            &outer_tx,
+            &mut last_tool_output,
+        )
+        .await;
 
-            let Some(stop_reason) = stop_reason else {
-                break;
-            };
+        let Some(stop_reason) = stop_reason else {
+            return;
+        };
 
-            match stop_reason {
-                LoopStopReason::Completed
-                | LoopStopReason::AwaitingInput
-                | LoopStopReason::Sleeping => {}
-                _ => break,
-            }
-
-            tick_count += 1;
-            if tick_count >= tick_config.max_ticks {
-                let _ = outer_tx.send(LoopEvent::Finished {
-                    session_id: String::new(),
-                    stop_reason: LoopStopReason::BudgetExhausted,
-                });
-                break;
-            }
-
-            let sleep_signal = parse_sleep_signal(last_tool_output.as_deref());
-            let sleep_duration = sleep_signal.unwrap_or(tick_config.tick_interval);
-
-            if let Some(duration) = sleep_signal {
+        let final_stop_reason = if tick_config.enabled && stop_reason == LoopStopReason::Completed {
+            if let Some(duration) = parse_sleep_signal(last_tool_output.as_deref()) {
                 let _ = outer_tx.send(LoopEvent::AgentSleeping {
                     duration_secs: duration.as_secs(),
                     reason: "sleep_idle signal from tool".into(),
                 });
+                LoopStopReason::Sleeping
+            } else {
+                stop_reason
             }
+        } else {
+            stop_reason
+        };
 
-            tokio::select! {
-                _ = tokio::time::sleep(sleep_duration) => {}
-                Some(LoopInput::Cancel) = outer_input_rx.recv() => {
-                    break;
-                }
-            }
-
-            conversation.push(tick_message());
-            let _ = outer_tx.send(LoopEvent::TickInjected {
-                tick_number: tick_count,
-            });
-            tracing::debug!(tick = tick_count, "injecting tick message");
-
-            let services = shared.to_orchestrator_services();
-            let run_config = config.clone_for_tick();
-
-            let (rx, tx) = AgenticOrchestrator::new(services, run_config)
-                .run(conversation.clone(), options.clone());
-            inner_rx = rx;
-            inner_input_tx = tx;
-            last_tool_output = None;
-        }
+        let _ = outer_tx.send(LoopEvent::Finished {
+            session_id,
+            stop_reason: final_stop_reason,
+        });
     }
 
     async fn forward_events(
@@ -143,8 +108,6 @@ impl TickEngine {
         outer_tx: &mpsc::UnboundedSender<LoopEvent>,
         last_tool_output: &mut Option<String>,
     ) -> Option<LoopStopReason> {
-        let mut stop_reason = None;
-
         loop {
             tokio::select! {
                 event = inner_rx.recv() => {
@@ -154,10 +117,8 @@ impl TickEngine {
                         *last_tool_output = Some(output.clone());
                     }
 
-                    if let LoopEvent::Finished { stop_reason: ref reason, .. } = event {
-                        stop_reason = Some(reason.clone());
-                        let _ = outer_tx.send(event);
-                        break;
+                    if let LoopEvent::Finished { stop_reason, .. } = event {
+                        return Some(stop_reason);
                     }
 
                     if outer_tx.send(event).is_err() {
@@ -169,11 +130,14 @@ impl TickEngine {
 
                     if matches!(input, LoopInput::Cancel) {
                         let _ = inner_input_tx.send(LoopInput::Cancel);
-                        // Drain remaining events until the orchestrator finishes
                         while let Some(event) = inner_rx.recv().await {
-                            let is_finished = matches!(event, LoopEvent::Finished { .. });
+                            if let LoopEvent::ToolResult { ref output, .. } = event {
+                                *last_tool_output = Some(output.clone());
+                            }
+                            if matches!(event, LoopEvent::Finished { .. }) {
+                                break;
+                            }
                             let _ = outer_tx.send(event);
-                            if is_finished { break; }
                         }
                         return None;
                     }
@@ -183,16 +147,7 @@ impl TickEngine {
             }
         }
 
-        stop_reason
-    }
-}
-
-fn tick_message() -> ModelMessage {
-    ModelMessage {
-        role: Role::User,
-        content: vec![Content::Text {
-            text: "<tick>".to_string(),
-        }],
+        None
     }
 }
 
@@ -212,36 +167,6 @@ fn parse_sleep_signal(output: Option<&str>) -> Option<Duration> {
         .and_then(|value| value.as_u64())
         .unwrap_or(60);
     Some(Duration::from_secs(secs))
-}
-
-struct SharedServices {
-    ai_client: Arc<crate::ai::client::AiClient>,
-    tool_registry: Arc<crate::tools::registry::ToolRegistry>,
-    process_registry: Arc<crate::process::ProcessRegistry>,
-    db_path: std::path::PathBuf,
-    skills_manager: Arc<RwLock<crate::skills::SkillsManager>>,
-}
-
-impl SharedServices {
-    fn from_orchestrator_services(s: &OrchestratorServices) -> Self {
-        Self {
-            ai_client: Arc::clone(&s.ai_client),
-            tool_registry: Arc::clone(&s.tool_registry),
-            process_registry: Arc::clone(&s.process_registry),
-            db_path: s.db_path.clone(),
-            skills_manager: Arc::clone(&s.skills_manager),
-        }
-    }
-
-    fn to_orchestrator_services(&self) -> OrchestratorServices {
-        OrchestratorServices {
-            ai_client: Arc::clone(&self.ai_client),
-            tool_registry: Arc::clone(&self.tool_registry),
-            process_registry: Arc::clone(&self.process_registry),
-            db_path: self.db_path.clone(),
-            skills_manager: Arc::clone(&self.skills_manager),
-        }
-    }
 }
 
 trait CloneForTick {
@@ -275,17 +200,6 @@ mod tests {
         assert_eq!(config.tick_interval, Duration::from_secs(30));
         assert_eq!(config.max_ticks, 1000);
         assert!(!config.enabled);
-    }
-
-    #[test]
-    fn tick_message_is_user_role_with_tick_text() {
-        let msg = tick_message();
-        assert_eq!(msg.role, Role::User);
-        assert_eq!(msg.content.len(), 1);
-        match &msg.content[0] {
-            Content::Text { text } => assert_eq!(text, "<tick>"),
-            _ => panic!("expected Content::Text"),
-        }
     }
 
     #[test]

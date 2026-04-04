@@ -5,6 +5,7 @@ use serde_json::Value;
 use tracing::info;
 
 use crate::agent::hooks::{HookResult, PreToolHook};
+use crate::agent::loop_events::LoopEvent;
 use crate::ai::client::AiClient;
 use crate::tools::registry::{PermissionMode, ToolContext};
 
@@ -27,7 +28,6 @@ const SAFE_TOOLS: &[&str] = &[
     "set_work_mode",
     "enter_plan_mode",
     "set_workspace_context",
-    "agent",
 ];
 
 const CLASSIFIER_PROMPT: &str = r#"You are a safety classifier for an AI coding agent operating in autonomous mode. Your job is to decide whether a tool call should be ALLOWED or BLOCKED.
@@ -94,7 +94,24 @@ impl AutoClassifierHook {
         format!("Tool: {name}\nArguments: {sanitized_args}")
     }
 
-    async fn classify(&self, name: &str, params: &Value) -> HookResult {
+    fn emit_decision(
+        ctx: &ToolContext,
+        tool_name: &str,
+        decision: &str,
+        reason: String,
+        stage: u8,
+    ) {
+        if let Some(tx) = ctx.loop_event_tx.as_ref() {
+            let _ = tx.send(LoopEvent::ClassifierDecision {
+                tool_name: tool_name.to_string(),
+                decision: decision.to_string(),
+                reason,
+                stage,
+            });
+        }
+    }
+
+    async fn classify(&self, name: &str, params: &Value, ctx: &ToolContext) -> HookResult {
         let sanitized = Self::sanitize_args(params);
         let user_prompt = Self::build_user_prompt(name, &sanitized);
         let model = &self.ai_client.config().model;
@@ -107,12 +124,15 @@ impl AutoClassifierHook {
         {
             Ok(response) => match Self::parse_verdict(&response) {
                 Some(true) => {
+                    let reason = response.trim().to_string();
                     info!(
                         tool = name,
                         verdict = "ALLOW",
                         stage = 1,
+                        reason = %reason,
                         "Classifier approved tool call"
                     );
+                    Self::emit_decision(ctx, name, "allow", reason, 1);
                     return HookResult::Continue;
                 }
                 Some(false) => {
@@ -140,34 +160,38 @@ impl AutoClassifierHook {
         {
             Ok(response) => match Self::parse_verdict(&response) {
                 Some(true) => {
+                    let reason = response.trim().to_string();
                     info!(
                         tool = name,
                         verdict = "ALLOW",
                         stage = 2,
+                        reason = %reason,
                         "Classifier approved tool call on appeal"
                     );
+                    Self::emit_decision(ctx, name, "allow", reason, 2);
                     HookResult::Continue
                 }
                 Some(false) => {
                     let reason = response.trim().to_string();
                     info!(tool = name, verdict = "BLOCK", stage = 2, reason = %reason, "Classifier blocked tool call");
+                    Self::emit_decision(ctx, name, "block", reason.clone(), 2);
                     HookResult::Block {
                         reason: format!("Auto-classifier blocked: {reason}"),
                     }
                 }
                 None => {
-                    info!(tool = name, response = %response, "Stage 2 ambiguous, denying");
-                    HookResult::Block {
-                        reason: "Auto-classifier: ambiguous verdict, defaulting to deny"
-                            .to_string(),
-                    }
+                    let reason =
+                        "Auto-classifier: ambiguous verdict, defaulting to deny".to_string();
+                    info!(tool = name, response = %response, reason = %reason, "Stage 2 ambiguous, denying");
+                    Self::emit_decision(ctx, name, "block", reason.clone(), 2);
+                    HookResult::Block { reason }
                 }
             },
             Err(e) => {
-                info!(tool = name, error = %e, "Stage 2 failed, denying");
-                HookResult::Block {
-                    reason: format!("Auto-classifier error, defaulting to deny: {e}"),
-                }
+                let reason = format!("Auto-classifier error, defaulting to deny: {e}");
+                info!(tool = name, error = %e, reason = %reason, "Stage 2 failed, denying");
+                Self::emit_decision(ctx, name, "block", reason.clone(), 2);
+                HookResult::Block { reason }
             }
         }
     }
@@ -181,11 +205,13 @@ impl PreToolHook for AutoClassifierHook {
         }
 
         if Self::is_safe_tool(name) {
-            info!(tool = name, "Classifier bypass: safe tool");
+            let reason = format!("Safe tool bypass: '{name}' is on the autonomous allowlist");
+            info!(tool = name, reason = %reason, "Classifier bypass: safe tool");
+            Self::emit_decision(ctx, name, "allow", reason, 0);
             return HookResult::Continue;
         }
 
-        self.classify(name, params).await
+        self.classify(name, params, ctx).await
     }
 }
 
@@ -292,5 +318,34 @@ mod tests {
             .before_execute("read", &json!({"path": "/etc/passwd"}), &ctx)
             .await;
         assert!(matches!(result, HookResult::Continue));
+    }
+
+    #[tokio::test]
+    async fn safe_tool_bypass_emits_classifier_event() {
+        let config = crate::ai::client::AiClientConfig::default();
+        let client = Arc::new(AiClient::new(config, "test-key".to_string()));
+        let hook = AutoClassifierHook::new(client);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolContext {
+            permission_mode: PermissionMode::Autonomous,
+            loop_event_tx: Some(event_tx),
+            ..Default::default()
+        };
+
+        let result = hook
+            .before_execute("read", &json!({"path": "Cargo.toml"}), &ctx)
+            .await;
+        assert!(matches!(result, HookResult::Continue));
+
+        let event = event_rx.recv().await.expect("classifier event");
+        assert!(matches!(
+            event,
+            LoopEvent::ClassifierDecision {
+                tool_name,
+                decision,
+                stage,
+                ..
+            } if tool_name == "read" && decision == "allow" && stage == 0
+        ));
     }
 }

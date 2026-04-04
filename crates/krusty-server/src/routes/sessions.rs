@@ -695,6 +695,7 @@ mod tests {
                 push_service: None,
                 apns_service: None,
                 oauth_flows: Arc::new(Mutex::new(HashMap::new())),
+                mako_runtime: crate::mako_runtime::MakoRuntimeManager::new(),
             },
             temp_dir,
         )

@@ -6,8 +6,12 @@
 //! - `krusty serve` — unified server + PWA + Tailscale
 //! - Clean architecture from day one
 
+use std::io::{self, Write};
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use futures::StreamExt;
+use serde::{de::DeserializeOwned, Deserialize};
 
 // Re-export core modules for TUI usage
 use krusty_core::{
@@ -66,9 +70,94 @@ enum MakoCommand {
         /// Project directory (defaults to current)
         #[arg(long)]
         project_dir: Option<String>,
+        /// Attach to the live event stream after dispatch
+        #[arg(long)]
+        attach: bool,
     },
-    /// Show status of Mako sessions
-    Status,
+    /// Show status for Mako sessions
+    Status {
+        /// Optional session id for detailed status
+        session_id: Option<String>,
+    },
+    /// Attach to a running Mako session's live event stream
+    Attach {
+        /// Mako session id
+        session_id: String,
+    },
+    /// Pause a running Mako session
+    Pause {
+        /// Mako session id
+        session_id: String,
+    },
+    /// Resume a paused or idle Mako session
+    Resume {
+        /// Mako session id
+        session_id: String,
+    },
+    /// Cancel and delete a Mako session
+    Cancel {
+        /// Mako session id
+        session_id: String,
+    },
+    /// Send a follow-up message to an existing Mako session
+    Send {
+        /// Mako session id
+        session_id: String,
+        /// Follow-up message
+        message: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct MakoDispatchResponse {
+    session_id: String,
+    status: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MakoOkResponse {
+    ok: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct MakoRuntimeStateResponse {
+    session_id: String,
+    status: String,
+    next_wake_at: Option<String>,
+    sleep_reason: Option<String>,
+    last_error: Option<String>,
+    current_run_id: Option<String>,
+    last_wake_reason: Option<String>,
+    updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MakoSessionSummaryResponse {
+    session_id: String,
+    title: String,
+    agent_state: String,
+    runtime: Option<MakoRuntimeStateResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MakoTaskResponse {
+    id: String,
+    subject: String,
+    description: String,
+    status: String,
+    owner: Option<String>,
+    blocked_by: Vec<String>,
+    result: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MakoSessionStatusResponse {
+    session_id: String,
+    session_type: String,
+    title: String,
+    tasks: Vec<MakoTaskResponse>,
+    agent_state: String,
+    runtime: Option<MakoRuntimeStateResponse>,
 }
 
 fn mako_server_url() -> String {
@@ -80,77 +169,403 @@ async fn run_mako_command(command: MakoCommand) -> Result<()> {
     let client = reqwest::Client::new();
 
     match command {
-        MakoCommand::Run { task, project_dir } => {
+        MakoCommand::Run {
+            task,
+            project_dir,
+            attach,
+        } => {
             let mut body = serde_json::json!({ "task": task });
             if let Some(dir) = &project_dir {
                 body["project_dir"] = serde_json::json!(dir);
             }
 
-            let resp = client
-                .post(format!("{base}/api/mako/dispatch"))
-                .json(&body)
-                .send()
-                .await
-                .context("Failed to reach Krusty server")?;
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
-                anyhow::bail!("Server returned {status}: {text}");
-            }
-
-            let data: serde_json::Value = resp
-                .json()
-                .await
-                .context("Failed to parse dispatch response")?;
-
-            let session_id = data["session_id"].as_str().unwrap_or("unknown");
+            let response: MakoDispatchResponse = request_json(
+                client.post(format!("{base}/api/mako/dispatch")).json(&body),
+                "Failed to dispatch Mako task",
+            )
+            .await?;
 
             println!("Mako task dispatched");
-            println!("  Session: {session_id}");
-            println!("  Observe: {base}/session/{session_id}");
-        }
-        MakoCommand::Status => {
-            let resp = client
-                .get(format!("{base}/api/mako/sessions"))
-                .send()
-                .await
-                .context("Failed to reach Krusty server")?;
+            println!("  Session: {}", response.session_id);
+            println!("  Status: {}", response.status);
+            println!("  Observe: krusty mako attach {}", response.session_id);
+            println!("  Status: krusty mako status {}", response.session_id);
 
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
-                anyhow::bail!("Server returned {status}: {text}");
+            if attach {
+                attach_mako_session(&client, &base, &response.session_id).await?;
             }
-
-            let sessions: Vec<serde_json::Value> = resp
-                .json()
-                .await
-                .context("Failed to parse sessions response")?;
-
-            if sessions.is_empty() {
-                println!("No active Mako sessions.");
+        }
+        MakoCommand::Status { session_id } => {
+            if let Some(session_id) = session_id {
+                let status: MakoSessionStatusResponse = request_json(
+                    client.get(format!("{base}/api/mako/sessions/{session_id}/status")),
+                    "Failed to fetch Mako session status",
+                )
+                .await?;
+                print_mako_session_status(&status);
             } else {
-                println!("{:<38} {:<12} {:<30}", "SESSION ID", "STATUS", "TASK");
-                println!("{}", "-".repeat(80));
-                for s in &sessions {
-                    let id = s["id"].as_str().unwrap_or("-");
-                    let status = s["status"].as_str().unwrap_or("-");
-                    let task = s["task"]
-                        .as_str()
-                        .unwrap_or(s["title"].as_str().unwrap_or("-"));
-                    let task_display = if task.len() > 28 {
-                        format!("{}...", &task[..25])
-                    } else {
-                        task.to_string()
-                    };
-                    println!("{:<38} {:<12} {:<30}", id, status, task_display);
+                let sessions: Vec<MakoSessionSummaryResponse> = request_json(
+                    client.get(format!("{base}/api/mako/sessions")),
+                    "Failed to fetch Mako sessions",
+                )
+                .await?;
+                print_mako_session_summaries(&sessions);
+            }
+        }
+        MakoCommand::Attach { session_id } => {
+            attach_mako_session(&client, &base, &session_id).await?;
+        }
+        MakoCommand::Pause { session_id } => {
+            let response: MakoOkResponse = request_json(
+                client.post(format!("{base}/api/mako/sessions/{session_id}/pause")),
+                "Failed to pause Mako session",
+            )
+            .await?;
+            if response.ok {
+                println!("Paused Mako session {session_id}");
+            }
+        }
+        MakoCommand::Resume { session_id } => {
+            let response: MakoOkResponse = request_json(
+                client.post(format!("{base}/api/mako/sessions/{session_id}/resume")),
+                "Failed to resume Mako session",
+            )
+            .await?;
+            if response.ok {
+                println!("Resumed Mako session {session_id}");
+            }
+        }
+        MakoCommand::Cancel { session_id } => {
+            request_empty(
+                client.delete(format!("{base}/api/mako/sessions/{session_id}")),
+                "Failed to cancel Mako session",
+            )
+            .await?;
+            println!("Cancelled Mako session {session_id}");
+        }
+        MakoCommand::Send {
+            session_id,
+            message,
+        } => {
+            let response: MakoOkResponse = request_json(
+                client
+                    .post(format!("{base}/api/mako/sessions/{session_id}/message"))
+                    .json(&serde_json::json!({ "message": message })),
+                "Failed to send message to Mako session",
+            )
+            .await?;
+            if response.ok {
+                println!("Queued message for Mako session {session_id}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn request_json<T>(request: reqwest::RequestBuilder, context: &str) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let response = request.send().await.with_context(|| context.to_string())?;
+    let response = ensure_success(response).await?;
+    response
+        .json::<T>()
+        .await
+        .with_context(|| format!("{context}: failed to parse response"))
+}
+
+async fn request_empty(request: reqwest::RequestBuilder, context: &str) -> Result<()> {
+    let response = request.send().await.with_context(|| context.to_string())?;
+    let _ = ensure_success(response).await?;
+    Ok(())
+}
+
+async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    anyhow::bail!("Server returned {status}: {text}");
+}
+
+fn print_mako_session_summaries(sessions: &[MakoSessionSummaryResponse]) {
+    if sessions.is_empty() {
+        println!("No Mako sessions found.");
+        return;
+    }
+
+    println!(
+        "{:<38} {:<16} {:<14} {:<36}",
+        "SESSION ID", "RUNTIME", "AGENT", "TITLE"
+    );
+    println!("{}", "-".repeat(110));
+
+    for session in sessions {
+        let runtime_status = session
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.status.as_str())
+            .unwrap_or(session.agent_state.as_str());
+        println!(
+            "{:<38} {:<16} {:<14} {:<36}",
+            session.session_id,
+            runtime_status,
+            session.agent_state,
+            truncate(&session.title, 36)
+        );
+    }
+}
+
+fn print_mako_session_status(status: &MakoSessionStatusResponse) {
+    println!("Session: {}", status.session_id);
+    println!("Type: {}", status.session_type);
+    println!("Title: {}", status.title);
+    println!("Agent State: {}", status.agent_state);
+
+    if let Some(runtime) = &status.runtime {
+        println!("Runtime: {}", runtime.status);
+        println!("Runtime Session: {}", runtime.session_id);
+        println!("Updated: {}", runtime.updated_at);
+        if let Some(wake_reason) = &runtime.last_wake_reason {
+            println!("Wake Reason: {}", wake_reason);
+        }
+        if let Some(run_id) = &runtime.current_run_id {
+            println!("Run ID: {}", run_id);
+        }
+        if let Some(next_wake_at) = &runtime.next_wake_at {
+            println!("Next Wake: {}", next_wake_at);
+        }
+        if let Some(reason) = &runtime.sleep_reason {
+            println!("Sleep Reason: {}", reason);
+        }
+        if let Some(error) = &runtime.last_error {
+            println!("Last Error: {}", error);
+        }
+    }
+
+    if status.tasks.is_empty() {
+        println!("Tasks: none");
+        return;
+    }
+
+    println!("Tasks:");
+    for task in &status.tasks {
+        println!("- [{}] {} ({})", task.status, task.subject, task.id);
+        if !task.description.is_empty() {
+            println!("  {}", task.description);
+        }
+        if let Some(owner) = &task.owner {
+            println!("  owner: {}", owner);
+        }
+        if !task.blocked_by.is_empty() {
+            println!("  blocked_by: {}", task.blocked_by.join(", "));
+        }
+        if let Some(result) = &task.result {
+            println!("  result: {}", truncate(result, 120));
+        }
+    }
+}
+
+async fn attach_mako_session(client: &reqwest::Client, base: &str, session_id: &str) -> Result<()> {
+    let response = client
+        .get(format!("{base}/api/mako/sessions/{session_id}/events"))
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .send()
+        .await
+        .context("Failed to attach to Mako session")?;
+    let response = ensure_success(response).await?;
+
+    println!("Attaching to Mako session {}", session_id);
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("Failed to read Mako event stream")?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(newline_idx) = buffer.find('\n') {
+            let line = buffer[..newline_idx].trim_end_matches('\r').to_string();
+            buffer.drain(..=newline_idx);
+
+            if let Some(data) = line.strip_prefix("data: ") {
+                if data.trim().is_empty() {
+                    continue;
+                }
+
+                let event: serde_json::Value = serde_json::from_str(data)
+                    .with_context(|| format!("Failed to parse Mako event: {data}"))?;
+                if print_mako_event(&event)? {
+                    return Ok(());
                 }
             }
         }
     }
 
     Ok(())
+}
+
+fn print_mako_event(event: &serde_json::Value) -> Result<bool> {
+    let Some(event_type) = event.get("type").and_then(|value| value.as_str()) else {
+        println!("[event] {}", event);
+        return Ok(false);
+    };
+
+    match event_type {
+        "text_delta" | "text_delta_with_citations" => {
+            if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
+                print!("{}", delta);
+                io::stdout().flush()?;
+            }
+        }
+        "tool_output_delta" => {
+            if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
+                print!("{}", delta);
+                io::stdout().flush()?;
+            }
+        }
+        "tool_call_start" => {
+            let name = event
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            println!("\n[tool:start] {}", name);
+        }
+        "tool_call_complete" => {
+            let name = event
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            println!("\n[tool:call] {}", name);
+        }
+        "tool_result" => {
+            if let Some(output) = event.get("output").and_then(|value| value.as_str()) {
+                let output = output.trim();
+                if !output.is_empty() {
+                    println!("\n[tool:result] {}", output);
+                }
+            }
+        }
+        "user_message" => {
+            let level = event
+                .get("level")
+                .and_then(|value| value.as_str())
+                .unwrap_or("info");
+            let title = event
+                .get("title")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let message = event
+                .get("message")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            if title.is_empty() {
+                println!("\n[user:{}] {}", level, message);
+            } else {
+                println!("\n[user:{}] {}: {}", level, title, message);
+            }
+        }
+        "agent_sleeping" => {
+            let duration = event
+                .get("duration_secs")
+                .and_then(|value| value.as_u64())
+                .unwrap_or_default();
+            let reason = event
+                .get("reason")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            println!("\n[sleep] {}s {}", duration, reason);
+        }
+        "tick_injected" => {
+            let tick = event
+                .get("tick_number")
+                .and_then(|value| value.as_u64())
+                .unwrap_or_default();
+            println!("\n[tick] #{}", tick);
+        }
+        "classifier_decision" => {
+            let tool_name = event
+                .get("tool_name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let decision = event
+                .get("decision")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let reason = event
+                .get("reason")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            println!("\n[classifier] {} => {} ({})", tool_name, decision, reason);
+        }
+        "delegated_progress" => {
+            let agent_name = event
+                .get("agent_name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("agent");
+            let stage = event
+                .get("stage")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let status = event
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let action = event
+                .get("current_action")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            if action.is_empty() {
+                println!("\n[delegated] {} {} {}", agent_name, stage, status);
+            } else {
+                println!(
+                    "\n[delegated] {} {} {}: {}",
+                    agent_name, stage, status, action
+                );
+            }
+        }
+        "plan_update" => {
+            let count = event
+                .get("items")
+                .and_then(|value| value.as_array())
+                .map(|items| items.len())
+                .unwrap_or_default();
+            println!("\n[plan] {} items", count);
+        }
+        "finish" => {
+            let stop_reason = event
+                .get("stop_reason")
+                .and_then(|value| value.as_str())
+                .unwrap_or("completed");
+            println!("\n[finish] {}", stop_reason);
+            return Ok(true);
+        }
+        "error" => {
+            let error = event
+                .get("error")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown error");
+            println!("\n[error] {}", error);
+            return Ok(true);
+        }
+        _ => {
+            println!("\n[{}] {}", event_type, event);
+        }
+    }
+
+    Ok(false)
+}
+
+fn truncate(value: &str, max_chars: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value.to_string();
+    }
+
+    let truncated: String = value.chars().take(max_chars.saturating_sub(3)).collect();
+    format!("{}...", truncated)
 }
 
 /// Restore terminal state - called on panic or unexpected exit

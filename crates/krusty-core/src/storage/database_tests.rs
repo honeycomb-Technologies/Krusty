@@ -26,7 +26,7 @@ mod tests {
 
         // Database should initialize with schema_version table
         let version = db.get_schema_version();
-        assert_eq!(version, 25, "Expected current schema version to be 25");
+        assert_eq!(version, 27, "Expected current schema version to be 27");
     }
 
     #[test]
@@ -146,6 +146,45 @@ mod tests {
     }
 
     #[test]
+    fn test_mako_runtime_state_table_exists() {
+        let (db, _temp) = create_test_db();
+
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='mako_runtime_state'",
+            )
+            .expect("Failed to prepare query");
+
+        let tables: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .expect("Failed to query tables")
+            .filter_map(Result::ok)
+            .collect();
+
+        assert!(tables.contains(&"mako_runtime_state".to_string()));
+
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(mako_runtime_state)")
+            .expect("Failed to prepare PRAGMA");
+
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("Failed to get columns")
+            .filter_map(Result::ok)
+            .collect();
+
+        assert!(columns.contains(&"session_id".to_string()));
+        assert!(columns.contains(&"status".to_string()));
+        assert!(columns.contains(&"next_wake_at".to_string()));
+        assert!(columns.contains(&"sleep_reason".to_string()));
+        assert!(columns.contains(&"last_error".to_string()));
+        assert!(columns.contains(&"current_run_id".to_string()));
+        assert!(columns.contains(&"last_wake_reason".to_string()));
+        assert!(columns.contains(&"updated_at".to_string()));
+    }
+
+    #[test]
     fn test_messages_table_exists() {
         let (db, _temp) = create_test_db();
 
@@ -224,7 +263,7 @@ mod tests {
         let version = db.get_schema_version();
 
         // After all migrations, version should be current
-        assert_eq!(version, 25, "Expected final schema version");
+        assert_eq!(version, 27, "Expected final schema version");
     }
 
     #[test]

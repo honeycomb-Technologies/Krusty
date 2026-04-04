@@ -29,22 +29,21 @@ impl Tool for SleepTool {
     }
 
     fn description(&self) -> &str {
-        "Idle when there is nothing to do. Returns a signal that pauses the autonomous tick engine for the specified duration."
+        "Idle when there is nothing to do. Returns a signal that lets the autonomous runtime schedule the next wake."
     }
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            r#"Use this when you have no pending work and are waiting for an external condition (build completing, user returning, scheduled event, etc.).
+            r#"Use this when you have no pending coordination work and are waiting for an external condition (background agent progress, user input, scheduled retry, etc.).
 
-This does NOT actually sleep — it returns a signal that the tick engine reads to pause ticking. The agent loop will resume after the specified duration or when an external event wakes it.
+This does NOT block the model process. It returns a signal that the autonomous runtime converts into a sleeping state and a scheduled wake. The session can also be woken earlier by explicit events such as a new user message or resume request.
 
 Duration considerations:
 - Default: 60 seconds. Maximum: 300 seconds (5 minutes).
-- Anthropic prompt caching has a ~5-minute TTL. Sleeping longer than 300s would expire the cache, so the maximum is capped there.
 - For short waits (polling a build), use 30-60s.
-- For longer idle periods (nothing to do), use the full 300s.
+- For longer idle periods where nothing needs immediate attention, use up to 300s.
 
-Always provide a reason so the user understands why the agent is idle."#,
+Always provide a reason so the user can understand why Mako is idle."#,
         )
     }
 

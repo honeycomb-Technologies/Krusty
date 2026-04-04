@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::hooks::{HookResult, PostToolHook, PreToolHook};
+use crate::agent::loop_events::LoopEvent;
 use crate::agent::subagent::AgentProgress;
 use crate::ai::client::AiClient;
 use crate::ai::types::{AiTool, ModelMessage};
@@ -243,7 +244,6 @@ pub fn tool_policy(name: &str) -> ToolPolicy {
         | "task_complete"
         | "add_subtask"
         | "set_dependency"
-        | "send_message"
         | "send_user_message"
         | "sleep"
         | "create_task"
@@ -439,6 +439,8 @@ pub struct ToolContext {
     pub tool_registry: Option<Arc<ToolRegistry>>,
     /// Parent conversation context for delegated agents that need upstream history.
     pub parent_conversation: Option<Arc<Vec<ModelMessage>>>,
+    /// Canonical loop-event sink for hooks/tools that need to surface runtime events.
+    pub loop_event_tx: Option<mpsc::UnboundedSender<LoopEvent>>,
 }
 
 impl Default for ToolContext {
@@ -467,6 +469,7 @@ impl Default for ToolContext {
             delegation_policy: None,
             tool_registry: None,
             parent_conversation: None,
+            loop_event_tx: None,
         }
     }
 }
@@ -590,6 +593,12 @@ impl ToolContext {
     /// Set parent conversation context for delegated agents.
     pub fn with_parent_conversation(mut self, conv: Arc<Vec<ModelMessage>>) -> Self {
         self.parent_conversation = Some(conv);
+        self
+    }
+
+    /// Attach the canonical loop-event sink for runtime observability.
+    pub fn with_loop_event_tx(mut self, tx: mpsc::UnboundedSender<LoopEvent>) -> Self {
+        self.loop_event_tx = Some(tx);
         self
     }
 

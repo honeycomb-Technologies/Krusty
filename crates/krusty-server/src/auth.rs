@@ -16,8 +16,6 @@ use std::path::{Path, PathBuf};
 
 use crate::AppState;
 
-pub(crate) const REMOTE_AUTH_COOKIE_NAME: &str = "krusty_remote_access";
-
 /// User context attached to request extensions by middleware.
 #[derive(Debug, Clone)]
 pub struct AuthenticatedUser {
@@ -145,31 +143,6 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .and_then(|value| value.strip_prefix("Bearer "))
         .map(str::trim)
         .filter(|value| !value.is_empty())
-}
-
-pub(crate) fn request_remote_access_token(headers: &HeaderMap) -> Option<String> {
-    cookie_token(headers).or_else(|| bearer_token(headers).map(ToString::to_string))
-}
-
-fn cookie_token(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|raw| {
-            raw.split(';').find_map(|cookie| {
-                let (name, value) = cookie.trim().split_once('=')?;
-                if name.trim() == REMOTE_AUTH_COOKIE_NAME {
-                    let token = value.trim();
-                    if token.is_empty() {
-                        None
-                    } else {
-                        Some(token.to_string())
-                    }
-                } else {
-                    None
-                }
-            })
-        })
 }
 
 pub(crate) fn is_local_host(host: &str) -> bool {
@@ -317,6 +290,7 @@ mod tests {
             push_service: None,
             apns_service: None,
             oauth_flows: Arc::new(Mutex::new(HashMap::new())),
+            mako_runtime: crate::mako_runtime::MakoRuntimeManager::new(),
         }
     }
 

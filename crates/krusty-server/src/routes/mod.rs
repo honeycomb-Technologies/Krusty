@@ -18,7 +18,6 @@ mod ports;
 mod preview_settings;
 mod processes;
 mod push;
-pub(crate) mod remote_auth;
 mod reports;
 mod server;
 mod sessions;

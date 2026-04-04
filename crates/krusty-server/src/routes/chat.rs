@@ -17,6 +17,8 @@ use serde_json::json;
 use tokio::sync::{mpsc, Mutex, OwnedMutexGuard};
 use tokio_stream::wrappers::ReceiverStream;
 
+use krusty_core::agent::coordinator_prompt::COORDINATOR_SYSTEM_PROMPT;
+use krusty_core::agent::loop_events::LoopStopReason;
 use krusty_core::agent::plan_handler::parse_plan_confirm_choice;
 use krusty_core::agent::{
     AgenticOrchestrator, LoopEvent, LoopInput, OrchestratorConfig, OrchestratorServices,
@@ -248,13 +250,7 @@ async fn setup_chat_session(
                  If the user needs coding help, suggest they switch to Code mode. \
                  Be helpful, natural, and conversational.".to_string()
             ),
-            SessionType::Mako => Some(
-                "You are Mako, an autonomous project coordinator. You manage teams of agents, \
-                 break work into tasks, delegate to specialized teammates, and verify results. \
-                 Use create_task to define work, agent with name + run_in_background to spawn teammates, \
-                 list_tasks to monitor progress, send_user_message for user communication, \
-                 and sleep when waiting. Never fabricate results. Verify before declaring success.".to_string()
-            ),
+            SessionType::Mako => Some(COORDINATOR_SYSTEM_PROMPT.to_string()),
             SessionType::Code => None, // uses default Krusty coding assistant prompt
         },
         ..Default::default()
@@ -563,6 +559,9 @@ fn loop_event_requires_delivery(event: &LoopEvent) -> bool {
         LoopEvent::AwaitingInput { .. }
             | LoopEvent::ToolApprovalRequired { .. }
             | LoopEvent::PlanComplete { .. }
+            | LoopEvent::AgentSleeping { .. }
+            | LoopEvent::UserMessage { .. }
+            | LoopEvent::ClassifierDecision { .. }
             | LoopEvent::Finished { .. }
             | LoopEvent::Error { .. }
     )
@@ -695,9 +694,17 @@ async fn start_orchestrator_sse(
         let _guard = guard;
         let mut awaiting_input = false;
         let mut had_error = false;
+        let mut stop_reason: Option<LoopStopReason> = None;
         let mut skipped_events = 0usize;
 
         while let Some(loop_event) = event_rx.recv().await {
+            if let LoopEvent::Finished {
+                stop_reason: ref reason,
+                ..
+            } = loop_event
+            {
+                stop_reason = Some(reason.clone());
+            }
             let is_finished = matches!(loop_event, LoopEvent::Finished { .. });
 
             if matches!(loop_event, LoopEvent::AwaitingInput { .. }) {
@@ -789,6 +796,11 @@ async fn start_orchestrator_sse(
                     },
                     ApnsEventType::Error,
                 );
+            } else if stop_reason == Some(LoopStopReason::Sleeping) {
+                tracing::info!(
+                    session_id = %session_id,
+                    "Session entered sleeping state; skipping completion push"
+                );
             } else {
                 let title = session_title(&db_path, &session_id);
                 fire_push(
@@ -855,11 +867,8 @@ const MAKO_ONLY_TOOLS: &[&str] = &[
 /// - **Code**: all registered tools except Mako-only tools.
 /// - **Chat**: only a minimal subset (no file/bash tools). When
 ///   `research_enabled` is true, the agent and report tools are included.
-/// - **Mako**: all registered tools (Code tools + Mako extensions).
-///
-/// TODO: Mako sessions should use the TickEngine instead of the bare
-/// orchestrator. The tool set is wired here; TickEngine integration is
-/// deferred.
+/// - **Mako**: all registered tools (Code tools + Mako extensions), executed
+///   through the autonomous wake-driven runtime.
 fn filter_tools_for_session_type(
     tools: Vec<AiTool>,
     session_type: SessionType,
@@ -1069,6 +1078,7 @@ mod tests {
                 push_service: None,
                 apns_service: None,
                 oauth_flows: Arc::new(Mutex::new(HashMap::new())),
+                mako_runtime: crate::mako_runtime::MakoRuntimeManager::new(),
             },
             temp_dir,
         )

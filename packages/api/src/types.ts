@@ -251,6 +251,65 @@ export interface DelegatedRunResponse {
 }
 
 // ============================================================================
+// Mako Types
+// ============================================================================
+
+export type MakoRuntimeStatus = 'idle' | 'running' | 'sleeping' | 'awaiting_input' | 'paused' | 'error' | 'cancelled';
+export type AutonomousTaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
+
+export interface MakoDispatchResponse {
+  session_id: string;
+  status: string;
+}
+
+export interface SimpleOkResponse {
+  ok: boolean;
+}
+
+export interface AutonomousTask {
+  id: string;
+  session_id: string;
+  subject: string;
+  description: string;
+  status: AutonomousTaskStatus;
+  owner?: string | null;
+  blocked_by: string[];
+  created_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+  result?: string | null;
+}
+
+export interface MakoRuntimeState {
+  session_id: string;
+  status: MakoRuntimeStatus;
+  next_wake_at?: string | null;
+  sleep_reason?: string | null;
+  last_error?: string | null;
+  current_run_id?: string | null;
+  last_wake_reason?: string | null;
+  updated_at: string;
+}
+
+export interface MakoSessionSummary {
+  session_id: string;
+  title: string;
+  updated_at: string;
+  project_dir?: string | null;
+  agent_state: string;
+  runtime?: MakoRuntimeState | null;
+}
+
+export interface MakoSessionStatus {
+  session_id: string;
+  session_type: SessionType;
+  title: string;
+  tasks: AutonomousTask[];
+  agent_state: string;
+  runtime?: MakoRuntimeState | null;
+}
+
+// ============================================================================
 // Stream Types
 // ============================================================================
 

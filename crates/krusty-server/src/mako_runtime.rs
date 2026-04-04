@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -527,7 +527,7 @@ fn load_conversation(raw_messages: Vec<(String, String)>) -> Vec<ModelMessage> {
 }
 
 fn apply_runtime_event_state(
-    db_path: &PathBuf,
+    db_path: &Path,
     session_id: &str,
     run_id: &str,
     event: &LoopEvent,
@@ -607,7 +607,7 @@ fn parse_wake_at(next_wake_at: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 }
 
 fn persist_runtime_state(
-    db_path: &PathBuf,
+    db_path: &Path,
     session_id: &str,
     status: MakoRuntimeStateStatus,
     next_wake_at: Option<&str>,

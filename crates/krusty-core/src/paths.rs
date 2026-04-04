@@ -2,7 +2,7 @@
 //!
 //! All application paths in one place for consistency
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::constants::ui;
 
@@ -11,6 +11,16 @@ pub fn config_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(ui::CONFIG_DIR_NAME)
+}
+
+/// Get the per-project Krusty state directory (<project>/.krusty)
+pub fn project_state_dir(project_root: &Path) -> PathBuf {
+    project_root.join(ui::CONFIG_DIR_NAME)
+}
+
+/// Get the per-project reports directory (<project>/.krusty/reports)
+pub fn project_reports_dir(project_root: &Path) -> PathBuf {
+    project_state_dir(project_root).join("reports")
 }
 
 /// Get the extensions directory (~/.krusty/extensions)

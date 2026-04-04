@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use tracing::info;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 26;
+const SCHEMA_VERSION: i32 = 27;
 
 /// Shared database handle for connection reuse
 ///
@@ -882,6 +882,31 @@ impl Database {
             )
             .context("Migration 26: APNs device tokens")?;
             self.set_schema_version_tx(&tx, 26)?;
+        }
+
+        // Migration 27: Persisted Mako runtime state
+        if current_version < 27 {
+            info!("Running migration 27: Mako runtime state");
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS mako_runtime_state (
+                    session_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('idle', 'running', 'sleeping', 'awaiting_input', 'paused', 'error', 'cancelled')),
+                    next_wake_at TEXT,
+                    sleep_reason TEXT,
+                    last_error TEXT,
+                    current_run_id TEXT,
+                    last_wake_reason TEXT,
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_mako_runtime_state_status
+                    ON mako_runtime_state(status);
+                CREATE INDEX IF NOT EXISTS idx_mako_runtime_state_next_wake
+                    ON mako_runtime_state(next_wake_at);",
+            )
+            .context("Migration 27: Mako runtime state")?;
+            self.set_schema_version_tx(&tx, 27)?;
         }
 
         tx.commit()?;
