@@ -41,12 +41,13 @@ interface StoresContextValue {
 const StoresContext = createContext<StoresContextValue | null>(null);
 
 interface StoresProviderProps {
-  client: KrustyClient;
+  client: KrustyClient | null;
   children: ReactNode;
 }
 
 export function StoresProvider({ client, children }: StoresProviderProps) {
   const stores = useMemo(() => {
+    if (!client) return null;
     const storage = createStorage();
     const workspace = createWorkspaceStore(storage);
     const sessions = createSessionsStore(client, workspace);
@@ -66,12 +67,12 @@ export function StoresProvider({ client, children }: StoresProviderProps) {
   }, [client]);
 
   useEffect(() => {
-    stores.sessions.getState().loadSessions();
+    stores?.sessions.getState().loadSessions();
   }, [stores]);
 
   useEffect(() => {
     return () => {
-      stores.session.getState().cleanup();
+      stores?.session.getState().cleanup();
     };
   }, [stores]);
 
@@ -81,40 +82,43 @@ export function StoresProvider({ client, children }: StoresProviderProps) {
 }
 
 function useStoresContext() {
-  const ctx = useContext(StoresContext);
-  if (!ctx) throw new Error("useStores must be used within StoresProvider");
-  return ctx;
+  return useContext(StoresContext);
 }
 
 export function useSessionsStore<T>(
   selector: (state: SessionsStoreState) => T,
-): T {
-  const { sessions } = useStoresContext();
-  return useStore(sessions, selector);
+): T | undefined {
+  const ctx = useStoresContext();
+  const store = ctx?.sessions;
+  return store ? useStore(store, selector) : undefined;
 }
 
 export function useSessionStore<T>(
   selector: (state: SessionStoreState) => T,
-): T {
-  const { session } = useStoresContext();
-  return useStore(session, selector);
+): T | undefined {
+  const ctx = useStoresContext();
+  const store = ctx?.session;
+  return store ? useStore(store, selector) : undefined;
 }
 
 export function useWorkspaceStore<T>(
   selector: (state: WorkspaceStoreState) => T,
-): T {
-  const { workspace } = useStoresContext();
-  return useStore(workspace, selector);
+): T | undefined {
+  const ctx = useStoresContext();
+  const store = ctx?.workspace;
+  return store ? useStore(store, selector) : undefined;
 }
 
-export function useGitStore<T>(selector: (state: GitStoreState) => T): T {
-  const { git } = useStoresContext();
-  return useStore(git, selector);
+export function useGitStore<T>(selector: (state: GitStoreState) => T): T | undefined {
+  const ctx = useStoresContext();
+  const store = ctx?.git;
+  return store ? useStore(store, selector) : undefined;
 }
 
-export function usePlanStore<T>(selector: (state: PlanStoreState) => T): T {
-  const { plan } = useStoresContext();
-  return useStore(plan, selector);
+export function usePlanStore<T>(selector: (state: PlanStoreState) => T): T | undefined {
+  const ctx = useStoresContext();
+  const store = ctx?.plan;
+  return store ? useStore(store, selector) : undefined;
 }
 
 export function useStores() {

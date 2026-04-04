@@ -44,11 +44,7 @@ function RootNavigator() {
     </>
   );
 
-  // Wrap in StoresProvider only when connected (client available)
-  if (client) {
-    return <StoresProvider client={client}>{content}</StoresProvider>;
-  }
-  return content;
+  return <StoresProvider client={client}>{content}</StoresProvider>;
 }
 
 function SplashWrapper({ children }: { children: React.ReactNode }) {
