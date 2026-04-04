@@ -19,7 +19,6 @@ const BG = '#0b1119';
 const SCREEN_H = Dimensions.get('window').height;
 const SCREEN_W = Dimensions.get('window').width;
 
-// Same text as KrustyLogo
 const LINES = [
   '▄ •▄ ▄▄▄  ▄• ▄▌.▄▄ · ▄▄▄▄▄ ▄· ▄▌',
   '█▌▄▌▪▀▄ █·█▪██▌▐█ ▀. •██  ▐█▪██▌',
@@ -34,10 +33,10 @@ const GRADIENT_COLORS = [
   '#ff6b35', '#cd853f', '#8b4513',
 ] as const;
 
-// RN paddingTop '35%' = 35% of container WIDTH
-const PADDING_TOP = SCREEN_W * 0.35;
-// Distance from 35% position down to screen center
-const DROP_DISTANCE = (SCREEN_H / 2 - 40) - PADDING_TOP;
+// The logo rests at paddingTop 35% (of width) in the app.
+// 50% of screen height is further down. The difference is the drop distance.
+const PADDING_TOP_PX = SCREEN_W * 0.35;
+const DROP_Y = (SCREEN_H / 2 - 40) - PADDING_TOP_PX;
 
 interface Props {
   children: React.ReactNode;
@@ -47,23 +46,20 @@ interface Props {
 export function SplashOverlay({ children, onComplete }: Props) {
   const [done, setDone] = useState(false);
 
-  // Measure text widths with flex-start alignment (no centering offset)
   const [kWidth, setKWidth] = useState(0);
   const [fullWidth, setFullWidth] = useState(0);
   const [textHeight, setTextHeight] = useState(0);
   const measured = kWidth > 0 && fullWidth > 0 && textHeight > 0;
   const restWidth = fullWidth - kWidth;
 
-  // ---- Animated values ----
-  // Phase 1: K at screen center
-  const posY = useSharedValue(DROP_DISTANCE);    // positive = below 35%, at screen center
-  const posScale = useSharedValue(1.08);
+  // Phase 1: K zoomed in at screen center
+  const zoomScale = useSharedValue(2.5);   // starts big
+  const yOffset = useSharedValue(DROP_Y);  // positive = further down from 35%
 
-  // Phase 2: Unfold — K slides left, cover reveals RUSTY
-  const offsetX = useSharedValue(0);             // shifts whole block right to center K
-  const coverX = useSharedValue(0);              // cover slides right
+  // Phase 2: K slides left, cover reveals RUSTY
+  const xOffset = useSharedValue(0);       // shifts right to center K, then 0
+  const coverX = useSharedValue(0);        // cover slides right
 
-  // Ambient
   const shimmer = useSharedValue(-80);
   const overlayOpacity = useSharedValue(1);
 
@@ -81,10 +77,10 @@ export function SplashOverlay({ children, onComplete }: Props) {
   useEffect(() => {
     if (!measured) return;
 
-    // Initial state: K centered horizontally and at screen center vertically
-    offsetX.value = restWidth / 2;
-    posY.value = DROP_DISTANCE;
-    posScale.value = 1.08;
+    // Initial: K zoomed in at screen center, horizontally offset to center just K
+    zoomScale.value = 2.5;
+    yOffset.value = DROP_Y;
+    xOffset.value = restWidth / 2;
     coverX.value = 0;
 
     const finish = () => {
@@ -93,38 +89,45 @@ export function SplashOverlay({ children, onComplete }: Props) {
     };
 
     const run = async () => {
-      // ===== PHASE 0: Hide native splash (300ms) =====
+      // === Phase 0: Show overlay, hide native splash ===
       await new Promise(r => setTimeout(r, 300));
       await SplashScreen.hideAsync();
+      shimmer.value = withTiming(80, { duration: 3000, easing: Easing.inOut(Easing.ease) });
 
-      // Start shimmer (runs throughout)
-      shimmer.value = withTiming(80, { duration: 2500, easing: Easing.inOut(Easing.ease) });
-
-      // ===== PHASE 1: Hold K at screen center (500ms) =====
+      // === Phase 1: Hold zoomed K at center (500ms) ===
       await new Promise(r => setTimeout(r, 500));
 
-      // ===== PHASE 2: Quick snap up to 35% with scale pulse (350ms total) =====
-      posY.value = withTiming(0, { duration: 250, easing: Easing.out(Easing.cubic) });
-      posScale.value = withSequence(
-        withTiming(0.97, { duration: 200, easing: Easing.in(Easing.cubic) }),
-        withTiming(1.0, { duration: 150, easing: Easing.out(Easing.cubic) }),
-      );
+      // === Phase 2: Zoom out + move to 35% position (600ms) ===
+      // Scale shrinks from 2.5 → 1.0, Y moves from DROP_Y → 0
+      // Both happen together — feels like the K is pulling back on Z axis
+      zoomScale.value = withTiming(1.0, {
+        duration: 600,
+        easing: Easing.out(Easing.cubic),
+      });
+      yOffset.value = withTiming(0, {
+        duration: 600,
+        easing: Easing.out(Easing.cubic),
+      });
 
-      // Wait for snap to fully complete before unfold
-      await new Promise(r => setTimeout(r, 500));
+      // Wait for zoom-out to complete
+      await new Promise(r => setTimeout(r, 700));
 
-      // ===== PHASE 3: K slides left + RUSTY unfolds (700ms) =====
-      offsetX.value = withTiming(0, { duration: 600, easing: Easing.inOut(Easing.cubic) });
-      // Cover starts sliding 150ms after K starts moving
-      coverX.value = withDelay(150, withTiming(restWidth + 50, {
+      // === Phase 3: K slides left + RUSTY unfolds (600ms) ===
+      xOffset.value = withTiming(0, {
+        duration: 600,
+        easing: Easing.inOut(Easing.cubic),
+      });
+      coverX.value = withDelay(100, withTiming(restWidth + 50, {
         duration: 600,
         easing: Easing.out(Easing.cubic),
       }));
 
-      // Wait for unfold to fully complete
-      await new Promise(r => setTimeout(r, 900));
+      // Wait for unfold to complete
+      await new Promise(r => setTimeout(r, 800));
 
-      // ===== PHASE 4: Fade out overlay (350ms) =====
+      // === Phase 4: Fade out overlay (350ms) ===
+      // The splash logo disappears. The app's KrustyLogo appears
+      // with the rest of the UI via entrance animations.
       overlayOpacity.value = withTiming(0, {
         duration: 350,
         easing: Easing.out(Easing.cubic),
@@ -136,12 +139,11 @@ export function SplashOverlay({ children, onComplete }: Props) {
     run();
   }, [measured]);
 
-  // ---- Animated styles ----
   const blockStyle = useAnimatedStyle(() => ({
     transform: [
-      { translateX: offsetX.value },
-      { translateY: posY.value },
-      { scale: posScale.value },
+      { translateX: xOffset.value },
+      { translateY: yOffset.value },
+      { scale: zoomScale.value },
     ],
   }));
 
@@ -161,41 +163,28 @@ export function SplashOverlay({ children, onComplete }: Props) {
 
   return (
     <View style={styles.root}>
-      {/* App content underneath */}
       <View style={StyleSheet.absoluteFill}>{children}</View>
 
-      {/* Hidden measurement — uses flex-start so widths are accurate */}
+      {/* Measure text widths off-screen */}
       <View style={styles.measureContainer} pointerEvents="none">
-        <View onLayout={onKLayout} style={styles.measureRow}>
-          {K_LINES.map((line, i) => (
-            <Text key={`mk${i}`} style={styles.line}>{line}</Text>
-          ))}
+        <View onLayout={onKLayout}>
+          {K_LINES.map((line, i) => <Text key={`mk${i}`} style={styles.line}>{line}</Text>)}
         </View>
-        <View onLayout={onFullLayout} style={styles.measureRow}>
-          {LINES.map((line, i) => (
-            <Text key={`mf${i}`} style={styles.line}>{line}</Text>
-          ))}
+        <View onLayout={onFullLayout}>
+          {LINES.map((line, i) => <Text key={`mf${i}`} style={styles.line}>{line}</Text>)}
         </View>
       </View>
 
       {/* Splash overlay */}
       <Animated.View style={[styles.solidOverlay, fadeStyle]} pointerEvents="none">
-        {/* Position matches ChatScreen empty state: paddingTop 35%, center, flex-start */}
         <View style={styles.logoPosition}>
           <Animated.View style={blockStyle}>
             <View style={styles.textContainer}>
-              {/*
-                MaskedView renders the full KRUSTY text.
-                The mask uses flex-start alignment so text starts at x=0.
-                The gradient is positioned to cover just the text width.
-                This means cover left:kWidth correctly sits at the K's right edge.
-              */}
+              {/* Full KRUSTY text rendered as single MaskedView */}
               <MaskedView
                 maskElement={
                   <View>
-                    {LINES.map((line, i) => (
-                      <Text key={i} style={styles.line}>{line}</Text>
-                    ))}
+                    {LINES.map((line, i) => <Text key={i} style={styles.line}>{line}</Text>)}
                   </View>
                 }
               >
@@ -209,7 +198,7 @@ export function SplashOverlay({ children, onComplete }: Props) {
                 </Animated.View>
               </MaskedView>
 
-              {/* Cover — same color as BG, hides RUSTY, slides right to reveal */}
+              {/* BG-colored cover hides RUSTY, slides right to reveal */}
               {measured && (
                 <Animated.View
                   style={[
@@ -234,9 +223,7 @@ export function SplashOverlay({ children, onComplete }: Props) {
 }
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-  },
+  root: { flex: 1 },
   solidOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: BG,
@@ -248,9 +235,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingTop: '35%',
   },
-  textContainer: {
-    position: 'relative',
-  },
+  textContainer: { position: 'relative' },
   line: {
     fontFamily: 'Courier',
     fontSize: 12,
@@ -258,17 +243,11 @@ const styles = StyleSheet.create({
     letterSpacing: 0,
     color: '#000',
   },
-  gradient: {
-    width: '100%',
-    height: '100%',
-  },
+  gradient: { width: '100%', height: '100%' },
   measureContainer: {
     position: 'absolute',
     top: -9999,
     left: -9999,
     opacity: 0,
-  },
-  measureRow: {
-    alignItems: 'flex-start',
   },
 });
