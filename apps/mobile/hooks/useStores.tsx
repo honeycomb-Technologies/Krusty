@@ -16,6 +16,7 @@ import type {
   SessionsStoreState,
   SessionStoreState,
   WorkspaceStoreState,
+  GitStoreState,
   PlanStoreState,
 } from "@krusty/state";
 import type { KrustyClient } from "@krusty/api";
@@ -104,6 +105,11 @@ export function useWorkspaceStore<T>(
 ): T {
   const { workspace } = useStoresContext();
   return useStore(workspace, selector);
+}
+
+export function useGitStore<T>(selector: (state: GitStoreState) => T): T {
+  const { git } = useStoresContext();
+  return useStore(git, selector);
 }
 
 export function usePlanStore<T>(selector: (state: PlanStoreState) => T): T {

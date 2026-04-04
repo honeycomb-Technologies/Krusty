@@ -1,5 +1,5 @@
 import { View, Text, Pressable, StyleSheet } from "react-native";
-import { CheckCircle2, Circle, ListChecks, X } from "lucide-react-native";
+import { CheckCircle2, Circle, ListChecks } from "lucide-react-native";
 import * as Haptics from "../../platform/haptics";
 import { BlurView } from "../../platform/blur";
 import { useThemeContext } from "../../hooks/useTheme";

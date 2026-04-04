@@ -23,7 +23,7 @@ export function useBreakpoint(): {
     breakpoint,
     isMobile: breakpoint === 'mobile',
     isTablet: breakpoint === 'tablet',
-    isDesktop: breakpoint !== 'mobile',
+    isDesktop: breakpoint === 'desktop',
     width,
   };
 }

@@ -21,7 +21,6 @@ export function Terminal({ visible }: TerminalProps) {
 
   const [tabs, setTabs] = useState<TerminalTab[]>([]);
   const [activeTab, setActiveTab] = useState<string | null>(null);
-  const containerRef = useRef<View>(null);
   const termInstancesRef = useRef<Map<string, any>>(new Map());
   const wsRef = useRef<Map<string, WebSocket>>(new Map());
 
@@ -39,7 +38,6 @@ export function Terminal({ visible }: TerminalProps) {
       setTabs((prev) => [...prev, tab]);
       setActiveTab(id);
     } catch {
-      // Fallback: create local tab
       const id = `term-${Date.now()}`;
       setTabs((prev) => [...prev, { id, label: `Terminal ${tabs.length + 1}` }]);
       setActiveTab(id);
@@ -63,7 +61,7 @@ export function Terminal({ visible }: TerminalProps) {
     if (visible && tabs.length === 0 && client) {
       createTab();
     }
-  }, [visible, client]);
+  }, [visible, client, createTab]);
 
   return (
     <View style={[styles.container, { backgroundColor: t.background, borderTopColor: t.border }]}>
@@ -118,24 +116,24 @@ function XtermView({
 }: {
   terminalId: string;
   serverUrl: string | null;
-  instancesRef: React.MutableRefObject<Map<string, any>>;
-  wsRef: React.MutableRefObject<Map<string, WebSocket>>;
+  instancesRef: React.RefObject<Map<string, any>>;
+  wsRef: React.RefObject<Map<string, WebSocket>>;
 }) {
   const divRef = useRef<HTMLDivElement | null>(null);
   const { theme } = useThemeContext();
+  const cleanupRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (Platform.OS !== "web" || !divRef.current || !serverUrl) return;
 
-    let terminal: any;
-    let fitAddon: any;
-    let ws: WebSocket;
+    let disposed = false;
 
     (async () => {
       const { Terminal } = await import("xterm");
       const { FitAddon } = await import("@xterm/addon-fit");
+      if (disposed) return;
 
-      terminal = new Terminal({
+      const terminal = new Terminal({
         cursorBlink: true,
         fontSize: 14,
         fontFamily: "JetBrainsMono, Menlo, Monaco, monospace",
@@ -146,17 +144,17 @@ function XtermView({
         },
       });
 
-      fitAddon = new FitAddon();
+      const fitAddon = new FitAddon();
       terminal.loadAddon(fitAddon);
       terminal.open(divRef.current!);
       fitAddon.fit();
 
-      instancesRef.current.set(terminalId, terminal);
+      instancesRef.current!.set(terminalId, terminal);
 
       // WebSocket connection
       const wsUrl = serverUrl.replace(/^http/, "ws") + `/api/terminal/${terminalId}/ws`;
-      ws = new WebSocket(wsUrl);
-      wsRef.current.set(terminalId, ws);
+      const ws = new WebSocket(wsUrl);
+      wsRef.current!.set(terminalId, ws);
 
       ws.onmessage = (event) => {
         terminal.write(typeof event.data === "string" ? event.data : new Uint8Array(event.data));
@@ -173,28 +171,30 @@ function XtermView({
         }
       });
 
-      // Handle container resize
       const observer = new ResizeObserver(() => fitAddon.fit());
       observer.observe(divRef.current!);
 
-      return () => {
+      cleanupRef.current = () => {
         observer.disconnect();
         ws.close();
         terminal.dispose();
+        instancesRef.current!.delete(terminalId);
+        wsRef.current!.delete(terminalId);
       };
     })();
 
     return () => {
-      if (terminal) terminal.dispose();
-      const existingWs = wsRef.current.get(terminalId);
-      if (existingWs) existingWs.close();
+      disposed = true;
+      cleanupRef.current?.();
+      cleanupRef.current = null;
     };
-  }, [terminalId, serverUrl]);
+  }, [terminalId, serverUrl, theme]);
 
-  // Render a raw div for xterm.js — React Native Web supports this via ref
   return (
     <View style={styles.xtermContainer}>
-      <div ref={divRef as any} style={{ width: "100%", height: "100%" }} />
+      {Platform.OS === "web" && (
+        <div ref={divRef as any} style={{ width: "100%", height: "100%" }} />
+      )}
     </View>
   );
 }

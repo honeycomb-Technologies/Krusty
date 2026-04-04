@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { View, Text, Pressable, StyleSheet, Platform } from "react-native";
-import { Globe, RefreshCw, X, ExternalLink } from "lucide-react-native";
+import { Globe, X, ExternalLink } from "lucide-react-native";
 import * as Haptics from "../../platform/haptics";
 import { useThemeContext } from "../../hooks/useTheme";
 import { useConnection } from "../../hooks/useConnection";
@@ -96,14 +96,16 @@ export function WorkspacePreview({ visible }: WorkspacePreviewProps) {
         ))}
       </View>
 
-      {/* Preview iframe */}
+      {/* Preview iframe — web only */}
       <View style={styles.previewArea}>
-        {activePort ? (
-          <iframe
-            src={`http://localhost:${activePort}`}
-            style={{ width: "100%", height: "100%", border: "none", borderRadius: 0 }}
-            title={`Preview :${activePort}`}
-          />
+        {activePort && Platform.OS === "web" ? (
+          <div style={{ width: "100%", height: "100%" }}>
+            <iframe
+              src={`http://localhost:${activePort}`}
+              style={{ width: "100%", height: "100%", border: "none" }}
+              title={`Preview :${activePort}`}
+            />
+          </div>
         ) : (
           <View style={styles.empty}>
             <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
