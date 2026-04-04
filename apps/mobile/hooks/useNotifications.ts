@@ -1,20 +1,30 @@
 import { useEffect, useRef, useCallback, useState } from "react";
-import { AppState } from "react-native";
-import * as Notifications from "expo-notifications";
-import * as Device from "expo-device";
+import { AppState, Platform } from "react-native";
 import * as SecureStore from "../platform/secure-store";
 
 export type NotificationLevel = "all" | "important" | "silent";
 
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: false,
-    shouldShowBanner: false,
-    shouldShowList: false,
-    shouldPlaySound: false,
-    shouldSetBadge: false,
-  }),
-});
+// Native-only — expo-notifications and expo-device crash on web
+let Notifications: any = null;
+let Device: any = null;
+
+if (Platform.OS !== "web") {
+  try {
+    Notifications = require("expo-notifications");
+    Device = require("expo-device");
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowAlert: false,
+        shouldShowBanner: false,
+        shouldShowList: false,
+        shouldPlaySound: false,
+        shouldSetBadge: false,
+      }),
+    });
+  } catch {
+    // Not available
+  }
+}
 
 const PUSH_TOKEN_KEY = "krusty_push_token";
 const NOTIFICATION_LEVEL_KEY = "krusty_notification_level";
@@ -24,6 +34,7 @@ const STREAM_COMPLETE_CATEGORY = "STREAM_COMPLETE";
 const MAKO_UPDATE_CATEGORY = "MAKO_UPDATE";
 
 async function registerNotificationCategories() {
+  if (!Notifications) return;
   await Notifications.setNotificationCategoryAsync(TOOL_APPROVAL_CATEGORY, [
     {
       identifier: "APPROVE",
@@ -55,7 +66,7 @@ async function registerNotificationCategories() {
 }
 
 async function registerForPushNotifications(): Promise<string | null> {
-  if (!Device.isDevice) return null;
+  if (!Notifications || !Device || !Device.isDevice) return null;
 
   const { status: existing } = await Notifications.getPermissionsAsync();
   let finalStatus = existing;
@@ -84,11 +95,10 @@ export function useNotifications(options?: UseNotificationsOptions) {
   const [pushToken, setPushToken] = useState<string | null>(null);
   const [notificationLevel, setNotificationLevel] =
     useState<NotificationLevel>("important");
-  const responseListenerRef = useRef<Notifications.EventSubscription | null>(
-    null,
-  );
+  const responseListenerRef = useRef<any>(null);
 
   useEffect(() => {
+    if (!Notifications) return;
     registerNotificationCategories();
 
     SecureStore.getItemAsync(NOTIFICATION_LEVEL_KEY).then(
@@ -123,7 +133,7 @@ export function useNotifications(options?: UseNotificationsOptions) {
         } else if (actionId === "VIEW_REPORT") {
           options?.onNavigate?.("/(tabs)", { openReports: "true" });
         } else if (
-          actionId === Notifications.DEFAULT_ACTION_IDENTIFIER &&
+          actionId === Notifications?.DEFAULT_ACTION_IDENTIFIER &&
           data.sessionId
         ) {
           options?.onNavigate?.("/(tabs)", { sessionId: data.sessionId });
@@ -145,7 +155,7 @@ export function useNotifications(options?: UseNotificationsOptions) {
 
   const notifyToolApproval = useCallback(
     async (requestId: string, toolName: string, sessionId: string) => {
-      if (notificationLevel === "silent") return;
+      if (!Notifications || notificationLevel === "silent") return;
       if (AppState.currentState === "active") return;
 
       await Notifications.scheduleNotificationAsync({
@@ -169,7 +179,7 @@ export function useNotifications(options?: UseNotificationsOptions) {
       tokenCount: number,
       elapsedSeconds: number,
     ) => {
-      if (notificationLevel === "silent") return;
+      if (!Notifications || notificationLevel === "silent") return;
       if (AppState.currentState === "active") return;
 
       const m = Math.floor(elapsedSeconds / 60);
@@ -192,7 +202,7 @@ export function useNotifications(options?: UseNotificationsOptions) {
 
   const notifyMakoUpdate = useCallback(
     async (title: string, body: string) => {
-      if (notificationLevel === "silent") return;
+      if (!Notifications || notificationLevel === "silent") return;
 
       await Notifications.scheduleNotificationAsync({
         content: {

@@ -1,8 +1,18 @@
 import { useEffect } from "react";
 import { Platform } from "react-native";
 
-import MakoWidgetInstance from "../widgets/MakoWidget";
-import ChatWidgetInstance from "../widgets/ChatWidget";
+// Native-only — widget instances loaded dynamically to avoid crash on web
+let MakoWidgetInstance: any = null;
+let ChatWidgetInstance: any = null;
+
+if (Platform.OS === "ios") {
+  try {
+    MakoWidgetInstance = require("../widgets/MakoWidget").default;
+    ChatWidgetInstance = require("../widgets/ChatWidget").default;
+  } catch {
+    // Widgets not available
+  }
+}
 
 interface ChatState {
   hasActiveSession: boolean;

@@ -1,10 +1,20 @@
 import { useRef, useCallback, useEffect } from 'react';
 import { Platform } from 'react-native';
-import { addUserInteractionListener } from 'expo-widgets';
-import type { LiveActivity } from 'expo-widgets';
 
-// Import the Live Activity factory
-import ChatStreamActivityFactory from '../widgets/ChatStreamActivity';
+// Native-only imports — loaded dynamically to avoid crash on web
+let addUserInteractionListener: any = () => ({ remove: () => {} });
+let ChatStreamActivityFactory: any = null;
+
+if (Platform.OS === 'ios') {
+  try {
+    addUserInteractionListener = require('expo-widgets').addUserInteractionListener;
+    ChatStreamActivityFactory = require('../widgets/ChatStreamActivity').default;
+  } catch {
+    // Not available (web, simulator without widgets)
+  }
+}
+
+type LiveActivity = any;
 
 interface StreamState {
   chatTitle: string;
