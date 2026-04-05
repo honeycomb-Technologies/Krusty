@@ -8,8 +8,6 @@
     "userInterfaceStyle": "automatic",
     "scheme": "krusty",
     "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
       "backgroundColor": "#0b1119"
     },
     "ios": {
@@ -50,9 +48,7 @@
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#0b1119",
-          "image": "./assets/splash-icon.png",
-          "imageWidth": 200
+          "backgroundColor": "#0b1119"
         }
       ],
       "expo-font",

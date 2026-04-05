@@ -5,6 +5,8 @@ import * as SplashScreen from 'expo-splash-screen';
 
 SplashScreen.preventAutoHideAsync();
 
+const DELAY_BEFORE_PLAY_MS = 400;
+
 interface Props {
   children: React.ReactNode;
   onComplete?: () => void;
@@ -12,23 +14,17 @@ interface Props {
 
 export function SplashOverlay({ children, onComplete }: Props) {
   const [done, setDone] = useState(false);
-  const [ready, setReady] = useState(false);
   const lottieRef = useRef<LottieView>(null);
 
   const handleLayout = useCallback(() => {
-    setReady(true);
-  }, []);
+    SplashScreen.hideAsync();
 
-  useEffect(() => {
-    if (!ready) return;
-
-    const timer = setTimeout(async () => {
-      await SplashScreen.hideAsync();
+    const timer = setTimeout(() => {
       lottieRef.current?.play();
-    }, 150);
+    }, DELAY_BEFORE_PLAY_MS);
 
     return () => clearTimeout(timer);
-  }, [ready]);
+  }, []);
 
   const handleFinish = useCallback(
     (isCancelled: boolean) => {
@@ -64,5 +60,6 @@ const styles = StyleSheet.create({
   overlay: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 10,
+    backgroundColor: '#0b1119',
   },
 });
