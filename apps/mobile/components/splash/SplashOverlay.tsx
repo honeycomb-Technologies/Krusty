@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { View, StyleSheet } from 'react-native';
 import LottieView from 'lottie-react-native';
 import * as SplashScreen from 'expo-splash-screen';
@@ -12,13 +12,23 @@ interface Props {
 
 export function SplashOverlay({ children, onComplete }: Props) {
   const [done, setDone] = useState(false);
+  const [ready, setReady] = useState(false);
+  const lottieRef = useRef<LottieView>(null);
+
+  const handleLayout = useCallback(() => {
+    setReady(true);
+  }, []);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      SplashScreen.hideAsync();
-    }, 100);
+    if (!ready) return;
+
+    const timer = setTimeout(async () => {
+      await SplashScreen.hideAsync();
+      lottieRef.current?.play();
+    }, 150);
+
     return () => clearTimeout(timer);
-  }, []);
+  }, [ready]);
 
   const handleFinish = useCallback(
     (isCancelled: boolean) => {
@@ -36,12 +46,14 @@ export function SplashOverlay({ children, onComplete }: Props) {
     <View style={styles.root}>
       <View style={StyleSheet.absoluteFill}>{children}</View>
       <LottieView
+        ref={lottieRef}
         source={require('../../assets/animations/splash.json')}
-        autoPlay
         loop={false}
         onAnimationFinish={handleFinish}
+        onLayout={handleLayout}
         style={styles.overlay}
         resizeMode="cover"
+        progress={0}
       />
     </View>
   );

@@ -2,7 +2,7 @@
   "expo": {
     "name": "Krusty",
     "slug": "krusty",
-    "version": "0.9.1",
+    "version": "0.9.3",
     "orientation": "portrait",
     "icon": "./assets/icons/ios-light.png",
     "userInterfaceStyle": "automatic",
@@ -15,7 +15,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "io.krusty.mobile",
-      "buildNumber": "35",
+      "buildNumber": "40",
       "backgroundColor": "#0b1119",
       "icon": {
         "light": "./assets/icons/ios-light.png",
