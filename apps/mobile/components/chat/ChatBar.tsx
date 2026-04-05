@@ -363,7 +363,7 @@ export function ChatBar(props: ChatBarProps) {
 
       {/* Model popover — slides out from behind accordion */}
       {modelPickerOpen && (
-          <View style={styles.modelClip}>
+          <View style={[styles.modelClip, { bottom: bottomOffset + PILL + GAP }]}>
             <Animated.View style={[styles.modelPopover, modelPopoverStyle]}>
             <BlurView intensity={40} tint={pillTint} style={StyleSheet.absoluteFill} />
             <View style={[StyleSheet.absoluteFill, { backgroundColor: isDark ? 'rgba(15,20,30,0.92)' : 'rgba(255,255,255,0.92)', borderRadius: RADIUS }]} />
@@ -400,7 +400,7 @@ export function ChatBar(props: ChatBarProps) {
 
       {/* Attach popover — same area, slides from behind accordion */}
       {attachPickerOpen && (
-          <View style={styles.modelClip}>
+          <View style={[styles.modelClip, { bottom: bottomOffset + PILL + GAP }]}>
             <Animated.View style={[styles.modelPopover, attachPopoverStyle]}>
               <BlurView intensity={40} tint={pillTint} style={StyleSheet.absoluteFill} />
               <View style={[StyleSheet.absoluteFill, { backgroundColor: isDark ? 'rgba(15,20,30,0.92)' : 'rgba(255,255,255,0.92)', borderRadius: RADIUS }]} />
@@ -474,7 +474,6 @@ const styles = StyleSheet.create({
   // Clip container — hides the popover as it slides from behind accordion
   modelClip: {
     position: 'absolute',
-    bottom: PILL + GAP + 6,
     left: 10,
     right: PILL + GAP + 10,
     height: 4 * PILL + 3 * GAP,
