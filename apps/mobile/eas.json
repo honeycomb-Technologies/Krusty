@@ -15,7 +15,9 @@
       "distribution": "internal"
     },
     "production": {
-      "autoIncrement": true
+      "ios": {
+        "autoIncrement": true
+      }
     }
   },
   "submit": {
