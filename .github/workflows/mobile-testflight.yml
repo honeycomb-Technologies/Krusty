@@ -6,6 +6,7 @@ on:
     paths:
       - 'apps/mobile/**'
       - 'packages/**'
+      - '.github/workflows/mobile-testflight.yml'
   workflow_dispatch:
 
 concurrency:
