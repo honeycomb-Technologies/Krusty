@@ -8,7 +8,7 @@
 
 ## Overview
 
-Krusty is a single binary that bundles a terminal TUI, a web server with an embedded PWA frontend, and editor integration via ACP — all in one.
+Krusty is a single binary that bundles a terminal TUI, a web server with an embedded web frontend, and editor integration via ACP.
 
 ## Repository Layout
 
@@ -18,8 +18,8 @@ crates/
   krusty-core/    Shared AI, tools, storage, runtime
   krusty-server/  API server (library, embedded in CLI)
 apps/
-  pwa/            SvelteKit PWA frontend (embedded at compile time)
-  desktop/        Tauri desktop wrapper
+  mobile/         Expo mobile app + primary React web client
+  desktop/        Tauri desktop wrapper around the Expo web build
 ```
 
 ## Quick Start
@@ -46,11 +46,11 @@ cargo build --release
 | Command | Description |
 |---------|-------------|
 | `krusty` | Launch the interactive TUI |
-| `krusty serve` | Start the web server with embedded PWA (default port 3000) |
+| `krusty serve` | Start the web server with embedded web UI (default port 3000) |
 | `krusty serve --port 8080` | Start on a custom port |
 | `krusty acp` | Run as ACP server for editor integration |
 
-`krusty serve` bundles everything — API server, agent runtime, and PWA frontend — into a single process. On first run it walks you through provider and API key setup. If Tailscale is installed, it auto-configures remote HTTPS access.
+`krusty serve` bundles everything — API server, agent runtime, and the embedded Expo web build — into a single process. On first run it walks you through provider and API key setup. If Tailscale is installed, it auto-configures remote HTTPS access.
 
 If `krusty serve` reports Tailscale permission denied, run this once:
 
@@ -203,13 +203,11 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-PWA frontend (requires [bun](https://bun.sh)):
+Expo mobile/web frontend:
 
 ```bash
-cd apps/pwa/app
-bun install
-bun run check
-bun run build
+cd apps/mobile
+npx expo export --platform web
 ```
 
 ## License

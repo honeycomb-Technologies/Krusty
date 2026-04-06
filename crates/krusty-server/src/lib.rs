@@ -64,16 +64,16 @@ pub mod types;
 pub mod utils;
 pub mod ws;
 
-/// Embedded PWA frontend assets.
+/// Embedded web frontend assets.
 ///
-/// At compile time, rust-embed includes all files from the PWA build directory.
+/// At compile time, rust-embed includes all files from the Expo web build directory.
 /// When the build directory is absent, this will be empty and the server
 /// gracefully falls back to API-only mode.
 #[derive(Embed)]
-#[folder = "../../apps/pwa/app/build"]
+#[folder = "../../apps/mobile/dist"]
 #[prefix = ""]
 #[allow_missing = true]
-struct PwaAssets;
+struct WebAssets;
 
 /// Configuration for starting the server.
 pub struct ServerConfig {
@@ -317,7 +317,7 @@ async fn initialize_models(registry: &SharedModelRegistry, credentials: &Credent
     }
 }
 
-/// Build the Axum router with all routes and embedded PWA assets.
+/// Build the Axum router with all routes and embedded web assets.
 pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppState)> {
     let db_path = paths::config_dir().join("krusty.db");
     let _db = Database::new(&db_path)?;
@@ -452,7 +452,7 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
         .route("/health", get(health))
         .merge(routes::oauth::callback_router())
         .merge(protected_routes)
-        .fallback(serve_pwa)
+        .fallback(serve_web_app)
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         // Allow large request bodies for image uploads (up to 100MB)
@@ -547,12 +547,12 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Serve embedded PWA assets with SPA fallback.
-async fn serve_pwa(uri: Uri) -> impl IntoResponse {
+/// Serve embedded web assets with SPA fallback.
+async fn serve_web_app(uri: Uri) -> impl IntoResponse {
     let path = uri.path().trim_start_matches('/');
 
     // Try exact file match first
-    if let Some(file) = PwaAssets::get(path) {
+    if let Some(file) = WebAssets::get(path) {
         let mime = mime_guess::from_path(path).first_or_octet_stream();
         return Response::builder()
             .status(StatusCode::OK)
@@ -563,7 +563,7 @@ async fn serve_pwa(uri: Uri) -> impl IntoResponse {
     }
 
     // SPA fallback: serve index.html for all non-file routes
-    match PwaAssets::get("index.html") {
+    match WebAssets::get("index.html") {
         Some(index) => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
@@ -574,7 +574,7 @@ async fn serve_pwa(uri: Uri) -> impl IntoResponse {
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/plain")
             .body(Body::from(
-                "Krusty API server running. PWA frontend not embedded in this build.",
+                "Krusty API server running. Web frontend not embedded in this build.",
             ))
             .expect("static response builder"),
     }
@@ -582,8 +582,8 @@ async fn serve_pwa(uri: Uri) -> impl IntoResponse {
 
 /// Cache-control header value based on file type.
 fn cache_control(path: &str) -> &'static str {
-    if path.contains("/_app/immutable/") {
-        // SvelteKit immutable assets — hash in filename, cache forever
+    if path.contains("/_app/immutable/") || path.starts_with("_expo/static/") {
+        // Bundled immutable assets — hash in filename, cache forever
         "public, max-age=31536000, immutable"
     } else if path.ends_with(".html") {
         "no-cache"

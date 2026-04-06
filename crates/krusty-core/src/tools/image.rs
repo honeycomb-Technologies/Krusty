@@ -51,7 +51,7 @@ pub fn load_from_path(path: &Path) -> Result<LoadedFile> {
     // Read and encode file
     let bytes = std::fs::read(path)?;
 
-    // Check file size (allow up to 50MB for images - matches PWA limit)
+    // Check file size (allow up to 50MB for images - matches current web limit)
     if bytes.len() > 50 * 1024 * 1024 {
         bail!("Image too large: {} bytes (max 50MB)", bytes.len());
     }

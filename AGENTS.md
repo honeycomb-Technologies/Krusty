@@ -26,9 +26,9 @@ Repository-level engineering guardrails for Krusty - an AI coding assistant CLI/
   - `src/process/`: Background process registry/management.
   - `src/auth/`: OAuth/auth flows and token storage helpers.
   - `src/updater/`: Auto-updater for dev/release modes.
-- `crates/krusty-server`: Self-host API for external clients.
-- `apps/pwa/app`: Primary installable web client (SvelteKit).
-- `apps/desktop/shell`: Tauri wrapper around the PWA.
+- `crates/krusty-server`: Self-host API plus embedded web bundle for external clients.
+- `apps/mobile`: Expo app that now serves as the primary mobile client and React-based web surface.
+- `apps/desktop/shell`: Tauri wrapper around the Expo web build.
 - `apps/marketing/site`: Static marketing/legal pages only.
 
 ## Design Patterns
@@ -51,8 +51,8 @@ Repository-level engineering guardrails for Krusty - an AI coding assistant CLI/
 - Build and run current local code only; do not require `git pull` for day-to-day refinement.
 - Rust builds inherit `TMPDIR` from `.cargo/config.toml`, pointing rustc temp files at the workspace `target/` directory instead of `/tmp`.
 - **Rust backend**: `cargo run -p krusty` from repo root.
-- **PWA dev server**: `cd apps/pwa/app && bun run dev` (default `http://localhost:5173`).
-- Do active UI/PWA iteration at `http://localhost:5173` so HMR is enabled, with `/api` and `/ws` proxied to backend.
+- **Expo web dev server**: `cd apps/mobile && npx expo start --web --port 5173`.
+- Do active UI/web iteration at `http://localhost:5173` while the backend runs separately.
 - Frontend edits hot-reload automatically; Rust backend edits require a restart.
 - **ACP mode** (editor integration): `krusty acp`
 
@@ -64,9 +64,9 @@ cargo test --workspace
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 ```
-PWA validation:
+Web/mobile validation:
 ```bash
-cd apps/pwa/app && bun run check && bun run build
+cd apps/mobile && npx expo export --platform web
 ```
 
 ## Dependencies

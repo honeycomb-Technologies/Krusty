@@ -1,4 +1,4 @@
-//! OAuth authentication endpoints for PWA.
+//! OAuth authentication endpoints for web and mobile clients.
 
 use std::time::Instant;
 

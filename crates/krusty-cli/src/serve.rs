@@ -1,6 +1,6 @@
-//! `krusty serve` — unified server with embedded PWA and Tailscale integration
+//! `krusty serve` — unified server with embedded web app and Tailscale integration
 //!
-//! Starts the Krusty API server with the PWA frontend embedded in the binary.
+//! Starts the Krusty API server with the web frontend embedded in the binary.
 //! On first run, prompts for provider and API key configuration.
 //! Detects and reuses an already-running instance if present.
 

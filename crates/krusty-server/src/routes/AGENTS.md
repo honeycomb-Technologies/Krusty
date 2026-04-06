@@ -4,7 +4,7 @@
 HTTP route handlers and endpoint contracts.
 
 ## Guardrails
-- Keep request/response shapes synchronized with CLI/PWA clients.
+- Keep request/response shapes synchronized with CLI, web, and mobile clients.
 - Validate and sanitize all user inputs before side effects.
 - Preserve streaming route stability and backpressure behavior.
 - Chat routes must honor persisted session model unless an explicit per-request override is provided.
@@ -17,7 +17,7 @@ HTTP route handlers and endpoint contracts.
 - Direct tool execution must keep `working_dir` scoped to the same allowed workspace root as the rest of the server file/path surfaces.
 - Chat streaming must keep a bounded queue with explicit lag signaling; never let a slow SSE client silently stall or redefine core loop semantics.
 - Server control-plane routes must expose remote-access state, token rotation, and published private endpoints without bypassing the bearer-token remote authority model.
-- Push endpoints (`/push/*`) must stay aligned with PWA diagnostics and test-send flows.
+- Push endpoints (`/push/*`) must stay aligned with mobile/web diagnostics and test-send flows.
 - Port proxy endpoints (`/ports/*`) must remain localhost-scoped and deny recursive self-proxy loops.
 
 ## Validation

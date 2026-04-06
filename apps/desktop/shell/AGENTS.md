@@ -1,7 +1,7 @@
 # AGENTS Guide: /apps/desktop/shell
 
 ## Purpose
-Tauri wrapper project around the PWA.
+Tauri wrapper project around the Expo web build.
 
 ## Guardrails
 - Keep JS package scripts and Tauri config in sync.

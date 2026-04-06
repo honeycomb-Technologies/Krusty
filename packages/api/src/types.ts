@@ -467,6 +467,10 @@ export interface OAuthStatusResponse {
   flow_active: boolean;
 }
 
+export interface OAuthExchangeResponse {
+  success: boolean;
+}
+
 export interface TailscaleAccessResponse {
   status: string;
   url?: string | null;
@@ -533,6 +537,82 @@ export interface TreeEntry {
   path: string;
   is_dir: boolean;
   children?: TreeEntry[];
+}
+
+// ============================================================================
+// Preview / MCP / Skills Types
+// ============================================================================
+
+export interface PreviewSettings {
+  enabled: boolean;
+  auto_refresh_secs: number;
+  show_only_http_like: boolean;
+  probe_timeout_ms: number;
+  allow_force_open_non_http: boolean;
+  pinned_ports: number[];
+  hidden_ports: number[];
+  blocked_ports: number[];
+}
+
+export interface PreviewSettingsPatch {
+  enabled?: boolean;
+  auto_refresh_secs?: number;
+  show_only_http_like?: boolean;
+  probe_timeout_ms?: number;
+  allow_force_open_non_http?: boolean;
+  pinned_ports?: number[];
+  hidden_ports?: number[];
+  blocked_ports?: number[];
+}
+
+export type PortProbeStatus = 'ok' | 'timeout' | 'conn_refused' | 'non_http' | 'error';
+
+export interface PortEntry {
+  port: number;
+  name: string;
+  description: string | null;
+  command: string | null;
+  pid: number | null;
+  source: string;
+  active: boolean;
+  pinned: boolean;
+  is_http_like: boolean;
+  is_previewable_http: boolean;
+  probe_status: PortProbeStatus;
+  last_probe_ms: number | null;
+  preview_path: string;
+}
+
+export interface PortListResponse {
+  ports: PortEntry[];
+  settings: PreviewSettings;
+  discovery_error?: string | null;
+}
+
+export interface McpToolResponse {
+  name: string;
+  description?: string | null;
+}
+
+export interface McpServerResponse {
+  name: string;
+  server_type: string;
+  status: string;
+  connected: boolean;
+  tool_count: number;
+  tools: McpToolResponse[];
+  error?: string | null;
+}
+
+export type SkillSource = 'global' | 'project';
+
+export interface SkillInfo {
+  name: string;
+  description: string;
+  version?: string | null;
+  author?: string | null;
+  tags: string[];
+  source: SkillSource;
 }
 
 // ============================================================================

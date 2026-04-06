@@ -1,1 +1,1 @@
-export { getInitialURL, addEventListener } from 'expo-linking';
+export { addEventListener, getInitialURL, openURL } from "expo-linking";

@@ -1,6 +1,6 @@
 # Desktop App
 
-This directory is reserved for desktop packaging (Tauri/Electron) around the same app experience as PWA.
+This directory is reserved for desktop packaging around the React/Expo web client.
 
 ## Scope
 - Native wrapper and packaging
@@ -8,7 +8,7 @@ This directory is reserved for desktop packaging (Tauri/Electron) around the sam
 - Local connection config to self-hosted `krusty-server`
 
 ## Active Scaffold
-- `shell/` contains a Tauri wrapper targeting `apps/pwa/app`.
+- `shell/` contains a Tauri wrapper targeting `apps/mobile`.
 
 ## Local Run
 

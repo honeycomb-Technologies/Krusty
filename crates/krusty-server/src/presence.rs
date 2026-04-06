@@ -156,7 +156,7 @@ mod tests {
             session_id,
             SessionPresenceRecord {
                 client_id: "client-1".to_string(),
-                surface: "pwa".to_string(),
+                surface: "web".to_string(),
                 capability: PresenceCapability::Controller,
                 user_id: None,
                 last_seen_at: Utc::now() - Duration::seconds(20),
@@ -180,7 +180,7 @@ mod tests {
             session_id,
             SessionPresenceRecord {
                 client_id: "client-1".to_string(),
-                surface: "pwa".to_string(),
+                surface: "web".to_string(),
                 capability: PresenceCapability::Observer,
                 user_id: Some("alice".to_string()),
                 last_seen_at: Utc::now(),

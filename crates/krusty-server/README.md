@@ -1,6 +1,6 @@
 # Krusty Server
 
-Self-hosted API server used by the PWA and desktop shell.
+Self-hosted API server used by the Expo mobile app, the embedded web client, and the desktop shell.
 
 ## Scope
 
@@ -34,8 +34,9 @@ Credentials can also be set through:
 
 ## Client Connection
 
-- PWA expects `VITE_API_BASE` (defaults to `/api` with dev proxy to `http://localhost:3000`)
-- Desktop shell wraps the same PWA build and therefore uses the same server API
+- Expo web is exported and embedded into the server build for single-process web delivery.
+- Desktop shell wraps the same Expo web bundle and therefore uses the same server API.
+- Mobile clients connect directly to the same HTTP and WebSocket surface.
 
 ## Optional User Scoping
 

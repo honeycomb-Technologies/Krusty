@@ -316,7 +316,7 @@ pub struct MessageResponse {
 // Chat Types
 // ============================================================================
 
-/// Content block from PWA (text or image)
+/// Content block from web/mobile clients (text or image)
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ContentBlock {

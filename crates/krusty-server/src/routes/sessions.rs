@@ -798,7 +798,7 @@ mod tests {
             Path(session_id),
             Json(SessionPresenceHeartbeatRequest {
                 client_id: "client-1".to_string(),
-                surface: "pwa".to_string(),
+                surface: "web".to_string(),
                 capability: crate::presence::PresenceCapability::Controller,
                 last_event_sequence: Some(12),
             }),

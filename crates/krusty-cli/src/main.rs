@@ -3,7 +3,7 @@
 //! A terminal-based AI coding assistant with:
 //! - Multi-provider AI with API key authentication
 //! - Single-mode Chat UI with slash commands
-//! - `krusty serve` — unified server + PWA + Tailscale
+//! - `krusty serve` — unified server + embedded web app + Tailscale
 //! - Clean architecture from day one
 
 use std::io::{self, Write};
@@ -43,9 +43,9 @@ enum Commands {
     /// - Or provider-specific: ANTHROPIC_API_KEY, OPENROUTER_API_KEY, etc.
     Acp,
 
-    /// Start the Krusty web server with embedded PWA frontend
+    /// Start the Krusty web server with embedded web frontend
     ///
-    /// Launches the API server with the PWA bundled into the binary.
+    /// Launches the API server with the web bundle embedded into the binary.
     /// On first run, prompts for provider and API key configuration.
     /// Automatically configures Tailscale for remote access if available.
     Serve {

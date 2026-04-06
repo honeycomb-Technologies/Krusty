@@ -10,6 +10,7 @@ import type {
   ProviderStatus,
   OAuthStartResponse,
   OAuthStatusResponse,
+  OAuthExchangeResponse,
   ServerAccessResponse,
   ChatRequest,
   StreamCallbacks,
@@ -19,6 +20,12 @@ import type {
   SessionType,
   TreeEntry,
   WorkspaceMode,
+  PreviewSettings,
+  PreviewSettingsPatch,
+  PortListResponse,
+  McpServerResponse,
+  McpToolResponse,
+  SkillInfo,
   Report,
   ReportSummary,
   MakoDispatchResponse,
@@ -86,16 +93,9 @@ export class KrustyClient {
   }
 
   async bootstrapAuth(): Promise<boolean> {
-    try {
-      const resp = await fetch(`${this.baseUrl}/remote-auth/bootstrap`, {
-        method: 'POST',
-        headers: this.headers(),
-        body: JSON.stringify({ token: this.token }),
-      });
-      return resp.ok;
-    } catch {
-      return false;
-    }
+    // The current server authenticates each API request with the bearer token
+    // directly and does not expose a separate bootstrap route.
+    return true;
   }
 
   // Sessions
@@ -209,7 +209,7 @@ export class KrustyClient {
 
   async setCredential(providerId: string, apiKey: string): Promise<ProviderStatus> {
     return this.request(`/credentials/${providerId}`, {
-      method: 'PUT',
+      method: 'POST',
       body: JSON.stringify({ api_key: apiKey }),
     });
   }
@@ -219,11 +219,25 @@ export class KrustyClient {
   }
 
   async startOAuth(provider: string): Promise<OAuthStartResponse> {
-    return this.request(`/credentials/${provider}/oauth/start`, { method: 'POST' });
+    return this.request('/auth/oauth/start', {
+      method: 'POST',
+      body: JSON.stringify({ provider }),
+    });
   }
 
   async getOAuthStatus(provider: string): Promise<OAuthStatusResponse> {
-    return this.request(`/credentials/${provider}/oauth/status`);
+    return this.request(`/auth/oauth/status/${provider}`);
+  }
+
+  async exchangeOAuthCode(provider: string, code: string): Promise<OAuthExchangeResponse> {
+    return this.request('/auth/oauth/exchange', {
+      method: 'POST',
+      body: JSON.stringify({ provider, code }),
+    });
+  }
+
+  async revokeOAuth(provider: string): Promise<OAuthStatusResponse> {
+    return this.request(`/auth/oauth/revoke/${provider}`, { method: 'DELETE' });
   }
 
   // Files
@@ -241,6 +255,71 @@ export class KrustyClient {
   // Server
   async getServerAccess(): Promise<ServerAccessResponse> {
     return this.request('/server/access');
+  }
+
+  // Preview / Ports
+  async getPorts(): Promise<PortListResponse> {
+    return this.request('/ports');
+  }
+
+  async getPreviewSettings(): Promise<PreviewSettings> {
+    return this.request('/settings/preview');
+  }
+
+  async updatePreviewSettings(patch: PreviewSettingsPatch): Promise<PreviewSettings> {
+    return this.request('/settings/preview', {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+  }
+
+  async addPinnedPort(port: number): Promise<PreviewSettings> {
+    return this.request('/settings/preview/pins', {
+      method: 'POST',
+      body: JSON.stringify({ port }),
+    });
+  }
+
+  async removePinnedPort(port: number): Promise<PreviewSettings> {
+    return this.request(`/settings/preview/pins/${port}`, { method: 'DELETE' });
+  }
+
+  async addHiddenPort(port: number): Promise<PreviewSettings> {
+    return this.request('/settings/preview/hidden', {
+      method: 'POST',
+      body: JSON.stringify({ port }),
+    });
+  }
+
+  async removeHiddenPort(port: number): Promise<PreviewSettings> {
+    return this.request(`/settings/preview/hidden/${port}`, { method: 'DELETE' });
+  }
+
+  // MCP
+  async getMcpServers(): Promise<McpServerResponse[]> {
+    return this.request('/mcp');
+  }
+
+  async reloadMcpConfig(): Promise<McpServerResponse[]> {
+    return this.request('/mcp/reload', { method: 'POST' });
+  }
+
+  async connectMcpServer(name: string): Promise<McpServerResponse> {
+    return this.request(`/mcp/${encodeURIComponent(name)}/connect`, { method: 'POST' });
+  }
+
+  async disconnectMcpServer(name: string): Promise<McpServerResponse> {
+    return this.request(`/mcp/${encodeURIComponent(name)}/disconnect`, { method: 'POST' });
+  }
+
+  async getMcpServerTools(name: string): Promise<McpToolResponse[]> {
+    return this.request(`/mcp/${encodeURIComponent(name)}/tools`);
+  }
+
+  // Skills
+  async getSkills(scope: 'all' | 'global' = 'all'): Promise<SkillInfo[]> {
+    const query = scope === 'global' ? '?scope=global' : '';
+    return this.request(`/skills${query}`);
   }
 
   // Tools

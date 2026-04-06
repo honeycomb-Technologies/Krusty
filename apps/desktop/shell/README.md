@@ -1,10 +1,10 @@
 # Desktop Shell (Tauri)
 
-This wraps the PWA app surface as a native desktop app.
+This wraps the Expo web app surface as a native desktop app.
 
 ## Dev Flow
 1. Run desktop shell (`bun run dev`) in this folder.
-2. Tauri will automatically run the PWA dev server from `apps/pwa/app`.
+2. Tauri will automatically run the Expo web dev server from `apps/mobile`.
 
 The shell loads `http://localhost:5173` during development.
 
@@ -17,7 +17,7 @@ The shell loads `http://localhost:5173` during development.
    - `bun install`
    - `bun run build`
 
-`tauri.conf.json` points `frontendDist` at `../../pwa/app/build`.
+`tauri.conf.json` points `frontendDist` at `../../mobile/dist`.
 
 Build outputs:
 - `src-tauri/target/release/bundle/deb/*.deb`

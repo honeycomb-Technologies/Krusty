@@ -21,6 +21,7 @@ mod push;
 mod reports;
 mod server;
 mod sessions;
+mod skills;
 mod tools;
 
 /// Build the API router with all endpoints
@@ -43,6 +44,7 @@ pub fn api_router() -> Router<AppState> {
         .nest("/apns", apns::router())
         .nest("/reports", reports::router())
         .nest("/server", server::router())
+        .nest("/skills", skills::router())
         .nest("/auth/oauth", oauth::router())
         .merge(Router::new())
 }
