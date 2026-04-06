@@ -2,7 +2,6 @@
 //!
 //! This is the core ACP agent that handles all protocol methods.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_client_protocol::{
@@ -65,14 +64,13 @@ pub struct KrustyAgent {
 impl KrustyAgent {
     /// Create a new Krusty ACP agent
     pub fn new() -> Self {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let tools = Arc::new(ToolRegistry::new());
         Self {
             sessions: Arc::new(SessionManager::new()),
             tools: tools.clone(),
             client_capabilities: RwLock::new(None),
             api_key: RwLock::new(None),
-            processor: RwLock::new(PromptProcessor::new(tools, cwd)),
+            processor: RwLock::new(PromptProcessor::new(tools)),
             notification_tx: RwLock::new(None),
             current_model: RwLock::new(None),
             available_models: RwLock::new(Vec::new()),
@@ -81,13 +79,12 @@ impl KrustyAgent {
 
     /// Create with custom tool registry
     pub fn with_tools(tools: Arc<ToolRegistry>) -> Self {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Self {
             sessions: Arc::new(SessionManager::new()),
             tools: tools.clone(),
             client_capabilities: RwLock::new(None),
             api_key: RwLock::new(None),
-            processor: RwLock::new(PromptProcessor::new(tools, cwd)),
+            processor: RwLock::new(PromptProcessor::new(tools)),
             notification_tx: RwLock::new(None),
             current_model: RwLock::new(None),
             available_models: RwLock::new(Vec::new()),
@@ -121,7 +118,7 @@ impl KrustyAgent {
             }
 
             let credential = match provider {
-                ProviderId::OpenAI => resolve_openai_auth(&store, "gpt-5-codex").credential,
+                ProviderId::OpenAI => resolve_openai_auth(&store, "gpt-5.3-codex").credential,
                 ProviderId::Anthropic => resolve_anthropic_auth(&store).credential,
                 _ => store.get_auth(&provider),
             };
@@ -791,7 +788,6 @@ fn build_workspace_context(cwd: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     use tempfile::tempdir;
@@ -807,14 +803,13 @@ mod tests {
     use super::*;
 
     fn agent_with_storage(storage: Arc<Mutex<StorageSessionManager>>) -> KrustyAgent {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let tools = Arc::new(ToolRegistry::new());
         KrustyAgent {
             sessions: Arc::new(SessionManager::with_storage(storage)),
             tools: tools.clone(),
             client_capabilities: RwLock::new(None),
             api_key: RwLock::new(None),
-            processor: RwLock::new(PromptProcessor::new(tools, cwd)),
+            processor: RwLock::new(PromptProcessor::new(tools)),
             notification_tx: RwLock::new(None),
             current_model: RwLock::new(None),
             available_models: RwLock::new(Vec::new()),

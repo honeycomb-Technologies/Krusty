@@ -14,7 +14,6 @@ mod skills;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use crate::ai::client::AiClient;
 use crate::tui::app::{App, Popup};
 
 impl App {
@@ -145,49 +144,7 @@ impl App {
                     used_k, metadata.display_name, max_k
                 ));
             } else {
-                let provider_id = metadata.provider;
-                let model_id = metadata.id.clone();
-
-                // Switch provider if selecting model from different provider
-                if provider_id != self.runtime.active_provider {
-                    self.switch_provider(provider_id);
-                    if !self.is_authenticated() {
-                        let _ = futures::executor::block_on(self.try_load_auth());
-                    }
-                }
-                self.runtime.current_model = model_id.clone();
-
-                // Reinitialize AI client with new model
-                if self.runtime.api_key.is_some() {
-                    let config = self.create_client_config();
-                    if let Some(key) = &self.runtime.api_key {
-                        self.runtime.ai_client = Some(AiClient::with_api_key(config, key.clone()));
-                    }
-                }
-
-                // Ensure model metadata is present (supports custom IDs),
-                // then mark model as recently used.
-                let registry = self.services.model_registry.clone();
-                futures::executor::block_on(async {
-                    registry.upsert_model(metadata.clone()).await;
-                    registry.mark_recent(&model_id).await;
-                });
-
-                // Save to preferences (current model + recent list)
-                if let Some(ref prefs) = self.services.preferences {
-                    if let Err(e) = prefs.set_current_model(&model_id) {
-                        tracing::warn!("Failed to save current model: {}", e);
-                    }
-                    if let Err(e) = prefs.add_recent_model(&model_id) {
-                        tracing::warn!("Failed to save recent model: {}", e);
-                    }
-                    if is_custom {
-                        if let Err(e) = prefs.save_custom_model(&metadata) {
-                            tracing::warn!("Failed to persist custom model metadata: {}", e);
-                        }
-                    }
-                }
-
+                self.apply_model_selection(metadata, is_custom);
                 self.ui.popup = Popup::None;
             }
         }

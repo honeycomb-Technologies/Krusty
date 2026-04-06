@@ -16,6 +16,7 @@ HTTP route handlers and endpoint contracts.
 - Tool execution routes must pass the same governance context as orchestrated runs (permission mode, delegated turn budget, and extensibility managers) so direct execution does not silently diverge from core behavior.
 - Direct tool execution must keep `working_dir` scoped to the same allowed workspace root as the rest of the server file/path surfaces.
 - Chat streaming must keep a bounded queue with explicit lag signaling; never let a slow SSE client silently stall or redefine core loop semantics.
+- Auth and credential routes for dynamic-model providers should refresh shared model catalogs eagerly so web/mobile clients see the new curated list without a restart.
 - Server control-plane routes must expose remote-access state, token rotation, and published private endpoints without bypassing the bearer-token remote authority model.
 - Push endpoints (`/push/*`) must stay aligned with mobile/web diagnostics and test-send flows.
 - Port proxy endpoints (`/ports/*`) must remain localhost-scoped and deny recursive self-proxy loops.

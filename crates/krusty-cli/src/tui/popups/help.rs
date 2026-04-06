@@ -147,6 +147,7 @@ impl HelpPopup {
             ("/home", "Return to start menu"),
             ("/load", "Load previous session"),
             ("/model", "Select AI model"),
+            ("/fast", "Toggle fast/full model variant"),
             ("/auth", "Manage API providers"),
             ("/theme", "Change color theme"),
             ("/clear", "Clear chat messages"),

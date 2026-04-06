@@ -89,15 +89,8 @@ async fn set_credential(
             .map_err(|e| AppError::Internal(e.to_string()))?;
     }
 
-    if provider_id == ProviderId::OpenRouter {
-        let registry = state.model_registry.clone();
-        let key = req.api_key;
-        tokio::spawn(async move {
-            match krusty_core::ai::openrouter::fetch_models(&key).await {
-                Ok(models) => registry.set_models(ProviderId::OpenRouter, models).await,
-                Err(e) => tracing::warn!("Failed to refresh OpenRouter models: {}", e),
-            }
-        });
+    if matches!(provider_id, ProviderId::OpenRouter | ProviderId::OpenAI) {
+        spawn_dynamic_model_refresh(state.model_registry.clone(), provider_id, req.api_key);
     }
 
     let oauth_store = krusty_core::auth::OAuthTokenStore::load().unwrap_or_default();
@@ -141,4 +134,23 @@ async fn delete_credential(
 fn parse_provider(s: &str) -> Result<ProviderId, AppError> {
     crate::utils::providers::parse_provider(s)
         .ok_or_else(|| AppError::BadRequest(format!("Unknown provider: {}", s)))
+}
+
+fn spawn_dynamic_model_refresh(
+    registry: krusty_core::ai::models::SharedModelRegistry,
+    provider_id: ProviderId,
+    credential: String,
+) {
+    tokio::spawn(async move {
+        let result = match provider_id {
+            ProviderId::OpenRouter => krusty_core::ai::openrouter::fetch_models(&credential).await,
+            ProviderId::OpenAI => krusty_core::ai::openai::fetch_models(&credential).await,
+            _ => return,
+        };
+
+        match result {
+            Ok(models) => registry.set_models(provider_id, models).await,
+            Err(e) => tracing::warn!("Failed to refresh {} models: {}", provider_id, e),
+        }
+    });
 }

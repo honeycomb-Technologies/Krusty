@@ -11,6 +11,7 @@ use super::models::{ApiFormat, ModelMetadata};
 use super::providers::{ProviderConfig, ProviderId, ReasoningFormat};
 
 const OPENAI_MODELS_URL: &str = "https://api.openai.com/v1/models";
+const ALLOWED_OPENAI_MODELS: &[&str] = &["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"];
 
 #[derive(Debug, Deserialize)]
 struct ModelsResponse {
@@ -77,27 +78,7 @@ fn is_useful_model(id: &str) -> bool {
     let id = id.to_ascii_lowercase();
     let normalized = id.strip_prefix("openai/").unwrap_or(&id);
 
-    let supported_prefix = normalized.starts_with("gpt-")
-        || is_openai_o_series(normalized)
-        || normalized.contains("codex");
-
-    if !supported_prefix {
-        return false;
-    }
-
-    let excluded_patterns = [
-        "audio",
-        "transcribe",
-        "tts",
-        "realtime",
-        "image",
-        "embedding",
-        "moderation",
-        "search",
-        "whisper",
-    ];
-
-    !excluded_patterns.iter().any(|pattern| id.contains(pattern))
+    ALLOWED_OPENAI_MODELS.contains(&normalized)
 }
 
 fn parse_model(raw: OpenAiModel) -> ModelMetadata {
@@ -180,17 +161,19 @@ mod tests {
     use crate::ai::models::ApiFormat;
 
     #[test]
-    fn filters_text_models_only() {
-        assert!(is_useful_model("gpt-5-codex"));
-        assert!(is_useful_model("o3"));
-        assert!(is_useful_model("o5"));
+    fn keeps_curated_openai_models_only() {
+        assert!(is_useful_model("gpt-5.3-codex"));
+        assert!(is_useful_model("gpt-5.4"));
+        assert!(is_useful_model("gpt-5.4-mini"));
+        assert!(!is_useful_model("gpt-5.3-codex-spark"));
+        assert!(!is_useful_model("gpt-5.2-pro"));
         assert!(!is_useful_model("whisper-1"));
-        assert!(!is_useful_model("gpt-image-1"));
     }
 
     #[test]
     fn builds_readable_display_name() {
-        assert_eq!(display_name("gpt-5-codex"), "GPT 5 Codex");
+        assert_eq!(display_name("gpt-5.3-codex"), "GPT 5.3 Codex");
+        assert_eq!(display_name("gpt-5.4-mini"), "GPT 5.4 Mini");
     }
 
     #[test]

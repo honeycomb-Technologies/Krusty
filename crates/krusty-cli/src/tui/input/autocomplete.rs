@@ -250,6 +250,11 @@ pub fn get_all_commands() -> Vec<CommandSuggestion> {
             description: "Select AI model",
         },
         CommandSuggestion {
+            primary: "/fast",
+            aliases: vec![],
+            description: "Toggle fast/full model variant",
+        },
+        CommandSuggestion {
             primary: "/auth",
             aliases: vec![],
             description: "Manage API providers",

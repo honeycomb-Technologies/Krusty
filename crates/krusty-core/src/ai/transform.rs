@@ -474,7 +474,7 @@ mod tests {
     #[test]
     fn request_transform_sets_parallel_tool_calls_for_responses() {
         let body = json!({
-            "model": "gpt-5-codex",
+            "model": "gpt-5.3-codex",
             "tools": [{"name": "read"}]
         });
 
@@ -482,7 +482,7 @@ mod tests {
             body,
             ProviderId::OpenAI,
             ApiFormat::OpenAIResponses,
-            "gpt-5-codex",
+            "gpt-5.3-codex",
         );
 
         assert_eq!(transformed["parallel_tool_calls"], Value::Bool(true));

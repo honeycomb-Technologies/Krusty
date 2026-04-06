@@ -142,10 +142,14 @@ impl ModelInfo {
         }
     }
 
-    /// Add Anthropic-style extended thinking support
-    pub fn with_anthropic_thinking(mut self) -> Self {
-        self.reasoning = Some(ReasoningFormat::Anthropic);
+    pub fn with_reasoning(mut self, reasoning: ReasoningFormat) -> Self {
+        self.reasoning = Some(reasoning);
         self
+    }
+
+    /// Add Anthropic-style extended thinking support
+    pub fn with_anthropic_thinking(self) -> Self {
+        self.with_reasoning(ReasoningFormat::Anthropic)
     }
 }
 
@@ -185,7 +189,7 @@ impl ProviderConfig {
             // Dynamic providers need a fallback
             match self.id {
                 ProviderId::OpenRouter => "openai/gpt-5-codex",
-                ProviderId::OpenAI => "gpt-5-codex",
+                ProviderId::OpenAI => "gpt-5.3-codex",
                 _ => "MiniMax-M2.5", // Ultimate fallback
             }
         }
@@ -371,6 +375,27 @@ pub fn translate_model_or_default(model_id: &str, from: ProviderId, to: Provider
     })
 }
 
+/// Toggle between standard and fast model variants when a known pair exists.
+pub fn toggle_fast_model(model_id: &str) -> Option<String> {
+    const FAST_MODEL_PAIRS: &[(&str, &str)] = &[
+        ("gpt-5.4", "gpt-5.4-mini"),
+        ("claude-opus-4-6", "claude-haiku-4-5-20251001"),
+        ("claude-opus-4.6", "claude-haiku-4.5"),
+        ("anthropic/claude-opus-4.6", "anthropic/claude-haiku-4.5"),
+    ];
+
+    for (standard, fast) in FAST_MODEL_PAIRS {
+        if model_id == *standard {
+            return Some((*fast).to_string());
+        }
+        if model_id == *fast {
+            return Some((*standard).to_string());
+        }
+    }
+
+    None
+}
+
 // ============================================================================
 // Provider Capabilities
 // ============================================================================
@@ -470,7 +495,8 @@ static BUILTIN_PROVIDERS: LazyLock<Vec<ProviderConfig>> = LazyLock::new(|| {
                 ),
                 ModelInfo::new("anthropic/claude-opus-4", "Claude Opus 4", 200_000, 16_384),
                 // OpenAI models
-                ModelInfo::new("openai/gpt-5-codex", "GPT-5 Codex", 400_000, 128_000),
+                ModelInfo::new("openai/gpt-5-codex", "GPT-5 Codex", 400_000, 128_000)
+                    .with_reasoning(ReasoningFormat::OpenAI),
                 // Google models
                 ModelInfo::new(
                     "google/gemini-2.5-pro-preview",
@@ -576,13 +602,16 @@ static BUILTIN_PROVIDERS: LazyLock<Vec<ProviderConfig>> = LazyLock::new(|| {
         ProviderConfig {
             id: ProviderId::OpenAI,
             name: "OpenAI".to_string(),
-            description: "GPT-5 + Codex models (OAuth or API key)".to_string(),
+            description: "GPT-5.4 + Mini + Codex (OAuth or API key)".to_string(),
             base_url: "https://api.openai.com/v1/chat/completions".to_string(),
             auth_header: AuthHeader::Bearer,
             models: vec![
-                ModelInfo::new("gpt-5-codex", "GPT-5 Codex", 400_000, 128_000),
-                ModelInfo::new("gpt-5", "GPT-5", 400_000, 128_000),
-                ModelInfo::new("gpt-5-chat-latest", "GPT-5 Chat Latest", 400_000, 128_000),
+                ModelInfo::new("gpt-5.3-codex", "GPT-5.3 Codex", 400_000, 128_000)
+                    .with_reasoning(ReasoningFormat::OpenAI),
+                ModelInfo::new("gpt-5.4", "GPT-5.4", 400_000, 128_000)
+                    .with_reasoning(ReasoningFormat::OpenAI),
+                ModelInfo::new("gpt-5.4-mini", "GPT-5.4 Mini", 400_000, 128_000)
+                    .with_reasoning(ReasoningFormat::OpenAI),
             ],
             supports_tools: true,
             dynamic_models: true,
@@ -661,13 +690,32 @@ mod tests {
     }
 
     #[test]
+    fn test_openai_config_uses_curated_models() {
+        let provider = get_provider(ProviderId::OpenAI).unwrap();
+        let ids: Vec<_> = provider
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect();
+
+        assert_eq!(provider.default_model(), "gpt-5.3-codex");
+        assert_eq!(ids, vec!["gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini"]);
+        assert!(provider
+            .models
+            .iter()
+            .all(|model| model.reasoning.is_some()));
+    }
+
+    #[test]
     fn test_openai_routing_prefers_responses_for_gpt5_and_codex() {
         assert!(ProviderConfig::openai_prefers_responses_api("gpt-5"));
-        assert!(ProviderConfig::openai_prefers_responses_api("gpt-5-codex"));
+        assert!(ProviderConfig::openai_prefers_responses_api(
+            "gpt-5.3-codex"
+        ));
         assert!(ProviderConfig::openai_prefers_responses_api("gpt-6.4"));
         assert!(ProviderConfig::openai_prefers_responses_api("o5"));
         assert_eq!(
-            ProviderConfig::openai_format_for_auth("gpt-5-codex", OpenAIAuthType::ApiKey),
+            ProviderConfig::openai_format_for_auth("gpt-5.3-codex", OpenAIAuthType::ApiKey),
             ApiFormat::OpenAIResponses
         );
         assert_eq!(
@@ -729,6 +777,27 @@ mod tests {
         // Unknown model: fallback to provider default
         let result = translate_model_or_default("GLM-5", ProviderId::ZAi, ProviderId::MiniMax);
         assert_eq!(result, "MiniMax-M2.5");
+    }
+
+    #[test]
+    fn test_toggle_fast_model() {
+        assert_eq!(
+            toggle_fast_model("gpt-5.4").as_deref(),
+            Some("gpt-5.4-mini")
+        );
+        assert_eq!(
+            toggle_fast_model("gpt-5.4-mini").as_deref(),
+            Some("gpt-5.4")
+        );
+        assert_eq!(
+            toggle_fast_model("claude-opus-4-6").as_deref(),
+            Some("claude-haiku-4-5-20251001")
+        );
+        assert_eq!(
+            toggle_fast_model("anthropic/claude-opus-4.6").as_deref(),
+            Some("anthropic/claude-haiku-4.5")
+        );
+        assert!(toggle_fast_model("gpt-5.3-codex").is_none());
     }
 
     #[test]

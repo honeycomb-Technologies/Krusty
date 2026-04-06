@@ -270,7 +270,8 @@ impl App {
                 ThinkingLevel::Off => None,
                 ThinkingLevel::Low => Some(AnthropicAdaptiveEffort::Low),
                 ThinkingLevel::Medium => Some(AnthropicAdaptiveEffort::Medium),
-                ThinkingLevel::High | ThinkingLevel::XHigh => Some(AnthropicAdaptiveEffort::High),
+                ThinkingLevel::High => Some(AnthropicAdaptiveEffort::High),
+                ThinkingLevel::XHigh => Some(AnthropicAdaptiveEffort::Max),
             }
         } else {
             None

@@ -49,6 +49,11 @@ import type {
   ThinkingLevel,
   ToolCall,
 } from "@krusty/state";
+import {
+  isFastModeModel,
+  supportsFastMode,
+  toggleFastModeModel,
+} from "@krusty/state";
 
 const TAB_TYPES: SessionType[] = ["chat", "code", "mako"];
 const CHAT_BAR_ZONE = 130;
@@ -144,6 +149,8 @@ export default function ChatScreen() {
   const mode = useSessionStore((state) => state.mode);
   const tokenCount = useSessionStore((state) => state.tokenCount);
   const error = useSessionStore((state) => state.error);
+  const fastModeSupported = supportsFastMode(model);
+  const fastModeEnabled = isFastModeModel(model);
 
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [activeToolCallId, setActiveToolCallId] = useState<string | null>(null);
@@ -605,6 +612,17 @@ export default function ChatScreen() {
     [sessionStore],
   );
 
+  const handleFastModeToggle = useCallback(() => {
+    const currentModel = sessionStore.getState().model;
+    const nextModel = toggleFastModeModel(currentModel);
+    if (!nextModel || nextModel === currentModel) {
+      return;
+    }
+
+    sessionStore.getState().setModel(nextModel);
+    void SecureStore.setItemAsync(SELECTED_MODEL_KEY, nextModel);
+  }, [sessionStore]);
+
   const handleTabChange = useCallback(
     (index: number) => {
       setActiveTab(index);
@@ -779,6 +797,9 @@ export default function ChatScreen() {
           onThinkingChange={(level) =>
             sessionStore.getState().setThinkingLevel(level)
           }
+          fastModeEnabled={fastModeEnabled}
+          fastModeSupported={fastModeSupported}
+          onFastModeToggle={handleFastModeToggle}
           mode={mode}
           onModeToggle={() =>
             sessionStore.getState().setMode(mode === "build" ? "plan" : "build")

@@ -7,6 +7,7 @@ All user-facing application surfaces.
 - Preserve strict separation between app surfaces and core runtime internals.
 - Do not duplicate business logic that already exists in `krusty-core` or `krusty-server`.
 - Keep desktop and Expo web behavior aligned where features overlap.
+- Keep model-speed and reasoning controls driven by shared client state or server contracts rather than ad-hoc component-local mappings.
 
 ## Directory Notes
 - `desktop/`: Tauri shell for desktop distribution.

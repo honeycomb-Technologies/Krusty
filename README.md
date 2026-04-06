@@ -66,7 +66,7 @@ Configure providers via `/auth` in the TUI or on first run of `krusty serve`. An
 |----------|--------|
 | **MiniMax** | MiniMax M2.5 |
 | **Anthropic** | Claude Opus 4.6, Claude Haiku 4.5 |
-| **OpenAI** | GPT-5.3 Codex |
+| **OpenAI** | GPT-5.4, GPT-5.4 Mini, GPT-5.3 Codex |
 | **OpenRouter** | 100+ models (Claude, GPT, Gemini, Llama, DeepSeek, Qwen) |
 | **Z.ai** | GLM-5 |
 

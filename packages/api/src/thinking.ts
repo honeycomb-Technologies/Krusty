@@ -3,7 +3,10 @@ import type { ThinkingLevel } from './types';
 export function cycleThinkingLevel(current: ThinkingLevel, model: string | null): ThinkingLevel {
   const modelLower = (model ?? '').toLowerCase();
   const isCodex = modelLower.includes('codex');
-  const isOpus = modelLower.includes('opus');
+  const isOpus =
+    modelLower.includes('opus-4-6')
+    || modelLower.includes('opus-4.6')
+    || modelLower.includes('opus 4.6');
 
   if (isCodex) {
     // Full cycle for Codex models
@@ -13,8 +16,8 @@ export function cycleThinkingLevel(current: ThinkingLevel, model: string | null)
   }
 
   if (isOpus) {
-    // Limited cycle for Opus models
-    const cycle: ThinkingLevel[] = ['off', 'low', 'medium', 'high'];
+    // Full cycle for Opus 4.6 adaptive effort, including Max
+    const cycle: ThinkingLevel[] = ['off', 'low', 'medium', 'high', 'xhigh'];
     const idx = cycle.indexOf(current);
     return cycle[(idx + 1) % cycle.length];
   }

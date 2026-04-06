@@ -68,68 +68,51 @@ struct ChatSessionContext {
 
 /// Build user message content from content blocks (images) and text message.
 fn build_user_content(message: &str, content_blocks: &[ContentBlock]) -> Vec<Content> {
-    let mut contents: Vec<Content> = Vec::new();
+    let mut contents = Vec::with_capacity(content_blocks.len() + usize::from(!message.is_empty()));
+    let mut has_text_block = false;
 
     for block in content_blocks {
         match block {
             ContentBlock::Text { text } => {
                 tracing::debug!("Content block: Text ({} chars)", text.len());
-            }
-            ContentBlock::Image { source } => match source {
-                crate::types::ImageSource::Base64 { media_type, data } => {
-                    tracing::debug!(
-                        "Content block: Image (base64, media_type={}, data_len={})",
-                        media_type,
-                        data.len()
-                    );
-                }
-                crate::types::ImageSource::Url { url } => {
-                    tracing::debug!("Content block: Image (url={})", url);
-                }
-            },
-        }
-    }
-
-    for block in content_blocks {
-        match block {
-            ContentBlock::Text { text } => {
+                has_text_block = true;
                 contents.push(Content::Text { text: text.clone() });
             }
             ContentBlock::Image { source } => {
-                let image_content = match source {
+                let image = match source {
                     crate::types::ImageSource::Base64 { media_type, data } => {
-                        Some(Content::Image {
-                            image: ImageContent {
-                                base64: Some(data.clone()),
-                                url: None,
-                                media_type: Some(media_type.clone()),
-                            },
-                            detail: None,
-                        })
+                        tracing::debug!(
+                            "Content block: Image (base64, media_type={}, data_len={})",
+                            media_type,
+                            data.len()
+                        );
+                        ImageContent {
+                            base64: Some(data.clone()),
+                            url: None,
+                            media_type: Some(media_type.clone()),
+                        }
                     }
-                    crate::types::ImageSource::Url { url } => Some(Content::Image {
-                        image: ImageContent {
+                    crate::types::ImageSource::Url { url } => {
+                        tracing::debug!("Content block: Image (url={})", url);
+                        ImageContent {
                             base64: None,
                             url: Some(url.clone()),
                             media_type: None,
-                        },
-                        detail: None,
-                    }),
+                        }
+                    }
                 };
-                if let Some(img) = image_content {
-                    contents.push(img);
-                }
+                contents.push(Content::Image {
+                    image,
+                    detail: None,
+                });
             }
         }
     }
 
-    if contents.is_empty() || !message.is_empty() {
-        let has_text = contents.iter().any(|c| matches!(c, Content::Text { .. }));
-        if !message.is_empty() && !has_text {
-            contents.push(Content::Text {
-                text: message.to_string(),
-            });
-        }
+    if !message.is_empty() && !has_text_block {
+        contents.push(Content::Text {
+            text: message.to_string(),
+        });
     }
 
     if contents.is_empty() {
@@ -924,7 +907,9 @@ fn apply_thinking_config(
     let model_lower = cfg.model.to_ascii_lowercase();
     let is_codex = cfg.provider_id == ProviderId::OpenAI && model_lower.contains("codex");
     let is_anthropic_opus_4_6 = cfg.provider_id == ProviderId::Anthropic
-        && (model_lower.contains("opus-4-6") || model_lower.contains("opus 4.6"));
+        && (model_lower.contains("opus-4-6")
+            || model_lower.contains("opus-4.6")
+            || model_lower.contains("opus 4.6"));
 
     options.thinking = Some(ThinkingConfig::default());
 
@@ -941,7 +926,8 @@ fn apply_thinking_config(
             ThinkingLevel::Off => return,
             ThinkingLevel::Low => AnthropicAdaptiveEffort::Low,
             ThinkingLevel::Medium => AnthropicAdaptiveEffort::Medium,
-            ThinkingLevel::High | ThinkingLevel::XHigh => AnthropicAdaptiveEffort::High,
+            ThinkingLevel::High => AnthropicAdaptiveEffort::High,
+            ThinkingLevel::XHigh => AnthropicAdaptiveEffort::Max,
         });
     }
 }
@@ -1027,6 +1013,7 @@ mod tests {
     use krusty_core::agent::loop_events::LoopStopReason;
     use krusty_core::agent::{AgentCancellation, LoopEvent, LoopInput, UserHookManager};
     use krusty_core::ai::models::create_model_registry;
+    use krusty_core::ai::types::Content;
     use krusty_core::mcp::McpManager;
     use krusty_core::process::ProcessRegistry;
     use krusty_core::skills::SkillsManager;
@@ -1035,10 +1022,10 @@ mod tests {
     use krusty_core::tools::registry::ToolRegistry;
     use krusty_core::SessionManager;
 
-    use super::{forward_loop_event, resolve_model_override, tool_approval};
+    use super::{build_user_content, forward_loop_event, resolve_model_override, tool_approval};
     use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::error::AppError;
-    use crate::types::ToolApprovalRequest;
+    use crate::types::{ContentBlock, ToolApprovalRequest};
     use crate::AppState;
 
     fn create_test_state() -> (AppState, PathBuf) {
@@ -1120,6 +1107,40 @@ mod tests {
     #[test]
     fn resolve_model_override_ignores_empty_values() {
         assert_eq!(resolve_model_override(Some("   "), Some("   ")), None);
+    }
+
+    #[test]
+    fn build_user_content_appends_message_when_only_images_are_provided() {
+        let content = build_user_content(
+            "describe this",
+            &[ContentBlock::Image {
+                source: crate::types::ImageSource::Url {
+                    url: "https://example.com/image.png".to_string(),
+                },
+            }],
+        );
+
+        assert!(matches!(content.first(), Some(Content::Image { .. })));
+        assert!(matches!(
+            content.last(),
+            Some(Content::Text { text }) if text == "describe this"
+        ));
+    }
+
+    #[test]
+    fn build_user_content_does_not_duplicate_message_when_text_block_exists() {
+        let content = build_user_content(
+            "fallback message",
+            &[ContentBlock::Text {
+                text: "block text".to_string(),
+            }],
+        );
+
+        assert_eq!(content.len(), 1);
+        assert!(matches!(
+            content.first(),
+            Some(Content::Text { text }) if text == "block text"
+        ));
     }
 
     #[tokio::test]

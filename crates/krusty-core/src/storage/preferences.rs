@@ -271,8 +271,8 @@ mod tests {
     fn caches_dynamic_model_metadata_with_provider_ttl() {
         let (prefs, _temp) = create_preferences();
         let models = vec![ModelMetadata::new(
-            "gpt-5-codex",
-            "GPT-5 Codex",
+            "gpt-5.3-codex",
+            "GPT-5.3 Codex",
             ProviderId::OpenAI,
         )];
 
@@ -291,8 +291,8 @@ mod tests {
     fn invalid_cache_metadata_marks_model_cache_stale() {
         let (prefs, _temp) = create_preferences();
         let models = vec![ModelMetadata::new(
-            "gpt-5-codex",
-            "GPT-5 Codex",
+            "gpt-5.3-codex",
+            "GPT-5.3 Codex",
             ProviderId::OpenAI,
         )];
 

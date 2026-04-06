@@ -46,6 +46,9 @@ interface ChatBarProps {
   disabled: boolean;
   thinkingLevel: ThinkingLevel;
   onThinkingChange: (level: ThinkingLevel) => void;
+  fastModeEnabled?: boolean;
+  fastModeSupported?: boolean;
+  onFastModeToggle?: () => void;
   mode: 'build' | 'plan';
   onModeToggle: () => void;
   onModelSelect: (modelId: string) => void;
@@ -65,6 +68,7 @@ export function ChatBar(props: ChatBarProps) {
   const {
     onSend, onStop, isStreaming, disabled,
     thinkingLevel, onThinkingChange,
+    fastModeEnabled, fastModeSupported, onFastModeToggle,
     mode, onModeToggle, onModelSelect, model, models,
     sessionType, researchEnabled, onResearchToggle, tokenCount,
   } = props;
@@ -340,6 +344,9 @@ export function ChatBar(props: ChatBarProps) {
           <AccordionControls
             thinkingLevel={thinkingLevel}
             onThinkingChange={onThinkingChange}
+            fastModeEnabled={fastModeEnabled}
+            fastModeSupported={fastModeSupported}
+            onFastModeToggle={onFastModeToggle}
             mode={mode}
             onModeToggle={onModeToggle}
             onAttach={handleAttach}

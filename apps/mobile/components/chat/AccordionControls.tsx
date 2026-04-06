@@ -12,13 +12,16 @@ import Animated, {
   runOnJS,
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import { Brain, Hammer, Compass, Paperclip, Bot, FlaskConical } from 'lucide-react-native';
+import { Brain, Hammer, Compass, Paperclip, Bot, FlaskConical, Zap } from 'lucide-react-native';
 import { useThemeContext } from '../../hooks/useTheme';
 import { cycleThinkingLevel, type ThinkingLevel } from '@krusty/api';
 
 interface AccordionControlsProps {
   thinkingLevel: ThinkingLevel;
   onThinkingChange: (level: ThinkingLevel) => void;
+  fastModeEnabled?: boolean;
+  fastModeSupported?: boolean;
+  onFastModeToggle?: () => void;
   mode: 'build' | 'plan';
   onModeToggle: () => void;
   onAttach: () => void;
@@ -120,6 +123,9 @@ function AccordionPill({
 export function AccordionControls({
   thinkingLevel,
   onThinkingChange,
+  fastModeEnabled = false,
+  fastModeSupported = false,
+  onFastModeToggle,
   mode,
   onModeToggle,
   onAttach,
@@ -134,6 +140,7 @@ export function AccordionControls({
   const { theme } = useThemeContext();
   const [flashThinking, setFlashThinking] = useState<string | null>(null);
   const [flashMode, setFlashMode] = useState<string | null>(null);
+  const [flashFast, setFlashFast] = useState<string | null>(null);
   const isChat = sessionType === 'chat';
 
   const handleThinking = () => {
@@ -166,6 +173,14 @@ export function AccordionControls({
     onAttach();
   };
 
+  const handleFastMode = () => {
+    if (!fastModeSupported) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    onFastModeToggle?.();
+    setFlashFast(fastModeEnabled ? 'Full' : 'Fast');
+    setTimeout(() => setFlashFast(null), 1200);
+  };
+
   const handleModel = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     onModelSelect();
@@ -188,25 +203,35 @@ export function AccordionControls({
       {/* Floating accordion pills */}
       <GestureDetector gesture={swipeDown}>
         <Animated.View style={styles.pillColumn}>
-          <AccordionPill index={3} isOpen={isOpen} onPress={handleModel} flashLabel={null}>
+          <AccordionPill index={4} isOpen={isOpen} onPress={handleModel} flashLabel={null}>
             <Bot size={24} color={t.mutedForeground} strokeWidth={1.6} />
           </AccordionPill>
 
-          <AccordionPill index={2} isOpen={isOpen} onPress={handleAttach} flashLabel={null}>
+          <AccordionPill index={3} isOpen={isOpen} onPress={handleAttach} flashLabel={null}>
             <Paperclip size={24} color={t.mutedForeground} strokeWidth={1.6} />
           </AccordionPill>
 
           {isChat ? (
-            <AccordionPill index={1} isOpen={isOpen} onPress={handleResearch} flashLabel={flashMode}>
+            <AccordionPill index={2} isOpen={isOpen} onPress={handleResearch} flashLabel={flashMode}>
               <FlaskConical size={24} color={researchEnabled ? t.thinking : t.mutedForeground} strokeWidth={1.6} />
             </AccordionPill>
           ) : (
-            <AccordionPill index={1} isOpen={isOpen} onPress={handleMode} flashLabel={flashMode}>
+            <AccordionPill index={2} isOpen={isOpen} onPress={handleMode} flashLabel={flashMode}>
               {mode === 'build' ? (
                 <Hammer size={24} color={t.mutedForeground} strokeWidth={1.6} />
               ) : (
                 <Compass size={24} color={t.mutedForeground} strokeWidth={1.6} />
               )}
+            </AccordionPill>
+          )}
+
+          {fastModeSupported && (
+            <AccordionPill index={1} isOpen={isOpen} onPress={handleFastMode} flashLabel={flashFast}>
+              <Zap
+                size={24}
+                color={fastModeEnabled ? t.thinking : t.mutedForeground}
+                strokeWidth={1.6}
+              />
             </AccordionPill>
           )}
 

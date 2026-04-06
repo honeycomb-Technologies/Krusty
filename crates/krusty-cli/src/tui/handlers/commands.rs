@@ -70,6 +70,23 @@ impl App {
                     self.start_dynamic_model_fetch(self.runtime.active_provider);
                 }
             }
+            "/fast" => match self.toggle_fast_model() {
+                Some(model_id) => {
+                    self.runtime.chat.messages.push((
+                        "system".to_string(),
+                        format!("Fast mode toggled: {}", model_id),
+                    ));
+                }
+                None => {
+                    self.runtime.chat.messages.push((
+                        "system".to_string(),
+                        format!(
+                            "Fast mode is not available for {}.",
+                            self.runtime.current_model
+                        ),
+                    ));
+                }
+            },
             "/auth" => {
                 self.ui.popups.auth.reset();
                 // Set configured providers to show checkmarks

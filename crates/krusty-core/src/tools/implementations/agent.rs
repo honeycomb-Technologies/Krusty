@@ -264,11 +264,12 @@ impl AgentTool {
 
     /// Resolve a fast/cheap model for lightweight agent tasks (e.g., explore).
     /// Only downgrades for providers that have a known fast tier — otherwise
-    /// inherits the parent model so non-Anthropic providers work unchanged.
+    /// inherits the parent model.
     fn resolve_fast_model(&self, ctx: &ToolContext, client: &AiClient) -> String {
         use crate::ai::providers::ProviderId;
         match client.provider_id() {
             ProviderId::Anthropic => "claude-haiku-4-5-20251001".to_string(),
+            ProviderId::OpenAI => "gpt-5.4-mini".to_string(),
             // All other providers: use the same model as the parent.
             _ => self.resolve_model(ctx, client),
         }

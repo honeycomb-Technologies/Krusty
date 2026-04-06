@@ -199,6 +199,7 @@ async fn start_openai_device_oauth(
     }
 
     let oauth_flows = state.oauth_flows.clone();
+    let model_registry = state.model_registry.clone();
     let device_auth_id = code_response.device_auth_id.clone();
     let user_code = code_response.user_code.clone();
     let poll_interval = code_response.interval;
@@ -220,11 +221,13 @@ async fn start_openai_device_oauth(
                 }
 
                 if let Ok(mut store) = OAuthTokenStore::load() {
+                    let access_token = token_data.access_token.clone();
                     store.set(provider_id, token_data);
                     if let Err(error) = store.save() {
                         tracing::error!("Failed to save OAuth token: {}", error);
                     } else {
                         tracing::info!("OpenAI OAuth token stored successfully");
+                        refresh_openai_models(model_registry.clone(), access_token).await;
                     }
                 }
             }
@@ -529,6 +532,7 @@ async fn oauth_callback(
                     );
                 }
             };
+            let access_token = token_data.access_token.clone();
             store.set(provider_id, token_data);
             if let Err(error) = store.save() {
                 return callback_error_page(
@@ -536,6 +540,11 @@ async fn oauth_callback(
                     format!("Failed to save your sign-in: {}", error),
                 );
             }
+
+            let registry = state.model_registry.clone();
+            tokio::spawn(async move {
+                refresh_openai_models(registry, access_token).await;
+            });
 
             callback_success_page(provider_id.storage_key().to_string())
         }
@@ -554,6 +563,16 @@ fn device_code_response(code: &OpenAIDeviceCodeResponse) -> OAuthDeviceCodeRespo
         verification_uri: code.verification_uri.clone(),
         verification_uri_complete: code.verification_uri_complete.clone(),
         expires_in: code.expires_in,
+    }
+}
+
+async fn refresh_openai_models(
+    registry: krusty_core::ai::models::SharedModelRegistry,
+    access_token: String,
+) {
+    match krusty_core::ai::openai::fetch_models(&access_token).await {
+        Ok(models) => registry.set_models(ProviderId::OpenAI, models).await,
+        Err(error) => tracing::warn!("Failed to refresh OpenAI models after OAuth: {}", error),
     }
 }
 

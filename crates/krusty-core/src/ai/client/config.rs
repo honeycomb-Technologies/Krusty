@@ -181,6 +181,7 @@ pub enum AnthropicAdaptiveEffort {
     Low,
     Medium,
     High,
+    Max,
 }
 
 impl AnthropicAdaptiveEffort {
@@ -189,6 +190,7 @@ impl AnthropicAdaptiveEffort {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::Max => "max",
         }
     }
 }

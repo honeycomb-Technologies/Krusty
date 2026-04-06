@@ -135,13 +135,14 @@ impl ThinkingLevel {
         }
     }
 
-    /// Cycle for Anthropic Opus: Off -> Low -> Medium -> High -> Off (no XHigh)
+    /// Cycle for Anthropic Opus: Off -> Low -> Medium -> High -> XHigh -> Off
     pub fn cycle_anthropic(self) -> Self {
         match self {
             Self::Off => Self::Low,
             Self::Low => Self::Medium,
             Self::Medium => Self::High,
-            Self::High | Self::XHigh => Self::Off,
+            Self::High => Self::XHigh,
+            Self::XHigh => Self::Off,
         }
     }
 
