@@ -1,9 +1,11 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { View, StyleSheet } from 'react-native';
 import LottieView from 'lottie-react-native';
 import * as SplashScreen from 'expo-splash-screen';
 
 SplashScreen.preventAutoHideAsync();
+
+const DELAY_BEFORE_PLAY_MS = 400;
 
 interface Props {
   children: React.ReactNode;
@@ -12,11 +14,15 @@ interface Props {
 
 export function SplashOverlay({ children, onComplete }: Props) {
   const [done, setDone] = useState(false);
+  const lottieRef = useRef<LottieView>(null);
 
-  useEffect(() => {
+  const handleLayout = useCallback(() => {
+    SplashScreen.hideAsync();
+
     const timer = setTimeout(() => {
-      SplashScreen.hideAsync();
-    }, 100);
+      lottieRef.current?.play();
+    }, DELAY_BEFORE_PLAY_MS);
+
     return () => clearTimeout(timer);
   }, []);
 
@@ -36,12 +42,14 @@ export function SplashOverlay({ children, onComplete }: Props) {
     <View style={styles.root}>
       <View style={StyleSheet.absoluteFill}>{children}</View>
       <LottieView
+        ref={lottieRef}
         source={require('../../assets/animations/splash.json')}
-        autoPlay
         loop={false}
         onAnimationFinish={handleFinish}
+        onLayout={handleLayout}
         style={styles.overlay}
         resizeMode="cover"
+        progress={0}
       />
     </View>
   );
@@ -52,5 +60,6 @@ const styles = StyleSheet.create({
   overlay: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 10,
+    backgroundColor: '#0b1119',
   },
 });
