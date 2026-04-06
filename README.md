@@ -8,18 +8,23 @@
 
 ## Overview
 
-Krusty is a single binary that bundles a terminal TUI, a web server with an embedded web frontend, and editor integration via ACP.
+Krusty is a multi-platform AI coding assistant. A single Rust binary bundles a terminal TUI, a web server with an embedded frontend, editor integration via ACP, and an autonomous agent mode (Mako). The frontend is built with Expo (React Native) and shared across mobile (iOS/Android), web (embedded in the server binary), and desktop (Tauri wrapper).
 
 ## Repository Layout
 
 ```
 crates/
-  krusty-cli/     Terminal UI + CLI entry point
-  krusty-core/    Shared AI, tools, storage, runtime
-  krusty-server/  API server (library, embedded in CLI)
+  krusty-cli/     Terminal UI + CLI entry point (the main binary)
+  krusty-core/    Shared AI, tools, storage, runtime (library)
+  krusty-server/  API server with embedded web frontend (library)
 apps/
-  mobile/         Expo mobile app + primary React web client
+  mobile/         Expo app — iOS, Android, and web (React Native)
   desktop/        Tauri desktop wrapper around the Expo web build
+packages/
+  api/            TypeScript API client (shared between mobile + desktop)
+  state/          Zustand state management (shared between mobile + desktop)
+  ui/             Design tokens and theme definitions (shared between mobile + desktop)
+wit/              WebAssembly Interface Types for the extension system
 ```
 
 ## Quick Start
@@ -49,6 +54,9 @@ cargo build --release
 | `krusty serve` | Start the web server with embedded web UI (default port 3000) |
 | `krusty serve --port 8080` | Start on a custom port |
 | `krusty acp` | Run as ACP server for editor integration |
+| `krusty mako run "task"` | Submit a task to the autonomous agent |
+| `krusty mako status` | Show Mako session status |
+| `krusty mako attach <id>` | Attach to a running Mako session |
 
 `krusty serve` bundles everything — API server, agent runtime, and the embedded Expo web build — into a single process. On first run it walks you through provider and API key setup. If Tailscale is installed, it auto-configures remote HTTPS access.
 
@@ -110,7 +118,7 @@ Switch providers and models anytime with `/model`.
 | `/permissions` | Switch between Supervised and Autonomous mode |
 | `/ps` | View background processes |
 | `/terminal` | Open interactive terminal (aliases: `/term`, `/shell`) |
-| `/init` | Generate KRAB.md project context file |
+| `/init` | Generate project context file |
 | `/update` | Check for updates |
 | `/cmd` | Show command help popup |
 
@@ -190,11 +198,39 @@ Data stored in `~/.krusty/`:
 
 ### Project Configuration
 
-Add a `KRAB.md` or `CLAUDE.md` file to your project root for project-specific instructions that are automatically included in context. Generate one with `/init`.
+Add a `CLAUDE.md` file to your project root for project-specific instructions that are automatically included in context. Generate one with `/init`.
 
 Project-level skills in `.krusty/skills/` override global skills.
 
+## Documentation
+
+Detailed project documentation lives in [`docs/`](docs/README.md):
+
+- **[Architecture](docs/architecture/)** - System overview, data flow, and design decisions
+- **[Core Engine](docs/core-engine/)** - Agent orchestrator, AI providers, tools, context management
+- **[Storage](docs/storage/)** - SQLite persistence layer
+- **[Interfaces](docs/interfaces/)** - TUI, web server/API, ACP editor integration, Mako autonomous mode
+- **[Frontends](docs/frontends/)** - Mobile app (Expo), desktop app (Tauri), shared packages
+- **[Extensions](docs/extensions/)** - WASM extension system, MCP, plugins, plans, skills
+- **[Operations](docs/operations/)** - Build, CI/CD, packaging, and deployment
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| **Backend** | Rust (tokio, axum, ratatui, rusqlite, wasmtime) |
+| **Mobile** | Expo / React Native (iOS, Android) |
+| **Web** | Expo web export (embedded in Rust binary via rust-embed) |
+| **Desktop** | Tauri v2 (wraps Expo web build) |
+| **Shared Frontend** | TypeScript, React 19, Zustand |
+| **Package Manager** | Cargo (Rust), Bun (TypeScript) |
+| **Database** | SQLite (embedded, local-first) |
+| **Extensions** | WebAssembly (Wasmtime, Zed-compatible WIT) |
+| **Protocols** | ACP (editor integration), MCP (tool discovery) |
+
 ## Development
+
+### Rust backend
 
 ```bash
 cargo fmt --all
@@ -203,11 +239,23 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-Expo mobile/web frontend:
+### Expo frontend (mobile + web)
 
 ```bash
 cd apps/mobile
-npx expo export --platform web
+bun install
+bun run start              # dev server (all platforms)
+bun run web                # web only
+npx expo export --platform web  # production web build
+```
+
+### Desktop (Tauri)
+
+```bash
+cd apps/desktop/shell
+bun install
+bun run dev                # Tauri dev with Expo web hot-reload
+bun run build              # production build (DEB, RPM)
 ```
 
 ## License

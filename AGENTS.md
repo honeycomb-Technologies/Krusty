@@ -1,13 +1,10 @@
 # AGENTS Guide: Krusty
 
 ## Purpose
-Repository-level engineering guardrails for Krusty - an AI coding assistant CLI/TUI with ACP server mode.
+Repository-level engineering guardrails for Krusty - an AI coding assistant with CLI/TUI, web server, ACP editor integration, and autonomous agent modes.
 
 ## AGENTS Strategy
-- Keep `AGENTS.md` only at architectural boundaries where local rules differ.
-- Do not create AGENTS in every leaf folder.
-- Add a new AGENTS file only when a directory has unique invariants, workflows, or integration risk.
-- When a notable structural or behavioral change lands, update the nearest applicable AGENTS file in the same commit.
+This is the **only** AGENTS file in the repository. All module-specific invariants live in sections below rather than scattered across subdirectories.
 
 ## Core Architecture
 - `crates/krusty-cli`: Terminal client and TUI runtime. Entry point with command parsing.
@@ -27,9 +24,8 @@ Repository-level engineering guardrails for Krusty - an AI coding assistant CLI/
   - `src/auth/`: OAuth/auth flows and token storage helpers.
   - `src/updater/`: Auto-updater for dev/release modes.
 - `crates/krusty-server`: Self-host API plus embedded web bundle for external clients.
-- `apps/mobile`: Expo app that now serves as the primary mobile client and React-based web surface.
+- `apps/mobile`: Expo app that serves as the primary mobile client and React-based web surface.
 - `apps/desktop/shell`: Tauri wrapper around the Expo web build.
-- `apps/marketing/site`: Static marketing/legal pages only.
 
 ## Design Patterns
 - **Event Bus**: AgentEventBus as central dispatcher.
@@ -46,6 +42,120 @@ Repository-level engineering guardrails for Krusty - an AI coding assistant CLI/
 - Error handling: anyhow + thiserror + custom error enum.
 - Logging: tracing + tracing_subscriber.
 - Async: tokio (no async-std).
+
+## Crate Boundaries
+- `krusty-cli`: terminal UX only. Do not re-implement core runtime logic here.
+- `krusty-core`: shared runtime. All shared business logic lives here.
+- `krusty-server`: HTTP API. Keep route handlers thin; push shared logic into core.
+- Move shared logic to `krusty-core`; avoid duplication across CLI/server.
+
+## Module-Specific Invariants
+
+### AI Provider Layer (`crates/krusty-core/src/ai/`)
+- Keep provider-specific quirks isolated from shared response models.
+- Keep model-family prompt behavior in shared profiles; streaming and simple/conversation calls must build the same instruction layers.
+- Keep provider request/stream normalization in the shared AI transform layer; avoid scattering provider patches across individual transport call-sites.
+- Streaming behavior must be robust to partial/malformed provider events.
+- Parser changes must preserve existing tool/thinking/message semantics.
+- Keep curated direct-provider model catalogs aligned with product-supported IDs; when a provider adds fast or effort variants, update static fallbacks and dynamic filtering together.
+
+### Tool System (`crates/krusty-core/src/tools/`)
+- Tool argument parsing and error surfaces are user-facing contracts.
+- Keep permission/approval semantics explicit and conservative.
+- Avoid hidden filesystem/network side effects in tool implementations.
+- Prefer structured tool result envelopes (`ok`, `data`, `error`, optional `warnings`/`metadata`) over ad-hoc plain strings.
+- Delegated tool surfaces (subagents, remote MCP wrappers) must carry inherited governance metadata and enforce parent permission constraints.
+- Keep filesystem path policy owned by `ToolContext`/registry logic; do not reintroduce duplicate standalone path-validation helpers.
+
+### Storage (`crates/krusty-core/src/storage/`)
+- Migration safety first: schema changes must be forward-only and tested.
+- Keep read/write behavior explicit and transaction-aware.
+- Keep interrupted-turn recovery state separate from canonical conversation history.
+- Keep runtime traces compact and structured; persist summarized diagnostic payloads rather than raw stream dumps unless exact replay fidelity is required by design.
+- Linked-session persistence must preserve parent ownership metadata so pinch/continuation flows do not escape multi-tenant boundaries.
+- For push reliability changes, keep `database.rs`, `push_subscriptions.rs`, and `push_delivery_attempts.rs` aligned.
+- Never log sensitive credentials.
+
+### Agent Core (`crates/krusty-core/src/`)
+- Keep subsystem contracts explicit between AI, tools, storage, plugins, and protocols.
+- Prefer typed boundaries over ad-hoc JSON passing.
+- Keep live compaction separate from pinch/session handoff; do not use pinch as the default overflow path.
+- Keep loop budgets and streaming timeouts explicit and shared across callers; do not hide behavioral caps inside transport layers.
+- Keep UI-facing tool output separate from model-facing history retention; long raw tool output should not be preserved in conversation history unless the exact payload is still needed for the next turn.
+- Keep agent tool approval/retry/result policy centralized in the agent control layer rather than embedding it ad hoc in transport or tool implementation code.
+- Keep delegated execution (subagents, MCP, extensions, skills) on explicit inherited governance contracts for permission mode and turn budget; delegated paths must not silently bypass parent policy.
+- Resolve delegated turn budgets and permission mode from the shared contract at execution time; do not duplicate drift-prone defaults across subagent or route surfaces.
+- Keep plan lifecycle state canonical in core helpers; active-vs-archived plan resolution and effective work mode must not be re-derived independently in UI or server layers.
+- Capture runtime observability from the canonical `LoopEvent` boundary; do not add drift-prone provider/tool/UI-specific trace streams for the same execution path.
+
+### Server Routes (`crates/krusty-server/src/routes/`)
+- Keep request/response shapes synchronized with CLI, web, and mobile clients.
+- Validate and sanitize all user inputs before side effects.
+- Preserve streaming route stability and backpressure behavior.
+- Chat routes must honor persisted session model unless an explicit per-request override is provided.
+- Session routes must keep `working_dir` as runtime source-of-truth and treat `target_branch` as optional session intent metadata.
+- Session creation, read, pinch, and approval routes must preserve multi-tenant ownership end-to-end.
+- Tool approval routes must stay contract-aligned with mobile/web notification surfaces by accepting explicit session-targeted approvals and surfacing delivery failures.
+- Session presence routes must stay ownership-checked, server-authored, and stale-aware.
+- Tool execution routes must pass the same governance context as orchestrated runs (permission mode, delegated turn budget, and extensibility managers).
+- Direct tool execution must keep `working_dir` scoped to the same allowed workspace root as the rest of the server file/path surfaces.
+- Chat streaming must keep a bounded queue with explicit lag signaling; never let a slow SSE client silently stall or redefine core loop semantics.
+- Auth and credential routes for dynamic-model providers should refresh shared model catalogs eagerly.
+- Push endpoints (`/push/*`) must stay aligned with mobile/web diagnostics and test-send flows.
+- Port proxy endpoints (`/ports/*`) must remain localhost-scoped and deny recursive self-proxy loops.
+
+### TUI (`crates/krusty-cli/src/tui/`)
+- Protect frame-time performance and input responsiveness. Avoid heavy allocations in render/event hot paths.
+- Keep streaming updates idempotent and visually stable.
+- Keep stream backpressure policy, queue telemetry, and interruption recovery messaging explicit in shared TUI state/handlers.
+- Handle partial stream events safely; never panic on malformed chunks.
+- Drain bursty stream output incrementally; do not let a single stream monopolize a frame and starve input/render.
+- Plan/task UI state must come from persisted plan lifecycle or explicit loop events, not heuristic parsing of assistant prose.
+- Keep contrast/readability strong in both dense and sparse views. Theme additions must update registry wiring and defaults intentionally. Avoid hardcoding colors outside theme primitives.
+
+### TUI Handlers (`crates/krusty-cli/src/tui/handlers/`)
+- Keep keyboard/mouse/render handling deterministic.
+- Keep session/tool side effects explicit and traceable.
+- Keep model selection and quick-toggle flows on a shared handler path so persistence, auth rebinds, and recent-model state do not drift.
+
+### Extensions & WIT (`crates/krusty-core/src/extensions/`, `wit/`)
+- Treat WIT and extension host changes as ABI-sensitive.
+- Keep manifest parsing strict and error messages actionable.
+- Preserve compatibility rules across extension API versions.
+- Version contract changes intentionally; avoid silent breaking renames.
+- Keep generated/runtime expectations synchronized across crates.
+
+### Plugins (`crates/krusty-core/src/plugins/`)
+- Treat plugin install/update flows as security-sensitive.
+- Verify trust and signature requirements before writing plugin artifacts.
+- Keep lockfile and on-disk state transitions atomic and recoverable.
+- Error messages must clearly distinguish trust failures from IO failures.
+
+### Apps (`apps/`)
+- Preserve strict separation between app surfaces and core runtime internals.
+- Do not duplicate business logic that already exists in `krusty-core` or `krusty-server`.
+- Keep desktop and Expo web behavior aligned where features overlap.
+- Keep model-speed and reasoning controls driven by shared client state or server contracts rather than ad-hoc component-local mappings.
+- Notification and Live Activity actions that mutate session state must carry explicit session context; never assume the currently focused chat is the correct target.
+- Desktop shell is a host for the Expo web build, not a separate product surface. Keep desktop-specific code focused on windowing, permissions, startup wiring, and packaging.
+- Treat Tauri permissions, deep links, and updater config as security-sensitive.
+
+### CI/CD (`.github/`)
+- Treat workflow changes as production-impacting.
+- Keep CI reproducible and aligned with local developer commands.
+- Avoid secret leakage in logs and artifact names.
+- Keep release workflows backward-compatible for existing tags and packaging paths.
+
+### Packaging (`aur/`)
+- Keep PKGBUILD/install scripts aligned with released artifacts.
+- Avoid distro-specific assumptions in core runtime logic.
+- Any packaging change should preserve clean install/upgrade paths.
+
+### Git Hooks (`.githooks/`)
+- Keep hooks deterministic and quick.
+- Prefer local checks; avoid network-dependent commands.
+- Fail with clear, actionable error messages.
+- Any new hook must not duplicate CI logic unnecessarily.
 
 ## Default Dev Workflow
 - Build and run current local code only; do not require `git pull` for day-to-day refinement.

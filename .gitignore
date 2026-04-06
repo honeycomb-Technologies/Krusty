@@ -1,7 +1,6 @@
 # Krusty Dev .gitignore
 
-# Internal documentation and plans
-docs/
+# Internal configuration
 CLAUDE.md
 
 # Build outputs
