@@ -36,6 +36,7 @@ interface ChatStreamProps {
   progress: number;
   toolApprovalId?: string;
   toolApprovalName?: string;
+  toolApprovalSessionId?: string;
 }
 
 function formatElapsed(seconds: number): string {
@@ -58,6 +59,7 @@ const ChatStreamActivity: LiveActivityComponent<ChatStreamProps> = (props) => {
     progress,
     toolApprovalId,
     toolApprovalName,
+    toolApprovalSessionId,
   } = props;
 
   const statusColor =
@@ -141,16 +143,18 @@ const ChatStreamActivity: LiveActivityComponent<ChatStreamProps> = (props) => {
           modifiers={[foregroundStyle(statusColor)]}
         />
 
-        {status === "awaiting_approval" && toolApprovalId && (
+        {status === "awaiting_approval" &&
+          toolApprovalId &&
+          toolApprovalSessionId && (
           <HStack spacing={12}>
             <Button
-              target={`deny:${toolApprovalId}`}
+              target={`deny:${encodeURIComponent(toolApprovalSessionId)}:${encodeURIComponent(toolApprovalId)}`}
               role="destructive"
               label="Deny"
               modifiers={[frame({ maxWidth: 999 })]}
             />
             <Button
-              target={`approve:${toolApprovalId}`}
+              target={`approve:${encodeURIComponent(toolApprovalSessionId)}:${encodeURIComponent(toolApprovalId)}`}
               label="Approve"
               modifiers={[frame({ maxWidth: 999 })]}
             />

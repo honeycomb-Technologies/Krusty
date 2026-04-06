@@ -512,11 +512,18 @@ async fn tool_approval(
     user: Option<CurrentUser>,
     Json(req): Json<ToolApprovalRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    submit_tool_approval(&state, user.as_ref(), req).await
+}
+
+pub(crate) async fn submit_tool_approval(
+    state: &AppState,
+    user: Option<&CurrentUser>,
+    req: ToolApprovalRequest,
+) -> Result<Json<serde_json::Value>, AppError> {
     let session_manager = SessionManager::new(Database::new(&state.db_path)?);
-    if !session_manager.verify_session_ownership(
-        &req.session_id,
-        user.as_ref().and_then(|u| u.0.user_id.as_deref()),
-    )? {
+    if !session_manager
+        .verify_session_ownership(&req.session_id, user.and_then(|u| u.0.user_id.as_deref()))?
+    {
         return Err(AppError::NotFound(format!(
             "Session {} not found",
             req.session_id
@@ -527,10 +534,17 @@ async fn tool_approval(
     let sender = inputs
         .get(&req.session_id)
         .ok_or_else(|| AppError::NotFound("No active session".into()))?;
-    let _ = sender.send(LoopInput::ToolApproval {
-        tool_call_id: req.tool_call_id,
-        approved: req.approved,
-    });
+    sender
+        .send(LoopInput::ToolApproval {
+            tool_call_id: req.tool_call_id,
+            approved: req.approved,
+        })
+        .map_err(|_| {
+            AppError::Conflict(format!(
+                "Session {} is no longer accepting tool approvals",
+                req.session_id
+            ))
+        })?;
     Ok(Json(json!({"status": "ok"})))
 }
 
@@ -1175,6 +1189,39 @@ mod tests {
 
         assert!(matches!(result, Err(AppError::NotFound(_))));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn tool_approval_rejects_closed_session_channel() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let session_id = session_manager
+            .create_session_for_user("Owned Session", None, None, Some("alice"))
+            .expect("session creation should succeed");
+
+        let (tx, rx) = mpsc::unbounded_channel::<LoopInput>();
+        drop(rx);
+        state
+            .session_inputs
+            .write()
+            .await
+            .insert(session_id.clone(), tx);
+
+        let result = tool_approval(
+            State(state),
+            Some(current_user("alice", std::path::Path::new("/tmp"))),
+            Json(ToolApprovalRequest {
+                session_id,
+                tool_call_id: "tool-1".to_string(),
+                approved: true,
+            }),
+        )
+        .await;
+
+        assert!(matches!(result, Err(AppError::Conflict(_))));
     }
 
     #[tokio::test]

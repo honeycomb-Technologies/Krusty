@@ -87,7 +87,11 @@ async function registerForPushNotifications(): Promise<string | null> {
 
 interface UseNotificationsOptions {
   serverUrl?: string;
-  onToolApproval?: (requestId: string, approved: boolean) => void;
+  onToolApproval?: (
+    sessionId: string,
+    requestId: string,
+    approved: boolean,
+  ) => void;
   onNavigate?: (route: string, params?: Record<string, string>) => void;
 }
 
@@ -124,10 +128,10 @@ export function useNotifications(options?: UseNotificationsOptions) {
           string
         >;
 
-        if (actionId === "APPROVE" && data.requestId) {
-          options?.onToolApproval?.(data.requestId, true);
-        } else if (actionId === "DENY" && data.requestId) {
-          options?.onToolApproval?.(data.requestId, false);
+        if (actionId === "APPROVE" && data.requestId && data.sessionId) {
+          options?.onToolApproval?.(data.sessionId, data.requestId, true);
+        } else if (actionId === "DENY" && data.requestId && data.sessionId) {
+          options?.onToolApproval?.(data.sessionId, data.requestId, false);
         } else if (actionId === "VIEW" && data.sessionId) {
           options?.onNavigate?.("/(tabs)", { sessionId: data.sessionId });
         } else if (actionId === "VIEW_REPORT") {

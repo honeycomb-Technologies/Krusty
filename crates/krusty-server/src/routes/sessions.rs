@@ -18,11 +18,12 @@ use krusty_core::SessionManager;
 use crate::auth::CurrentUser;
 use crate::error::AppError;
 use crate::presence::{remove_presence, snapshot_presence, upsert_presence, SessionPresenceRecord};
+use crate::routes::chat::submit_tool_approval;
 use crate::types::{
     CreateSessionRequest, MessageResponse, PinchRequest, PinchResponse,
     SessionPresenceClientResponse, SessionPresenceHeartbeatRequest, SessionPresenceResponse,
     SessionResponse, SessionStateResponse, SessionTraceResponse, SessionWithMessagesResponse,
-    UpdateSessionRequest,
+    ToolApprovalRequest, UpdateSessionRequest,
 };
 use crate::AppState;
 
@@ -51,6 +52,12 @@ pub struct GetSessionTraceQuery {
     pub after_sequence: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SessionToolApprovalRequest {
+    tool_call_id: String,
+    approved: bool,
+}
+
 /// Build the sessions router
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -73,6 +80,7 @@ pub fn router() -> Router<AppState> {
             axum::routing::delete(remove_session_presence),
         )
         .route("/:id/pinch", post(pinch_session))
+        .route("/:id/tool-approval", post(tool_approval_for_session))
 }
 
 fn normalize_requested_workspace(
@@ -128,6 +136,24 @@ async fn list_sessions(
     let response: Vec<SessionResponse> = sessions.into_iter().map(Into::into).collect();
 
     Ok(Json(response))
+}
+
+async fn tool_approval_for_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    user: Option<CurrentUser>,
+    Json(req): Json<SessionToolApprovalRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    submit_tool_approval(
+        &state,
+        user.as_ref(),
+        ToolApprovalRequest {
+            session_id,
+            tool_call_id: req.tool_call_id,
+            approved: req.approved,
+        },
+    )
+    .await
 }
 
 /// List all directories that have sessions

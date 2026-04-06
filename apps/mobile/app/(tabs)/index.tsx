@@ -46,6 +46,7 @@ import type { ModelInfo, SessionResponse, SessionType } from "@krusty/api";
 import type {
   Attachment as SessionAttachment,
   ChatMessage,
+  PermissionMode,
   ThinkingLevel,
   ToolCall,
 } from "@krusty/state";
@@ -146,6 +147,7 @@ export default function ChatScreen() {
   const isThinking = useSessionStore((state) => state.isThinking);
   const model = useSessionStore((state) => state.model);
   const thinkingLevel = useSessionStore((state) => state.thinkingLevel);
+  const permissionMode = useSessionStore((state) => state.permissionMode);
   const mode = useSessionStore((state) => state.mode);
   const tokenCount = useSessionStore((state) => state.tokenCount);
   const error = useSessionStore((state) => state.error);
@@ -188,22 +190,32 @@ export default function ChatScreen() {
     lastAssistantMessage?.content?.slice(0, 200) ?? "";
 
   const handleToolApprovalAction = useCallback(
-    async (toolCallId: string, approved: boolean) => {
+    async (targetSessionId: string, toolCallId: string, approved: boolean) => {
+      if (!targetSessionId || activeToolCallId) {
+        return;
+      }
+
       const currentSessionId = sessionStore.getState().sessionId;
-      if (!currentSessionId || activeToolCallId) {
+      if (!currentSessionId && !client) {
         return;
       }
 
       setActiveToolCallId(toolCallId);
       try {
-        await sessionStore.getState().submitToolApproval(toolCallId, approved);
+        if (currentSessionId === targetSessionId) {
+          await sessionStore.getState().submitToolApproval(toolCallId, approved);
+        } else if (client) {
+          await client.submitToolApproval(targetSessionId, toolCallId, approved);
+        }
       } catch {
-        await sessionStore.getState().loadSession(currentSessionId, true);
+        if (currentSessionId === targetSessionId) {
+          await sessionStore.getState().loadSession(targetSessionId, true);
+        }
       } finally {
         setActiveToolCallId(null);
       }
     },
-    [activeToolCallId, sessionStore],
+    [activeToolCallId, client, sessionStore],
   );
 
   const { startActivity, updateActivity, endActivity } = useLiveActivity({
@@ -356,6 +368,7 @@ export default function ChatScreen() {
         progress: awaitingApproval ? 0.85 : isStreaming ? 0.5 : 1,
         toolApprovalId: awaitingApproval?.id,
         toolApprovalName: awaitingApproval?.name,
+        toolApprovalSessionId: awaitingApproval ? sessionId ?? undefined : undefined,
       });
     } else if (liveActivityOpenRef.current) {
       endActivity();
@@ -796,6 +809,10 @@ export default function ChatScreen() {
           thinkingLevel={thinkingLevel as ThinkingLevel}
           onThinkingChange={(level) =>
             sessionStore.getState().setThinkingLevel(level)
+          }
+          permissionMode={permissionMode as PermissionMode}
+          onPermissionModeToggle={() =>
+            sessionStore.getState().togglePermissionMode()
           }
           fastModeEnabled={fastModeEnabled}
           fastModeSupported={fastModeSupported}

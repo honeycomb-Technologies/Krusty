@@ -26,10 +26,35 @@ interface StreamState {
   progress: number;
   toolApprovalId?: string;
   toolApprovalName?: string;
+  toolApprovalSessionId?: string;
 }
 
 interface UseLiveActivityOptions {
-  onToolApproval?: (id: string, approved: boolean) => void;
+  onToolApproval?: (
+    sessionId: string,
+    id: string,
+    approved: boolean,
+  ) => void;
+}
+
+function parseApprovalTarget(
+  target: string,
+  prefix: 'approve:' | 'deny:',
+): { sessionId: string; toolCallId: string } | null {
+  if (!target.startsWith(prefix)) {
+    return null;
+  }
+
+  const payload = target.slice(prefix.length);
+  const separatorIndex = payload.indexOf(':');
+  if (separatorIndex === -1) {
+    return null;
+  }
+
+  return {
+    sessionId: decodeURIComponent(payload.slice(0, separatorIndex)),
+    toolCallId: decodeURIComponent(payload.slice(separatorIndex + 1)),
+  };
 }
 
 export function useLiveActivity(options?: UseLiveActivityOptions) {
@@ -44,12 +69,27 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
 
     const sub = addUserInteractionListener((event) => {
       const target = event.target;
-      if (target.startsWith('approve:')) {
-        const id = target.slice('approve:'.length);
-        options?.onToolApproval?.(id, true);
-      } else if (target.startsWith('deny:')) {
-        const id = target.slice('deny:'.length);
-        options?.onToolApproval?.(id, false);
+      if (typeof target !== 'string') {
+        return;
+      }
+
+      const approvedAction = parseApprovalTarget(target, 'approve:');
+      if (approvedAction) {
+        options?.onToolApproval?.(
+          approvedAction.sessionId,
+          approvedAction.toolCallId,
+          true,
+        );
+        return;
+      }
+
+      const deniedAction = parseApprovalTarget(target, 'deny:');
+      if (deniedAction) {
+        options?.onToolApproval?.(
+          deniedAction.sessionId,
+          deniedAction.toolCallId,
+          false,
+        );
       }
     });
 

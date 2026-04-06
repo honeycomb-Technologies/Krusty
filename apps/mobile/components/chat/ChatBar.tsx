@@ -28,6 +28,7 @@ import { Waveform } from './Waveform';
 import { CrabIcon } from '../ui/CrabIcon';
 import Svg, { Circle } from 'react-native-svg';
 import type { ThinkingLevel, ModelInfo, SessionType } from '@krusty/api';
+import type { PermissionMode } from '@krusty/state';
 
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from '../../platform/speech';
 
@@ -46,6 +47,8 @@ interface ChatBarProps {
   disabled: boolean;
   thinkingLevel: ThinkingLevel;
   onThinkingChange: (level: ThinkingLevel) => void;
+  permissionMode: PermissionMode;
+  onPermissionModeToggle: () => void;
   fastModeEnabled?: boolean;
   fastModeSupported?: boolean;
   onFastModeToggle?: () => void;
@@ -68,6 +71,7 @@ export function ChatBar(props: ChatBarProps) {
   const {
     onSend, onStop, isStreaming, disabled,
     thinkingLevel, onThinkingChange,
+    permissionMode, onPermissionModeToggle,
     fastModeEnabled, fastModeSupported, onFastModeToggle,
     mode, onModeToggle, onModelSelect, model, models,
     sessionType, researchEnabled, onResearchToggle, tokenCount,
@@ -344,6 +348,8 @@ export function ChatBar(props: ChatBarProps) {
           <AccordionControls
             thinkingLevel={thinkingLevel}
             onThinkingChange={onThinkingChange}
+            permissionMode={permissionMode}
+            onPermissionModeToggle={onPermissionModeToggle}
             fastModeEnabled={fastModeEnabled}
             fastModeSupported={fastModeSupported}
             onFastModeToggle={onFastModeToggle}

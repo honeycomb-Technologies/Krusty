@@ -324,9 +324,9 @@ export class KrustyClient {
 
   // Tools
   async submitToolApproval(sessionId: string, toolCallId: string, approved: boolean): Promise<{ status: string }> {
-    return this.request(`/sessions/${sessionId}/tool-approval`, {
+    return this.request('/chat/tool-approval', {
       method: 'POST',
-      body: JSON.stringify({ tool_call_id: toolCallId, approved }),
+      body: JSON.stringify({ session_id: sessionId, tool_call_id: toolCallId, approved }),
     });
   }
 

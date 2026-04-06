@@ -12,13 +12,16 @@ import Animated, {
   runOnJS,
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import { Brain, Hammer, Compass, Paperclip, Bot, FlaskConical, Zap } from 'lucide-react-native';
+import { Brain, Hammer, Compass, Paperclip, Bot, FlaskConical, Shield, Zap } from 'lucide-react-native';
 import { useThemeContext } from '../../hooks/useTheme';
 import { cycleThinkingLevel, type ThinkingLevel } from '@krusty/api';
+import type { PermissionMode } from '@krusty/state';
 
 interface AccordionControlsProps {
   thinkingLevel: ThinkingLevel;
   onThinkingChange: (level: ThinkingLevel) => void;
+  permissionMode: PermissionMode;
+  onPermissionModeToggle: () => void;
   fastModeEnabled?: boolean;
   fastModeSupported?: boolean;
   onFastModeToggle?: () => void;
@@ -123,6 +126,8 @@ function AccordionPill({
 export function AccordionControls({
   thinkingLevel,
   onThinkingChange,
+  permissionMode,
+  onPermissionModeToggle,
   fastModeEnabled = false,
   fastModeSupported = false,
   onFastModeToggle,
@@ -141,6 +146,7 @@ export function AccordionControls({
   const [flashThinking, setFlashThinking] = useState<string | null>(null);
   const [flashMode, setFlashMode] = useState<string | null>(null);
   const [flashFast, setFlashFast] = useState<string | null>(null);
+  const [flashPermission, setFlashPermission] = useState<string | null>(null);
   const isChat = sessionType === 'chat';
 
   const handleThinking = () => {
@@ -181,6 +187,13 @@ export function AccordionControls({
     setTimeout(() => setFlashFast(null), 1200);
   };
 
+  const handlePermissionMode = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    onPermissionModeToggle();
+    setFlashPermission(permissionMode === 'supervised' ? 'Auto' : 'Ask');
+    setTimeout(() => setFlashPermission(null), 1200);
+  };
+
   const handleModel = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     onModelSelect();
@@ -203,20 +216,20 @@ export function AccordionControls({
       {/* Floating accordion pills */}
       <GestureDetector gesture={swipeDown}>
         <Animated.View style={styles.pillColumn}>
-          <AccordionPill index={4} isOpen={isOpen} onPress={handleModel} flashLabel={null}>
+          <AccordionPill index={5} isOpen={isOpen} onPress={handleModel} flashLabel={null}>
             <Bot size={24} color={t.mutedForeground} strokeWidth={1.6} />
           </AccordionPill>
 
-          <AccordionPill index={3} isOpen={isOpen} onPress={handleAttach} flashLabel={null}>
+          <AccordionPill index={4} isOpen={isOpen} onPress={handleAttach} flashLabel={null}>
             <Paperclip size={24} color={t.mutedForeground} strokeWidth={1.6} />
           </AccordionPill>
 
           {isChat ? (
-            <AccordionPill index={2} isOpen={isOpen} onPress={handleResearch} flashLabel={flashMode}>
+            <AccordionPill index={3} isOpen={isOpen} onPress={handleResearch} flashLabel={flashMode}>
               <FlaskConical size={24} color={researchEnabled ? t.thinking : t.mutedForeground} strokeWidth={1.6} />
             </AccordionPill>
           ) : (
-            <AccordionPill index={2} isOpen={isOpen} onPress={handleMode} flashLabel={flashMode}>
+            <AccordionPill index={3} isOpen={isOpen} onPress={handleMode} flashLabel={flashMode}>
               {mode === 'build' ? (
                 <Hammer size={24} color={t.mutedForeground} strokeWidth={1.6} />
               ) : (
@@ -224,6 +237,14 @@ export function AccordionControls({
               )}
             </AccordionPill>
           )}
+
+          <AccordionPill index={2} isOpen={isOpen} onPress={handlePermissionMode} flashLabel={flashPermission}>
+            <Shield
+              size={24}
+              color={permissionMode === 'autonomous' ? t.warning : t.success}
+              strokeWidth={1.6}
+            />
+          </AccordionPill>
 
           {fastModeSupported && (
             <AccordionPill index={1} isOpen={isOpen} onPress={handleFastMode} flashLabel={flashFast}>

@@ -12,6 +12,7 @@ HTTP route handlers and endpoint contracts.
 - Session trace/diagnostic endpoints must expose core-derived summaries and events, not rebuild telemetry from route-local heuristics.
 - Session routes should share common session-manager/session-loading helpers rather than duplicating existence and ownership plumbing per handler.
 - Session creation, read, pinch, and approval routes must preserve multi-tenant ownership end-to-end; never create or expose a session without binding it back to the authenticated user context when one exists.
+- Tool approval routes must stay contract-aligned with mobile/web notification surfaces by accepting explicit session-targeted approvals and surfacing delivery failures instead of silently reporting success.
 - Session presence routes must stay ownership-checked, server-authored, and stale-aware; clients may heartbeat state but must not become the authority for session truth.
 - Tool execution routes must pass the same governance context as orchestrated runs (permission mode, delegated turn budget, and extensibility managers) so direct execution does not silently diverge from core behavior.
 - Direct tool execution must keep `working_dir` scoped to the same allowed workspace root as the rest of the server file/path surfaces.
