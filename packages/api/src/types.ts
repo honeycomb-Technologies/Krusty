@@ -255,6 +255,7 @@ export interface DelegatedRunResponse {
 // ============================================================================
 
 export type MakoRuntimeStatus = 'idle' | 'running' | 'sleeping' | 'awaiting_input' | 'paused' | 'error' | 'cancelled';
+export type MakoHomeStatus = 'awake' | 'sleeping' | 'paused' | 'blocked' | 'idle';
 export type AutonomousTaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 
 export interface MakoDispatchResponse {
@@ -307,6 +308,47 @@ export interface MakoSessionStatus {
   tasks: AutonomousTask[];
   agent_state: string;
   runtime?: MakoRuntimeState | null;
+}
+
+export interface MakoCurrentRunSummary {
+  session_id: string;
+  title: string;
+  updated_at: string;
+  project_dir?: string | null;
+  agent_state: string;
+  runtime?: MakoRuntimeState | null;
+  pending_tasks: number;
+  in_progress_tasks: number;
+  completed_tasks: number;
+  failed_tasks: number;
+  blocked_tasks: number;
+}
+
+export interface MakoStatusSummary {
+  home_status: MakoHomeStatus;
+  total_count: number;
+  running_count: number;
+  sleeping_count: number;
+  paused_count: number;
+  waiting_count: number;
+  failed_count: number;
+  idle_count: number;
+  pending_approvals_count: number;
+  next_wake_at?: string | null;
+}
+
+export interface MakoCurrentResponse {
+  status: MakoStatusSummary;
+  runs: MakoCurrentRunSummary[];
+}
+
+export interface MakoRunWakeEvent {
+  id: string;
+  timestamp: string;
+  title: string;
+  detail?: string | null;
+  kind: 'runtime' | 'task';
+  status: string;
 }
 
 // ============================================================================
