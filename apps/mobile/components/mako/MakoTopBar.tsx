@@ -3,11 +3,14 @@ import { ArrowLeft, Menu } from "lucide-react-native";
 import * as Haptics from "../../platform/haptics";
 import { useThemeContext } from "../../hooks/useTheme";
 import { MakoStatusBadge } from "./MakoStatusBadge";
+import { getRuntimeLabel } from "./utils";
 
 interface MakoTopBarProps {
   title: string;
   subtitle?: string;
   status: string;
+  titleStatus?: string | null;
+  showStatusBadge?: boolean;
   onBack?: () => void;
   onOpenMenu?: () => void;
 }
@@ -16,12 +19,15 @@ export function MakoTopBar({
   title,
   subtitle,
   status,
+  titleStatus,
+  showStatusBadge = true,
   onBack,
   onOpenMenu,
 }: MakoTopBarProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
   const hasAction = Boolean(onBack || onOpenMenu);
+  const inlineStatus = titleStatus ? `(${getRuntimeLabel(titleStatus)})` : null;
 
   return (
     <View style={styles.wrap}>
@@ -46,9 +52,19 @@ export function MakoTopBar({
         )}
 
         <View style={styles.copy}>
-          <Text style={[styles.title, { color: t.foreground }]} numberOfLines={1}>
-            {title}
-          </Text>
+          <View style={styles.titleRow}>
+            <Text style={[styles.title, { color: t.foreground }]} numberOfLines={1}>
+              {title}
+            </Text>
+            {inlineStatus ? (
+              <Text
+                style={[styles.titleStatus, { color: t.mutedForeground }]}
+                numberOfLines={1}
+              >
+                {inlineStatus}
+              </Text>
+            ) : null}
+          </View>
           {subtitle ? (
             <Text
               style={[styles.subtitle, { color: t.mutedForeground }]}
@@ -59,7 +75,7 @@ export function MakoTopBar({
           ) : null}
         </View>
 
-        <MakoStatusBadge status={status} />
+        {showStatusBadge ? <MakoStatusBadge status={status} /> : null}
       </View>
     </View>
   );
@@ -90,10 +106,22 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
   },
+  titleRow: {
+    flexDirection: "row",
+    alignItems: "baseline",
+    gap: 8,
+  },
   title: {
     fontSize: 24,
     fontWeight: "700",
     letterSpacing: -0.5,
+    flexShrink: 1,
+  },
+  titleStatus: {
+    fontSize: 14,
+    fontWeight: "600",
+    letterSpacing: 0.2,
+    textTransform: "lowercase",
   },
   subtitle: {
     marginTop: 3,

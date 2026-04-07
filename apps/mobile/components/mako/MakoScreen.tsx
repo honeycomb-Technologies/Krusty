@@ -74,6 +74,8 @@ export function MakoScreen({
             title="Mako"
             subtitle="Always Swimming."
             status={status}
+            titleStatus={status}
+            showStatusBadge={false}
             onOpenMenu={!isDesktop ? onOpenMenu : undefined}
           />
 
