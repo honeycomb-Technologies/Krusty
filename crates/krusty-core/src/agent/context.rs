@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tokio::sync::RwLock;
+use tracing::warn;
 
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::plan::PlanManager;
@@ -33,6 +34,7 @@ const PROJECT_FILES: &[&str] = &[
     "JULES.md",
     "gemini.md",
 ];
+const MAKO_FILES: &[&str] = &["MAKO.md", "mako.md"];
 
 /// Build a conversation clone with context system messages prepended.
 ///
@@ -92,6 +94,11 @@ pub fn inject_context(
     let coordinator_ctx = build_coordinator_context(session_type.unwrap_or("code"));
     let skills_ctx = build_skills_context(skills_manager, project_dir.is_some());
     let project_ctx = project_dir.map(build_project_context).unwrap_or_default();
+    let mako_ctx = if session_type == Some("mako") {
+        build_mako_context(project_dir.unwrap_or(working_dir))
+    } else {
+        String::new()
+    };
     let project_settings = project_dir.map(ProjectSettings::load).unwrap_or_default();
 
     let mut injected = Vec::with_capacity(conversation.len() + 8);
@@ -120,6 +127,12 @@ pub fn inject_context(
         injected.push(ModelMessage {
             role: Role::System,
             content: vec![Content::Text { text: project_ctx }],
+        });
+    }
+    if !mako_ctx.is_empty() {
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text { text: mako_ctx }],
         });
     }
     if let Some(ref append) = project_settings.system_prompt_append {
@@ -720,6 +733,33 @@ pub fn build_project_context(working_dir: &Path) -> String {
     sections.join("\n\n")
 }
 
+fn build_mako_context(project_root: &Path) -> String {
+    let Some(path) = discover_named_file(project_root, MAKO_FILES) else {
+        return String::new();
+    };
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) => {
+            warn!(path = %path.display(), error = %error, "Failed to read Mako identity file");
+            return String::new();
+        }
+    };
+    if content.trim().is_empty() {
+        return String::new();
+    }
+
+    let label = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("MAKO.md");
+
+    format!(
+        "[MAKO IDENTITY - {}]\n\n{}\n\n[END MAKO IDENTITY]",
+        label, content
+    )
+}
+
 fn discover_instruction_files(working_dir: &Path) -> Vec<PathBuf> {
     let start = working_dir
         .canonicalize()
@@ -755,6 +795,13 @@ fn discover_instruction_files(working_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
+fn discover_named_file(base_dir: &Path, candidates: &[&str]) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .map(|name| base_dir.join(name))
+        .find(|path| path.is_file())
+}
+
 fn discover_project_root(working_dir: &Path) -> &Path {
     for ancestor in working_dir.ancestors() {
         if ancestor.join(".git").exists() {
@@ -766,7 +813,7 @@ fn discover_project_root(working_dir: &Path) -> &Path {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_project_context, inject_context};
+    use super::{build_mako_context, build_project_context, inject_context};
     use std::fs;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
@@ -793,6 +840,18 @@ mod tests {
 
         assert!(context.contains("root instructions"));
         assert!(context.contains("nested instructions"));
+    }
+
+    #[test]
+    fn build_mako_context_loads_project_root_identity_file() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        fs::write(repo.join("MAKO.md"), "Always Swimming.").unwrap();
+
+        let context = build_mako_context(repo);
+
+        assert!(context.contains("[MAKO IDENTITY - MAKO.md]"));
+        assert!(context.contains("Always Swimming."));
     }
 
     #[test]
@@ -834,6 +893,112 @@ mod tests {
             Content::Text { text } if text.contains("[ENVIRONMENT]")
         ));
         assert_eq!(injected[2].role, Role::User);
+    }
+
+    #[test]
+    fn inject_context_includes_mako_identity_only_for_mako_sessions() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(repo.join("AGENTS.md"), "repo instructions").unwrap();
+        fs::write(repo.join("MAKO.md"), "Always Swimming.").unwrap();
+
+        let skills = RwLock::new(SkillsManager::with_defaults(repo));
+        let conversation = vec![ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "hello".to_string(),
+            }],
+        }];
+
+        let mako_injected = inject_context(
+            &conversation,
+            repo.join("krusty.db").as_path(),
+            "session-id",
+            repo,
+            Some(repo),
+            WorkMode::Build,
+            &skills,
+            None,
+            Some("mako"),
+        );
+        let code_injected = inject_context(
+            &conversation,
+            repo.join("krusty.db").as_path(),
+            "session-id",
+            repo,
+            Some(repo),
+            WorkMode::Build,
+            &skills,
+            None,
+            Some("code"),
+        );
+
+        assert!(mako_injected.iter().any(|message| {
+            matches!(
+                &message.content[0],
+                Content::Text { text } if text.contains("[MAKO IDENTITY - MAKO.md]") && text.contains("Always Swimming.")
+            )
+        }));
+        assert!(!code_injected.iter().any(|message| {
+            matches!(
+                &message.content[0],
+                Content::Text { text } if text.contains("[MAKO IDENTITY - MAKO.md]")
+            )
+        }));
+    }
+
+    #[test]
+    fn inject_context_places_mako_identity_before_project_settings() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(repo.join(".krusty")).unwrap();
+        fs::write(repo.join("AGENTS.md"), "repo instructions").unwrap();
+        fs::write(repo.join("MAKO.md"), "Always Swimming.").unwrap();
+        fs::write(
+            repo.join(".krusty").join("settings.json"),
+            r#"{ "system_prompt_append": "Project append." }"#,
+        )
+        .unwrap();
+
+        let skills = RwLock::new(SkillsManager::with_defaults(repo));
+        let conversation = vec![ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "hello".to_string(),
+            }],
+        }];
+
+        let injected = inject_context(
+            &conversation,
+            repo.join("krusty.db").as_path(),
+            "session-id",
+            repo,
+            Some(repo),
+            WorkMode::Build,
+            &skills,
+            None,
+            Some("mako"),
+        );
+
+        let texts = injected
+            .iter()
+            .filter_map(|message| match &message.content[0] {
+                Content::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mako_index = texts
+            .iter()
+            .position(|text| text.contains("[MAKO IDENTITY - MAKO.md]"))
+            .unwrap();
+        let settings_index = texts
+            .iter()
+            .position(|text| text.contains("[PROJECT SETTINGS]"))
+            .unwrap();
+
+        assert!(mako_index < settings_index);
     }
 
     #[test]
