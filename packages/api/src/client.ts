@@ -26,8 +26,11 @@ import type {
   McpServerResponse,
   McpToolResponse,
   SkillInfo,
+  AgentMemory,
   Report,
   ReportSummary,
+  MemoryType,
+  PromoteReportToMemoryResponse,
   MakoDispatchResponse,
   MakoCurrentResponse,
   MakoRunPriority,
@@ -385,6 +388,33 @@ export class KrustyClient {
 
   async getReport(id: string): Promise<Report> {
     return this.request(`/reports/${id}`);
+  }
+
+  async promoteReportToMemory(
+    id: string,
+    options?: { memoryType?: MemoryType },
+  ): Promise<PromoteReportToMemoryResponse> {
+    return this.request(`/reports/${id}/promote`, {
+      method: 'POST',
+      body: JSON.stringify({
+        memory_type: options?.memoryType ?? undefined,
+      }),
+    });
+  }
+
+  async getMemories(
+    projectDir?: string,
+    memoryType?: MemoryType,
+  ): Promise<{ memories: AgentMemory[] }> {
+    const params = new URLSearchParams();
+    if (projectDir) {
+      params.set('project_dir', projectDir);
+    }
+    if (memoryType) {
+      params.set('memory_type', memoryType);
+    }
+    const q = params.toString();
+    return this.request(`/memories${q ? `?${q}` : ''}`);
   }
 
   // Mako

@@ -269,6 +269,23 @@ export interface SimpleOkResponse {
   ok: boolean;
 }
 
+export type MemoryType = 'user' | 'feedback' | 'project' | 'reference';
+
+export interface AgentMemory {
+  id: string;
+  memory_type: MemoryType;
+  title: string;
+  content: string;
+  project_dir?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PromoteReportToMemoryResponse {
+  created: boolean;
+  memory: AgentMemory;
+}
+
 export interface AutonomousTask {
   id: string;
   session_id: string;

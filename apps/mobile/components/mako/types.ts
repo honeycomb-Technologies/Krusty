@@ -13,6 +13,8 @@ import type { Attachment as ChatBarAttachment } from "../chat/ChatBar";
 
 export type MakoTopLevelView = "current" | "runs" | "reports" | "status";
 export type MakoRunSection = "overview" | "wake" | "tasks" | "chat" | "artifacts";
+export type MakoKnowledgeView = "reports" | "memory";
+export type MakoKnowledgeScope = "workspace" | "all";
 export type { MakoCurrentRunSummary };
 
 export interface MakoChatContext {

@@ -1,15 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { useConnection } from "../../../hooks/useConnection";
 import type { Report, ReportSummary } from "@krusty/api";
-
-export type MakoReportScope = "workspace" | "all";
+import type { MakoKnowledgeScope } from "../types";
 
 export function useMakoReports(
   enabled: boolean,
   workspaceDirectory?: string | null,
 ) {
   const { client, isConnected } = useConnection();
-  const [scope, setScope] = useState<MakoReportScope>(
+  const [scope, setScope] = useState<MakoKnowledgeScope>(
     workspaceDirectory ? "workspace" : "all",
   );
   const [reports, setReports] = useState<ReportSummary[]>([]);

@@ -2,13 +2,14 @@
 
 use axum::{
     extract::{Path, Query, State},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 
-use krusty_core::storage::{Database, ReportStore};
+use krusty_core::storage::{Database, MemoryStore, MemoryType, ReportStore};
 
+use super::memories::{memory_to_response, MemoryResponse};
 use super::session_access::{current_user_id, request_workspace_scope};
 use crate::auth::CurrentUser;
 use crate::error::AppError;
@@ -48,10 +49,22 @@ pub struct ListReportsResponse {
     pub reports: Vec<ReportSummaryResponse>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PromoteReportRequest {
+    pub memory_type: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct PromoteReportResponse {
+    pub created: bool,
+    pub memory: MemoryResponse,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_reports))
         .route("/:id", get(get_report))
+        .route("/:id/promote", post(promote_report))
 }
 
 async fn list_reports(
@@ -107,6 +120,59 @@ async fn get_report(
     }))
 }
 
+async fn promote_report(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Path(id): Path<String>,
+    Json(payload): Json<PromoteReportRequest>,
+) -> Result<Json<PromoteReportResponse>, AppError> {
+    let db = Database::new(&state.db_path)?;
+    let report_store = ReportStore::new(db.clone());
+    let memory_store = MemoryStore::new(db);
+    let user_id = current_user_id(user.as_ref());
+    let report = report_store
+        .get_report_for_user(&id, user_id)?
+        .ok_or_else(|| AppError::NotFound(format!("Report {} not found", id)))?;
+
+    let memory_type = payload
+        .memory_type
+        .as_deref()
+        .unwrap_or("project")
+        .parse::<MemoryType>()
+        .map_err(AppError::BadRequest)?;
+    let memory_content = promote_report_content(&report);
+    let (memory, created) = memory_store.save_or_update_by_title(
+        memory_type,
+        &report.title,
+        &memory_content,
+        report.project_dir.as_deref(),
+        user_id,
+    )?;
+
+    Ok(Json(PromoteReportResponse {
+        created,
+        memory: memory_to_response(memory),
+    }))
+}
+
+fn promote_report_content(report: &krusty_core::storage::Report) -> String {
+    let summary = report.summary.trim();
+    if !summary.is_empty() {
+        return summary.to_string();
+    }
+
+    let mut collapsed = report
+        .content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.len() > 600 {
+        collapsed.truncate(600);
+        collapsed.push_str("...");
+    }
+    collapsed
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -125,12 +191,13 @@ mod tests {
     use krusty_core::process::ProcessRegistry;
     use krusty_core::skills::SkillsManager;
     use krusty_core::storage::{
-        credentials::CredentialStore, reports::CreateReportInput, Database, ReportStore,
+        credentials::CredentialStore, reports::CreateReportInput, Database, MemoryStore,
+        MemoryType, ReportStore,
     };
     use krusty_core::tools::registry::ToolRegistry;
     use krusty_core::SessionManager;
 
-    use super::{get_report, list_reports, ListReportsQuery};
+    use super::{get_report, list_reports, promote_report, ListReportsQuery, PromoteReportRequest};
     use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::error::AppError;
     use crate::AppState;
@@ -324,5 +391,47 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(AppError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn promote_report_creates_or_updates_project_memory() {
+        let (state, temp_dir) = create_test_state();
+        let alice_root = temp_dir.join("alice");
+        let alice_project = alice_root.join("repo");
+        std::fs::create_dir_all(&alice_project).expect("alice project should exist");
+        create_test_user(&state, "alice");
+        let report_id = seed_report(&state, "alice", "Architecture Report", &alice_project);
+
+        let Json(created_response) = promote_report(
+            State(state.clone()),
+            Some(current_user("alice", &alice_root)),
+            Path(report_id.clone()),
+            Json(PromoteReportRequest { memory_type: None }),
+        )
+        .await
+        .expect("first promotion should succeed");
+
+        assert!(created_response.created);
+        assert_eq!(created_response.memory.memory_type, MemoryType::Project.as_str());
+
+        let Json(updated_response) = promote_report(
+            State(state.clone()),
+            Some(current_user("alice", &alice_root)),
+            Path(report_id),
+            Json(PromoteReportRequest {
+                memory_type: Some("project".to_string()),
+            }),
+        )
+        .await
+        .expect("second promotion should succeed");
+
+        assert!(!updated_response.created);
+        assert_eq!(created_response.memory.id, updated_response.memory.id);
+
+        let store = MemoryStore::new(Database::new(&state.db_path).expect("database should open"));
+        let memories = store.list(Some(alice_project.to_string_lossy().as_ref()), Some("alice"));
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].title, "Architecture Report");
+        assert_eq!(memories[0].content, "summary");
     }
 }
