@@ -7,7 +7,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use krusty_core::storage::{AgentMemory, Database, MemoryStore, MemoryType};
+use krusty_core::storage::{
+    is_current_snapshot, refresh_current_snapshot, AgentMemory, Database, MemoryStore, MemoryType,
+};
 
 use super::session_access::{current_user_id, request_workspace_scope};
 use crate::auth::CurrentUser;
@@ -19,6 +21,11 @@ use crate::AppState;
 pub struct ListMemoriesQuery {
     pub project_dir: Option<String>,
     pub memory_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GetMemorySnapshotQuery {
+    pub project_dir: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,8 +44,15 @@ pub struct ListMemoriesResponse {
     pub memories: Vec<MemoryResponse>,
 }
 
+#[derive(Serialize)]
+pub struct MemorySnapshotResponse {
+    pub snapshot: Option<MemoryResponse>,
+}
+
 pub fn router() -> Router<AppState> {
-    Router::new().route("/", get(list_memories))
+    Router::new()
+        .route("/", get(list_memories))
+        .route("/snapshot", get(get_memory_snapshot))
 }
 
 pub(super) fn memory_to_response(memory: AgentMemory) -> MemoryResponse {
@@ -78,8 +92,30 @@ async fn list_memories(
     };
 
     Ok(Json(ListMemoriesResponse {
-        memories: memories.into_iter().map(memory_to_response).collect(),
+        memories: memories
+            .into_iter()
+            .filter(|memory| !is_current_snapshot(memory))
+            .map(memory_to_response)
+            .collect(),
     }))
+}
+
+async fn get_memory_snapshot(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Query(query): Query<GetMemorySnapshotQuery>,
+) -> Result<Json<MemorySnapshotResponse>, AppError> {
+    let workspace_scope = request_workspace_scope(&state, user.as_ref());
+    let project_dir = resolve_optional_workspace_path(
+        query.project_dir.as_deref(),
+        &workspace_scope.base_dir,
+        &workspace_scope.allowed_root,
+    )?;
+    let user_id = current_user_id(user.as_ref());
+    let snapshot = refresh_current_snapshot(&state.db_path, project_dir.as_deref(), user_id)?
+        .map(memory_to_response);
+
+    Ok(Json(MemorySnapshotResponse { snapshot }))
 }
 
 #[cfg(test)]
@@ -102,7 +138,7 @@ mod tests {
     use krusty_core::storage::{credentials::CredentialStore, Database, MemoryStore, MemoryType};
     use krusty_core::tools::registry::ToolRegistry;
 
-    use super::{list_memories, ListMemoriesQuery};
+    use super::{get_memory_snapshot, list_memories, GetMemorySnapshotQuery, ListMemoriesQuery};
     use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::error::AppError;
     use crate::AppState;
@@ -227,6 +263,70 @@ mod tests {
 
         assert_eq!(response.memories.len(), 1);
         assert_eq!(response.memories[0].title, "Alice Memory");
+    }
+
+    #[tokio::test]
+    async fn list_memories_hides_current_snapshot_entries() {
+        let (state, temp_dir) = create_test_state();
+        let user_root = temp_dir.join("user");
+        std::fs::create_dir_all(&user_root).expect("user root should exist");
+        seed_memory(&state, "alice", "Architecture", None, MemoryType::Project);
+        seed_memory(
+            &state,
+            "alice",
+            krusty_core::storage::CURRENT_SNAPSHOT_TITLE,
+            None,
+            MemoryType::Project,
+        );
+
+        let Json(response) = list_memories(
+            State(state),
+            Some(current_user("alice", &user_root)),
+            Query(ListMemoriesQuery {
+                project_dir: None,
+                memory_type: None,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("memory listing should succeed"));
+
+        assert_eq!(response.memories.len(), 1);
+        assert_eq!(response.memories[0].title, "Architecture");
+    }
+
+    #[tokio::test]
+    async fn get_memory_snapshot_refreshes_and_returns_snapshot() {
+        let (state, temp_dir) = create_test_state();
+        let user_root = temp_dir.join("user");
+        let project_dir = user_root.join("repo");
+        std::fs::create_dir_all(&project_dir).expect("project dir should exist");
+        std::fs::create_dir_all(&user_root).expect("user root should exist");
+
+        let memory_store =
+            MemoryStore::new(Database::new(&state.db_path).expect("database should open"));
+        memory_store
+            .save(
+                MemoryType::Project,
+                "Wake cadence",
+                "Favor a faster cadence while the queue is active.",
+                Some(project_dir.to_string_lossy().as_ref()),
+                Some("alice"),
+            )
+            .expect("memory should create");
+
+        let Json(response) = get_memory_snapshot(
+            State(state),
+            Some(current_user("alice", &user_root)),
+            Query(GetMemorySnapshotQuery {
+                project_dir: Some("repo".to_string()),
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("snapshot fetch should succeed"));
+
+        let snapshot = response.snapshot.expect("snapshot");
+        assert_eq!(snapshot.title, krusty_core::storage::CURRENT_SNAPSHOT_TITLE);
+        assert!(snapshot.content.contains("Wake cadence"));
     }
 
     #[tokio::test]

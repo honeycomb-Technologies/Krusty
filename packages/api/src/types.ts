@@ -286,6 +286,10 @@ export interface PromoteReportToMemoryResponse {
   memory: AgentMemory;
 }
 
+export interface MemorySnapshotResponse {
+  snapshot: AgentMemory | null;
+}
+
 export interface AutonomousTask {
   id: string;
   session_id: string;

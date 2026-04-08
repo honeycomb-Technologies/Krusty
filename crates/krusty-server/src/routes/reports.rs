@@ -8,7 +8,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use krusty_core::storage::reports::promote_report_content;
-use krusty_core::storage::{Database, MemoryStore, MemoryType, ReportStore};
+use krusty_core::storage::{
+    refresh_current_snapshot, Database, MemoryStore, MemoryType, ReportStore,
+};
 
 use super::memories::{memory_to_response, MemoryResponse};
 use super::session_access::{current_user_id, request_workspace_scope};
@@ -148,6 +150,7 @@ async fn promote_report(
         report.project_dir.as_deref(),
         user_id,
     )?;
+    refresh_current_snapshot(&state.db_path, report.project_dir.as_deref(), user_id)?;
 
     Ok(Json(PromoteReportResponse {
         created,
@@ -173,8 +176,8 @@ mod tests {
     use krusty_core::process::ProcessRegistry;
     use krusty_core::skills::SkillsManager;
     use krusty_core::storage::{
-        credentials::CredentialStore, reports::CreateReportInput, Database, MemoryStore,
-        MemoryType, ReportStore,
+        credentials::CredentialStore, is_current_snapshot, reports::CreateReportInput, Database,
+        MemoryStore, MemoryType, ReportStore,
     };
     use krusty_core::tools::registry::ToolRegistry;
     use krusty_core::SessionManager;
@@ -418,8 +421,12 @@ mod tests {
             Some(alice_project.to_string_lossy().as_ref()),
             Some("alice"),
         );
-        assert_eq!(memories.len(), 1);
-        assert_eq!(memories[0].title, "Architecture Report");
-        assert_eq!(memories[0].content, "summary");
+        let durable_memories: Vec<_> = memories
+            .iter()
+            .filter(|memory| !is_current_snapshot(memory))
+            .collect();
+        assert_eq!(durable_memories.len(), 1);
+        assert_eq!(durable_memories[0].title, "Architecture Report");
+        assert_eq!(durable_memories[0].content, "summary");
     }
 }

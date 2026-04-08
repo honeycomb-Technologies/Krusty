@@ -130,6 +130,28 @@ function MemoryCard({
   );
 }
 
+function SnapshotCard({ snapshot }: { snapshot: AgentMemory }) {
+  const { theme } = useThemeContext();
+  const t = theme.colors;
+
+  return (
+    <GlassCard style={styles.snapshotCard} elevated>
+      <View style={styles.snapshotHeader}>
+        <Text style={[styles.snapshotTitle, { color: t.foreground }]}>
+          Current Snapshot
+        </Text>
+        <Text style={[styles.snapshotMeta, { color: t.userMessage }]}>
+          Updated {formatRelativeTime(snapshot.updated_at)}
+        </Text>
+      </View>
+
+      <Text style={[styles.snapshotBody, { color: t.foreground }]}>
+        {snapshot.content}
+      </Text>
+    </GlassCard>
+  );
+}
+
 function MemoryDetailPane({
   memory,
 }: {
@@ -241,6 +263,8 @@ export function MakoMemoryView({
         Memory is where reports turn into durable working knowledge. Keep it concise enough to carry forward, not verbose enough to become another report archive.
       </Text>
 
+      {state.snapshot ? <SnapshotCard snapshot={state.snapshot} /> : null}
+
       <View style={styles.metricsRow}>
         <MakoInsightCard
           label="Memories"
@@ -305,7 +329,7 @@ export function MakoMemoryView({
         <Text style={[styles.error, { color: t.error }]}>{state.error}</Text>
       ) : null}
 
-      {visibleMemories.length === 0 ? (
+      {visibleMemories.length === 0 && !state.snapshot ? (
         <GlassCard style={styles.emptyCard}>
           <Text style={[styles.emptyTitle, { color: t.foreground }]}>
             {state.memories.length === 0 ? "No memories yet" : "No matching memories"}
@@ -316,7 +340,7 @@ export function MakoMemoryView({
               : "Try a different search term or memory type."}
           </Text>
         </GlassCard>
-      ) : (
+      ) : visibleMemories.length > 0 ? (
         visibleMemories.map((memory) => (
           <MemoryCard
             key={memory.id}
@@ -328,7 +352,7 @@ export function MakoMemoryView({
             }}
           />
         ))
-      )}
+      ) : null}
     </>
   );
 
@@ -449,6 +473,30 @@ const styles = StyleSheet.create({
   description: {
     fontSize: 13,
     lineHeight: 18,
+  },
+  snapshotCard: {
+    marginBottom: 0,
+  },
+  snapshotHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 12,
+    alignItems: "flex-start",
+  },
+  snapshotTitle: {
+    fontSize: 17,
+    fontWeight: "800",
+    lineHeight: 22,
+    flex: 1,
+  },
+  snapshotMeta: {
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  snapshotBody: {
+    marginTop: 12,
+    fontSize: 13,
+    lineHeight: 19,
   },
   metricsRow: {
     flexDirection: "row",

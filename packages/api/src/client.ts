@@ -30,6 +30,7 @@ import type {
   Report,
   ReportSummary,
   MemoryType,
+  MemorySnapshotResponse,
   PromoteReportToMemoryResponse,
   MakoDispatchResponse,
   MakoCurrentResponse,
@@ -415,6 +416,11 @@ export class KrustyClient {
     }
     const q = params.join('&');
     return this.request(`/memories${q ? `?${q}` : ''}`);
+  }
+
+  async getMemorySnapshot(projectDir?: string): Promise<MemorySnapshotResponse> {
+    const q = projectDir ? `?project_dir=${encodeURIComponent(projectDir)}` : '';
+    return this.request(`/memories/snapshot${q}`);
   }
 
   // Mako

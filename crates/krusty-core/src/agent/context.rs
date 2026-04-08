@@ -15,8 +15,8 @@ use crate::ai::types::{Content, ModelMessage, Role};
 use crate::plan::PlanManager;
 use crate::skills::SkillsManager;
 use crate::storage::{
-    AutonomousTaskStore, Database, DelegatedRunStore, MemoryStore, MemoryType, ProjectSettings,
-    ReportStore, TaskStatus, WorkMode,
+    is_current_snapshot, refresh_current_snapshot, AutonomousTaskStore, Database,
+    DelegatedRunStore, MemoryStore, MemoryType, ProjectSettings, ReportStore, TaskStatus, WorkMode,
 };
 
 /// Instruction files to search for in the working directory (priority order).
@@ -268,7 +268,11 @@ fn build_memory_context(
         return String::new();
     };
     let store = MemoryStore::new(db);
-    let memories = store.list(project_dir, user_id);
+    let memories = store
+        .list(project_dir, user_id)
+        .into_iter()
+        .filter(|memory| !is_current_snapshot(memory))
+        .collect::<Vec<_>>();
     if memories.is_empty() {
         return String::new();
     }
@@ -486,6 +490,10 @@ fn build_mako_knowledge_context(
     project_dir: Option<&str>,
     user_id: Option<&str>,
 ) -> String {
+    if let Err(error) = refresh_current_snapshot(db_path, project_dir, user_id) {
+        warn!(project_dir = ?project_dir, error = %error, "Failed to refresh Mako snapshot context");
+    }
+
     let mut memories =
         if let Some(memory_db) = open_context_database(db_path, "building mako memory context") {
             let memory_store = MemoryStore::new(memory_db);
@@ -523,14 +531,24 @@ fn build_mako_knowledge_context(
         return String::new();
     }
 
+    let current_snapshot = memories.iter().find(|memory| is_current_snapshot(memory));
+    let carry_forward_memories = memories
+        .iter()
+        .filter(|memory| !is_current_snapshot(memory))
+        .collect::<Vec<_>>();
     let mut sections = vec![
         "[MAKO KNOWLEDGE]".to_string(),
         "Carry forward durable facts from memory and recent outcomes from reports. Prefer promoted memory for stable decisions, and use `ReadReport` when full report detail matters.".to_string(),
     ];
 
-    if !memories.is_empty() {
+    if let Some(snapshot) = current_snapshot {
+        sections.push("## Current Snapshot".to_string());
+        sections.push(snapshot.content.clone());
+    }
+
+    if !carry_forward_memories.is_empty() {
         sections.push("## Carry Forward".to_string());
-        for memory in memories.iter().take(MAX_MAKO_MEMORY_ITEMS) {
+        for memory in carry_forward_memories.iter().take(MAX_MAKO_MEMORY_ITEMS) {
             let scope = if project_dir.is_some() && memory.project_dir.as_deref() == project_dir {
                 "project"
             } else {

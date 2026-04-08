@@ -8,7 +8,10 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::storage::{Database, MemoryStore, MemoryType};
+use crate::storage::{
+    is_current_snapshot, is_current_snapshot_title, refresh_current_snapshot, Database,
+    MemoryStore, MemoryType,
+};
 use crate::tools::parse_params;
 use crate::tools::registry::{Tool, ToolContext, ToolResult};
 
@@ -112,9 +115,9 @@ Actions:
         let user_id = ctx.user_id.as_deref();
 
         match params.action.as_str() {
-            "save" => execute_save(&store, &params, project_dir.as_deref(), user_id),
-            "update" => execute_update(&store, &params),
-            "delete" => execute_delete(&store, &params),
+            "save" => execute_save(&store, db_path, &params, project_dir.as_deref(), user_id),
+            "update" => execute_update(&store, db_path, &params),
+            "delete" => execute_delete(&store, db_path, &params),
             "list" => execute_list(&store, &params, project_dir.as_deref(), user_id),
             other => ToolResult::invalid_parameters(format!(
                 "Unknown action '{}'. Valid actions: save, update, delete, list",
@@ -126,6 +129,7 @@ Actions:
 
 fn execute_save(
     store: &MemoryStore,
+    db_path: &std::path::Path,
     params: &Params,
     project_dir: Option<&str>,
     user_id: Option<&str>,
@@ -142,24 +146,35 @@ fn execute_save(
     let Some(title) = params.title.as_deref().filter(|t| !t.is_empty()) else {
         return ToolResult::invalid_parameters("'save' requires a non-empty title");
     };
+    if is_current_snapshot_title(title) {
+        return ToolResult::invalid_parameters("Current Snapshot is managed automatically");
+    }
     let Some(content) = params.content.as_deref().filter(|c| !c.is_empty()) else {
         return ToolResult::invalid_parameters("'save' requires non-empty content");
     };
 
     match store.save(memory_type, title, content, project_dir, user_id) {
-        Ok(memory) => ToolResult::success_data(json!({
-            "id": memory.id,
-            "memory_type": memory.memory_type.as_str(),
-            "title": memory.title,
-            "content": memory.content,
-            "project_dir": memory.project_dir,
-            "created_at": memory.created_at,
-        })),
+        Ok(memory) => {
+            if let Err(err) = refresh_current_snapshot(db_path, project_dir, user_id) {
+                return ToolResult::error(format!(
+                    "memory saved but snapshot refresh failed: {err}"
+                ));
+            }
+
+            ToolResult::success_data(json!({
+                "id": memory.id,
+                "memory_type": memory.memory_type.as_str(),
+                "title": memory.title,
+                "content": memory.content,
+                "project_dir": memory.project_dir,
+                "created_at": memory.created_at,
+            }))
+        }
         Err(err) => ToolResult::error(format!("failed to save memory: {err}")),
     }
 }
 
-fn execute_update(store: &MemoryStore, params: &Params) -> ToolResult {
+fn execute_update(store: &MemoryStore, db_path: &std::path::Path, params: &Params) -> ToolResult {
     let Some(id) = params.memory_id.as_deref().filter(|i| !i.is_empty()) else {
         return ToolResult::invalid_parameters("'update' requires memory_id");
     };
@@ -173,25 +188,72 @@ fn execute_update(store: &MemoryStore, params: &Params) -> ToolResult {
         );
     }
 
+    let Some(existing) = store.get(id).ok().flatten() else {
+        return ToolResult::error(format!(
+            "failed to update memory: memory '{}' not found",
+            id
+        ));
+    };
+    if is_current_snapshot(&existing) {
+        return ToolResult::invalid_parameters("Current Snapshot is managed automatically");
+    }
+    if title.is_some_and(is_current_snapshot_title) {
+        return ToolResult::invalid_parameters("Current Snapshot is managed automatically");
+    }
+
     match store.update(id, title, content) {
-        Ok(()) => ToolResult::success_data(json!({
-            "id": id,
-            "updated": true,
-        })),
+        Ok(()) => {
+            if let Err(err) = refresh_current_snapshot(
+                db_path,
+                existing.project_dir.as_deref(),
+                existing.user_id.as_deref(),
+            ) {
+                return ToolResult::error(format!(
+                    "memory updated but snapshot refresh failed: {err}"
+                ));
+            }
+
+            ToolResult::success_data(json!({
+                "id": id,
+                "updated": true,
+            }))
+        }
         Err(err) => ToolResult::error(format!("failed to update memory: {err}")),
     }
 }
 
-fn execute_delete(store: &MemoryStore, params: &Params) -> ToolResult {
+fn execute_delete(store: &MemoryStore, db_path: &std::path::Path, params: &Params) -> ToolResult {
     let Some(id) = params.memory_id.as_deref().filter(|i| !i.is_empty()) else {
         return ToolResult::invalid_parameters("'delete' requires memory_id");
     };
 
+    let Some(existing) = store.get(id).ok().flatten() else {
+        return ToolResult::error(format!(
+            "failed to delete memory: memory '{}' not found",
+            id
+        ));
+    };
+    if is_current_snapshot(&existing) {
+        return ToolResult::invalid_parameters("Current Snapshot is managed automatically");
+    }
+
     match store.delete(id) {
-        Ok(()) => ToolResult::success_data(json!({
-            "id": id,
-            "deleted": true,
-        })),
+        Ok(()) => {
+            if let Err(err) = refresh_current_snapshot(
+                db_path,
+                existing.project_dir.as_deref(),
+                existing.user_id.as_deref(),
+            ) {
+                return ToolResult::error(format!(
+                    "memory deleted but snapshot refresh failed: {err}"
+                ));
+            }
+
+            ToolResult::success_data(json!({
+                "id": id,
+                "deleted": true,
+            }))
+        }
         Err(err) => ToolResult::error(format!("failed to delete memory: {err}")),
     }
 }
@@ -217,6 +279,7 @@ fn execute_list(
 
     let entries: Vec<Value> = memories
         .iter()
+        .filter(|memory| !is_current_snapshot(memory))
         .map(|m| {
             json!({
                 "id": m.id,
@@ -340,6 +403,26 @@ mod tests {
             .execute(json!({ "action": "delete", "memory_id": id }), &ctx)
             .await;
         assert!(!delete_result.is_error);
+
+        let list_result = MemoryTool.execute(json!({ "action": "list" }), &ctx).await;
+        let parsed: Value = serde_json::from_str(&list_result.output).unwrap();
+        assert_eq!(parsed["data"]["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn list_hides_current_snapshot_memory() {
+        let (ctx, _tmp) = test_ctx();
+        let db_path = ctx.db_path.as_ref().expect("db path");
+        let store = MemoryStore::new(Database::new(db_path).expect("database"));
+        store
+            .save(
+                MemoryType::Project,
+                crate::storage::CURRENT_SNAPSHOT_TITLE,
+                "snapshot",
+                None,
+                None,
+            )
+            .expect("snapshot should save");
 
         let list_result = MemoryTool.execute(json!({ "action": "list" }), &ctx).await;
         let parsed: Value = serde_json::from_str(&list_result.output).unwrap();

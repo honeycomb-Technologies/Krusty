@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use crate::storage::reports::promote_report_content;
 use crate::storage::reports::CreateReportInput;
-use crate::storage::{Database, MemoryStore, MemoryType, ReportStore};
+use crate::storage::{refresh_current_snapshot, Database, MemoryStore, MemoryType, ReportStore};
 use crate::tools::parse_params;
 use crate::tools::registry::{Tool, ToolContext, ToolResult};
 
@@ -204,6 +204,12 @@ Structure:
                 } else {
                     None
                 };
+
+                if let Err(e) = refresh_current_snapshot(db_path, project_dir.as_deref(), user_id) {
+                    return ToolResult::error(format!(
+                        "report created but snapshot refresh failed: {e}"
+                    ));
+                }
 
                 ToolResult::success_data(json!({
                     "report_id": report_id,
@@ -517,9 +523,11 @@ mod tests {
                 ctx.project_dir.as_ref().and_then(|path| path.to_str()),
                 None,
             );
-        assert_eq!(memories.len(), 1);
-        assert_eq!(memories[0].title, "Wake audit");
-        assert_eq!(memories[0].content, "Wake flow is stable.");
+        let durable = memories
+            .iter()
+            .find(|memory| memory.title == "Wake audit")
+            .expect("durable promoted memory");
+        assert_eq!(durable.content, "Wake flow is stable.");
     }
 
     #[tokio::test]
