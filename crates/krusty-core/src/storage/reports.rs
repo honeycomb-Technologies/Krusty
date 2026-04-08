@@ -222,6 +222,24 @@ impl ReportStore {
     }
 }
 
+pub fn promote_report_content(report: &Report) -> String {
+    let summary = report.summary.trim();
+    if !summary.is_empty() {
+        return summary.to_string();
+    }
+
+    let mut collapsed = report
+        .content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.len() > 600 {
+        collapsed.truncate(600);
+        collapsed.push_str("...");
+    }
+    collapsed
+}
+
 fn row_to_report(row: &rusqlite::Row<'_>) -> rusqlite::Result<Report> {
     let tags_json: String = row.get(6)?;
     let sources_json: String = row.get(7)?;

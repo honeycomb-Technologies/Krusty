@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use krusty_core::storage::reports::promote_report_content;
 use krusty_core::storage::{Database, MemoryStore, MemoryType, ReportStore};
 
 use super::memories::{memory_to_response, MemoryResponse};
@@ -152,24 +153,6 @@ async fn promote_report(
         created,
         memory: memory_to_response(memory),
     }))
-}
-
-fn promote_report_content(report: &krusty_core::storage::Report) -> String {
-    let summary = report.summary.trim();
-    if !summary.is_empty() {
-        return summary.to_string();
-    }
-
-    let mut collapsed = report
-        .content
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if collapsed.len() > 600 {
-        collapsed.truncate(600);
-        collapsed.push_str("...");
-    }
-    collapsed
 }
 
 #[cfg(test)]
