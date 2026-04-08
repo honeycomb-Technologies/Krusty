@@ -81,16 +81,6 @@ impl Database {
             .unwrap_or(0)
     }
 
-    /// Set schema version after successful migration
-    #[allow(dead_code)]
-    fn set_schema_version(&self, version: i32) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO schema_version (version) VALUES (?1)",
-            [version],
-        )?;
-        Ok(())
-    }
-
     /// Set schema version within a transaction
     fn set_schema_version_tx(&self, tx: &rusqlite::Transaction, version: i32) -> Result<()> {
         tx.execute(

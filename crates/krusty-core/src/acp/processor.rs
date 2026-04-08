@@ -7,7 +7,6 @@
 //! 3. Stream responses back via ACP session/update notifications
 //! 4. Execute tool calls and stream their results
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_client_protocol::{
@@ -50,7 +49,7 @@ pub struct PromptProcessor {
 
 impl PromptProcessor {
     /// Create a new prompt processor
-    pub fn new(tools: Arc<ToolRegistry>, _cwd: PathBuf) -> Self {
+    pub fn new(tools: Arc<ToolRegistry>) -> Self {
         Self {
             ai_client: None,
             tools,

@@ -1,5 +1,7 @@
 //! Session management endpoints
 
+use std::path::{Path as StdPath, PathBuf};
+
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -8,13 +10,21 @@ use axum::{
 };
 use serde::Deserialize;
 
-use krusty_core::agent::pinch_context::{PinchContext, PinchContextInput};
 use krusty_core::agent::summarizer::{generate_summary, SummarizationResult};
-use krusty_core::ai::types::{Content, ModelMessage, Role};
+use krusty_core::agent::{
+    build_project_context,
+    pinch_context::{PinchContext, PinchContextInput},
+};
 use krusty_core::plan::PlanManager;
-use krusty_core::storage::{Database, DelegatedRunStore, SessionInfo, SessionType, WorkspaceMode};
+use krusty_core::storage::{
+    Database, DelegatedRunStore, FileActivityTracker, RankedFile, SessionType, WorkspaceMode,
+};
 use krusty_core::SessionManager;
 
+use super::session_access::{
+    current_user_id, ensure_owned_session, load_agent_state_or_idle, load_owned_session,
+    request_workspace_scope,
+};
 use crate::auth::CurrentUser;
 use crate::error::AppError;
 use crate::presence::{remove_presence, snapshot_presence, upsert_presence, SessionPresenceRecord};
@@ -24,6 +34,12 @@ use crate::types::{
     SessionPresenceClientResponse, SessionPresenceHeartbeatRequest, SessionPresenceResponse,
     SessionResponse, SessionStateResponse, SessionTraceResponse, SessionWithMessagesResponse,
     ToolApprovalRequest, UpdateSessionRequest,
+};
+use crate::utils::messages::parse_stored_model_messages;
+use crate::utils::text::trimmed_nonempty;
+use crate::utils::workspace::{
+    normalize_resolved_requested_workspace, resolve_optional_workspace_path,
+    resolve_session_working_dir, NormalizedWorkspace, WorkspaceNormalizationPolicy,
 };
 use crate::AppState;
 
@@ -58,6 +74,10 @@ struct SessionToolApprovalRequest {
     approved: bool,
 }
 
+const PINCH_RANKED_FILE_LIMIT: usize = 20;
+const PINCH_SUMMARY_FILE_CONTENT_LIMIT: usize = 10;
+const PINCH_CONTEXT_FILE_CONTENT_LIMIT: usize = 5;
+
 /// Build the sessions router
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -83,46 +103,6 @@ pub fn router() -> Router<AppState> {
         .route("/:id/tool-approval", post(tool_approval_for_session))
 }
 
-fn normalize_requested_workspace(
-    working_dir: Option<&str>,
-    project_dir: Option<&str>,
-    workspace_mode: Option<WorkspaceMode>,
-) -> (Option<String>, Option<String>, WorkspaceMode) {
-    let normalized_working_dir = working_dir
-        .map(str::trim)
-        .filter(|dir| !dir.is_empty())
-        .map(ToOwned::to_owned);
-    let normalized_project_dir = project_dir
-        .map(str::trim)
-        .filter(|dir| !dir.is_empty())
-        .map(ToOwned::to_owned);
-
-    let workspace_mode = workspace_mode.unwrap_or_else(|| {
-        if normalized_project_dir.is_some() || normalized_working_dir.is_some() {
-            WorkspaceMode::Selected
-        } else {
-            WorkspaceMode::Neutral
-        }
-    });
-
-    let runtime_dir = match workspace_mode {
-        WorkspaceMode::Neutral => normalized_working_dir
-            .clone()
-            .or(normalized_project_dir.clone()),
-        WorkspaceMode::Selected | WorkspaceMode::Created => normalized_project_dir
-            .clone()
-            .or(normalized_working_dir.clone()),
-    };
-    let project_dir = match workspace_mode {
-        WorkspaceMode::Neutral => None,
-        WorkspaceMode::Selected | WorkspaceMode::Created => {
-            normalized_project_dir.or(normalized_working_dir)
-        }
-    };
-
-    (runtime_dir, project_dir, workspace_mode)
-}
-
 /// List all sessions, optionally filtered by working directory
 async fn list_sessions(
     State(state): State<AppState>,
@@ -130,9 +110,16 @@ async fn list_sessions(
     Query(query): Query<ListSessionsQuery>,
 ) -> Result<Json<Vec<SessionResponse>>, AppError> {
     let session_manager = open_session_manager(&state)?;
+    let workspace_scope = request_workspace_scope(&state, user.as_ref());
+    let working_dir_filter = resolve_optional_workspace_path(
+        query.working_dir.as_deref(),
+        &workspace_scope.base_dir,
+        &workspace_scope.allowed_root,
+    )?;
 
     let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
-    let sessions = session_manager.list_sessions_for_user(query.working_dir.as_deref(), user_id)?;
+    let sessions =
+        session_manager.list_sessions_for_user(working_dir_filter.as_deref(), user_id)?;
     let response: Vec<SessionResponse> = sessions.into_iter().map(Into::into).collect();
 
     Ok(Json(response))
@@ -176,13 +163,20 @@ async fn create_session(
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<(StatusCode, Json<SessionResponse>), AppError> {
     let session_manager = open_session_manager(&state)?;
+    let workspace_scope = request_workspace_scope(&state, user.as_ref());
 
     let title = req.title.as_deref().unwrap_or("New Session");
-    let (working_dir, project_dir, workspace_mode) = normalize_requested_workspace(
+    let workspace = normalize_resolved_requested_workspace(
         req.working_dir.as_deref(),
         req.project_dir.as_deref(),
         req.workspace_mode,
-    );
+        WorkspaceNormalizationPolicy {
+            default_mode_without_paths: WorkspaceMode::Neutral,
+            selected_fallback_dir: None,
+        },
+        &workspace_scope.base_dir,
+        &workspace_scope.allowed_root,
+    )?;
     let target_branch = req.target_branch.as_deref().map(str::trim).and_then(|b| {
         if b.is_empty() {
             None
@@ -192,10 +186,10 @@ async fn create_session(
     });
     let session_id = session_manager.create_session_for_user_with_config(
         title,
-        req.model.as_deref(),
-        working_dir.as_deref(),
-        project_dir.as_deref(),
-        workspace_mode,
+        trimmed_nonempty(req.model.as_deref()),
+        workspace.working_dir.as_deref(),
+        workspace.project_dir.as_deref(),
+        workspace.workspace_mode,
         current_user_id(user.as_ref()),
         target_branch,
         req.session_type.unwrap_or(SessionType::Code),
@@ -256,16 +250,18 @@ async fn update_session(
 ) -> Result<Json<SessionResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
     ensure_owned_session(&session_manager, &id, user.as_ref())?;
+    let workspace_scope = request_workspace_scope(&state, user.as_ref());
 
     if req.title.is_none()
         && req.working_dir.is_none()
+        && req.project_dir.is_none()
+        && req.workspace_mode.is_none()
         && req.mode.is_none()
         && req.model.is_none()
         && req.target_branch.is_none()
     {
         return Err(AppError::BadRequest(
-            "At least one of title, working_dir, mode, model, or target_branch must be provided"
-                .to_string(),
+            "At least one of title, working_dir, project_dir, workspace_mode, mode, model, or target_branch must be provided".to_string(),
         ));
     }
 
@@ -273,14 +269,29 @@ async fn update_session(
         session_manager.update_session_title(&id, title)?;
     }
 
-    if let Some(working_dir) = req.working_dir.as_deref() {
-        let trimmed = working_dir.trim();
-        let normalized = if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        };
-        session_manager.update_session_working_dir(&id, normalized)?;
+    let workspace_update = resolve_workspace_update(
+        &req,
+        &workspace_scope.base_dir,
+        &workspace_scope.allowed_root,
+    )?;
+
+    if workspace_update.is_none() {
+        let working_dir = resolve_optional_workspace_path(
+            req.working_dir.as_deref(),
+            &workspace_scope.base_dir,
+            &workspace_scope.allowed_root,
+        )?;
+        if req.working_dir.is_some() {
+            session_manager.update_session_working_dir(&id, working_dir.as_deref())?;
+        }
+    }
+
+    if let Some(workspace) = workspace_update {
+        session_manager.update_session_workspace(
+            &id,
+            workspace.project_dir.as_deref(),
+            workspace.workspace_mode,
+        )?;
     }
 
     if let Some(mode) = req.mode {
@@ -288,17 +299,12 @@ async fn update_session(
     }
 
     if let Some(model) = req.model.as_deref() {
-        let normalized = if model.is_empty() { None } else { Some(model) };
+        let normalized = trimmed_nonempty(Some(model));
         session_manager.update_session_model(&id, normalized)?;
     }
 
     if let Some(target_branch) = req.target_branch.as_deref() {
-        let normalized = target_branch.trim();
-        let normalized = if normalized.is_empty() {
-            None
-        } else {
-            Some(normalized)
-        };
+        let normalized = trimmed_nonempty(Some(target_branch));
         session_manager.update_session_target_branch(&id, normalized)?;
     }
 
@@ -307,6 +313,42 @@ async fn update_session(
         .ok_or_else(|| AppError::Internal("Failed to fetch updated session".to_string()))?;
 
     Ok(Json(session.into()))
+}
+
+fn resolve_workspace_update(
+    req: &UpdateSessionRequest,
+    workspace_base: &StdPath,
+    allowed_root: &StdPath,
+) -> Result<Option<NormalizedWorkspace>, AppError> {
+    if req.project_dir.is_none() && req.workspace_mode.is_none() {
+        return Ok(None);
+    }
+
+    let project_hint = trimmed_nonempty(req.project_dir.as_deref())
+        .or(trimmed_nonempty(req.working_dir.as_deref()));
+    let workspace = normalize_resolved_requested_workspace(
+        req.working_dir.as_deref(),
+        req.project_dir.as_deref(),
+        req.workspace_mode,
+        WorkspaceNormalizationPolicy {
+            default_mode_without_paths: WorkspaceMode::Neutral,
+            selected_fallback_dir: None,
+        },
+        workspace_base,
+        allowed_root,
+    )?;
+
+    match workspace.workspace_mode {
+        WorkspaceMode::Neutral if project_hint.is_some() => Err(AppError::BadRequest(
+            "workspace mode 'neutral' cannot include a project_dir".to_string(),
+        )),
+        WorkspaceMode::Selected | WorkspaceMode::Created if workspace.project_dir.is_none() => {
+            Err(AppError::BadRequest(
+                "workspace modes 'selected' and 'created' require a project_dir".to_string(),
+            ))
+        }
+        _ => Ok(Some(workspace)),
+    }
 }
 
 /// Delete a session
@@ -339,14 +381,7 @@ async fn get_session_state(
     let session = load_owned_session(&session_manager, &id, user.as_ref())?;
 
     // Get agent state
-    let agent_state =
-        session_manager
-            .get_agent_state(&id)
-            .unwrap_or_else(|| krusty_core::storage::AgentState {
-                state: "idle".to_string(),
-                started_at: None,
-                last_event_at: None,
-            });
+    let agent_state = load_agent_state_or_idle(&session_manager, &id)?;
     let recovery = session_manager.load_recovery_state(&id)?;
     let live_partial_assistant =
         live_partial_assistant_for_state(&agent_state.state, recovery.as_ref());
@@ -514,27 +549,31 @@ async fn pinch_session(
 ) -> Result<Json<PinchResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
     let source_session = load_owned_session(&session_manager, &id, user.as_ref())?;
+    let workspace_scope = request_workspace_scope(&state, user.as_ref());
 
     // Load messages and convert to ModelMessage format
     let raw_messages = session_manager.load_session_messages(&id)?;
-    let messages: Vec<ModelMessage> = raw_messages
-        .into_iter()
-        .filter_map(|(role, content_json)| {
-            let role = match role.as_str() {
-                "user" => Role::User,
-                "assistant" => Role::Assistant,
-                _ => return None,
-            };
-            let content: Vec<Content> = serde_json::from_str(&content_json).ok()?;
-            Some(ModelMessage { role, content })
-        })
-        .collect();
+    let messages = parse_stored_model_messages(&id, raw_messages, "pinch context");
 
     if messages.is_empty() {
         return Err(AppError::BadRequest(
             "Cannot pinch session with no messages".to_string(),
         ));
     }
+
+    let working_dir = resolve_session_working_dir(
+        source_session.working_dir.as_deref(),
+        &workspace_scope.base_dir,
+        &workspace_scope.allowed_root,
+    )?;
+    let ranked_files = ranked_files_for_pinch(&session_manager, &id);
+    let file_contents = load_key_file_contents(
+        &id,
+        &working_dir,
+        &ranked_files,
+        PINCH_SUMMARY_FILE_CONTENT_LIMIT,
+    );
+    let project_context = load_project_context(&working_dir);
 
     // Generate summary using AI if configured, otherwise use defaults.
     let summary_model = source_session.model.as_deref();
@@ -543,10 +582,10 @@ async fn pinch_session(
             &ai_client,
             &messages,
             req.preservation_hints.as_deref(),
-            &[],  // ranked files
-            &[],  // file contents
-            None, // CLAUDE.md
-            None, // project context
+            &ranked_files,
+            &file_contents,
+            project_context.as_deref(),
+            summary_model,
         )
         .await
         .unwrap_or_else(|e| {
@@ -558,37 +597,35 @@ async fn pinch_session(
     };
 
     // Create pinch context
-    let active_plan = PlanManager::new((*state.db_path).clone())
-        .ok()
-        .and_then(|pm| pm.get_active_plan(&id).ok().flatten())
-        .map(|plan| plan.to_markdown());
+    let active_plan = load_active_plan_markdown_for_pinch(&state, &id);
+    let key_file_contents = file_contents
+        .iter()
+        .take(PINCH_CONTEXT_FILE_CONTENT_LIMIT)
+        .cloned()
+        .collect();
 
     let pinch_ctx = PinchContext::from_input(PinchContextInput {
         source_session_id: id.clone(),
         source_session_title: source_session.title.clone(),
         summary: summary_result.clone(),
-        ranked_files: vec![], // No ranked files for now
+        ranked_files,
         preservation_hints: req.preservation_hints,
         direction: req.direction,
-        project_context: None,     // No project context for now
-        key_file_contents: vec![], // No key file contents for now
+        project_context,
+        key_file_contents,
         active_plan,
     });
 
     // Create the child session
     let new_title = format!("{} (continued)", source_session.title);
-    let default_working_dir = state.working_dir.to_string_lossy().to_string();
-    let working_dir_for_child = source_session
-        .working_dir
-        .as_deref()
-        .unwrap_or(default_working_dir.as_str());
+    let working_dir_for_child = working_dir.to_string_lossy().to_string();
     let model_for_child = source_session.model.as_deref();
     let new_session_id = session_manager.create_linked_session(
         &new_title,
         &id,
         &pinch_ctx,
         model_for_child,
-        Some(working_dir_for_child),
+        Some(working_dir_for_child.as_str()),
         source_session.target_branch.as_deref(),
     )?;
 
@@ -616,49 +653,72 @@ fn open_session_manager(state: &AppState) -> Result<SessionManager, AppError> {
     Ok(SessionManager::new(Database::new(&state.db_path)?))
 }
 
-fn current_user_id(user: Option<&CurrentUser>) -> Option<&str> {
-    user.and_then(|u| u.0.user_id.as_deref())
-}
-
-fn load_session_or_404(
-    session_manager: &SessionManager,
-    session_id: &str,
-) -> Result<SessionInfo, AppError> {
-    session_manager
-        .get_session(session_id)?
-        .ok_or_else(|| AppError::NotFound(format!("Session {} not found", session_id)))
-}
-
-fn ensure_owned_session(
-    session_manager: &SessionManager,
-    session_id: &str,
-    user: Option<&CurrentUser>,
-) -> Result<(), AppError> {
-    let _session = load_session_or_404(session_manager, session_id)?;
-    let user_id = current_user_id(user);
-    if !session_manager.verify_session_ownership(session_id, user_id)? {
-        return Err(AppError::NotFound(format!(
-            "Session {} not found",
-            session_id
-        )));
+fn ranked_files_for_pinch(session_manager: &SessionManager, session_id: &str) -> Vec<RankedFile> {
+    match FileActivityTracker::new(session_manager.db(), session_id.to_string())
+        .get_ranked_files(PINCH_RANKED_FILE_LIMIT)
+    {
+        Ok(ranked_files) => ranked_files,
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "Failed to load ranked files for pinch context"
+            );
+            Vec::new()
+        }
     }
-    Ok(())
 }
 
-fn load_owned_session(
-    session_manager: &SessionManager,
-    session_id: &str,
-    user: Option<&CurrentUser>,
-) -> Result<SessionInfo, AppError> {
-    let session = load_session_or_404(session_manager, session_id)?;
-    let user_id = current_user_id(user);
-    if !session_manager.verify_session_ownership(session_id, user_id)? {
-        return Err(AppError::NotFound(format!(
-            "Session {} not found",
-            session_id
-        )));
+fn load_project_context(working_dir: &StdPath) -> Option<String> {
+    let context = build_project_context(working_dir);
+    (!context.trim().is_empty()).then_some(context)
+}
+
+fn load_active_plan_markdown_for_pinch(state: &AppState, session_id: &str) -> Option<String> {
+    match PlanManager::new((*state.db_path).clone()).and_then(|pm| pm.get_active_plan(session_id)) {
+        Ok(Some(plan)) => Some(plan.to_markdown()),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "Failed to load active plan for pinch context"
+            );
+            None
+        }
     }
-    Ok(session)
+}
+
+fn load_key_file_contents(
+    session_id: &str,
+    working_dir: &StdPath,
+    ranked_files: &[RankedFile],
+    limit: usize,
+) -> Vec<(String, String)> {
+    ranked_files
+        .iter()
+        .take(limit)
+        .filter_map(|file| {
+            let path = if StdPath::new(&file.path).is_absolute() {
+                PathBuf::from(&file.path)
+            } else {
+                working_dir.join(&file.path)
+            };
+
+            match std::fs::read_to_string(&path) {
+                Ok(content) => Some((file.path.clone(), content)),
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        path = %path.display(),
+                        error = %error,
+                        "Failed to load key file content for pinch context"
+                    );
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -669,11 +729,13 @@ mod tests {
 
     use axum::extract::{Path, Query, State};
     use axum::Json;
+    use chrono::Utc;
     use tokio::sync::{Mutex, RwLock};
 
     use krusty_core::agent::{AgentCancellation, UserHookManager};
     use krusty_core::ai::models::create_model_registry;
     use krusty_core::mcp::McpManager;
+    use krusty_core::plan::{PlanFile, PlanManager};
     use krusty_core::process::ProcessRegistry;
     use krusty_core::skills::SkillsManager;
     use krusty_core::storage::credentials::CredentialStore;
@@ -779,6 +841,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_session_resolves_relative_workspace_paths_within_user_root() {
+        let (state, temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        let user_root = temp_dir.join("alice-home");
+        std::fs::create_dir_all(&user_root).expect("user root should exist");
+
+        let (_, Json(created)) = create_session(
+            State(state),
+            Some(current_user("alice", &user_root)),
+            Json(CreateSessionRequest {
+                title: Some("Relative Workspace".to_string()),
+                model: None,
+                project_dir: Some("repo".to_string()),
+                working_dir: None,
+                workspace_mode: Some(WorkspaceMode::Selected),
+                target_branch: None,
+                session_type: None,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("session creation should succeed"));
+
+        let expected = user_root.join("repo").to_string_lossy().to_string();
+        assert_eq!(created.project_dir.as_deref(), Some(expected.as_str()));
+        assert_eq!(created.working_dir.as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
     async fn get_session_rejects_foreign_owner() {
         let (state, _temp_dir) = create_test_state();
         create_test_user(&state, "alice");
@@ -805,6 +895,63 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(AppError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn load_owned_session_rejects_legacy_userless_session_for_authenticated_user() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let session_id = session_manager
+            .create_session("Legacy Session", None, None)
+            .expect("session creation should succeed");
+        let user = current_user("alice", std::path::Path::new("/tmp"));
+
+        let result = super::load_owned_session(&session_manager, &session_id, Some(&user));
+
+        assert!(matches!(result, Err(AppError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn list_sessions_resolves_relative_working_dir_filter_within_user_root() {
+        let (state, temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        let user_root = temp_dir.join("alice-home");
+        let repo_dir = user_root.join("repo");
+        std::fs::create_dir_all(&repo_dir).expect("repo dir should exist");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        session_manager
+            .create_session_for_user_with_config(
+                "Scoped Session",
+                None,
+                Some(repo_dir.to_string_lossy().as_ref()),
+                Some(repo_dir.to_string_lossy().as_ref()),
+                WorkspaceMode::Selected,
+                Some("alice"),
+                None,
+                SessionType::Code,
+            )
+            .expect("session creation should succeed");
+
+        let Json(response) = list_sessions(
+            State(state),
+            Some(current_user("alice", &user_root)),
+            Query(ListSessionsQuery {
+                working_dir: Some("repo".to_string()),
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("session list should succeed"));
+
+        assert_eq!(response.len(), 1);
+        assert_eq!(
+            response[0].working_dir.as_deref(),
+            Some(repo_dir.to_string_lossy().as_ref())
+        );
     }
 
     #[tokio::test]
@@ -839,6 +986,177 @@ mod tests {
         assert_eq!(response.clients[0].last_event_sequence, Some(12));
     }
 
+    #[tokio::test]
+    async fn pinch_session_includes_project_context_and_ranked_files() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let workspace = state.working_dir.as_ref();
+        let source_file = workspace.join("src/lib.rs");
+        std::fs::create_dir_all(source_file.parent().expect("parent dir should exist"))
+            .expect("src dir should exist");
+        std::fs::write(
+            workspace.join("AGENTS.md"),
+            "# Workspace Rules\nPreserve session context.\n",
+        )
+        .expect("project instructions should write");
+        std::fs::write(
+            &source_file,
+            "pub fn important() -> &'static str { \"hello\" }\n",
+        )
+        .expect("source file should write");
+
+        let session_manager = match open_session_manager(&state) {
+            Ok(session_manager) => session_manager,
+            Err(_) => panic!("session manager should open"),
+        };
+        let session_id = session_manager
+            .create_session_for_user(
+                "Pinch Source",
+                Some("claude-3-5-sonnet"),
+                Some(workspace.to_string_lossy().as_ref()),
+                Some("alice"),
+            )
+            .expect("session should create");
+
+        let user_message =
+            serde_json::json!([{ "type": "text", "text": "Continue refining the server pinch flow." }])
+                .to_string();
+        let assistant_message =
+            serde_json::json!([{ "type": "text", "text": "I inspected the route and found missing continuation context." }])
+                .to_string();
+        session_manager
+            .save_message(&session_id, "user", &user_message)
+            .expect("user message should save");
+        session_manager
+            .save_message(&session_id, "assistant", &assistant_message)
+            .expect("assistant message should save");
+
+        let plan_manager =
+            PlanManager::new((*state.db_path).clone()).expect("plan manager should open");
+        let plan = PlanFile::from_markdown(
+            r#"# Plan: Server Pinch Follow-up
+
+Created: 2026-04-06 12:00 UTC
+Session: placeholder
+Working Directory: placeholder
+Status: in_progress
+
+---
+
+## Phase 1: Continuation
+
+- [ ] Task 1.1: Keep session continuity
+"#,
+        )
+        .expect("plan should parse");
+        plan_manager
+            .save_plan_for_session(&session_id, &plan)
+            .expect("plan should save");
+
+        session_manager
+            .db()
+            .conn()
+            .execute(
+                "INSERT INTO file_activity (session_id, file_path, read_count, write_count, edit_count, last_accessed, user_referenced)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (
+                    &session_id,
+                    "src/lib.rs",
+                    2_i64,
+                    1_i64,
+                    0_i64,
+                    Utc::now().to_rfc3339(),
+                    1_i64,
+                ),
+            )
+            .expect("file activity should insert");
+
+        let Json(response) = pinch_session(
+            State(state.clone()),
+            Some(current_user("alice", workspace)),
+            Path(session_id.clone()),
+            Json(PinchRequest {
+                preservation_hints: Some("Keep the route semantics intact.".to_string()),
+                direction: Some("Continue the server audit.".to_string()),
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("pinch should succeed"));
+
+        let messages = session_manager
+            .load_session_messages(&response.session.id)
+            .expect("child messages should load");
+        let (role, system_message_json) = messages.first().expect("system message should exist");
+
+        assert_eq!(role, "system");
+        assert!(system_message_json.contains("Project Instructions"));
+        assert!(system_message_json.contains("[PROJECT INSTRUCTIONS -"));
+        assert!(system_message_json.contains("Key Files (by importance)"));
+        assert!(system_message_json.contains("src/lib.rs"));
+        assert!(system_message_json.contains("Key File Contents (Pre-loaded)"));
+        assert!(system_message_json.contains("pub fn important()"));
+        assert!(system_message_json.contains("## Active Plan"));
+        assert!(system_message_json.contains("Task 1.1: Keep session continuity"));
+    }
+
+    #[tokio::test]
+    async fn pinch_session_resolves_legacy_relative_working_dir_against_user_home() {
+        let (state, temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        let user_root = temp_dir.join("alice-home");
+        let repo_dir = user_root.join("repo");
+        std::fs::create_dir_all(&repo_dir).expect("repo dir should exist");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let session_id = session_manager
+            .create_session_for_user_with_config(
+                "Legacy Relative Session",
+                None,
+                Some("repo"),
+                Some("repo"),
+                WorkspaceMode::Selected,
+                Some("alice"),
+                None,
+                SessionType::Code,
+            )
+            .expect("session should create");
+        let user_message =
+            serde_json::json!([{ "type": "text", "text": "Continue from the last session." }])
+                .to_string();
+        let assistant_message =
+            serde_json::json!([{ "type": "text", "text": "I will resume the work." }]).to_string();
+        session_manager
+            .save_message(&session_id, "user", &user_message)
+            .expect("user message should save");
+        session_manager
+            .save_message(&session_id, "assistant", &assistant_message)
+            .expect("assistant message should save");
+
+        let Json(response) = pinch_session(
+            State(state),
+            Some(current_user("alice", &user_root)),
+            Path(session_id),
+            Json(PinchRequest {
+                preservation_hints: None,
+                direction: None,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("pinch should succeed"));
+
+        let expected = repo_dir.to_string_lossy().to_string();
+        assert_eq!(
+            response.session.working_dir.as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            response.session.project_dir.as_deref(),
+            Some(expected.as_str())
+        );
+    }
+
     #[test]
     fn live_partial_assistant_only_surfaces_for_active_states() {
         let recovery = krusty_core::storage::SessionRecoveryState::new(
@@ -861,5 +1179,232 @@ mod tests {
             .expect("active state should surface live partial");
         assert_eq!(live.text, "partial");
         assert_eq!(live.thinking, "reasoning");
+    }
+
+    #[tokio::test]
+    async fn session_routes_normalize_blank_model_input_to_none() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let (_, Json(created)) = create_session(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Json(CreateSessionRequest {
+                title: Some("Whitespace Model".to_string()),
+                model: Some("   ".to_string()),
+                project_dir: None,
+                working_dir: None,
+                workspace_mode: None,
+                target_branch: None,
+                session_type: None,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("session creation should succeed"));
+
+        assert_eq!(created.model, None);
+
+        let Json(updated) = update_session(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Path(created.id.clone()),
+            Json(UpdateSessionRequest {
+                title: None,
+                project_dir: None,
+                working_dir: None,
+                workspace_mode: None,
+                mode: None,
+                model: Some("  gpt-5  ".to_string()),
+                target_branch: None,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("session update should succeed"));
+
+        assert_eq!(updated.model.as_deref(), Some("gpt-5"));
+
+        let Json(cleared) = update_session(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Path(created.id),
+            Json(UpdateSessionRequest {
+                title: None,
+                project_dir: None,
+                working_dir: None,
+                workspace_mode: None,
+                mode: None,
+                model: Some("   ".to_string()),
+                target_branch: None,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("session update should succeed"));
+
+        assert_eq!(cleared.model, None);
+    }
+
+    #[tokio::test]
+    async fn session_routes_apply_workspace_updates() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        let project_dir = state.working_dir.join("demo-app");
+        std::fs::create_dir_all(&project_dir).expect("project dir should exist");
+
+        let (_, Json(created)) = create_session(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Json(CreateSessionRequest {
+                title: Some("Workspace Update".to_string()),
+                model: None,
+                project_dir: None,
+                working_dir: None,
+                workspace_mode: None,
+                target_branch: None,
+                session_type: None,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("session creation should succeed"));
+
+        let Json(updated) = update_session(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Path(created.id.clone()),
+            Json(UpdateSessionRequest {
+                title: None,
+                project_dir: Some(project_dir.to_string_lossy().to_string()),
+                working_dir: None,
+                workspace_mode: Some(WorkspaceMode::Created),
+                mode: None,
+                model: None,
+                target_branch: None,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("workspace update should succeed"));
+
+        assert_eq!(
+            updated.project_dir.as_deref(),
+            Some(project_dir.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            updated.working_dir.as_deref(),
+            Some(project_dir.to_string_lossy().as_ref())
+        );
+        assert_eq!(updated.workspace_mode, WorkspaceMode::Created);
+
+        let Json(neutral) = update_session(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Path(created.id),
+            Json(UpdateSessionRequest {
+                title: None,
+                project_dir: None,
+                working_dir: None,
+                workspace_mode: Some(WorkspaceMode::Neutral),
+                mode: None,
+                model: None,
+                target_branch: None,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("neutral workspace update should succeed"));
+
+        assert_eq!(neutral.project_dir, None);
+        assert_eq!(neutral.working_dir, None);
+        assert_eq!(neutral.workspace_mode, WorkspaceMode::Neutral);
+    }
+
+    #[tokio::test]
+    async fn session_routes_reject_invalid_workspace_payloads() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let (_, Json(created)) = create_session(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Json(CreateSessionRequest {
+                title: Some("Workspace Validation".to_string()),
+                model: None,
+                project_dir: None,
+                working_dir: None,
+                workspace_mode: None,
+                target_branch: None,
+                session_type: None,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("session creation should succeed"));
+
+        let result = update_session(
+            State(state),
+            Some(current_user("alice", std::path::Path::new("/tmp"))),
+            Path(created.id),
+            Json(UpdateSessionRequest {
+                title: None,
+                project_dir: None,
+                working_dir: None,
+                workspace_mode: Some(WorkspaceMode::Created),
+                mode: None,
+                model: None,
+                target_branch: None,
+            }),
+        )
+        .await;
+
+        match result {
+            Err(AppError::BadRequest(message)) => {
+                assert_eq!(
+                    message,
+                    "workspace modes 'selected' and 'created' require a project_dir"
+                );
+            }
+            Ok(_) => panic!("invalid workspace update should fail"),
+            Err(_) => panic!("invalid workspace update should fail with bad request"),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_routes_reject_working_dir_updates_outside_user_root() {
+        let (state, temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        let user_root = temp_dir.join("alice-home");
+        let outside_root = temp_dir.join("outside");
+        std::fs::create_dir_all(&user_root).expect("user root should exist");
+        std::fs::create_dir_all(&outside_root).expect("outside root should exist");
+
+        let (_, Json(created)) = create_session(
+            State(state.clone()),
+            Some(current_user("alice", &user_root)),
+            Json(CreateSessionRequest {
+                title: Some("Workspace Validation".to_string()),
+                model: None,
+                project_dir: None,
+                working_dir: None,
+                workspace_mode: None,
+                target_branch: None,
+                session_type: None,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("session creation should succeed"));
+
+        let result = update_session(
+            State(state),
+            Some(current_user("alice", &user_root)),
+            Path(created.id),
+            Json(UpdateSessionRequest {
+                title: None,
+                project_dir: None,
+                working_dir: Some(outside_root.to_string_lossy().to_string()),
+                workspace_mode: None,
+                mode: None,
+                model: None,
+                target_branch: None,
+            }),
+        )
+        .await;
+
+        assert!(matches!(result, Err(AppError::BadRequest(_))));
     }
 }

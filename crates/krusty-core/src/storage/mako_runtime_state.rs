@@ -1,7 +1,9 @@
 //! Persistent Mako runtime state for daemon-owned autonomous sessions.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, params_from_iter, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use super::database::Database;
@@ -98,6 +100,32 @@ impl MakoRuntimeStateStore {
             .query_map([], map_state_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    pub fn list_states_for_sessions(
+        &self,
+        session_ids: &[String],
+    ) -> Result<HashMap<String, MakoRuntimeState>> {
+        if session_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let placeholders = vec!["?"; session_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT session_id, status, next_wake_at, sleep_reason, last_error,
+                    current_run_id, last_wake_reason, updated_at
+             FROM mako_runtime_state
+             WHERE session_id IN ({placeholders})"
+        );
+        let mut stmt = self.db.conn().prepare(&sql)?;
+        let rows = stmt
+            .query_map(params_from_iter(session_ids.iter()), map_state_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(rows
+            .into_iter()
+            .map(|state| (state.session_id.clone(), state))
+            .collect())
     }
 
     pub fn upsert_state(&self, state: &MakoRuntimeState) -> Result<()> {
@@ -281,5 +309,60 @@ mod tests {
                 && state.status == MakoRuntimeStateStatus::Running));
         assert!(states.iter().any(|state| state.session_id == "sess-2"
             && state.status == MakoRuntimeStateStatus::Sleeping));
+    }
+
+    #[test]
+    fn list_states_for_sessions_returns_requested_rows_only() {
+        let (store, _tmp) = create_store();
+        let now = chrono::Utc::now().to_rfc3339();
+        store
+            .db
+            .conn()
+            .execute(
+                "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params!["sess-2", "Mako Sleep", now, now],
+            )
+            .expect("seed second session");
+        store
+            .db
+            .conn()
+            .execute(
+                "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params!["sess-3", "Mako Idle", now, now],
+            )
+            .expect("seed third session");
+        store
+            .set_state(
+                "sess-1",
+                MakoRuntimeStateStatus::Running,
+                None,
+                None,
+                None,
+                Some("run-1"),
+                Some("dispatch"),
+            )
+            .expect("write sess-1 state");
+        store
+            .set_state(
+                "sess-2",
+                MakoRuntimeStateStatus::Sleeping,
+                Some("2026-01-01T00:00:00Z"),
+                Some("waiting"),
+                None,
+                None,
+                Some("sleep"),
+            )
+            .expect("write sess-2 state");
+
+        let states = store
+            .list_states_for_sessions(&["sess-1".to_string(), "sess-3".to_string()])
+            .expect("batch state lookup");
+
+        assert_eq!(states.len(), 1);
+        assert_eq!(
+            states.get("sess-1").map(|state| state.status),
+            Some(MakoRuntimeStateStatus::Running)
+        );
+        assert!(!states.contains_key("sess-3"));
     }
 }

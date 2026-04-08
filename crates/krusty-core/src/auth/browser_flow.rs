@@ -329,15 +329,39 @@ struct TokenResponse {
     id_token: Option<String>,
     #[serde(default)]
     expires_in: Option<u64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    token_type: Option<String>,
+    #[serde(rename = "token_type", default)]
+    _token_type: Option<String>,
 }
 
 /// Result from the OAuth callback
 pub enum CallbackResult {
     Success { code: String },
     Error { error: String, description: String },
+}
+
+fn callback_timeout_result() -> CallbackResult {
+    CallbackResult::Error {
+        error: "callback_timeout".to_string(),
+        description: "OAuth callback timed out with no browser response".to_string(),
+    }
+}
+
+fn callback_receive_error(error: impl std::fmt::Display) -> CallbackResult {
+    CallbackResult::Error {
+        error: "server_error".to_string(),
+        description: format!("Failed while waiting for OAuth callback: {}", error),
+    }
+}
+
+fn receive_callback_request<T, E>(result: Result<Option<T>, E>) -> Result<T, CallbackResult>
+where
+    E: std::fmt::Display,
+{
+    match result {
+        Ok(Some(request)) => Ok(request),
+        Ok(None) => Err(callback_timeout_result()),
+        Err(error) => Err(callback_receive_error(error)),
+    }
 }
 
 /// Generate a random state parameter for CSRF protection
@@ -376,46 +400,51 @@ pub fn run_callback_server(port: u16, expected_state: String, tx: mpsc::Sender<C
     };
 
     // Wait for exactly one request
-    if let Some(request) = server.recv_timeout(Duration::from_secs(300)).ok().flatten() {
-        let path = request.url().to_string();
-        let params = parse_query_params(&path);
-
-        // Check state parameter
-        let state = params.get("state").map(|s| s.as_str()).unwrap_or("");
-        if state != expected_state {
-            let _ = tx.send(CallbackResult::Error {
-                error: "state_mismatch".to_string(),
-                description: "State parameter does not match".to_string(),
-            });
-            respond_with_error(request, "State mismatch - possible CSRF attack");
+    let request = match receive_callback_request(server.recv_timeout(Duration::from_secs(300))) {
+        Ok(request) => request,
+        Err(error) => {
+            let _ = tx.send(error);
             return;
         }
+    };
+    let path = request.url().to_string();
+    let params = parse_query_params(&path);
 
-        // Check for error
-        if let Some(error) = params.get("error") {
-            let description = params
-                .get("error_description")
-                .map(|s| s.as_str())
-                .unwrap_or("Unknown error");
-            let _ = tx.send(CallbackResult::Error {
-                error: error.clone(),
-                description: description.to_string(),
-            });
-            respond_with_error(request, description);
-            return;
-        }
+    // Check state parameter
+    let state = params.get("state").map(|s| s.as_str()).unwrap_or("");
+    if state != expected_state {
+        let _ = tx.send(CallbackResult::Error {
+            error: "state_mismatch".to_string(),
+            description: "State parameter does not match".to_string(),
+        });
+        respond_with_error(request, "State mismatch - possible CSRF attack");
+        return;
+    }
 
-        // Get the authorization code
-        if let Some(code) = params.get("code") {
-            let _ = tx.send(CallbackResult::Success { code: code.clone() });
-            respond_with_success(request);
-        } else {
-            let _ = tx.send(CallbackResult::Error {
-                error: "missing_code".to_string(),
-                description: "No authorization code received".to_string(),
-            });
-            respond_with_error(request, "No authorization code received");
-        }
+    // Check for error
+    if let Some(error) = params.get("error") {
+        let description = params
+            .get("error_description")
+            .map(|s| s.as_str())
+            .unwrap_or("Unknown error");
+        let _ = tx.send(CallbackResult::Error {
+            error: error.clone(),
+            description: description.to_string(),
+        });
+        respond_with_error(request, description);
+        return;
+    }
+
+    // Get the authorization code
+    if let Some(code) = params.get("code") {
+        let _ = tx.send(CallbackResult::Success { code: code.clone() });
+        respond_with_success(request);
+    } else {
+        let _ = tx.send(CallbackResult::Error {
+            error: "missing_code".to_string(),
+            description: "No authorization code received".to_string(),
+        });
+        respond_with_error(request, "No authorization code received");
     }
 }
 
@@ -634,5 +663,35 @@ mod tests {
         let s2 = generate_state();
         assert_ne!(s1, s2, "State should be random");
         assert!(s1.len() >= 32, "State should be sufficiently long");
+    }
+
+    #[test]
+    fn test_receive_callback_request_reports_timeout() {
+        let result = receive_callback_request::<(), std::io::Error>(Ok(None));
+
+        match result {
+            Err(CallbackResult::Error { error, description }) => {
+                assert_eq!(error, "callback_timeout");
+                assert!(description.contains("timed out"));
+            }
+            Ok(_) => panic!("timeout should not produce a request"),
+            Err(CallbackResult::Success { .. }) => panic!("timeout should not succeed"),
+        }
+    }
+
+    #[test]
+    fn test_receive_callback_request_reports_server_error() {
+        let result = receive_callback_request::<(), std::io::Error>(Err(std::io::Error::other(
+            "socket failed",
+        )));
+
+        match result {
+            Err(CallbackResult::Error { error, description }) => {
+                assert_eq!(error, "server_error");
+                assert!(description.contains("socket failed"));
+            }
+            Ok(_) => panic!("server error should not produce a request"),
+            Err(CallbackResult::Success { .. }) => panic!("server error should not succeed"),
+        }
     }
 }

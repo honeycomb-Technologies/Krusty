@@ -33,12 +33,21 @@ use krusty_core::storage::{Database, SessionType, WorkMode, WorkspaceMode};
 use krusty_core::tools::registry::PermissionMode;
 use krusty_core::SessionManager;
 
+use super::session_access::{
+    current_user_id, ensure_owned_session, load_owned_session, request_workspace_scope,
+};
 use crate::apns::{ApnsEventType, ApnsPayload, ApnsService};
 use crate::auth::CurrentUser;
 use crate::error::AppError;
 use crate::push::{PushEventType, PushPayload, PushService};
 use crate::types::{
     AgenticEvent, ChatRequest, ContentBlock, ThinkingLevel, ToolApprovalRequest, ToolResultRequest,
+};
+use crate::utils::messages::parse_stored_model_messages;
+use crate::utils::text::trimmed_nonempty;
+use crate::utils::workspace::{
+    normalize_resolved_requested_workspace, resolve_session_working_dir,
+    WorkspaceNormalizationPolicy,
 };
 use crate::AppState;
 
@@ -64,6 +73,40 @@ struct ChatSessionContext {
     session_type: SessionType,
     user_id: Option<String>,
     guard: OwnedMutexGuard<()>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestedModel<'a> {
+    Unspecified,
+    Clear,
+    Set(&'a str),
+}
+
+impl<'a> RequestedModel<'a> {
+    fn from_request(value: Option<&'a str>) -> Self {
+        match value {
+            Some(raw) => trimmed_nonempty(Some(raw))
+                .map(Self::Set)
+                .unwrap_or(Self::Clear),
+            None => Self::Unspecified,
+        }
+    }
+
+    fn effective(self, session_model: Option<&'a str>) -> Option<&'a str> {
+        match self {
+            Self::Unspecified => trimmed_nonempty(session_model),
+            Self::Clear => None,
+            Self::Set(model) => Some(model),
+        }
+    }
+
+    fn persisted(self) -> Option<Option<&'a str>> {
+        match self {
+            Self::Unspecified => None,
+            Self::Clear => Some(None),
+            Self::Set(model) => Some(Some(model)),
+        }
+    }
 }
 
 /// Build user message content from content blocks (images) and text message.
@@ -124,62 +167,32 @@ fn build_user_content(message: &str, content_blocks: &[ContentBlock]) -> Vec<Con
     contents
 }
 
-fn resolve_model_override<'a>(
-    requested_model: Option<&'a str>,
-    session_model: Option<&'a str>,
-) -> Option<&'a str> {
-    requested_model
-        .and_then(|model| {
-            let trimmed = model.trim();
-            (!trimmed.is_empty()).then_some(trimmed)
-        })
-        .or_else(|| {
-            session_model.and_then(|model| {
-                let trimmed = model.trim();
-                (!trimmed.is_empty()).then_some(trimmed)
-            })
-        })
-}
-
 async fn setup_chat_session(
     state: &AppState,
     user: Option<&CurrentUser>,
     session_id: &str,
-    model_override: Option<&str>,
+    requested_model: RequestedModel<'_>,
     thinking_level: ThinkingLevel,
     research_enabled: bool,
 ) -> Result<ChatSessionContext, AppError> {
-    let user_id = user.and_then(|u| u.0.user_id.clone());
-    let user_home_dir = user.and_then(|u| u.0.home_dir.clone());
-    let default_working_dir = user_home_dir
-        .clone()
-        .unwrap_or_else(|| (*state.working_dir).clone());
+    let user_id = current_user_id(user).map(ToOwned::to_owned);
+    let workspace_scope = request_workspace_scope(state, user);
 
     let db = Database::new(&state.db_path)?;
     let session_manager = SessionManager::new(db);
+    let session = load_owned_session(&session_manager, session_id, user)?;
 
-    if !session_manager.verify_session_ownership(session_id, user_id.as_deref())? {
-        return Err(AppError::NotFound(format!(
-            "Session {} not found",
-            session_id
-        )));
-    }
-
-    let session = session_manager
-        .get_session(session_id)?
-        .ok_or_else(|| AppError::NotFound(format!("Session {} not found", session_id)))?;
-
-    let effective_model = resolve_model_override(model_override, session.model.as_deref());
+    let effective_model = requested_model.effective(session.model.as_deref());
     let ai_client = state
         .resolve_ai_client(effective_model)
         .await
         .ok_or_else(|| AppError::BadRequest("No AI credentials configured".to_string()))?;
 
-    let working_dir = session
-        .working_dir
-        .as_deref()
-        .map(PathBuf::from)
-        .unwrap_or(default_working_dir);
+    let working_dir = resolve_session_working_dir(
+        session.working_dir.as_deref(),
+        &workspace_scope.base_dir,
+        &workspace_scope.allowed_root,
+    )?;
 
     let session_lock = {
         let mut locks = state.session_locks.write().await;
@@ -198,19 +211,7 @@ async fn setup_chat_session(
         .map_err(|_| AppError::Conflict(format!("Session {} is busy", session_id)))?;
 
     let raw_messages = session_manager.load_session_messages(session_id)?;
-    let conversation: Vec<ModelMessage> = raw_messages
-        .into_iter()
-        .filter_map(|(role_str, content_json)| {
-            let role = match role_str.as_str() {
-                "user" => Role::User,
-                "assistant" => Role::Assistant,
-                _ => return None,
-            };
-            serde_json::from_str(&content_json)
-                .ok()
-                .map(|content| ModelMessage { role, content })
-        })
-        .collect();
+    let conversation = parse_stored_model_messages(session_id, raw_messages, "chat conversation");
 
     tracing::info!(
         session_type = ?session.session_type,
@@ -269,86 +270,51 @@ async fn chat(
     user: Option<CurrentUser>,
     Json(req): Json<ChatRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
-    let user_id = user.as_ref().and_then(|u| u.0.user_id.clone());
-    let default_working_dir = user
-        .as_ref()
-        .and_then(|u| u.0.home_dir.clone())
-        .unwrap_or_else(|| (*state.working_dir).clone());
-    let model_override = resolve_model_override(req.model.as_deref(), None);
+    let user_id = current_user_id(user.as_ref()).map(ToOwned::to_owned);
+    let workspace_scope = request_workspace_scope(&state, user.as_ref());
+    let requested_model = RequestedModel::from_request(req.model.as_deref());
     let requested_session_type = req.session_type.unwrap_or(SessionType::Code);
 
-    let (session_id, is_first_message) = match req.session_id {
+    let (session_id, is_first_message, pending_model_update) = match req.session_id {
         Some(id) => {
             let db = Database::new(&state.db_path)?;
             let sm = SessionManager::new(db);
-            if !sm.verify_session_ownership(&id, user_id.as_deref())? {
-                return Err(AppError::NotFound(format!("Session {} not found", id)));
-            }
-            if let Some(ref model) = req.model {
-                let normalized = if model.is_empty() {
-                    None
-                } else {
-                    Some(model.as_str())
-                };
-                sm.update_session_model(&id, normalized)?;
-            }
+            ensure_owned_session(&sm, &id, user.as_ref())?;
             let messages = sm.load_session_messages(&id)?;
-            (id, messages.is_empty())
+            (id, messages.is_empty(), requested_model.persisted())
         }
         None => {
             let db = Database::new(&state.db_path)?;
             let sm = SessionManager::new(db);
             let title = SessionManager::generate_title_from_content(&req.message);
-            let requested_working_dir = req
-                .working_dir
-                .as_deref()
-                .map(str::trim)
-                .filter(|dir| !dir.is_empty())
-                .map(ToOwned::to_owned);
-            let requested_project_dir = req
-                .project_dir
-                .as_deref()
-                .map(str::trim)
-                .filter(|dir| !dir.is_empty())
-                .map(ToOwned::to_owned);
-            let workspace_mode = req.workspace_mode.unwrap_or_else(|| {
-                if requested_project_dir.is_some() || requested_working_dir.is_some() {
-                    WorkspaceMode::Selected
-                } else if requested_session_type == SessionType::Chat {
-                    WorkspaceMode::Neutral
-                } else {
-                    WorkspaceMode::Selected
-                }
-            });
-            let default_workspace = if workspace_mode == WorkspaceMode::Neutral {
-                None
+            let default_mode_without_paths = if requested_session_type == SessionType::Chat {
+                WorkspaceMode::Neutral
             } else {
-                Some(default_working_dir.to_string_lossy().to_string())
+                WorkspaceMode::Selected
             };
-            let working_dir = match workspace_mode {
-                WorkspaceMode::Neutral => requested_working_dir.clone(),
-                WorkspaceMode::Selected | WorkspaceMode::Created => requested_project_dir
-                    .clone()
-                    .or(requested_working_dir.clone())
-                    .or(default_workspace.clone()),
-            };
-            let project_dir = match workspace_mode {
-                WorkspaceMode::Neutral => None,
-                WorkspaceMode::Selected | WorkspaceMode::Created => requested_project_dir
-                    .or(requested_working_dir)
-                    .or(default_workspace),
-            };
+            let default_workspace = workspace_scope.base_dir.to_string_lossy().to_string();
+            let workspace = normalize_resolved_requested_workspace(
+                req.working_dir.as_deref(),
+                req.project_dir.as_deref(),
+                req.workspace_mode,
+                WorkspaceNormalizationPolicy {
+                    default_mode_without_paths,
+                    selected_fallback_dir: Some(default_workspace.as_str()),
+                },
+                &workspace_scope.base_dir,
+                &workspace_scope.allowed_root,
+            )?;
             let id = sm.create_session_for_user_with_config(
                 &title,
-                model_override,
-                working_dir.as_deref(),
-                project_dir.as_deref(),
-                workspace_mode,
+                requested_model.effective(None),
+                workspace.working_dir.as_deref(),
+                workspace.project_dir.as_deref(),
+                workspace.workspace_mode,
                 user_id.as_deref(),
                 None,
                 requested_session_type,
             )?;
-            (id, true)
+            (id, true, None)
         }
     };
 
@@ -356,11 +322,16 @@ async fn chat(
         &state,
         user.as_ref(),
         &session_id,
-        model_override,
+        requested_model,
         req.thinking_enabled,
         req.research_enabled.unwrap_or(false),
     )
     .await?;
+
+    if let Some(model_override) = pending_model_update {
+        ctx.session_manager
+            .update_session_model(&session_id, model_override)?;
+    }
 
     let mut work_mode = ctx.work_mode;
     if let Some(requested_mode) = req.mode {
@@ -400,7 +371,7 @@ async fn tool_result(
         &state,
         user.as_ref(),
         &req.session_id,
-        None,
+        RequestedModel::Unspecified,
         ThinkingLevel::Off,
         false,
     )
@@ -521,14 +492,7 @@ pub(crate) async fn submit_tool_approval(
     req: ToolApprovalRequest,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let session_manager = SessionManager::new(Database::new(&state.db_path)?);
-    if !session_manager
-        .verify_session_ownership(&req.session_id, user.and_then(|u| u.0.user_id.as_deref()))?
-    {
-        return Err(AppError::NotFound(format!(
-            "Session {} not found",
-            req.session_id
-        )));
-    }
+    ensure_owned_session(&session_manager, &req.session_id, user)?;
 
     let inputs = state.session_inputs.read().await;
     let sender = inputs
@@ -1036,10 +1000,10 @@ mod tests {
     use krusty_core::tools::registry::ToolRegistry;
     use krusty_core::SessionManager;
 
-    use super::{build_user_content, forward_loop_event, resolve_model_override, tool_approval};
+    use super::{build_user_content, chat, forward_loop_event, tool_approval, RequestedModel};
     use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::error::AppError;
-    use crate::types::{ContentBlock, ToolApprovalRequest};
+    use crate::types::{ChatRequest, ContentBlock, ToolApprovalRequest};
     use crate::AppState;
 
     fn create_test_state() -> (AppState, PathBuf) {
@@ -1103,24 +1067,44 @@ mod tests {
     }
 
     #[test]
-    fn resolve_model_override_prefers_request_and_trims_input() {
+    fn requested_model_prefers_request_and_trims_input() {
+        let requested_model = RequestedModel::from_request(Some("  openai/gpt-5  "));
+
         assert_eq!(
-            resolve_model_override(Some("  openai/gpt-5  "), Some("minimax/m2")),
+            requested_model.effective(Some("minimax/m2")),
             Some("openai/gpt-5")
         );
+        assert_eq!(requested_model.persisted(), Some(Some("openai/gpt-5")));
     }
 
     #[test]
-    fn resolve_model_override_falls_back_to_session_model() {
+    fn requested_model_falls_back_to_session_model_when_unspecified() {
+        let requested_model = RequestedModel::from_request(None);
+
         assert_eq!(
-            resolve_model_override(None, Some("  anthropic/claude-opus-4.6  ")),
+            requested_model.effective(Some("  anthropic/claude-opus-4.6  ")),
             Some("anthropic/claude-opus-4.6")
         );
+        assert_eq!(requested_model.persisted(), None);
     }
 
     #[test]
-    fn resolve_model_override_ignores_empty_values() {
-        assert_eq!(resolve_model_override(Some("   "), Some("   ")), None);
+    fn requested_model_unspecified_ignores_empty_session_values() {
+        let requested_model = RequestedModel::from_request(None);
+
+        assert_eq!(requested_model.effective(Some("   ")), None);
+        assert_eq!(requested_model.persisted(), None);
+    }
+
+    #[test]
+    fn requested_model_clear_does_not_fall_back_to_session_model() {
+        let requested_model = RequestedModel::from_request(Some("   "));
+
+        assert_eq!(
+            requested_model.effective(Some("anthropic/claude-opus-4.6")),
+            None
+        );
+        assert_eq!(requested_model.persisted(), Some(None));
     }
 
     #[test]
@@ -1222,6 +1206,61 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(AppError::Conflict(_))));
+    }
+
+    #[tokio::test]
+    async fn chat_does_not_persist_model_override_when_setup_fails() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let session_id = session_manager
+            .create_session_for_user_with_config(
+                "Existing Session",
+                Some("minimax/m2"),
+                None,
+                None,
+                krusty_core::storage::WorkspaceMode::Neutral,
+                Some("alice"),
+                None,
+                krusty_core::storage::SessionType::Code,
+            )
+            .expect("session should be created");
+
+        let result = chat(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Json(ChatRequest {
+                session_id: Some(session_id.clone()),
+                message: "hello".to_string(),
+                content: Vec::new(),
+                project_dir: None,
+                working_dir: None,
+                workspace_mode: None,
+                session_type: None,
+                model: Some("openai/gpt-5".to_string()),
+                thinking_enabled: crate::types::ThinkingLevel::Off,
+                mode: None,
+                permission_mode: krusty_core::tools::registry::PermissionMode::default(),
+                research_enabled: None,
+            }),
+        )
+        .await;
+
+        match result {
+            Err(AppError::BadRequest(message)) => {
+                assert_eq!(message, "No AI credentials configured");
+            }
+            Ok(_) => panic!("chat request should fail without configured AI credentials"),
+            Err(_) => panic!("chat request should fail with bad request"),
+        }
+
+        let reloaded = session_manager
+            .get_session(&session_id)
+            .expect("session lookup should succeed")
+            .expect("session should exist");
+        assert_eq!(reloaded.model.as_deref(), Some("minimax/m2"));
     }
 
     #[tokio::test]

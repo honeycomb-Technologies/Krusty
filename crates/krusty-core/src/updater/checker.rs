@@ -431,31 +431,15 @@ pub fn detect_repo_path() -> Option<PathBuf> {
 }
 
 /// Detect platform string for download
-#[allow(clippy::unnecessary_wraps)] // Result is needed for unsupported platforms
 fn detect_platform() -> Result<&'static str> {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    return Ok("x86_64-unknown-linux-gnu");
-
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    return Ok("aarch64-unknown-linux-gnu");
-
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    return Ok("x86_64-apple-darwin");
-
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    return Ok("aarch64-apple-darwin");
-
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    return Ok("x86_64-pc-windows-msvc");
-
-    #[cfg(not(any(
-        all(target_os = "linux", target_arch = "x86_64"),
-        all(target_os = "linux", target_arch = "aarch64"),
-        all(target_os = "macos", target_arch = "x86_64"),
-        all(target_os = "macos", target_arch = "aarch64"),
-        all(target_os = "windows", target_arch = "x86_64"),
-    )))]
-    return Err(anyhow!("Unsupported platform"));
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Ok("x86_64-unknown-linux-gnu"),
+        ("linux", "aarch64") => Ok("aarch64-unknown-linux-gnu"),
+        ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
+        ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
+        ("windows", "x86_64") => Ok("x86_64-pc-windows-msvc"),
+        _ => Err(anyhow!("Unsupported platform")),
+    }
 }
 
 /// Compare semver versions (returns true if new > current)
@@ -592,7 +576,7 @@ fn extract_zip(_archive: &PathBuf, _dest: &PathBuf) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_newer_version;
+    use super::{detect_platform, is_newer_version};
 
     #[test]
     fn semver_comparison_prefers_higher_components() {
@@ -607,5 +591,22 @@ mod tests {
         assert!(is_newer_version("0.5", "0.4.9"));
         assert!(is_newer_version("2", "1.99.99"));
         assert!(!is_newer_version("0.4", "0.4.1"));
+    }
+
+    #[test]
+    fn detect_platform_matches_runtime_target() {
+        let expected = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("linux", "x86_64") => Some("x86_64-unknown-linux-gnu"),
+            ("linux", "aarch64") => Some("aarch64-unknown-linux-gnu"),
+            ("macos", "x86_64") => Some("x86_64-apple-darwin"),
+            ("macos", "aarch64") => Some("aarch64-apple-darwin"),
+            ("windows", "x86_64") => Some("x86_64-pc-windows-msvc"),
+            _ => None,
+        };
+
+        match expected {
+            Some(expected) => assert_eq!(detect_platform().unwrap(), expected),
+            None => assert!(detect_platform().is_err()),
+        }
     }
 }

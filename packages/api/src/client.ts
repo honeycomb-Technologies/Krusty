@@ -29,6 +29,7 @@ import type {
   Report,
   ReportSummary,
   MakoDispatchResponse,
+  MakoCurrentResponse,
   MakoSessionSummary,
   MakoSessionStatus,
   SimpleOkResponse,
@@ -395,6 +396,10 @@ export class KrustyClient {
         model: options?.model ?? undefined,
       }),
     });
+  }
+
+  async getMakoCurrent(): Promise<MakoCurrentResponse> {
+    return this.request('/mako/current');
   }
 
   async listMakoSessions(): Promise<MakoSessionSummary[]> {

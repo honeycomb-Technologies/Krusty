@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use krusty_core::storage::{Database, ReportStore};
 
+use super::session_access::{current_user_id, request_workspace_scope};
+use crate::auth::CurrentUser;
 use crate::error::AppError;
+use crate::utils::workspace::resolve_optional_workspace_path;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -52,19 +55,27 @@ pub fn router() -> Router<AppState> {
 
 async fn list_reports(
     State(state): State<AppState>,
+    user: Option<CurrentUser>,
     Query(query): Query<ListReportsQuery>,
 ) -> Result<Json<ListReportsResponse>, AppError> {
     let store = ReportStore::new(Database::new(&state.db_path)?);
-    let reports = store.list_reports(query.project_dir.as_deref())?;
+    let workspace_scope = request_workspace_scope(&state, user.as_ref());
+    let project_dir = resolve_optional_workspace_path(
+        query.project_dir.as_deref(),
+        &workspace_scope.base_dir,
+        &workspace_scope.allowed_root,
+    )?;
+    let user_id = current_user_id(user.as_ref());
+    let reports = store.list_reports_for_user(project_dir.as_deref(), user_id)?;
 
     let summaries = reports
         .into_iter()
-        .map(|r| ReportSummaryResponse {
-            id: r.id,
-            title: r.title,
-            summary: r.summary,
-            tags: r.tags,
-            created_at: r.created_at,
+        .map(|report| ReportSummaryResponse {
+            id: report.id,
+            title: report.title,
+            summary: report.summary,
+            tags: report.tags,
+            created_at: report.created_at,
         })
         .collect();
 
@@ -73,11 +84,12 @@ async fn list_reports(
 
 async fn get_report(
     State(state): State<AppState>,
+    user: Option<CurrentUser>,
     Path(id): Path<String>,
 ) -> Result<Json<ReportDetailResponse>, AppError> {
     let store = ReportStore::new(Database::new(&state.db_path)?);
     let report = store
-        .get_report(&id)?
+        .get_report_for_user(&id, current_user_id(user.as_ref()))?
         .ok_or_else(|| AppError::NotFound(format!("Report {} not found", id)))?;
 
     Ok(Json(ReportDetailResponse {
@@ -91,4 +103,220 @@ async fn get_report(
         project_dir: report.project_dir,
         created_at: report.created_at,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use axum::{
+        extract::{Path, Query, State},
+        Json,
+    };
+    use tokio::sync::{Mutex, RwLock};
+
+    use krusty_core::agent::{AgentCancellation, UserHookManager};
+    use krusty_core::ai::models::create_model_registry;
+    use krusty_core::mcp::McpManager;
+    use krusty_core::process::ProcessRegistry;
+    use krusty_core::skills::SkillsManager;
+    use krusty_core::storage::{
+        credentials::CredentialStore, reports::CreateReportInput, Database, ReportStore,
+    };
+    use krusty_core::tools::registry::ToolRegistry;
+    use krusty_core::SessionManager;
+
+    use super::{get_report, list_reports, ListReportsQuery};
+    use crate::auth::{AuthenticatedUser, CurrentUser};
+    use crate::error::AppError;
+    use crate::AppState;
+
+    fn create_test_state() -> (AppState, PathBuf) {
+        let temp_dir =
+            std::env::temp_dir().join(format!("krusty-server-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        let db_path = temp_dir.join("krusty.db");
+        Database::new(&db_path).expect("database should initialize");
+        let working_dir = temp_dir.join("workspace");
+        std::fs::create_dir_all(&working_dir).expect("workspace should exist");
+
+        (
+            AppState {
+                server_port: 3000,
+                db_path: Arc::new(db_path),
+                working_dir: Arc::new(working_dir.clone()),
+                ai_client: None,
+                tool_registry: Arc::new(ToolRegistry::new()),
+                process_registry: Arc::new(ProcessRegistry::new()),
+                model_registry: create_model_registry(),
+                credential_store: Arc::new(RwLock::new(CredentialStore::default())),
+                mcp_manager: Arc::new(McpManager::new(working_dir.clone())),
+                hook_manager: Arc::new(RwLock::new(UserHookManager::new())),
+                skills_manager: Arc::new(RwLock::new(SkillsManager::with_defaults(&working_dir))),
+                cancellation: AgentCancellation::new(),
+                session_locks: Arc::new(RwLock::new(HashMap::new())),
+                session_inputs: Arc::new(RwLock::new(HashMap::new())),
+                session_presence: Arc::new(RwLock::new(HashMap::new())),
+                delegated_state: Arc::new(RwLock::new(HashMap::new())),
+                remote_access: Arc::new(RwLock::new(crate::remote_access::RemoteAccessConfig {
+                    enabled: true,
+                    token: "test-token".to_string(),
+                })),
+                active_agent_streams: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                peak_rss_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                peak_virtual_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                push_service: None,
+                apns_service: None,
+                oauth_flows: Arc::new(Mutex::new(HashMap::new())),
+                mako_runtime: crate::mako_runtime::MakoRuntimeManager::new(),
+            },
+            temp_dir,
+        )
+    }
+
+    fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
+        CurrentUser(AuthenticatedUser {
+            user_id: Some(user_id.to_string()),
+            home_dir: Some(home_dir.to_path_buf()),
+        })
+    }
+
+    fn create_test_user(state: &AppState, user_id: &str) {
+        let db = Database::new(&state.db_path).expect("database should open");
+        db.conn()
+            .execute(
+                "INSERT INTO users (id, email, license_tier) VALUES (?1, ?2, ?3)",
+                (user_id, format!("{user_id}@example.com"), "free"),
+            )
+            .expect("user should insert");
+    }
+
+    fn seed_report(
+        state: &AppState,
+        user_id: &str,
+        title: &str,
+        project_dir: &std::path::Path,
+    ) -> String {
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let session_id = session_manager
+            .create_session_for_user_with_config(
+                "Research Session",
+                None,
+                Some(project_dir.to_string_lossy().as_ref()),
+                Some(project_dir.to_string_lossy().as_ref()),
+                krusty_core::storage::WorkspaceMode::Selected,
+                Some(user_id),
+                None,
+                krusty_core::storage::SessionType::Code,
+            )
+            .expect("session should create");
+        let store = ReportStore::new(Database::new(&state.db_path).expect("database should open"));
+        store
+            .create_report(CreateReportInput {
+                title,
+                session_id: &session_id,
+                project_dir: Some(project_dir.to_string_lossy().as_ref()),
+                report_root: Some(project_dir),
+                content: "content",
+                summary: "summary",
+                tags: &[],
+                sources: &[],
+            })
+            .expect("report should create")
+    }
+
+    #[tokio::test]
+    async fn list_reports_resolves_relative_project_dir_filter_within_user_root() {
+        let (state, temp_dir) = create_test_state();
+        let user_root = temp_dir.join("user");
+        let project_dir = user_root.join("repo");
+        std::fs::create_dir_all(&project_dir).expect("project dir should exist");
+        std::fs::create_dir_all(&user_root).expect("user root should exist");
+        create_test_user(&state, "alice");
+        seed_report(&state, "alice", "Workspace Report", &project_dir);
+
+        let Json(response) = list_reports(
+            State(state),
+            Some(current_user("alice", &user_root)),
+            Query(ListReportsQuery {
+                project_dir: Some("repo".to_string()),
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("report listing should succeed"));
+
+        assert_eq!(response.reports.len(), 1);
+        assert_eq!(response.reports[0].title, "Workspace Report");
+    }
+
+    #[tokio::test]
+    async fn list_reports_hides_reports_from_other_users() {
+        let (state, temp_dir) = create_test_state();
+        let alice_root = temp_dir.join("alice");
+        let bob_root = temp_dir.join("bob");
+        let alice_project = alice_root.join("repo");
+        let bob_project = bob_root.join("repo");
+        std::fs::create_dir_all(&alice_project).expect("alice project should exist");
+        std::fs::create_dir_all(&bob_project).expect("bob project should exist");
+        create_test_user(&state, "alice");
+        create_test_user(&state, "bob");
+        seed_report(&state, "alice", "Alice Report", &alice_project);
+        seed_report(&state, "bob", "Bob Report", &bob_project);
+
+        let Json(response) = list_reports(
+            State(state),
+            Some(current_user("alice", &alice_root)),
+            Query(ListReportsQuery { project_dir: None }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("report listing should succeed"));
+
+        assert_eq!(response.reports.len(), 1);
+        assert_eq!(response.reports[0].title, "Alice Report");
+    }
+
+    #[tokio::test]
+    async fn list_reports_rejects_project_dir_filter_outside_user_root() {
+        let (state, temp_dir) = create_test_state();
+        let user_root = temp_dir.join("user");
+        let outside_root = temp_dir.join("outside");
+        std::fs::create_dir_all(&user_root).expect("user root should exist");
+        std::fs::create_dir_all(&outside_root).expect("outside root should exist");
+
+        let result = list_reports(
+            State(state),
+            Some(current_user("alice", &user_root)),
+            Query(ListReportsQuery {
+                project_dir: Some(outside_root.to_string_lossy().to_string()),
+            }),
+        )
+        .await;
+
+        assert!(matches!(result, Err(AppError::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn get_report_rejects_foreign_owner() {
+        let (state, temp_dir) = create_test_state();
+        let alice_root = temp_dir.join("alice");
+        let bob_root = temp_dir.join("bob");
+        let alice_project = alice_root.join("repo");
+        std::fs::create_dir_all(&alice_project).expect("alice project should exist");
+        std::fs::create_dir_all(&bob_root).expect("bob root should exist");
+        create_test_user(&state, "alice");
+        create_test_user(&state, "bob");
+        let report_id = seed_report(&state, "alice", "Alice Report", &alice_project);
+
+        let result = get_report(
+            State(state),
+            Some(current_user("bob", &bob_root)),
+            Path(report_id),
+        )
+        .await;
+
+        assert!(matches!(result, Err(AppError::NotFound(_))));
+    }
 }

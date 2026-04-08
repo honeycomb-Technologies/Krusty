@@ -38,8 +38,8 @@ impl App {
         Some((line_index, rel_x))
     }
 
-    /// Get markdown line count from cache (O(1) cache hit) or fast estimate on miss
-    /// Used by hit_test functions - prefers cache hit from calculate_message_lines
+    /// Get markdown line count from the rendered cache or a fast estimate on miss.
+    /// Used by hit_test functions after layout has usually already populated the cache.
     pub fn get_markdown_line_count(&self, content: &str, wrap_width: usize) -> usize {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -55,11 +55,6 @@ impl App {
             .get_rendered(content_hash, wrap_width)
         {
             return cached.lines.len();
-        }
-
-        // Fall back to legacy cache
-        if let Some(cached) = self.ui.markdown_cache.get(content_hash, wrap_width) {
-            return cached.len();
         }
 
         // Cache miss - use fast estimation (should rarely happen after calculate_message_lines runs)

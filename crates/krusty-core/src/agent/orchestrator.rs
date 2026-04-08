@@ -86,6 +86,7 @@ impl Default for OrchestratorConfig {
 }
 
 /// Shared services the orchestrator needs.
+#[derive(Clone)]
 pub struct OrchestratorServices {
     pub ai_client: Arc<AiClient>,
     pub tool_registry: Arc<ToolRegistry>,

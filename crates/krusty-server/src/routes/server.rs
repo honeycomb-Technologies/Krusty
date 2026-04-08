@@ -8,6 +8,7 @@ use krusty_core::SessionManager;
 use crate::auth::CurrentUser;
 use crate::error::AppError;
 use crate::presence::snapshot_presence;
+use crate::remote_access::RemoteAccessConfig;
 use crate::types::{
     ActiveSessionStatusResponse, ServerAccessResponse, ServerMemoryStatusResponse,
     ServerStatusResponse, TailscaleAccessResponse, UpdateServerAccessRequest,
@@ -27,18 +28,10 @@ async fn get_server_access(
     State(state): State<AppState>,
 ) -> Result<Json<ServerAccessResponse>, AppError> {
     let remote_access = state.remote_access.read().await.clone();
-    let tailscale = tailscale_status(state.server_port);
-
-    Ok(Json(ServerAccessResponse {
-        local_url: format!("http://localhost:{}", state.server_port),
-        remote_access_enabled: remote_access.enabled,
-        remote_access_token: remote_access.token.clone(),
-        remote_launch_url: tailscale
-            .url
-            .as_ref()
-            .map(|url| format!("{url}/#krusty-remote-token={}", remote_access.token)),
-        tailscale,
-    }))
+    Ok(Json(server_access_response(
+        &remote_access,
+        state.server_port,
+    )))
 }
 
 async fn update_server_access(
@@ -56,17 +49,10 @@ async fn update_server_access(
         remote_access.persist(&state.db_path)?;
     }
 
-    let tailscale = tailscale_status(state.server_port);
-    Ok(Json(ServerAccessResponse {
-        local_url: format!("http://localhost:{}", state.server_port),
-        remote_access_enabled: remote_access.enabled,
-        remote_access_token: remote_access.token.clone(),
-        remote_launch_url: tailscale
-            .url
-            .as_ref()
-            .map(|url| format!("{url}/#krusty-remote-token={}", remote_access.token)),
-        tailscale,
-    }))
+    Ok(Json(server_access_response(
+        &remote_access,
+        state.server_port,
+    )))
 }
 
 async fn get_server_status(
@@ -75,25 +61,16 @@ async fn get_server_status(
 ) -> Result<Json<ServerStatusResponse>, AppError> {
     let session_manager = SessionManager::new(Database::new(&state.db_path)?);
     let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
+    let visible_sessions = load_visible_active_sessions(&session_manager, user_id)?;
+
     let mut presence = state.session_presence.write().await;
-
-    let mut active_sessions = session_manager
-        .list_active_sessions()?
+    let mut active_sessions = visible_sessions
         .into_iter()
-        .filter_map(|(session_id, agent_state)| {
-            if !session_manager
-                .verify_session_ownership(&session_id, user_id)
-                .unwrap_or(false)
-                && user_id.is_some()
-            {
-                return None;
-            }
+        .map(|(session, agent_state)| {
+            let presence_snapshot = snapshot_presence(&mut presence, &session.id);
 
-            let session = session_manager.get_session(&session_id).ok().flatten()?;
-            let presence_snapshot = snapshot_presence(&mut presence, &session_id);
-
-            Some(ActiveSessionStatusResponse {
-                id: session_id,
+            ActiveSessionStatusResponse {
+                id: session.id,
                 title: session.title,
                 agent_state: agent_state.state,
                 started_at: agent_state.started_at,
@@ -104,7 +81,7 @@ async fn get_server_status(
                 active_viewers: presence_snapshot.active_viewers,
                 active_controllers: presence_snapshot.active_controllers,
                 stale_clients: presence_snapshot.stale_clients,
-            })
+            }
         })
         .collect::<Vec<_>>();
     active_sessions.sort_by(|left, right| left.id.cmp(&right.id));
@@ -121,6 +98,37 @@ async fn get_server_status(
         },
         tailscale: tailscale_status(state.server_port),
     }))
+}
+
+fn server_access_response(
+    remote_access: &RemoteAccessConfig,
+    server_port: u16,
+) -> ServerAccessResponse {
+    let tailscale = tailscale_status(server_port);
+
+    ServerAccessResponse {
+        local_url: format!("http://localhost:{server_port}"),
+        remote_access_enabled: remote_access.enabled,
+        remote_access_token: remote_access.token.clone(),
+        remote_launch_url: tailscale
+            .url
+            .as_ref()
+            .map(|url| format!("{url}/#krusty-remote-token={}", remote_access.token)),
+        tailscale,
+    }
+}
+
+fn load_visible_active_sessions(
+    session_manager: &SessionManager,
+    user_id: Option<&str>,
+) -> Result<
+    Vec<(
+        krusty_core::storage::SessionInfo,
+        krusty_core::storage::AgentState,
+    )>,
+    AppError,
+> {
+    Ok(session_manager.list_active_session_details_for_user(user_id)?)
 }
 
 fn tailscale_status(port: u16) -> TailscaleAccessResponse {
@@ -158,6 +166,7 @@ mod tests {
 
     use axum::extract::State;
     use axum::Json;
+    use chrono::Utc;
     use tokio::sync::{Mutex, RwLock};
 
     use krusty_core::agent::{AgentCancellation, UserHookManager};
@@ -168,8 +177,11 @@ mod tests {
     use krusty_core::storage::credentials::CredentialStore;
     use krusty_core::storage::Database;
     use krusty_core::tools::registry::ToolRegistry;
+    use krusty_core::SessionManager;
 
-    use super::{get_server_access, update_server_access};
+    use super::{get_server_access, get_server_status, update_server_access};
+    use crate::auth::{AuthenticatedUser, CurrentUser};
+    use crate::presence::{PresenceCapability, SessionPresenceRecord};
     use crate::types::UpdateServerAccessRequest;
     use crate::AppState;
 
@@ -214,6 +226,23 @@ mod tests {
         )
     }
 
+    fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
+        CurrentUser(AuthenticatedUser {
+            user_id: Some(user_id.to_string()),
+            home_dir: Some(home_dir.to_path_buf()),
+        })
+    }
+
+    fn create_test_user(state: &AppState, user_id: &str) {
+        let db = Database::new(&state.db_path).expect("database should open");
+        db.conn()
+            .execute(
+                "INSERT INTO users (id, email, license_tier) VALUES (?1, ?2, ?3)",
+                (user_id, format!("{user_id}@example.com"), "free"),
+            )
+            .expect("user should insert");
+    }
+
     #[tokio::test]
     async fn update_server_access_rotates_token() {
         let (state, _temp_dir) = create_test_state();
@@ -233,5 +262,116 @@ mod tests {
         .unwrap_or_else(|_| panic!("rotate request should succeed"));
 
         assert_ne!(before.remote_access_token, after.remote_access_token);
+    }
+
+    #[tokio::test]
+    async fn get_server_status_filters_active_sessions_by_owner() {
+        let (state, temp_dir) = create_test_state();
+        create_test_user(&state, "user-a");
+        create_test_user(&state, "user-b");
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+
+        let my_session = session_manager
+            .create_session_for_user(
+                "Mine",
+                None,
+                Some(temp_dir.to_str().expect("temp dir should be utf-8")),
+                Some("user-a"),
+            )
+            .expect("session should create");
+        let foreign_session = session_manager
+            .create_session_for_user(
+                "Theirs",
+                None,
+                Some(temp_dir.to_str().expect("temp dir should be utf-8")),
+                Some("user-b"),
+            )
+            .expect("session should create");
+        session_manager
+            .set_agent_state(&my_session, "streaming")
+            .expect("agent state should persist");
+        session_manager
+            .set_agent_state(&foreign_session, "tool_executing")
+            .expect("agent state should persist");
+
+        let mut presence = state.session_presence.write().await;
+        presence.insert(
+            my_session.clone(),
+            HashMap::from([(
+                "client-1".to_string(),
+                SessionPresenceRecord {
+                    client_id: "client-1".to_string(),
+                    surface: "web".to_string(),
+                    capability: PresenceCapability::Controller,
+                    user_id: Some("user-a".to_string()),
+                    last_seen_at: Utc::now(),
+                    last_event_sequence: Some(42),
+                },
+            )]),
+        );
+        presence.insert(
+            foreign_session.clone(),
+            HashMap::from([(
+                "client-2".to_string(),
+                SessionPresenceRecord {
+                    client_id: "client-2".to_string(),
+                    surface: "web".to_string(),
+                    capability: PresenceCapability::Observer,
+                    user_id: Some("user-b".to_string()),
+                    last_seen_at: Utc::now(),
+                    last_event_sequence: Some(7),
+                },
+            )]),
+        );
+        drop(presence);
+
+        let Json(response) =
+            match get_server_status(State(state), Some(current_user("user-a", &temp_dir))).await {
+                Ok(response) => response,
+                Err(_) => panic!("status should succeed"),
+            };
+
+        assert_eq!(response.active_sessions.len(), 1);
+        let session = &response.active_sessions[0];
+        assert_eq!(session.id, my_session);
+        assert_eq!(session.title, "Mine");
+        assert_eq!(session.active_viewers, 1);
+        assert_eq!(session.active_controllers, 1);
+        assert_eq!(session.stale_clients, 0);
+    }
+
+    #[tokio::test]
+    async fn get_server_status_includes_all_active_sessions_in_local_mode() {
+        let (state, temp_dir) = create_test_state();
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+
+        let first = session_manager
+            .create_session("A", None, Some(temp_dir.to_str().expect("utf-8 path")))
+            .expect("session should create");
+        let second = session_manager
+            .create_session("B", None, Some(temp_dir.to_str().expect("utf-8 path")))
+            .expect("session should create");
+        session_manager
+            .set_agent_state(&first, "streaming")
+            .expect("agent state should persist");
+        session_manager
+            .set_agent_state(&second, "awaiting_input")
+            .expect("agent state should persist");
+
+        let Json(response) = match get_server_status(State(state), None).await {
+            Ok(response) => response,
+            Err(_) => panic!("status should succeed"),
+        };
+
+        let mut expected = vec![first, second];
+        expected.sort();
+        let actual = response
+            .active_sessions
+            .into_iter()
+            .map(|session| session.id)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
     }
 }
