@@ -46,8 +46,8 @@ use crate::types::{
 use crate::utils::messages::parse_stored_model_messages;
 use crate::utils::text::trimmed_nonempty;
 use crate::utils::workspace::{
-    normalize_resolved_requested_workspace, resolve_session_working_dir,
-    WorkspaceNormalizationPolicy,
+    normalize_resolved_requested_workspace, resolve_optional_workspace_path,
+    resolve_session_working_dir, WorkspaceNormalizationPolicy,
 };
 use crate::AppState;
 
@@ -69,6 +69,7 @@ struct ChatSessionContext {
     session_id: String,
     session_manager: SessionManager,
     working_dir: PathBuf,
+    project_dir: Option<PathBuf>,
     work_mode: WorkMode,
     session_type: SessionType,
     user_id: Option<String>,
@@ -193,6 +194,12 @@ async fn setup_chat_session(
         &workspace_scope.base_dir,
         &workspace_scope.allowed_root,
     )?;
+    let project_dir = resolve_optional_workspace_path(
+        session.project_dir.as_deref(),
+        &workspace_scope.base_dir,
+        &workspace_scope.allowed_root,
+    )?
+    .map(PathBuf::from);
 
     let session_lock = {
         let mut locks = state.session_locks.write().await;
@@ -256,6 +263,7 @@ async fn setup_chat_session(
         session_id: session_id.to_string(),
         session_manager,
         working_dir,
+        project_dir,
         work_mode: effective_work_mode,
         session_type: session.session_type,
         user_id,
@@ -615,6 +623,8 @@ async fn start_orchestrator_sse(
     let config = OrchestratorConfig {
         session_id: ctx.session_id.clone(),
         working_dir: ctx.working_dir,
+        project_dir: ctx.project_dir,
+        session_type: ctx.session_type,
         permission_mode,
         user_id: ctx.user_id.clone(),
         initial_work_mode: work_mode,

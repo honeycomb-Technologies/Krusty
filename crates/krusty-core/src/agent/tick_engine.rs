@@ -329,6 +329,7 @@ impl CloneForTick for OrchestratorConfig {
             session_id: self.session_id.clone(),
             working_dir: self.working_dir.clone(),
             project_dir: self.project_dir.clone(),
+            session_type: self.session_type,
             permission_mode: self.permission_mode,
             max_iterations: self.max_iterations,
             stream_idle_timeout: self.stream_idle_timeout,
@@ -373,6 +374,24 @@ mod tests {
         let output = r#"{"ok":true,"data":{"slept_seconds":120,"signal":"sleep_idle","reason":"waiting for CI"}}"#;
         let duration = parse_sleep_signal(Some(output));
         assert_eq!(duration, Some(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn clone_for_tick_preserves_session_identity() {
+        let config = OrchestratorConfig {
+            session_id: "session-1".to_string(),
+            working_dir: std::path::PathBuf::from("/tmp/workspace"),
+            project_dir: Some(std::path::PathBuf::from("/tmp/workspace/project")),
+            session_type: SessionType::Mako,
+            generate_title: true,
+            ..Default::default()
+        };
+
+        let cloned = config.clone_for_tick();
+
+        assert_eq!(cloned.project_dir, config.project_dir);
+        assert_eq!(cloned.session_type, SessionType::Mako);
+        assert!(!cloned.generate_title);
     }
 
     #[test]

@@ -446,6 +446,7 @@ async fn run_mako_session_inner(
         .as_deref()
         .map(PathBuf::from)
         .unwrap_or_else(|| (*state.working_dir).clone());
+    let project_dir = resolve_persisted_project_dir(session.project_dir.as_deref(), &working_dir);
 
     let options = CallOptions {
         tools: Some(state.tool_registry.get_ai_tools().await),
@@ -465,6 +466,8 @@ async fn run_mako_session_inner(
     let config = OrchestratorConfig {
         session_id: session_id.clone(),
         working_dir,
+        project_dir,
+        session_type: SessionType::Mako,
         permission_mode: PermissionMode::Autonomous,
         user_id: session.user_id.clone(),
         initial_work_mode: work_mode,
@@ -552,6 +555,21 @@ fn load_conversation(raw_messages: Vec<(String, String)>) -> Vec<ModelMessage> {
                 .map(|content| ModelMessage { role, content })
         })
         .collect()
+}
+
+fn resolve_persisted_project_dir(
+    stored_project_dir: Option<&str>,
+    workspace_base: &Path,
+) -> Option<PathBuf> {
+    let raw = stored_project_dir
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let candidate = PathBuf::from(raw);
+    Some(if candidate.is_absolute() {
+        candidate
+    } else {
+        workspace_base.join(candidate)
+    })
 }
 
 fn apply_runtime_event_state(
@@ -669,7 +687,7 @@ fn persist_runtime_state(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use tokio::sync::{Mutex, RwLock};
@@ -687,8 +705,8 @@ mod tests {
     use krusty_core::SessionManager;
 
     use super::{
-        apply_runtime_event_state, persist_runtime_state, with_registered_session_input,
-        ActiveMakoRuntime, MakoRuntimeManager,
+        apply_runtime_event_state, persist_runtime_state, resolve_persisted_project_dir,
+        with_registered_session_input, ActiveMakoRuntime, MakoRuntimeManager,
     };
     use crate::AppState;
 
@@ -750,6 +768,21 @@ mod tests {
                 session_type,
             )
             .expect("session should create")
+    }
+
+    #[test]
+    fn resolve_persisted_project_dir_supports_relative_and_absolute_paths() {
+        let workspace = Path::new("/workspace");
+
+        assert_eq!(
+            resolve_persisted_project_dir(Some("repo"), workspace),
+            Some(workspace.join("repo"))
+        );
+        assert_eq!(
+            resolve_persisted_project_dir(Some("/tmp/project"), workspace),
+            Some(PathBuf::from("/tmp/project"))
+        );
+        assert_eq!(resolve_persisted_project_dir(Some("   "), workspace), None);
     }
 
     #[tokio::test]

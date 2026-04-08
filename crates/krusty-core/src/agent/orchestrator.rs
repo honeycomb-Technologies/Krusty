@@ -19,7 +19,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, RwLock};
@@ -34,7 +34,7 @@ use crate::process::ProcessRegistry;
 use crate::skills::SkillsManager;
 use crate::storage::{
     Database, PartialAssistantState, ProjectSettings, RecoveryDecision, RecoveryNonResumableReason,
-    RecoveryStatus, RecoveryToolCall, SessionManager, SessionRecoveryState, WorkMode,
+    RecoveryStatus, RecoveryToolCall, SessionManager, SessionRecoveryState, SessionType, WorkMode,
 };
 use crate::tools::registry::{PermissionMode, ToolRegistry};
 
@@ -56,6 +56,7 @@ pub struct OrchestratorConfig {
     pub session_id: String,
     pub working_dir: PathBuf,
     pub project_dir: Option<PathBuf>,
+    pub session_type: SessionType,
     pub permission_mode: PermissionMode,
     pub max_iterations: Option<usize>,
     pub stream_idle_timeout: std::time::Duration,
@@ -74,6 +75,7 @@ impl Default for OrchestratorConfig {
             session_id: String::new(),
             working_dir: PathBuf::new(),
             project_dir: None,
+            session_type: SessionType::Code,
             permission_mode: PermissionMode::default(),
             max_iterations: None,
             stream_idle_timeout: constants::http::STREAM_TIMEOUT,
@@ -99,6 +101,38 @@ pub struct OrchestratorServices {
 pub struct AgenticOrchestrator {
     services: OrchestratorServices,
     config: OrchestratorConfig,
+}
+
+fn session_type_name(session_type: SessionType) -> &'static str {
+    match session_type {
+        SessionType::Chat => "chat",
+        SessionType::Code => "code",
+        SessionType::Mako => "mako",
+    }
+}
+
+fn inject_runtime_context(
+    conversation: &[ModelMessage],
+    db_path: &Path,
+    session_id: &str,
+    working_dir: &Path,
+    project_dir: Option<&Path>,
+    work_mode: WorkMode,
+    skills_manager: &RwLock<SkillsManager>,
+    model: Option<&str>,
+    session_type: SessionType,
+) -> Vec<ModelMessage> {
+    context::inject_context(
+        conversation,
+        db_path,
+        session_id,
+        working_dir,
+        project_dir,
+        work_mode,
+        skills_manager,
+        model,
+        Some(session_type_name(session_type)),
+    )
 }
 
 impl AgenticOrchestrator {
@@ -165,6 +199,7 @@ impl AgenticOrchestrator {
             session_id,
             working_dir,
             project_dir,
+            session_type,
             permission_mode,
             max_iterations,
             stream_idle_timeout,
@@ -256,7 +291,7 @@ impl AgenticOrchestrator {
             iteration += 1;
 
             // Build context-injected conversation
-            let mut conversation_with_context = context::inject_context(
+            let mut conversation_with_context = inject_runtime_context(
                 &conversation,
                 &db_path,
                 &session_id,
@@ -265,7 +300,7 @@ impl AgenticOrchestrator {
                 work_mode,
                 &skills_manager,
                 Some(ai_client.config().model.as_str()),
-                None,
+                session_type,
             );
             let estimated_tokens_before =
                 super::estimate_conversation_tokens(&conversation_with_context);
@@ -316,7 +351,7 @@ impl AgenticOrchestrator {
                 persist_context_state(&db_path, &session_id, &context_ledger);
                 persist_conversation(&db_path, &session_id, &conversation);
 
-                conversation_with_context = context::inject_context(
+                conversation_with_context = inject_runtime_context(
                     &conversation,
                     &db_path,
                     &session_id,
@@ -325,7 +360,7 @@ impl AgenticOrchestrator {
                     work_mode,
                     &skills_manager,
                     Some(ai_client.config().model.as_str()),
-                    None,
+                    session_type,
                 );
                 let estimated_tokens_after =
                     super::estimate_conversation_tokens(&conversation_with_context);
@@ -835,8 +870,6 @@ fn handle_plan_detection(
 
 // ── DB helpers ─────────────────────────────────────────────────────────
 
-use std::path::Path;
-
 fn build_assistant_message(
     text: &str,
     thinking_blocks: &[ThinkingBlock],
@@ -1230,9 +1263,15 @@ fn recovery_decision(
 
 #[cfg(test)]
 mod tests {
-    use super::finalize_explore_only_turn;
-    use crate::ai::types::{AiToolCall, Content};
+    use std::fs;
+
+    use super::{finalize_explore_only_turn, inject_runtime_context};
+    use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
+    use crate::skills::SkillsManager;
+    use crate::storage::{SessionType, WorkMode};
     use serde_json::json;
+    use tempfile::TempDir;
+    use tokio::sync::RwLock;
 
     #[test]
     fn finalize_explore_only_turn_returns_summary_for_successful_explore() {
@@ -1286,5 +1325,60 @@ mod tests {
         }];
 
         assert!(finalize_explore_only_turn(&tool_calls, &tool_results).is_none());
+    }
+
+    #[test]
+    fn inject_runtime_context_applies_mako_session_identity() {
+        let temp = TempDir::new().expect("temp dir should exist");
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(".git")).expect("git dir should exist");
+        fs::write(repo.join("AGENTS.md"), "repo instructions").expect("agents should exist");
+        fs::write(repo.join("MAKO.md"), "Always Swimming.").expect("mako identity should exist");
+
+        let skills = RwLock::new(SkillsManager::with_defaults(repo));
+        let conversation = vec![ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "hello".to_string(),
+            }],
+        }];
+        let db_path = repo.join("krusty.db");
+
+        let mako_injected = inject_runtime_context(
+            &conversation,
+            &db_path,
+            "session-id",
+            repo,
+            Some(repo),
+            WorkMode::Build,
+            &skills,
+            None,
+            SessionType::Mako,
+        );
+        let code_injected = inject_runtime_context(
+            &conversation,
+            &db_path,
+            "session-id",
+            repo,
+            Some(repo),
+            WorkMode::Build,
+            &skills,
+            None,
+            SessionType::Code,
+        );
+
+        assert!(mako_injected.iter().any(|message| {
+            matches!(
+                &message.content[0],
+                Content::Text { text }
+                    if text.contains("[MAKO IDENTITY - MAKO.md]") && text.contains("Always Swimming.")
+            )
+        }));
+        assert!(!code_injected.iter().any(|message| {
+            matches!(
+                &message.content[0],
+                Content::Text { text } if text.contains("[MAKO IDENTITY - MAKO.md]")
+            )
+        }));
     }
 }
