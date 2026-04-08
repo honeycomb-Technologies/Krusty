@@ -308,6 +308,7 @@ export interface MakoSessionStatus {
   tasks: AutonomousTask[];
   agent_state: string;
   runtime?: MakoRuntimeState | null;
+  cadence: MakoCadenceSummary;
 }
 
 export interface MakoCurrentRunSummary {
@@ -322,6 +323,7 @@ export interface MakoCurrentRunSummary {
   completed_tasks: number;
   failed_tasks: number;
   blocked_tasks: number;
+  cadence: MakoCadenceSummary;
 }
 
 export interface MakoStatusSummary {
@@ -335,6 +337,11 @@ export interface MakoStatusSummary {
   idle_count: number;
   pending_approvals_count: number;
   next_wake_at?: string | null;
+}
+
+export interface MakoCadenceSummary {
+  tick_interval_secs: number;
+  max_ticks: number;
 }
 
 export interface MakoCurrentResponse {

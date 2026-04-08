@@ -66,6 +66,10 @@ export function MakoRunView({
       failed: tasks.filter((task) => task.status === "failed").length,
     };
   }, [status?.tasks]);
+  const cadence = status?.cadence ?? summary?.cadence ?? {
+    tick_interval_secs: 30,
+    max_ticks: 1000,
+  };
 
   const handlePause = async () => {
     if (!client) {
@@ -131,6 +135,11 @@ export function MakoRunView({
               <View style={styles.metricsRow}>
                 <OverviewCard label="Open tasks" value={String(taskStats.pending + taskStats.inProgress)} />
                 <OverviewCard label="Completed" value={String(taskStats.completed)} />
+              </View>
+
+              <View style={styles.metricsRow}>
+                <OverviewCard label="Tick interval" value={`${cadence.tick_interval_secs}s`} />
+                <OverviewCard label="Tick budget" value={String(cadence.max_ticks)} />
               </View>
 
               <GlassCard style={styles.card}>

@@ -2,7 +2,7 @@ import { StyleSheet, Text, View } from "react-native";
 import { GlassCard } from "../ui/GlassCard";
 import { useThemeContext } from "../../hooks/useTheme";
 import { formatTimestamp } from "./utils";
-import type { MakoCurrentState } from "./types";
+import type { MakoCurrentRunSummary, MakoCurrentState } from "./types";
 
 interface MakoStatusViewProps {
   state: MakoCurrentState;
@@ -12,6 +12,7 @@ export function MakoStatusView({ state }: MakoStatusViewProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
   const status = state.current?.status;
+  const cadence = summarizeCadence(state.current?.runs ?? []);
 
   return (
     <View style={styles.wrap}>
@@ -32,6 +33,8 @@ export function MakoStatusView({ state }: MakoStatusViewProps) {
         />
         <StatusCard label="Paused" value={String(status?.paused_count ?? 0)} />
         <StatusCard label="Failed" value={String(status?.failed_count ?? 0)} />
+        <StatusCard label="Tick interval" value={cadence.tickIntervalLabel} />
+        <StatusCard label="Tick budget" value={cadence.tickBudgetLabel} />
       </View>
 
       <GlassCard style={styles.card}>
@@ -42,8 +45,48 @@ export function MakoStatusView({ state }: MakoStatusViewProps) {
           {formatTimestamp(status?.next_wake_at)}
         </Text>
       </GlassCard>
+
+      <GlassCard style={styles.card}>
+        <Text style={[styles.cardLabel, { color: t.mutedForeground }]}>
+          Cadence
+        </Text>
+        <Text style={[styles.cardBody, { color: t.foreground }]}>
+          {cadence.detail}
+        </Text>
+      </GlassCard>
     </View>
   );
+}
+
+function summarizeCadence(runs: MakoCurrentRunSummary[]) {
+  if (!runs.length) {
+    return {
+      tickIntervalLabel: "30s",
+      tickBudgetLabel: "1000",
+      detail: "Default cadence applies until a project-specific Mako policy is present.",
+    };
+  }
+
+  const profiles = new Map<string, number>();
+  for (const run of runs) {
+    const key = `${run.cadence.tick_interval_secs}:${run.cadence.max_ticks}`;
+    profiles.set(key, (profiles.get(key) ?? 0) + 1);
+  }
+
+  if (profiles.size === 1) {
+    const first = runs[0]?.cadence;
+    return {
+      tickIntervalLabel: `${first?.tick_interval_secs ?? 30}s`,
+      tickBudgetLabel: String(first?.max_ticks ?? 1000),
+      detail: "All visible runs share the same cadence policy.",
+    };
+  }
+
+  return {
+    tickIntervalLabel: "Mixed",
+    tickBudgetLabel: `${profiles.size} profiles`,
+    detail: `Visible runs currently span ${profiles.size} cadence profiles.`,
+  };
 }
 
 function StatusCard({
@@ -97,5 +140,10 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: "700",
     letterSpacing: -0.5,
+  },
+  cardBody: {
+    marginTop: 10,
+    fontSize: 14,
+    lineHeight: 20,
   },
 });

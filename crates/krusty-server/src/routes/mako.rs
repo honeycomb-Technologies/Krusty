@@ -1,6 +1,7 @@
 //! Mako dispatch and session management endpoints
 
 use std::convert::Infallible;
+use std::path::PathBuf;
 
 use axum::{
     extract::{Path, Query, State},
@@ -15,7 +16,8 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use krusty_core::storage::{
     AutonomousTask, AutonomousTaskStore, Database, MakoRuntimeState, MakoRuntimeStateStatus,
-    MakoRuntimeStateStore, RuntimeTraceEvent, SessionType, TaskStatus, WorkspaceMode,
+    MakoRuntimeStateStore, ProjectSettings, RuntimeTraceEvent, SessionType, TaskStatus,
+    WorkspaceMode,
 };
 use krusty_core::SessionManager;
 
@@ -89,6 +91,7 @@ struct MakoSessionStatus {
     tasks: Vec<AutonomousTask>,
     agent_state: String,
     runtime: Option<MakoRuntimeState>,
+    cadence: MakoCadenceSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,6 +107,7 @@ struct MakoCurrentRunSummary {
     completed_tasks: usize,
     failed_tasks: usize,
     blocked_tasks: usize,
+    cadence: MakoCadenceSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -118,6 +122,12 @@ struct MakoStatusSummary {
     idle_count: usize,
     pending_approvals_count: usize,
     next_wake_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone, Copy)]
+struct MakoCadenceSummary {
+    tick_interval_secs: u64,
+    max_ticks: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -229,6 +239,7 @@ async fn current(
     let session_manager = open_session_manager(&state)?;
     let runtime_store = MakoRuntimeStateStore::new(Database::new(&state.db_path)?);
     let task_store = AutonomousTaskStore::new(Database::new(&state.db_path)?);
+    let workspace_scope = request_workspace_scope(&state, user.as_ref());
 
     let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
     let sessions =
@@ -253,6 +264,12 @@ async fn current(
         let agent_state = load_agent_state_or_idle(&session_manager, &session.id)?.state;
         let runtime = runtime_states.get(&session.id).cloned();
         let task_counts = summarize_tasks(&task_store.list_tasks(&session.id)?);
+        let cadence = load_mako_cadence(
+            session.project_dir.as_deref(),
+            session.working_dir.as_deref(),
+            &workspace_scope.base_dir,
+            &workspace_scope.allowed_root,
+        );
 
         match classify_run_state(runtime.as_ref(), agent_state.as_str()) {
             RunState::Running => running_count += 1,
@@ -280,6 +297,7 @@ async fn current(
             completed_tasks: task_counts.completed,
             failed_tasks: task_counts.failed,
             blocked_tasks: task_counts.blocked,
+            cadence,
         });
     }
 
@@ -315,6 +333,7 @@ async fn session_status(
     Path(id): Path<String>,
 ) -> Result<Json<MakoSessionStatus>, AppError> {
     let session_manager = open_session_manager(&state)?;
+    let workspace_scope = request_workspace_scope(&state, user.as_ref());
     let session = load_owned_session_of_type(
         &session_manager,
         &id,
@@ -328,6 +347,12 @@ async fn session_status(
     let task_store = AutonomousTaskStore::new(Database::new(&state.db_path)?);
     let tasks = task_store.list_tasks(&id)?;
     let runtime = MakoRuntimeStateStore::new(Database::new(&state.db_path)?).get_state(&id)?;
+    let cadence = load_mako_cadence(
+        session.project_dir.as_deref(),
+        session.working_dir.as_deref(),
+        &workspace_scope.base_dir,
+        &workspace_scope.allowed_root,
+    );
 
     Ok(Json(MakoSessionStatus {
         session_id: id,
@@ -336,6 +361,7 @@ async fn session_status(
         tasks,
         agent_state,
         runtime,
+        cadence,
     }))
 }
 
@@ -562,6 +588,25 @@ fn summarize_tasks(tasks: &[AutonomousTask]) -> TaskCounts {
     }
 
     counts
+}
+
+fn load_mako_cadence(
+    project_dir: Option<&str>,
+    working_dir: Option<&str>,
+    workspace_base: &std::path::Path,
+    allowed_root: &std::path::Path,
+) -> MakoCadenceSummary {
+    let resolved_project_dir =
+        resolve_optional_workspace_path(project_dir.or(working_dir), workspace_base, allowed_root)
+            .ok()
+            .flatten()
+            .map(PathBuf::from);
+    let settings = ProjectSettings::load_mako_settings(resolved_project_dir.as_deref());
+
+    MakoCadenceSummary {
+        tick_interval_secs: settings.tick_interval_secs,
+        max_ticks: settings.max_ticks,
+    }
 }
 
 fn classify_run_state(runtime: Option<&MakoRuntimeState>, agent_state: &str) -> RunState {
@@ -984,6 +1029,46 @@ mod tests {
             Some("2026-01-01T00:00:00Z")
         );
         assert_eq!(summary.runs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn session_status_includes_resolved_cadence() {
+        let (state, temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        let user_root = temp_dir.join("alice-home");
+        let project_dir = user_root.join("repo");
+        std::fs::create_dir_all(project_dir.join(".krusty")).expect("project settings dir");
+        std::fs::write(
+            project_dir.join(".krusty").join("settings.json"),
+            r#"{ "mako": { "tick_interval_secs": 15, "max_ticks": 50 } }"#,
+        )
+        .expect("project settings should write");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let session_id = session_manager
+            .create_session_for_user_with_config(
+                "Configured Run",
+                None,
+                Some(project_dir.to_string_lossy().as_ref()),
+                Some(project_dir.to_string_lossy().as_ref()),
+                WorkspaceMode::Selected,
+                Some("alice"),
+                None,
+                SessionType::Mako,
+            )
+            .expect("configured session should create");
+
+        let Json(status) = session_status(
+            State(state.clone()),
+            Some(current_user("alice", &user_root)),
+            Path(session_id),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("session status should succeed"));
+
+        assert_eq!(status.cadence.tick_interval_secs, 15);
+        assert_eq!(status.cadence.max_ticks, 50);
     }
 
     #[test]
