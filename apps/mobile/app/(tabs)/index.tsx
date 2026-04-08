@@ -306,6 +306,20 @@ export default function ChatScreen() {
   }, [client, isConnected, model, sessionStore, sessionsStore]);
 
   useEffect(() => {
+    if (!client || !isConnected) {
+      return;
+    }
+
+    const refreshHandle = setInterval(() => {
+      if (AppState.currentState === "active") {
+        void sessionsStore.getState().loadSessions();
+      }
+    }, 5000);
+
+    return () => clearInterval(refreshHandle);
+  }, [client, isConnected, sessionsStore]);
+
+  useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextState) => {
       if (nextState !== "active") {
         return;
@@ -490,6 +504,8 @@ export default function ChatScreen() {
       stopCurrentStream();
 
       try {
+        const currentModel = sessionStore.getState().model;
+        const currentThinkingLevel = sessionStore.getState().thinkingLevel;
         const session = await client.createSession(
           undefined,
           directory,
@@ -497,7 +513,14 @@ export default function ChatScreen() {
           directory ? "selected" : undefined,
           sessionTypeForTab(activeTab),
         );
-        await bootstrapSession(session);
+        await sessionStore.getState().loadSession(session.id);
+        if (currentModel) {
+          sessionStore.getState().setModel(currentModel);
+        }
+        if (sessionStore.getState().thinkingLevel !== currentThinkingLevel) {
+          sessionStore.getState().setThinkingLevel(currentThinkingLevel);
+        }
+        await sessionsStore.getState().loadSessions();
         setActiveToolCallId(null);
         setDrawerOpen(false);
         void Haptics.notificationAsync(
@@ -508,7 +531,7 @@ export default function ChatScreen() {
         return null;
       }
     },
-    [activeTab, bootstrapSession, client, stopCurrentStream],
+    [activeTab, client, sessionStore, sessionsStore, stopCurrentStream],
   );
 
   const ensureSessionForSend = useCallback(async () => {
@@ -569,34 +592,34 @@ export default function ChatScreen() {
 
   const handleDeleteSession = useCallback(
     (id: string) => {
-      if (!client) {
-        return;
-      }
-
       Alert.alert("Delete Session", "Delete this session?", [
         { text: "Cancel", style: "cancel" },
         {
           text: "Delete",
           style: "destructive",
           onPress: async () => {
-            try {
-              if (sessionStore.getState().sessionId === id) {
-                stopCurrentStream();
-              }
-              await client.deleteSession(id);
-              await sessionsStore.getState().loadSessions();
-              if (sessionStore.getState().sessionId === id) {
-                sessionStore.getState().clearSession();
-                setActiveToolCallId(null);
-              }
-            } catch {
-              // silent
+            const isActiveSession = sessionStore.getState().sessionId === id;
+
+            if (isActiveSession) {
+              stopCurrentStream();
             }
+
+            const deleted = await sessionsStore.getState().deleteSession(id);
+            if (!deleted) {
+              return;
+            }
+
+            if (isActiveSession) {
+              sessionStore.getState().clearSession();
+              setActiveToolCallId(null);
+            }
+
+            void sessionsStore.getState().loadSessions();
           },
         },
       ]);
     },
-    [client, sessionsStore, stopCurrentStream, sessionStore],
+    [sessionsStore, stopCurrentStream, sessionStore],
   );
 
   const handleInteractiveToolResult = useCallback(
@@ -804,6 +827,22 @@ export default function ChatScreen() {
         />
       </Animated.View>
 
+      {messages.length > 0 && error ? (
+        <View
+          style={[
+            styles.errorBanner,
+            {
+              borderColor: `${t.error}40`,
+              backgroundColor: `${t.error}14`,
+            },
+          ]}
+        >
+          <Text style={[styles.errorBannerText, { color: t.error }]}>
+            {error}
+          </Text>
+        </View>
+      ) : null}
+
       <Animated.View style={[entrance.bottomBarStyle, { overflow: "visible" }]}>
         <ChatBar
           onSend={handleSend}
@@ -858,6 +897,7 @@ export default function ChatScreen() {
           sessionId,
           title: sessionTitle,
           messages,
+          error,
           isLoading,
           isStreaming,
           isThinking,
@@ -994,6 +1034,19 @@ const styles = StyleSheet.create({
   },
   emptyHint: {
     fontSize: 17,
+  },
+  errorBanner: {
+    marginHorizontal: 16,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  errorBannerText: {
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: "500",
   },
   stubTitle: {
     fontSize: 24,

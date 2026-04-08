@@ -566,9 +566,14 @@ export class KrustyClient {
       return;
     }
 
-    const reader = response.body?.getReader();
+    const reader = response.body?.getReader?.();
     if (!reader) {
-      callbacks.onError('No response body');
+      const fallbackText = await response.text().catch(() => '');
+      if (!fallbackText) {
+        callbacks.onError('No response body');
+        return;
+      }
+      this.processSSEChunk(fallbackText, callbacks, true);
       return;
     }
 
@@ -590,44 +595,48 @@ export class KrustyClient {
         if (done) break;
 
         lastActivity = Date.now();
-        buffer += decoder.decode(value, { stream: true });
-
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed.startsWith(':')) continue;
-
-          if (trimmed.startsWith('data: ')) {
-            const data = trimmed.slice(6);
-            try {
-              const event = JSON.parse(data) as StreamEvent;
-              this.handleEvent(event, callbacks);
-            } catch {
-              // Skip malformed events
-            }
-          }
-        }
+        buffer = this.processSSEChunk(
+          buffer + decoder.decode(value, { stream: true }),
+          callbacks,
+        );
       }
 
-      if (buffer.trim()) {
-        const trimmed = buffer.trim();
-        if (trimmed.startsWith('data: ')) {
-          try {
-            const event = JSON.parse(trimmed.slice(6)) as StreamEvent;
-            this.handleEvent(event, callbacks);
-          } catch {
-            // Skip malformed events
-          }
-        }
-      }
+      this.processSSEChunk(buffer, callbacks, true);
     } catch (err) {
       if (signal?.aborted) return;
       callbacks.onError(err instanceof Error ? err.message : 'Stream error');
     } finally {
       clearInterval(activityCheck);
     }
+  }
+
+  private processSSEChunk(
+    chunk: string,
+    callbacks: StreamCallbacks,
+    flush = false,
+  ): string {
+    const lines = chunk.split('\n');
+    let remainder = lines.pop() ?? '';
+
+    if (flush && remainder) {
+      lines.push(remainder);
+      remainder = '';
+    }
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith(':')) continue;
+      if (!trimmed.startsWith('data: ')) continue;
+
+      try {
+        const event = JSON.parse(trimmed.slice(6)) as StreamEvent;
+        this.handleEvent(event, callbacks);
+      } catch {
+        // Skip malformed events
+      }
+    }
+
+    return remainder;
   }
 
   private handleEvent(event: StreamEvent, callbacks: StreamCallbacks): void {

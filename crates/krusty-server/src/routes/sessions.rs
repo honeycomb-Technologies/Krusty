@@ -177,6 +177,11 @@ async fn create_session(
         &workspace_scope.base_dir,
         &workspace_scope.allowed_root,
     )?;
+    validate_workspace_payload(
+        &workspace,
+        trimmed_nonempty(req.project_dir.as_deref())
+            .or(trimmed_nonempty(req.working_dir.as_deref())),
+    )?;
     let target_branch = req.target_branch.as_deref().map(str::trim).and_then(|b| {
         if b.is_empty() {
             None
@@ -338,6 +343,14 @@ fn resolve_workspace_update(
         allowed_root,
     )?;
 
+    validate_workspace_payload(&workspace, project_hint)?;
+    Ok(Some(workspace))
+}
+
+fn validate_workspace_payload(
+    workspace: &NormalizedWorkspace,
+    project_hint: Option<&str>,
+) -> Result<(), AppError> {
     match workspace.workspace_mode {
         WorkspaceMode::Neutral if project_hint.is_some() => Err(AppError::BadRequest(
             "workspace mode 'neutral' cannot include a project_dir".to_string(),
@@ -347,7 +360,7 @@ fn resolve_workspace_update(
                 "workspace modes 'selected' and 'created' require a project_dir".to_string(),
             ))
         }
-        _ => Ok(Some(workspace)),
+        _ => Ok(()),
     }
 }
 
@@ -866,6 +879,97 @@ mod tests {
         let expected = user_root.join("repo").to_string_lossy().to_string();
         assert_eq!(created.project_dir.as_deref(), Some(expected.as_str()));
         assert_eq!(created.working_dir.as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
+    async fn create_session_accepts_fresh_absolute_workspace_path_with_existing_ancestor() {
+        let (state, temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        let user_root = temp_dir.join("alice-home");
+        let parent_dir = user_root.join("projects");
+        std::fs::create_dir_all(&parent_dir).expect("parent dir should exist");
+
+        let fresh_project_dir = parent_dir.join("fresh-repo");
+
+        let (_, Json(created)) = create_session(
+            State(state),
+            Some(current_user("alice", &user_root)),
+            Json(CreateSessionRequest {
+                title: Some("Fresh Workspace".to_string()),
+                model: None,
+                project_dir: Some(fresh_project_dir.to_string_lossy().to_string()),
+                working_dir: None,
+                workspace_mode: Some(WorkspaceMode::Selected),
+                target_branch: None,
+                session_type: Some(SessionType::Code),
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("session creation should succeed"));
+
+        let expected = fresh_project_dir.to_string_lossy().to_string();
+        assert_eq!(created.project_dir.as_deref(), Some(expected.as_str()));
+        assert_eq!(created.working_dir.as_deref(), Some(expected.as_str()));
+        assert_eq!(created.workspace_mode, WorkspaceMode::Selected);
+        assert_eq!(created.session_type, SessionType::Code);
+    }
+
+    #[tokio::test]
+    async fn create_session_rejects_invalid_workspace_payloads() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let missing_project_dir = create_session(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Json(CreateSessionRequest {
+                title: Some("Invalid Selected Workspace".to_string()),
+                model: None,
+                project_dir: None,
+                working_dir: None,
+                workspace_mode: Some(WorkspaceMode::Selected),
+                target_branch: None,
+                session_type: None,
+            }),
+        )
+        .await;
+
+        match missing_project_dir {
+            Err(AppError::BadRequest(message)) => {
+                assert_eq!(
+                    message,
+                    "workspace modes 'selected' and 'created' require a project_dir"
+                );
+            }
+            Ok(_) => panic!("invalid selected workspace should fail"),
+            Err(_) => panic!("invalid selected workspace should fail with bad request"),
+        }
+
+        let neutral_with_project = create_session(
+            State(state),
+            Some(current_user("alice", std::path::Path::new("/tmp"))),
+            Json(CreateSessionRequest {
+                title: Some("Invalid Neutral Workspace".to_string()),
+                model: None,
+                project_dir: Some("/tmp/repo".to_string()),
+                working_dir: None,
+                workspace_mode: Some(WorkspaceMode::Neutral),
+                target_branch: None,
+                session_type: None,
+            }),
+        )
+        .await;
+
+        match neutral_with_project {
+            Err(AppError::BadRequest(message)) => {
+                assert_eq!(
+                    message,
+                    "workspace mode 'neutral' cannot include a project_dir"
+                );
+            }
+            Ok(_) => panic!("neutral workspace with project should fail"),
+            Err(_) => panic!("neutral workspace with project should fail with bad request"),
+        }
     }
 
     #[tokio::test]

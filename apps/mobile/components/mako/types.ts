@@ -21,6 +21,7 @@ export interface MakoChatContext {
   sessionId: string | null;
   title: string | null;
   messages: ChatMessage[];
+  error: string | null;
   isLoading: boolean;
   isStreaming: boolean;
   isThinking: boolean;

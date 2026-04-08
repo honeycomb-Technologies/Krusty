@@ -40,6 +40,22 @@ export function MakoChatView({ chat }: MakoChatViewProps) {
         }
       />
 
+      {chat.error ? (
+        <View
+          style={[
+            styles.errorBanner,
+            {
+              borderColor: `${t.error}40`,
+              backgroundColor: `${t.error}14`,
+            },
+          ]}
+        >
+          <Text style={[styles.errorText, { color: t.error }]}>
+            {chat.error}
+          </Text>
+        </View>
+      ) : null}
+
       <ChatBar
         onSend={chat.onSend}
         onStop={chat.onStop}
@@ -88,5 +104,18 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 22,
     textAlign: "center",
+  },
+  errorBanner: {
+    marginHorizontal: 16,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  errorText: {
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: "500",
   },
 });

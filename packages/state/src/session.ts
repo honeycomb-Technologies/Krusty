@@ -352,6 +352,20 @@ function finalizeTransientAssistantMessages(
   );
 }
 
+function pruneEmptyAssistantMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.filter((message) => {
+    if (message.role !== "assistant") {
+      return true;
+    }
+
+    return (
+      message.content.trim().length > 0 ||
+      (message.thinking?.trim().length ?? 0) > 0 ||
+      (message.toolCalls?.length ?? 0) > 0
+    );
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Recovery / live-partial / delegation helpers
 // ---------------------------------------------------------------------------
@@ -1475,7 +1489,7 @@ export function createSessionStore(
 
         set({
           sessionId,
-          messages,
+          messages: pruneEmptyAssistantMessages(messages),
           queuedMessages: [],
           isStreaming: false,
           isThinking: false,
@@ -1505,7 +1519,9 @@ export function createSessionStore(
           isStreaming: false,
           isThinking: false,
           thinkingContent: "",
-          messages: finalizeTransientAssistantMessages(s.messages),
+          messages: pruneEmptyAssistantMessages(
+            finalizeTransientAssistantMessages(s.messages),
+          ),
           error,
         }));
       },
@@ -1684,6 +1700,17 @@ export function createSessionStore(
         return;
       }
 
+      const ref: AssistantMessageRef = {
+        current: {
+          id: createChatMessageId("assistant-stream"),
+          role: "assistant",
+          content: "",
+          thinking: "",
+          toolCalls: [],
+          kind: "streaming",
+        },
+      };
+
       set((s) => ({
         messages: [
           ...s.messages,
@@ -1692,6 +1719,7 @@ export function createSessionStore(
             role: "user",
             content: displayContent,
           },
+          ref.current,
         ],
         isLoading: true,
         isStreaming: true,
@@ -1711,17 +1739,6 @@ export function createSessionStore(
             ? buildContentBlocks(requestMessage, attachments)
             : undefined;
 
-        const ref: AssistantMessageRef = {
-          current: {
-            id: createChatMessageId("assistant-stream"),
-            role: "assistant",
-            content: "",
-            thinking: "",
-            toolCalls: [],
-            kind: "streaming",
-          },
-        };
-
         await client.streamChat(
           {
             session_id: state.sessionId ?? undefined,
@@ -1740,11 +1757,16 @@ export function createSessionStore(
           abortController.signal,
         );
       } catch (err) {
-        set({
+        set((s) => ({
           isLoading: false,
           isStreaming: false,
+          isThinking: false,
+          thinkingContent: "",
+          messages: pruneEmptyAssistantMessages(
+            finalizeTransientAssistantMessages(s.messages),
+          ),
           error: toErrorMessage(err),
-        });
+        }));
       } finally {
         get().stopStatePolling();
       }
@@ -1772,7 +1794,7 @@ export function createSessionStore(
           sessionId: data.session.id,
           title: data.session.title || "Untitled",
           mode,
-          model: data.session.model ?? null,
+          model: data.session.model ?? s.model,
           tokenCount: data.session.token_count ?? 0,
           messages: applyLivePartialAssistant(
             applyRecoveryParity(

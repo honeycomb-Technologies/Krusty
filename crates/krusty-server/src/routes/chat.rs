@@ -949,7 +949,7 @@ mod tests {
     use krusty_core::process::ProcessRegistry;
     use krusty_core::skills::SkillsManager;
     use krusty_core::storage::credentials::CredentialStore;
-    use krusty_core::storage::Database;
+    use krusty_core::storage::{Database, SessionType, WorkspaceMode};
     use krusty_core::tools::registry::ToolRegistry;
     use krusty_core::SessionManager;
 
@@ -1214,6 +1214,57 @@ mod tests {
             .expect("session lookup should succeed")
             .expect("session should exist");
         assert_eq!(reloaded.model.as_deref(), Some("minimax/m2"));
+    }
+
+    #[tokio::test]
+    async fn chat_creates_code_session_in_fresh_workspace_before_ai_setup() {
+        let (state, temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        let user_root = temp_dir.join("alice-home");
+        let parent_dir = user_root.join("projects");
+        std::fs::create_dir_all(&parent_dir).expect("parent dir should exist");
+        let fresh_project_dir = parent_dir.join("fresh-chat-repo");
+
+        let result = chat(
+            State(state.clone()),
+            Some(current_user("alice", &user_root)),
+            Json(ChatRequest {
+                session_id: None,
+                message: "scan this workspace".to_string(),
+                content: Vec::new(),
+                project_dir: Some(fresh_project_dir.to_string_lossy().to_string()),
+                working_dir: None,
+                workspace_mode: Some(WorkspaceMode::Selected),
+                session_type: Some(SessionType::Code),
+                model: None,
+                thinking_enabled: crate::types::ThinkingLevel::Off,
+                mode: None,
+                permission_mode: krusty_core::tools::registry::PermissionMode::default(),
+                research_enabled: None,
+            }),
+        )
+        .await;
+
+        match result {
+            Err(AppError::BadRequest(message)) => {
+                assert_eq!(message, "No AI credentials configured");
+            }
+            Ok(_) => panic!("chat request should fail without configured AI credentials"),
+            Err(_) => panic!("chat request should fail with bad request"),
+        }
+
+        let expected = fresh_project_dir.to_string_lossy().to_string();
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let sessions = session_manager
+            .list_sessions_for_user(Some(expected.as_str()), Some("alice"))
+            .expect("session listing should succeed");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_type, SessionType::Code);
+        assert_eq!(sessions[0].workspace_mode, WorkspaceMode::Selected);
+        assert_eq!(sessions[0].project_dir.as_deref(), Some(expected.as_str()));
+        assert_eq!(sessions[0].working_dir.as_deref(), Some(expected.as_str()));
     }
 
     #[tokio::test]
