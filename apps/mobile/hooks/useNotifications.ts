@@ -32,6 +32,20 @@ const NOTIFICATION_LEVEL_KEY = "krusty_notification_level";
 const TOOL_APPROVAL_CATEGORY = "TOOL_APPROVAL";
 const STREAM_COMPLETE_CATEGORY = "STREAM_COMPLETE";
 const MAKO_UPDATE_CATEGORY = "MAKO_UPDATE";
+type NotificationResponseData = {
+  requestId?: string;
+  sessionId?: string;
+};
+type NotificationResponseEvent = {
+  actionIdentifier: string;
+  notification: {
+    request: {
+      content: {
+        data?: unknown;
+      };
+    };
+  };
+};
 
 async function registerNotificationCategories() {
   if (!Notifications) return;
@@ -121,12 +135,10 @@ export function useNotifications(options?: UseNotificationsOptions) {
     });
 
     responseListenerRef.current =
-      Notifications.addNotificationResponseReceivedListener((response) => {
+      Notifications.addNotificationResponseReceivedListener((response: NotificationResponseEvent) => {
         const actionId = response.actionIdentifier;
-        const data = response.notification.request.content.data as Record<
-          string,
-          string
-        >;
+        const data = (response.notification.request.content.data ??
+          {}) as NotificationResponseData;
 
         if (actionId === "APPROVE" && data.requestId && data.sessionId) {
           options?.onToolApproval?.(data.sessionId, data.requestId, true);

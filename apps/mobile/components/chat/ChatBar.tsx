@@ -12,7 +12,7 @@ import {
   FlatList,
 } from 'react-native';
 import { BlurView } from '../../platform/blur';
-import { ArrowUp, Square, X, Mic, FlaskConical } from 'lucide-react-native';
+import { ArrowUp, X, Mic, FlaskConical } from 'lucide-react-native';
 import * as Haptics from '../../platform/haptics';
 import * as ImagePicker from '../../platform/image-picker';
 import * as DocumentPicker from '../../platform/document-picker';
@@ -362,9 +362,9 @@ export function ChatBar(props: ChatBarProps) {
               }]}
             >
               {isStreaming
-                ? <Square size={14} color="#fff" fill="#fff" strokeWidth={0} />
+                ? <View style={styles.stopGlyph} />
                 : isRecording
-                  ? <Square size={14} color="#fff" fill="#fff" strokeWidth={0} />
+                  ? <View style={styles.stopGlyph} />
                   : canSend
                     ? <ArrowUp size={18} color="#fff" strokeWidth={2.5} />
                     : <Mic size={18} color={t.mutedForeground} strokeWidth={1.8} />
@@ -509,6 +509,12 @@ const styles = StyleSheet.create({
   barInner: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 8, minHeight: PILL, gap: 4 },
   btn: { width: 34, height: 34, borderRadius: 17, justifyContent: 'center', alignItems: 'center' },
   actionBtn: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
+  stopGlyph: {
+    width: 12,
+    height: 12,
+    borderRadius: 2,
+    backgroundColor: '#fff',
+  },
   input: { flex: 1, fontSize: 16, lineHeight: 22, maxHeight: 120, paddingVertical: Platform.OS === 'ios' ? 6 : 4, paddingHorizontal: 6 },
   kCol: { width: PILL, alignItems: 'center', justifyContent: 'flex-end', gap: GAP },
   kWrap: { width: PILL, height: PILL, borderRadius: RADIUS, overflow: 'hidden', borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.08)' },
