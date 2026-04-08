@@ -6,8 +6,16 @@ import {
   View,
 } from "react-native";
 import { useThemeContext } from "../../hooks/useTheme";
+import { MakoInsightCard } from "./MakoInsightCard";
 import { MakoRunList } from "./MakoRunList";
-import { getRunGroup } from "./utils";
+import {
+  formatTimestamp,
+  getAttentionRuns,
+  getQueueHeadRuns,
+  getRunGroup,
+  getRunNextWakeAt,
+  getRunPriority,
+} from "./utils";
 import type { MakoCurrentState } from "./types";
 
 interface MakoRunsViewProps {
@@ -27,6 +35,17 @@ export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
     queued: runs.filter((run) => getRunGroup(run) === "queued"),
     completed: runs.filter((run) => getRunGroup(run) === "completed"),
   };
+  const attentionRuns = getAttentionRuns(runs);
+  const queueHead = getQueueHeadRuns(runs);
+  const highPriorityCount = queueHead.filter(
+    (run) => getRunPriority(run) === "high",
+  ).length;
+  const queuedLaterCount = groups.queued.length + groups.sleeping.length;
+  const nextWakeAt =
+    queueHead
+      .map((run) => getRunNextWakeAt(run))
+      .filter((value): value is string => Boolean(value))
+      .sort()[0] ?? null;
 
   return (
     <ScrollView
@@ -44,8 +63,46 @@ export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
       }
     >
       <Text style={[styles.description, { color: t.mutedForeground }]}>
-        Runs are grouped by where they are in the water right now, with higher-priority work surfacing first.
+        Runs keep the open queue visible first, then break the waterline into active, waiting, sleeping, queued, and completed groups.
       </Text>
+
+      <View style={styles.grid}>
+        <MakoInsightCard
+          label="Open queue"
+          value={String(queueHead.length)}
+          detail={`${groups.active.length} active • ${attentionRuns.length} need attention`}
+          style={styles.metricCard}
+        />
+        <MakoInsightCard
+          label="Queued later"
+          value={String(queuedLaterCount)}
+          detail={nextWakeAt ? `Next wake ${formatTimestamp(nextWakeAt)}` : "No wake is queued yet."}
+          style={styles.metricCard}
+          tone="accent"
+        />
+        <MakoInsightCard
+          label="High priority"
+          value={String(highPriorityCount)}
+          detail="High-priority work floats to the top of the queue."
+          style={styles.metricCard}
+          tone={highPriorityCount > 0 ? "warning" : "default"}
+        />
+        <MakoInsightCard
+          label="Completed"
+          value={String(groups.completed.length)}
+          detail="Finished runs stay visible here for quick follow-up."
+          style={styles.metricCard}
+          tone="success"
+        />
+      </View>
+
+      <Section title="Queue head">
+        <MakoRunList
+          runs={queueHead.slice(0, 6)}
+          emptyLabel="No open runs are in the queue."
+          onSelectRun={onSelectRun}
+        />
+      </Section>
 
       <Section title="Active">
         <MakoRunList
@@ -123,6 +180,15 @@ const styles = StyleSheet.create({
   },
   section: {
     gap: 10,
+  },
+  grid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 12,
+  },
+  metricCard: {
+    width: "47%",
+    marginBottom: 0,
   },
   sectionTitle: {
     fontSize: 18,

@@ -8,8 +8,15 @@ import {
 import { GlassCard } from "../ui/GlassCard";
 import { useThemeContext } from "../../hooks/useTheme";
 import { MakoApprovalList } from "./MakoApprovalList";
+import { MakoInsightCard } from "./MakoInsightCard";
 import { MakoRunList } from "./MakoRunList";
-import { formatTimestamp } from "./utils";
+import {
+  formatTimestamp,
+  getAttentionRuns,
+  getQueueHeadRuns,
+  getRunNextWakeAt,
+  getRunPriority,
+} from "./utils";
 import type { MakoCurrentRunSummary, MakoCurrentState } from "./types";
 
 interface MakoStatusViewProps {
@@ -32,7 +39,11 @@ export function MakoStatusView({
   const status = state.current?.status;
   const runs = state.current?.runs ?? [];
   const approvals = state.current?.approvals ?? [];
+  const attentionRuns = getAttentionRuns(runs);
+  const queueHead = getQueueHeadRuns(runs);
   const cadence = summarizeCadence(runs);
+  const queueHealth = summarizeQueueHealth(runs, approvals.length);
+  const priorityProfile = summarizePriorityProfile(queueHead);
   const scheduledRuns = runs
     .filter(
       (run) =>
@@ -107,6 +118,21 @@ export function MakoStatusView({
         </Text>
       </GlassCard>
 
+      <View style={styles.insights}>
+        <MakoInsightCard
+          label="Queue health"
+          value={queueHealth.value}
+          detail={queueHealth.detail}
+          tone={queueHealth.tone}
+        />
+        <MakoInsightCard
+          label="Priority mix"
+          value={priorityProfile.value}
+          detail={priorityProfile.detail}
+          tone={priorityProfile.tone}
+        />
+      </View>
+
       <View style={styles.section}>
         <Text style={[styles.sectionTitle, { color: t.foreground }]}>
           Pending approvals
@@ -118,6 +144,17 @@ export function MakoStatusView({
           onSelectRun={onSelectRun}
           onApproveTool={onApproveTool}
           onDenyTool={onDenyTool}
+        />
+      </View>
+
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: t.foreground }]}>
+          Needs attention
+        </Text>
+        <MakoRunList
+          runs={attentionRuns}
+          emptyLabel="Nothing is blocked or failed right now."
+          onSelectRun={onSelectRun}
         />
       </View>
 
@@ -166,6 +203,69 @@ function summarizeCadence(runs: MakoCurrentRunSummary[]) {
   };
 }
 
+function summarizeQueueHealth(
+  runs: MakoCurrentRunSummary[],
+  approvalCount: number,
+) {
+  const openRuns = getQueueHeadRuns(runs);
+  const attentionRuns = getAttentionRuns(runs);
+  const dueSoonCount = openRuns.filter((run) => {
+    const wakeAt = getRunNextWakeAt(run);
+    if (!wakeAt) {
+      return false;
+    }
+    const diff = new Date(wakeAt).getTime() - Date.now();
+    return diff > 0 && diff <= 60 * 60 * 1000;
+  }).length;
+
+  if (attentionRuns.length > 0 || approvalCount > 0) {
+    return {
+      value: "Attention",
+      detail: `${attentionRuns.length} runs need intervention • ${approvalCount} approvals waiting • ${dueSoonCount} wake within 1h`,
+      tone: "warning" as const,
+    };
+  }
+
+  if (openRuns.length >= 6 || dueSoonCount >= 2) {
+    return {
+      value: "Busy",
+      detail: `${openRuns.length} open runs are moving • ${dueSoonCount} wake within 1h`,
+      tone: "accent" as const,
+    };
+  }
+
+  return {
+    value: "Calm",
+    detail: `${openRuns.length} open runs • ${dueSoonCount} near-term wakes`,
+    tone: "success" as const,
+  };
+}
+
+function summarizePriorityProfile(runs: MakoCurrentRunSummary[]) {
+  const counts = {
+    high: runs.filter((run) => getRunPriority(run) === "high").length,
+    normal: runs.filter((run) => getRunPriority(run) === "normal").length,
+    low: runs.filter((run) => getRunPriority(run) === "low").length,
+  };
+
+  if (runs.length === 0) {
+    return {
+      value: "Quiet",
+      detail: "No open runs are loaded into the queue right now.",
+      tone: "default" as const,
+    };
+  }
+
+  return {
+    value: `${counts.high}H • ${counts.normal}N • ${counts.low}L`,
+    detail:
+      counts.high > 0
+        ? "High-priority runs will stay ahead of the rest of the queue."
+        : "No high-priority pressure is pushing on the queue right now.",
+    tone: counts.high > 0 ? ("warning" as const) : ("default" as const),
+  };
+}
+
 function StatusCard({
   label,
   value,
@@ -208,6 +308,9 @@ const styles = StyleSheet.create({
   },
   card: {
     marginBottom: 0,
+  },
+  insights: {
+    gap: 12,
   },
   cardLabel: {
     fontSize: 12,

@@ -70,6 +70,31 @@ export function getRunPriority(
   return run.runtime?.priority ?? "normal";
 }
 
+export function isScheduledRun(
+  run: Pick<MakoCurrentRunSummary, "runtime">,
+): boolean {
+  return (
+    run.runtime?.status === "sleeping" &&
+    run.runtime.sleep_reason === "scheduled"
+  );
+}
+
+export function isFailedRun(
+  run: Pick<MakoCurrentRunSummary, "runtime" | "agent_state">,
+): boolean {
+  return run.runtime?.status === "error" || run.agent_state === "error";
+}
+
+export function getRunNextWakeAt(
+  run: Pick<MakoCurrentRunSummary, "runtime">,
+): string | null {
+  if (isScheduledRun(run) || run.runtime?.status === "sleeping") {
+    return run.runtime?.next_wake_at ?? null;
+  }
+
+  return null;
+}
+
 export function formatRunMeta(summary: MakoCurrentRunSummary): string {
   const parts = [formatProjectLabel(summary.project_dir)];
   const priority = getRunPriority(summary);
@@ -153,10 +178,7 @@ export function describeRun(summary: MakoCurrentRunSummary): string {
 }
 
 export function getRunGroup(summary: MakoCurrentRunSummary): "waiting" | "active" | "sleeping" | "queued" | "completed" {
-  if (
-    summary.runtime?.status === "sleeping" &&
-    summary.runtime.sleep_reason === "scheduled"
-  ) {
+  if (isScheduledRun(summary)) {
     return "queued";
   }
   const displayStatus = getRunDisplayStatus(summary);
@@ -174,6 +196,20 @@ export function getRunGroup(summary: MakoCurrentRunSummary): "waiting" | "active
     return "queued";
   }
   return "completed";
+}
+
+export function getQueueHeadRuns(
+  runs: MakoCurrentRunSummary[],
+): MakoCurrentRunSummary[] {
+  return runs.filter((run) => getRunGroup(run) !== "completed");
+}
+
+export function getAttentionRuns(
+  runs: MakoCurrentRunSummary[],
+): MakoCurrentRunSummary[] {
+  return runs.filter(
+    (run) => getRunGroup(run) === "waiting" || isFailedRun(run),
+  );
 }
 
 function taskWakeEvent(task: AutonomousTask, completedIds: Set<string>): MakoRunWakeEvent {
