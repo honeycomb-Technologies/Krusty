@@ -40,6 +40,7 @@ pub fn router() -> Router<AppState> {
         .route("/sessions/:id/status", get(session_status))
         .route("/sessions/:id/events", get(observe_events))
         .route("/sessions/:id/message", post(send_message))
+        .route("/sessions/:id/schedule", post(schedule_session))
         .route("/sessions/:id/pause", post(pause_session))
         .route("/sessions/:id/resume", post(resume_session))
         .route("/sessions/:id", delete(cancel_session))
@@ -56,6 +57,11 @@ struct DispatchRequest {
 #[derive(Debug, Deserialize)]
 struct MessageRequest {
     message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScheduleRequest {
+    start_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -490,6 +496,29 @@ async fn pause_session(
     Ok(Json(OkResponse { ok: true }))
 }
 
+async fn schedule_session(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Path(id): Path<String>,
+    Json(req): Json<ScheduleRequest>,
+) -> Result<Json<OkResponse>, AppError> {
+    let session_manager = open_session_manager(&state)?;
+    ensure_owned_session_of_type(
+        &session_manager,
+        &id,
+        SessionType::Mako,
+        "Mako",
+        user.as_ref(),
+    )?;
+    let wake_at = parse_requested_wake_at(Some(req.start_at.as_str()))?
+        .ok_or_else(|| AppError::BadRequest("start_at must be provided".to_string()))?;
+    state
+        .mako_runtime
+        .schedule_session(&state, id, wake_at, "manual_schedule", "scheduled")
+        .await?;
+    Ok(Json(OkResponse { ok: true }))
+}
+
 async fn resume_session(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
@@ -748,7 +777,8 @@ mod tests {
     use krusty_core::SessionManager;
 
     use super::{
-        current, dispatch, list_sessions, map_runtime_trace_event, session_status, DispatchRequest,
+        current, dispatch, list_sessions, map_runtime_trace_event, schedule_session,
+        session_status, DispatchRequest, ScheduleRequest,
     };
     use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::error::AppError;
@@ -965,6 +995,53 @@ mod tests {
 
         assert_eq!(summary.status.scheduled_count, 1);
         assert_eq!(summary.status.sleeping_count, 0);
+    }
+
+    #[tokio::test]
+    async fn schedule_session_can_reschedule_existing_run() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let (_, Json(response)) = dispatch(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Json(DispatchRequest {
+                task: "Investigate issue".to_string(),
+                project_dir: None,
+                model: None,
+                start_at: None,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("dispatch should succeed"));
+
+        let wake_at = chrono::Utc::now() + chrono::Duration::hours(2);
+        let Json(_) = schedule_session(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Path(response.session_id.clone()),
+            Json(ScheduleRequest {
+                start_at: wake_at.to_rfc3339(),
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("schedule should succeed"));
+
+        let runtime_store = MakoRuntimeStateStore::new(
+            Database::new(&state.db_path).expect("database should open"),
+        );
+        let runtime = runtime_store
+            .get_state(&response.session_id)
+            .expect("runtime lookup should succeed")
+            .expect("runtime should exist");
+        let expected_wake_at = wake_at.to_rfc3339();
+        assert_eq!(runtime.status, MakoRuntimeStateStatus::Sleeping);
+        assert_eq!(runtime.sleep_reason.as_deref(), Some("scheduled"));
+        assert_eq!(runtime.last_wake_reason.as_deref(), Some("manual_schedule"));
+        assert_eq!(
+            runtime.next_wake_at.as_deref(),
+            Some(expected_wake_at.as_str())
+        );
     }
 
     #[tokio::test]

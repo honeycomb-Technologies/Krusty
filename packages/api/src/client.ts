@@ -418,6 +418,13 @@ export class KrustyClient {
     });
   }
 
+  async scheduleMakoSession(id: string, startAt: string): Promise<SimpleOkResponse> {
+    return this.request(`/mako/sessions/${id}/schedule`, {
+      method: 'POST',
+      body: JSON.stringify({ start_at: startAt }),
+    });
+  }
+
   async pauseMakoSession(id: string): Promise<SimpleOkResponse> {
     return this.request(`/mako/sessions/${id}/pause`, { method: 'POST' });
   }
