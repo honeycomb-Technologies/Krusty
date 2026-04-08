@@ -13,7 +13,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "io.krusty.mobile",
-      "buildNumber": "204",
+      "buildNumber": "206",
       "backgroundColor": "#0b1119",
       "icon": {
         "light": "./assets/icons/ios-light.png",

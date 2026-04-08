@@ -3,6 +3,7 @@ import { StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useBreakpoint } from "../../hooks/useBreakpoint";
 import { useThemeContext } from "../../hooks/useTheme";
+import { MakoChatView } from "./MakoChatView";
 import { MakoCurrentView } from "./MakoCurrentView";
 import { MakoReportsView } from "./MakoReportsView";
 import { MakoRunView } from "./MakoRunView";
@@ -82,6 +83,7 @@ export function MakoScreen({
           <MakoTopNav
             items={[
               { id: "current", label: "Current" },
+              { id: "chat", label: "Chat" },
               { id: "runs", label: "Runs" },
               { id: "reports", label: "Reports" },
               { id: "status", label: "Status" },
@@ -104,6 +106,8 @@ export function MakoScreen({
               onDenyTool={chat.onDenyTool}
             />
           ) : null}
+
+          {navigation.topLevel === "chat" ? <MakoChatView chat={chat} /> : null}
 
           {navigation.topLevel === "runs" ? (
             <MakoRunsView

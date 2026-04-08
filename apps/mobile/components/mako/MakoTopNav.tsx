@@ -20,6 +20,7 @@ export function MakoTopNav<T extends string>({
     <ScrollView
       horizontal
       showsHorizontalScrollIndicator={false}
+      style={styles.scroll}
       contentContainerStyle={styles.content}
     >
       {items.map((item) => {
@@ -59,14 +60,22 @@ export function MakoTopNav<T extends string>({
 }
 
 const styles = StyleSheet.create({
+  scroll: {
+    flexGrow: 0,
+    maxHeight: 58,
+  },
   content: {
+    alignItems: "center",
     gap: 8,
     paddingHorizontal: 16,
     paddingBottom: 8,
   },
   pill: {
+    alignSelf: "flex-start",
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
+    minHeight: 42,
+    justifyContent: "center",
     paddingHorizontal: 14,
     paddingVertical: 9,
   },

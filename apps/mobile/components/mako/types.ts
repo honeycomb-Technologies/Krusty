@@ -11,7 +11,7 @@ import type {
 } from "@krusty/api";
 import type { Attachment as ChatBarAttachment } from "../chat/ChatBar";
 
-export type MakoTopLevelView = "current" | "runs" | "reports" | "status";
+export type MakoTopLevelView = "current" | "chat" | "runs" | "reports" | "status";
 export type MakoRunSection = "overview" | "wake" | "tasks" | "chat" | "artifacts";
 export type MakoKnowledgeView = "reports" | "memory";
 export type MakoKnowledgeScope = "workspace" | "all";
