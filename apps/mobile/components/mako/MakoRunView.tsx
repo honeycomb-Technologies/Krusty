@@ -64,6 +64,7 @@ export function MakoRunView({
   const [isScheduling, setIsScheduling] = useState(false);
   const [isSavingPriority, setIsSavingPriority] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [composerReserveHeight, setComposerReserveHeight] = useState(150);
   const { status, wake, isLoading, refresh } = useMakoRun(runId, true);
 
   const displayStatus = getRunDisplayStatus(summary ?? {
@@ -397,13 +398,14 @@ export function MakoRunView({
                     </Text>
                   </View>
                 }
-                bottomPadding={150}
+                bottomPadding={composerReserveHeight}
                 showPlanTracker={false}
               />
 
               <ChatBar
                 onSend={chat.onSend}
                 onStop={chat.onStop}
+                onHeightChange={setComposerReserveHeight}
                 isStreaming={chat.isStreaming}
                 disabled={!chat.sessionId}
                 thinkingLevel={chat.thinkingLevel}

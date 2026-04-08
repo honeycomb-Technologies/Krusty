@@ -6,8 +6,8 @@ import {
   StyleSheet,
   View,
 } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "../../platform/linear-gradient";
+import { BlurView } from "../../platform/blur";
 import { useBreakpoint } from "../../hooks/useBreakpoint";
 import { useThemeContext } from "../../hooks/useTheme";
 import { MessageBubble } from "./MessageBubble";
@@ -35,8 +35,31 @@ interface ChatTranscriptProps {
   showPlanTracker?: boolean;
 }
 
-function lastMessageContentLength(messages: ChatMessage[]): number {
-  return messages[messages.length - 1]?.content?.length ?? 0;
+function lastMessageLayoutSignature(messages: ChatMessage[]): string {
+  const lastMessage = messages[messages.length - 1];
+  if (!lastMessage) return "empty";
+
+  const toolSignature =
+    lastMessage.toolCalls
+      ?.map(
+        (toolCall) =>
+          [
+            toolCall.id,
+            toolCall.status,
+            toolCall.output?.length ?? 0,
+            toolCall.delegated?.thinking?.length ?? 0,
+          ].join(":"),
+      )
+      .join("|") ?? "";
+
+  return [
+    lastMessage.id,
+    lastMessage.content.length,
+    lastMessage.thinking?.length ?? 0,
+    toolSignature,
+    lastMessage.isQueued ? "queued" : "steady",
+    lastMessage.kind ?? "none",
+  ].join("::");
 }
 
 export function ChatTranscript({
@@ -55,16 +78,24 @@ export function ChatTranscript({
 }: ChatTranscriptProps) {
   const { theme } = useThemeContext();
   const { isDesktop } = useBreakpoint();
-  const insets = useSafeAreaInsets();
   const flatListRef = useRef<FlatList>(null);
   const listHeightRef = useRef(0);
   const contentHeightRef = useRef(0);
   const t = theme.colors;
+  const blurTint =
+    theme.scheme === "dark"
+      ? "systemChromeMaterialDark"
+      : "systemChromeMaterialLight";
 
   const messageCount = messages.length;
-  const lastContentLength = useMemo(
-    () => lastMessageContentLength(messages),
+  const layoutSignature = useMemo(
+    () => lastMessageLayoutSignature(messages),
     [messages],
+  );
+  const topFadeHeight = isDesktop ? 22 : 28;
+  const bottomFadeHeight = Math.max(
+    isDesktop ? 116 : 144,
+    Math.min(bottomPadding + 40, isDesktop ? 188 : 236),
   );
 
   const scrollToBottom = useCallback(() => {
@@ -81,7 +112,7 @@ export function ChatTranscript({
     if (messageCount > 0) {
       requestAnimationFrame(scrollToBottom);
     }
-  }, [lastContentLength, messageCount, scrollToBottom]);
+  }, [bottomPadding, layoutSignature, messageCount, scrollToBottom]);
 
   if (messages.length === 0) {
     return <Pressable style={styles.empty} onPress={Keyboard.dismiss}>{emptyState}</Pressable>;
@@ -92,7 +123,7 @@ export function ChatTranscript({
       <FlatList
         ref={flatListRef}
         data={messages}
-        keyExtractor={(_, index) => String(index)}
+        keyExtractor={(message) => message.id}
         onScrollBeginDrag={Keyboard.dismiss}
         renderItem={({ item, index }) => (
           <MessageBubble
@@ -119,29 +150,58 @@ export function ChatTranscript({
         contentContainerStyle={[
           styles.list,
           isDesktop && styles.listDesktop,
-          { paddingBottom: bottomPadding + insets.bottom },
+          { paddingBottom: bottomPadding + 16 },
         ]}
         onLayout={(event) => {
           listHeightRef.current = event.nativeEvent.layout.height;
+          if (messages.length > 0) {
+            requestAnimationFrame(scrollToBottom);
+          }
         }}
         onContentSizeChange={(_width, height) => {
           contentHeightRef.current = height;
+          if (messages.length > 0) {
+            requestAnimationFrame(scrollToBottom);
+          }
         }}
         keyboardDismissMode="interactive"
         keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
       />
 
-      <LinearGradient
-        colors={[t.background, `${t.background}00`]}
-        style={styles.fadeTop}
+      <View
+        style={[styles.edgeMask, styles.edgeMaskTop, { height: topFadeHeight }]}
         pointerEvents="none"
-      />
+      >
+        <BlurView
+          intensity={10}
+          tint={blurTint}
+          style={StyleSheet.absoluteFill}
+        />
+        <LinearGradient
+          colors={[`${t.background}88`, `${t.background}00`]}
+          style={StyleSheet.absoluteFill}
+        />
+      </View>
       {!isDesktop && showPlanTracker ? <PlanTracker /> : null}
-      <LinearGradient
-        colors={[`${t.background}00`, t.background]}
-        style={styles.fadeBottom}
+      <View
+        style={[
+          styles.edgeMask,
+          styles.edgeMaskBottom,
+          { height: bottomFadeHeight, bottom: 0 },
+        ]}
         pointerEvents="none"
-      />
+      >
+        <BlurView
+          intensity={28}
+          tint={blurTint}
+          style={StyleSheet.absoluteFill}
+        />
+        <LinearGradient
+          colors={[`${t.background}00`, `${t.background}d0`, t.background]}
+          style={StyleSheet.absoluteFill}
+        />
+      </View>
     </View>
   );
 }
@@ -162,18 +222,16 @@ const styles = StyleSheet.create({
     alignSelf: "center",
     width: "100%",
   },
-  fadeTop: {
+  edgeMask: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+  },
+  edgeMaskTop: {
     position: "absolute",
     top: 0,
-    left: 0,
-    right: 0,
-    height: 64,
   },
-  fadeBottom: {
+  edgeMaskBottom: {
     position: "absolute",
-    bottom: 0,
-    left: 0,
-    right: 0,
-    height: 120,
   },
 });

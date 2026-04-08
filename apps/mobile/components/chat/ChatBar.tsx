@@ -43,6 +43,7 @@ export interface Attachment {
 interface ChatBarProps {
   onSend: (content: string, attachments?: Attachment[]) => void;
   onStop: () => void;
+  onHeightChange?: (height: number) => void;
   isStreaming: boolean;
   disabled: boolean;
   thinkingLevel: ThinkingLevel;
@@ -69,7 +70,7 @@ const GAP = 10;
 
 export function ChatBar(props: ChatBarProps) {
   const {
-    onSend, onStop, isStreaming, disabled,
+    onSend, onStop, onHeightChange, isStreaming, disabled,
     thinkingLevel, onThinkingChange,
     permissionMode, onPermissionModeToggle,
     fastModeEnabled, fastModeSupported, onFastModeToggle,
@@ -95,6 +96,8 @@ export function ChatBar(props: ChatBarProps) {
   const transcriptRef = useRef('');
   const inputRef = useRef<TextInput>(null);
   const accordionOpenRef = useRef(false);
+  const measuredRootHeightRef = useRef(0);
+  const reportedComposerHeightRef = useRef(0);
   useEffect(() => { accordionOpenRef.current = accordionOpen; }, [accordionOpen]);
 
   const t = theme.colors;
@@ -277,8 +280,35 @@ export function ChatBar(props: ChatBarProps) {
   const gaugePct = Math.min(100, (gaugeTokens / 200000) * 100);
   const gaugeColor = gaugeTokens > 180000 ? t.error : gaugeTokens > 120000 ? t.warning : t.mutedForeground + '60';
 
+  useEffect(() => {
+    const measuredRootHeight = measuredRootHeightRef.current;
+    if (!measuredRootHeight || !onHeightChange) return;
+    const reservedHeight = Math.max(
+      PILL,
+      Math.ceil(measuredRootHeight - (keyboardHeight > 0 ? keyboardHeight : 0)),
+    );
+    if (reportedComposerHeightRef.current === reservedHeight) return;
+    reportedComposerHeightRef.current = reservedHeight;
+    onHeightChange(reservedHeight);
+  }, [keyboardHeight, onHeightChange]);
+
   return (
-    <View style={[styles.root, { paddingBottom: bottomOffset }]}>
+    <View
+      style={[styles.root, { paddingBottom: bottomOffset }]}
+      onLayout={(event) => {
+        measuredRootHeightRef.current = event.nativeEvent.layout.height;
+        if (!onHeightChange) return;
+        const reservedHeight = Math.max(
+          PILL,
+          Math.ceil(
+            event.nativeEvent.layout.height - (keyboardHeight > 0 ? keyboardHeight : 0),
+          ),
+        );
+        if (reportedComposerHeightRef.current === reservedHeight) return;
+        reportedComposerHeightRef.current = reservedHeight;
+        onHeightChange(reservedHeight);
+      }}
+    >
       {/* Attachment previews */}
       {attachments.length > 0 && (
         <View style={styles.attachRow}>

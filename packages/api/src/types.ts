@@ -76,12 +76,13 @@ export interface MessageResponse {
 }
 
 export interface ChatMessage {
+  id: string;
   role: 'user' | 'assistant';
   content: string;
   thinking?: string;
   toolCalls?: ToolCall[];
   isQueued?: boolean;
-  kind?: 'recovery_notice' | 'live_partial';
+  kind?: 'recovery_notice' | 'live_partial' | 'streaming';
 }
 
 export interface ToolCall {

@@ -105,12 +105,13 @@ export interface DelegatedArtifactState {
 }
 
 export interface ChatMessage {
+  id: string;
   role: "user" | "assistant";
   content: string;
   thinking?: string;
   toolCalls?: ToolCall[];
   isQueued?: boolean;
-  kind?: "recovery_notice" | "live_partial";
+  kind?: "recovery_notice" | "live_partial" | "streaming";
 }
 
 export type SessionMode = "build" | "plan";
@@ -289,6 +290,63 @@ function toErrorMessage(err: unknown, fallback = "Unknown error"): string {
   return err instanceof Error ? err.message : fallback;
 }
 
+function createChatMessageId(prefix: string): string {
+  return `${prefix}-${crypto.randomUUID()}`;
+}
+
+function buildStoredMessageId(index: number, message: ChatMessage): string {
+  const firstToolId = message.toolCalls?.[0]?.id;
+  if (firstToolId) {
+    return `stored-${index}-${message.role}-${firstToolId}`;
+  }
+
+  return [
+    "stored",
+    index,
+    message.role,
+    message.content.length,
+    message.thinking?.length ?? 0,
+  ].join("-");
+}
+
+function isTransientAssistantKind(
+  kind: ChatMessage["kind"] | undefined,
+): kind is "live_partial" | "streaming" {
+  return kind === "live_partial" || kind === "streaming";
+}
+
+function isTransientAssistantMessage(
+  message: ChatMessage | undefined,
+): boolean {
+  return message?.role === "assistant" && isTransientAssistantKind(message.kind);
+}
+
+function upsertTransientAssistantMessage(
+  messages: ChatMessage[],
+  message: ChatMessage,
+): ChatMessage[] {
+  const nextMessages = messages.filter((entry) => entry.kind !== "live_partial");
+  const lastIndex = nextMessages.length - 1;
+  const lastMessage = nextMessages[lastIndex];
+
+  if (lastIndex >= 0 && isTransientAssistantMessage(lastMessage)) {
+    nextMessages[lastIndex] = { ...message, id: lastMessage.id };
+    return nextMessages;
+  }
+
+  return [...nextMessages, message];
+}
+
+function finalizeTransientAssistantMessages(
+  messages: ChatMessage[],
+): ChatMessage[] {
+  return messages.map((message) =>
+    isTransientAssistantMessage(message)
+      ? { ...message, kind: undefined }
+      : message,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Recovery / live-partial / delegation helpers
 // ---------------------------------------------------------------------------
@@ -344,6 +402,12 @@ function applyRecoveryParity(
     }));
 
     nextMessages.unshift({
+      id: [
+        "recovery-notice",
+        recovery.schema_version,
+        recovery.status,
+        recovery.stop_reason ?? "unknown",
+      ].join("-"),
       role: "assistant",
       content: `[Recovery Notice] ${buildRecoveryNotice(recovery)}`,
       kind: "recovery_notice",
@@ -793,16 +857,14 @@ function applyLivePartialAssistant(
     return nextMessages;
   }
 
-  return [
-    ...nextMessages,
-    {
-      role: "assistant",
-      content: livePartial.text,
-      thinking: livePartial.thinking,
-      toolCalls,
-      kind: "live_partial",
-    },
-  ];
+  return upsertTransientAssistantMessage(nextMessages, {
+    id: createChatMessageId("live-partial"),
+    role: "assistant",
+    content: livePartial.text,
+    thinking: livePartial.thinking,
+    toolCalls,
+    kind: "live_partial",
+  });
 }
 
 function applyDelegatedSessionState(
@@ -946,7 +1008,13 @@ function parseStoredMessage(
 ): ChatMessage {
   const role: "user" | "assistant" =
     m.role === "user" || m.role === "assistant" ? m.role : "assistant";
-  const msg: ChatMessage = { role, content: "", thinking: "", toolCalls: [] };
+  const msg: ChatMessage = {
+    id: "",
+    role,
+    content: "",
+    thinking: "",
+    toolCalls: [],
+  };
   const contentArray = Array.isArray(m.content) ? m.content : [];
 
   for (const block of contentArray) {
@@ -1036,6 +1104,7 @@ function processStoredMessages(
     const hasThinking = (msg.thinking?.trim().length ?? 0) > 0;
     const hasToolCalls = (msg.toolCalls?.length ?? 0) > 0;
     if (hasContent || hasThinking || hasToolCalls) {
+      msg.id = buildStoredMessageId(result.length, msg);
       result.push(msg);
     }
   }
@@ -1203,13 +1272,10 @@ export function createSessionStore(
       updater?: (s: SessionStoreState) => Partial<SessionStoreState>,
     ) {
       set((s) => {
-        const messages = [...s.messages];
-        const lastIdx = messages.length - 1;
-        if (messages[lastIdx]?.role === "assistant") {
-          messages[lastIdx] = { ...ref.current };
-        } else {
-          messages.push({ ...ref.current });
-        }
+        const messages = upsertTransientAssistantMessage(
+          s.messages,
+          { ...ref.current },
+        );
         return { messages, ...updater?.(s) };
       });
     }
@@ -1396,8 +1462,10 @@ export function createSessionStore(
         const currentState = get();
         const queued = currentState.queuedMessages;
 
-        const messages = currentState.messages.map((m) =>
-          m.isQueued ? { ...m, isQueued: false } : m,
+        const messages = finalizeTransientAssistantMessages(
+          currentState.messages.map((m) =>
+            m.isQueued ? { ...m, isQueued: false } : m,
+          ),
         );
 
         set({
@@ -1421,7 +1489,14 @@ export function createSessionStore(
       },
 
       onError: (error) => {
-        set({ isLoading: false, isStreaming: false, error });
+        set((s) => ({
+          isLoading: false,
+          isStreaming: false,
+          isThinking: false,
+          thinkingContent: "",
+          messages: finalizeTransientAssistantMessages(s.messages),
+          error,
+        }));
       },
     };
   }
@@ -1579,7 +1654,12 @@ export function createSessionStore(
             queuedMessages: [...s.queuedMessages, { content, attachments }],
             messages: [
               ...s.messages,
-              { role: "user", content: displayContent, isQueued: true },
+              {
+                id: createChatMessageId("user-queued"),
+                role: "user",
+                content: displayContent,
+                isQueued: true,
+              },
             ],
           };
         });
@@ -1587,7 +1667,14 @@ export function createSessionStore(
       }
 
       set((s) => ({
-        messages: [...s.messages, { role: "user", content: displayContent }],
+        messages: [
+          ...s.messages,
+          {
+            id: createChatMessageId("user"),
+            role: "user",
+            content: displayContent,
+          },
+        ],
         isLoading: true,
         isStreaming: true,
         error: null,
@@ -1608,10 +1695,12 @@ export function createSessionStore(
 
         const ref: AssistantMessageRef = {
           current: {
+            id: createChatMessageId("assistant-stream"),
             role: "assistant",
             content: "",
             thinking: "",
             toolCalls: [],
+            kind: "streaming",
           },
         };
 
@@ -1817,15 +1906,17 @@ export function createSessionStore(
 
       const ref: AssistantMessageRef = {
         current: {
+          id: createChatMessageId("assistant-stream"),
           role: "assistant",
           content: "",
           thinking: "",
           toolCalls: [],
+          kind: "streaming",
         },
       };
 
       set((s) => ({
-        messages: [...s.messages, ref.current],
+        messages: upsertTransientAssistantMessage(s.messages, ref.current),
       }));
 
       try {
@@ -1882,7 +1973,13 @@ export function createSessionStore(
     stopStreaming() {
       abortController?.abort();
       get().stopStatePolling();
-      set({ isLoading: false, isStreaming: false, isThinking: false });
+      set((s) => ({
+        isLoading: false,
+        isStreaming: false,
+        isThinking: false,
+        thinkingContent: "",
+        messages: finalizeTransientAssistantMessages(s.messages),
+      }));
     },
 
     // -- state polling ------------------------------------------------------
