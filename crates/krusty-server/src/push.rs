@@ -37,6 +37,7 @@ pub struct PushPayload {
 pub enum PushEventType {
     Completion,
     AwaitingInput,
+    MakoUpdate,
     Error,
     Test,
 }
@@ -46,6 +47,7 @@ impl PushEventType {
         match self {
             Self::Completion => "completion",
             Self::AwaitingInput => "awaiting_input",
+            Self::MakoUpdate => "mako_update",
             Self::Error => "error",
             Self::Test => "test",
         }

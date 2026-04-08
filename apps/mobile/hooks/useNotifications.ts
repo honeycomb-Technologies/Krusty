@@ -35,6 +35,7 @@ const MAKO_UPDATE_CATEGORY = "MAKO_UPDATE";
 type NotificationResponseData = {
   requestId?: string;
   sessionId?: string;
+  focus?: string;
 };
 type NotificationResponseEvent = {
   actionIdentifier: string;
@@ -72,15 +73,22 @@ async function registerNotificationCategories() {
 
   await Notifications.setNotificationCategoryAsync(MAKO_UPDATE_CATEGORY, [
     {
-      identifier: "VIEW_REPORT",
-      buttonTitle: "View Report",
+      identifier: "OPEN_MAKO",
+      buttonTitle: "Open Mako",
       options: { opensAppToForeground: true },
     },
   ]);
 }
 
-async function registerForPushNotifications(): Promise<string | null> {
-  if (!Notifications || !Device || !Device.isDevice) return null;
+type RegisteredNotificationTokens = {
+  displayToken: string | null;
+  nativeDeviceToken: string | null;
+};
+
+async function registerForPushNotifications(): Promise<RegisteredNotificationTokens> {
+  if (!Notifications || !Device || !Device.isDevice) {
+    return { displayToken: null, nativeDeviceToken: null };
+  }
 
   const { status: existing } = await Notifications.getPermissionsAsync();
   let finalStatus = existing;
@@ -90,13 +98,25 @@ async function registerForPushNotifications(): Promise<string | null> {
     finalStatus = status;
   }
 
-  if (finalStatus !== "granted") return null;
+  if (finalStatus !== "granted") {
+    return { displayToken: null, nativeDeviceToken: null };
+  }
 
   const tokenData = await Notifications.getExpoPushTokenAsync({
     projectId: "6e327449-af3c-4138-b1c4-7ceca2baf243",
-  });
+  }).catch(() => null);
+  const nativeTokenData =
+    Platform.OS === "ios"
+      ? await Notifications.getDevicePushTokenAsync().catch(() => null)
+      : null;
 
-  return tokenData.data;
+  return {
+    displayToken:
+      (typeof tokenData?.data === "string" && tokenData.data) ||
+      (typeof nativeTokenData?.data === "string" ? nativeTokenData.data : null),
+    nativeDeviceToken:
+      typeof nativeTokenData?.data === "string" ? nativeTokenData.data : null,
+  };
 }
 
 interface UseNotificationsOptions {
@@ -107,6 +127,7 @@ interface UseNotificationsOptions {
     approved: boolean,
   ) => void;
   onNavigate?: (route: string, params?: Record<string, string>) => void;
+  onRegisterNativeDevice?: (deviceToken: string) => void | Promise<void>;
 }
 
 export function useNotifications(options?: UseNotificationsOptions) {
@@ -127,10 +148,13 @@ export function useNotifications(options?: UseNotificationsOptions) {
       },
     );
 
-    registerForPushNotifications().then(async (token) => {
-      if (token) {
-        setPushToken(token);
-        await SecureStore.setItemAsync(PUSH_TOKEN_KEY, token);
+    registerForPushNotifications().then(async ({ displayToken, nativeDeviceToken }) => {
+      if (displayToken) {
+        setPushToken(displayToken);
+        await SecureStore.setItemAsync(PUSH_TOKEN_KEY, displayToken);
+      }
+      if (nativeDeviceToken) {
+        await options?.onRegisterNativeDevice?.(nativeDeviceToken);
       }
     });
 
@@ -146,20 +170,30 @@ export function useNotifications(options?: UseNotificationsOptions) {
           options?.onToolApproval?.(data.sessionId, data.requestId, false);
         } else if (actionId === "VIEW" && data.sessionId) {
           options?.onNavigate?.("/(tabs)", { sessionId: data.sessionId });
-        } else if (actionId === "VIEW_REPORT") {
-          options?.onNavigate?.("/(tabs)", { openReports: "true" });
+        } else if (actionId === "OPEN_MAKO") {
+          const params = data.sessionId
+            ? { focus: "mako", sessionId: data.sessionId }
+            : { focus: "mako" };
+          options?.onNavigate?.("/(tabs)", params);
         } else if (
           actionId === Notifications?.DEFAULT_ACTION_IDENTIFIER &&
-          data.sessionId
+          (data.sessionId || data.focus === "mako")
         ) {
-          options?.onNavigate?.("/(tabs)", { sessionId: data.sessionId });
+          const params: Record<string, string> = {};
+          if (data.sessionId) {
+            params.sessionId = data.sessionId;
+          }
+          if (data.focus) {
+            params.focus = data.focus;
+          }
+          options?.onNavigate?.("/(tabs)", params);
         }
       });
 
     return () => {
       responseListenerRef.current?.remove();
     };
-  }, [options?.onNavigate, options?.onToolApproval]);
+  }, [options?.onNavigate, options?.onRegisterNativeDevice, options?.onToolApproval]);
 
   const changeNotificationLevel = useCallback(
     async (level: NotificationLevel) => {
@@ -217,7 +251,7 @@ export function useNotifications(options?: UseNotificationsOptions) {
   );
 
   const notifyMakoUpdate = useCallback(
-    async (title: string, body: string) => {
+    async (title: string, body: string, sessionId?: string) => {
       if (!Notifications || notificationLevel === "silent") return;
 
       await Notifications.scheduleNotificationAsync({
@@ -225,7 +259,7 @@ export function useNotifications(options?: UseNotificationsOptions) {
           title: `Mako: ${title}`,
           body,
           categoryIdentifier: MAKO_UPDATE_CATEGORY,
-          data: { type: "mako_update" },
+          data: { type: "mako_update", sessionId, focus: "mako" },
           sound: notificationLevel === "all" ? "default" : false,
         },
         trigger: null,

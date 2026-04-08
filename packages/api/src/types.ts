@@ -269,6 +269,15 @@ export interface SimpleOkResponse {
   ok: boolean;
 }
 
+export interface ApnsRegisterResponse {
+  id: string;
+}
+
+export interface ApnsStatusResponse {
+  apns_configured: boolean;
+  device_count: number;
+}
+
 export type MemoryType = 'user' | 'feedback' | 'project' | 'reference';
 
 export interface AgentMemory {

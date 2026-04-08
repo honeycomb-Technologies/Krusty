@@ -221,11 +221,51 @@ export default function ChatScreen() {
     [activeToolCallId, client, sessionStore],
   );
 
+  const handleNotificationNavigate = useCallback(
+    async (_route: string, params?: Record<string, string>) => {
+      const focus = params?.focus;
+      const targetSessionId = params?.sessionId;
+      const shouldOpenReports = params?.openReports === "true";
+
+      if (focus === "mako") {
+        setActiveTab(2);
+      }
+      if (shouldOpenReports) {
+        setReportsOpen(true);
+      }
+      if (!targetSessionId) {
+        return;
+      }
+
+      try {
+        await sessionStore.getState().loadSession(targetSessionId, true);
+      } catch {
+        void sessionsStore.getState().loadSessions();
+      }
+    },
+    [sessionStore, sessionsStore],
+  );
+
+  const handleRegisterNativeDevice = useCallback(
+    async (deviceToken: string) => {
+      if (!client || !isConnected || !deviceToken) {
+        return;
+      }
+
+      try {
+        await client.registerApnsDevice(deviceToken);
+      } catch {}
+    },
+    [client, isConnected],
+  );
+
   const { startActivity, updateActivity, endActivity } = useLiveActivity({
     onToolApproval: handleToolApprovalAction,
   });
   const { notifyToolApproval, notifyStreamComplete } = useNotifications({
     onToolApproval: handleToolApprovalAction,
+    onNavigate: handleNotificationNavigate,
+    onRegisterNativeDevice: handleRegisterNativeDevice,
   });
 
   useWidgetSync({

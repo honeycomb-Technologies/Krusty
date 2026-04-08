@@ -1,7 +1,7 @@
 //! Chat endpoint with SSE streaming via core orchestrator.
 
 use std::convert::Infallible;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -36,10 +36,11 @@ use krusty_core::SessionManager;
 use super::session_access::{
     current_user_id, ensure_owned_session, load_owned_session, request_workspace_scope,
 };
-use crate::apns::{ApnsEventType, ApnsPayload, ApnsService};
+use crate::apns::{ApnsEventType, ApnsPayload};
 use crate::auth::CurrentUser;
 use crate::error::AppError;
-use crate::push::{PushEventType, PushPayload, PushService};
+use crate::notifications::{fire_apns, fire_push, session_title};
+use crate::push::{PushEventType, PushPayload};
 use crate::types::{
     AgenticEvent, ChatRequest, ContentBlock, ThinkingLevel, ToolApprovalRequest, ToolResultRequest,
 };
@@ -700,7 +701,10 @@ async fn start_orchestrator_sse(
                         body: "Krusty needs your input".into(),
                         session_id: Some(session_id.clone()),
                         category: Some("TOOL_APPROVAL".into()),
-                        data: None,
+                        data: Some(json!({
+                            "type": "awaiting_input",
+                            "sessionId": session_id.clone(),
+                        })),
                     },
                     ApnsEventType::AwaitingInput,
                 );
@@ -721,6 +725,7 @@ async fn start_orchestrator_sse(
                         category: Some("TOOL_APPROVAL".into()),
                         data: Some(serde_json::json!({
                             "requestId": id,
+                            "sessionId": session_id.clone(),
                             "toolName": name,
                             "type": "tool_approval",
                         })),
@@ -764,7 +769,10 @@ async fn start_orchestrator_sse(
                         body: "Session encountered an error".into(),
                         session_id: Some(session_id.clone()),
                         category: None,
-                        data: None,
+                        data: Some(json!({
+                            "type": "error",
+                            "sessionId": session_id.clone(),
+                        })),
                     },
                     ApnsEventType::Error,
                 );
@@ -796,6 +804,7 @@ async fn start_orchestrator_sse(
                         category: Some("STREAM_COMPLETE".into()),
                         data: Some(serde_json::json!({
                             "type": "stream_complete",
+                            "sessionId": session_id.clone(),
                         })),
                     },
                     ApnsEventType::Completion,
@@ -917,73 +926,6 @@ fn apply_thinking_config(
             ThinkingLevel::Medium => AnthropicAdaptiveEffort::Medium,
             ThinkingLevel::High => AnthropicAdaptiveEffort::High,
             ThinkingLevel::XHigh => AnthropicAdaptiveEffort::Max,
-        });
-    }
-}
-
-fn session_title(db_path: &Path, session_id: &str) -> String {
-    match Database::new(db_path) {
-        Ok(db) => {
-            let session_manager = SessionManager::new(db);
-            match session_manager.get_session(session_id) {
-                Ok(Some(session)) => session.title,
-                Ok(None) => "Session".to_string(),
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        "Failed to load session title: {}", e
-                    );
-                    "Session".to_string()
-                }
-            }
-        }
-        Err(e) => {
-            tracing::error!("Failed to open database while loading session title: {}", e);
-            "Session".to_string()
-        }
-    }
-}
-
-fn fire_push(
-    push_service: &Option<Arc<PushService>>,
-    user_id: Option<&str>,
-    payload: PushPayload,
-    event_type: PushEventType,
-) {
-    if let Some(svc) = push_service.clone() {
-        let uid = user_id.map(String::from);
-        tokio::spawn(async move {
-            let stats = svc.notify_user(uid.as_deref(), payload, event_type).await;
-            tracing::info!(
-                event_type = event_type.as_str(),
-                attempted = stats.attempted,
-                sent = stats.sent,
-                stale_removed = stats.stale_removed,
-                failed = stats.failed,
-                "Push event dispatched"
-            );
-        });
-    }
-}
-
-fn fire_apns(
-    apns_service: &Option<Arc<ApnsService>>,
-    user_id: Option<&str>,
-    payload: ApnsPayload,
-    event_type: ApnsEventType,
-) {
-    if let Some(svc) = apns_service.clone() {
-        let uid = user_id.map(String::from);
-        tokio::spawn(async move {
-            let stats = svc.notify_user(uid.as_deref(), payload, event_type).await;
-            tracing::info!(
-                event_type = event_type.as_str(),
-                attempted = stats.attempted,
-                sent = stats.sent,
-                stale_removed = stats.stale_removed,
-                failed = stats.failed,
-                "APNs event dispatched"
-            );
         });
     }
 }

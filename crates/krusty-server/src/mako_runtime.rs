@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use serde_json::json;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
@@ -24,6 +25,9 @@ use krusty_core::storage::{
 };
 use krusty_core::tools::registry::PermissionMode;
 
+use crate::apns::{ApnsEventType, ApnsPayload};
+use crate::notifications::{fire_apns, fire_push, session_title};
+use crate::push::{PushEventType, PushPayload};
 use crate::types::AgenticEvent;
 use crate::AppState;
 
@@ -518,19 +522,101 @@ async fn run_mako_session_inner(
     };
 
     let session_inputs = Arc::clone(&state.session_inputs);
+    let push_service = state.push_service.clone();
+    let apns_service = state.apns_service.clone();
+    let user_id = session.user_id.clone();
     with_registered_session_input(session_inputs, session_id.clone(), input_tx, async {
+        let mut awaiting_input = false;
+        let mut had_error = false;
+        let mut stop_reason: Option<LoopStopReason> = None;
+        let mut sent_user_message = false;
+
         while let Some(loop_event) = event_rx.recv().await {
+            if let LoopEvent::Finished {
+                stop_reason: ref reason,
+                ..
+            } = loop_event
+            {
+                stop_reason = Some(reason.clone());
+            }
+
             if let LoopEvent::AgentSleeping { duration_secs, .. } = &loop_event {
                 let wake_at = chrono::Utc::now() + chrono::Duration::seconds(*duration_secs as i64);
                 manager
                     .schedule_wake_at(state.clone(), session_id.clone(), wake_at, "sleep")
                     .await;
             }
+
+            if matches!(loop_event, LoopEvent::AwaitingInput { .. }) {
+                awaiting_input = true;
+                notify_mako_awaiting_input(
+                    &push_service,
+                    &apns_service,
+                    user_id.as_deref(),
+                    &session_id,
+                );
+            }
+
+            if let LoopEvent::ToolApprovalRequired {
+                ref id, ref name, ..
+            } = loop_event
+            {
+                notify_mako_tool_approval(&apns_service, user_id.as_deref(), &session_id, id, name);
+            }
+
+            if let LoopEvent::UserMessage {
+                ref title,
+                ref message,
+                ref level,
+            } = loop_event
+            {
+                sent_user_message = true;
+                notify_mako_user_message(
+                    &state.db_path,
+                    &push_service,
+                    &apns_service,
+                    user_id.as_deref(),
+                    &session_id,
+                    title.as_deref(),
+                    message,
+                    level,
+                );
+            }
+
+            if let LoopEvent::Error { .. } = &loop_event {
+                had_error = true;
+            }
+
             apply_runtime_event_state(&state.db_path, &session_id, &run_id, &loop_event)?;
             let is_finished = matches!(loop_event, LoopEvent::Finished { .. });
             let _ = event_tx.send(loop_event.into());
             if is_finished {
                 break;
+            }
+        }
+
+        if !awaiting_input {
+            if had_error {
+                notify_mako_error(
+                    &state.db_path,
+                    &push_service,
+                    &apns_service,
+                    user_id.as_deref(),
+                    &session_id,
+                );
+            } else if stop_reason == Some(LoopStopReason::Sleeping) {
+                tracing::info!(
+                    session_id = %session_id,
+                    "Mako session entered sleeping state; skipping completion push"
+                );
+            } else if !sent_user_message {
+                notify_mako_completion(
+                    &state.db_path,
+                    &push_service,
+                    &apns_service,
+                    user_id.as_deref(),
+                    &session_id,
+                );
             }
         }
 
@@ -698,6 +784,198 @@ fn parse_wake_at(next_wake_at: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         .map(|dt| dt.with_timezone(&chrono::Utc))
 }
 
+fn mako_notification_title(title: Option<&str>, session_label: &str) -> String {
+    let label = title
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(session_label);
+    format!("Mako — {label}")
+}
+
+fn notify_mako_user_message(
+    db_path: &Path,
+    push_service: &Option<Arc<crate::push::PushService>>,
+    apns_service: &Option<Arc<crate::apns::ApnsService>>,
+    user_id: Option<&str>,
+    session_id: &str,
+    title: Option<&str>,
+    message: &str,
+    level: &str,
+) {
+    let session_label = session_title(db_path, session_id);
+    let notification_title = mako_notification_title(title, &session_label);
+    fire_push(
+        push_service,
+        user_id,
+        PushPayload {
+            title: notification_title.clone(),
+            body: message.to_string(),
+            session_id: Some(session_id.to_string()),
+            tag: Some(format!("mako-{session_id}")),
+        },
+        PushEventType::MakoUpdate,
+    );
+    fire_apns(
+        apns_service,
+        user_id,
+        ApnsPayload {
+            title: notification_title,
+            body: message.to_string(),
+            session_id: Some(session_id.to_string()),
+            category: Some("MAKO_UPDATE".into()),
+            data: Some(json!({
+                "type": "mako_update",
+                "sessionId": session_id,
+                "level": level,
+                "title": title,
+            })),
+        },
+        ApnsEventType::MakoUpdate,
+    );
+}
+
+fn notify_mako_awaiting_input(
+    push_service: &Option<Arc<crate::push::PushService>>,
+    apns_service: &Option<Arc<crate::apns::ApnsService>>,
+    user_id: Option<&str>,
+    session_id: &str,
+) {
+    fire_push(
+        push_service,
+        user_id,
+        PushPayload {
+            title: "Mako".into(),
+            body: "Mako needs your input".into(),
+            session_id: Some(session_id.to_string()),
+            tag: Some(format!("mako-{session_id}")),
+        },
+        PushEventType::AwaitingInput,
+    );
+    fire_apns(
+        apns_service,
+        user_id,
+        ApnsPayload {
+            title: "Mako".into(),
+            body: "Mako needs your input".into(),
+            session_id: Some(session_id.to_string()),
+            category: Some("MAKO_UPDATE".into()),
+            data: Some(json!({
+                "type": "mako_update",
+                "sessionId": session_id,
+                "level": "warning",
+            })),
+        },
+        ApnsEventType::AwaitingInput,
+    );
+}
+
+fn notify_mako_tool_approval(
+    apns_service: &Option<Arc<crate::apns::ApnsService>>,
+    user_id: Option<&str>,
+    session_id: &str,
+    request_id: &str,
+    tool_name: &str,
+) {
+    fire_apns(
+        apns_service,
+        user_id,
+        ApnsPayload {
+            title: "Tool Approval Required".into(),
+            body: format!("Mako wants to run \"{tool_name}\"."),
+            session_id: Some(session_id.to_string()),
+            category: Some("TOOL_APPROVAL".into()),
+            data: Some(json!({
+                "requestId": request_id,
+                "sessionId": session_id,
+                "toolName": tool_name,
+                "type": "tool_approval",
+            })),
+        },
+        ApnsEventType::ToolApproval,
+    );
+}
+
+fn notify_mako_error(
+    db_path: &Path,
+    push_service: &Option<Arc<crate::push::PushService>>,
+    apns_service: &Option<Arc<crate::apns::ApnsService>>,
+    user_id: Option<&str>,
+    session_id: &str,
+) {
+    let session_label = session_title(db_path, session_id);
+    fire_push(
+        push_service,
+        user_id,
+        PushPayload {
+            title: "Mako".into(),
+            body: format!("{session_label} encountered an error"),
+            session_id: Some(session_id.to_string()),
+            tag: Some(format!("mako-{session_id}")),
+        },
+        PushEventType::Error,
+    );
+    fire_apns(
+        apns_service,
+        user_id,
+        ApnsPayload {
+            title: format!(
+                "{} — Attention needed",
+                mako_notification_title(None, &session_label)
+            ),
+            body: "Run encountered an error".into(),
+            session_id: Some(session_id.to_string()),
+            category: Some("MAKO_UPDATE".into()),
+            data: Some(json!({
+                "type": "mako_update",
+                "sessionId": session_id,
+                "level": "error",
+            })),
+        },
+        ApnsEventType::Error,
+    );
+}
+
+fn notify_mako_completion(
+    db_path: &Path,
+    push_service: &Option<Arc<crate::push::PushService>>,
+    apns_service: &Option<Arc<crate::apns::ApnsService>>,
+    user_id: Option<&str>,
+    session_id: &str,
+) {
+    let session_label = session_title(db_path, session_id);
+    let notification_title = format!(
+        "{} — Complete",
+        mako_notification_title(None, &session_label)
+    );
+    fire_push(
+        push_service,
+        user_id,
+        PushPayload {
+            title: "Mako".into(),
+            body: format!("{session_label} is complete"),
+            session_id: Some(session_id.to_string()),
+            tag: Some(format!("mako-{session_id}")),
+        },
+        PushEventType::MakoUpdate,
+    );
+    fire_apns(
+        apns_service,
+        user_id,
+        ApnsPayload {
+            title: notification_title,
+            body: "Run finished".into(),
+            session_id: Some(session_id.to_string()),
+            category: Some("MAKO_UPDATE".into()),
+            data: Some(json!({
+                "type": "mako_update",
+                "sessionId": session_id,
+                "level": "success",
+            })),
+        },
+        ApnsEventType::MakoUpdate,
+    );
+}
+
 fn persist_runtime_state(
     db_path: &Path,
     session_id: &str,
@@ -746,8 +1024,9 @@ mod tests {
     use krusty_core::SessionManager;
 
     use super::{
-        apply_runtime_event_state, persist_runtime_state, resolve_persisted_project_dir,
-        with_registered_session_input, ActiveMakoRuntime, MakoRuntimeManager,
+        apply_runtime_event_state, mako_notification_title, persist_runtime_state,
+        resolve_persisted_project_dir, with_registered_session_input, ActiveMakoRuntime,
+        MakoRuntimeManager,
     };
     use crate::AppState;
 
@@ -792,6 +1071,26 @@ mod tests {
             },
             temp_dir,
         )
+    }
+
+    #[test]
+    fn mako_notification_title_prefers_explicit_title() {
+        assert_eq!(
+            mako_notification_title(Some("Verification complete"), "Auth refactor"),
+            "Mako — Verification complete"
+        );
+    }
+
+    #[test]
+    fn mako_notification_title_falls_back_to_session_label() {
+        assert_eq!(
+            mako_notification_title(Some("   "), "Auth refactor"),
+            "Mako — Auth refactor"
+        );
+        assert_eq!(
+            mako_notification_title(None, "Auth refactor"),
+            "Mako — Auth refactor"
+        );
     }
 
     fn create_session(state: &AppState, session_type: SessionType) -> String {

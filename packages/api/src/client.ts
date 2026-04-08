@@ -37,6 +37,8 @@ import type {
   MakoRunPriority,
   MakoSessionSummary,
   MakoSessionStatus,
+  ApnsRegisterResponse,
+  ApnsStatusResponse,
   SimpleOkResponse,
 } from './types';
 
@@ -102,6 +104,21 @@ export class KrustyClient {
     // The current server authenticates each API request with the bearer token
     // directly and does not expose a separate bootstrap route.
     return true;
+  }
+
+  // Notifications
+  async registerApnsDevice(deviceToken: string, bundleId?: string): Promise<ApnsRegisterResponse> {
+    return this.request('/apns/register', {
+      method: 'POST',
+      body: JSON.stringify({
+        device_token: deviceToken,
+        bundle_id: bundleId ?? undefined,
+      }),
+    });
+  }
+
+  async getApnsStatus(): Promise<ApnsStatusResponse> {
+    return this.request('/apns/status');
   }
 
   // Sessions
