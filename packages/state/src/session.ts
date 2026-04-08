@@ -129,6 +129,7 @@ export interface Attachment {
 interface QueuedMessage {
   content: string;
   attachments: Attachment[];
+  researchEnabled: boolean;
 }
 
 interface FastModelPair {
@@ -261,7 +262,11 @@ export interface SessionStoreState {
   error: string | null;
   model: string | null;
 
-  sendMessage: (content: string, attachments?: Attachment[]) => Promise<void>;
+  sendMessage: (
+    content: string,
+    attachments?: Attachment[],
+    researchEnabled?: boolean,
+  ) => Promise<void>;
   loadSession: (sessionId: string, isRefresh?: boolean) => Promise<void>;
   clearSession: () => void;
   initSession: (sessionId: string, title: string) => void;
@@ -1481,8 +1486,14 @@ export function createSessionStore(
         if (queued.length > 0) {
           const combinedContent = queued.map((q) => q.content).join("\n\n");
           const combinedAttachments = queued.flatMap((q) => q.attachments);
+          const queuedResearchEnabled = queued.some((q) => q.researchEnabled);
           setTimeout(
-            () => get().sendMessage(combinedContent, combinedAttachments),
+            () =>
+              get().sendMessage(
+                combinedContent,
+                combinedAttachments,
+                queuedResearchEnabled,
+              ),
             50,
           );
         }
@@ -1621,7 +1632,11 @@ export function createSessionStore(
 
     // -- sendMessage --------------------------------------------------------
 
-    async sendMessage(content: string, attachments: Attachment[] = []) {
+    async sendMessage(
+      content: string,
+      attachments: Attachment[] = [],
+      researchEnabled = false,
+    ) {
       const state = get();
       const ws = workspace.getState();
       const normalizedContent = content.trim();
@@ -1651,7 +1666,10 @@ export function createSessionStore(
             };
           }
           return {
-            queuedMessages: [...s.queuedMessages, { content, attachments }],
+            queuedMessages: [
+              ...s.queuedMessages,
+              { content, attachments, researchEnabled },
+            ],
             messages: [
               ...s.messages,
               {
@@ -1712,6 +1730,7 @@ export function createSessionStore(
             project_dir: state.sessionId ? undefined : ws.directory,
             working_dir: state.sessionId ? undefined : ws.directory,
             workspace_mode: state.sessionId ? undefined : ws.mode,
+            research_enabled: researchEnabled || undefined,
             model: state.model ?? undefined,
             thinking_enabled: thinkingLevelToApiValue(state.thinkingLevel),
             permission_mode: state.permissionMode,

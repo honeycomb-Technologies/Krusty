@@ -108,6 +108,7 @@ export interface ChatRequest {
   working_dir?: string | null;
   workspace_mode?: WorkspaceMode;
   session_type?: SessionType;
+  research_enabled?: boolean;
   model?: string;
   thinking_enabled?: boolean | string;
   permission_mode?: PermissionMode;

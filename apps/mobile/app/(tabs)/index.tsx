@@ -642,9 +642,13 @@ export default function ChatScreen() {
 
       await sessionStore
         .getState()
-        .sendMessage(trimmed, attachments as SessionAttachment[]);
+        .sendMessage(
+          trimmed,
+          attachments as SessionAttachment[],
+          researchEnabled,
+        );
     },
-    [client, ensureSessionForSend, sessionStore],
+    [client, ensureSessionForSend, researchEnabled, sessionStore],
   );
 
   const handleSessionToolApproval = useCallback(
