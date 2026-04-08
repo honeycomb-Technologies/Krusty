@@ -11,11 +11,13 @@ import { MakoApprovalList } from "./MakoApprovalList";
 import { MakoInsightCard } from "./MakoInsightCard";
 import { MakoRunList } from "./MakoRunList";
 import {
+  describeRunDrift,
   formatTimestamp,
   getAttentionRuns,
   getQueueHeadRuns,
   getRunNextWakeAt,
   getRunPriority,
+  getStaleRuns,
 } from "./utils";
 import type { MakoCurrentRunSummary, MakoCurrentState } from "./types";
 
@@ -40,10 +42,12 @@ export function MakoStatusView({
   const runs = state.current?.runs ?? [];
   const approvals = state.current?.approvals ?? [];
   const attentionRuns = getAttentionRuns(runs);
+  const staleRuns = getStaleRuns(runs);
   const queueHead = getQueueHeadRuns(runs);
   const cadence = summarizeCadence(runs);
   const queueHealth = summarizeQueueHealth(runs, approvals.length);
   const priorityProfile = summarizePriorityProfile(queueHead);
+  const runtimeDrift = summarizeRuntimeDrift(staleRuns);
   const scheduledRuns = runs
     .filter(
       (run) =>
@@ -94,6 +98,7 @@ export function MakoStatusView({
           label="High priority"
           value={String(status?.high_priority_count ?? 0)}
         />
+        <StatusCard label="Drifting" value={String(staleRuns.length)} />
         <StatusCard label="Paused" value={String(status?.paused_count ?? 0)} />
         <StatusCard label="Failed" value={String(status?.failed_count ?? 0)} />
         <StatusCard label="Tick interval" value={cadence.tickIntervalLabel} />
@@ -131,6 +136,12 @@ export function MakoStatusView({
           detail={priorityProfile.detail}
           tone={priorityProfile.tone}
         />
+        <MakoInsightCard
+          label="Runtime drift"
+          value={runtimeDrift.value}
+          detail={runtimeDrift.detail}
+          tone={runtimeDrift.tone}
+        />
       </View>
 
       <View style={styles.section}>
@@ -155,6 +166,18 @@ export function MakoStatusView({
           runs={attentionRuns}
           emptyLabel="Nothing is blocked or failed right now."
           onSelectRun={onSelectRun}
+        />
+      </View>
+
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: t.foreground }]}>
+          Stalled or overdue
+        </Text>
+        <MakoRunList
+          runs={staleRuns}
+          emptyLabel="No runs look stalled right now."
+          onSelectRun={onSelectRun}
+          detailOverride={describeRunDrift}
         />
       </View>
 
@@ -263,6 +286,30 @@ function summarizePriorityProfile(runs: MakoCurrentRunSummary[]) {
         ? "High-priority runs will stay ahead of the rest of the queue."
         : "No high-priority pressure is pushing on the queue right now.",
     tone: counts.high > 0 ? ("warning" as const) : ("default" as const),
+  };
+}
+
+function summarizeRuntimeDrift(runs: MakoCurrentRunSummary[]) {
+  const overdueWakeCount = runs.filter(
+    (run) =>
+      run.runtime?.status === "sleeping" &&
+      run.runtime.sleep_reason === "scheduled" &&
+      run.runtime.next_wake_at &&
+      new Date(run.runtime.next_wake_at).getTime() < Date.now(),
+  ).length;
+
+  if (runs.length === 0) {
+    return {
+      value: "Healthy",
+      detail: "No runs are currently drifting or overdue.",
+      tone: "success" as const,
+    };
+  }
+
+  return {
+    value: `${runs.length} drifting`,
+    detail: `${overdueWakeCount} overdue wakes • ${runs.length - overdueWakeCount} stale active or queued runs`,
+    tone: overdueWakeCount > 0 ? ("warning" as const) : ("accent" as const),
   };
 }
 

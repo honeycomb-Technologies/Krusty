@@ -8,6 +8,11 @@ import type {
 } from "@krusty/api";
 import { formatPriorityLabel } from "./priority";
 
+const ACTIVE_STALE_MS = 30 * 60 * 1000;
+const WAITING_STALE_MS = 15 * 60 * 1000;
+const QUEUED_STALE_MS = 60 * 60 * 1000;
+const OVERDUE_WAKE_GRACE_MS = 5 * 60 * 1000;
+
 function completedTaskIds(tasks: AutonomousTask[]): Set<string> {
   return new Set(
     tasks
@@ -230,6 +235,67 @@ export function getAttentionRuns(
   return runs.filter(
     (run) => getRunGroup(run) === "waiting" || isFailedRun(run),
   );
+}
+
+export function isOverdueScheduledRun(
+  run: Pick<MakoCurrentRunSummary, "runtime">,
+): boolean {
+  const wakeAt = run.runtime?.next_wake_at;
+  if (!isScheduledRun(run) || !wakeAt) {
+    return false;
+  }
+
+  return Date.now() - new Date(wakeAt).getTime() > OVERDUE_WAKE_GRACE_MS;
+}
+
+export function isStaleRun(run: MakoCurrentRunSummary): boolean {
+  if (isFailedRun(run) || isOverdueScheduledRun(run)) {
+    return true;
+  }
+
+  const updatedAt = run.updated_at;
+  if (!updatedAt) {
+    return false;
+  }
+
+  const ageMs = Date.now() - new Date(updatedAt).getTime();
+  switch (getRunGroup(run)) {
+    case "active":
+      return ageMs > ACTIVE_STALE_MS;
+    case "waiting":
+      return ageMs > WAITING_STALE_MS;
+    case "queued":
+      return ageMs > QUEUED_STALE_MS;
+    default:
+      return false;
+  }
+}
+
+export function getStaleRuns(
+  runs: MakoCurrentRunSummary[],
+): MakoCurrentRunSummary[] {
+  return runs.filter((run) => isStaleRun(run));
+}
+
+export function describeRunDrift(run: MakoCurrentRunSummary): string {
+  if (isOverdueScheduledRun(run)) {
+    return "Wake is overdue";
+  }
+  if (isFailedRun(run)) {
+    return "Run failed and needs review";
+  }
+
+  const age = formatRelativeTime(run.updated_at);
+  switch (getRunGroup(run)) {
+    case "active":
+      return `No new activity for ${age}`;
+    case "waiting":
+      return `Blocked for ${age}`;
+    case "queued":
+      return `Queued without movement for ${age}`;
+    default:
+      return `Last activity ${age}`;
+  }
 }
 
 function taskWakeEvent(task: AutonomousTask, completedIds: Set<string>): MakoRunWakeEvent {

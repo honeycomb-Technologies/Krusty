@@ -17,6 +17,7 @@ interface MakoRunListProps {
   runs: MakoCurrentRunSummary[];
   emptyLabel: string;
   onSelectRun: (runId: string) => void;
+  detailOverride?: (run: MakoCurrentRunSummary) => string;
   activeActionRunId?: string | null;
   onPauseRun?: (runId: string) => void;
   onResumeRun?: (runId: string) => void;
@@ -26,6 +27,7 @@ export function MakoRunList({
   runs,
   emptyLabel,
   onSelectRun,
+  detailOverride,
   activeActionRunId,
   onPauseRun,
   onResumeRun,
@@ -76,7 +78,7 @@ export function MakoRunList({
                 style={[styles.summary, { color: t.mutedForeground }]}
                 numberOfLines={2}
               >
-                {describeRun(run)}
+                {detailOverride ? detailOverride(run) : describeRun(run)}
               </Text>
             </Pressable>
 
