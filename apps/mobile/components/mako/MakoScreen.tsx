@@ -112,7 +112,14 @@ export function MakoScreen({
           ) : null}
 
           {navigation.topLevel === "reports" ? <MakoReportsView /> : null}
-          {navigation.topLevel === "status" ? <MakoStatusView state={current} /> : null}
+          {navigation.topLevel === "status" ? (
+            <MakoStatusView
+              state={current}
+              onSelectRun={(runId) => {
+                void handleOpenRun(runId);
+              }}
+            />
+          ) : null}
         </>
       )}
     </SafeAreaView>

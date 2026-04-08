@@ -1,21 +1,54 @@
-import { StyleSheet, Text, View } from "react-native";
+import {
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { GlassCard } from "../ui/GlassCard";
 import { useThemeContext } from "../../hooks/useTheme";
+import { MakoRunList } from "./MakoRunList";
 import { formatTimestamp } from "./utils";
 import type { MakoCurrentRunSummary, MakoCurrentState } from "./types";
 
 interface MakoStatusViewProps {
   state: MakoCurrentState;
+  onSelectRun: (runId: string) => void;
 }
 
-export function MakoStatusView({ state }: MakoStatusViewProps) {
+export function MakoStatusView({ state, onSelectRun }: MakoStatusViewProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
   const status = state.current?.status;
-  const cadence = summarizeCadence(state.current?.runs ?? []);
+  const runs = state.current?.runs ?? [];
+  const cadence = summarizeCadence(runs);
+  const scheduledRuns = runs
+    .filter(
+      (run) =>
+        run.runtime?.status === "sleeping" &&
+        run.runtime.sleep_reason === "scheduled",
+    )
+    .sort((left, right) => {
+      const leftValue = left.runtime?.next_wake_at ?? "";
+      const rightValue = right.runtime?.next_wake_at ?? "";
+      return leftValue.localeCompare(rightValue);
+    });
 
   return (
-    <View style={styles.wrap}>
+    <ScrollView
+      style={styles.scroll}
+      contentContainerStyle={styles.wrap}
+      showsVerticalScrollIndicator={false}
+      refreshControl={
+        <RefreshControl
+          refreshing={state.isRefreshing}
+          onRefresh={() => {
+            void state.refresh();
+          }}
+          tintColor={t.userMessage}
+        />
+      }
+    >
       <Text style={[styles.description, { color: t.mutedForeground }]}>
         Status keeps the control-plane truth compact: what is awake, what is queued, what is blocked, and when the next wake is expected.
       </Text>
@@ -58,7 +91,18 @@ export function MakoStatusView({ state }: MakoStatusViewProps) {
           {cadence.detail}
         </Text>
       </GlassCard>
-    </View>
+
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: t.foreground }]}>
+          Upcoming wakes
+        </Text>
+        <MakoRunList
+          runs={scheduledRuns}
+          emptyLabel="No deferred wakes are queued."
+          onSelectRun={onSelectRun}
+        />
+      </View>
+    </ScrollView>
   );
 }
 
@@ -112,9 +156,12 @@ function StatusCard({
 }
 
 const styles = StyleSheet.create({
-  wrap: {
+  scroll: {
     flex: 1,
+  },
+  wrap: {
     paddingHorizontal: 16,
+    paddingBottom: 28,
     gap: 16,
   },
   description: {
@@ -149,5 +196,13 @@ const styles = StyleSheet.create({
     marginTop: 10,
     fontSize: 14,
     lineHeight: 20,
+  },
+  section: {
+    gap: 10,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    letterSpacing: -0.3,
   },
 });
