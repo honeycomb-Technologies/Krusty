@@ -63,6 +63,31 @@ const SELECTED_MODEL_KEY = "krusty_selected_model";
 type WorkspaceMode = "neutral" | "selected" | "created";
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
 
+function normalizeProviderId(provider: string | null | undefined): string {
+  return (provider ?? "").trim().toLowerCase();
+}
+
+function isModelUsable(
+  modelId: string | null | undefined,
+  catalog: ModelInfo[],
+  configuredProviders: string[],
+): boolean {
+  if (!modelId) {
+    return false;
+  }
+
+  const match = catalog.find((candidate) => candidate.id === modelId);
+  if (!match) {
+    return false;
+  }
+
+  if (configuredProviders.length === 0) {
+    return true;
+  }
+
+  return configuredProviders.includes(normalizeProviderId(match.provider));
+}
+
 function sessionTypeForTab(index: number): SessionType {
   return TAB_TYPES[index] ?? "code";
 }
@@ -241,6 +266,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
 
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [defaultModelId, setDefaultModelId] = useState<string | null>(null);
+  const [configuredProviders, setConfiguredProviders] = useState<string[]>([]);
   const [activeToolCallId, setActiveToolCallId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState(1);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -367,42 +393,64 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       return null;
     }
 
-    const response = await client.getModels();
+    const [response, credentials] = await Promise.all([
+      client.getModels(),
+      client.getCredentials().catch(() => []),
+    ]);
+    const nextConfiguredProviders = credentials
+      .filter((provider) => provider.configured || provider.has_oauth)
+      .map((provider) => normalizeProviderId(provider.name));
     setModels(response.models);
     setDefaultModelId(response.default_model ?? null);
-    return response;
+    setConfiguredProviders(nextConfiguredProviders);
+    return {
+      response,
+      configuredProviders: nextConfiguredProviders,
+    };
   }, [client, isConnected]);
 
   const ensureModelReady = useCallback(async () => {
     const existingModel = sessionStore.getState().model;
-    if (existingModel) {
+    let catalog = models;
+    let fallbackDefault = defaultModelId;
+    let allowedProviders = configuredProviders;
+
+    if (catalog.length === 0) {
+      const result = await loadModelCatalog().catch(() => null);
+      if (!result) {
+        return null;
+      }
+      catalog = result.response.models;
+      fallbackDefault = result.response.default_model ?? null;
+      allowedProviders = result.configuredProviders;
+    }
+
+    if (isModelUsable(existingModel, catalog, allowedProviders)) {
       return existingModel;
     }
 
-    let catalog = models;
-    let fallbackDefault = defaultModelId;
-
-    if (catalog.length === 0) {
-      const response = await loadModelCatalog().catch(() => null);
-      if (!response) {
-        return null;
-      }
-      catalog = response.models;
-      fallbackDefault = response.default_model ?? null;
-    }
-
     const saved = await SecureStore.getItemAsync(SELECTED_MODEL_KEY);
-    const selectedModel =
-      saved && catalog.some((candidate) => candidate.id === saved)
-        ? saved
-        : fallbackDefault ?? catalog[0]?.id ?? null;
+    const firstUsableModel =
+      catalog.find((candidate) =>
+        allowedProviders.length === 0
+          ? true
+          : allowedProviders.includes(normalizeProviderId(candidate.provider)),
+      )?.id ?? null;
+    const selectedModel = isModelUsable(saved, catalog, allowedProviders)
+      ? saved
+      : isModelUsable(fallbackDefault, catalog, allowedProviders)
+        ? fallbackDefault
+        : firstUsableModel;
 
     if (selectedModel) {
       sessionStore.getState().setModel(selectedModel);
+      if (saved !== selectedModel) {
+        await SecureStore.setItemAsync(SELECTED_MODEL_KEY, selectedModel);
+      }
     }
 
     return selectedModel;
-  }, [defaultModelId, loadModelCatalog, models, sessionStore]);
+  }, [configuredProviders, defaultModelId, loadModelCatalog, models, sessionStore]);
 
   useEffect(() => {
     if (!client || !isConnected) {
