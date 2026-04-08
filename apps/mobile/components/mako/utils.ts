@@ -134,6 +134,26 @@ export function getRunDisplayStatus(
   }
 }
 
+export function canPauseRun(
+  run: Pick<MakoCurrentRunSummary, "runtime">,
+): boolean {
+  return (
+    run.runtime?.status !== "sleeping" && run.runtime?.status !== "paused"
+  );
+}
+
+export function canResumeRun(
+  run: Pick<MakoCurrentRunSummary, "runtime">,
+): boolean {
+  return run.runtime?.status !== "running";
+}
+
+export function getRunResumeLabel(
+  run: Pick<MakoCurrentRunSummary, "runtime">,
+): string {
+  return run.runtime?.status === "sleeping" ? "Wake now" : "Resume";
+}
+
 export function getRuntimeLabel(status: string): string {
   switch (status) {
     case "running":

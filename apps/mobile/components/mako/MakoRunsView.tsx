@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   RefreshControl,
   ScrollView,
@@ -5,6 +6,8 @@ import {
   Text,
   View,
 } from "react-native";
+import * as Haptics from "../../platform/haptics";
+import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";
 import { MakoInsightCard } from "./MakoInsightCard";
 import { MakoRunList } from "./MakoRunList";
@@ -24,9 +27,14 @@ interface MakoRunsViewProps {
 }
 
 export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
+  const { client } = useConnection();
   const { theme } = useThemeContext();
   const t = theme.colors;
   const runs = state.current?.runs ?? [];
+  const [activeActionRunId, setActiveActionRunId] = useState<string | null>(
+    null,
+  );
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const groups = {
     active: runs.filter((run) => getRunGroup(run) === "active"),
@@ -47,6 +55,46 @@ export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
       .filter((value): value is string => Boolean(value))
       .sort()[0] ?? null;
 
+  const handlePauseRun = async (runId: string) => {
+    if (!client || activeActionRunId) {
+      return;
+    }
+
+    setActionError(null);
+    setActiveActionRunId(runId);
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    try {
+      await client.pauseMakoSession(runId);
+      await state.refresh();
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : "Failed to pause this run.",
+      );
+    } finally {
+      setActiveActionRunId(null);
+    }
+  };
+
+  const handleResumeRun = async (runId: string) => {
+    if (!client || activeActionRunId) {
+      return;
+    }
+
+    setActionError(null);
+    setActiveActionRunId(runId);
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    try {
+      await client.resumeMakoSession(runId);
+      await state.refresh();
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : "Failed to wake this run.",
+      );
+    } finally {
+      setActiveActionRunId(null);
+    }
+  };
+
   return (
     <ScrollView
       style={styles.scroll}
@@ -65,6 +113,10 @@ export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
       <Text style={[styles.description, { color: t.mutedForeground }]}>
         Runs keep the open queue visible first, then break the waterline into active, waiting, sleeping, queued, and completed groups.
       </Text>
+
+      {actionError ? (
+        <Text style={[styles.error, { color: t.error }]}>{actionError}</Text>
+      ) : null}
 
       <View style={styles.grid}>
         <MakoInsightCard
@@ -101,6 +153,13 @@ export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
           runs={queueHead.slice(0, 6)}
           emptyLabel="No open runs are in the queue."
           onSelectRun={onSelectRun}
+          activeActionRunId={activeActionRunId}
+          onPauseRun={(runId) => {
+            void handlePauseRun(runId);
+          }}
+          onResumeRun={(runId) => {
+            void handleResumeRun(runId);
+          }}
         />
       </Section>
 
@@ -109,6 +168,13 @@ export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
           runs={groups.active}
           emptyLabel="No active runs."
           onSelectRun={onSelectRun}
+          activeActionRunId={activeActionRunId}
+          onPauseRun={(runId) => {
+            void handlePauseRun(runId);
+          }}
+          onResumeRun={(runId) => {
+            void handleResumeRun(runId);
+          }}
         />
       </Section>
 
@@ -117,6 +183,13 @@ export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
           runs={groups.waiting}
           emptyLabel="No runs are waiting on you."
           onSelectRun={onSelectRun}
+          activeActionRunId={activeActionRunId}
+          onPauseRun={(runId) => {
+            void handlePauseRun(runId);
+          }}
+          onResumeRun={(runId) => {
+            void handleResumeRun(runId);
+          }}
         />
       </Section>
 
@@ -125,6 +198,13 @@ export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
           runs={groups.sleeping}
           emptyLabel="No sleeping runs."
           onSelectRun={onSelectRun}
+          activeActionRunId={activeActionRunId}
+          onPauseRun={(runId) => {
+            void handlePauseRun(runId);
+          }}
+          onResumeRun={(runId) => {
+            void handleResumeRun(runId);
+          }}
         />
       </Section>
 
@@ -133,6 +213,13 @@ export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
           runs={groups.queued}
           emptyLabel="No queued runs."
           onSelectRun={onSelectRun}
+          activeActionRunId={activeActionRunId}
+          onPauseRun={(runId) => {
+            void handlePauseRun(runId);
+          }}
+          onResumeRun={(runId) => {
+            void handleResumeRun(runId);
+          }}
         />
       </Section>
 
@@ -175,6 +262,10 @@ const styles = StyleSheet.create({
     gap: 18,
   },
   description: {
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  error: {
     fontSize: 13,
     lineHeight: 18,
   },
