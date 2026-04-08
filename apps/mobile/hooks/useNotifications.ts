@@ -164,7 +164,7 @@ export function useNotifications(options?: UseNotificationsOptions) {
 
       await Notifications.scheduleNotificationAsync({
         content: {
-          title: "Tool Approval Required",
+          title: "Permission Required",
           body: `"${toolName}" is requesting permission to execute.`,
           categoryIdentifier: TOOL_APPROVAL_CATEGORY,
           data: { requestId, sessionId, type: "tool_approval" },

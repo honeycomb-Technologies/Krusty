@@ -12,7 +12,7 @@ import Animated, {
   runOnJS,
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import { Brain, Hammer, Compass, Paperclip, Bot, FlaskConical, Shield, Zap } from 'lucide-react-native';
+import { Brain, Hammer, Compass, Paperclip, Bot, FlaskConical, ShieldCheck, ShieldOff, Zap } from 'lucide-react-native';
 import { useThemeContext } from '../../hooks/useTheme';
 import { cycleThinkingLevel, type ThinkingLevel } from '@krusty/api';
 import type { PermissionMode } from '@krusty/state';
@@ -190,7 +190,7 @@ export function AccordionControls({
   const handlePermissionMode = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     onPermissionModeToggle();
-    setFlashPermission(permissionMode === 'supervised' ? 'Auto' : 'Ask');
+    setFlashPermission(permissionMode === 'supervised' ? 'Autonomous' : 'Supervised');
     setTimeout(() => setFlashPermission(null), 1200);
   };
 
@@ -239,11 +239,11 @@ export function AccordionControls({
           )}
 
           <AccordionPill index={2} isOpen={isOpen} onPress={handlePermissionMode} flashLabel={flashPermission}>
-            <Shield
-              size={24}
-              color={permissionMode === 'autonomous' ? t.warning : t.success}
-              strokeWidth={1.6}
-            />
+            {permissionMode === 'supervised' ? (
+              <ShieldCheck size={24} color={t.success} strokeWidth={1.6} />
+            ) : (
+              <ShieldOff size={24} color={t.warning} strokeWidth={1.6} />
+            )}
           </AccordionPill>
 
           {fastModeSupported && (

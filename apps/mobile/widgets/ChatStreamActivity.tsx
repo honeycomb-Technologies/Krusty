@@ -81,7 +81,7 @@ const ChatStreamActivity: LiveActivityComponent<ChatStreamProps> = (props) => {
         : status === "tool_call"
           ? currentTool
           : status === "awaiting_approval"
-            ? "Approval Required"
+            ? "Permission Required"
             : "Complete";
 
   return {
@@ -197,7 +197,7 @@ const ChatStreamActivity: LiveActivityComponent<ChatStreamProps> = (props) => {
         </Text>
         <Text modifiers={[font({ size: 12 }), lineLimit(2), opacity(0.7)]}>
           {status === "awaiting_approval"
-            ? `Tool "${toolApprovalName}" needs approval`
+            ? `Tool "${toolApprovalName}" needs permission`
             : status === "tool_call"
               ? `Running: ${currentTool}`
               : currentText || statusLabel}

@@ -740,7 +740,7 @@ async fn start_orchestrator_sse(
                     &apns_service,
                     user_id.as_deref(),
                     ApnsPayload {
-                        title: "Tool Approval Required".into(),
+                        title: "Permission Required".into(),
                         body: format!("\"{name}\" is requesting permission to execute."),
                         session_id: Some(session_id.clone()),
                         category: Some("TOOL_APPROVAL".into()),

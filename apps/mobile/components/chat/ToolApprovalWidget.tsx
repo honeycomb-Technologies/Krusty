@@ -1,5 +1,5 @@
 import { View, Text, Pressable, StyleSheet } from "react-native";
-import { Shield, Check, X } from "lucide-react-native";
+import { ShieldAlert, ShieldCheck, ShieldX, Check, X } from "lucide-react-native";
 import { useThemeContext } from "../../hooks/useTheme";
 import type { ToolCall } from "@krusty/api";
 
@@ -36,9 +36,15 @@ export function ToolApprovalWidget({
           },
         ]}
       >
-        <Shield size={15} color={t.warning} strokeWidth={1.8} />
-        <Text style={[styles.title, { color: t.warning }]} numberOfLines={1}>
-          Permission Required: {toolCall.name}
+        {isAwaiting ? (
+          <ShieldAlert size={16} color={t.warning} strokeWidth={1.8} />
+        ) : toolCall.status === "error" ? (
+          <ShieldX size={16} color={t.error} strokeWidth={1.8} />
+        ) : (
+          <ShieldCheck size={16} color={t.success} strokeWidth={1.8} />
+        )}
+        <Text style={[styles.title, { color: isAwaiting ? t.warning : toolCall.status === "error" ? t.error : t.success }]} numberOfLines={1}>
+          Permission: {toolCall.name}
         </Text>
         {!isAwaiting && (
           <View style={styles.badgeRow}>
@@ -163,7 +169,7 @@ const styles = StyleSheet.create({
   },
   primaryButton: {
     flex: 1,
-    minHeight: 42,
+    minHeight: 44,
     borderRadius: 10,
     flexDirection: "row",
     alignItems: "center",
@@ -177,7 +183,7 @@ const styles = StyleSheet.create({
   },
   secondaryButton: {
     flex: 1,
-    minHeight: 42,
+    minHeight: 44,
     borderRadius: 10,
     borderWidth: 1,
     flexDirection: "row",

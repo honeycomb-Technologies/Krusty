@@ -146,7 +146,7 @@ const styles = StyleSheet.create({
   },
   primaryButton: {
     flex: 1,
-    minHeight: 42,
+    minHeight: 44,
     borderRadius: 10,
     flexDirection: "row",
     alignItems: "center",
@@ -160,7 +160,7 @@ const styles = StyleSheet.create({
   },
   secondaryButton: {
     flex: 1,
-    minHeight: 42,
+    minHeight: 44,
     borderRadius: 10,
     borderWidth: 1,
     flexDirection: "row",
