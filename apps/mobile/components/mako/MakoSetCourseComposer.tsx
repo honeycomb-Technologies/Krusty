@@ -13,7 +13,7 @@ import { MakoPriorityPicker } from "./MakoPriorityPicker";
 import { MakoSchedulePicker } from "./MakoSchedulePicker";
 import type { MakoRunPriority } from "@krusty/api";
 import {
-  resolveScheduleStartAt,
+  resolveScheduleSelection,
   type MakoSchedulePreset,
 } from "./schedule";
 import { formatProjectLabel } from "./utils";
@@ -33,7 +33,9 @@ export function MakoSetCourseComposer({
   const t = theme.colors;
   const [value, setValue] = useState("");
   const [schedulePreset, setSchedulePreset] = useState<MakoSchedulePreset>("now");
+  const [customSchedule, setCustomSchedule] = useState("");
   const [priority, setPriority] = useState<MakoRunPriority>("normal");
+  const schedule = resolveScheduleSelection(schedulePreset, customSchedule);
 
   return (
     <GlassCard style={styles.card} elevated>
@@ -72,31 +74,47 @@ export function MakoSetCourseComposer({
         ]}
       />
 
-      <MakoSchedulePicker value={schedulePreset} onChange={setSchedulePreset} />
+      <MakoSchedulePicker
+        value={schedulePreset}
+        onChange={setSchedulePreset}
+        customValue={customSchedule}
+        onCustomValueChange={setCustomSchedule}
+        customError={schedulePreset === "custom" ? schedule.error : null}
+      />
       <MakoPriorityPicker value={priority} onChange={setPriority} />
 
       <View style={styles.actions}>
         <Pressable
-          disabled={isSubmitting || value.trim().length === 0}
+          disabled={
+            isSubmitting ||
+            value.trim().length === 0 ||
+            (schedulePreset === "custom" && schedule.error !== null)
+          }
           onPress={async () => {
             const task = value.trim();
             if (!task) {
               return;
             }
+            if (schedulePreset === "custom" && schedule.error) {
+              return;
+            }
             void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
             await onSubmit(task, {
-              startAt: resolveScheduleStartAt(schedulePreset),
+              startAt: schedule.startAt,
               priority,
             });
             setValue("");
             setSchedulePreset("now");
+            setCustomSchedule("");
             setPriority("normal");
           }}
           style={[
             styles.button,
             {
               backgroundColor:
-                isSubmitting || value.trim().length === 0
+                isSubmitting ||
+                value.trim().length === 0 ||
+                (schedulePreset === "custom" && schedule.error !== null)
                   ? `${t.userMessage}55`
                   : t.userMessage,
             },

@@ -19,7 +19,8 @@ import { MakoWakeTimeline } from "./MakoWakeTimeline";
 import { useMakoRun } from "./hooks/useMakoRun";
 import { formatPriorityLabel } from "./priority";
 import {
-  resolveScheduleStartAt,
+  formatScheduleInputValue,
+  resolveScheduleSelection,
   type MakoSchedulePreset,
 } from "./schedule";
 import { MakoStatusBadge } from "./MakoStatusBadge";
@@ -58,6 +59,7 @@ export function MakoRunView({
     "overview" | "wake" | "tasks" | "chat" | "artifacts"
   >("overview");
   const [schedulePreset, setSchedulePreset] = useState<MakoSchedulePreset>("30m");
+  const [customSchedule, setCustomSchedule] = useState("");
   const [priority, setPriority] = useState(getRunPriority(summary ?? { runtime: null }));
   const [isScheduling, setIsScheduling] = useState(false);
   const [isSavingPriority, setIsSavingPriority] = useState(false);
@@ -86,6 +88,7 @@ export function MakoRunView({
   const runtimeStatus = status?.runtime?.status ?? null;
   const runtimePriority = status?.runtime?.priority ?? summary?.runtime?.priority ?? "normal";
   const nextWakeAt = status?.runtime?.next_wake_at ?? summary?.runtime?.next_wake_at;
+  const schedule = resolveScheduleSelection(schedulePreset, customSchedule);
   const resumeLabel = runtimeStatus === "sleeping" ? "Wake now" : "Resume";
   const showPause = runtimeStatus !== "sleeping" && runtimeStatus !== "paused";
   const showResume = runtimeStatus !== "running";
@@ -93,6 +96,10 @@ export function MakoRunView({
   useEffect(() => {
     setPriority(runtimePriority);
   }, [runtimePriority]);
+
+  useEffect(() => {
+    setCustomSchedule(formatScheduleInputValue(nextWakeAt));
+  }, [nextWakeAt]);
 
   const handlePause = async () => {
     if (!client) {
@@ -130,8 +137,13 @@ export function MakoRunView({
     if (!client) {
       return;
     }
-    const startAt = resolveScheduleStartAt(schedulePreset);
+    if (schedule.error) {
+      setActionError(schedule.error);
+      return;
+    }
+    const startAt = schedule.startAt;
     if (!startAt) {
+      setActionError("Choose a future wake time before rescheduling.");
       return;
     }
     setActionError(null);
@@ -274,13 +286,19 @@ export function MakoRunView({
                     onChange={setSchedulePreset}
                     includeImmediate={false}
                     subject="run"
+                    customValue={customSchedule}
+                    onCustomValueChange={setCustomSchedule}
+                    customError={schedulePreset === "custom" ? schedule.error : null}
                   />
                 </View>
                 <View style={styles.actionRow}>
                   <ActionButton
                     label={isScheduling ? "Scheduling..." : "Reschedule"}
                     tone="primary"
-                    disabled={isScheduling}
+                    disabled={
+                      isScheduling ||
+                      (schedulePreset === "custom" && schedule.error !== null)
+                    }
                     onPress={() => {
                       void handleSchedule();
                     }}
