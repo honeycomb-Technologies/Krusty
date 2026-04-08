@@ -1,4 +1,5 @@
 import {
+  Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -24,6 +25,7 @@ import type {
   MakoCurrentState,
 } from "./types";
 import type {
+  MakoDaemonSummary,
   MakoDiagnosticsSummary,
   MakoHealthState,
   MakoKnowledgeHealthSummary,
@@ -48,6 +50,7 @@ export function MakoStatusView({
   const t = theme.colors;
   const status = state.current?.status;
   const diagnostics = state.current?.diagnostics;
+  const daemon = diagnostics?.daemon;
   const runs = state.current?.runs ?? [];
   const approvals = state.current?.approvals ?? [];
   const attentionRuns = getAttentionRuns(runs);
@@ -58,6 +61,7 @@ export function MakoStatusView({
   const priorityProfile = summarizePriorityProfile(queueHead);
   const runtimeDrift = summarizeRuntimeDrift(staleRuns, diagnostics);
   const knowledgeHealth = summarizeKnowledgeHealth(diagnostics?.knowledge);
+  const daemonHealth = summarizeDaemonHealth(daemon, diagnostics?.health_state);
   const scheduledRuns = runs
     .filter(
       (run) =>
@@ -121,6 +125,10 @@ export function MakoStatusView({
           value={formatHealthState(diagnostics?.health_state)}
         />
         <StatusCard
+          label="Daemon uptime"
+          value={formatElapsedSeconds(daemon?.uptime_secs)}
+        />
+        <StatusCard
           label="Latest trace"
           value={formatTimestamp(diagnostics?.latest_trace_at)}
         />
@@ -173,7 +181,51 @@ export function MakoStatusView({
           detail={knowledgeHealth.detail}
           tone={knowledgeHealth.tone}
         />
+        <MakoInsightCard
+          label="Daemon"
+          value={daemonHealth.value}
+          detail={daemonHealth.detail}
+          tone={daemonHealth.tone}
+        />
       </View>
+
+      <GlassCard style={styles.card}>
+        <Text style={[styles.cardLabel, { color: t.mutedForeground }]}>
+          Daemon recovery
+        </Text>
+        <Text style={[styles.cardBody, { color: t.foreground }]}>
+          Recoverable sessions are persisted runtime states that can be rescheduled or resumed without waiting for another user action.
+        </Text>
+        <View style={styles.actionRow}>
+          <Pressable
+            onPress={() => {
+              void state.recoverDaemon();
+            }}
+            disabled={state.isRecovering}
+            style={[
+              styles.actionButton,
+              {
+                backgroundColor:
+                  daemon?.recoverable_session_count
+                    ? t.userMessage
+                    : t.glass.backgroundElevated,
+                opacity: state.isRecovering ? 0.6 : 1,
+              },
+            ]}
+          >
+            <Text
+              style={[
+                styles.actionLabel,
+                {
+                  color: daemon?.recoverable_session_count ? "#ffffff" : t.foreground,
+                },
+              ]}
+            >
+              {state.isRecovering ? "Recovering..." : "Recover daemon"}
+            </Text>
+          </Pressable>
+        </View>
+      </GlassCard>
 
       <View style={styles.section}>
         <Text style={[styles.sectionTitle, { color: t.foreground }]}>
@@ -332,6 +384,22 @@ function formatHealthState(state?: MakoHealthState | null): string {
   }
 }
 
+function formatElapsedSeconds(value?: number | null): string {
+  if (!value || value < 60) {
+    return `${value ?? 0}s`;
+  }
+  const minutes = Math.floor(value / 60);
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h`;
+  }
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
+}
+
 function summarizePriorityProfile(runs: MakoCurrentRunSummary[]) {
   const counts = {
     high: runs.filter((run) => getRunPriority(run) === "high").length,
@@ -446,6 +514,40 @@ function summarizeKnowledgeHealth(
   };
 }
 
+function summarizeDaemonHealth(
+  daemon?: MakoDaemonSummary | null,
+  healthState?: MakoHealthState | null,
+) {
+  if (!daemon) {
+    return {
+      value: "Pending",
+      detail: "Daemon stats will appear once Mako has loaded current workspace state.",
+      tone: "default" as const,
+    };
+  }
+
+  const detail = `${daemon.active_runtime_count} active • ${daemon.scheduled_wake_count} scheduled • ${daemon.event_stream_count} streams • ${daemon.recoverable_session_count} recoverable`;
+  if (healthState === "degraded") {
+    return {
+      value: formatElapsedSeconds(daemon.uptime_secs),
+      detail,
+      tone: "danger" as const,
+    };
+  }
+  if (daemon.recoverable_session_count > 0 || daemon.scheduled_wake_count > 0) {
+    return {
+      value: formatElapsedSeconds(daemon.uptime_secs),
+      detail,
+      tone: "accent" as const,
+    };
+  }
+  return {
+    value: formatElapsedSeconds(daemon.uptime_secs),
+    detail,
+    tone: "success" as const,
+  };
+}
+
 function StatusCard({
   label,
   value,
@@ -511,6 +613,18 @@ const styles = StyleSheet.create({
   },
   section: {
     gap: 10,
+  },
+  actionRow: {
+    marginTop: 14,
+  },
+  actionButton: {
+    borderRadius: 16,
+    paddingVertical: 12,
+    alignItems: "center",
+  },
+  actionLabel: {
+    fontSize: 13,
+    fontWeight: "700",
   },
   sectionTitle: {
     fontSize: 18,

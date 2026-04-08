@@ -3,7 +3,7 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -41,6 +41,7 @@ pub struct MakoRuntimeManager {
     event_streams: RwLock<HashMap<String, broadcast::Sender<AgenticEvent>>>,
     scheduled_wakes: RwLock<HashMap<String, JoinHandle<()>>>,
     wake_tx: mpsc::UnboundedSender<WakeCommand>,
+    started_at: Instant,
 }
 
 struct ActiveMakoRuntime {
@@ -54,6 +55,14 @@ struct WakeCommand {
     wake_reason: String,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MakoRuntimeStats {
+    pub active_runtime_count: usize,
+    pub scheduled_wake_count: usize,
+    pub event_stream_count: usize,
+    pub uptime_secs: u64,
+}
+
 impl MakoRuntimeManager {
     pub fn new() -> Arc<Self> {
         let (wake_tx, mut wake_rx) = mpsc::unbounded_channel();
@@ -62,6 +71,7 @@ impl MakoRuntimeManager {
             event_streams: RwLock::new(HashMap::new()),
             scheduled_wakes: RwLock::new(HashMap::new()),
             wake_tx,
+            started_at: Instant::now(),
         });
 
         let weak_manager = Arc::downgrade(&manager);
@@ -125,58 +135,113 @@ impl MakoRuntimeManager {
                 continue;
             }
 
-            match runtime_state.status {
-                MakoRuntimeStateStatus::Running => {
-                    tracing::info!(
-                        session_id = %runtime_state.session_id,
-                        "Recovering running Mako session after server startup"
-                    );
-                    self.start_or_restart_session(
-                        state.clone(),
-                        runtime_state.session_id.clone(),
-                        "startup_recover_running",
-                    )
-                    .await?;
-                }
-                MakoRuntimeStateStatus::Sleeping => {
-                    let wake_at = runtime_state
-                        .next_wake_at
-                        .as_deref()
-                        .and_then(parse_wake_at);
-                    match wake_at {
-                        Some(wake_at) if wake_at > chrono::Utc::now() => {
-                            tracing::info!(
-                                session_id = %runtime_state.session_id,
-                                wake_at = %wake_at,
-                                "Scheduling persisted sleeping Mako session after server startup"
-                            );
-                            self.schedule_wake_at(
-                                state.clone(),
-                                runtime_state.session_id.clone(),
-                                wake_at,
-                                "startup_resume_sleep",
-                            )
-                            .await;
-                        }
-                        _ => {
-                            tracing::info!(
-                                session_id = %runtime_state.session_id,
-                                "Resuming persisted sleeping Mako session immediately after server startup"
-                            );
-                            self.start_or_restart_session(
-                                state.clone(),
-                                runtime_state.session_id.clone(),
-                                "startup_resume_sleep",
-                            )
-                            .await?;
-                        }
-                    }
-                }
-                _ => {}
-            }
+            self.recover_persisted_state(state.clone(), &runtime_state, "startup_recover")
+                .await?;
         }
 
         Ok(())
+    }
+
+    pub async fn recover_persisted_state(
+        &self,
+        state: AppState,
+        runtime_state: &krusty_core::storage::MakoRuntimeState,
+        wake_reason: &'static str,
+    ) -> Result<()> {
+        match runtime_state.status {
+            MakoRuntimeStateStatus::Running => {
+                tracing::info!(
+                    session_id = %runtime_state.session_id,
+                    "Recovering persisted running Mako session"
+                );
+                self.start_or_restart_session(state, runtime_state.session_id.clone(), wake_reason)
+                    .await
+            }
+            MakoRuntimeStateStatus::Sleeping => {
+                let wake_at = runtime_state
+                    .next_wake_at
+                    .as_deref()
+                    .and_then(parse_wake_at);
+                match wake_at {
+                    Some(wake_at) if wake_at > chrono::Utc::now() => {
+                        tracing::info!(
+                            session_id = %runtime_state.session_id,
+                            wake_at = %wake_at,
+                            "Scheduling persisted sleeping Mako session"
+                        );
+                        self.stop_active_run(&state, &runtime_state.session_id)
+                            .await;
+                        ensure_runnable_mako_session(&state.db_path, &runtime_state.session_id)?;
+                        persist_runtime_state(
+                            &state.db_path,
+                            &runtime_state.session_id,
+                            MakoRuntimeStateStatus::Sleeping,
+                            Some(&wake_at.to_rfc3339()),
+                            runtime_state.sleep_reason.as_deref(),
+                            None,
+                            None,
+                            Some(wake_reason),
+                        )?;
+                        self.schedule_wake_at(
+                            state,
+                            runtime_state.session_id.clone(),
+                            wake_at,
+                            wake_reason,
+                        )
+                        .await;
+                        Ok(())
+                    }
+                    _ => {
+                        tracing::info!(
+                            session_id = %runtime_state.session_id,
+                            "Resuming persisted sleeping Mako session immediately"
+                        );
+                        self.start_or_restart_session(
+                            state,
+                            runtime_state.session_id.clone(),
+                            wake_reason,
+                        )
+                        .await
+                    }
+                }
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub async fn stats_for_sessions(&self, session_ids: &[String]) -> MakoRuntimeStats {
+        let session_ids = session_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        let active_runtime_count = self
+            .runtimes
+            .read()
+            .await
+            .keys()
+            .filter(|session_id| session_ids.contains(session_id.as_str()))
+            .count();
+        let scheduled_wake_count = self
+            .scheduled_wakes
+            .read()
+            .await
+            .keys()
+            .filter(|session_id| session_ids.contains(session_id.as_str()))
+            .count();
+        let event_stream_count = self
+            .event_streams
+            .read()
+            .await
+            .keys()
+            .filter(|session_id| session_ids.contains(session_id.as_str()))
+            .count();
+
+        MakoRuntimeStats {
+            active_runtime_count,
+            scheduled_wake_count,
+            event_stream_count,
+            uptime_secs: self.started_at.elapsed().as_secs(),
+        }
     }
 
     pub async fn start_or_restart_session(

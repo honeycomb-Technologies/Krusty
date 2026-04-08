@@ -40,6 +40,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/dispatch", post(dispatch))
         .route("/current", get(current))
+        .route("/daemon/recover", post(recover_daemon))
         .route("/sessions", get(list_sessions))
         .route("/sessions/:id/status", get(session_status))
         .route("/sessions/:id/events", get(observe_events))
@@ -195,7 +196,17 @@ struct MakoDiagnosticsSummary {
     health_state: String,
     queue_pressure: String,
     latest_trace_at: Option<String>,
+    daemon: MakoDaemonSummary,
     knowledge: MakoKnowledgeHealthSummary,
+}
+
+#[derive(Debug, Serialize)]
+struct MakoDaemonSummary {
+    uptime_secs: u64,
+    active_runtime_count: usize,
+    scheduled_wake_count: usize,
+    event_stream_count: usize,
+    recoverable_session_count: usize,
 }
 
 #[derive(Debug, Serialize, Clone, Copy)]
@@ -215,6 +226,12 @@ struct MakoCurrentResponse {
 #[derive(Debug, Serialize)]
 struct OkResponse {
     ok: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct RecoverDaemonResponse {
+    ok: bool,
+    recovered_count: usize,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -339,6 +356,16 @@ async fn current(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
 ) -> Result<Json<MakoCurrentResponse>, AppError> {
+    let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
+    let sessions = {
+        let session_manager = open_session_manager(&state)?;
+        session_manager.list_sessions_for_user_by_type(None, user_id, SessionType::Mako)?
+    };
+    let session_ids = sessions
+        .iter()
+        .map(|session| session.id.clone())
+        .collect::<Vec<_>>();
+    let daemon_stats = state.mako_runtime.stats_for_sessions(&session_ids).await;
     let session_manager = open_session_manager(&state)?;
     let runtime_store = MakoRuntimeStateStore::new(Database::new(&state.db_path)?);
     let task_store = AutonomousTaskStore::new(Database::new(&state.db_path)?);
@@ -347,16 +374,12 @@ async fn current(
     let trace_db = Database::new(&state.db_path)?;
     let trace_store = RuntimeTraceStore::new(&trace_db);
     let workspace_scope = request_workspace_scope(&state, user.as_ref());
-
-    let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
-    let sessions =
-        session_manager.list_sessions_for_user_by_type(None, user_id, SessionType::Mako)?;
-    let runtime_states = runtime_store.list_states_for_sessions(
-        &sessions
-            .iter()
-            .map(|session| session.id.clone())
-            .collect::<Vec<_>>(),
-    )?;
+    let runtime_states = runtime_store.list_states_for_sessions(&session_ids)?;
+    let recoverable_session_ids = runtime_store
+        .list_recoverable_states()?
+        .into_iter()
+        .map(|state| state.session_id)
+        .collect::<std::collections::HashSet<_>>();
 
     let mut runs = Vec::with_capacity(sessions.len());
     let mut running_count = 0usize;
@@ -533,10 +556,59 @@ async fn current(
             )
             .to_string(),
             latest_trace_at,
+            daemon: MakoDaemonSummary {
+                uptime_secs: daemon_stats.uptime_secs,
+                active_runtime_count: daemon_stats.active_runtime_count,
+                scheduled_wake_count: daemon_stats.scheduled_wake_count,
+                event_stream_count: daemon_stats.event_stream_count,
+                recoverable_session_count: sessions
+                    .iter()
+                    .filter(|session| recoverable_session_ids.contains(session.id.as_str()))
+                    .count(),
+            },
             knowledge,
         },
         runs,
         approvals,
+    }))
+}
+
+async fn recover_daemon(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+) -> Result<Json<RecoverDaemonResponse>, AppError> {
+    let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
+    let recoverable_states = {
+        let session_manager = open_session_manager(&state)?;
+        let runtime_store = MakoRuntimeStateStore::new(Database::new(&state.db_path)?);
+        let mut states = Vec::new();
+        for runtime_state in runtime_store.list_recoverable_states()? {
+            let Some(session) = session_manager.get_session(&runtime_state.session_id)? else {
+                continue;
+            };
+            if session.session_type != SessionType::Mako {
+                continue;
+            }
+            if session.user_id.as_deref() != user_id {
+                continue;
+            }
+            states.push(runtime_state);
+        }
+        states
+    };
+    let mut recovered_count = 0usize;
+
+    for runtime_state in recoverable_states {
+        state
+            .mako_runtime
+            .recover_persisted_state(state.clone(), &runtime_state, "manual_recover")
+            .await?;
+        recovered_count += 1;
+    }
+
+    Ok(Json(RecoverDaemonResponse {
+        ok: true,
+        recovered_count,
     }))
 }
 
@@ -1593,8 +1665,9 @@ mod tests {
     use krusty_core::SessionManager;
 
     use super::{
-        current, dispatch, list_sessions, map_runtime_trace_event, schedule_session,
-        session_status, set_priority, DispatchRequest, PriorityRequest, ScheduleRequest,
+        current, dispatch, list_sessions, map_runtime_trace_event, recover_daemon,
+        schedule_session, session_status, set_priority, DispatchRequest, PriorityRequest,
+        ScheduleRequest,
     };
     use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::error::AppError;
@@ -2073,6 +2146,9 @@ mod tests {
             summary.status.next_wake_at.as_deref(),
             Some("2026-01-01T00:00:00Z")
         );
+        assert_eq!(summary.diagnostics.daemon.active_runtime_count, 0);
+        assert_eq!(summary.diagnostics.daemon.scheduled_wake_count, 0);
+        assert_eq!(summary.diagnostics.daemon.recoverable_session_count, 1);
         assert_eq!(summary.runs.len(), 2);
     }
 
@@ -2314,6 +2390,100 @@ mod tests {
             updated_summary.diagnostics.knowledge.stale_snapshot_count,
             1
         );
+    }
+
+    #[tokio::test]
+    async fn recover_daemon_only_recovers_owned_sessions() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        create_test_user(&state, "bob");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let alice_session_id = session_manager
+            .create_session_for_user_with_config(
+                "Alice Sleeping",
+                None,
+                Some(state.working_dir.to_string_lossy().as_ref()),
+                Some(state.working_dir.to_string_lossy().as_ref()),
+                WorkspaceMode::Selected,
+                Some("alice"),
+                None,
+                SessionType::Mako,
+            )
+            .expect("alice session should create");
+        let bob_session_id = session_manager
+            .create_session_for_user_with_config(
+                "Bob Sleeping",
+                None,
+                Some(state.working_dir.to_string_lossy().as_ref()),
+                Some(state.working_dir.to_string_lossy().as_ref()),
+                WorkspaceMode::Selected,
+                Some("bob"),
+                None,
+                SessionType::Mako,
+            )
+            .expect("bob session should create");
+
+        let wake_at = (chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339();
+        let runtime_store = MakoRuntimeStateStore::new(
+            Database::new(&state.db_path).expect("database should open"),
+        );
+        runtime_store
+            .set_state(
+                &alice_session_id,
+                MakoRuntimeStateStatus::Sleeping,
+                Some(wake_at.as_str()),
+                Some("scheduled"),
+                None,
+                None,
+                Some("dispatch"),
+                MakoRunPriority::Normal,
+            )
+            .expect("alice runtime state should persist");
+        runtime_store
+            .set_state(
+                &bob_session_id,
+                MakoRuntimeStateStatus::Sleeping,
+                Some(wake_at.as_str()),
+                Some("scheduled"),
+                None,
+                None,
+                Some("dispatch"),
+                MakoRunPriority::Normal,
+            )
+            .expect("bob runtime state should persist");
+
+        let Json(response) = recover_daemon(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("recover should succeed"));
+
+        assert!(response.ok);
+        assert_eq!(response.recovered_count, 1);
+
+        let Json(alice_summary) = current(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("alice current should succeed"));
+        assert_eq!(alice_summary.diagnostics.daemon.scheduled_wake_count, 1);
+        assert_eq!(
+            alice_summary.diagnostics.daemon.recoverable_session_count,
+            1
+        );
+
+        let Json(bob_summary) = current(
+            State(state.clone()),
+            Some(current_user("bob", state.working_dir.as_ref())),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("bob current should succeed"));
+        assert_eq!(bob_summary.diagnostics.daemon.scheduled_wake_count, 0);
+        assert_eq!(bob_summary.diagnostics.daemon.recoverable_session_count, 1);
     }
 
     #[tokio::test]

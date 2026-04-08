@@ -418,6 +418,14 @@ export interface MakoKnowledgeHealthSummary {
   latest_snapshot_at?: string | null;
 }
 
+export interface MakoDaemonSummary {
+  uptime_secs: number;
+  active_runtime_count: number;
+  scheduled_wake_count: number;
+  event_stream_count: number;
+  recoverable_session_count: number;
+}
+
 export interface MakoDiagnosticsSummary {
   degraded_count: number;
   stalled_count: number;
@@ -429,6 +437,7 @@ export interface MakoDiagnosticsSummary {
   health_state: MakoHealthState;
   queue_pressure: MakoQueuePressure;
   latest_trace_at?: string | null;
+  daemon: MakoDaemonSummary;
   knowledge: MakoKnowledgeHealthSummary;
 }
 
@@ -442,6 +451,11 @@ export interface MakoCurrentResponse {
   diagnostics: MakoDiagnosticsSummary;
   runs: MakoCurrentRunSummary[];
   approvals: MakoPendingApproval[];
+}
+
+export interface MakoRecoverDaemonResponse {
+  ok: boolean;
+  recovered_count: number;
 }
 
 export interface MakoRunWakeEvent {

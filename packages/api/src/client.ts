@@ -34,6 +34,7 @@ import type {
   PromoteReportToMemoryResponse,
   MakoDispatchResponse,
   MakoCurrentResponse,
+  MakoRecoverDaemonResponse,
   MakoRunPriority,
   MakoSessionSummary,
   MakoSessionStatus,
@@ -466,6 +467,10 @@ export class KrustyClient {
 
   async getMakoCurrent(): Promise<MakoCurrentResponse> {
     return this.request('/mako/current');
+  }
+
+  async recoverMakoDaemon(): Promise<MakoRecoverDaemonResponse> {
+    return this.request('/mako/daemon/recover', { method: 'POST' });
   }
 
   async listMakoSessions(): Promise<MakoSessionSummary[]> {

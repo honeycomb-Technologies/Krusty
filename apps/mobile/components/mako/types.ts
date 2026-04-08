@@ -58,6 +58,7 @@ export interface MakoCurrentState {
   current: MakoCurrentResponse | null;
   isLoading: boolean;
   isRefreshing: boolean;
+  isRecovering: boolean;
   error: string | null;
   refresh: () => Promise<void>;
   setCourse: (task: string, options?: {
@@ -66,6 +67,7 @@ export interface MakoCurrentState {
     startAt?: string | null;
     priority?: MakoRunPriority | null;
   }) => Promise<string | null>;
+  recoverDaemon: () => Promise<number>;
   isDispatching: boolean;
 }
 
