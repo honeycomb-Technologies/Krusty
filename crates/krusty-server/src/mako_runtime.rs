@@ -12,7 +12,7 @@ use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use krusty_core::agent::coordinator_prompt::COORDINATOR_SYSTEM_PROMPT;
+use krusty_core::agent::coordinator_prompt::system_prompt_for_session;
 use krusty_core::agent::loop_events::LoopStopReason;
 use krusty_core::agent::{LoopEvent, LoopInput, OrchestratorConfig, OrchestratorServices};
 use krusty_core::ai::client::CallOptions;
@@ -479,7 +479,7 @@ async fn run_mako_session_inner(
         tools: Some(state.tool_registry.get_ai_tools().await),
         session_id: Some(session_id.clone()),
         codex_parallel_tool_calls: true,
-        system_prompt: Some(COORDINATOR_SYSTEM_PROMPT.to_string()),
+        system_prompt: system_prompt_for_session(SessionType::Mako),
         ..Default::default()
     };
 

@@ -99,7 +99,6 @@ pub fn inject_context(
     } else {
         String::new()
     };
-    let coordinator_ctx = build_coordinator_context(session_type.unwrap_or("code"));
     let skills_ctx = build_skills_context(skills_manager, project_dir.is_some());
     let project_ctx = project_dir.map(build_project_context).unwrap_or_default();
     let mako_ctx = if is_mako {
@@ -109,7 +108,7 @@ pub fn inject_context(
     };
     let project_settings = project_dir.map(ProjectSettings::load).unwrap_or_default();
 
-    let mut injected = Vec::with_capacity(conversation.len() + 8);
+    let mut injected = Vec::with_capacity(conversation.len() + 7);
 
     if !workspace_ctx.is_empty() {
         injected.push(ModelMessage {
@@ -185,14 +184,6 @@ pub fn inject_context(
         injected.push(ModelMessage {
             role: Role::System,
             content: vec![Content::Text { text: report_ctx }],
-        });
-    }
-    if !coordinator_ctx.is_empty() {
-        injected.push(ModelMessage {
-            role: Role::System,
-            content: vec![Content::Text {
-                text: coordinator_ctx,
-            }],
         });
     }
     if !skills_ctx.is_empty() {
@@ -578,15 +569,6 @@ fn build_mako_knowledge_context(
 
     sections.push("[/MAKO KNOWLEDGE]".to_string());
     sections.join("\n")
-}
-
-/// Build coordinator prompt for Mako sessions.
-fn build_coordinator_context(session_type: &str) -> String {
-    if session_type == "mako" {
-        crate::agent::coordinator_prompt::COORDINATOR_SYSTEM_PROMPT.to_string()
-    } else {
-        String::new()
-    }
 }
 
 /// Build combined workspace + project context for a subagent system prompt.
@@ -1254,6 +1236,41 @@ mod tests {
             .unwrap();
 
         assert!(mako_index < settings_index);
+    }
+
+    #[test]
+    fn inject_context_does_not_inline_mako_coordinator_prompt() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(repo.join("MAKO.md"), "Always Swimming.").unwrap();
+
+        let skills = RwLock::new(SkillsManager::with_defaults(repo));
+        let conversation = vec![ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "hello".to_string(),
+            }],
+        }];
+
+        let injected = inject_context(
+            &conversation,
+            repo.join("krusty.db").as_path(),
+            "session-id",
+            repo,
+            Some(repo),
+            WorkMode::Build,
+            &skills,
+            None,
+            Some("mako"),
+        );
+
+        assert!(!injected.iter().any(|message| {
+            matches!(
+                &message.content[0],
+                Content::Text { text } if text.contains("[MAKO COORDINATOR]")
+            )
+        }));
     }
 
     #[test]

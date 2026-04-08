@@ -17,7 +17,7 @@ use serde_json::json;
 use tokio::sync::{mpsc, Mutex, OwnedMutexGuard};
 use tokio_stream::wrappers::ReceiverStream;
 
-use krusty_core::agent::coordinator_prompt::COORDINATOR_SYSTEM_PROMPT;
+use krusty_core::agent::coordinator_prompt::system_prompt_for_session;
 use krusty_core::agent::loop_events::LoopStopReason;
 use krusty_core::agent::plan_handler::parse_plan_confirm_choice;
 use krusty_core::agent::{
@@ -241,7 +241,7 @@ async fn setup_chat_session(
                  If the user needs coding help, suggest they switch to Code mode. \
                  Be helpful, natural, and conversational.".to_string()
             ),
-            SessionType::Mako => Some(COORDINATOR_SYSTEM_PROMPT.to_string()),
+            SessionType::Mako => system_prompt_for_session(SessionType::Mako),
             SessionType::Code => None, // uses default Krusty coding assistant prompt
         },
         ..Default::default()
