@@ -7,20 +7,31 @@ import {
 } from "react-native";
 import { GlassCard } from "../ui/GlassCard";
 import { useThemeContext } from "../../hooks/useTheme";
+import { MakoApprovalList } from "./MakoApprovalList";
 import { MakoRunList } from "./MakoRunList";
 import { formatTimestamp } from "./utils";
 import type { MakoCurrentRunSummary, MakoCurrentState } from "./types";
 
 interface MakoStatusViewProps {
   state: MakoCurrentState;
+  activeToolCallId?: string | null;
   onSelectRun: (runId: string) => void;
+  onApproveTool: (sessionId: string, toolCallId: string) => void;
+  onDenyTool: (sessionId: string, toolCallId: string) => void;
 }
 
-export function MakoStatusView({ state, onSelectRun }: MakoStatusViewProps) {
+export function MakoStatusView({
+  state,
+  activeToolCallId,
+  onSelectRun,
+  onApproveTool,
+  onDenyTool,
+}: MakoStatusViewProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
   const status = state.current?.status;
   const runs = state.current?.runs ?? [];
+  const approvals = state.current?.approvals ?? [];
   const cadence = summarizeCadence(runs);
   const scheduledRuns = runs
     .filter(
@@ -95,6 +106,20 @@ export function MakoStatusView({ state, onSelectRun }: MakoStatusViewProps) {
           {cadence.detail}
         </Text>
       </GlassCard>
+
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: t.foreground }]}>
+          Pending approvals
+        </Text>
+        <MakoApprovalList
+          approvals={approvals}
+          activeToolCallId={activeToolCallId}
+          emptyLabel="No approvals are waiting."
+          onSelectRun={onSelectRun}
+          onApproveTool={onApproveTool}
+          onDenyTool={onDenyTool}
+        />
+      </View>
 
       <View style={styles.section}>
         <Text style={[styles.sectionTitle, { color: t.foreground }]}>

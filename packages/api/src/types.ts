@@ -328,6 +328,17 @@ export interface MakoCurrentRunSummary {
   cadence: MakoCadenceSummary;
 }
 
+export interface MakoPendingApproval {
+  session_id: string;
+  session_title: string;
+  project_dir?: string | null;
+  tool_call_id: string;
+  tool_name: string;
+  arguments: unknown;
+  requested_at: string;
+  priority: MakoRunPriority;
+}
+
 export interface MakoStatusSummary {
   home_status: MakoHomeStatus;
   total_count: number;
@@ -351,6 +362,7 @@ export interface MakoCadenceSummary {
 export interface MakoCurrentResponse {
   status: MakoStatusSummary;
   runs: MakoCurrentRunSummary[];
+  approvals: MakoPendingApproval[];
 }
 
 export interface MakoRunWakeEvent {

@@ -95,10 +95,13 @@ export function MakoScreen({
               state={current}
               workspaceDirectory={workspaceDirectory}
               model={chat.model ?? null}
+              activeToolCallId={chat.activeToolCallId}
               onSelectRun={(runId) => {
                 void handleOpenRun(runId);
               }}
               onCourseSet={handleOpenRun}
+              onApproveTool={chat.onApproveTool}
+              onDenyTool={chat.onDenyTool}
             />
           ) : null}
 
@@ -115,9 +118,12 @@ export function MakoScreen({
           {navigation.topLevel === "status" ? (
             <MakoStatusView
               state={current}
+              activeToolCallId={chat.activeToolCallId}
               onSelectRun={(runId) => {
                 void handleOpenRun(runId);
               }}
+              onApproveTool={chat.onApproveTool}
+              onDenyTool={chat.onDenyTool}
             />
           ) : null}
         </>

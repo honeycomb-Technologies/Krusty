@@ -1,5 +1,6 @@
 //! Mako dispatch and session management endpoints
 
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
 
@@ -11,13 +12,14 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
 use krusty_core::storage::{
     AutonomousTask, AutonomousTaskStore, Database, MakoRunPriority, MakoRuntimeState,
-    MakoRuntimeStateStatus, MakoRuntimeStateStore, ProjectSettings, RuntimeTraceEvent, SessionType,
-    TaskStatus, WorkspaceMode,
+    MakoRuntimeStateStatus, MakoRuntimeStateStore, ProjectSettings, RuntimeTraceEvent,
+    RuntimeTraceStore, SessionType, TaskStatus, WorkspaceMode,
 };
 use krusty_core::SessionManager;
 
@@ -125,6 +127,18 @@ struct MakoCurrentRunSummary {
 }
 
 #[derive(Debug, Serialize)]
+struct MakoPendingApprovalSummary {
+    session_id: String,
+    session_title: String,
+    project_dir: Option<String>,
+    tool_call_id: String,
+    tool_name: String,
+    arguments: Value,
+    requested_at: String,
+    priority: MakoRunPriority,
+}
+
+#[derive(Debug, Serialize)]
 struct MakoStatusSummary {
     home_status: String,
     total_count: usize,
@@ -150,6 +164,7 @@ struct MakoCadenceSummary {
 struct MakoCurrentResponse {
     status: MakoStatusSummary,
     runs: Vec<MakoCurrentRunSummary>,
+    approvals: Vec<MakoPendingApprovalSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -274,6 +289,8 @@ async fn current(
     let session_manager = open_session_manager(&state)?;
     let runtime_store = MakoRuntimeStateStore::new(Database::new(&state.db_path)?);
     let task_store = AutonomousTaskStore::new(Database::new(&state.db_path)?);
+    let trace_db = Database::new(&state.db_path)?;
+    let trace_store = RuntimeTraceStore::new(&trace_db);
     let workspace_scope = request_workspace_scope(&state, user.as_ref());
 
     let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
@@ -296,6 +313,7 @@ async fn current(
     let mut failed_count = 0usize;
     let mut idle_count = 0usize;
     let mut next_wake_at: Option<String> = None;
+    let mut approvals = Vec::new();
 
     for session in sessions {
         let agent_state = load_agent_state_or_idle(&session_manager, &session.id)?.state;
@@ -307,15 +325,16 @@ async fn current(
             &workspace_scope.base_dir,
             &workspace_scope.allowed_root,
         );
-        if runtime
+        let priority = runtime
             .as_ref()
-            .map(|state| state.priority == MakoRunPriority::High)
-            .unwrap_or(false)
-        {
+            .map(|state| state.priority)
+            .unwrap_or(MakoRunPriority::Normal);
+        if priority == MakoRunPriority::High {
             high_priority_count += 1;
         }
 
-        match classify_run_state(runtime.as_ref(), agent_state.as_str()) {
+        let run_state = classify_run_state(runtime.as_ref(), agent_state.as_str());
+        match run_state {
             RunState::Running => running_count += 1,
             RunState::Scheduled => {
                 scheduled_count += 1;
@@ -330,7 +349,16 @@ async fn current(
                 }
             }
             RunState::Paused => paused_count += 1,
-            RunState::Waiting => waiting_count += 1,
+            RunState::Waiting => {
+                waiting_count += 1;
+                approvals.extend(load_pending_approvals(
+                    &trace_store,
+                    &session.id,
+                    &session.title,
+                    session.project_dir.as_deref(),
+                    priority,
+                )?);
+            }
             RunState::Failed => failed_count += 1,
             RunState::Idle => idle_count += 1,
         }
@@ -352,6 +380,7 @@ async fn current(
     }
 
     runs.sort_by(compare_run_summaries);
+    approvals.sort_by(compare_pending_approvals);
 
     Ok(Json(MakoCurrentResponse {
         status: MakoStatusSummary {
@@ -373,10 +402,11 @@ async fn current(
             waiting_count,
             failed_count,
             idle_count,
-            pending_approvals_count: waiting_count,
+            pending_approvals_count: approvals.len(),
             next_wake_at,
         },
         runs,
+        approvals,
     }))
 }
 
@@ -791,6 +821,75 @@ fn earlier_timestamp(current: Option<String>, candidate: Option<String>) -> Opti
     }
 }
 
+fn load_pending_approvals(
+    trace_store: &RuntimeTraceStore<'_>,
+    session_id: &str,
+    session_title: &str,
+    project_dir: Option<&str>,
+    priority: MakoRunPriority,
+) -> Result<Vec<MakoPendingApprovalSummary>, AppError> {
+    let mut pending = BTreeMap::new();
+
+    for event in trace_store.list_events(session_id, Some(200))? {
+        match event.event_type.as_str() {
+            "tool_approval_required" => {
+                let Some(tool_call_id) = event.payload.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(tool_name) = event.payload.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                let arguments = event
+                    .payload
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+
+                pending.insert(
+                    tool_call_id.to_string(),
+                    MakoPendingApprovalSummary {
+                        session_id: session_id.to_string(),
+                        session_title: session_title.to_string(),
+                        project_dir: project_dir.map(str::to_string),
+                        tool_call_id: tool_call_id.to_string(),
+                        tool_name: tool_name.to_string(),
+                        arguments,
+                        requested_at: event.created_at,
+                        priority,
+                    },
+                );
+            }
+            "tool_approved" | "tool_denied" | "tool_result" => {
+                if let Some(tool_call_id) = event.payload.get("id").and_then(Value::as_str) {
+                    pending.remove(tool_call_id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(pending.into_values().collect())
+}
+
+fn compare_pending_approvals(
+    left: &MakoPendingApprovalSummary,
+    right: &MakoPendingApprovalSummary,
+) -> std::cmp::Ordering {
+    let priority_order = priority_rank(right.priority).cmp(&priority_rank(left.priority));
+    if priority_order != std::cmp::Ordering::Equal {
+        return priority_order;
+    }
+
+    let requested_order = left.requested_at.cmp(&right.requested_at);
+    if requested_order != std::cmp::Ordering::Equal {
+        return requested_order;
+    }
+
+    left.session_title
+        .cmp(&right.session_title)
+        .then_with(|| left.tool_name.cmp(&right.tool_name))
+}
+
 fn compare_run_summaries(
     left: &MakoCurrentRunSummary,
     right: &MakoCurrentRunSummary,
@@ -865,7 +964,7 @@ mod tests {
     use axum::Json;
     use tokio::sync::{Mutex, RwLock};
 
-    use krusty_core::agent::{AgentCancellation, UserHookManager};
+    use krusty_core::agent::{AgentCancellation, LoopEvent, UserHookManager};
     use krusty_core::ai::models::create_model_registry;
     use krusty_core::mcp::McpManager;
     use krusty_core::process::ProcessRegistry;
@@ -873,7 +972,7 @@ mod tests {
     use krusty_core::storage::credentials::CredentialStore;
     use krusty_core::storage::{
         Database, MakoRunPriority, MakoRuntimeStateStatus, MakoRuntimeStateStore,
-        RuntimeTraceEvent, SessionType, WorkspaceMode,
+        RuntimeTraceEvent, RuntimeTraceStore, SessionType, WorkspaceMode,
     };
     use krusty_core::tools::registry::ToolRegistry;
     use krusty_core::SessionManager;
@@ -1354,12 +1453,82 @@ mod tests {
         assert_eq!(summary.status.waiting_count, 1);
         assert_eq!(summary.status.sleeping_count, 1);
         assert_eq!(summary.status.high_priority_count, 1);
-        assert_eq!(summary.status.pending_approvals_count, 1);
+        assert_eq!(summary.status.pending_approvals_count, 0);
         assert_eq!(
             summary.status.next_wake_at.as_deref(),
             Some("2026-01-01T00:00:00Z")
         );
         assert_eq!(summary.runs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn current_surfaces_pending_tool_approvals() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let session_id = session_manager
+            .create_session_for_user_with_config(
+                "Approval Run",
+                None,
+                Some(state.working_dir.to_string_lossy().as_ref()),
+                Some(state.working_dir.to_string_lossy().as_ref()),
+                WorkspaceMode::Selected,
+                Some("alice"),
+                None,
+                SessionType::Mako,
+            )
+            .expect("approval session should create");
+
+        let runtime_store = MakoRuntimeStateStore::new(
+            Database::new(&state.db_path).expect("database should open"),
+        );
+        runtime_store
+            .set_state(
+                &session_id,
+                MakoRuntimeStateStatus::AwaitingInput,
+                None,
+                Some("approval"),
+                None,
+                None,
+                Some("user"),
+                MakoRunPriority::High,
+            )
+            .expect("waiting state should persist");
+
+        let trace_db = Database::new(&state.db_path).expect("database should open");
+        let trace_store = RuntimeTraceStore::new(&trace_db);
+        let approval_event = RuntimeTraceEvent::from_loop_event(
+            "run-1",
+            1,
+            0,
+            &LoopEvent::ToolApprovalRequired {
+                id: "tool-1".to_string(),
+                name: "bash".to_string(),
+                arguments: serde_json::json!({
+                    "command": "git push",
+                    "cwd": "/workspace"
+                }),
+            },
+        );
+        trace_store
+            .append_event(&session_id, &approval_event)
+            .expect("approval event should persist");
+
+        let Json(summary) = current(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("current should succeed"));
+
+        assert_eq!(summary.status.pending_approvals_count, 1);
+        assert_eq!(summary.approvals.len(), 1);
+        assert_eq!(summary.approvals[0].session_id, session_id);
+        assert_eq!(summary.approvals[0].tool_call_id, "tool-1");
+        assert_eq!(summary.approvals[0].tool_name, "bash");
+        assert_eq!(summary.approvals[0].priority, MakoRunPriority::High);
     }
 
     #[tokio::test]
