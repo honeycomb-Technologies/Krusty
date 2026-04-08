@@ -22,6 +22,7 @@ use crate::AppState;
 #[derive(Debug, Deserialize)]
 pub struct ListReportsQuery {
     pub project_dir: Option<String>,
+    pub query: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -83,7 +84,17 @@ async fn list_reports(
         &workspace_scope.allowed_root,
     )?;
     let user_id = current_user_id(user.as_ref());
-    let reports = store.list_reports_for_user(project_dir.as_deref(), user_id)?;
+    let reports = match query
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(search_query) => {
+            store.search_reports_for_user(search_query, project_dir.as_deref(), user_id)?
+        }
+        None => store.list_reports_for_user(project_dir.as_deref(), user_id)?,
+    };
 
     let summaries = reports
         .into_iter()
@@ -297,6 +308,7 @@ mod tests {
             Some(current_user("alice", &user_root)),
             Query(ListReportsQuery {
                 project_dir: Some("repo".to_string()),
+                query: None,
             }),
         )
         .await
@@ -327,7 +339,10 @@ mod tests {
         let Json(response) = list_reports(
             State(state),
             Some(current_user("alice", &alice_root)),
-            Query(ListReportsQuery { project_dir: None }),
+            Query(ListReportsQuery {
+                project_dir: None,
+                query: None,
+            }),
         )
         .await
         .unwrap_or_else(|_| panic!("report listing should succeed"));
@@ -349,6 +364,7 @@ mod tests {
             Some(current_user("alice", &user_root)),
             Query(ListReportsQuery {
                 project_dir: Some(outside_root.to_string_lossy().to_string()),
+                query: None,
             }),
         )
         .await;
@@ -428,5 +444,30 @@ mod tests {
         assert_eq!(durable_memories.len(), 1);
         assert_eq!(durable_memories[0].title, "Architecture Report");
         assert_eq!(durable_memories[0].content, "summary");
+    }
+
+    #[tokio::test]
+    async fn list_reports_supports_query_filter() {
+        let (state, temp_dir) = create_test_state();
+        let user_root = temp_dir.join("user");
+        let project_dir = user_root.join("repo");
+        std::fs::create_dir_all(&project_dir).expect("project dir should exist");
+        create_test_user(&state, "alice");
+        seed_report(&state, "alice", "Queue Health Review", &project_dir);
+        seed_report(&state, "alice", "Runtime Notes", &project_dir);
+
+        let Json(response) = list_reports(
+            State(state),
+            Some(current_user("alice", &user_root)),
+            Query(ListReportsQuery {
+                project_dir: Some("repo".to_string()),
+                query: Some("queue".to_string()),
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("report search should succeed"));
+
+        assert_eq!(response.reports.len(), 1);
+        assert_eq!(response.reports[0].title, "Queue Health Review");
     }
 }

@@ -193,13 +193,13 @@ impl ReportStore {
     }
 
     pub fn search_reports(&self, query: &str, project_dir: Option<&str>) -> Result<Vec<Report>> {
-        let pattern = format!("%{query}%");
+        let pattern = report_search_pattern(query);
 
         let (sql, bound) = if let Some(pd) = project_dir {
             (
                 "SELECT id, title, session_id, project_dir, content, summary, tags, sources, created_at
                  FROM reports
-                 WHERE (title LIKE ?1 OR tags LIKE ?1)
+                 WHERE (title LIKE ?1 OR summary LIKE ?1 OR tags LIKE ?1 OR sources LIKE ?1)
                    AND project_dir = ?2
                  ORDER BY created_at DESC",
                 vec![pattern, pd.to_string()],
@@ -208,7 +208,7 @@ impl ReportStore {
             (
                 "SELECT id, title, session_id, project_dir, content, summary, tags, sources, created_at
                  FROM reports
-                 WHERE title LIKE ?1 OR tags LIKE ?1
+                 WHERE title LIKE ?1 OR summary LIKE ?1 OR tags LIKE ?1 OR sources LIKE ?1
                  ORDER BY created_at DESC",
                 vec![pattern],
             )
@@ -222,6 +222,69 @@ impl ReportStore {
         let rows = stmt.query_map(params.as_slice(), row_to_report)?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("searching reports")
+    }
+
+    pub fn search_reports_for_user(
+        &self,
+        query: &str,
+        project_dir: Option<&str>,
+        user_id: Option<&str>,
+    ) -> Result<Vec<Report>> {
+        let pattern = report_search_pattern(query);
+
+        let (sql, bound) = match (project_dir, user_id) {
+            (Some(project_dir), Some(user_id)) => (
+                "SELECT reports.id, reports.title, reports.session_id, reports.project_dir,
+                        reports.content, reports.summary, reports.tags, reports.sources,
+                        reports.created_at
+                 FROM reports
+                 INNER JOIN sessions ON sessions.id = reports.session_id
+                 WHERE (reports.title LIKE ?1 OR reports.summary LIKE ?1 OR reports.tags LIKE ?1 OR reports.sources LIKE ?1)
+                   AND reports.project_dir = ?2
+                   AND sessions.user_id = ?3
+                 ORDER BY reports.created_at DESC"
+                    .to_string(),
+                vec![pattern, project_dir.to_string(), user_id.to_string()],
+            ),
+            (Some(project_dir), None) => (
+                "SELECT id, title, session_id, project_dir, content, summary, tags, sources, created_at
+                 FROM reports
+                 WHERE (title LIKE ?1 OR summary LIKE ?1 OR tags LIKE ?1 OR sources LIKE ?1)
+                   AND project_dir = ?2
+                 ORDER BY created_at DESC"
+                    .to_string(),
+                vec![pattern, project_dir.to_string()],
+            ),
+            (None, Some(user_id)) => (
+                "SELECT reports.id, reports.title, reports.session_id, reports.project_dir,
+                        reports.content, reports.summary, reports.tags, reports.sources,
+                        reports.created_at
+                 FROM reports
+                 INNER JOIN sessions ON sessions.id = reports.session_id
+                 WHERE (reports.title LIKE ?1 OR reports.summary LIKE ?1 OR reports.tags LIKE ?1 OR reports.sources LIKE ?1)
+                   AND sessions.user_id = ?2
+                 ORDER BY reports.created_at DESC"
+                    .to_string(),
+                vec![pattern, user_id.to_string()],
+            ),
+            (None, None) => (
+                "SELECT id, title, session_id, project_dir, content, summary, tags, sources, created_at
+                 FROM reports
+                 WHERE (title LIKE ?1 OR summary LIKE ?1 OR tags LIKE ?1 OR sources LIKE ?1)
+                 ORDER BY created_at DESC"
+                    .to_string(),
+                vec![pattern],
+            ),
+        };
+
+        let mut stmt = self.db.conn().prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = bound
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt.query_map(params.as_slice(), row_to_report)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("searching reports for user")
     }
 
     pub fn delete_report(&self, id: &str) -> Result<()> {
@@ -265,6 +328,10 @@ fn row_to_report(row: &rusqlite::Row<'_>) -> rusqlite::Result<Report> {
         sources: serde_json::from_str(&sources_json).unwrap_or_default(),
         created_at: row.get(8)?,
     })
+}
+
+fn report_search_pattern(query: &str) -> String {
+    format!("%{}%", query.trim())
 }
 
 fn slugify(title: &str) -> String {
@@ -491,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn search_reports_by_title_and_tags() {
+    fn search_reports_by_title_summary_tags_and_sources() {
         let (store, _tmp) = create_store();
         store
             .create_report(CreateReportInput {
@@ -500,9 +567,9 @@ mod tests {
                 project_dir: None,
                 report_root: None,
                 content: "content",
-                summary: "",
+                summary: "Steps for a safe schema rollout",
                 tags: &["database".into(), "migration".into()],
-                sources: &[],
+                sources: &["docs/schema.md".into()],
             })
             .unwrap();
         store
@@ -525,6 +592,14 @@ mod tests {
         let results = store.search_reports("api", None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "API Design");
+
+        let results = store.search_reports("safe schema", None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Database Migration Guide");
+
+        let results = store.search_reports("docs/schema", None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Database Migration Guide");
     }
 
     #[test]
@@ -696,5 +771,52 @@ mod tests {
             .get_report_for_user(&report_id, Some("user-b"))
             .unwrap();
         assert!(hidden.is_none());
+    }
+
+    #[test]
+    fn search_reports_for_user_honors_owner_scope() {
+        let (store, _tmp) = create_store_with_users();
+        store
+            .create_report(CreateReportInput {
+                title: "Alice Architecture",
+                session_id: "sess-a",
+                project_dir: Some("/proj-a"),
+                report_root: None,
+                content: "content a",
+                summary: "queue policy notes",
+                tags: &["ops".into()],
+                sources: &["alice.md".into()],
+            })
+            .unwrap();
+        store
+            .create_report(CreateReportInput {
+                title: "Bob Architecture",
+                session_id: "sess-b",
+                project_dir: Some("/proj-b"),
+                report_root: None,
+                content: "content b",
+                summary: "queue policy notes",
+                tags: &["ops".into()],
+                sources: &["bob.md".into()],
+            })
+            .unwrap();
+
+        let user_a_results = store
+            .search_reports_for_user("queue policy", None, Some("user-a"))
+            .unwrap();
+        assert_eq!(user_a_results.len(), 1);
+        assert_eq!(user_a_results[0].title, "Alice Architecture");
+
+        let scoped_results = store
+            .search_reports_for_user("alice.md", Some("/proj-a"), Some("user-a"))
+            .unwrap();
+        assert_eq!(scoped_results.len(), 1);
+        assert_eq!(scoped_results[0].title, "Alice Architecture");
+
+        let hidden_results = store
+            .search_reports_for_user("queue policy", None, Some("user-b"))
+            .unwrap();
+        assert_eq!(hidden_results.len(), 1);
+        assert_eq!(hidden_results[0].title, "Bob Architecture");
     }
 }

@@ -246,7 +246,7 @@ impl Tool for ListReportsTool {
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            r#"Query existing reports for context from prior research. Omit query to list all reports for the current project. Provide a query string to search by title or tags.
+            r#"Query existing reports for context from prior research. Omit query to list all reports for the current project. Provide a query string to search by title, summary, tags, or sources.
 
 Use this to check if relevant research already exists before starting a new investigation."#,
         )
@@ -258,7 +258,7 @@ Use this to check if relevant research already exists before starting a new inve
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query to filter by title or tags (omit for all reports)"
+                    "description": "Search query to filter by title, summary, tags, or sources (omit for all reports)"
                 }
             },
             "additionalProperties": false

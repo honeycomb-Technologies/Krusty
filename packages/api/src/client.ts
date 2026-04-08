@@ -399,8 +399,18 @@ export class KrustyClient {
   }
 
   // Reports
-  async getReports(projectDir?: string): Promise<{ reports: ReportSummary[] }> {
-    const q = projectDir ? `?project_dir=${encodeURIComponent(projectDir)}` : '';
+  async getReports(options?: {
+    projectDir?: string;
+    query?: string;
+  }): Promise<{ reports: ReportSummary[] }> {
+    const params: string[] = [];
+    if (options?.projectDir) {
+      params.push(`project_dir=${encodeURIComponent(options.projectDir)}`);
+    }
+    if (options?.query) {
+      params.push(`query=${encodeURIComponent(options.query)}`);
+    }
+    const q = params.length > 0 ? `?${params.join('&')}` : '';
     return this.request(`/reports${q}`);
   }
 

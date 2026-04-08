@@ -6,6 +6,7 @@ import type { MakoKnowledgeScope } from "../types";
 export function useMakoReports(
   enabled: boolean,
   workspaceDirectory?: string | null,
+  query?: string,
 ) {
   const { client, isConnected } = useConnection();
   const [scope, setScope] = useState<MakoKnowledgeScope>(
@@ -18,6 +19,17 @@ export function useMakoReports(
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isDetailLoading, setIsDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [debouncedQuery, setDebouncedQuery] = useState(query?.trim() ?? "");
+
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      setDebouncedQuery(query?.trim() ?? "");
+    }, 180);
+
+    return () => {
+      clearTimeout(timeout);
+    };
+  }, [query]);
 
   useEffect(() => {
     if (!workspaceDirectory && scope === "workspace") {
@@ -53,7 +65,10 @@ export function useMakoReports(
 
       try {
         const response = await client.getReports(
-          scope === "workspace" ? workspaceDirectory ?? undefined : undefined,
+          {
+            projectDir: scope === "workspace" ? workspaceDirectory ?? undefined : undefined,
+            query: debouncedQuery || undefined,
+          },
         );
 
         if (cancelled) {
@@ -87,7 +102,7 @@ export function useMakoReports(
     return () => {
       cancelled = true;
     };
-  }, [client, enabled, isConnected, scope, workspaceDirectory]);
+  }, [client, debouncedQuery, enabled, isConnected, scope, workspaceDirectory]);
 
   useEffect(() => {
     if (selectedReportId && !reports.some((report) => report.id === selectedReportId)) {
@@ -110,7 +125,10 @@ export function useMakoReports(
     setError(null);
     try {
       const response = await client.getReports(
-        scope === "workspace" ? workspaceDirectory ?? undefined : undefined,
+        {
+          projectDir: scope === "workspace" ? workspaceDirectory ?? undefined : undefined,
+          query: debouncedQuery || undefined,
+        },
       );
       setReports(response.reports);
     } catch (refreshError) {
@@ -123,7 +141,7 @@ export function useMakoReports(
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [client, isConnected, scope, workspaceDirectory]);
+  }, [client, debouncedQuery, isConnected, scope, workspaceDirectory]);
 
   const selectReport = useCallback(async (reportId: string) => {
     if (!client || !isConnected) {
@@ -172,6 +190,7 @@ export function useMakoReports(
     isRefreshing,
     isDetailLoading,
     error,
+    debouncedQuery,
     refresh,
     selectReport,
     clearSelection,

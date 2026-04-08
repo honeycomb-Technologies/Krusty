@@ -34,26 +34,6 @@ interface PromotionState {
   tone: "success" | "accent" | "danger";
 }
 
-function matchesReportQuery(
-  report: {
-    title: string;
-    summary: string;
-    tags: string[];
-    project_dir?: string;
-  },
-  query: string,
-): boolean {
-  const normalizedQuery = query.trim().toLowerCase();
-  if (!normalizedQuery) {
-    return true;
-  }
-
-  return [report.title, report.summary, report.project_dir ?? "", ...report.tags]
-    .join(" ")
-    .toLowerCase()
-    .includes(normalizedQuery);
-}
-
 function topTagLabel(
   reports: Array<{
     tags: string[];
@@ -229,12 +209,9 @@ export function MakoReportsView({ workspaceDirectory }: MakoReportsViewProps) {
   const [query, setQuery] = useState("");
   const [isPromoting, setIsPromoting] = useState(false);
   const [promotionState, setPromotionState] = useState<PromotionState | null>(null);
-  const reports = useMakoReports(knowledgeView === "reports", workspaceDirectory);
+  const reports = useMakoReports(knowledgeView === "reports", workspaceDirectory, query);
   const memories = useMakoMemories(knowledgeView === "memory", workspaceDirectory);
-
-  const visibleReports = reports.reports.filter((report) =>
-    matchesReportQuery(report, query),
-  );
+  const visibleReports = reports.reports;
   const visibleReportIds = visibleReports.map((report) => report.id).join("|");
   const uniqueProjects = new Set(
     visibleReports
@@ -381,7 +358,7 @@ export function MakoReportsView({ workspaceDirectory }: MakoReportsViewProps) {
       <TextInput
         value={query}
         onChangeText={setQuery}
-        placeholder="Search reports or tags"
+        placeholder="Search titles, summaries, tags, or sources"
         placeholderTextColor={t.mutedForeground}
         style={[
           styles.searchInput,
@@ -400,10 +377,12 @@ export function MakoReportsView({ workspaceDirectory }: MakoReportsViewProps) {
       {visibleReports.length === 0 ? (
         <GlassCard style={styles.emptyCard}>
           <Text style={[styles.emptyTitle, { color: t.foreground }]}>
-            {reports.reports.length === 0 ? "No reports yet" : "No matching reports"}
+            {reports.reports.length === 0 && !reports.debouncedQuery
+              ? "No reports yet"
+              : "No matching reports"}
           </Text>
           <Text style={[styles.emptyBody, { color: t.mutedForeground }]}>
-            {reports.reports.length === 0
+            {reports.reports.length === 0 && !reports.debouncedQuery
               ? "Mako has not written any durable briefs for this scope yet."
               : "Try a different search term or switch scopes."}
           </Text>
