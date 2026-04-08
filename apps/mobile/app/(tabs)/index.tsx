@@ -6,6 +6,7 @@ import {
   Text,
   Pressable,
   Alert,
+  ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
@@ -118,13 +119,87 @@ function getWorkspaceMode(path: string | null): WorkspaceMode {
 
 export default function ChatScreen() {
   const { theme } = useThemeContext();
+  const {
+    status,
+    error: connectionError,
+    reconnect,
+    isConfigured,
+  } = useConnection();
   const stores = useStores();
 
   if (!stores) {
+    const t = theme.colors;
+    const isRetryable = status === "error" || status === "disconnected";
+
     return (
-      <SafeAreaView style={[{ flex: 1, backgroundColor: theme.colors.background }]}>
-        <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
+      <SafeAreaView style={[styles.bootScreen, { backgroundColor: t.background }]}>
+        <View style={styles.bootInner}>
           <KrustyLogo />
+          {status === "connecting" ? (
+            <>
+              <ActivityIndicator
+                size="small"
+                color={t.userMessage}
+                style={styles.bootSpinner}
+              />
+              <Text style={[styles.bootMessage, { color: t.mutedForeground }]}>
+                Reconnecting to your server...
+              </Text>
+            </>
+          ) : null}
+          {isRetryable ? (
+            <View style={styles.bootActions}>
+              <Text
+                style={[
+                  styles.bootMessage,
+                  {
+                    color: isConfigured ? t.error : t.mutedForeground,
+                    marginTop: 0,
+                  },
+                ]}
+              >
+                {connectionError ||
+                  (isConfigured
+                    ? "Could not reconnect to your server."
+                    : "Server connection is not configured.")}
+              </Text>
+              <Pressable
+                onPress={() => {
+                  if (isConfigured) {
+                    void reconnect();
+                  } else {
+                    router.replace("/onboarding");
+                  }
+                }}
+                style={[
+                  styles.bootButton,
+                  { backgroundColor: t.userMessage },
+                ]}
+              >
+                <Text style={styles.bootButtonText}>
+                  {isConfigured ? "Retry Connection" : "Open Setup"}
+                </Text>
+              </Pressable>
+              {isConfigured ? (
+                <Pressable
+                  onPress={() => router.replace("/onboarding")}
+                  style={[
+                    styles.bootButtonSecondary,
+                    { borderColor: t.border },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.bootButtonSecondaryText,
+                      { color: t.foreground },
+                    ]}
+                  >
+                    Server Setup
+                  </Text>
+                </Pressable>
+              ) : null}
+            </View>
+          ) : null}
         </View>
       </SafeAreaView>
     );
@@ -1006,6 +1081,54 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
 }
 
 const styles = StyleSheet.create({
+  bootScreen: { flex: 1 },
+  bootInner: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 28,
+  },
+  bootSpinner: {
+    marginTop: 20,
+  },
+  bootActions: {
+    marginTop: 24,
+    alignItems: "center",
+    gap: 12,
+    width: "100%",
+    maxWidth: 320,
+  },
+  bootMessage: {
+    marginTop: 14,
+    fontSize: 15,
+    lineHeight: 21,
+    textAlign: "center",
+  },
+  bootButton: {
+    marginTop: 4,
+    borderRadius: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 18,
+    width: "100%",
+    alignItems: "center",
+  },
+  bootButtonText: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  bootButtonSecondary: {
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingVertical: 14,
+    paddingHorizontal: 18,
+    width: "100%",
+    alignItems: "center",
+  },
+  bootButtonSecondaryText: {
+    fontSize: 16,
+    fontWeight: "600",
+  },
   container: { flex: 1 },
   flex: { flex: 1 },
   topBar: {

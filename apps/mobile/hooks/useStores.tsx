@@ -51,6 +51,23 @@ const STORAGE_HYDRATION_KEYS = [
   "krusty:presence-client-id",
 ] as const;
 
+function buildStores(client: KrustyClient, storage: ReturnType<typeof createStorage>) {
+  const workspace = createWorkspaceStore(storage);
+  const sessions = createSessionsStore(client, workspace);
+  const plan = createPlanStore();
+  const session = createSessionStore(
+    client,
+    storage,
+    workspace,
+    sessions,
+    plan,
+  );
+  const getDirectory = () => workspace.getState().directory;
+  const git = createGitStore(client, getDirectory);
+
+  return { sessions, session, workspace, git, plan };
+}
+
 export function StoresProvider({ client, children }: StoresProviderProps) {
   const [stores, setStores] = useState<StoresContextValue | null>(null);
 
@@ -69,26 +86,15 @@ export function StoresProvider({ client, children }: StoresProviderProps) {
     void (async () => {
       const storage = createStorage();
       if (typeof storage.hydrate === "function") {
-        await storage.hydrate([...STORAGE_HYDRATION_KEYS]);
+        try {
+          await storage.hydrate([...STORAGE_HYDRATION_KEYS]);
+        } catch {}
       }
       if (cancelled) {
         return;
       }
 
-      const workspace = createWorkspaceStore(storage);
-      const sessions = createSessionsStore(client, workspace);
-      const plan = createPlanStore();
-      const session = createSessionStore(
-        client,
-        storage,
-        workspace,
-        sessions,
-        plan,
-      );
-      const getDirectory = () => workspace.getState().directory;
-      const git = createGitStore(client, getDirectory);
-
-      setStores({ sessions, session, workspace, git, plan });
+      setStores(buildStores(client, storage));
     })();
 
     return () => {
