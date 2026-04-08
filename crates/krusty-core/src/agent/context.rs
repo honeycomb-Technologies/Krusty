@@ -75,26 +75,34 @@ pub fn inject_context(
 
     let workspace_ctx = build_workspace_context(working_dir, project_dir);
     let env_ctx = build_environment_context(working_dir, model_id);
-    let memory_ctx = build_memory_context(
-        db_path,
-        project_dir
-            .map(|p| p.to_string_lossy().to_string())
-            .as_deref(),
-        None, // user_id — single-tenant for now
-    );
+    let context_project_dir = project_dir.map(|p| p.to_string_lossy().to_string());
+    let is_mako = session_type == Some("mako");
+    let memory_ctx = if is_mako {
+        String::new()
+    } else {
+        build_memory_context(
+            db_path,
+            context_project_dir.as_deref(),
+            None, // user_id — single-tenant for now
+        )
+    };
     let plan_ctx = build_plan_context(db_path, session_id, work_mode);
     let delegated_ctx = build_delegated_context(db_path, session_id);
     let task_ctx = build_autonomous_task_context(db_path, session_id);
-    let report_ctx = build_report_context(
-        db_path,
-        project_dir
-            .map(|p| p.to_string_lossy().to_string())
-            .as_deref(),
-    );
+    let report_ctx = if is_mako {
+        String::new()
+    } else {
+        build_report_context(db_path, context_project_dir.as_deref())
+    };
+    let mako_knowledge_ctx = if is_mako {
+        build_mako_knowledge_context(db_path, context_project_dir.as_deref(), None)
+    } else {
+        String::new()
+    };
     let coordinator_ctx = build_coordinator_context(session_type.unwrap_or("code"));
     let skills_ctx = build_skills_context(skills_manager, project_dir.is_some());
     let project_ctx = project_dir.map(build_project_context).unwrap_or_default();
-    let mako_ctx = if session_type == Some("mako") {
+    let mako_ctx = if is_mako {
         build_mako_context(project_dir.unwrap_or(working_dir))
     } else {
         String::new()
@@ -121,6 +129,14 @@ pub fn inject_context(
         injected.push(ModelMessage {
             role: Role::System,
             content: vec![Content::Text { text: memory_ctx }],
+        });
+    }
+    if !mako_knowledge_ctx.is_empty() {
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text {
+                text: mako_knowledge_ctx,
+            }],
         });
     }
     if !project_ctx.is_empty() {
@@ -196,6 +212,10 @@ const MAX_MEMORIES_PER_TYPE: usize = 15;
 const MAX_MEMORY_CONTENT_CHARS: usize = 300;
 /// Approximate upper bound on total memory context output size.
 const MAX_MEMORY_CONTEXT_BYTES: usize = 8 * 1024;
+/// Maximum number of memories included in the Mako-specific knowledge block.
+const MAX_MAKO_MEMORY_ITEMS: usize = 8;
+/// Maximum number of reports included in the Mako-specific knowledge block.
+const MAX_MAKO_REPORT_ITEMS: usize = 5;
 
 /// Truncate a string to at most `max_chars` characters on a valid UTF-8
 /// boundary, appending "..." when truncation occurs.
@@ -450,6 +470,96 @@ fn build_report_context(db_path: &Path, project_dir: Option<&str>) -> String {
     lines.push("Use `ReadReport` tool to access full content.".to_string());
 
     lines.join("\n")
+}
+
+fn format_memory_kind(memory_type: MemoryType) -> &'static str {
+    match memory_type {
+        MemoryType::User => "User",
+        MemoryType::Feedback => "Feedback",
+        MemoryType::Project => "Project",
+        MemoryType::Reference => "Reference",
+    }
+}
+
+fn build_mako_knowledge_context(
+    db_path: &Path,
+    project_dir: Option<&str>,
+    user_id: Option<&str>,
+) -> String {
+    let mut memories =
+        if let Some(memory_db) = open_context_database(db_path, "building mako memory context") {
+            let memory_store = MemoryStore::new(memory_db);
+            memory_store.list(project_dir, user_id)
+        } else {
+            Vec::new()
+        };
+    if let Some(project_dir) = project_dir {
+        memories.sort_by(|left, right| {
+            let left_project_match = left.project_dir.as_deref() == Some(project_dir);
+            let right_project_match = right.project_dir.as_deref() == Some(project_dir);
+
+            right_project_match
+                .cmp(&left_project_match)
+                .then_with(|| right.updated_at.cmp(&left.updated_at))
+        });
+    }
+
+    let reports = if let Some(report_db) =
+        open_context_database(db_path, "building mako report context")
+    {
+        let report_store = ReportStore::new(report_db);
+        match report_store.list_reports(project_dir) {
+            Ok(reports) => reports,
+            Err(error) => {
+                warn!(project_dir = ?project_dir, error = %error, "Failed to load Mako reports for context");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    if memories.is_empty() && reports.is_empty() {
+        return String::new();
+    }
+
+    let mut sections = vec![
+        "[MAKO KNOWLEDGE]".to_string(),
+        "Carry forward durable facts from memory and recent outcomes from reports. Prefer promoted memory for stable decisions, and use `ReadReport` when full report detail matters.".to_string(),
+    ];
+
+    if !memories.is_empty() {
+        sections.push("## Carry Forward".to_string());
+        for memory in memories.iter().take(MAX_MAKO_MEMORY_ITEMS) {
+            let scope = if project_dir.is_some() && memory.project_dir.as_deref() == project_dir {
+                "project"
+            } else {
+                "global"
+            };
+            let content = truncate_utf8(&memory.content, MAX_MEMORY_CONTENT_CHARS);
+            sections.push(format!(
+                "- [{} | {}] {}: {}",
+                format_memory_kind(memory.memory_type),
+                scope,
+                memory.title,
+                content
+            ));
+        }
+    }
+
+    if !reports.is_empty() {
+        sections.push("## Recent Reports".to_string());
+        for report in reports.iter().take(MAX_MAKO_REPORT_ITEMS) {
+            let summary = truncate_utf8(&report.summary, 200);
+            sections.push(format!(
+                "- \"{}\" ({}): {}",
+                report.title, report.created_at, summary
+            ));
+        }
+    }
+
+    sections.push("[/MAKO KNOWLEDGE]".to_string());
+    sections.join("\n")
 }
 
 /// Build coordinator prompt for Mako sessions.
@@ -895,9 +1005,10 @@ mod tests {
     use crate::agent::DelegatedRunStage;
     use crate::ai::types::{Content, ModelMessage, Role};
     use crate::skills::SkillsManager;
+    use crate::storage::reports::CreateReportInput;
     use crate::storage::{
         Database, DelegatedRunRole, DelegatedRunScope, DelegatedRunStartInput, DelegatedRunStore,
-        SessionManager, WorkMode,
+        MemoryStore, MemoryType, ReportStore, SessionManager, WorkMode,
     };
 
     #[test]
@@ -1125,6 +1236,150 @@ mod tests {
             .unwrap();
 
         assert!(mako_index < settings_index);
+    }
+
+    #[test]
+    fn inject_context_includes_mako_knowledge_from_memory_and_reports() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(repo.join("MAKO.md"), "Always Swimming.").unwrap();
+
+        let db_path = repo.join("krusty.db");
+        let session_manager = SessionManager::new(Database::new(&db_path).unwrap());
+        let session_id = session_manager
+            .create_session("test", None, Some(repo.to_string_lossy().as_ref()))
+            .unwrap();
+
+        let memory_store = MemoryStore::new(Database::new(&db_path).unwrap());
+        memory_store
+            .save(
+                MemoryType::Project,
+                "Auth decision",
+                "Use the daemon loop as the canonical wake path.",
+                Some(repo.to_string_lossy().as_ref()),
+                None,
+            )
+            .unwrap();
+
+        let report_store = ReportStore::new(Database::new(&db_path).unwrap());
+        report_store
+            .create_report(CreateReportInput {
+                title: "Wake pipeline check",
+                session_id: &session_id,
+                project_dir: Some(repo.to_string_lossy().as_ref()),
+                report_root: Some(repo),
+                content: "The wake pipeline is healthy.",
+                summary: "Validated the wake pipeline end to end.",
+                tags: &[],
+                sources: &[],
+            })
+            .unwrap();
+
+        let skills = RwLock::new(SkillsManager::with_defaults(repo));
+        let conversation = vec![ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "hello".to_string(),
+            }],
+        }];
+
+        let injected = inject_context(
+            &conversation,
+            db_path.as_path(),
+            &session_id,
+            repo,
+            Some(repo),
+            WorkMode::Build,
+            &skills,
+            None,
+            Some("mako"),
+        );
+
+        assert!(injected.iter().any(|message| {
+            matches!(
+                &message.content[0],
+                Content::Text { text }
+                    if text.contains("[MAKO KNOWLEDGE]")
+                        && text.contains("## Carry Forward")
+                        && text.contains("Auth decision")
+                        && text.contains("## Recent Reports")
+                        && text.contains("Wake pipeline check")
+            )
+        }));
+    }
+
+    #[test]
+    fn inject_context_does_not_duplicate_generic_memory_and_report_blocks_for_mako() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(repo.join("MAKO.md"), "Always Swimming.").unwrap();
+
+        let db_path = repo.join("krusty.db");
+        let session_manager = SessionManager::new(Database::new(&db_path).unwrap());
+        let session_id = session_manager
+            .create_session("test", None, Some(repo.to_string_lossy().as_ref()))
+            .unwrap();
+
+        let memory_store = MemoryStore::new(Database::new(&db_path).unwrap());
+        memory_store
+            .save(
+                MemoryType::Feedback,
+                "Status preference",
+                "Show upcoming wakes before aggregate counters.",
+                Some(repo.to_string_lossy().as_ref()),
+                None,
+            )
+            .unwrap();
+
+        let report_store = ReportStore::new(Database::new(&db_path).unwrap());
+        report_store
+            .create_report(CreateReportInput {
+                title: "Queue audit",
+                session_id: &session_id,
+                project_dir: Some(repo.to_string_lossy().as_ref()),
+                report_root: Some(repo),
+                content: "Queue ordering is stable.",
+                summary: "Queue ordering remains stable.",
+                tags: &[],
+                sources: &[],
+            })
+            .unwrap();
+
+        let skills = RwLock::new(SkillsManager::with_defaults(repo));
+        let conversation = vec![ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "hello".to_string(),
+            }],
+        }];
+
+        let injected = inject_context(
+            &conversation,
+            db_path.as_path(),
+            &session_id,
+            repo,
+            Some(repo),
+            WorkMode::Build,
+            &skills,
+            None,
+            Some("mako"),
+        );
+
+        let texts = injected
+            .iter()
+            .filter_map(|message| match &message.content[0] {
+                Content::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(texts.iter().any(|text| text.contains("[MAKO KNOWLEDGE]")));
+        assert!(!texts
+            .iter()
+            .any(|text| text.contains("[PERSISTENT MEMORY]")));
+        assert!(!texts.iter().any(|text| text.contains("[RECENT REPORTS]")));
     }
 
     #[test]
