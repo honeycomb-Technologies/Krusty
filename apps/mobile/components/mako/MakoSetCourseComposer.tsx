@@ -9,12 +9,19 @@ import {
 import * as Haptics from "../../platform/haptics";
 import { GlassCard } from "../ui/GlassCard";
 import { useThemeContext } from "../../hooks/useTheme";
+import { MakoPriorityPicker } from "./MakoPriorityPicker";
+import { MakoSchedulePicker } from "./MakoSchedulePicker";
+import type { MakoRunPriority } from "@krusty/api";
+import {
+  resolveScheduleSelection,
+  type MakoSchedulePreset,
+} from "./schedule";
 import { formatProjectLabel } from "./utils";
 
 interface MakoSetCourseComposerProps {
   projectDir?: string | null;
   isSubmitting: boolean;
-  onSubmit: (task: string) => Promise<void>;
+  onSubmit: (task: string, options?: { startAt?: string | null; priority?: MakoRunPriority | null }) => Promise<void>;
 }
 
 export function MakoSetCourseComposer({
@@ -25,6 +32,10 @@ export function MakoSetCourseComposer({
   const { theme } = useThemeContext();
   const t = theme.colors;
   const [value, setValue] = useState("");
+  const [schedulePreset, setSchedulePreset] = useState<MakoSchedulePreset>("now");
+  const [customSchedule, setCustomSchedule] = useState("");
+  const [priority, setPriority] = useState<MakoRunPriority>("normal");
+  const schedule = resolveScheduleSelection(schedulePreset, customSchedule);
 
   return (
     <GlassCard style={styles.card} elevated>
@@ -63,33 +74,58 @@ export function MakoSetCourseComposer({
         ]}
       />
 
+      <MakoSchedulePicker
+        value={schedulePreset}
+        onChange={setSchedulePreset}
+        customValue={customSchedule}
+        onCustomValueChange={setCustomSchedule}
+        customError={schedulePreset === "custom" ? schedule.error : null}
+      />
+      <MakoPriorityPicker value={priority} onChange={setPriority} />
+
       <View style={styles.actions}>
-        <Text style={[styles.hint, { color: t.mutedForeground }]}>
-          New work opens as a run inside Mako.
-        </Text>
         <Pressable
-          disabled={isSubmitting || value.trim().length === 0}
+          disabled={
+            isSubmitting ||
+            value.trim().length === 0 ||
+            (schedulePreset === "custom" && schedule.error !== null)
+          }
           onPress={async () => {
             const task = value.trim();
             if (!task) {
               return;
             }
+            if (schedulePreset === "custom" && schedule.error) {
+              return;
+            }
             void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-            await onSubmit(task);
+            await onSubmit(task, {
+              startAt: schedule.startAt,
+              priority,
+            });
             setValue("");
+            setSchedulePreset("now");
+            setCustomSchedule("");
+            setPriority("normal");
           }}
           style={[
             styles.button,
             {
               backgroundColor:
-                isSubmitting || value.trim().length === 0
+                isSubmitting ||
+                value.trim().length === 0 ||
+                (schedulePreset === "custom" && schedule.error !== null)
                   ? `${t.userMessage}55`
                   : t.userMessage,
             },
           ]}
         >
           <Text style={styles.buttonLabel}>
-            {isSubmitting ? "Setting..." : "Set course"}
+            {isSubmitting
+              ? "Setting..."
+              : schedulePreset === "now"
+                ? "Set course"
+                : "Schedule course"}
           </Text>
         </Pressable>
       </View>
@@ -144,13 +180,8 @@ const styles = StyleSheet.create({
     marginTop: 14,
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
+    justifyContent: "flex-end",
     gap: 12,
-  },
-  hint: {
-    flex: 1,
-    fontSize: 12,
-    lineHeight: 17,
   },
   button: {
     borderRadius: 999,

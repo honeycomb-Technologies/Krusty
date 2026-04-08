@@ -20,9 +20,9 @@ import Animated, {
 } from 'react-native-reanimated';
 import { ArrowLeft, X } from 'lucide-react-native';
 import * as Haptics from '../platform/haptics';
-import Markdown from '@ronradtke/react-native-markdown-display';
 import { useThemeContext } from '../hooks/useTheme';
 import { useConnection } from '../hooks/useConnection';
+import { ReportDetailContent } from './reports/ReportDetailContent';
 import type { ReportSummary, Report } from '@krusty/api';
 
 const SCREEN_HEIGHT = Dimensions.get('window').height;
@@ -120,25 +120,6 @@ export function ReportsViewer({ visible, onClose }: ReportsViewerProps) {
     pointerEvents: progress.value > 0.1 ? ('auto' as const) : ('none' as const),
   }));
 
-  const markdownStyles = {
-    body: { color: t.foreground, fontSize: 15, lineHeight: 22 },
-    heading1: { color: t.foreground, fontSize: 22, fontWeight: '700' as const, marginBottom: 8, marginTop: 16 },
-    heading2: { color: t.foreground, fontSize: 19, fontWeight: '600' as const, marginBottom: 6, marginTop: 14 },
-    heading3: { color: t.foreground, fontSize: 17, fontWeight: '600' as const, marginBottom: 4, marginTop: 12 },
-    paragraph: { color: t.foreground, marginBottom: 10 },
-    link: { color: t.userMessage },
-    blockquote: { backgroundColor: 'rgba(255,255,255,0.04)', borderLeftColor: t.mutedForeground, borderLeftWidth: 3, paddingLeft: 12, paddingVertical: 4 },
-    code_inline: { backgroundColor: 'rgba(255,255,255,0.08)', color: t.thinking, fontSize: 13, paddingHorizontal: 4, borderRadius: 3 },
-    fence: { backgroundColor: 'rgba(0,0,0,0.3)', padding: 12, borderRadius: 8, marginVertical: 8 },
-    code_block: { color: t.foreground, fontSize: 13 },
-    list_item: { color: t.foreground, marginBottom: 4 },
-    bullet_list_icon: { color: t.mutedForeground },
-    ordered_list_icon: { color: t.mutedForeground },
-    hr: { backgroundColor: t.border, marginVertical: 16 },
-    strong: { fontWeight: '700' as const },
-    em: { fontStyle: 'italic' as const },
-  };
-
   if (!mounted) return null;
 
   const renderReportCard = ({ item }: { item: ReportSummary }) => (
@@ -225,31 +206,7 @@ export function ReportsViewer({ visible, onClose }: ReportsViewerProps) {
             contentContainerStyle={styles.detailContent}
             showsVerticalScrollIndicator={false}
           >
-            {selectedReport.tags.length > 0 && (
-              <View style={styles.detailTags}>
-                {selectedReport.tags.map((tag) => (
-                  <View
-                    key={tag}
-                    style={[styles.tagPill, { backgroundColor: t.userMessage + '18', borderColor: t.userMessage + '30' }]}
-                  >
-                    <Text style={[styles.tagText, { color: t.userMessage }]}>{tag}</Text>
-                  </View>
-                ))}
-              </View>
-            )}
-            <Markdown style={markdownStyles}>
-              {selectedReport.content}
-            </Markdown>
-            {selectedReport.sources.length > 0 && (
-              <View style={styles.sourcesSection}>
-                <Text style={[styles.sourcesTitle, { color: t.mutedForeground }]}>Sources</Text>
-                {selectedReport.sources.map((src, i) => (
-                  <Text key={i} style={[styles.sourceItem, { color: t.foreground }]}>
-                    {src}
-                  </Text>
-                ))}
-              </View>
-            )}
+            <ReportDetailContent report={selectedReport} />
           </ScrollView>
         ) : loading ? (
           <View style={styles.centered}>
@@ -375,28 +332,6 @@ const styles = StyleSheet.create({
   detailContent: {
     padding: 16,
     paddingBottom: 40,
-  },
-  detailTags: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-    marginBottom: 16,
-  },
-  sourcesSection: {
-    marginTop: 24,
-    paddingTop: 16,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: 'rgba(255,255,255,0.1)',
-  },
-  sourcesTitle: {
-    fontSize: 14,
-    fontWeight: '600',
-    marginBottom: 8,
-  },
-  sourceItem: {
-    fontSize: 13,
-    lineHeight: 18,
-    marginBottom: 4,
   },
   detailOverlay: {
     ...StyleSheet.absoluteFillObject,

@@ -76,12 +76,13 @@ export interface MessageResponse {
 }
 
 export interface ChatMessage {
+  id: string;
   role: 'user' | 'assistant';
   content: string;
   thinking?: string;
   toolCalls?: ToolCall[];
   isQueued?: boolean;
-  kind?: 'recovery_notice' | 'live_partial';
+  kind?: 'recovery_notice' | 'live_partial' | 'streaming';
 }
 
 export interface ToolCall {
@@ -256,6 +257,7 @@ export interface DelegatedRunResponse {
 
 export type MakoRuntimeStatus = 'idle' | 'running' | 'sleeping' | 'awaiting_input' | 'paused' | 'error' | 'cancelled';
 export type MakoHomeStatus = 'awake' | 'sleeping' | 'paused' | 'blocked' | 'idle';
+export type MakoRunPriority = 'low' | 'normal' | 'high';
 export type AutonomousTaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 
 export interface MakoDispatchResponse {
@@ -265,6 +267,23 @@ export interface MakoDispatchResponse {
 
 export interface SimpleOkResponse {
   ok: boolean;
+}
+
+export type MemoryType = 'user' | 'feedback' | 'project' | 'reference';
+
+export interface AgentMemory {
+  id: string;
+  memory_type: MemoryType;
+  title: string;
+  content: string;
+  project_dir?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PromoteReportToMemoryResponse {
+  created: boolean;
+  memory: AgentMemory;
 }
 
 export interface AutonomousTask {
@@ -289,6 +308,7 @@ export interface MakoRuntimeState {
   last_error?: string | null;
   current_run_id?: string | null;
   last_wake_reason?: string | null;
+  priority: MakoRunPriority;
   updated_at: string;
 }
 
@@ -308,6 +328,7 @@ export interface MakoSessionStatus {
   tasks: AutonomousTask[];
   agent_state: string;
   runtime?: MakoRuntimeState | null;
+  cadence: MakoCadenceSummary;
 }
 
 export interface MakoCurrentRunSummary {
@@ -322,6 +343,18 @@ export interface MakoCurrentRunSummary {
   completed_tasks: number;
   failed_tasks: number;
   blocked_tasks: number;
+  cadence: MakoCadenceSummary;
+}
+
+export interface MakoPendingApproval {
+  session_id: string;
+  session_title: string;
+  project_dir?: string | null;
+  tool_call_id: string;
+  tool_name: string;
+  arguments: unknown;
+  requested_at: string;
+  priority: MakoRunPriority;
 }
 
 export interface MakoStatusSummary {
@@ -329,6 +362,8 @@ export interface MakoStatusSummary {
   total_count: number;
   running_count: number;
   sleeping_count: number;
+  scheduled_count: number;
+  high_priority_count: number;
   paused_count: number;
   waiting_count: number;
   failed_count: number;
@@ -337,9 +372,15 @@ export interface MakoStatusSummary {
   next_wake_at?: string | null;
 }
 
+export interface MakoCadenceSummary {
+  tick_interval_secs: number;
+  max_ticks: number;
+}
+
 export interface MakoCurrentResponse {
   status: MakoStatusSummary;
   runs: MakoCurrentRunSummary[];
+  approvals: MakoPendingApproval[];
 }
 
 export interface MakoRunWakeEvent {
@@ -677,11 +718,11 @@ export interface ReportSummary {
   summary: string;
   tags: string[];
   created_at: string;
+  project_dir?: string;
 }
 
 export interface Report extends ReportSummary {
   content: string;
   sources: string[];
   session_id: string;
-  project_dir?: string;
 }

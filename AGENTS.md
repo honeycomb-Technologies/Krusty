@@ -99,6 +99,7 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - Session presence routes must stay ownership-checked, server-authored, and stale-aware.
 - Tool execution routes must pass the same governance context as orchestrated runs (permission mode, delegated turn budget, and extensibility managers).
 - Direct tool execution must keep `working_dir` scoped to the same allowed workspace root as the rest of the server file/path surfaces.
+- Knowledge routes must keep reports and memories on shared typed contracts with project/user scoping preserved end-to-end; avoid shadow stores or client-only promotion state.
 - Chat streaming must keep a bounded queue with explicit lag signaling; never let a slow SSE client silently stall or redefine core loop semantics.
 - Auth and credential routes for dynamic-model providers should refresh shared model catalogs eagerly.
 - Push endpoints (`/push/*`) must stay aligned with mobile/web diagnostics and test-send flows.
@@ -137,6 +138,7 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - Keep desktop and Expo web behavior aligned where features overlap.
 - Keep model-speed and reasoning controls driven by shared client state or server contracts rather than ad-hoc component-local mappings.
 - Notification and Live Activity actions that mutate session state must carry explicit session context; never assume the currently focused chat is the correct target.
+- Keep knowledge surfaces server-backed and shared across modes; reports and memories should behave like one project knowledge substrate rather than separate client-local feature stacks.
 - Desktop shell is a host for the Expo web build, not a separate product surface. Keep desktop-specific code focused on windowing, permissions, startup wiring, and packaging.
 - Treat Tauri permissions, deep links, and updater config as security-sensitive.
 

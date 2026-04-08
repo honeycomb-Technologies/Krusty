@@ -8,6 +8,7 @@ import {
 } from "react-native";
 import { GlassCard } from "../ui/GlassCard";
 import { useThemeContext } from "../../hooks/useTheme";
+import { MakoApprovalList } from "./MakoApprovalList";
 import { MakoRunList } from "./MakoRunList";
 import { MakoSetCourseComposer } from "./MakoSetCourseComposer";
 import { formatTimestamp, getRunGroup } from "./utils";
@@ -17,8 +18,11 @@ interface MakoCurrentViewProps {
   state: MakoCurrentState;
   workspaceDirectory?: string | null;
   model?: string | null;
+  activeToolCallId?: string | null;
   onSelectRun: (runId: string) => void;
   onCourseSet: (runId: string) => Promise<void>;
+  onApproveTool: (sessionId: string, toolCallId: string) => void;
+  onDenyTool: (sessionId: string, toolCallId: string) => void;
 }
 
 function SummaryCard({
@@ -66,8 +70,11 @@ export function MakoCurrentView({
   state,
   workspaceDirectory,
   model,
+  activeToolCallId,
   onSelectRun,
   onCourseSet,
+  onApproveTool,
+  onDenyTool,
 }: MakoCurrentViewProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
@@ -84,6 +91,8 @@ export function MakoCurrentView({
   const waitingRuns = runs.filter((run) => getRunGroup(run) === "waiting");
   const activeRuns = runs.filter((run) => getRunGroup(run) === "active");
   const sleepingRuns = runs.filter((run) => getRunGroup(run) === "sleeping");
+  const queuedRuns = runs.filter((run) => getRunGroup(run) === "queued");
+  const approvals = state.current?.approvals ?? [];
   const status = state.current?.status;
 
   return (
@@ -121,19 +130,21 @@ export function MakoCurrentView({
           hint={formatTimestamp(status?.next_wake_at)}
         />
         <SummaryCard
-          label="Idle"
-          value={String(status?.idle_count ?? 0)}
-          hint="ready for more"
+          label="Scheduled"
+          value={String(status?.scheduled_count ?? 0)}
+          hint="queued for later"
         />
       </View>
 
       <MakoSetCourseComposer
         projectDir={workspaceDirectory}
         isSubmitting={state.isDispatching}
-        onSubmit={async (task) => {
+        onSubmit={async (task, options) => {
           const runId = await state.setCourse(task, {
             projectDir: workspaceDirectory ?? undefined,
             model: model ?? undefined,
+            startAt: options?.startAt ?? undefined,
+            priority: options?.priority ?? undefined,
           });
           if (runId) {
             await onCourseSet(runId);
@@ -144,6 +155,17 @@ export function MakoCurrentView({
       {state.error ? (
         <Text style={[styles.error, { color: t.error }]}>{state.error}</Text>
       ) : null}
+
+      <Section title="Pending approvals">
+        <MakoApprovalList
+          approvals={approvals}
+          activeToolCallId={activeToolCallId}
+          emptyLabel="No approvals are waiting."
+          onSelectRun={onSelectRun}
+          onApproveTool={onApproveTool}
+          onDenyTool={onDenyTool}
+        />
+      </Section>
 
       <Section title="Waiting on you">
         <MakoRunList
@@ -165,6 +187,14 @@ export function MakoCurrentView({
         <MakoRunList
           runs={sleepingRuns}
           emptyLabel="No sleeping runs."
+          onSelectRun={onSelectRun}
+        />
+      </Section>
+
+      <Section title="Queued for later">
+        <MakoRunList
+          runs={queuedRuns}
+          emptyLabel="No deferred runs."
           onSelectRun={onSelectRun}
         />
       </Section>

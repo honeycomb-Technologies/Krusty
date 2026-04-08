@@ -19,7 +19,8 @@ use krusty_core::ai::client::CallOptions;
 use krusty_core::ai::types::{ModelMessage, Role};
 use krusty_core::plan::PlanManager;
 use krusty_core::storage::{
-    Database, MakoRuntimeStateStatus, MakoRuntimeStateStore, SessionManager, SessionType,
+    Database, MakoRunPriority, MakoRuntimeStateStatus, MakoRuntimeStateStore, ProjectSettings,
+    SessionManager, SessionType,
 };
 use krusty_core::tools::registry::PermissionMode;
 
@@ -266,6 +267,31 @@ impl MakoRuntimeManager {
         )
     }
 
+    pub async fn schedule_session(
+        &self,
+        state: &AppState,
+        session_id: String,
+        wake_at: chrono::DateTime<chrono::Utc>,
+        wake_reason: &'static str,
+        sleep_reason: &'static str,
+    ) -> Result<()> {
+        self.stop_active_run(state, &session_id).await;
+        ensure_runnable_mako_session(&state.db_path, &session_id)?;
+        persist_runtime_state(
+            &state.db_path,
+            &session_id,
+            MakoRuntimeStateStatus::Sleeping,
+            Some(&wake_at.to_rfc3339()),
+            Some(sleep_reason),
+            None,
+            None,
+            Some(wake_reason),
+        )?;
+        self.schedule_wake_at(state.clone(), session_id, wake_at, wake_reason)
+            .await;
+        Ok(())
+    }
+
     pub async fn stop_active_run(&self, state: &AppState, session_id: &str) {
         self.cancel_scheduled_wake(session_id).await;
 
@@ -446,6 +472,8 @@ async fn run_mako_session_inner(
         .as_deref()
         .map(PathBuf::from)
         .unwrap_or_else(|| (*state.working_dir).clone());
+    let project_dir = resolve_persisted_project_dir(session.project_dir.as_deref(), &working_dir);
+    let mako_settings = ProjectSettings::load_mako_settings(project_dir.as_deref());
 
     let options = CallOptions {
         tools: Some(state.tool_registry.get_ai_tools().await),
@@ -465,6 +493,8 @@ async fn run_mako_session_inner(
     let config = OrchestratorConfig {
         session_id: session_id.clone(),
         working_dir,
+        project_dir,
+        session_type: SessionType::Mako,
         permission_mode: PermissionMode::Autonomous,
         user_id: session.user_id.clone(),
         initial_work_mode: work_mode,
@@ -478,8 +508,8 @@ async fn run_mako_session_inner(
             services,
             config,
             TickEngineConfig {
-                tick_interval: Duration::from_secs(30),
-                max_ticks: 1000,
+                tick_interval: Duration::from_secs(mako_settings.tick_interval_secs),
+                max_ticks: mako_settings.max_ticks,
                 enabled: true,
             },
             conversation,
@@ -554,6 +584,21 @@ fn load_conversation(raw_messages: Vec<(String, String)>) -> Vec<ModelMessage> {
         .collect()
 }
 
+fn resolve_persisted_project_dir(
+    stored_project_dir: Option<&str>,
+    workspace_base: &Path,
+) -> Option<PathBuf> {
+    let raw = stored_project_dir
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let candidate = PathBuf::from(raw);
+    Some(if candidate.is_absolute() {
+        candidate
+    } else {
+        workspace_base.join(candidate)
+    })
+}
+
 fn apply_runtime_event_state(
     db_path: &Path,
     session_id: &str,
@@ -565,6 +610,10 @@ fn apply_runtime_event_state(
     let existing_wake_reason = existing_state
         .as_ref()
         .and_then(|state| state.last_wake_reason.as_deref());
+    let existing_priority = existing_state
+        .as_ref()
+        .map(|state| state.priority)
+        .unwrap_or(MakoRunPriority::Normal);
 
     match event {
         LoopEvent::AgentSleeping {
@@ -580,6 +629,7 @@ fn apply_runtime_event_state(
                 None,
                 Some(run_id),
                 existing_wake_reason.or(Some("sleep")),
+                existing_priority,
             )?;
         }
         LoopEvent::AwaitingInput { .. } => {
@@ -591,6 +641,7 @@ fn apply_runtime_event_state(
                 None,
                 Some(run_id),
                 existing_wake_reason.or(Some("awaiting_input")),
+                existing_priority,
             )?;
         }
         LoopEvent::Finished { stop_reason, .. } => {
@@ -610,6 +661,7 @@ fn apply_runtime_event_state(
                 None,
                 None,
                 existing_wake_reason,
+                existing_priority,
             )?;
         }
         LoopEvent::Error { error } => {
@@ -621,6 +673,7 @@ fn apply_runtime_event_state(
                 Some(error),
                 Some(run_id),
                 existing_wake_reason.or(Some("error")),
+                existing_priority,
             )?;
         }
         _ => {
@@ -632,6 +685,7 @@ fn apply_runtime_event_state(
                 None,
                 Some(run_id),
                 existing_wake_reason.or(Some("running")),
+                existing_priority,
             )?;
         }
     }
@@ -655,6 +709,10 @@ fn persist_runtime_state(
     last_wake_reason: Option<&str>,
 ) -> Result<()> {
     let store = MakoRuntimeStateStore::new(Database::new(db_path)?);
+    let priority = store
+        .get_state(session_id)?
+        .map(|state| state.priority)
+        .unwrap_or(MakoRunPriority::Normal);
     store.set_state(
         session_id,
         status,
@@ -663,13 +721,14 @@ fn persist_runtime_state(
         last_error,
         current_run_id,
         last_wake_reason,
+        priority,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use tokio::sync::{Mutex, RwLock};
@@ -687,8 +746,8 @@ mod tests {
     use krusty_core::SessionManager;
 
     use super::{
-        apply_runtime_event_state, persist_runtime_state, with_registered_session_input,
-        ActiveMakoRuntime, MakoRuntimeManager,
+        apply_runtime_event_state, persist_runtime_state, resolve_persisted_project_dir,
+        with_registered_session_input, ActiveMakoRuntime, MakoRuntimeManager,
     };
     use crate::AppState;
 
@@ -750,6 +809,21 @@ mod tests {
                 session_type,
             )
             .expect("session should create")
+    }
+
+    #[test]
+    fn resolve_persisted_project_dir_supports_relative_and_absolute_paths() {
+        let workspace = Path::new("/workspace");
+
+        assert_eq!(
+            resolve_persisted_project_dir(Some("repo"), workspace),
+            Some(workspace.join("repo"))
+        );
+        assert_eq!(
+            resolve_persisted_project_dir(Some("/tmp/project"), workspace),
+            Some(PathBuf::from("/tmp/project"))
+        );
+        assert_eq!(resolve_persisted_project_dir(Some("   "), workspace), None);
     }
 
     #[tokio::test]

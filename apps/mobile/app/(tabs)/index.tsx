@@ -164,6 +164,8 @@ export default function ChatScreen() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [reportsOpen, setReportsOpen] = useState(false);
   const [researchEnabled, setResearchEnabled] = useState(false);
+  const [composerReserveHeight, setComposerReserveHeight] =
+    useState(CHAT_BAR_ZONE);
 
   const previousStreamingRef = useRef(false);
   const currentStreamSessionIdRef = useRef<string | null>(null);
@@ -754,7 +756,7 @@ export default function ChatScreen() {
               ) : null}
             </View>
           }
-          bottomPadding={CHAT_BAR_ZONE}
+          bottomPadding={composerReserveHeight}
         />
       </Animated.View>
 
@@ -762,6 +764,7 @@ export default function ChatScreen() {
         <ChatBar
           onSend={handleSend}
           onStop={handleStop}
+          onHeightChange={setComposerReserveHeight}
           isStreaming={isStreaming}
           disabled={!isConnected}
           thinkingLevel={thinkingLevel as ThinkingLevel}

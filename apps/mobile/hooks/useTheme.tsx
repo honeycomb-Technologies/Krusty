@@ -24,10 +24,12 @@ const ThemeContext = createContext<ThemeContextValue>({
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const systemScheme = useColorScheme();
   const [colorScheme, setColorScheme] = useState<ColorScheme>('dark');
+  const resolvedSystemScheme: ResolvedScheme =
+    systemScheme === 'light' ? 'light' : 'dark';
 
   const resolved: ResolvedScheme =
     colorScheme === 'system'
-      ? (systemScheme ?? 'dark')
+      ? resolvedSystemScheme
       : colorScheme;
 
   const theme = resolved === 'dark' ? darkTheme : lightTheme;

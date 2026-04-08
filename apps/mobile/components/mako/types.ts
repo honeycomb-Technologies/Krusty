@@ -2,6 +2,7 @@ import type {
   ChatMessage,
   MakoCurrentRunSummary,
   MakoCurrentResponse,
+  MakoRunPriority,
   MakoRunWakeEvent,
   MakoSessionStatus,
   ModelInfo,
@@ -12,6 +13,8 @@ import type { Attachment as ChatBarAttachment } from "../chat/ChatBar";
 
 export type MakoTopLevelView = "current" | "runs" | "reports" | "status";
 export type MakoRunSection = "overview" | "wake" | "tasks" | "chat" | "artifacts";
+export type MakoKnowledgeView = "reports" | "memory";
+export type MakoKnowledgeScope = "workspace" | "all";
 export type { MakoCurrentRunSummary };
 
 export interface MakoChatContext {
@@ -57,7 +60,12 @@ export interface MakoCurrentState {
   isRefreshing: boolean;
   error: string | null;
   refresh: () => Promise<void>;
-  setCourse: (task: string, options?: { projectDir?: string | null; model?: string | null }) => Promise<string | null>;
+  setCourse: (task: string, options?: {
+    projectDir?: string | null;
+    model?: string | null;
+    startAt?: string | null;
+    priority?: MakoRunPriority | null;
+  }) => Promise<string | null>;
   isDispatching: boolean;
 }
 

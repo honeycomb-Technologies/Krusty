@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -13,8 +13,16 @@ import { useThemeContext } from "../../hooks/useTheme";
 import { ChatBar } from "../chat/ChatBar";
 import { ChatTranscript } from "../chat/ChatTranscript";
 import { GlassCard } from "../ui/GlassCard";
+import { MakoPriorityPicker } from "./MakoPriorityPicker";
+import { MakoSchedulePicker } from "./MakoSchedulePicker";
 import { MakoWakeTimeline } from "./MakoWakeTimeline";
 import { useMakoRun } from "./hooks/useMakoRun";
+import { formatPriorityLabel } from "./priority";
+import {
+  formatScheduleInputValue,
+  resolveScheduleSelection,
+  type MakoSchedulePreset,
+} from "./schedule";
 import { MakoStatusBadge } from "./MakoStatusBadge";
 import { MakoTopBar } from "./MakoTopBar";
 import { MakoTopNav } from "./MakoTopNav";
@@ -23,6 +31,7 @@ import {
   formatProjectLabel,
   formatRelativeTime,
   formatTimestamp,
+  getRunPriority,
   getRunDisplayStatus,
   getRuntimeLabel,
 } from "./utils";
@@ -49,6 +58,13 @@ export function MakoRunView({
   const [runSection, setRunSection] = useState<
     "overview" | "wake" | "tasks" | "chat" | "artifacts"
   >("overview");
+  const [schedulePreset, setSchedulePreset] = useState<MakoSchedulePreset>("30m");
+  const [customSchedule, setCustomSchedule] = useState("");
+  const [priority, setPriority] = useState(getRunPriority(summary ?? { runtime: null }));
+  const [isScheduling, setIsScheduling] = useState(false);
+  const [isSavingPriority, setIsSavingPriority] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [composerReserveHeight, setComposerReserveHeight] = useState(150);
   const { status, wake, isLoading, refresh } = useMakoRun(runId, true);
 
   const displayStatus = getRunDisplayStatus(summary ?? {
@@ -66,23 +82,104 @@ export function MakoRunView({
       failed: tasks.filter((task) => task.status === "failed").length,
     };
   }, [status?.tasks]);
+  const cadence = status?.cadence ?? summary?.cadence ?? {
+    tick_interval_secs: 30,
+    max_ticks: 1000,
+  };
+  const runtimeStatus = status?.runtime?.status ?? null;
+  const runtimePriority = status?.runtime?.priority ?? summary?.runtime?.priority ?? "normal";
+  const nextWakeAt = status?.runtime?.next_wake_at ?? summary?.runtime?.next_wake_at;
+  const schedule = resolveScheduleSelection(schedulePreset, customSchedule);
+  const resumeLabel = runtimeStatus === "sleeping" ? "Wake now" : "Resume";
+  const showPause = runtimeStatus !== "sleeping" && runtimeStatus !== "paused";
+  const showResume = runtimeStatus !== "running";
+
+  useEffect(() => {
+    setPriority(runtimePriority);
+  }, [runtimePriority]);
+
+  useEffect(() => {
+    setCustomSchedule(formatScheduleInputValue(nextWakeAt));
+  }, [nextWakeAt]);
 
   const handlePause = async () => {
     if (!client) {
       return;
     }
+    setActionError(null);
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    await client.pauseMakoSession(runId);
-    await refresh();
+    try {
+      await client.pauseMakoSession(runId);
+      await refresh();
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : "Failed to pause this run.",
+      );
+    }
   };
 
   const handleResume = async () => {
     if (!client) {
       return;
     }
+    setActionError(null);
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    await client.resumeMakoSession(runId);
-    await refresh();
+    try {
+      await client.resumeMakoSession(runId);
+      await refresh();
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : "Failed to wake this run.",
+      );
+    }
+  };
+
+  const handleSchedule = async () => {
+    if (!client) {
+      return;
+    }
+    if (schedule.error) {
+      setActionError(schedule.error);
+      return;
+    }
+    const startAt = schedule.startAt;
+    if (!startAt) {
+      setActionError("Choose a future wake time before rescheduling.");
+      return;
+    }
+    setActionError(null);
+    setIsScheduling(true);
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    try {
+      await client.scheduleMakoSession(runId, startAt);
+      await refresh();
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : "Failed to reschedule this run.",
+      );
+    } finally {
+      setIsScheduling(false);
+    }
+  };
+
+  const handlePriorityChange = async (nextPriority: typeof priority) => {
+    if (!client) {
+      return;
+    }
+    setPriority(nextPriority);
+    setActionError(null);
+    setIsSavingPriority(true);
+    try {
+      await client.setMakoSessionPriority(runId, nextPriority);
+      await refresh();
+    } catch (error) {
+      setPriority(runtimePriority);
+      setActionError(
+        error instanceof Error ? error.message : "Failed to update priority.",
+      );
+    } finally {
+      setIsSavingPriority(false);
+    }
   };
 
   return (
@@ -133,6 +230,11 @@ export function MakoRunView({
                 <OverviewCard label="Completed" value={String(taskStats.completed)} />
               </View>
 
+              <View style={styles.metricsRow}>
+                <OverviewCard label="Tick interval" value={`${cadence.tick_interval_secs}s`} />
+                <OverviewCard label="Tick budget" value={String(cadence.max_ticks)} />
+              </View>
+
               <GlassCard style={styles.card}>
                 <Text style={[styles.cardTitle, { color: t.foreground }]}>
                   Run state
@@ -148,27 +250,94 @@ export function MakoRunView({
                 </View>
               </GlassCard>
 
+              <GlassCard style={styles.card}>
+                <Text style={[styles.cardTitle, { color: t.foreground }]}>
+                  Run priority
+                </Text>
+                <Text style={[styles.cardBody, { color: t.mutedForeground }]}>
+                  {formatPriorityLabel(runtimePriority)}
+                </Text>
+                <View style={styles.scheduleWrap}>
+                  <MakoPriorityPicker
+                    value={priority}
+                    onChange={(nextPriority) => {
+                      void handlePriorityChange(nextPriority);
+                    }}
+                  />
+                </View>
+                {isSavingPriority ? (
+                  <Text style={[styles.metaText, { color: t.mutedForeground }]}>
+                    Saving priority...
+                  </Text>
+                ) : null}
+              </GlassCard>
+
+              <GlassCard style={styles.card}>
+                <Text style={[styles.cardTitle, { color: t.foreground }]}>
+                  Course timing
+                </Text>
+                <Text style={[styles.cardBody, { color: t.mutedForeground }]}>
+                  {nextWakeAt
+                    ? `Next wake is ${formatTimestamp(nextWakeAt)}.`
+                    : "No future wake is set right now."}
+                </Text>
+                <View style={styles.scheduleWrap}>
+                  <MakoSchedulePicker
+                    value={schedulePreset}
+                    onChange={setSchedulePreset}
+                    includeImmediate={false}
+                    subject="run"
+                    customValue={customSchedule}
+                    onCustomValueChange={setCustomSchedule}
+                    customError={schedulePreset === "custom" ? schedule.error : null}
+                  />
+                </View>
+                <View style={styles.actionRow}>
+                  <ActionButton
+                    label={isScheduling ? "Scheduling..." : "Reschedule"}
+                    tone="primary"
+                    disabled={
+                      isScheduling ||
+                      (schedulePreset === "custom" && schedule.error !== null)
+                    }
+                    onPress={() => {
+                      void handleSchedule();
+                    }}
+                  />
+                </View>
+              </GlassCard>
+
               <View style={styles.actionRow}>
-                <ActionButton
-                  label="Pause"
-                  tone="neutral"
-                  onPress={() => {
-                    void handlePause();
-                  }}
-                />
-                <ActionButton
-                  label="Resume"
-                  tone="primary"
-                  onPress={() => {
-                    void handleResume();
-                  }}
-                />
+                {showPause ? (
+                  <ActionButton
+                    label="Pause"
+                    tone="neutral"
+                    onPress={() => {
+                      void handlePause();
+                    }}
+                  />
+                ) : null}
+                {showResume ? (
+                  <ActionButton
+                    label={resumeLabel}
+                    tone="primary"
+                    onPress={() => {
+                      void handleResume();
+                    }}
+                  />
+                ) : null}
                 <ActionButton
                   label="Cancel"
                   tone="danger"
                   onPress={() => onDeleteRun(runId)}
                 />
               </View>
+
+              {actionError ? (
+                <Text style={[styles.errorText, { color: t.error }]}>
+                  {actionError}
+                </Text>
+              ) : null}
             </ScrollView>
           ) : null}
 
@@ -229,13 +398,14 @@ export function MakoRunView({
                     </Text>
                   </View>
                 }
-                bottomPadding={150}
+                bottomPadding={composerReserveHeight}
                 showPlanTracker={false}
               />
 
               <ChatBar
                 onSend={chat.onSend}
                 onStop={chat.onStop}
+                onHeightChange={setComposerReserveHeight}
                 isStreaming={chat.isStreaming}
                 disabled={!chat.sessionId}
                 thinkingLevel={chat.thinkingLevel}
@@ -313,10 +483,12 @@ function OverviewCard({
 function ActionButton({
   label,
   tone,
+  disabled = false,
   onPress,
 }: {
   label: string;
   tone: "primary" | "neutral" | "danger";
+  disabled?: boolean;
   onPress: () => void;
 }) {
   const { theme } = useThemeContext();
@@ -330,11 +502,18 @@ function ActionButton({
 
   return (
     <Pressable
+      disabled={disabled}
       onPress={() => {
         void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
         onPress();
       }}
-      style={[styles.actionButton, { backgroundColor: palette.backgroundColor }]}
+      style={[
+        styles.actionButton,
+        {
+          backgroundColor: palette.backgroundColor,
+          opacity: disabled ? 0.6 : 1,
+        },
+      ]}
     >
       <Text style={[styles.actionLabel, { color: palette.color }]}>{label}</Text>
     </Pressable>
@@ -396,6 +575,9 @@ const styles = StyleSheet.create({
     gap: 12,
     marginTop: 14,
   },
+  scheduleWrap: {
+    marginTop: 14,
+  },
   metaText: {
     fontSize: 12,
     fontWeight: "500",
@@ -403,6 +585,10 @@ const styles = StyleSheet.create({
   actionRow: {
     flexDirection: "row",
     gap: 10,
+  },
+  errorText: {
+    fontSize: 13,
+    lineHeight: 18,
   },
   actionButton: {
     flex: 1,

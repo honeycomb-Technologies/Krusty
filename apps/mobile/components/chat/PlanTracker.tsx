@@ -12,7 +12,8 @@ export function PlanTracker() {
   const t = theme.colors;
   const isDark = theme.scheme === "dark";
 
-  const items = usePlanStore((s) => s.items);
+  const planItems = usePlanStore((s) => s.items);
+  const items = planItems ?? [];
   const isVisible = usePlanStore((s) => s.isVisible);
 
   if (!isVisible || items.length === 0) return null;

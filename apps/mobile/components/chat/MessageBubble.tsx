@@ -100,7 +100,7 @@ export function MessageBubble({
       )}
 
       {!isUser && (
-        <>
+        <View style={styles.assistantWrap}>
           {(message.thinking || (isLast && isThinking)) && (
             <ThinkingBlock
               content={message.thinking ?? ""}
@@ -185,7 +185,7 @@ export function MessageBubble({
               ))}
             </View>
           )}
-        </>
+        </View>
       )}
     </View>
   );
@@ -232,14 +232,18 @@ function ThinkingBlock({
 
 const styles = StyleSheet.create({
   container: {
-    marginVertical: 6,
-    gap: 8,
+    marginTop: 4,
+    marginBottom: 10,
   },
   containerUser: {
     alignItems: "flex-end",
   },
+  assistantWrap: {
+    maxWidth: "92%",
+    gap: 10,
+  },
   userWrap: {
-    maxWidth: "85%",
+    maxWidth: "84%",
     gap: 6,
   },
   userQueuedWrap: {
@@ -262,7 +266,8 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   assistantText: {
-    paddingVertical: 4,
+    paddingLeft: 2,
+    paddingVertical: 2,
   },
   cursor: {
     width: 2,
@@ -272,7 +277,7 @@ const styles = StyleSheet.create({
     opacity: 0.8,
   },
   toolSection: {
-    gap: 8,
+    gap: 6,
   },
   toolLabel: {
     fontSize: 12,
@@ -283,7 +288,7 @@ const styles = StyleSheet.create({
   thinkingBlock: {
     borderLeftWidth: 2,
     paddingLeft: 12,
-    paddingVertical: 4,
+    paddingVertical: 3,
   },
   thinkingHeader: {
     flexDirection: "row",
