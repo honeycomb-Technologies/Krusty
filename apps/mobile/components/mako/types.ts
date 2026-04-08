@@ -2,6 +2,7 @@ import type {
   ChatMessage,
   MakoCurrentRunSummary,
   MakoCurrentResponse,
+  MakoRunPriority,
   MakoRunWakeEvent,
   MakoSessionStatus,
   ModelInfo,
@@ -57,7 +58,12 @@ export interface MakoCurrentState {
   isRefreshing: boolean;
   error: string | null;
   refresh: () => Promise<void>;
-  setCourse: (task: string, options?: { projectDir?: string | null; model?: string | null; startAt?: string | null }) => Promise<string | null>;
+  setCourse: (task: string, options?: {
+    projectDir?: string | null;
+    model?: string | null;
+    startAt?: string | null;
+    priority?: MakoRunPriority | null;
+  }) => Promise<string | null>;
   isDispatching: boolean;
 }
 

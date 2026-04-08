@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useConnection } from "../../../hooks/useConnection";
-import type { MakoCurrentResponse } from "@krusty/api";
+import type { MakoCurrentResponse, MakoRunPriority } from "@krusty/api";
 
 export function useMakoCurrent(enabled: boolean) {
   const { client, isConnected } = useConnection();
@@ -37,7 +37,12 @@ export function useMakoCurrent(enabled: boolean) {
   const setCourse = useCallback(
     async (
       task: string,
-      options?: { projectDir?: string | null; model?: string | null; startAt?: string | null },
+      options?: {
+        projectDir?: string | null;
+        model?: string | null;
+        startAt?: string | null;
+        priority?: MakoRunPriority | null;
+      },
     ) => {
       if (!client || !isConnected) {
         return null;
@@ -50,6 +55,7 @@ export function useMakoCurrent(enabled: boolean) {
           projectDir: options?.projectDir ?? undefined,
           model: options?.model ?? undefined,
           startAt: options?.startAt ?? undefined,
+          priority: options?.priority ?? undefined,
         });
         await refresh();
         return response.session_id;

@@ -9,7 +9,9 @@ import {
 import * as Haptics from "../../platform/haptics";
 import { GlassCard } from "../ui/GlassCard";
 import { useThemeContext } from "../../hooks/useTheme";
+import { MakoPriorityPicker } from "./MakoPriorityPicker";
 import { MakoSchedulePicker } from "./MakoSchedulePicker";
+import type { MakoRunPriority } from "@krusty/api";
 import {
   resolveScheduleStartAt,
   type MakoSchedulePreset,
@@ -19,7 +21,7 @@ import { formatProjectLabel } from "./utils";
 interface MakoSetCourseComposerProps {
   projectDir?: string | null;
   isSubmitting: boolean;
-  onSubmit: (task: string, options?: { startAt?: string | null }) => Promise<void>;
+  onSubmit: (task: string, options?: { startAt?: string | null; priority?: MakoRunPriority | null }) => Promise<void>;
 }
 
 export function MakoSetCourseComposer({
@@ -31,6 +33,7 @@ export function MakoSetCourseComposer({
   const t = theme.colors;
   const [value, setValue] = useState("");
   const [schedulePreset, setSchedulePreset] = useState<MakoSchedulePreset>("now");
+  const [priority, setPriority] = useState<MakoRunPriority>("normal");
 
   return (
     <GlassCard style={styles.card} elevated>
@@ -70,6 +73,7 @@ export function MakoSetCourseComposer({
       />
 
       <MakoSchedulePicker value={schedulePreset} onChange={setSchedulePreset} />
+      <MakoPriorityPicker value={priority} onChange={setPriority} />
 
       <View style={styles.actions}>
         <Pressable
@@ -80,9 +84,13 @@ export function MakoSetCourseComposer({
               return;
             }
             void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-            await onSubmit(task, { startAt: resolveScheduleStartAt(schedulePreset) });
+            await onSubmit(task, {
+              startAt: resolveScheduleStartAt(schedulePreset),
+              priority,
+            });
             setValue("");
             setSchedulePreset("now");
+            setPriority("normal");
           }}
           style={[
             styles.button,

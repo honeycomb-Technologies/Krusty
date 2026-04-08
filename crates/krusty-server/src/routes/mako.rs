@@ -53,6 +53,7 @@ struct DispatchRequest {
     project_dir: Option<String>,
     model: Option<String>,
     start_at: Option<String>,
+    priority: Option<MakoRunPriority>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,6 +186,7 @@ async fn dispatch(
     .unwrap_or_else(|| workspace_scope.base_dir.to_string_lossy().into_owned());
     let start_at = parse_requested_wake_at(req.start_at.as_deref())?;
     let model = trimmed_nonempty(req.model.as_deref());
+    let priority = req.priority.unwrap_or(MakoRunPriority::Normal);
 
     let session_id = session_manager.create_session_for_user_with_config(
         task,
@@ -196,6 +198,8 @@ async fn dispatch(
         None,
         SessionType::Mako,
     )?;
+    MakoRuntimeStateStore::new(Database::new(&state.db_path)?)
+        .set_priority(&session_id, priority)?;
 
     let content_json = serde_json::json!([{ "type": "text", "text": task }]).to_string();
     session_manager.save_message(&session_id, "user", &content_json)?;
@@ -955,6 +959,7 @@ mod tests {
                 project_dir: None,
                 model: Some("  openai/gpt-5  ".to_string()),
                 start_at: None,
+                priority: None,
             }),
         )
         .await
@@ -984,6 +989,7 @@ mod tests {
                 project_dir: Some("repo".to_string()),
                 model: None,
                 start_at: None,
+                priority: None,
             }),
         )
         .await
@@ -1013,6 +1019,7 @@ mod tests {
                 project_dir: None,
                 model: None,
                 start_at: None,
+                priority: None,
             }),
         )
         .await;
@@ -1041,6 +1048,7 @@ mod tests {
                 project_dir: Some(outside_root.to_string_lossy().to_string()),
                 model: None,
                 start_at: None,
+                priority: None,
             }),
         )
         .await;
@@ -1062,6 +1070,7 @@ mod tests {
                 project_dir: None,
                 model: None,
                 start_at: Some(wake_at.to_rfc3339()),
+                priority: None,
             }),
         )
         .await
@@ -1096,6 +1105,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_persists_requested_priority() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let (_, Json(response)) = dispatch(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Json(DispatchRequest {
+                task: "Escalate production fix".to_string(),
+                project_dir: None,
+                model: None,
+                start_at: None,
+                priority: Some(MakoRunPriority::High),
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("dispatch should succeed"));
+
+        let runtime_store = MakoRuntimeStateStore::new(
+            Database::new(&state.db_path).expect("database should open"),
+        );
+        let runtime = runtime_store
+            .get_state(&response.session_id)
+            .expect("runtime lookup should succeed")
+            .expect("runtime should exist");
+        assert_eq!(runtime.priority, MakoRunPriority::High);
+    }
+
+    #[tokio::test]
     async fn schedule_session_can_reschedule_existing_run() {
         let (state, _temp_dir) = create_test_state();
         create_test_user(&state, "alice");
@@ -1108,6 +1146,7 @@ mod tests {
                 project_dir: None,
                 model: None,
                 start_at: None,
+                priority: None,
             }),
         )
         .await

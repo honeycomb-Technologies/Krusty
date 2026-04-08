@@ -136,6 +136,7 @@ export function MakoCurrentView({
             projectDir: workspaceDirectory ?? undefined,
             model: model ?? undefined,
             startAt: options?.startAt ?? undefined,
+            priority: options?.priority ?? undefined,
           });
           if (runId) {
             await onCourseSet(runId);
