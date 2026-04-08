@@ -68,6 +68,10 @@ export function MakoStatusView({ state, onSelectRun }: MakoStatusViewProps) {
           label="Scheduled"
           value={String(status?.scheduled_count ?? 0)}
         />
+        <StatusCard
+          label="High priority"
+          value={String(status?.high_priority_count ?? 0)}
+        />
         <StatusCard label="Paused" value={String(status?.paused_count ?? 0)} />
         <StatusCard label="Failed" value={String(status?.failed_count ?? 0)} />
         <StatusCard label="Tick interval" value={cadence.tickIntervalLabel} />

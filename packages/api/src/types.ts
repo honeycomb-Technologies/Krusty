@@ -256,6 +256,7 @@ export interface DelegatedRunResponse {
 
 export type MakoRuntimeStatus = 'idle' | 'running' | 'sleeping' | 'awaiting_input' | 'paused' | 'error' | 'cancelled';
 export type MakoHomeStatus = 'awake' | 'sleeping' | 'paused' | 'blocked' | 'idle';
+export type MakoRunPriority = 'low' | 'normal' | 'high';
 export type AutonomousTaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 
 export interface MakoDispatchResponse {
@@ -289,6 +290,7 @@ export interface MakoRuntimeState {
   last_error?: string | null;
   current_run_id?: string | null;
   last_wake_reason?: string | null;
+  priority: MakoRunPriority;
   updated_at: string;
 }
 
@@ -332,6 +334,7 @@ export interface MakoStatusSummary {
   running_count: number;
   sleeping_count: number;
   scheduled_count: number;
+  high_priority_count: number;
   paused_count: number;
   waiting_count: number;
   failed_count: number;

@@ -5,8 +5,7 @@ import { useThemeContext } from "../../hooks/useTheme";
 import type { MakoCurrentRunSummary } from "@krusty/api";
 import {
   describeRun,
-  formatProjectLabel,
-  formatRelativeTime,
+  formatRunMeta,
   getRunDisplayStatus,
 } from "./utils";
 import { MakoStatusBadge } from "./MakoStatusBadge";
@@ -54,7 +53,7 @@ export function MakoRunList({
                   style={[styles.meta, { color: t.mutedForeground }]}
                   numberOfLines={1}
                 >
-                  {formatProjectLabel(run.project_dir)} • {formatRelativeTime(run.updated_at)}
+                  {formatRunMeta(run)}
                 </Text>
               </View>
               <MakoStatusBadge status={getRunDisplayStatus(run)} />

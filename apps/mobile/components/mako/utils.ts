@@ -2,9 +2,11 @@ import type {
   AutonomousTask,
   MakoCurrentRunSummary,
   MakoHomeStatus,
+  MakoRunPriority,
   MakoRunWakeEvent,
   MakoSessionStatus,
 } from "@krusty/api";
+import { formatPriorityLabel } from "./priority";
 
 function completedTaskIds(tasks: AutonomousTask[]): Set<string> {
   return new Set(
@@ -60,6 +62,22 @@ export function formatProjectLabel(path?: string | null): string {
     return path;
   }
   return parts.slice(-2).join("/");
+}
+
+export function getRunPriority(
+  run: Pick<MakoCurrentRunSummary, "runtime">,
+): MakoRunPriority {
+  return run.runtime?.priority ?? "normal";
+}
+
+export function formatRunMeta(summary: MakoCurrentRunSummary): string {
+  const parts = [formatProjectLabel(summary.project_dir)];
+  const priority = getRunPriority(summary);
+  if (priority !== "normal") {
+    parts.push(formatPriorityLabel(priority));
+  }
+  parts.push(formatRelativeTime(summary.updated_at));
+  return parts.join(" • ");
 }
 
 export function getRunDisplayStatus(

@@ -30,6 +30,7 @@ import type {
   ReportSummary,
   MakoDispatchResponse,
   MakoCurrentResponse,
+  MakoRunPriority,
   MakoSessionSummary,
   MakoSessionStatus,
   SimpleOkResponse,
@@ -422,6 +423,13 @@ export class KrustyClient {
     return this.request(`/mako/sessions/${id}/schedule`, {
       method: 'POST',
       body: JSON.stringify({ start_at: startAt }),
+    });
+  }
+
+  async setMakoSessionPriority(id: string, priority: MakoRunPriority): Promise<SimpleOkResponse> {
+    return this.request(`/mako/sessions/${id}/priority`, {
+      method: 'POST',
+      body: JSON.stringify({ priority }),
     });
   }
 

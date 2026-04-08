@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -13,9 +13,11 @@ import { useThemeContext } from "../../hooks/useTheme";
 import { ChatBar } from "../chat/ChatBar";
 import { ChatTranscript } from "../chat/ChatTranscript";
 import { GlassCard } from "../ui/GlassCard";
+import { MakoPriorityPicker } from "./MakoPriorityPicker";
 import { MakoSchedulePicker } from "./MakoSchedulePicker";
 import { MakoWakeTimeline } from "./MakoWakeTimeline";
 import { useMakoRun } from "./hooks/useMakoRun";
+import { formatPriorityLabel } from "./priority";
 import {
   resolveScheduleStartAt,
   type MakoSchedulePreset,
@@ -28,6 +30,7 @@ import {
   formatProjectLabel,
   formatRelativeTime,
   formatTimestamp,
+  getRunPriority,
   getRunDisplayStatus,
   getRuntimeLabel,
 } from "./utils";
@@ -55,7 +58,9 @@ export function MakoRunView({
     "overview" | "wake" | "tasks" | "chat" | "artifacts"
   >("overview");
   const [schedulePreset, setSchedulePreset] = useState<MakoSchedulePreset>("30m");
+  const [priority, setPriority] = useState(getRunPriority(summary ?? { runtime: null }));
   const [isScheduling, setIsScheduling] = useState(false);
+  const [isSavingPriority, setIsSavingPriority] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const { status, wake, isLoading, refresh } = useMakoRun(runId, true);
 
@@ -79,10 +84,15 @@ export function MakoRunView({
     max_ticks: 1000,
   };
   const runtimeStatus = status?.runtime?.status ?? null;
+  const runtimePriority = status?.runtime?.priority ?? summary?.runtime?.priority ?? "normal";
   const nextWakeAt = status?.runtime?.next_wake_at ?? summary?.runtime?.next_wake_at;
   const resumeLabel = runtimeStatus === "sleeping" ? "Wake now" : "Resume";
   const showPause = runtimeStatus !== "sleeping" && runtimeStatus !== "paused";
   const showResume = runtimeStatus !== "running";
+
+  useEffect(() => {
+    setPriority(runtimePriority);
+  }, [runtimePriority]);
 
   const handlePause = async () => {
     if (!client) {
@@ -136,6 +146,26 @@ export function MakoRunView({
       );
     } finally {
       setIsScheduling(false);
+    }
+  };
+
+  const handlePriorityChange = async (nextPriority: typeof priority) => {
+    if (!client) {
+      return;
+    }
+    setPriority(nextPriority);
+    setActionError(null);
+    setIsSavingPriority(true);
+    try {
+      await client.setMakoSessionPriority(runId, nextPriority);
+      await refresh();
+    } catch (error) {
+      setPriority(runtimePriority);
+      setActionError(
+        error instanceof Error ? error.message : "Failed to update priority.",
+      );
+    } finally {
+      setIsSavingPriority(false);
     }
   };
 
@@ -205,6 +235,28 @@ export function MakoRunView({
                     {formatTimestamp(status?.runtime?.updated_at)}
                   </Text>
                 </View>
+              </GlassCard>
+
+              <GlassCard style={styles.card}>
+                <Text style={[styles.cardTitle, { color: t.foreground }]}>
+                  Run priority
+                </Text>
+                <Text style={[styles.cardBody, { color: t.mutedForeground }]}>
+                  {formatPriorityLabel(runtimePriority)}
+                </Text>
+                <View style={styles.scheduleWrap}>
+                  <MakoPriorityPicker
+                    value={priority}
+                    onChange={(nextPriority) => {
+                      void handlePriorityChange(nextPriority);
+                    }}
+                  />
+                </View>
+                {isSavingPriority ? (
+                  <Text style={[styles.metaText, { color: t.mutedForeground }]}>
+                    Saving priority...
+                  </Text>
+                ) : null}
               </GlassCard>
 
               <GlassCard style={styles.card}>

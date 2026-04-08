@@ -19,8 +19,8 @@ use krusty_core::ai::client::CallOptions;
 use krusty_core::ai::types::{ModelMessage, Role};
 use krusty_core::plan::PlanManager;
 use krusty_core::storage::{
-    Database, MakoRuntimeStateStatus, MakoRuntimeStateStore, ProjectSettings, SessionManager,
-    SessionType,
+    Database, MakoRunPriority, MakoRuntimeStateStatus, MakoRuntimeStateStore, ProjectSettings,
+    SessionManager, SessionType,
 };
 use krusty_core::tools::registry::PermissionMode;
 
@@ -610,6 +610,10 @@ fn apply_runtime_event_state(
     let existing_wake_reason = existing_state
         .as_ref()
         .and_then(|state| state.last_wake_reason.as_deref());
+    let existing_priority = existing_state
+        .as_ref()
+        .map(|state| state.priority)
+        .unwrap_or(MakoRunPriority::Normal);
 
     match event {
         LoopEvent::AgentSleeping {
@@ -625,6 +629,7 @@ fn apply_runtime_event_state(
                 None,
                 Some(run_id),
                 existing_wake_reason.or(Some("sleep")),
+                existing_priority,
             )?;
         }
         LoopEvent::AwaitingInput { .. } => {
@@ -636,6 +641,7 @@ fn apply_runtime_event_state(
                 None,
                 Some(run_id),
                 existing_wake_reason.or(Some("awaiting_input")),
+                existing_priority,
             )?;
         }
         LoopEvent::Finished { stop_reason, .. } => {
@@ -655,6 +661,7 @@ fn apply_runtime_event_state(
                 None,
                 None,
                 existing_wake_reason,
+                existing_priority,
             )?;
         }
         LoopEvent::Error { error } => {
@@ -666,6 +673,7 @@ fn apply_runtime_event_state(
                 Some(error),
                 Some(run_id),
                 existing_wake_reason.or(Some("error")),
+                existing_priority,
             )?;
         }
         _ => {
@@ -677,6 +685,7 @@ fn apply_runtime_event_state(
                 None,
                 Some(run_id),
                 existing_wake_reason.or(Some("running")),
+                existing_priority,
             )?;
         }
     }
@@ -700,6 +709,10 @@ fn persist_runtime_state(
     last_wake_reason: Option<&str>,
 ) -> Result<()> {
     let store = MakoRuntimeStateStore::new(Database::new(db_path)?);
+    let priority = store
+        .get_state(session_id)?
+        .map(|state| state.priority)
+        .unwrap_or(MakoRunPriority::Normal);
     store.set_state(
         session_id,
         status,
@@ -708,6 +721,7 @@ fn persist_runtime_state(
         last_error,
         current_run_id,
         last_wake_reason,
+        priority,
     )
 }
 

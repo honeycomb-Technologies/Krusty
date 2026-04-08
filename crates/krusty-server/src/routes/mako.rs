@@ -15,9 +15,9 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
 use krusty_core::storage::{
-    AutonomousTask, AutonomousTaskStore, Database, MakoRuntimeState, MakoRuntimeStateStatus,
-    MakoRuntimeStateStore, ProjectSettings, RuntimeTraceEvent, SessionType, TaskStatus,
-    WorkspaceMode,
+    AutonomousTask, AutonomousTaskStore, Database, MakoRunPriority, MakoRuntimeState,
+    MakoRuntimeStateStatus, MakoRuntimeStateStore, ProjectSettings, RuntimeTraceEvent, SessionType,
+    TaskStatus, WorkspaceMode,
 };
 use krusty_core::SessionManager;
 
@@ -41,6 +41,7 @@ pub fn router() -> Router<AppState> {
         .route("/sessions/:id/events", get(observe_events))
         .route("/sessions/:id/message", post(send_message))
         .route("/sessions/:id/schedule", post(schedule_session))
+        .route("/sessions/:id/priority", post(set_priority))
         .route("/sessions/:id/pause", post(pause_session))
         .route("/sessions/:id/resume", post(resume_session))
         .route("/sessions/:id", delete(cancel_session))
@@ -62,6 +63,11 @@ struct MessageRequest {
 #[derive(Debug, Deserialize)]
 struct ScheduleRequest {
     start_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PriorityRequest {
+    priority: MakoRunPriority,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +130,7 @@ struct MakoStatusSummary {
     running_count: usize,
     sleeping_count: usize,
     scheduled_count: usize,
+    high_priority_count: usize,
     paused_count: usize,
     waiting_count: usize,
     failed_count: usize,
@@ -279,6 +286,7 @@ async fn current(
     let mut running_count = 0usize;
     let mut sleeping_count = 0usize;
     let mut scheduled_count = 0usize;
+    let mut high_priority_count = 0usize;
     let mut paused_count = 0usize;
     let mut waiting_count = 0usize;
     let mut failed_count = 0usize;
@@ -295,6 +303,13 @@ async fn current(
             &workspace_scope.base_dir,
             &workspace_scope.allowed_root,
         );
+        if runtime
+            .as_ref()
+            .map(|state| state.priority == MakoRunPriority::High)
+            .unwrap_or(false)
+        {
+            high_priority_count += 1;
+        }
 
         match classify_run_state(runtime.as_ref(), agent_state.as_str()) {
             RunState::Running => running_count += 1,
@@ -332,7 +347,7 @@ async fn current(
         });
     }
 
-    runs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    runs.sort_by(compare_run_summaries);
 
     Ok(Json(MakoCurrentResponse {
         status: MakoStatusSummary {
@@ -349,6 +364,7 @@ async fn current(
             running_count,
             sleeping_count,
             scheduled_count,
+            high_priority_count,
             paused_count,
             waiting_count,
             failed_count,
@@ -516,6 +532,25 @@ async fn schedule_session(
         .mako_runtime
         .schedule_session(&state, id, wake_at, "manual_schedule", "scheduled")
         .await?;
+    Ok(Json(OkResponse { ok: true }))
+}
+
+async fn set_priority(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Path(id): Path<String>,
+    Json(req): Json<PriorityRequest>,
+) -> Result<Json<OkResponse>, AppError> {
+    let session_manager = open_session_manager(&state)?;
+    ensure_owned_session_of_type(
+        &session_manager,
+        &id,
+        SessionType::Mako,
+        "Mako",
+        user.as_ref(),
+    )?;
+    let store = MakoRuntimeStateStore::new(Database::new(&state.db_path)?);
+    store.set_priority(&id, req.priority)?;
     Ok(Json(OkResponse { ok: true }))
 }
 
@@ -752,6 +787,69 @@ fn earlier_timestamp(current: Option<String>, candidate: Option<String>) -> Opti
     }
 }
 
+fn compare_run_summaries(
+    left: &MakoCurrentRunSummary,
+    right: &MakoCurrentRunSummary,
+) -> std::cmp::Ordering {
+    let left_priority = left
+        .runtime
+        .as_ref()
+        .map(|runtime| runtime.priority)
+        .unwrap_or(MakoRunPriority::Normal);
+    let right_priority = right
+        .runtime
+        .as_ref()
+        .map(|runtime| runtime.priority)
+        .unwrap_or(MakoRunPriority::Normal);
+    let priority_order = priority_rank(right_priority).cmp(&priority_rank(left_priority));
+    if priority_order != std::cmp::Ordering::Equal {
+        return priority_order;
+    }
+
+    let left_scheduled = left
+        .runtime
+        .as_ref()
+        .map(|runtime| {
+            runtime.status == MakoRuntimeStateStatus::Sleeping
+                && runtime.sleep_reason.as_deref() == Some("scheduled")
+        })
+        .unwrap_or(false);
+    let right_scheduled = right
+        .runtime
+        .as_ref()
+        .map(|runtime| {
+            runtime.status == MakoRuntimeStateStatus::Sleeping
+                && runtime.sleep_reason.as_deref() == Some("scheduled")
+        })
+        .unwrap_or(false);
+
+    if left_scheduled && right_scheduled {
+        let wake_order = left
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.next_wake_at.as_ref())
+            .cmp(
+                &right
+                    .runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.next_wake_at.as_ref()),
+            );
+        if wake_order != std::cmp::Ordering::Equal {
+            return wake_order;
+        }
+    }
+
+    right.updated_at.cmp(&left.updated_at)
+}
+
+fn priority_rank(priority: MakoRunPriority) -> u8 {
+    match priority {
+        MakoRunPriority::High => 2,
+        MakoRunPriority::Normal => 1,
+        MakoRunPriority::Low => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -770,15 +868,15 @@ mod tests {
     use krusty_core::skills::SkillsManager;
     use krusty_core::storage::credentials::CredentialStore;
     use krusty_core::storage::{
-        Database, MakoRuntimeStateStatus, MakoRuntimeStateStore, RuntimeTraceEvent, SessionType,
-        WorkspaceMode,
+        Database, MakoRunPriority, MakoRuntimeStateStatus, MakoRuntimeStateStore,
+        RuntimeTraceEvent, SessionType, WorkspaceMode,
     };
     use krusty_core::tools::registry::ToolRegistry;
     use krusty_core::SessionManager;
 
     use super::{
         current, dispatch, list_sessions, map_runtime_trace_event, schedule_session,
-        session_status, DispatchRequest, ScheduleRequest,
+        session_status, set_priority, DispatchRequest, PriorityRequest, ScheduleRequest,
     };
     use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::error::AppError;
@@ -1127,6 +1225,7 @@ mod tests {
                 None,
                 None,
                 Some("sleep"),
+                MakoRunPriority::Normal,
             )
             .expect("runtime state should persist");
 
@@ -1189,6 +1288,7 @@ mod tests {
                 None,
                 None,
                 Some("user"),
+                MakoRunPriority::Normal,
             )
             .expect("waiting state should persist");
         runtime_store
@@ -1200,6 +1300,7 @@ mod tests {
                 None,
                 None,
                 Some("sleep"),
+                MakoRunPriority::High,
             )
             .expect("sleeping state should persist");
 
@@ -1213,12 +1314,104 @@ mod tests {
         assert_eq!(summary.status.home_status, "blocked");
         assert_eq!(summary.status.waiting_count, 1);
         assert_eq!(summary.status.sleeping_count, 1);
+        assert_eq!(summary.status.high_priority_count, 1);
         assert_eq!(summary.status.pending_approvals_count, 1);
         assert_eq!(
             summary.status.next_wake_at.as_deref(),
             Some("2026-01-01T00:00:00Z")
         );
         assert_eq!(summary.runs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn set_priority_updates_runtime_state_and_current_ordering() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let first_session_id = session_manager
+            .create_session_for_user_with_config(
+                "First Run",
+                None,
+                Some(state.working_dir.to_string_lossy().as_ref()),
+                Some(state.working_dir.to_string_lossy().as_ref()),
+                WorkspaceMode::Selected,
+                Some("alice"),
+                None,
+                SessionType::Mako,
+            )
+            .expect("first session should create");
+        let second_session_id = session_manager
+            .create_session_for_user_with_config(
+                "Second Run",
+                None,
+                Some(state.working_dir.to_string_lossy().as_ref()),
+                Some(state.working_dir.to_string_lossy().as_ref()),
+                WorkspaceMode::Selected,
+                Some("alice"),
+                None,
+                SessionType::Mako,
+            )
+            .expect("second session should create");
+
+        let runtime_store = MakoRuntimeStateStore::new(
+            Database::new(&state.db_path).expect("database should open"),
+        );
+        runtime_store
+            .set_state(
+                &first_session_id,
+                MakoRuntimeStateStatus::Sleeping,
+                Some("2026-01-01T00:00:00Z"),
+                Some("scheduled"),
+                None,
+                None,
+                Some("dispatch"),
+                MakoRunPriority::Normal,
+            )
+            .expect("first runtime state should persist");
+        runtime_store
+            .set_state(
+                &second_session_id,
+                MakoRuntimeStateStatus::Sleeping,
+                Some("2026-01-01T01:00:00Z"),
+                Some("scheduled"),
+                None,
+                None,
+                Some("dispatch"),
+                MakoRunPriority::Low,
+            )
+            .expect("second runtime state should persist");
+
+        let Json(_) = set_priority(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Path(second_session_id.clone()),
+            Json(PriorityRequest {
+                priority: MakoRunPriority::High,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("priority update should succeed"));
+
+        let runtime = runtime_store
+            .get_state(&second_session_id)
+            .expect("runtime lookup should succeed")
+            .expect("runtime should exist");
+        assert_eq!(runtime.priority, MakoRunPriority::High);
+
+        let Json(summary) = current(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("current should succeed"));
+
+        assert_eq!(summary.status.high_priority_count, 1);
+        assert_eq!(
+            summary.runs.first().map(|run| run.session_id.as_str()),
+            Some(second_session_id.as_str())
+        );
     }
 
     #[tokio::test]

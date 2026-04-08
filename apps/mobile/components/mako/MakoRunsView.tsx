@@ -44,7 +44,7 @@ export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
       }
     >
       <Text style={[styles.description, { color: t.mutedForeground }]}>
-        Runs are grouped by where they are in the water right now.
+        Runs are grouped by where they are in the water right now, with higher-priority work surfacing first.
       </Text>
 
       <Section title="Active">

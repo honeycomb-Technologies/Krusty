@@ -43,7 +43,9 @@ pub use delegated_runs::{
     DelegatedRunScope, DelegatedRunSnapshot, DelegatedRunStartInput, DelegatedRunStore,
 };
 pub use file_activity::{FileActivityTracker, RankedFile};
-pub use mako_runtime_state::{MakoRuntimeState, MakoRuntimeStateStatus, MakoRuntimeStateStore};
+pub use mako_runtime_state::{
+    MakoRunPriority, MakoRuntimeState, MakoRuntimeStateStatus, MakoRuntimeStateStore,
+};
 pub use memories::{AgentMemory, MemoryStore, MemoryType};
 pub use messages::MessageStore;
 pub use plans::{PlanStore, PlanSummary};
