@@ -20,8 +20,8 @@ use krusty_core::ai::client::CallOptions;
 use krusty_core::ai::types::{ModelMessage, Role};
 use krusty_core::plan::PlanManager;
 use krusty_core::storage::{
-    Database, MakoRunPriority, MakoRuntimeStateStatus, MakoRuntimeStateStore, ProjectSettings,
-    SessionManager, SessionType,
+    refresh_current_snapshot, Database, MakoRunPriority, MakoRuntimeStateStatus,
+    MakoRuntimeStateStore, ProjectSettings, SessionManager, SessionType,
 };
 use krusty_core::tools::registry::PermissionMode;
 
@@ -525,6 +525,7 @@ async fn run_mako_session_inner(
     let push_service = state.push_service.clone();
     let apns_service = state.apns_service.clone();
     let user_id = session.user_id.clone();
+    let project_scope = session.project_dir.clone();
     with_registered_session_input(session_inputs, session_id.clone(), input_tx, async {
         let mut awaiting_input = false;
         let mut had_error = false;
@@ -595,6 +596,13 @@ async fn run_mako_session_inner(
             }
         }
 
+        refresh_snapshot_after_run(
+            &state.db_path,
+            project_scope.as_deref(),
+            user_id.as_deref(),
+            stop_reason.as_ref(),
+        );
+
         if !awaiting_input {
             if had_error {
                 notify_mako_error(
@@ -623,6 +631,25 @@ async fn run_mako_session_inner(
         Ok(())
     })
     .await
+}
+
+fn refresh_snapshot_after_run(
+    db_path: &Path,
+    project_dir: Option<&str>,
+    user_id: Option<&str>,
+    stop_reason: Option<&LoopStopReason>,
+) {
+    if matches!(stop_reason, Some(LoopStopReason::Sleeping) | None) {
+        return;
+    }
+
+    if let Err(error) = refresh_current_snapshot(db_path, project_dir, user_id) {
+        tracing::warn!(
+            ?error,
+            project_dir,
+            "Failed to refresh Mako current snapshot after run"
+        );
+    }
 }
 
 fn ensure_runnable_mako_session(db_path: &Path, session_id: &str) -> Result<()> {
@@ -1011,22 +1038,25 @@ mod tests {
 
     use tokio::sync::{Mutex, RwLock};
 
+    use krusty_core::agent::loop_events::LoopStopReason;
     use krusty_core::agent::{AgentCancellation, LoopEvent, LoopInput, UserHookManager};
     use krusty_core::ai::models::create_model_registry;
     use krusty_core::mcp::McpManager;
     use krusty_core::process::ProcessRegistry;
     use krusty_core::skills::SkillsManager;
     use krusty_core::storage::credentials::CredentialStore;
+    use krusty_core::storage::reports::CreateReportInput;
     use krusty_core::storage::{
-        Database, MakoRuntimeStateStatus, MakoRuntimeStateStore, SessionType, WorkspaceMode,
+        Database, MakoRuntimeStateStatus, MakoRuntimeStateStore, MemoryStore, MemoryType,
+        ReportStore, SessionType, WorkspaceMode, CURRENT_SNAPSHOT_TITLE,
     };
     use krusty_core::tools::registry::ToolRegistry;
     use krusty_core::SessionManager;
 
     use super::{
         apply_runtime_event_state, mako_notification_title, persist_runtime_state,
-        resolve_persisted_project_dir, with_registered_session_input, ActiveMakoRuntime,
-        MakoRuntimeManager,
+        refresh_snapshot_after_run, resolve_persisted_project_dir, with_registered_session_input,
+        ActiveMakoRuntime, MakoRuntimeManager,
     };
     use crate::AppState;
 
@@ -1108,6 +1138,16 @@ mod tests {
                 session_type,
             )
             .expect("session should create")
+    }
+
+    fn create_test_user(state: &AppState, user_id: &str) {
+        let db = Database::new(&state.db_path).expect("database should open");
+        db.conn()
+            .execute(
+                "INSERT INTO users (id, email, license_tier) VALUES (?1, ?2, ?3)",
+                (user_id, format!("{user_id}@example.com"), "free"),
+            )
+            .expect("user should insert");
     }
 
     #[test]
@@ -1283,5 +1323,82 @@ mod tests {
         assert_eq!(runtime.status, MakoRuntimeStateStatus::Running);
         assert_eq!(runtime.current_run_id.as_deref(), Some("run-2"));
         assert_eq!(runtime.last_wake_reason.as_deref(), Some("dispatch"));
+    }
+
+    #[tokio::test]
+    async fn refresh_snapshot_after_run_updates_stale_snapshot_content() {
+        let (state, temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        let user_root = temp_dir.join("alice-home");
+        let project_dir = user_root.join("repo");
+        std::fs::create_dir_all(&project_dir).expect("project dir should exist");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let session_id = session_manager
+            .create_session_for_user_with_config(
+                "Knowledge Run",
+                None,
+                Some(project_dir.to_string_lossy().as_ref()),
+                Some(project_dir.to_string_lossy().as_ref()),
+                WorkspaceMode::Selected,
+                Some("alice"),
+                None,
+                SessionType::Mako,
+            )
+            .expect("session should create");
+
+        let report_store =
+            ReportStore::new(Database::new(&state.db_path).expect("database should open"));
+        report_store
+            .create_report(CreateReportInput {
+                title: "Fresh findings",
+                session_id: session_id.as_str(),
+                project_dir: Some(project_dir.to_string_lossy().as_ref()),
+                report_root: None,
+                content: "Fresh findings",
+                summary: "Fresh findings",
+                tags: &[],
+                sources: &[],
+            })
+            .expect("report should persist");
+
+        let memory_store =
+            MemoryStore::new(Database::new(&state.db_path).expect("database should open"));
+        let snapshot = memory_store
+            .save(
+                MemoryType::Project,
+                CURRENT_SNAPSHOT_TITLE,
+                "Stale snapshot",
+                Some(project_dir.to_string_lossy().as_ref()),
+                Some("alice"),
+            )
+            .expect("snapshot should persist");
+        Database::new(&state.db_path)
+            .expect("database should open")
+            .conn()
+            .execute(
+                "UPDATE agent_memories SET updated_at = ?1 WHERE id = ?2",
+                ("2025-01-01T00:00:00Z", snapshot.id.as_str()),
+            )
+            .expect("snapshot should backdate");
+
+        refresh_snapshot_after_run(
+            &state.db_path,
+            Some(project_dir.to_string_lossy().as_ref()),
+            Some("alice"),
+            Some(&LoopStopReason::Completed),
+        );
+
+        let refreshed = memory_store
+            .find_by_title_in_exact_scope(
+                CURRENT_SNAPSHOT_TITLE,
+                Some(project_dir.to_string_lossy().as_ref()),
+                Some("alice"),
+            )
+            .expect("snapshot should still exist");
+
+        assert_ne!(refreshed.updated_at, "2025-01-01T00:00:00Z");
+        assert!(refreshed.content.contains("Fresh findings"));
     }
 }
