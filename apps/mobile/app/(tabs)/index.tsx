@@ -60,6 +60,7 @@ const CHAT_BAR_ZONE = 130;
 const SELECTED_MODEL_KEY = "krusty_selected_model";
 
 type WorkspaceMode = "neutral" | "selected" | "created";
+type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
 
 function sessionTypeForTab(index: number): SessionType {
   return TAB_TYPES[index] ?? "code";
@@ -117,22 +118,27 @@ function getWorkspaceMode(path: string | null): WorkspaceMode {
 
 export default function ChatScreen() {
   const { theme } = useThemeContext();
-  const { client, isConnected } = useConnection();
-  const { isDesktop } = useBreakpoint();
-  const { splashDone } = useSplashState();
-  const entrance = useEntranceAnimation(splashDone);
   const stores = useStores();
 
-  // Stores not ready yet (before connection)
   if (!stores) {
     return (
       <SafeAreaView style={[{ flex: 1, backgroundColor: theme.colors.background }]}>
-        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+        <View style={{ flex: 1, justifyContent: "center", alignItems: "center" }}>
           <KrustyLogo />
         </View>
       </SafeAreaView>
     );
   }
+
+  return <ChatScreenContent stores={stores} />;
+}
+
+function ChatScreenContent({ stores }: { stores: LoadedStores }) {
+  const { theme } = useThemeContext();
+  const { client, isConnected } = useConnection();
+  const { isDesktop } = useBreakpoint();
+  const { splashDone } = useSplashState();
+  const entrance = useEntranceAnimation(splashDone);
 
   const { sessions: sessionsStore, session: sessionStore, workspace } = stores;
 
@@ -159,6 +165,7 @@ export default function ChatScreen() {
   const fastModeEnabled = isFastModeModel(model);
 
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [defaultModelId, setDefaultModelId] = useState<string | null>(null);
   const [activeToolCallId, setActiveToolCallId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState(1);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -280,30 +287,56 @@ export default function ChatScreen() {
 
   const t = theme.colors;
 
+  const loadModelCatalog = useCallback(async () => {
+    if (!client || !isConnected) {
+      return null;
+    }
+
+    const response = await client.getModels();
+    setModels(response.models);
+    setDefaultModelId(response.default_model ?? null);
+    return response;
+  }, [client, isConnected]);
+
+  const ensureModelReady = useCallback(async () => {
+    const existingModel = sessionStore.getState().model;
+    if (existingModel) {
+      return existingModel;
+    }
+
+    let catalog = models;
+    let fallbackDefault = defaultModelId;
+
+    if (catalog.length === 0) {
+      const response = await loadModelCatalog().catch(() => null);
+      if (!response) {
+        return null;
+      }
+      catalog = response.models;
+      fallbackDefault = response.default_model ?? null;
+    }
+
+    const saved = await SecureStore.getItemAsync(SELECTED_MODEL_KEY);
+    const selectedModel =
+      saved && catalog.some((candidate) => candidate.id === saved)
+        ? saved
+        : fallbackDefault ?? catalog[0]?.id ?? null;
+
+    if (selectedModel) {
+      sessionStore.getState().setModel(selectedModel);
+    }
+
+    return selectedModel;
+  }, [defaultModelId, loadModelCatalog, models, sessionStore]);
+
   useEffect(() => {
     if (!client || !isConnected) {
       return;
     }
 
     void sessionsStore.getState().loadSessions();
-    void client
-      .getModels()
-      .then(async (response) => {
-        setModels(response.models);
-        if (!sessionStore.getState().model) {
-          const saved = await SecureStore.getItemAsync(SELECTED_MODEL_KEY);
-          const selectedModel =
-            saved && response.models.some((candidate) => candidate.id === saved)
-              ? saved
-              : response.default_model;
-
-          if (selectedModel) {
-            sessionStore.getState().setModel(selectedModel);
-          }
-        }
-      })
-      .catch(() => {});
-  }, [client, isConnected, model, sessionStore, sessionsStore]);
+    void ensureModelReady();
+  }, [client, ensureModelReady, isConnected, sessionsStore]);
 
   useEffect(() => {
     if (!client || !isConnected) {
@@ -504,8 +537,7 @@ export default function ChatScreen() {
       stopCurrentStream();
 
       try {
-        const currentModel = sessionStore.getState().model;
-        const currentThinkingLevel = sessionStore.getState().thinkingLevel;
+        await ensureModelReady();
         const session = await client.createSession(
           undefined,
           directory,
@@ -513,14 +545,7 @@ export default function ChatScreen() {
           directory ? "selected" : undefined,
           sessionTypeForTab(activeTab),
         );
-        await sessionStore.getState().loadSession(session.id);
-        if (currentModel) {
-          sessionStore.getState().setModel(currentModel);
-        }
-        if (sessionStore.getState().thinkingLevel !== currentThinkingLevel) {
-          sessionStore.getState().setThinkingLevel(currentThinkingLevel);
-        }
-        await sessionsStore.getState().loadSessions();
+        await bootstrapSession(session);
         setActiveToolCallId(null);
         setDrawerOpen(false);
         void Haptics.notificationAsync(
@@ -531,7 +556,7 @@ export default function ChatScreen() {
         return null;
       }
     },
-    [activeTab, client, sessionStore, sessionsStore, stopCurrentStream],
+    [activeTab, bootstrapSession, client, ensureModelReady, stopCurrentStream],
   );
 
   const ensureSessionForSend = useCallback(async () => {
@@ -658,6 +683,15 @@ export default function ChatScreen() {
         return;
       }
 
+      const resolvedModel = await ensureModelReady();
+      if (!resolvedModel) {
+        sessionStore.setState({
+          error:
+            "No model is available yet. Check your model settings and try again.",
+        });
+        return;
+      }
+
       const ensuredSessionId = await ensureSessionForSend();
       if (!ensuredSessionId) {
         return;
@@ -671,7 +705,7 @@ export default function ChatScreen() {
           researchEnabled,
         );
     },
-    [client, ensureSessionForSend, researchEnabled, sessionStore],
+    [client, ensureModelReady, ensureSessionForSend, researchEnabled, sessionStore],
   );
 
   const handleSessionToolApproval = useCallback(

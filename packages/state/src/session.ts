@@ -1835,17 +1835,27 @@ export function createSessionStore(
     clearSession() {
       const current = get();
       get().stopPresenceHeartbeat(current.sessionId);
-      set({ ...initialState, permissionMode: loadPermissionMode() });
+      set({
+        ...initialState,
+        permissionMode: current.permissionMode,
+        model: current.model,
+        thinkingLevel: current.thinkingLevel,
+        thinkingEnabled: current.thinkingEnabled,
+      });
       workspace.getState().clear();
     },
 
     // -- initSession --------------------------------------------------------
 
     initSession(sessionId: string, title: string) {
-      get().stopPresenceHeartbeat(get().sessionId);
+      const current = get();
+      get().stopPresenceHeartbeat(current.sessionId);
       set({
         ...initialState,
-        permissionMode: loadPermissionMode(),
+        permissionMode: current.permissionMode,
+        model: current.model,
+        thinkingLevel: current.thinkingLevel,
+        thinkingEnabled: current.thinkingEnabled,
         sessionId,
         title,
       });
@@ -1971,11 +1981,16 @@ export function createSessionStore(
           abortController.signal,
         );
       } catch (err) {
-        set({
+        set((s) => ({
           isLoading: false,
           isStreaming: false,
+          isThinking: false,
+          thinkingContent: "",
+          messages: pruneEmptyAssistantMessages(
+            finalizeTransientAssistantMessages(s.messages),
+          ),
           error: toErrorMessage(err),
-        });
+        }));
       } finally {
         get().stopStatePolling();
       }
@@ -2019,7 +2034,9 @@ export function createSessionStore(
         isStreaming: false,
         isThinking: false,
         thinkingContent: "",
-        messages: finalizeTransientAssistantMessages(s.messages),
+        messages: pruneEmptyAssistantMessages(
+          finalizeTransientAssistantMessages(s.messages),
+        ),
       }));
     },
 
