@@ -295,8 +295,21 @@ function toErrorMessage(err: unknown, fallback = "Unknown error"): string {
   return err instanceof Error ? err.message : fallback;
 }
 
+function generateRuntimeId(prefix: string): string {
+  const randomUuid = globalThis.crypto?.randomUUID?.();
+  if (typeof randomUuid === "string" && randomUuid.length > 0) {
+    return `${prefix}-${randomUuid}`;
+  }
+
+  return [
+    prefix,
+    Date.now().toString(36),
+    Math.random().toString(36).slice(2, 10),
+  ].join("-");
+}
+
 function createChatMessageId(prefix: string): string {
-  return `${prefix}-${crypto.randomUUID()}`;
+  return generateRuntimeId(prefix);
 }
 
 function buildStoredMessageId(index: number, message: ChatMessage): string {
@@ -1215,7 +1228,7 @@ export function createSessionStore(
         presenceClientId = existing;
         return existing;
       }
-      const generated = crypto.randomUUID();
+      const generated = generateRuntimeId("presence");
       storage.set(PRESENCE_CLIENT_STORAGE_KEY, generated);
       presenceClientId = generated;
       return generated;

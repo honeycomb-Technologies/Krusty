@@ -772,13 +772,22 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         return;
       }
 
-      await sessionStore
-        .getState()
-        .sendMessage(
-          trimmed,
-          attachments as SessionAttachment[],
-          researchEnabled,
-        );
+      try {
+        await sessionStore
+          .getState()
+          .sendMessage(
+            trimmed,
+            attachments as SessionAttachment[],
+            researchEnabled,
+          );
+      } catch (err) {
+        sessionStore.setState({
+          error:
+            err instanceof Error
+              ? err.message
+              : "Failed to send message.",
+        });
+      }
     },
     [client, ensureModelReady, ensureSessionForSend, researchEnabled, sessionStore],
   );
