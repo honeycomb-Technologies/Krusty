@@ -532,33 +532,37 @@ fn apply_runtime_event_state(
     run_id: &str,
     event: &LoopEvent,
 ) -> Result<()> {
+    let store = MakoRuntimeStateStore::new(Database::new(db_path)?);
+    let existing_state = store.get_state(session_id)?;
+    let existing_wake_reason = existing_state
+        .as_ref()
+        .and_then(|state| state.last_wake_reason.as_deref());
+
     match event {
         LoopEvent::AgentSleeping {
             duration_secs,
             reason,
         } => {
             let wake_at = chrono::Utc::now() + chrono::Duration::seconds(*duration_secs as i64);
-            persist_runtime_state(
-                db_path,
+            store.set_state(
                 session_id,
                 MakoRuntimeStateStatus::Sleeping,
                 Some(&wake_at.to_rfc3339()),
                 Some(reason),
                 None,
-                None,
-                Some("sleep"),
+                Some(run_id),
+                existing_wake_reason.or(Some("sleep")),
             )?;
         }
         LoopEvent::AwaitingInput { .. } => {
-            persist_runtime_state(
-                db_path,
+            store.set_state(
                 session_id,
                 MakoRuntimeStateStatus::AwaitingInput,
                 None,
                 None,
                 None,
                 Some(run_id),
-                Some("awaiting_input"),
+                existing_wake_reason.or(Some("awaiting_input")),
             )?;
         }
         LoopEvent::Finished { stop_reason, .. } => {
@@ -570,30 +574,36 @@ fn apply_runtime_event_state(
                 }
                 _ => MakoRuntimeStateStatus::Idle,
             };
-            persist_runtime_state(db_path, session_id, status, None, None, None, None, None)?;
+            store.set_state(
+                session_id,
+                status,
+                None,
+                None,
+                None,
+                None,
+                existing_wake_reason,
+            )?;
         }
         LoopEvent::Error { error } => {
-            persist_runtime_state(
-                db_path,
+            store.set_state(
                 session_id,
                 MakoRuntimeStateStatus::Error,
                 None,
                 None,
                 Some(error),
                 Some(run_id),
-                Some("error"),
+                existing_wake_reason.or(Some("error")),
             )?;
         }
         _ => {
-            persist_runtime_state(
-                db_path,
+            store.set_state(
                 session_id,
                 MakoRuntimeStateStatus::Running,
                 None,
                 None,
                 None,
                 Some(run_id),
-                Some("running"),
+                existing_wake_reason.or(Some("running")),
             )?;
         }
     }
