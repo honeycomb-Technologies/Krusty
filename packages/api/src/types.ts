@@ -701,11 +701,11 @@ export interface ReportSummary {
   summary: string;
   tags: string[];
   created_at: string;
+  project_dir?: string;
 }
 
 export interface Report extends ReportSummary {
   content: string;
   sources: string[];
   session_id: string;
-  project_dir?: string;
 }

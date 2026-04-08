@@ -114,7 +114,9 @@ export function MakoScreen({
             />
           ) : null}
 
-          {navigation.topLevel === "reports" ? <MakoReportsView /> : null}
+          {navigation.topLevel === "reports" ? (
+            <MakoReportsView workspaceDirectory={workspaceDirectory} />
+          ) : null}
           {navigation.topLevel === "status" ? (
             <MakoStatusView
               state={current}

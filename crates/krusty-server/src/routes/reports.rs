@@ -27,6 +27,7 @@ pub struct ReportSummaryResponse {
     pub summary: String,
     pub tags: Vec<String>,
     pub created_at: String,
+    pub project_dir: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -76,6 +77,7 @@ async fn list_reports(
             summary: report.summary,
             tags: report.tags,
             created_at: report.created_at,
+            project_dir: report.project_dir,
         })
         .collect();
 
@@ -250,6 +252,10 @@ mod tests {
 
         assert_eq!(response.reports.len(), 1);
         assert_eq!(response.reports[0].title, "Workspace Report");
+        assert_eq!(
+            response.reports[0].project_dir.as_deref(),
+            Some(project_dir.to_string_lossy().as_ref())
+        );
     }
 
     #[tokio::test]
