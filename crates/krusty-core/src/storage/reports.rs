@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use super::database::Database;
@@ -66,8 +66,18 @@ impl ReportStore {
             ],
         )?;
 
-        if let Err(e) = write_report_to_disk(input.title, input.content, input.report_root) {
-            tracing::warn!("Failed to write report to disk: {e}");
+        match self.get_report(&id) {
+            Ok(Some(report)) => {
+                if let Err(error) = write_report_to_disk(&report, input.report_root) {
+                    tracing::warn!(report_id = %id, "Failed to write report to disk: {error}");
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(report_id = %id, "Created report could not be reloaded for disk write");
+            }
+            Err(error) => {
+                tracing::warn!(report_id = %id, "Failed to reload report for disk write: {error}");
+            }
         }
 
         Ok(id)
@@ -258,7 +268,7 @@ fn row_to_report(row: &rusqlite::Row<'_>) -> rusqlite::Result<Report> {
 }
 
 fn slugify(title: &str) -> String {
-    title
+    let slug = title
         .to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
@@ -266,22 +276,88 @@ fn slugify(title: &str) -> String {
         .split('-')
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
-        .join("-")
+        .join("-");
+
+    if slug.is_empty() {
+        "report".to_string()
+    } else {
+        slug
+    }
 }
 
-fn write_report_to_disk(title: &str, content: &str, report_root: Option<&Path>) -> Result<()> {
+#[derive(Serialize)]
+struct ReportFrontmatter<'a> {
+    title: &'a str,
+    created: &'a str,
+    session_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_dir: Option<&'a str>,
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    tags: &'a [String],
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    sources: &'a [String],
+}
+
+fn slice_is_empty(values: &[String]) -> bool {
+    values.is_empty()
+}
+
+fn write_report_to_disk(report: &Report, report_root: Option<&Path>) -> Result<PathBuf> {
     let reports_dir = report_root
         .map(paths::project_reports_dir)
         .unwrap_or_else(|| paths::config_dir().join("reports"));
     std::fs::create_dir_all(&reports_dir).context("creating reports directory")?;
 
-    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    let slug = slugify(title);
-    let filename = format!("{date}-{slug}.md");
-    let path = reports_dir.join(filename);
+    let path = next_report_path(report, &reports_dir);
+    let markdown = render_report_markdown(report)?;
 
-    std::fs::write(&path, content).context("writing report file")?;
-    Ok(())
+    std::fs::write(&path, markdown).context("writing report file")?;
+    Ok(path)
+}
+
+fn report_date_prefix(created_at: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|_| chrono::Utc::now().format("%Y-%m-%d").to_string())
+}
+
+fn next_report_path(report: &Report, reports_dir: &Path) -> PathBuf {
+    let date = report_date_prefix(&report.created_at);
+    let slug = slugify(&report.title);
+    let base = reports_dir.join(format!("{date}-{slug}.md"));
+    if !base.exists() {
+        return base;
+    }
+
+    let short_id: String = report.id.chars().filter(|c| *c != '-').take(8).collect();
+    let fallback = reports_dir.join(format!("{date}-{slug}-{short_id}.md"));
+    if !fallback.exists() {
+        return fallback;
+    }
+
+    for index in 2.. {
+        let candidate = reports_dir.join(format!("{date}-{slug}-{short_id}-{index}.md"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    unreachable!("report path search should always find an available file name");
+}
+
+fn render_report_markdown(report: &Report) -> Result<String> {
+    let frontmatter = ReportFrontmatter {
+        title: &report.title,
+        created: &report.created_at,
+        session_id: &report.session_id,
+        project_dir: report.project_dir.as_deref(),
+        tags: &report.tags,
+        sources: &report.sources,
+    };
+    let yaml = serde_yaml::to_string(&frontmatter).context("serializing report frontmatter")?;
+    let yaml = yaml.strip_prefix("---\n").unwrap_or(yaml.as_str());
+    let body = report.content.trim_start_matches('\n');
+    Ok(format!("---\n{}---\n\n{}", yaml, body))
 }
 
 #[cfg(test)]
@@ -497,6 +573,53 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(entries.len(), 1);
+        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+        assert!(content.contains("title: Workspace Report"));
+        assert!(content.contains("session_id: sess-1"));
+        assert!(content.contains("project_dir:"));
+        assert!(content.contains("\n---\n\ncontent"));
+    }
+
+    #[test]
+    fn duplicate_titles_do_not_overwrite_report_files() {
+        let (store, tmp) = create_store();
+        let project_root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&project_root).unwrap();
+
+        store
+            .create_report(CreateReportInput {
+                title: "Repeated Title",
+                session_id: "sess-1",
+                project_dir: Some(project_root.to_str().unwrap()),
+                report_root: Some(&project_root),
+                content: "first",
+                summary: "",
+                tags: &[],
+                sources: &[],
+            })
+            .unwrap();
+        store
+            .create_report(CreateReportInput {
+                title: "Repeated Title",
+                session_id: "sess-1",
+                project_dir: Some(project_root.to_str().unwrap()),
+                report_root: Some(&project_root),
+                content: "second",
+                summary: "",
+                tags: &[],
+                sources: &[],
+            })
+            .unwrap();
+
+        let reports_dir = crate::paths::project_reports_dir(&project_root);
+        let mut names = std::fs::read_dir(reports_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        names.sort();
+
+        assert_eq!(names.len(), 2);
+        assert_ne!(names[0], names[1]);
     }
 
     #[test]
@@ -505,6 +628,7 @@ mod tests {
         assert_eq!(slugify("Hello, World!"), "hello-world");
         assert_eq!(slugify("  spaces  "), "spaces");
         assert_eq!(slugify("a--b"), "a-b");
+        assert_eq!(slugify("!!!"), "report");
     }
 
     #[test]
