@@ -50,6 +50,7 @@ struct DispatchRequest {
     task: String,
     project_dir: Option<String>,
     model: Option<String>,
+    start_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +117,7 @@ struct MakoStatusSummary {
     total_count: usize,
     running_count: usize,
     sleeping_count: usize,
+    scheduled_count: usize,
     paused_count: usize,
     waiting_count: usize,
     failed_count: usize,
@@ -168,6 +170,7 @@ async fn dispatch(
         &workspace_scope.allowed_root,
     )?
     .unwrap_or_else(|| workspace_scope.base_dir.to_string_lossy().into_owned());
+    let start_at = parse_requested_wake_at(req.start_at.as_deref())?;
     let model = trimmed_nonempty(req.model.as_deref());
 
     let session_id = session_manager.create_session_for_user_with_config(
@@ -183,16 +186,31 @@ async fn dispatch(
 
     let content_json = serde_json::json!([{ "type": "text", "text": task }]).to_string();
     session_manager.save_message(&session_id, "user", &content_json)?;
-    state
-        .mako_runtime
-        .start_or_restart_session(state.clone(), session_id.clone(), "dispatch")
-        .await?;
+    let status = if let Some(wake_at) = start_at {
+        state
+            .mako_runtime
+            .schedule_session(
+                &state,
+                session_id.clone(),
+                wake_at,
+                "scheduled_dispatch",
+                "scheduled",
+            )
+            .await?;
+        "scheduled"
+    } else {
+        state
+            .mako_runtime
+            .start_or_restart_session(state.clone(), session_id.clone(), "dispatch")
+            .await?;
+        "started"
+    };
 
     Ok((
         StatusCode::CREATED,
         Json(DispatchResponse {
             session_id,
-            status: "started".to_string(),
+            status: status.to_string(),
         }),
     ))
 }
@@ -254,6 +272,7 @@ async fn current(
     let mut runs = Vec::with_capacity(sessions.len());
     let mut running_count = 0usize;
     let mut sleeping_count = 0usize;
+    let mut scheduled_count = 0usize;
     let mut paused_count = 0usize;
     let mut waiting_count = 0usize;
     let mut failed_count = 0usize;
@@ -273,6 +292,12 @@ async fn current(
 
         match classify_run_state(runtime.as_ref(), agent_state.as_str()) {
             RunState::Running => running_count += 1,
+            RunState::Scheduled => {
+                scheduled_count += 1;
+                if let Some(runtime) = runtime.as_ref() {
+                    next_wake_at = earlier_timestamp(next_wake_at, runtime.next_wake_at.clone());
+                }
+            }
             RunState::Sleeping => {
                 sleeping_count += 1;
                 if let Some(runtime) = runtime.as_ref() {
@@ -308,6 +333,7 @@ async fn current(
             home_status: overall_home_status(
                 running_count,
                 sleeping_count,
+                scheduled_count,
                 paused_count,
                 waiting_count,
                 failed_count,
@@ -316,6 +342,7 @@ async fn current(
             total_count: runs.len(),
             running_count,
             sleeping_count,
+            scheduled_count,
             paused_count,
             waiting_count,
             failed_count,
@@ -554,6 +581,7 @@ fn map_runtime_trace_event(event: RuntimeTraceEvent) -> Option<AgenticEvent> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RunState {
     Running,
+    Scheduled,
     Sleeping,
     Paused,
     Waiting,
@@ -610,26 +638,39 @@ fn load_mako_cadence(
 }
 
 fn classify_run_state(runtime: Option<&MakoRuntimeState>, agent_state: &str) -> RunState {
-    match runtime.map(|state| state.status) {
-        Some(MakoRuntimeStateStatus::Running) => RunState::Running,
-        Some(MakoRuntimeStateStatus::Sleeping) => RunState::Sleeping,
-        Some(MakoRuntimeStateStatus::Paused) => RunState::Paused,
-        Some(MakoRuntimeStateStatus::AwaitingInput) => RunState::Waiting,
-        Some(MakoRuntimeStateStatus::Error) => RunState::Failed,
-        Some(MakoRuntimeStateStatus::Cancelled | MakoRuntimeStateStatus::Idle) | None => {
-            match agent_state {
+    match runtime {
+        Some(runtime)
+            if runtime.status == MakoRuntimeStateStatus::Sleeping
+                && runtime.sleep_reason.as_deref() == Some("scheduled") =>
+        {
+            RunState::Scheduled
+        }
+        Some(runtime) => match runtime.status {
+            MakoRuntimeStateStatus::Running => RunState::Running,
+            MakoRuntimeStateStatus::Sleeping => RunState::Sleeping,
+            MakoRuntimeStateStatus::Paused => RunState::Paused,
+            MakoRuntimeStateStatus::AwaitingInput => RunState::Waiting,
+            MakoRuntimeStateStatus::Error => RunState::Failed,
+            MakoRuntimeStateStatus::Cancelled | MakoRuntimeStateStatus::Idle => match agent_state {
                 "streaming" | "tool_executing" => RunState::Running,
                 "awaiting_input" => RunState::Waiting,
                 "error" => RunState::Failed,
                 _ => RunState::Idle,
-            }
-        }
+            },
+        },
+        None => match agent_state {
+            "streaming" | "tool_executing" => RunState::Running,
+            "awaiting_input" => RunState::Waiting,
+            "error" => RunState::Failed,
+            _ => RunState::Idle,
+        },
     }
 }
 
 fn overall_home_status(
     running_count: usize,
     sleeping_count: usize,
+    scheduled_count: usize,
     paused_count: usize,
     waiting_count: usize,
     failed_count: usize,
@@ -640,11 +681,32 @@ fn overall_home_status(
         "blocked"
     } else if paused_count > 0 {
         "paused"
-    } else if sleeping_count > 0 {
+    } else if sleeping_count > 0 || scheduled_count > 0 {
         "sleeping"
     } else {
         "idle"
     }
+}
+
+fn parse_requested_wake_at(
+    value: Option<&str>,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, AppError> {
+    let Some(raw) = trimmed_nonempty(value) else {
+        return Ok(None);
+    };
+
+    let wake_at = chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|date| date.with_timezone(&chrono::Utc))
+        .map_err(|_| {
+            AppError::BadRequest("start_at must be a valid RFC3339 timestamp".to_string())
+        })?;
+    if wake_at <= chrono::Utc::now() {
+        return Err(AppError::BadRequest(
+            "start_at must be in the future".to_string(),
+        ));
+    }
+
+    Ok(Some(wake_at))
 }
 
 fn earlier_timestamp(current: Option<String>, candidate: Option<String>) -> Option<String> {
@@ -764,6 +826,7 @@ mod tests {
                 task: "Investigate issue".to_string(),
                 project_dir: None,
                 model: Some("  openai/gpt-5  ".to_string()),
+                start_at: None,
             }),
         )
         .await
@@ -792,6 +855,7 @@ mod tests {
                 task: "Investigate issue".to_string(),
                 project_dir: Some("repo".to_string()),
                 model: None,
+                start_at: None,
             }),
         )
         .await
@@ -820,6 +884,7 @@ mod tests {
                 task: "   ".to_string(),
                 project_dir: None,
                 model: None,
+                start_at: None,
             }),
         )
         .await;
@@ -847,11 +912,59 @@ mod tests {
                 task: "Investigate issue".to_string(),
                 project_dir: Some(outside_root.to_string_lossy().to_string()),
                 model: None,
+                start_at: None,
             }),
         )
         .await;
 
         assert!(matches!(result, Err(AppError::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn dispatch_can_schedule_future_run() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        let wake_at = chrono::Utc::now() + chrono::Duration::minutes(30);
+
+        let (_, Json(response)) = dispatch(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Json(DispatchRequest {
+                task: "Check CI later".to_string(),
+                project_dir: None,
+                model: None,
+                start_at: Some(wake_at.to_rfc3339()),
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("scheduled dispatch should succeed"));
+
+        assert_eq!(response.status, "scheduled");
+
+        let runtime_store = MakoRuntimeStateStore::new(
+            Database::new(&state.db_path).expect("database should open"),
+        );
+        let runtime = runtime_store
+            .get_state(&response.session_id)
+            .expect("runtime lookup should succeed")
+            .expect("runtime should exist");
+        assert_eq!(runtime.status, MakoRuntimeStateStatus::Sleeping);
+        assert_eq!(runtime.sleep_reason.as_deref(), Some("scheduled"));
+        assert_eq!(
+            runtime.last_wake_reason.as_deref(),
+            Some("scheduled_dispatch")
+        );
+        assert!(runtime.next_wake_at.is_some());
+
+        let Json(summary) = current(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("current should succeed"));
+
+        assert_eq!(summary.status.scheduled_count, 1);
+        assert_eq!(summary.status.sleeping_count, 0);
     }
 
     #[tokio::test]

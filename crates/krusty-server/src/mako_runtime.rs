@@ -267,6 +267,31 @@ impl MakoRuntimeManager {
         )
     }
 
+    pub async fn schedule_session(
+        &self,
+        state: &AppState,
+        session_id: String,
+        wake_at: chrono::DateTime<chrono::Utc>,
+        wake_reason: &'static str,
+        sleep_reason: &'static str,
+    ) -> Result<()> {
+        self.stop_active_run(state, &session_id).await;
+        ensure_runnable_mako_session(&state.db_path, &session_id)?;
+        persist_runtime_state(
+            &state.db_path,
+            &session_id,
+            MakoRuntimeStateStatus::Sleeping,
+            Some(&wake_at.to_rfc3339()),
+            Some(sleep_reason),
+            None,
+            None,
+            Some(wake_reason),
+        )?;
+        self.schedule_wake_at(state.clone(), session_id, wake_at, wake_reason)
+            .await;
+        Ok(())
+    }
+
     pub async fn stop_active_run(&self, state: &AppState, session_id: &str) {
         self.cancel_scheduled_wake(session_id).await;
 

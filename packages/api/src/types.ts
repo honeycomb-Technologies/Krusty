@@ -331,6 +331,7 @@ export interface MakoStatusSummary {
   total_count: number;
   running_count: number;
   sleeping_count: number;
+  scheduled_count: number;
   paused_count: number;
   waiting_count: number;
   failed_count: number;

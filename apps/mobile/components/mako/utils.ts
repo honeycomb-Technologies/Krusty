@@ -124,10 +124,23 @@ export function describeRun(summary: MakoCurrentRunSummary): string {
   if (summary.failed_tasks > 0) {
     parts.push(`${summary.failed_tasks} failed`);
   }
+  if (
+    parts.length === 0 &&
+    summary.runtime?.status === "sleeping" &&
+    summary.runtime.sleep_reason === "scheduled"
+  ) {
+    return `Scheduled for ${formatTimestamp(summary.runtime.next_wake_at)}`;
+  }
   return parts.join(" • ") || "No tasks yet";
 }
 
 export function getRunGroup(summary: MakoCurrentRunSummary): "waiting" | "active" | "sleeping" | "queued" | "completed" {
+  if (
+    summary.runtime?.status === "sleeping" &&
+    summary.runtime.sleep_reason === "scheduled"
+  ) {
+    return "queued";
+  }
   const displayStatus = getRunDisplayStatus(summary);
   if (displayStatus === "blocked") {
     return "waiting";

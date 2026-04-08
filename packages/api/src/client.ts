@@ -387,13 +387,14 @@ export class KrustyClient {
   }
 
   // Mako
-  async dispatchMako(task: string, options?: { projectDir?: string; model?: string }): Promise<MakoDispatchResponse> {
+  async dispatchMako(task: string, options?: { projectDir?: string; model?: string; startAt?: string }): Promise<MakoDispatchResponse> {
     return this.request('/mako/dispatch', {
       method: 'POST',
       body: JSON.stringify({
         task,
         project_dir: options?.projectDir ?? undefined,
         model: options?.model ?? undefined,
+        start_at: options?.startAt ?? undefined,
       }),
     });
   }

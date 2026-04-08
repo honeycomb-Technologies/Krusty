@@ -17,7 +17,7 @@ export function MakoStatusView({ state }: MakoStatusViewProps) {
   return (
     <View style={styles.wrap}>
       <Text style={[styles.description, { color: t.mutedForeground }]}>
-        Status keeps the control-plane truth compact: what is awake, what is blocked, and when the next wake is expected.
+        Status keeps the control-plane truth compact: what is awake, what is queued, what is blocked, and when the next wake is expected.
       </Text>
 
       <View style={styles.grid}>
@@ -30,6 +30,10 @@ export function MakoStatusView({ state }: MakoStatusViewProps) {
         <StatusCard
           label="Sleeping"
           value={String(status?.sleeping_count ?? 0)}
+        />
+        <StatusCard
+          label="Scheduled"
+          value={String(status?.scheduled_count ?? 0)}
         />
         <StatusCard label="Paused" value={String(status?.paused_count ?? 0)} />
         <StatusCard label="Failed" value={String(status?.failed_count ?? 0)} />

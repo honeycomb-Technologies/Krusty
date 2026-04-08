@@ -84,6 +84,7 @@ export function MakoCurrentView({
   const waitingRuns = runs.filter((run) => getRunGroup(run) === "waiting");
   const activeRuns = runs.filter((run) => getRunGroup(run) === "active");
   const sleepingRuns = runs.filter((run) => getRunGroup(run) === "sleeping");
+  const queuedRuns = runs.filter((run) => getRunGroup(run) === "queued");
   const status = state.current?.status;
 
   return (
@@ -121,19 +122,20 @@ export function MakoCurrentView({
           hint={formatTimestamp(status?.next_wake_at)}
         />
         <SummaryCard
-          label="Idle"
-          value={String(status?.idle_count ?? 0)}
-          hint="ready for more"
+          label="Scheduled"
+          value={String(status?.scheduled_count ?? 0)}
+          hint="queued for later"
         />
       </View>
 
       <MakoSetCourseComposer
         projectDir={workspaceDirectory}
         isSubmitting={state.isDispatching}
-        onSubmit={async (task) => {
+        onSubmit={async (task, options) => {
           const runId = await state.setCourse(task, {
             projectDir: workspaceDirectory ?? undefined,
             model: model ?? undefined,
+            startAt: options?.startAt ?? undefined,
           });
           if (runId) {
             await onCourseSet(runId);
@@ -165,6 +167,14 @@ export function MakoCurrentView({
         <MakoRunList
           runs={sleepingRuns}
           emptyLabel="No sleeping runs."
+          onSelectRun={onSelectRun}
+        />
+      </Section>
+
+      <Section title="Queued for later">
+        <MakoRunList
+          runs={queuedRuns}
+          emptyLabel="No deferred runs."
           onSelectRun={onSelectRun}
         />
       </Section>
