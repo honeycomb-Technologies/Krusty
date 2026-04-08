@@ -260,6 +260,15 @@ export type MakoRuntimeStatus = 'idle' | 'running' | 'sleeping' | 'awaiting_inpu
 export type MakoHomeStatus = 'awake' | 'sleeping' | 'paused' | 'blocked' | 'idle';
 export type MakoRunPriority = 'low' | 'normal' | 'high';
 export type AutonomousTaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
+export type MakoDiagnosticSeverity = 'info' | 'warning' | 'critical';
+export type MakoRunDiagnosticKind =
+  | 'awaiting_approval'
+  | 'awaiting_input'
+  | 'failed'
+  | 'overdue_wake'
+  | 'stale_active'
+  | 'stale_waiting'
+  | 'stale_queued';
 
 export interface MakoDispatchResponse {
   session_id: string;
@@ -358,6 +367,19 @@ export interface MakoCurrentRunSummary {
   failed_tasks: number;
   blocked_tasks: number;
   cadence: MakoCadenceSummary;
+  diagnostic?: MakoRunDiagnostic | null;
+}
+
+export interface MakoRunDiagnostic {
+  kind: MakoRunDiagnosticKind;
+  severity: MakoDiagnosticSeverity;
+  summary: string;
+  detail: string;
+  last_activity_at?: string | null;
+  last_trace_at?: string | null;
+  stalled_for_secs?: number | null;
+  overdue_by_secs?: number | null;
+  failure_streak: number;
 }
 
 export interface MakoPendingApproval {
@@ -386,6 +408,23 @@ export interface MakoStatusSummary {
   next_wake_at?: string | null;
 }
 
+export interface MakoKnowledgeHealthSummary {
+  scope_count: number;
+  healthy_scope_count: number;
+  missing_snapshot_count: number;
+  stale_snapshot_count: number;
+  latest_snapshot_at?: string | null;
+}
+
+export interface MakoDiagnosticsSummary {
+  degraded_count: number;
+  stalled_count: number;
+  overdue_wake_count: number;
+  repeating_failure_count: number;
+  latest_trace_at?: string | null;
+  knowledge: MakoKnowledgeHealthSummary;
+}
+
 export interface MakoCadenceSummary {
   tick_interval_secs: number;
   max_ticks: number;
@@ -393,6 +432,7 @@ export interface MakoCadenceSummary {
 
 export interface MakoCurrentResponse {
   status: MakoStatusSummary;
+  diagnostics: MakoDiagnosticsSummary;
   runs: MakoCurrentRunSummary[];
   approvals: MakoPendingApproval[];
 }

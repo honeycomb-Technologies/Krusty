@@ -19,7 +19,14 @@ import {
   getRunPriority,
   getStaleRuns,
 } from "./utils";
-import type { MakoCurrentRunSummary, MakoCurrentState } from "./types";
+import type {
+  MakoCurrentRunSummary,
+  MakoCurrentState,
+} from "./types";
+import type {
+  MakoDiagnosticsSummary,
+  MakoKnowledgeHealthSummary,
+} from "@krusty/api";
 
 interface MakoStatusViewProps {
   state: MakoCurrentState;
@@ -39,6 +46,7 @@ export function MakoStatusView({
   const { theme } = useThemeContext();
   const t = theme.colors;
   const status = state.current?.status;
+  const diagnostics = state.current?.diagnostics;
   const runs = state.current?.runs ?? [];
   const approvals = state.current?.approvals ?? [];
   const attentionRuns = getAttentionRuns(runs);
@@ -47,7 +55,8 @@ export function MakoStatusView({
   const cadence = summarizeCadence(runs);
   const queueHealth = summarizeQueueHealth(runs, approvals.length);
   const priorityProfile = summarizePriorityProfile(queueHead);
-  const runtimeDrift = summarizeRuntimeDrift(staleRuns);
+  const runtimeDrift = summarizeRuntimeDrift(staleRuns, diagnostics);
+  const knowledgeHealth = summarizeKnowledgeHealth(diagnostics?.knowledge);
   const scheduledRuns = runs
     .filter(
       (run) =>
@@ -98,11 +107,22 @@ export function MakoStatusView({
           label="High priority"
           value={String(status?.high_priority_count ?? 0)}
         />
-        <StatusCard label="Drifting" value={String(staleRuns.length)} />
+        <StatusCard
+          label="Drifting"
+          value={String(diagnostics?.stalled_count ?? staleRuns.length)}
+        />
         <StatusCard label="Paused" value={String(status?.paused_count ?? 0)} />
         <StatusCard label="Failed" value={String(status?.failed_count ?? 0)} />
         <StatusCard label="Tick interval" value={cadence.tickIntervalLabel} />
         <StatusCard label="Tick budget" value={cadence.tickBudgetLabel} />
+        <StatusCard
+          label="Latest trace"
+          value={formatTimestamp(diagnostics?.latest_trace_at)}
+        />
+        <StatusCard
+          label="Snapshot coverage"
+          value={knowledgeHealth.value}
+        />
       </View>
 
       <GlassCard style={styles.card}>
@@ -141,6 +161,12 @@ export function MakoStatusView({
           value={runtimeDrift.value}
           detail={runtimeDrift.detail}
           tone={runtimeDrift.tone}
+        />
+        <MakoInsightCard
+          label="Knowledge"
+          value={knowledgeHealth.value}
+          detail={knowledgeHealth.detail}
+          tone={knowledgeHealth.tone}
         />
       </View>
 
@@ -289,7 +315,36 @@ function summarizePriorityProfile(runs: MakoCurrentRunSummary[]) {
   };
 }
 
-function summarizeRuntimeDrift(runs: MakoCurrentRunSummary[]) {
+function summarizeRuntimeDrift(
+  runs: MakoCurrentRunSummary[],
+  diagnostics?: MakoDiagnosticsSummary | null,
+) {
+  if (diagnostics) {
+    if (diagnostics.stalled_count === 0 && diagnostics.overdue_wake_count === 0) {
+      return {
+        value: "Healthy",
+        detail: "No runs are currently drifting or overdue.",
+        tone: "success" as const,
+      };
+    }
+
+    const staleCount = Math.max(
+      diagnostics.stalled_count - diagnostics.overdue_wake_count,
+      0,
+    );
+
+    return {
+      value: `${diagnostics.stalled_count} drifting`,
+      detail: `${diagnostics.overdue_wake_count} overdue wakes • ${staleCount} stale active or queued runs`,
+      tone:
+        diagnostics.overdue_wake_count > 0
+          ? ("warning" as const)
+          : diagnostics.repeating_failure_count > 0
+            ? ("danger" as const)
+            : ("accent" as const),
+    };
+  }
+
   const overdueWakeCount = runs.filter(
     (run) =>
       run.runtime?.status === "sleeping" &&
@@ -310,6 +365,42 @@ function summarizeRuntimeDrift(runs: MakoCurrentRunSummary[]) {
     value: `${runs.length} drifting`,
     detail: `${overdueWakeCount} overdue wakes • ${runs.length - overdueWakeCount} stale active or queued runs`,
     tone: overdueWakeCount > 0 ? ("warning" as const) : ("accent" as const),
+  };
+}
+
+function summarizeKnowledgeHealth(
+  health?: MakoKnowledgeHealthSummary | null,
+) {
+  if (!health || health.scope_count === 0) {
+    return {
+      value: "Pending",
+      detail: "Knowledge snapshots will appear after Mako has enough workspace history to consolidate.",
+      tone: "default" as const,
+    };
+  }
+
+  if (health.missing_snapshot_count > 0) {
+    return {
+      value: `${health.healthy_scope_count}/${health.scope_count}`,
+      detail: `${health.missing_snapshot_count} workspace snapshots are still missing.`,
+      tone: "warning" as const,
+    };
+  }
+
+  if (health.stale_snapshot_count > 0) {
+    return {
+      value: `${health.healthy_scope_count}/${health.scope_count}`,
+      detail: `${health.stale_snapshot_count} workspace snapshots are behind the latest reports or runs.`,
+      tone: "accent" as const,
+    };
+  }
+
+  return {
+    value: `${health.healthy_scope_count}/${health.scope_count}`,
+    detail: `All workspace snapshots are current. Latest snapshot ${formatTimestamp(
+      health.latest_snapshot_at,
+    )}.`,
+    tone: "success" as const,
   };
 }
 

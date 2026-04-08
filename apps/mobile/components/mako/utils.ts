@@ -232,9 +232,13 @@ export function getQueueHeadRuns(
 export function getAttentionRuns(
   runs: MakoCurrentRunSummary[],
 ): MakoCurrentRunSummary[] {
-  return runs.filter(
-    (run) => getRunGroup(run) === "waiting" || isFailedRun(run),
-  );
+  return runs.filter((run) => {
+    const kind = run.diagnostic?.kind;
+    if (kind) {
+      return kind === "awaiting_approval" || kind === "awaiting_input" || kind === "failed";
+    }
+    return getRunGroup(run) === "waiting" || isFailedRun(run);
+  });
 }
 
 export function isOverdueScheduledRun(
@@ -274,10 +278,24 @@ export function isStaleRun(run: MakoCurrentRunSummary): boolean {
 export function getStaleRuns(
   runs: MakoCurrentRunSummary[],
 ): MakoCurrentRunSummary[] {
-  return runs.filter((run) => isStaleRun(run));
+  return runs.filter((run) => {
+    const kind = run.diagnostic?.kind;
+    if (kind) {
+      return (
+        kind === "overdue_wake" ||
+        kind === "stale_active" ||
+        kind === "stale_waiting" ||
+        kind === "stale_queued"
+      );
+    }
+    return isStaleRun(run);
+  });
 }
 
 export function describeRunDrift(run: MakoCurrentRunSummary): string {
+  if (run.diagnostic) {
+    return run.diagnostic.detail;
+  }
   if (isOverdueScheduledRun(run)) {
     return "Wake is overdue";
   }
