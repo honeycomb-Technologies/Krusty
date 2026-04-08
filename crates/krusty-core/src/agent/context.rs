@@ -207,6 +207,32 @@ fn truncate_utf8(s: &str, max_chars: usize) -> String {
     format!("{}...", truncated)
 }
 
+fn open_context_database(db_path: &Path, context: &'static str) -> Option<Database> {
+    match Database::new(db_path) {
+        Ok(db) => Some(db),
+        Err(error) => {
+            warn!(context, db_path = %db_path.display(), error = %error, "Failed to open context database");
+            None
+        }
+    }
+}
+
+fn plan_mode_default_context() -> String {
+    "[PLAN MODE ACTIVE]\n\n\
+     You are in PLAN MODE. The user wants a plan before implementing.\n\
+     - You can READ files, search code, and explore the codebase\n\
+     - You CANNOT write, edit, or create files\n\
+     - Use the AskUserQuestion tool for clarifications\n\n\
+     When creating a plan, use this format:\n\
+     ```\n\
+     # Plan: [Title]\n\n\
+     ## Phase 1: [Phase Name]\n\n\
+     - [ ] Task description\n\
+       > Context: Implementation details\n\
+     ```"
+    .to_string()
+}
+
 /// Build persistent memory context from the agent memory store.
 ///
 /// Returns an empty string when no memories exist, keeping the system
@@ -218,9 +244,8 @@ fn build_memory_context(
     project_dir: Option<&str>,
     user_id: Option<&str>,
 ) -> String {
-    let db = match Database::new(db_path) {
-        Ok(db) => db,
-        Err(_) => return String::new(),
+    let Some(db) = open_context_database(db_path, "building memory context") else {
+        return String::new();
     };
     let store = MemoryStore::new(db);
     let memories = store.list(project_dir, user_id);
@@ -280,14 +305,16 @@ fn build_memory_context(
 }
 
 fn build_delegated_context(db_path: &Path, session_id: &str) -> String {
-    let db = match Database::new(db_path) {
-        Ok(db) => db,
-        Err(_) => return String::new(),
+    let Some(db) = open_context_database(db_path, "building delegated context") else {
+        return String::new();
     };
     let store = DelegatedRunStore::new(db);
     let recent = match store.list_runs_for_session(session_id, 3) {
         Ok(runs) => runs,
-        Err(_) => return String::new(),
+        Err(error) => {
+            warn!(session_id = %session_id, error = %error, "Failed to load delegated runs for context");
+            return String::new();
+        }
     };
     if recent.is_empty() {
         return String::new();
@@ -338,14 +365,16 @@ fn build_delegated_context(db_path: &Path, session_id: &str) -> String {
 
 /// Build context for autonomous tasks in this session.
 fn build_autonomous_task_context(db_path: &Path, session_id: &str) -> String {
-    let db = match Database::new(db_path) {
-        Ok(db) => db,
-        Err(_) => return String::new(),
+    let Some(db) = open_context_database(db_path, "building autonomous task context") else {
+        return String::new();
     };
     let store = AutonomousTaskStore::new(db);
     let tasks = match store.list_tasks(session_id) {
         Ok(t) => t,
-        Err(_) => return String::new(),
+        Err(error) => {
+            warn!(session_id = %session_id, error = %error, "Failed to load autonomous tasks for context");
+            return String::new();
+        }
     };
     if tasks.is_empty() {
         return String::new();
@@ -395,14 +424,16 @@ fn build_autonomous_task_context(db_path: &Path, session_id: &str) -> String {
 
 /// Build context for recent reports in this project.
 fn build_report_context(db_path: &Path, project_dir: Option<&str>) -> String {
-    let db = match Database::new(db_path) {
-        Ok(db) => db,
-        Err(_) => return String::new(),
+    let Some(db) = open_context_database(db_path, "building report context") else {
+        return String::new();
     };
     let store = ReportStore::new(db);
     let reports = match store.list_reports(project_dir) {
         Ok(r) => r,
-        Err(_) => return String::new(),
+        Err(error) => {
+            warn!(project_dir = ?project_dir, error = %error, "Failed to load reports for context");
+            return String::new();
+        }
     };
     if reports.is_empty() {
         return String::new();
@@ -492,26 +523,29 @@ fn build_workspace_context(working_dir: &Path, project_dir: Option<&Path>) -> St
 pub fn build_plan_context(db_path: &Path, session_id: &str, work_mode: WorkMode) -> String {
     let plan_manager = match PlanManager::new(db_path.to_path_buf()) {
         Ok(pm) => pm,
-        Err(_) => return String::new(),
+        Err(error) => {
+            warn!(session_id = %session_id, db_path = %db_path.display(), error = %error, "Failed to open plan manager for context");
+            return if work_mode == WorkMode::Plan {
+                plan_mode_default_context()
+            } else {
+                String::new()
+            };
+        }
     };
 
     let plan = match plan_manager.get_active_plan(session_id) {
         Ok(Some(p)) => p,
+        Err(error) => {
+            warn!(session_id = %session_id, error = %error, "Failed to load active plan for context");
+            return if work_mode == WorkMode::Plan {
+                plan_mode_default_context()
+            } else {
+                String::new()
+            };
+        }
         _ => {
             return if work_mode == WorkMode::Plan {
-                "[PLAN MODE ACTIVE]\n\n\
-                 You are in PLAN MODE. The user wants a plan before implementing.\n\
-                 - You can READ files, search code, and explore the codebase\n\
-                 - You CANNOT write, edit, or create files\n\
-                 - Use the AskUserQuestion tool for clarifications\n\n\
-                 When creating a plan, use this format:\n\
-                 ```\n\
-                 # Plan: [Title]\n\n\
-                 ## Phase 1: [Phase Name]\n\n\
-                 - [ ] Task description\n\
-                   > Context: Implementation details\n\
-                 ```"
-                .to_string()
+                plan_mode_default_context()
             } else {
                 String::new()
             };
@@ -588,7 +622,13 @@ pub fn build_skills_context(
 ) -> String {
     let mut guard = match skills_manager.try_write() {
         Ok(g) => g,
-        Err(_) => return String::new(),
+        Err(_) => {
+            warn!(
+                include_project_skills,
+                "Skipping skills context because the skills manager is busy"
+            );
+            return String::new();
+        }
     };
 
     let skills = if include_project_skills {
@@ -615,7 +655,69 @@ pub fn build_skills_context(
 /// Build environment context with runtime information.
 ///
 /// Gathers working directory, git status, platform, shell, date, and model
-/// information. Git commands that fail are silently skipped.
+/// information. Git commands that fail are skipped with warnings.
+fn run_git_context_command(working_dir: &Path, args: &[&str]) -> Option<std::process::Output> {
+    match Command::new("git")
+        .args(args)
+        .current_dir(working_dir)
+        .output()
+    {
+        Ok(output) if output.status.success() => Some(output),
+        Ok(output) => {
+            warn!(
+                working_dir = %working_dir.display(),
+                ?args,
+                status = ?output.status,
+                "Git probe failed while building environment context"
+            );
+            None
+        }
+        Err(error) => {
+            warn!(
+                working_dir = %working_dir.display(),
+                ?args,
+                error = %error,
+                "Failed to run git probe while building environment context"
+            );
+            None
+        }
+    }
+}
+
+fn summarize_git_status(status_text: &str) -> Option<String> {
+    let mut modified = 0usize;
+    let mut staged = 0usize;
+    let mut untracked = 0usize;
+
+    for line in status_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("??") {
+            untracked += 1;
+        } else if trimmed.starts_with('A') {
+            staged += 1;
+        } else if trimmed.starts_with('M') || trimmed.contains('M') {
+            modified += 1;
+        }
+    }
+
+    let mut parts = Vec::new();
+    if modified > 0 {
+        parts.push(format!("{} modified", modified));
+    }
+    if staged > 0 {
+        parts.push(format!("{} staged", staged));
+    }
+    if untracked > 0 {
+        parts.push(format!("{} untracked", untracked));
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
+}
+
 fn build_environment_context(working_dir: &Path, model_id: Option<&str>) -> String {
     let mut lines = vec![
         "[ENVIRONMENT]".to_string(),
@@ -629,54 +731,19 @@ fn build_environment_context(working_dir: &Path, model_id: Option<&str>) -> Stri
     ));
 
     if is_git_repo {
-        if let Ok(output) = Command::new("git")
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .current_dir(working_dir)
-            .output()
+        if let Some(output) =
+            run_git_context_command(working_dir, &["rev-parse", "--abbrev-ref", "HEAD"])
         {
-            if output.status.success() {
-                let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !branch.is_empty() {
-                    lines.push(format!("Git branch: {}", branch));
-                }
+            let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !branch.is_empty() {
+                lines.push(format!("Git branch: {}", branch));
             }
         }
 
-        if let Ok(output) = Command::new("git")
-            .args(["status", "--short"])
-            .current_dir(working_dir)
-            .output()
-        {
-            if output.status.success() {
-                let status_text = String::from_utf8_lossy(&output.stdout);
-                let mut modified = 0usize;
-                let mut staged = 0usize;
-                let mut untracked = 0usize;
-
-                for line in status_text.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with("??") {
-                        untracked += 1;
-                    } else if trimmed.starts_with('A') {
-                        staged += 1;
-                    } else if trimmed.starts_with('M') || trimmed.contains('M') {
-                        modified += 1;
-                    }
-                }
-
-                let mut parts = Vec::new();
-                if modified > 0 {
-                    parts.push(format!("{} modified", modified));
-                }
-                if staged > 0 {
-                    parts.push(format!("{} staged", staged));
-                }
-                if untracked > 0 {
-                    parts.push(format!("{} untracked", untracked));
-                }
-                if !parts.is_empty() {
-                    lines.push(format!("Git status: {}", parts.join(", ")));
-                }
+        if let Some(output) = run_git_context_command(working_dir, &["status", "--short"]) {
+            let status_text = String::from_utf8_lossy(&output.stdout);
+            if let Some(summary) = summarize_git_status(&status_text) {
+                lines.push(format!("Git status: {}", summary));
             }
         }
     }
@@ -710,8 +777,12 @@ pub fn build_project_context(working_dir: &Path) -> String {
 
     let mut sections = Vec::new();
     for path in instruction_files {
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) => {
+                warn!(path = %path.display(), error = %error, "Failed to read project instruction file");
+                continue;
+            }
         };
         if content.trim().is_empty() {
             continue;
@@ -813,7 +884,10 @@ fn discover_project_root(working_dir: &Path) -> &Path {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_mako_context, build_project_context, inject_context};
+    use super::{
+        build_mako_context, build_plan_context, build_project_context, build_skills_context,
+        inject_context, summarize_git_status,
+    };
     use std::fs;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
@@ -852,6 +926,58 @@ mod tests {
 
         assert!(context.contains("[MAKO IDENTITY - MAKO.md]"));
         assert!(context.contains("Always Swimming."));
+    }
+
+    #[test]
+    fn build_plan_context_falls_back_to_generic_plan_mode_when_store_unavailable() {
+        let temp = TempDir::new().unwrap();
+        let missing_db_path = temp.path().join("missing").join("krusty.db");
+
+        let context = build_plan_context(&missing_db_path, "session-id", WorkMode::Plan);
+
+        assert!(context.contains("[PLAN MODE ACTIVE]"));
+        assert!(context.contains("You CANNOT write, edit, or create files"));
+    }
+
+    #[test]
+    fn build_plan_context_returns_empty_when_store_unavailable_in_build_mode() {
+        let temp = TempDir::new().unwrap();
+        let missing_db_path = temp.path().join("missing").join("krusty.db");
+
+        let context = build_plan_context(&missing_db_path, "session-id", WorkMode::Build);
+
+        assert!(context.is_empty());
+    }
+
+    #[test]
+    fn build_skills_context_returns_empty_when_manager_is_busy() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        let skills = RwLock::new(SkillsManager::with_defaults(repo));
+        let _guard = skills
+            .try_write()
+            .unwrap_or_else(|_| panic!("test should acquire write lock"));
+
+        let context = build_skills_context(&skills, true);
+
+        assert!(context.is_empty());
+    }
+
+    #[test]
+    fn summarize_git_status_counts_modified_staged_and_untracked() {
+        let summary = summarize_git_status(" M src/lib.rs\nA  Cargo.toml\n?? scratch.txt\n");
+
+        assert_eq!(
+            summary.as_deref(),
+            Some("1 modified, 1 staged, 1 untracked")
+        );
+    }
+
+    #[test]
+    fn summarize_git_status_returns_none_for_clean_status() {
+        let summary = summarize_git_status("");
+
+        assert!(summary.is_none());
     }
 
     #[test]

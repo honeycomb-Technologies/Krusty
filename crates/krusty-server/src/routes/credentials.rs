@@ -6,8 +6,10 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use krusty_core::ai::providers::ProviderId;
+use krusty_core::auth::OAuthTokenStore;
 
 use crate::error::AppError;
 use crate::AppState;
@@ -32,7 +34,7 @@ pub struct ProviderStatus {
 
 async fn list_providers(State(state): State<AppState>) -> Json<Vec<ProviderStatus>> {
     let store = state.credential_store.read().await;
-    let oauth_store = krusty_core::auth::OAuthTokenStore::load().unwrap_or_default();
+    let oauth_store = load_oauth_store_or_default("listing credential providers");
 
     let providers = ProviderId::all()
         .iter()
@@ -54,7 +56,7 @@ async fn get_provider(
 ) -> Result<Json<ProviderStatus>, AppError> {
     let provider_id = parse_provider(&provider)?;
     let store = state.credential_store.read().await;
-    let oauth_store = krusty_core::auth::OAuthTokenStore::load().unwrap_or_default();
+    let oauth_store = load_oauth_store_or_default("loading credential provider");
 
     Ok(Json(ProviderStatus {
         id: provider_id.storage_key().to_string(),
@@ -93,7 +95,7 @@ async fn set_credential(
         spawn_dynamic_model_refresh(state.model_registry.clone(), provider_id, req.api_key);
     }
 
-    let oauth_store = krusty_core::auth::OAuthTokenStore::load().unwrap_or_default();
+    let oauth_store = load_oauth_store_or_default("setting credential provider");
     Ok(Json(ProviderStatus {
         id: provider_id.storage_key().to_string(),
         name: provider_id.to_string(),
@@ -121,7 +123,7 @@ async fn delete_credential(
         state.model_registry.set_models(provider_id, vec![]).await;
     }
 
-    let oauth_store = krusty_core::auth::OAuthTokenStore::load().unwrap_or_default();
+    let oauth_store = load_oauth_store_or_default("deleting credential provider");
     Ok(Json(ProviderStatus {
         id: provider_id.storage_key().to_string(),
         name: provider_id.to_string(),
@@ -134,6 +136,23 @@ async fn delete_credential(
 fn parse_provider(s: &str) -> Result<ProviderId, AppError> {
     crate::utils::providers::parse_provider(s)
         .ok_or_else(|| AppError::BadRequest(format!("Unknown provider: {}", s)))
+}
+
+fn load_oauth_store_or_default(context: &'static str) -> OAuthTokenStore {
+    load_oauth_store_or_else(context, OAuthTokenStore::load)
+}
+
+fn load_oauth_store_or_else(
+    context: &'static str,
+    load: impl FnOnce() -> anyhow::Result<OAuthTokenStore>,
+) -> OAuthTokenStore {
+    match load() {
+        Ok(store) => store,
+        Err(error) => {
+            warn!(context, error = %error, "Failed to load OAuth token store");
+            OAuthTokenStore::default()
+        }
+    }
 }
 
 fn spawn_dynamic_model_refresh(
@@ -153,4 +172,24 @@ fn spawn_dynamic_model_refresh(
             Err(e) => tracing::warn!("Failed to refresh {} models: {}", provider_id, e),
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_oauth_store_or_else;
+    use krusty_core::auth::OAuthTokenStore;
+
+    #[test]
+    fn load_oauth_store_or_else_returns_loaded_store() {
+        let store = load_oauth_store_or_else("test", || Ok(OAuthTokenStore::default()));
+
+        assert!(!store.has_token(&krusty_core::ai::providers::ProviderId::OpenAI));
+    }
+
+    #[test]
+    fn load_oauth_store_or_else_falls_back_to_default_on_error() {
+        let store = load_oauth_store_or_else("test", || Err(anyhow::anyhow!("boom")));
+
+        assert!(!store.has_token(&krusty_core::ai::providers::ProviderId::OpenAI));
+    }
 }

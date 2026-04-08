@@ -155,12 +155,6 @@ impl ThemeRegistry {
             .filter_map(|name| self.themes.get(name).map(|theme| (name, theme)))
             .collect()
     }
-
-    /// Get the number of registered themes
-    #[allow(dead_code)]
-    pub fn count(&self) -> usize {
-        self.themes.len()
-    }
 }
 
 impl Default for ThemeRegistry {

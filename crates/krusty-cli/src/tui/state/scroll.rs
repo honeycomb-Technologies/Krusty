@@ -120,14 +120,6 @@ impl ScrollState {
     pub fn can_scroll_down(&self) -> bool {
         self.offset < self.max_scroll
     }
-
-    /// Check if scrollbar is needed (content exceeds viewport)
-    /// Note: Most blocks implement their own needs_scrollbar for block-specific logic
-    #[allow(dead_code)]
-    pub fn needs_scrollbar(&self) -> bool {
-        self.max_scroll > 0
-    }
-
     /// Lock scrolling to messages area (during momentum scroll)
     pub fn lock_to_messages(&mut self) {
         self.locked_to_messages = true;

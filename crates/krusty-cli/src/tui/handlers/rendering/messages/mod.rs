@@ -49,6 +49,7 @@ use crate::tui::utils::wrap_line;
 
 use selection::{
     apply_selection_to_line, apply_selection_to_rendered_line, style_user_line_with_file_refs,
+    UserLineFileRefOptions,
 };
 
 /// Symbol prefixes for message types (with trailing space)
@@ -610,14 +611,16 @@ impl App {
                             let content_line = if role == "user" {
                                 style_user_line_with_file_refs(
                                     &wrapped,
-                                    line_idx,
-                                    selection,
-                                    Style::default().fg(content_color),
-                                    self.ui.theme.link_color,
-                                    sel_bg,
-                                    sel_fg,
-                                    msg_idx,
-                                    hovered_file_ref,
+                                    UserLineFileRefOptions {
+                                        line_idx,
+                                        selection,
+                                        base_style: Style::default().fg(content_color),
+                                        link_color: self.ui.theme.link_color,
+                                        sel_bg,
+                                        sel_fg,
+                                        msg_idx,
+                                        hovered_file_ref,
+                                    },
                                 )
                             } else {
                                 apply_selection_to_line(

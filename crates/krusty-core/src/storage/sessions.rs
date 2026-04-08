@@ -30,6 +30,38 @@ const LIST_SESSIONS_SQL_BY_DIR_AND_USER: &str =
              FROM sessions
              WHERE working_dir = ?1 AND user_id = ?2
              ORDER BY updated_at DESC";
+const LIST_SESSIONS_SQL_BY_TYPE: &str =
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type
+             FROM sessions
+             WHERE session_type = ?1
+             ORDER BY updated_at DESC";
+const LIST_SESSIONS_SQL_BY_DIR_AND_TYPE: &str =
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type
+             FROM sessions
+             WHERE working_dir = ?1 AND session_type = ?2
+             ORDER BY updated_at DESC";
+const LIST_SESSIONS_SQL_BY_USER_AND_TYPE: &str =
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type
+             FROM sessions
+             WHERE user_id = ?1 AND session_type = ?2
+             ORDER BY updated_at DESC";
+const LIST_SESSIONS_SQL_BY_DIR_USER_AND_TYPE: &str =
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type
+             FROM sessions
+             WHERE working_dir = ?1 AND user_id = ?2 AND session_type = ?3
+             ORDER BY updated_at DESC";
+const LIST_ACTIVE_SESSIONS_SQL_ALL: &str =
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type,
+            agent_state, agent_started_at, agent_last_event_at
+             FROM sessions
+             WHERE agent_state != 'idle'
+             ORDER BY id";
+const LIST_ACTIVE_SESSIONS_SQL_BY_USER: &str =
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type,
+            agent_state, agent_started_at, agent_last_event_at
+             FROM sessions
+             WHERE agent_state != 'idle' AND user_id = ?1
+             ORDER BY id";
 const LIST_SESSION_DIRS_SQL_ALL: &str = "SELECT DISTINCT working_dir FROM sessions
                  WHERE working_dir IS NOT NULL
                  ORDER BY working_dir";
@@ -313,6 +345,29 @@ impl SessionManager {
         }
     }
 
+    /// List sessions for a specific user and surface type, with optional directory filtering.
+    pub fn list_sessions_for_user_by_type(
+        &self,
+        working_dir: Option<&str>,
+        user_id: Option<&str>,
+        session_type: SessionType,
+    ) -> Result<Vec<SessionInfo>> {
+        let session_type = session_type.to_string();
+        match (working_dir, user_id) {
+            (Some(dir), Some(uid)) => self.collect_sessions(
+                LIST_SESSIONS_SQL_BY_DIR_USER_AND_TYPE,
+                [dir, uid, &session_type],
+            ),
+            (Some(dir), None) => {
+                self.collect_sessions(LIST_SESSIONS_SQL_BY_DIR_AND_TYPE, [dir, &session_type])
+            }
+            (None, Some(uid)) => {
+                self.collect_sessions(LIST_SESSIONS_SQL_BY_USER_AND_TYPE, [uid, &session_type])
+            }
+            (None, None) => self.collect_sessions(LIST_SESSIONS_SQL_BY_TYPE, [&session_type]),
+        }
+    }
+
     fn collect_sessions<P>(&self, sql: &str, params: P) -> Result<Vec<SessionInfo>>
     where
         P: rusqlite::Params,
@@ -386,6 +441,18 @@ impl SessionManager {
             )
         })?;
         Ok((directory, session))
+    }
+
+    fn map_active_session_row(
+        row: &rusqlite::Row,
+    ) -> rusqlite::Result<(SessionInfo, super::agent_state::AgentState)> {
+        let session = Self::map_session_row(row)?;
+        let agent_state = super::agent_state::AgentState {
+            state: row.get(13)?,
+            started_at: row.get(14)?,
+            last_event_at: row.get(15)?,
+        };
+        Ok((session, agent_state))
     }
 
     /// List all directories that have sessions
@@ -516,7 +583,7 @@ impl SessionManager {
             "UPDATE sessions
              SET project_dir = ?1,
                  workspace_mode = ?2,
-                 working_dir = COALESCE(?3, working_dir),
+                 working_dir = ?3,
                  updated_at = ?4
              WHERE id = ?5",
             params![
@@ -942,7 +1009,15 @@ impl SessionManager {
 
     /// Get the agent state for a session
     pub fn get_agent_state(&self, session_id: &str) -> Option<super::agent_state::AgentState> {
-        super::agent_state::AgentStateStore::new(&self.db).get_agent_state(session_id)
+        self.try_get_agent_state(session_id).ok().flatten()
+    }
+
+    /// Get the agent state for a session without swallowing storage failures.
+    pub fn try_get_agent_state(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<super::agent_state::AgentState>> {
+        super::agent_state::AgentStateStore::new(&self.db).try_get_agent_state(session_id)
     }
 
     /// Update agent last_event_at timestamp (for keeping session "alive")
@@ -953,6 +1028,27 @@ impl SessionManager {
     /// List sessions with active agents (not idle)
     pub fn list_active_sessions(&self) -> Result<Vec<(String, super::agent_state::AgentState)>> {
         super::agent_state::AgentStateStore::new(&self.db).list_active_sessions()
+    }
+
+    /// List active sessions with session metadata and optional ownership filtering.
+    pub fn list_active_session_details_for_user(
+        &self,
+        user_id: Option<&str>,
+    ) -> Result<Vec<(SessionInfo, super::agent_state::AgentState)>> {
+        let mut stmt = if user_id.is_some() {
+            self.db.conn().prepare(LIST_ACTIVE_SESSIONS_SQL_BY_USER)?
+        } else {
+            self.db.conn().prepare(LIST_ACTIVE_SESSIONS_SQL_ALL)?
+        };
+
+        let rows = if let Some(user_id) = user_id {
+            stmt.query_map([user_id], Self::map_active_session_row)?
+        } else {
+            stmt.query_map([], Self::map_active_session_row)?
+        };
+
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// Load compact runtime trace events for a session.
@@ -990,7 +1086,7 @@ mod tests {
     use rusqlite::params;
     use tempfile::TempDir;
 
-    use crate::agent::pinch_context::PinchContext;
+    use crate::agent::pinch_context::{PinchContext, PinchContextInput};
     use crate::agent::summarizer::SummarizationResult;
     use crate::storage::sessions::SessionManager;
     use crate::storage::{Database, SessionType, WorkspaceMode};
@@ -1296,6 +1392,47 @@ mod tests {
     }
 
     #[test]
+    fn test_list_sessions_for_user_by_type_filters_surface() {
+        let (db, _temp) = create_test_db();
+        let user = "alice";
+        create_test_user(&db, user);
+
+        let manager = SessionManager::new(db);
+        let mako_session = manager
+            .create_session_for_user_with_config(
+                "Mako Session",
+                None,
+                Some("/tmp"),
+                Some("/tmp"),
+                WorkspaceMode::Selected,
+                Some(user),
+                None,
+                SessionType::Mako,
+            )
+            .expect("Failed to create Mako session");
+        manager
+            .create_session_for_user_with_config(
+                "Code Session",
+                None,
+                Some("/tmp"),
+                Some("/tmp"),
+                WorkspaceMode::Selected,
+                Some(user),
+                None,
+                SessionType::Code,
+            )
+            .expect("Failed to create Code session");
+
+        let sessions = manager
+            .list_sessions_for_user_by_type(Some("/tmp"), Some(user), SessionType::Mako)
+            .expect("Failed to list Mako sessions");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, mako_session);
+        assert_eq!(sessions[0].session_type, SessionType::Mako);
+    }
+
+    #[test]
     fn test_create_linked_session_preserves_parent_user_id() {
         let (db, _temp) = create_test_db();
         let user_id = "user-123";
@@ -1310,17 +1447,17 @@ mod tests {
                 Some(user_id),
             )
             .expect("Failed to create parent session");
-        let pinch_ctx = PinchContext::new(
-            parent_session_id.clone(),
-            "Parent Session".to_string(),
-            SummarizationResult::default(),
-            vec![],
-            None,
-            None,
-            None,
-            vec![],
-            None,
-        );
+        let pinch_ctx = PinchContext::from_input(PinchContextInput {
+            source_session_id: parent_session_id.clone(),
+            source_session_title: "Parent Session".to_string(),
+            summary: SummarizationResult::default(),
+            ranked_files: vec![],
+            preservation_hints: None,
+            direction: None,
+            project_context: None,
+            key_file_contents: vec![],
+            active_plan: None,
+        });
 
         let child_session_id = manager
             .create_linked_session(
@@ -1474,6 +1611,37 @@ mod tests {
     }
 
     #[test]
+    fn test_update_session_workspace_neutral_clears_working_dir() {
+        let (db, _temp) = create_test_db();
+        let manager = SessionManager::new(db);
+
+        let session_id = manager
+            .create_session_for_user_with_config(
+                "Workspace Session",
+                Some("gpt-5"),
+                Some("/tmp/demo-app"),
+                Some("/tmp/demo-app"),
+                WorkspaceMode::Created,
+                None,
+                None,
+                SessionType::Code,
+            )
+            .expect("Failed to create session");
+
+        manager
+            .update_session_workspace(&session_id, None, WorkspaceMode::Neutral)
+            .expect("Failed to clear workspace");
+
+        let session = manager
+            .get_session(&session_id)
+            .expect("Failed to get session")
+            .expect("Session should exist");
+        assert_eq!(session.workspace_mode, WorkspaceMode::Neutral);
+        assert_eq!(session.project_dir, None);
+        assert_eq!(session.working_dir, None);
+    }
+
+    #[test]
     fn test_delete_session() {
         // Test deleting a session
         let (db, _temp) = create_test_db();
@@ -1565,6 +1733,52 @@ mod tests {
         let active_ids: Vec<&str> = active.iter().map(|(id, _)| id.as_str()).collect();
         assert!(active_ids.contains(&session1.as_str()));
         assert!(active_ids.contains(&session2.as_str()));
+    }
+
+    #[test]
+    fn test_list_active_session_details_for_user_filters_ownership() {
+        let (db, _temp) = create_test_db();
+        let manager = SessionManager::new(db);
+
+        manager
+            .db()
+            .conn()
+            .execute(
+                "INSERT INTO users (id, email, license_tier) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["user-a", "user-a@example.com", "free"],
+            )
+            .expect("seed user a");
+        manager
+            .db()
+            .conn()
+            .execute(
+                "INSERT INTO users (id, email, license_tier) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["user-b", "user-b@example.com", "free"],
+            )
+            .expect("seed user b");
+
+        let session_a = manager
+            .create_session_for_user("A", None, Some("/tmp/a"), Some("user-a"))
+            .expect("session a should create");
+        let session_b = manager
+            .create_session_for_user("B", None, Some("/tmp/b"), Some("user-b"))
+            .expect("session b should create");
+
+        manager
+            .set_agent_state(&session_a, "streaming")
+            .expect("session a should become active");
+        manager
+            .set_agent_state(&session_b, "tool_executing")
+            .expect("session b should become active");
+
+        let active = manager
+            .list_active_session_details_for_user(Some("user-a"))
+            .expect("active sessions should load");
+
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].0.id, session_a);
+        assert_eq!(active[0].0.title, "A");
+        assert_eq!(active[0].1.state, "streaming");
     }
 
     #[test]

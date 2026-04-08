@@ -20,6 +20,7 @@ mod processes;
 mod push;
 mod reports;
 mod server;
+mod session_access;
 mod sessions;
 mod skills;
 mod tools;

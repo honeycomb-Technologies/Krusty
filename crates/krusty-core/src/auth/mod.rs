@@ -256,8 +256,25 @@ fn decode_jwt_payload(token: &str) -> Option<serde_json::Value> {
     serde_json::from_slice::<serde_json::Value>(&decoded).ok()
 }
 
+fn load_oauth_store_or_none(
+    context: &'static str,
+    load: impl FnOnce() -> anyhow::Result<OAuthTokenStore>,
+) -> Option<OAuthTokenStore> {
+    match load() {
+        Ok(store) => Some(store),
+        Err(error) => {
+            tracing::warn!(context, error = %error, "Failed to load OAuth token store");
+            None
+        }
+    }
+}
+
+fn load_optional_oauth_store(context: &'static str) -> Option<OAuthTokenStore> {
+    load_oauth_store_or_none(context, OAuthTokenStore::load)
+}
+
 fn load_openai_oauth_credential() -> Option<(String, Option<String>)> {
-    let oauth_store = OAuthTokenStore::load().ok()?;
+    let oauth_store = load_optional_oauth_store("loading OpenAI OAuth credential")?;
     let token = oauth_store.get(&ProviderId::OpenAI)?;
 
     if token.is_expired() {
@@ -292,7 +309,7 @@ fn load_openai_oauth_credential() -> Option<(String, Option<String>)> {
 }
 
 fn load_anthropic_oauth_credential() -> Option<(String, Option<String>)> {
-    let oauth_store = OAuthTokenStore::load().ok()?;
+    let oauth_store = load_optional_oauth_store("loading Anthropic OAuth credential")?;
     let token = oauth_store.get(&ProviderId::Anthropic)?;
 
     if token.is_expired() {
@@ -466,28 +483,141 @@ async fn refresh_anthropic_oauth_token() -> Result<OAuthTokenData> {
     Ok(refreshed)
 }
 
+fn log_refresh_failure(provider_id: ProviderId, context: &'static str, error: &anyhow::Error) {
+    tracing::warn!(provider = %provider_id, context, error = %error, "OAuth token refresh failed");
+}
+
+fn refresh_with_runtime(
+    provider_id: ProviderId,
+    runtime: tokio::runtime::Runtime,
+    context: &'static str,
+) -> Option<OAuthTokenData> {
+    match runtime.block_on(refresh_oauth_token(provider_id)) {
+        Ok(token) => Some(token),
+        Err(error) => {
+            log_refresh_failure(provider_id, context, &error);
+            None
+        }
+    }
+}
+
+fn build_blocking_refresh_runtime(provider_id: ProviderId) -> Option<tokio::runtime::Runtime> {
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => Some(runtime),
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider_id,
+                error = %error,
+                "Failed to build temporary runtime for blocking OAuth refresh"
+            );
+            None
+        }
+    }
+}
+
+fn join_refresh_thread(
+    provider_id: ProviderId,
+    join_result: std::thread::Result<Option<OAuthTokenData>>,
+) -> Option<OAuthTokenData> {
+    match join_result {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!(
+                provider = %provider_id,
+                "Blocking OAuth refresh thread panicked"
+            );
+            None
+        }
+    }
+}
+
 /// Sync wrapper for refreshing an OAuth token from non-async code paths
 pub fn try_refresh_oauth_token_blocking(provider_id: ProviderId) -> Option<OAuthTokenData> {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| handle.block_on(refresh_oauth_token(provider_id)).ok())
+            tokio::task::block_in_place(|| {
+                match handle.block_on(refresh_oauth_token(provider_id)) {
+                    Ok(token) => Some(token),
+                    Err(error) => {
+                        log_refresh_failure(
+                            provider_id,
+                            "refreshing OAuth token on current multithread runtime",
+                            &error,
+                        );
+                        None
+                    }
+                }
+            })
         }
-        Ok(_) => std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .ok()?;
-            runtime.block_on(refresh_oauth_token(provider_id)).ok()
-        })
-        .join()
-        .ok()
-        .flatten(),
+        Ok(_) => join_refresh_thread(
+            provider_id,
+            std::thread::spawn(move || {
+                let runtime = build_blocking_refresh_runtime(provider_id)?;
+                refresh_with_runtime(
+                    provider_id,
+                    runtime,
+                    "refreshing OAuth token on worker thread from current-thread runtime",
+                )
+            })
+            .join(),
+        ),
         Err(_) => {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .ok()?;
-            runtime.block_on(refresh_oauth_token(provider_id)).ok()
+            let runtime = build_blocking_refresh_runtime(provider_id)?;
+            refresh_with_runtime(
+                provider_id,
+                runtime,
+                "refreshing OAuth token without an active runtime",
+            )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{join_refresh_thread, load_oauth_store_or_none};
+    use crate::ai::providers::ProviderId;
+    use crate::auth::OAuthTokenStore;
+
+    #[test]
+    fn load_oauth_store_or_none_returns_store_on_success() {
+        let store = load_oauth_store_or_none("test", || Ok(OAuthTokenStore::default()));
+
+        assert!(store.is_some());
+        assert!(!store
+            .as_ref()
+            .is_some_and(|loaded| loaded.has_token(&ProviderId::OpenAI)));
+    }
+
+    #[test]
+    fn load_oauth_store_or_none_returns_none_on_failure() {
+        let store = load_oauth_store_or_none("test", || Err(anyhow::anyhow!("boom")));
+
+        assert!(store.is_none());
+    }
+
+    #[test]
+    fn join_refresh_thread_returns_inner_result() {
+        let result = join_refresh_thread(
+            ProviderId::OpenAI,
+            std::thread::spawn(|| None::<crate::auth::OAuthTokenData>).join(),
+        );
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn join_refresh_thread_returns_none_on_panic() {
+        let result = join_refresh_thread(
+            ProviderId::OpenAI,
+            std::thread::spawn(|| -> Option<crate::auth::OAuthTokenData> {
+                panic!("boom");
+            })
+            .join(),
+        );
+
+        assert!(result.is_none());
     }
 }

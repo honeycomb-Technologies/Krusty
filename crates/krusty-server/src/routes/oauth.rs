@@ -356,15 +356,30 @@ struct OAuthStatusResponse {
     flow_active: bool,
 }
 
+fn load_oauth_token_presence(
+    provider_id: ProviderId,
+    load: impl FnOnce() -> anyhow::Result<OAuthTokenStore>,
+) -> Result<bool, AppError> {
+    match load() {
+        Ok(store) => Ok(store.has_token(&provider_id)),
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider_id,
+                error = %error,
+                "Failed to load OAuth token store while serving OAuth status"
+            );
+            Err(AppError::Internal(error.to_string()))
+        }
+    }
+}
+
 async fn oauth_status(
     State(state): State<AppState>,
     Path(provider): Path<String>,
 ) -> Result<Json<OAuthStatusResponse>, AppError> {
     let provider_id = parse_provider(&provider)?;
 
-    let has_token = OAuthTokenStore::load()
-        .map(|store| store.has_token(&provider_id))
-        .unwrap_or(false);
+    let has_token = load_oauth_token_presence(provider_id, OAuthTokenStore::load)?;
 
     let flow_active = state
         .oauth_flows
@@ -753,4 +768,47 @@ fn escape_html(input: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_oauth_token_presence;
+    use crate::error::AppError;
+    use krusty_core::ai::providers::ProviderId;
+    use krusty_core::auth::{OAuthTokenData, OAuthTokenStore};
+
+    fn sample_token() -> OAuthTokenData {
+        OAuthTokenData {
+            access_token: "token".to_string(),
+            refresh_token: None,
+            id_token: None,
+            expires_at: None,
+            last_refresh: 0,
+            account_id: None,
+        }
+    }
+
+    #[test]
+    fn load_oauth_token_presence_returns_provider_presence() {
+        let mut store = OAuthTokenStore::default();
+        store.set(ProviderId::OpenAI, sample_token());
+
+        let has_token = load_oauth_token_presence(ProviderId::OpenAI, || Ok(store))
+            .unwrap_or_else(|_| panic!("status helper should succeed"));
+
+        assert!(has_token);
+    }
+
+    #[test]
+    fn load_oauth_token_presence_returns_error_on_store_failure() {
+        let result = load_oauth_token_presence(ProviderId::OpenAI, || {
+            Err(anyhow::anyhow!("store unavailable"))
+        });
+
+        match result {
+            Err(AppError::Internal(message)) => assert!(message.contains("store unavailable")),
+            Ok(_) => panic!("broken store should not report token absence"),
+            Err(_) => panic!("broken store should surface as internal error"),
+        }
+    }
 }

@@ -6,8 +6,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use ratatui::text::Line;
-
 use super::links::RenderedMarkdown;
 use crate::tui::themes::Theme;
 
@@ -23,8 +21,6 @@ pub struct MarkdownCache {
     cache: HashMap<CacheKey, Arc<RenderedMarkdown>>,
     /// Insertion order for the main cache (oldest at front)
     cache_order: VecDeque<CacheKey>,
-    /// Legacy cache for backward compatibility (no link tracking)
-    legacy_cache: HashMap<CacheKey, Arc<Vec<Line<'static>>>>,
     /// Last render width to track changes
     last_width: usize,
 }
@@ -41,7 +37,6 @@ impl MarkdownCache {
         Self {
             cache: HashMap::new(),
             cache_order: VecDeque::new(),
-            legacy_cache: HashMap::new(),
             last_width: 0,
         }
     }
@@ -64,11 +59,6 @@ impl MarkdownCache {
         let changed = self.last_width != width;
         self.last_width = width;
         changed
-    }
-
-    /// Get cached lines for content hash (legacy, no link tracking)
-    pub fn get(&self, content_hash: u64, width: usize) -> Option<Arc<Vec<Line<'static>>>> {
-        self.legacy_cache.get(&(content_hash, width)).cloned()
     }
 
     /// Get or render markdown with link tracking, caching the result

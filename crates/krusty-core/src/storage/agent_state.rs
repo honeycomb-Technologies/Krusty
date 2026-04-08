@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use super::database::Database;
 
@@ -53,22 +53,24 @@ impl<'a> AgentStateStore<'a> {
         Ok(())
     }
 
-    /// Get the agent state for a session
-    pub fn get_agent_state(&self, session_id: &str) -> Option<AgentState> {
-        let result = self.db.conn().query_row(
-            "SELECT agent_state, agent_started_at, agent_last_event_at
+    /// Get the agent state for a session without swallowing storage failures.
+    pub fn try_get_agent_state(&self, session_id: &str) -> Result<Option<AgentState>> {
+        self.db
+            .conn()
+            .query_row(
+                "SELECT agent_state, agent_started_at, agent_last_event_at
              FROM sessions WHERE id = ?1",
-            [session_id],
-            |row| {
-                Ok(AgentState {
-                    state: row.get::<_, String>(0)?,
-                    started_at: row.get::<_, Option<String>>(1)?,
-                    last_event_at: row.get::<_, Option<String>>(2)?,
-                })
-            },
-        );
-
-        result.ok()
+                [session_id],
+                |row| {
+                    Ok(AgentState {
+                        state: row.get::<_, String>(0)?,
+                        started_at: row.get::<_, Option<String>>(1)?,
+                        last_event_at: row.get::<_, Option<String>>(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     /// Update agent last_event_at timestamp (for keeping session "alive")
@@ -141,7 +143,9 @@ mod tests {
             .expect("Failed to set agent state");
 
         // Get agent state
-        let state = store.get_agent_state(&session_id);
+        let state = store
+            .try_get_agent_state(&session_id)
+            .expect("Failed to read agent state");
 
         assert!(state.is_some());
         assert_eq!(state.unwrap().state, "streaming");

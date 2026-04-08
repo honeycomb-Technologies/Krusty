@@ -1,6 +1,5 @@
 //! Tool execution endpoint
 
-use std::path::Path;
 use std::path::PathBuf;
 
 use axum::{
@@ -10,12 +9,14 @@ use axum::{
 };
 use serde::Serialize;
 
+use super::session_access::request_workspace_scope;
 use krusty_core::agent::AgentConfig as RuntimeAgentConfig;
 use krusty_core::tools::registry::{PermissionMode, ToolContext};
 
 use crate::auth::CurrentUser;
 use crate::error::AppError;
 use crate::types::{ToolExecuteRequest, ToolExecuteResponse};
+use crate::utils::workspace::resolve_scoped_workspace_path;
 use crate::AppState;
 
 /// Build the tools router
@@ -91,33 +92,12 @@ fn resolve_tool_working_dir(
     user: Option<&CurrentUser>,
     requested: Option<&str>,
 ) -> Result<PathBuf, AppError> {
-    let workspace_base = user
-        .and_then(|u| u.0.home_dir.clone())
-        .unwrap_or_else(|| (*state.working_dir).clone());
-
-    let working_dir = match requested.map(str::trim).filter(|path| !path.is_empty()) {
-        Some(raw) => {
-            let candidate = PathBuf::from(raw);
-            if candidate.is_absolute() {
-                candidate
-            } else {
-                workspace_base.join(candidate)
-            }
-        }
-        None => workspace_base.clone(),
-    };
-
-    let allowed_root = user
-        .and_then(|u| u.0.home_dir.clone())
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| workspace_base.clone());
-    validate_path_within(&allowed_root, &working_dir)?;
-
-    Ok(working_dir)
-}
-
-fn validate_path_within(base: &Path, path: &Path) -> Result<(), AppError> {
-    crate::utils::paths::validate_path_within(base, path)
+    let workspace_scope = request_workspace_scope(state, user);
+    resolve_scoped_workspace_path(
+        requested,
+        &workspace_scope.base_dir,
+        &workspace_scope.allowed_root,
+    )
 }
 
 #[cfg(test)]

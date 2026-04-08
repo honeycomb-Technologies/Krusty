@@ -70,6 +70,10 @@ impl ProcessInfo {
     }
 }
 
+fn elapsed_millis_u64(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 struct ProcessEntry {
     info: ProcessInfo,
     /// Keep handle alive to prevent task cancellation
@@ -138,8 +142,6 @@ impl ProcessRegistry {
             // Create new process group so we can kill all children
             #[cfg(unix)]
             {
-                #[allow(unused_imports)]
-                use std::os::unix::process::CommandExt;
                 c.process_group(0);
             }
             c
@@ -149,7 +151,7 @@ impl ProcessRegistry {
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
 
-        let child = cmd.spawn()?;
+        let mut child = cmd.spawn()?;
         let pid = child.id();
 
         let info = ProcessInfo {
@@ -170,13 +172,13 @@ impl ProcessRegistry {
         let owner_id = user_id.to_string();
         let start_time = info.started_at;
         let handle = tokio::spawn(async move {
-            let result = child.wait_with_output().await;
-            let duration_ms = start_time.elapsed().as_millis() as u64;
+            let result = child.wait().await;
+            let duration_ms = elapsed_millis_u64(start_time);
 
             let status = match result {
-                Ok(output) => {
-                    let code = output.status.code().unwrap_or(-1);
-                    if output.status.success() {
+                Ok(exit_status) => {
+                    let code = exit_status.code().unwrap_or(-1);
+                    if exit_status.success() {
                         ProcessStatus::Completed {
                             exit_code: code,
                             duration_ms,
@@ -253,7 +255,7 @@ impl ProcessRegistry {
                     }
                 }
 
-                let duration_ms = entry.info.started_at.elapsed().as_millis() as u64;
+                let duration_ms = elapsed_millis_u64(entry.info.started_at);
                 entry.info.status = ProcessStatus::Killed { duration_ms };
 
                 tracing::info!(id = %id, user_id = %user_id, "Process killed");
