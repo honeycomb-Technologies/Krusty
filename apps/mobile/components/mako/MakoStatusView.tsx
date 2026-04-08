@@ -25,6 +25,7 @@ import type {
 } from "./types";
 import type {
   MakoDiagnosticsSummary,
+  MakoHealthState,
   MakoKnowledgeHealthSummary,
 } from "@krusty/api";
 
@@ -53,7 +54,7 @@ export function MakoStatusView({
   const staleRuns = getStaleRuns(runs);
   const queueHead = getQueueHeadRuns(runs);
   const cadence = summarizeCadence(runs);
-  const queueHealth = summarizeQueueHealth(runs, approvals.length);
+  const queueHealth = summarizeQueueHealth(runs, approvals.length, diagnostics);
   const priorityProfile = summarizePriorityProfile(queueHead);
   const runtimeDrift = summarizeRuntimeDrift(staleRuns, diagnostics);
   const knowledgeHealth = summarizeKnowledgeHealth(diagnostics?.knowledge);
@@ -115,6 +116,10 @@ export function MakoStatusView({
         <StatusCard label="Failed" value={String(status?.failed_count ?? 0)} />
         <StatusCard label="Tick interval" value={cadence.tickIntervalLabel} />
         <StatusCard label="Tick budget" value={cadence.tickBudgetLabel} />
+        <StatusCard
+          label="Health"
+          value={formatHealthState(diagnostics?.health_state)}
+        />
         <StatusCard
           label="Latest trace"
           value={formatTimestamp(diagnostics?.latest_trace_at)}
@@ -255,7 +260,31 @@ function summarizeCadence(runs: MakoCurrentRunSummary[]) {
 function summarizeQueueHealth(
   runs: MakoCurrentRunSummary[],
   approvalCount: number,
+  diagnostics?: MakoDiagnosticsSummary | null,
 ) {
+  if (diagnostics) {
+    switch (diagnostics.queue_pressure) {
+      case "attention":
+        return {
+          value: "Attention",
+          detail: `${diagnostics.attention_run_count} runs need intervention • ${approvalCount} approvals waiting • ${diagnostics.due_soon_wake_count} wake within 1h`,
+          tone: "warning" as const,
+        };
+      case "busy":
+        return {
+          value: "Busy",
+          detail: `${diagnostics.open_run_count} open runs are moving • ${diagnostics.due_soon_wake_count} wake within 1h`,
+          tone: "accent" as const,
+        };
+      default:
+        return {
+          value: "Calm",
+          detail: `${diagnostics.open_run_count} open runs • ${diagnostics.due_soon_wake_count} near-term wakes`,
+          tone: "success" as const,
+        };
+    }
+  }
+
   const openRuns = getQueueHeadRuns(runs);
   const attentionRuns = getAttentionRuns(runs);
   const dueSoonCount = openRuns.filter((run) => {
@@ -288,6 +317,19 @@ function summarizeQueueHealth(
     detail: `${openRuns.length} open runs • ${dueSoonCount} near-term wakes`,
     tone: "success" as const,
   };
+}
+
+function formatHealthState(state?: MakoHealthState | null): string {
+  switch (state) {
+    case "healthy":
+      return "Healthy";
+    case "attention":
+      return "Attention";
+    case "degraded":
+      return "Degraded";
+    default:
+      return "Pending";
+  }
 }
 
 function summarizePriorityProfile(runs: MakoCurrentRunSummary[]) {

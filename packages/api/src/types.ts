@@ -269,6 +269,8 @@ export type MakoRunDiagnosticKind =
   | 'stale_active'
   | 'stale_waiting'
   | 'stale_queued';
+export type MakoHealthState = 'healthy' | 'attention' | 'degraded';
+export type MakoQueuePressure = 'calm' | 'busy' | 'attention';
 
 export interface MakoDispatchResponse {
   session_id: string;
@@ -421,6 +423,11 @@ export interface MakoDiagnosticsSummary {
   stalled_count: number;
   overdue_wake_count: number;
   repeating_failure_count: number;
+  open_run_count: number;
+  attention_run_count: number;
+  due_soon_wake_count: number;
+  health_state: MakoHealthState;
+  queue_pressure: MakoQueuePressure;
   latest_trace_at?: string | null;
   knowledge: MakoKnowledgeHealthSummary;
 }

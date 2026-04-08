@@ -189,6 +189,11 @@ struct MakoDiagnosticsSummary {
     stalled_count: usize,
     overdue_wake_count: usize,
     repeating_failure_count: usize,
+    open_run_count: usize,
+    attention_run_count: usize,
+    due_soon_wake_count: usize,
+    health_state: String,
+    queue_pressure: String,
     latest_trace_at: Option<String>,
     knowledge: MakoKnowledgeHealthSummary,
 }
@@ -368,6 +373,9 @@ async fn current(
     let mut stalled_count = 0usize;
     let mut overdue_wake_count = 0usize;
     let mut repeating_failure_count = 0usize;
+    let mut open_run_count = 0usize;
+    let mut attention_run_count = 0usize;
+    let mut due_soon_wake_count = 0usize;
     let mut latest_trace_at: Option<String> = None;
 
     for session in &sessions {
@@ -422,6 +430,13 @@ async fn current(
             RunState::Idle => idle_count += 1,
         }
 
+        if run_has_open_work(run_state, &task_counts) {
+            open_run_count += 1;
+        }
+        if has_due_soon_wake(runtime.as_ref()) {
+            due_soon_wake_count += 1;
+        }
+
         latest_trace_at =
             later_timestamp(latest_trace_at, trace_diagnostics.latest_trace_at.clone());
         approvals.extend(trace_diagnostics.pending_approvals.clone());
@@ -436,6 +451,9 @@ async fn current(
         );
         if let Some(diagnostic) = diagnostic.as_ref() {
             degraded_count += 1;
+            if diagnostic_needs_attention(diagnostic.kind.as_str()) {
+                attention_run_count += 1;
+            }
             if is_stalled_diagnostic(diagnostic.kind.as_str()) {
                 stalled_count += 1;
             }
@@ -496,6 +514,24 @@ async fn current(
             stalled_count,
             overdue_wake_count,
             repeating_failure_count,
+            open_run_count,
+            attention_run_count,
+            due_soon_wake_count,
+            health_state: summarize_health_state(
+                stalled_count,
+                overdue_wake_count,
+                repeating_failure_count,
+                attention_run_count,
+                approvals.len(),
+            )
+            .to_string(),
+            queue_pressure: summarize_queue_pressure(
+                attention_run_count,
+                approvals.len(),
+                open_run_count,
+                due_soon_wake_count,
+            )
+            .to_string(),
             latest_trace_at,
             knowledge,
         },
@@ -1321,6 +1357,66 @@ fn is_stalled_diagnostic(kind: &str) -> bool {
     )
 }
 
+fn diagnostic_needs_attention(kind: &str) -> bool {
+    matches!(kind, "awaiting_approval" | "awaiting_input" | "failed")
+}
+
+fn run_has_open_work(run_state: RunState, task_counts: &TaskCounts) -> bool {
+    if run_state != RunState::Idle {
+        return true;
+    }
+
+    (task_counts.pending + task_counts.in_progress + task_counts.blocked) > 0
+}
+
+fn has_due_soon_wake(runtime: Option<&MakoRuntimeState>) -> bool {
+    let Some(runtime) = runtime else {
+        return false;
+    };
+    if runtime.status != MakoRuntimeStateStatus::Sleeping
+        || runtime.sleep_reason.as_deref() != Some("scheduled")
+    {
+        return false;
+    }
+    let Some(next_wake_at) = runtime.next_wake_at.as_deref().and_then(parse_timestamp) else {
+        return false;
+    };
+
+    let lead_secs = (next_wake_at - chrono::Utc::now()).num_seconds();
+    lead_secs > 0 && lead_secs <= 60 * 60
+}
+
+fn summarize_health_state(
+    stalled_count: usize,
+    overdue_wake_count: usize,
+    repeating_failure_count: usize,
+    attention_run_count: usize,
+    pending_approvals_count: usize,
+) -> &'static str {
+    if overdue_wake_count > 0 || repeating_failure_count > 0 {
+        return "degraded";
+    }
+    if stalled_count > 0 || attention_run_count > 0 || pending_approvals_count > 0 {
+        return "attention";
+    }
+    "healthy"
+}
+
+fn summarize_queue_pressure(
+    attention_run_count: usize,
+    pending_approvals_count: usize,
+    open_run_count: usize,
+    due_soon_wake_count: usize,
+) -> &'static str {
+    if attention_run_count > 0 || pending_approvals_count > 0 {
+        return "attention";
+    }
+    if open_run_count >= 6 || due_soon_wake_count >= 2 {
+        return "busy";
+    }
+    "calm"
+}
+
 fn summarize_knowledge_health(
     memory_store: &MemoryStore,
     report_store: &ReportStore,
@@ -2048,6 +2144,9 @@ mod tests {
         assert_eq!(summary.approvals[0].tool_call_id, "tool-1");
         assert_eq!(summary.approvals[0].tool_name, "bash");
         assert_eq!(summary.approvals[0].priority, MakoRunPriority::High);
+        assert_eq!(summary.diagnostics.attention_run_count, 1);
+        assert_eq!(summary.diagnostics.queue_pressure, "attention");
+        assert_eq!(summary.diagnostics.health_state, "attention");
         assert_eq!(
             summary.runs[0]
                 .diagnostic
@@ -2104,6 +2203,9 @@ mod tests {
         assert_eq!(summary.diagnostics.degraded_count, 1);
         assert_eq!(summary.diagnostics.stalled_count, 1);
         assert_eq!(summary.diagnostics.overdue_wake_count, 1);
+        assert_eq!(summary.diagnostics.open_run_count, 1);
+        assert_eq!(summary.diagnostics.health_state, "degraded");
+        assert_eq!(summary.diagnostics.queue_pressure, "calm");
         assert_eq!(
             summary.runs[0]
                 .diagnostic
