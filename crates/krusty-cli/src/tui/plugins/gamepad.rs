@@ -122,13 +122,6 @@ impl GamepadHandler {
 
         changed
     }
-
-    /// Check if a button is currently pressed
-    #[allow(dead_code)]
-    pub fn is_pressed(&self, button: JoypadButton) -> bool {
-        self.pressed_buttons.contains(&(button as u8))
-    }
-
     /// Get all currently pressed buttons as libretro button IDs
     pub fn pressed_buttons(&self) -> impl Iterator<Item = u8> + '_ {
         self.pressed_buttons.iter().copied()

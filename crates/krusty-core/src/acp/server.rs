@@ -30,7 +30,6 @@ pub struct AcpServerConfig {
 pub struct AcpServer {
     agent: Arc<KrustyAgent>,
     /// Server configuration (reserved for future use)
-    #[allow(dead_code)]
     config: AcpServerConfig,
 }
 
@@ -157,6 +156,11 @@ impl AcpServer {
     /// Get a reference to the agent
     pub fn agent(&self) -> &KrustyAgent {
         &self.agent
+    }
+
+    /// Get the retained ACP server configuration.
+    pub fn config(&self) -> &AcpServerConfig {
+        &self.config
     }
 }
 
@@ -302,7 +306,6 @@ fn get_provider_api_key(provider: ProviderId) -> Option<String> {
 /// Returns true if stdin is not a TTY (likely being spawned by an editor)
 /// and the `--acp` flag is present.
 #[cfg(test)]
-#[allow(dead_code)]
 pub fn should_run_acp_mode(force_acp: bool) -> bool {
     if force_acp {
         return true;
@@ -321,6 +324,16 @@ mod tests {
     fn test_server_creation() {
         let server = AcpServer::new().unwrap();
         assert_eq!(server.agent().sessions().session_count(), 0);
+    }
+
+    #[test]
+    fn test_server_configuration_is_retained() {
+        let config = AcpServerConfig {
+            working_dir: Some(std::path::PathBuf::from("/tmp/krusty-acp")),
+        };
+        let server = AcpServer::with_config(config.clone()).unwrap();
+
+        assert_eq!(server.config().working_dir, config.working_dir);
     }
 
     #[test]

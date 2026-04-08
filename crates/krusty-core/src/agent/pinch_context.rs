@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 use super::summarizer::SummarizationResult;
 use crate::storage::RankedFile;
 
+const PROJECT_CONTEXT_MAX_BYTES: usize = 8000;
+const PROJECT_CONTEXT_SECTION_MARKER: &str = "[PROJECT INSTRUCTIONS - ";
+const PROJECT_CONTEXT_OMISSION_NOTICE: &str =
+    "[...earlier project instructions omitted for context limits]\n\n";
+
 /// Complete pinch context for injection into new session
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PinchContext {
@@ -81,6 +86,70 @@ fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+fn split_project_context_sections(ctx: &str) -> Vec<&str> {
+    let starts: Vec<_> = ctx
+        .match_indices(PROJECT_CONTEXT_SECTION_MARKER)
+        .map(|(idx, _)| idx)
+        .collect();
+    if starts.len() <= 1 {
+        return vec![ctx];
+    }
+
+    starts
+        .iter()
+        .enumerate()
+        .map(|(i, start)| {
+            let end = starts.get(i + 1).copied().unwrap_or(ctx.len());
+            ctx[*start..end].trim()
+        })
+        .collect()
+}
+
+fn truncate_project_context_for_pinch(ctx: &str) -> (String, bool) {
+    if ctx.len() <= PROJECT_CONTEXT_MAX_BYTES {
+        return (ctx.to_string(), false);
+    }
+
+    let sections = split_project_context_sections(ctx);
+    if sections.len() <= 1 {
+        return (
+            truncate_utf8(ctx, PROJECT_CONTEXT_MAX_BYTES).to_string(),
+            true,
+        );
+    }
+
+    let budget = PROJECT_CONTEXT_MAX_BYTES.saturating_sub(PROJECT_CONTEXT_OMISSION_NOTICE.len());
+    let mut selected = Vec::new();
+    let mut used = 0usize;
+
+    for section in sections.iter().rev() {
+        let separator_len = if selected.is_empty() { 0 } else { 2 };
+        let section_len = section.len();
+        if used + separator_len + section_len > budget {
+            continue;
+        }
+        selected.push(*section);
+        used += separator_len + section_len;
+    }
+
+    if selected.is_empty() {
+        selected.push(truncate_utf8(
+            sections.last().copied().unwrap_or(ctx),
+            budget.max(1),
+        ));
+    }
+
+    selected.reverse();
+    (
+        format!(
+            "{}{}",
+            PROJECT_CONTEXT_OMISSION_NOTICE,
+            selected.join("\n\n")
+        ),
+        true,
+    )
+}
+
 impl PinchContext {
     pub fn from_input(input: PinchContextInput) -> Self {
         Self {
@@ -97,32 +166,6 @@ impl PinchContext {
             key_file_contents: input.key_file_contents,
             active_plan: input.active_plan,
         }
-    }
-
-    /// Create a new pinch context.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        source_session_id: String,
-        source_session_title: String,
-        summary: SummarizationResult,
-        ranked_files: Vec<RankedFile>,
-        preservation_hints: Option<String>,
-        direction: Option<String>,
-        project_context: Option<String>,
-        key_file_contents: Vec<(String, String)>,
-        active_plan: Option<String>,
-    ) -> Self {
-        Self::from_input(PinchContextInput {
-            source_session_id,
-            source_session_title,
-            summary,
-            ranked_files,
-            preservation_hints,
-            direction,
-            project_context,
-            key_file_contents,
-            active_plan,
-        })
     }
 
     /// Format as system message for new session
@@ -196,16 +239,14 @@ impl PinchContext {
 
         msg.push_str("---\n\n");
 
-        // PROJECT CONTEXT (CLAUDE.md) - Critical for continuation!
+        // PROJECT CONTEXT - Critical for continuation!
         if let Some(ctx) = &self.project_context {
-            msg.push_str("## Project Instructions (CLAUDE.md)\n\n");
+            msg.push_str("## Project Instructions\n\n");
             msg.push_str("Follow these project rules and guidelines:\n\n");
-            // Truncate if extremely long (keep most important parts)
-            if ctx.len() > 8000 {
-                msg.push_str(truncate_utf8(ctx, 8000));
+            let (project_context, truncated) = truncate_project_context_for_pinch(ctx);
+            msg.push_str(&project_context);
+            if truncated {
                 msg.push_str("\n\n...[truncated for context limits]\n");
-            } else {
-                msg.push_str(ctx);
             }
             msg.push_str("\n\n---\n\n");
         }
@@ -266,5 +307,38 @@ impl PinchContext {
         ));
 
         msg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PinchContext, PinchContextInput};
+    use crate::agent::summarizer::SummarizationResult;
+
+    #[test]
+    fn to_system_message_keeps_closest_project_instructions_when_truncated() {
+        let root_section = format!(
+            "[PROJECT INSTRUCTIONS - /repo/KRAB.md]\n\n{}\n\n[END PROJECT INSTRUCTIONS]",
+            "root instructions\n".repeat(700)
+        );
+        let local_section = "[PROJECT INSTRUCTIONS - app/AGENTS.md]\n\nlocal instructions\n\n[END PROJECT INSTRUCTIONS]";
+        let pinch_ctx = PinchContext::from_input(PinchContextInput {
+            source_session_id: "source-session".to_string(),
+            source_session_title: "Source Session".to_string(),
+            summary: SummarizationResult::default(),
+            ranked_files: vec![],
+            preservation_hints: None,
+            direction: None,
+            project_context: Some(format!("{root_section}\n\n{local_section}")),
+            key_file_contents: vec![],
+            active_plan: None,
+        });
+
+        let message = pinch_ctx.to_system_message();
+
+        assert!(message.contains("## Project Instructions"));
+        assert!(message.contains("local instructions"));
+        assert!(message.contains("app/AGENTS.md"));
+        assert!(message.contains("omitted for context limits"));
     }
 }

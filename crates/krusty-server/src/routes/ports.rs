@@ -228,7 +228,17 @@ async fn proxy_root(
     uri: Uri,
     request: Request,
 ) -> Result<Response<axum::body::Body>, AppError> {
-    proxy_request(state, user, port, None, ws, method, uri, request).await
+    proxy_request(ProxyRequest {
+        state,
+        user,
+        port,
+        path: None,
+        ws,
+        method,
+        uri,
+        request,
+    })
+    .await
 }
 
 async fn proxy_path(
@@ -240,11 +250,20 @@ async fn proxy_path(
     uri: Uri,
     request: Request,
 ) -> Result<Response<axum::body::Body>, AppError> {
-    proxy_request(state, user, port, Some(path), ws, method, uri, request).await
+    proxy_request(ProxyRequest {
+        state,
+        user,
+        port,
+        path: Some(path),
+        ws,
+        method,
+        uri,
+        request,
+    })
+    .await
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn proxy_request(
+struct ProxyRequest {
     state: AppState,
     user: Option<CurrentUser>,
     port: u16,
@@ -253,7 +272,20 @@ async fn proxy_request(
     method: Method,
     uri: Uri,
     request: Request,
-) -> Result<Response<axum::body::Body>, AppError> {
+}
+
+async fn proxy_request(input: ProxyRequest) -> Result<Response<axum::body::Body>, AppError> {
+    let ProxyRequest {
+        state,
+        user,
+        port,
+        path,
+        ws,
+        method,
+        uri,
+        request,
+    } = input;
+
     let settings = load_preview_settings(&state, user.as_ref())?;
     if !settings.enabled {
         return Err(AppError::BadRequest(

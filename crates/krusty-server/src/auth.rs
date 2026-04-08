@@ -14,6 +14,7 @@ use axum::{
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+use crate::utils::workspace::resolve_scoped_workspace_path;
 use crate::AppState;
 
 /// User context attached to request extensions by middleware.
@@ -178,26 +179,12 @@ fn resolve_workspace_dir(
     server_root: &Path,
     requested: Option<&str>,
 ) -> Result<PathBuf, (StatusCode, &'static str)> {
-    let workspace_dir = match requested.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(raw) => {
-            let candidate = PathBuf::from(raw);
-            if candidate.is_absolute() {
-                candidate
-            } else {
-                server_root.join(candidate)
-            }
-        }
-        None => server_root.to_path_buf(),
-    };
-
-    crate::utils::paths::validate_path_within(server_root, &workspace_dir).map_err(|_| {
+    resolve_scoped_workspace_path(requested, server_root, server_root).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
             "Workspace directory must stay within the configured server root",
         )
-    })?;
-
-    Ok(workspace_dir)
+    })
 }
 
 #[cfg(test)]

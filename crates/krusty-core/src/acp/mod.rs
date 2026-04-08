@@ -37,7 +37,6 @@ mod processor;
 mod server;
 mod session;
 mod tools;
-mod updates;
 mod workspace_context;
 
 pub use agent::KrustyAgent;

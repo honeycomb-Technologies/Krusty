@@ -1,32 +1,13 @@
 //! ACP tool integration
 //!
 //! Bridges Krusty's tool system with ACP's tool call protocol.
-//! Some tools are executed locally, others are delegated to the client.
 
 use agent_client_protocol::{
-    Client, Content, ContentBlock, CreateTerminalRequest, Diff, ReadTextFileRequest,
-    ReleaseTerminalRequest, SessionId, TerminalId, TerminalOutputRequest, TextContent,
-    ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind, WriteTextFileRequest,
+    Content, ContentBlock, TextContent, ToolCallContent, ToolCallId, ToolCallLocation,
+    ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use tracing::{debug, warn};
-
-use super::error::AcpError;
-
-/// Tools that should be delegated to the client (editor)
-#[allow(dead_code)]
-const CLIENT_DELEGATED_TOOLS: &[&str] = &[
-    // File operations - editor has the authoritative view
-    // Note: We may still execute locally if client doesn't support
-];
-
-/// Check if a tool should be delegated to the client
-#[allow(dead_code)]
-pub fn should_delegate_to_client(tool_name: &str) -> bool {
-    CLIENT_DELEGATED_TOOLS.contains(&tool_name)
-}
 
 /// Map tool name to ACP ToolKind for proper UI categorization
 pub fn tool_name_to_kind(tool_name: &str) -> ToolKind {
@@ -86,51 +67,41 @@ pub fn extract_locations(tool_name: &str, input: &Value) -> Vec<ToolCallLocation
     locations
 }
 
+fn file_display_name(path: &str) -> std::borrow::Cow<'_, str> {
+    Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| path.into())
+}
+
+fn truncate_for_title(value: &str, max_chars: usize) -> std::borrow::Cow<'_, str> {
+    let mut chars = value.chars();
+    let visible: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_none() {
+        value.into()
+    } else {
+        format!("{}...", visible.trim_end_matches(char::is_whitespace)).into()
+    }
+}
+
+fn titled_path_action(input: &Value, field: &str, verb: &str, fallback: &str) -> String {
+    input
+        .get(field)
+        .and_then(Value::as_str)
+        .map(file_display_name)
+        .map(|name| format!("{verb} {name}"))
+        .unwrap_or_else(|| fallback.to_string())
+}
+
 /// Create a human-readable title for a tool call
 pub fn create_tool_title(tool_name: &str, input: &Value) -> String {
     match tool_name {
-        "read" | "Read" => {
-            if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
-                let filename = Path::new(path)
-                    .file_name()
-                    .map(|s| s.to_string_lossy())
-                    .unwrap_or_else(|| path.into());
-                format!("Reading {}", filename)
-            } else {
-                "Reading file".to_string()
-            }
-        }
-        "edit" | "Edit" => {
-            if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
-                let filename = Path::new(path)
-                    .file_name()
-                    .map(|s| s.to_string_lossy())
-                    .unwrap_or_else(|| path.into());
-                format!("Editing {}", filename)
-            } else {
-                "Editing file".to_string()
-            }
-        }
-        "write" | "Write" => {
-            if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
-                let filename = Path::new(path)
-                    .file_name()
-                    .map(|s| s.to_string_lossy())
-                    .unwrap_or_else(|| path.into());
-                format!("Writing {}", filename)
-            } else {
-                "Writing file".to_string()
-            }
-        }
+        "read" | "Read" => titled_path_action(input, "file_path", "Reading", "Reading file"),
+        "edit" | "Edit" => titled_path_action(input, "file_path", "Editing", "Editing file"),
+        "write" | "Write" => titled_path_action(input, "file_path", "Writing", "Writing file"),
         "bash" | "Bash" => {
             if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
-                // Truncate long commands
-                let display = if cmd.len() > 50 {
-                    format!("{}...", &cmd[..47])
-                } else {
-                    cmd.to_string()
-                };
-                format!("Running: {}", display)
+                format!("Running: {}", truncate_for_title(cmd, 47))
             } else {
                 "Running command".to_string()
             }
@@ -151,12 +122,7 @@ pub fn create_tool_title(tool_name: &str, input: &Value) -> String {
         }
         "web_fetch" | "WebFetch" => {
             if let Some(url) = input.get("url").and_then(|v| v.as_str()) {
-                let display = if url.len() > 40 {
-                    format!("{}...", &url[..37])
-                } else {
-                    url.to_string()
-                };
-                format!("Fetching: {}", display)
+                format!("Fetching: {}", truncate_for_title(url, 37))
             } else {
                 "Fetching URL".to_string()
             }
@@ -168,17 +134,7 @@ pub fn create_tool_title(tool_name: &str, input: &Value) -> String {
                 "Searching web".to_string()
             }
         }
-        "list" => {
-            if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
-                let dirname = Path::new(path)
-                    .file_name()
-                    .map(|s| s.to_string_lossy())
-                    .unwrap_or_else(|| path.into());
-                format!("Listing {}", dirname)
-            } else {
-                "Listing directory".to_string()
-            }
-        }
+        "list" => titled_path_action(input, "path", "Listing", "Listing directory"),
         "apply_patch" => {
             if let Some(patch) = input.get("patch").and_then(|v| v.as_str()) {
                 let file_count = patch.matches("*** Update File:").count()
@@ -195,16 +151,12 @@ pub fn create_tool_title(tool_name: &str, input: &Value) -> String {
         }
         "multiedit" | "multi_edit" => {
             if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
-                let filename = Path::new(path)
-                    .file_name()
-                    .map(|s| s.to_string_lossy())
-                    .unwrap_or_else(|| path.into());
                 let edit_count = input
                     .get("edits")
                     .and_then(|v| v.as_array())
                     .map(|a| a.len())
                     .unwrap_or(0);
-                format!("Editing {} ({} edits)", filename, edit_count)
+                format!("Editing {} ({} edits)", file_display_name(path), edit_count)
             } else {
                 "Multi-editing file".to_string()
             }
@@ -258,123 +210,32 @@ pub fn text_to_tool_content(text: &str) -> ToolCallContent {
     ToolCallContent::Content(Content::new(ContentBlock::Text(TextContent::new(text))))
 }
 
-/// Convert a file diff to ACP diff content
-/// Note: ACP Diff only stores the new text, not old text (unified diff is computed by client)
-#[allow(dead_code)]
-pub fn diff_to_tool_content(path: &Path, _old_text: &str, new_text: &str) -> ToolCallContent {
-    ToolCallContent::Diff(Diff::new(
-        path.to_string_lossy().to_string(),
-        new_text.to_string(),
-    ))
-}
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
 
-/// Read a file via the ACP client (if supported)
-#[allow(dead_code)]
-pub async fn read_file_via_client<C: Client>(
-    client: &C,
-    session_id: &SessionId,
-    path: &Path,
-    _start_line: Option<u32>,
-    _end_line: Option<u32>,
-) -> Result<String, AcpError> {
-    debug!("Reading file via client: {:?}", path);
+    use super::create_tool_title;
 
-    let request = ReadTextFileRequest::new(session_id.clone(), path.to_string_lossy().to_string());
-
-    match client.read_text_file(request).await {
-        Ok(response) => Ok(response.content),
-        Err(e) => {
-            warn!("Client file read failed, will fallback to local: {}", e);
-            Err(AcpError::ToolError(e.to_string()))
-        }
+    #[test]
+    fn create_tool_title_uses_file_name_for_path_actions() {
+        assert_eq!(
+            create_tool_title("read", &json!({"file_path": "/tmp/example.txt"})),
+            "Reading example.txt"
+        );
+        assert_eq!(
+            create_tool_title("list", &json!({"path": "/tmp/project"})),
+            "Listing project"
+        );
     }
-}
 
-/// Write a file via the ACP client (if supported)
-#[allow(dead_code)]
-pub async fn write_file_via_client<C: Client>(
-    client: &C,
-    session_id: &SessionId,
-    path: &Path,
-    content: &str,
-) -> Result<(), AcpError> {
-    debug!("Writing file via client: {:?}", path);
+    #[test]
+    fn create_tool_title_truncates_unicode_safely() {
+        let title = create_tool_title(
+            "bash",
+            &json!({"command": "echo 你好世界你好世界你好世界你好世界你好世界你好世界你好世界你好世界你好世界你好世界你好世界你好世界"}),
+        );
 
-    let request = WriteTextFileRequest::new(
-        session_id.clone(),
-        path.to_string_lossy().to_string(),
-        content.to_string(),
-    );
-
-    client
-        .write_text_file(request)
-        .await
-        .map_err(|e| AcpError::ToolError(e.to_string()))?;
-
-    Ok(())
-}
-
-/// Create a terminal via the ACP client
-#[allow(dead_code)]
-pub async fn create_terminal_via_client<C: Client>(
-    client: &C,
-    session_id: &SessionId,
-    command: &str,
-    _cwd: Option<&Path>,
-) -> Result<String, AcpError> {
-    debug!("Creating terminal via client: {}", command);
-
-    let request = CreateTerminalRequest::new(session_id.clone(), command.to_string());
-
-    let response = client
-        .create_terminal(request)
-        .await
-        .map_err(|e| AcpError::ToolError(e.to_string()))?;
-
-    Ok(response.terminal_id.to_string())
-}
-
-/// Get terminal output via the ACP client
-#[allow(dead_code)]
-pub async fn get_terminal_output_via_client<C: Client>(
-    client: &C,
-    session_id: &SessionId,
-    terminal_id: &str,
-) -> Result<(String, bool), AcpError> {
-    debug!("Getting terminal output: {}", terminal_id);
-
-    let request = TerminalOutputRequest::new(
-        session_id.clone(),
-        TerminalId::from(terminal_id.to_string()),
-    );
-
-    let response = client
-        .terminal_output(request)
-        .await
-        .map_err(|e| AcpError::ToolError(e.to_string()))?;
-
-    let is_complete = response.exit_status.is_some();
-    Ok((response.output, is_complete))
-}
-
-/// Release a terminal via the ACP client
-#[allow(dead_code)]
-pub async fn release_terminal_via_client<C: Client>(
-    client: &C,
-    session_id: &SessionId,
-    terminal_id: &str,
-) -> Result<(), AcpError> {
-    debug!("Releasing terminal: {}", terminal_id);
-
-    let request = ReleaseTerminalRequest::new(
-        session_id.clone(),
-        TerminalId::from(terminal_id.to_string()),
-    );
-
-    client
-        .release_terminal(request)
-        .await
-        .map_err(|e| AcpError::ToolError(e.to_string()))?;
-
-    Ok(())
+        assert!(title.starts_with("Running: echo 你好世界"));
+        assert!(title.ends_with("..."));
+    }
 }

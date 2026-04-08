@@ -11,6 +11,15 @@ use crate::tui::blocks::ClipContext;
 use crate::tui::components::scrollbars::render_scrollbar;
 use crate::tui::themes::Theme;
 
+#[derive(Clone, Copy)]
+struct SbsPanelColors {
+    change_color: Color,
+    change_bg: Color,
+    context_color: Color,
+    content_color: Color,
+    line_num_color: Color,
+}
+
 impl EditBlock {
     /// Render unified diff view
     pub(super) fn render_unified(
@@ -409,12 +418,13 @@ impl EditBlock {
                 area.x + 1,
                 mid_x - 1,
                 left_line,
-                deletion_color,
-                deletion_bg,
-                context_color,
-                content_color,
-                line_num_color,
-                border_color,
+                SbsPanelColors {
+                    change_color: deletion_color,
+                    change_bg: deletion_bg,
+                    context_color,
+                    content_color,
+                    line_num_color,
+                },
                 true,
             );
 
@@ -431,12 +441,13 @@ impl EditBlock {
                 mid_x + 1,
                 content_end_x,
                 right_line,
-                addition_color,
-                addition_bg,
-                context_color,
-                content_color,
-                line_num_color,
-                border_color,
+                SbsPanelColors {
+                    change_color: addition_color,
+                    change_bg: addition_bg,
+                    context_color,
+                    content_color,
+                    line_num_color,
+                },
                 false,
             );
 
@@ -508,7 +519,6 @@ impl EditBlock {
     }
 
     /// Render a single panel in side-by-side view
-    #[allow(clippy::too_many_arguments)]
     fn render_sbs_panel(
         &self,
         buf: &mut Buffer,
@@ -516,14 +526,17 @@ impl EditBlock {
         start_x: u16,
         end_x: u16,
         line: Option<&DiffLine>,
-        change_color: Color,
-        change_bg: Color,
-        context_color: Color,
-        content_color: Color,
-        line_num_color: Color,
-        _border_color: Color,
+        colors: SbsPanelColors,
         is_left: bool,
     ) {
+        let SbsPanelColors {
+            change_color,
+            change_bg,
+            context_color,
+            content_color,
+            line_num_color,
+        } = colors;
+
         let panel_width = (end_x - start_x) as usize;
         if panel_width < 8 {
             return;

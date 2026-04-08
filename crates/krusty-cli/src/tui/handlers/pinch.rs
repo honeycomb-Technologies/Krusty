@@ -9,13 +9,20 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::agent::{generate_summary, PinchContext, PinchContextInput, SummarizationResult};
+use crate::agent::{
+    build_project_context, generate_summary, PinchContext, PinchContextInput, SummarizationResult,
+};
 use crate::ai::client::AiClient;
 use crate::storage::{FileActivityTracker, RankedFile};
 use crate::tui::app::App;
 use crate::tui::utils::{SummarizationUpdate, TitleUpdate};
 
 const SUMMARIZATION_TIMEOUT: Duration = Duration::from_secs(600);
+
+fn load_pinch_project_context(working_dir: &std::path::Path) -> Option<String> {
+    let context = build_project_context(working_dir);
+    (!context.trim().is_empty()).then_some(context)
+}
 
 impl App {
     /// Start the summarization phase of pinch
@@ -119,29 +126,11 @@ impl App {
 
     /// Read project context from instruction files
     fn read_project_context(&self) -> Option<String> {
-        // Support common AI coding assistant instruction file formats
-        const PROJECT_FILES: &[&str] = &[
-            "KRAB.md",
-            "krab.md",
-            "AGENTS.md",
-            "agents.md",
-            "CLAUDE.md",
-            "claude.md",
-            ".cursorrules",
-            ".windsurfrules",
-            ".clinerules",
-            ".github/copilot-instructions.md",
-            "JULES.md",
-            "gemini.md",
-        ];
-        for filename in PROJECT_FILES {
-            let path = self.runtime.working_dir.join(filename);
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                tracing::debug!("Loaded project context from {}", filename);
-                return Some(content);
-            }
+        let context = load_pinch_project_context(&self.runtime.working_dir);
+        if context.is_some() {
+            tracing::debug!("Loaded pinch project context from instruction files");
         }
-        None
+        context
     }
 
     /// Create AI client for summarization
@@ -679,5 +668,31 @@ impl App {
     /// Create AI client for pinch title generation
     fn create_pinch_title_client(&self) -> Option<AiClient> {
         self.create_ai_client()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::load_pinch_project_context;
+
+    #[test]
+    fn load_pinch_project_context_uses_shared_hierarchical_builder() {
+        let temp = TempDir::new().expect("temp dir should create");
+        let repo = temp.path();
+        let nested = repo.join("a").join("b");
+        fs::create_dir_all(&nested).expect("nested dir should create");
+        fs::create_dir_all(repo.join(".git")).expect("git dir should create");
+        fs::write(repo.join("AGENTS.md"), "root instructions").expect("root instructions");
+        fs::write(repo.join("a").join("CLAUDE.md"), "nested instructions")
+            .expect("nested instructions");
+
+        let context = load_pinch_project_context(&nested).expect("project context should load");
+
+        assert!(context.contains("root instructions"));
+        assert!(context.contains("nested instructions"));
     }
 }

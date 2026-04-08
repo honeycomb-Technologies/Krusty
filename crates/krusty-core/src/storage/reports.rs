@@ -30,34 +30,43 @@ pub struct ReportStore {
     db: Database,
 }
 
+pub struct CreateReportInput<'a> {
+    pub title: &'a str,
+    pub session_id: &'a str,
+    pub project_dir: Option<&'a str>,
+    pub report_root: Option<&'a Path>,
+    pub content: &'a str,
+    pub summary: &'a str,
+    pub tags: &'a [String],
+    pub sources: &'a [String],
+}
+
 impl ReportStore {
     pub fn new(db: Database) -> Self {
         Self { db }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_report(
-        &self,
-        title: &str,
-        session_id: &str,
-        project_dir: Option<&str>,
-        report_root: Option<&Path>,
-        content: &str,
-        summary: &str,
-        tags: &[String],
-        sources: &[String],
-    ) -> Result<String> {
+    pub fn create_report(&self, input: CreateReportInput<'_>) -> Result<String> {
         let id = Uuid::new_v4().to_string();
-        let tags_json = serde_json::to_string(tags).context("serializing tags")?;
-        let sources_json = serde_json::to_string(sources).context("serializing sources")?;
+        let tags_json = serde_json::to_string(input.tags).context("serializing tags")?;
+        let sources_json = serde_json::to_string(input.sources).context("serializing sources")?;
 
         self.db.conn().execute(
             "INSERT INTO reports (id, title, session_id, project_dir, content, summary, tags, sources)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![id, title, session_id, project_dir, content, summary, tags_json, sources_json],
+            params![
+                id,
+                input.title,
+                input.session_id,
+                input.project_dir,
+                input.content,
+                input.summary,
+                tags_json,
+                sources_json
+            ],
         )?;
 
-        if let Err(e) = write_report_to_disk(title, content, report_root) {
+        if let Err(e) = write_report_to_disk(input.title, input.content, input.report_root) {
             tracing::warn!("Failed to write report to disk: {e}");
         }
 
@@ -73,6 +82,25 @@ impl ReportStore {
         stmt.query_row(params![id], row_to_report)
             .optional()
             .context("fetching report")
+    }
+
+    pub fn get_report_for_user(&self, id: &str, user_id: Option<&str>) -> Result<Option<Report>> {
+        if let Some(user_id) = user_id {
+            let mut stmt = self.db.conn().prepare(
+                "SELECT reports.id, reports.title, reports.session_id, reports.project_dir,
+                        reports.content, reports.summary, reports.tags, reports.sources,
+                        reports.created_at
+                 FROM reports
+                 INNER JOIN sessions ON sessions.id = reports.session_id
+                 WHERE reports.id = ?1 AND sessions.user_id = ?2",
+            )?;
+
+            stmt.query_row(params![id, user_id], row_to_report)
+                .optional()
+                .context("fetching report for user")
+        } else {
+            self.get_report(id)
+        }
     }
 
     pub fn list_reports(&self, project_dir: Option<&str>) -> Result<Vec<Report>> {
@@ -99,6 +127,59 @@ impl ReportStore {
         let rows = stmt.query_map(params.as_slice(), row_to_report)?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("listing reports")
+    }
+
+    pub fn list_reports_for_user(
+        &self,
+        project_dir: Option<&str>,
+        user_id: Option<&str>,
+    ) -> Result<Vec<Report>> {
+        let (sql, bound) = match (project_dir, user_id) {
+            (Some(project_dir), Some(user_id)) => (
+                "SELECT reports.id, reports.title, reports.session_id, reports.project_dir,
+                        reports.content, reports.summary, reports.tags, reports.sources,
+                        reports.created_at
+                 FROM reports
+                 INNER JOIN sessions ON sessions.id = reports.session_id
+                 WHERE reports.project_dir = ?1 AND sessions.user_id = ?2
+                 ORDER BY reports.created_at DESC"
+                    .to_string(),
+                vec![project_dir.to_string(), user_id.to_string()],
+            ),
+            (Some(project_dir), None) => (
+                "SELECT id, title, session_id, project_dir, content, summary, tags, sources, created_at
+                 FROM reports WHERE project_dir = ?1
+                 ORDER BY created_at DESC"
+                    .to_string(),
+                vec![project_dir.to_string()],
+            ),
+            (None, Some(user_id)) => (
+                "SELECT reports.id, reports.title, reports.session_id, reports.project_dir,
+                        reports.content, reports.summary, reports.tags, reports.sources,
+                        reports.created_at
+                 FROM reports
+                 INNER JOIN sessions ON sessions.id = reports.session_id
+                 WHERE sessions.user_id = ?1
+                 ORDER BY reports.created_at DESC"
+                    .to_string(),
+                vec![user_id.to_string()],
+            ),
+            (None, None) => (
+                "SELECT id, title, session_id, project_dir, content, summary, tags, sources, created_at
+                 FROM reports ORDER BY created_at DESC"
+                    .to_string(),
+                vec![],
+            ),
+        };
+
+        let mut stmt = self.db.conn().prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = bound
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt.query_map(params.as_slice(), row_to_report)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("listing reports for user")
     }
 
     pub fn search_reports(&self, query: &str, project_dir: Option<&str>) -> Result<Vec<Report>> {
@@ -206,20 +287,58 @@ mod tests {
         (ReportStore::new(db), tmp)
     }
 
+    fn create_store_with_users() -> (ReportStore, TempDir) {
+        let (store, tmp) = create_store();
+        let now = chrono::Utc::now().to_rfc3339();
+        store
+            .db
+            .conn()
+            .execute(
+                "INSERT INTO users (id, email, license_tier) VALUES (?1, ?2, ?3)",
+                params!["user-a", "user-a@example.com", "free"],
+            )
+            .expect("seed user a");
+        store
+            .db
+            .conn()
+            .execute(
+                "INSERT INTO users (id, email, license_tier) VALUES (?1, ?2, ?3)",
+                params!["user-b", "user-b@example.com", "free"],
+            )
+            .expect("seed user b");
+        store
+            .db
+            .conn()
+            .execute(
+                "INSERT INTO sessions (id, title, created_at, updated_at, user_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params!["sess-a", "User A Session", now, now, "user-a"],
+            )
+            .expect("seed owned session a");
+        store
+            .db
+            .conn()
+            .execute(
+                "INSERT INTO sessions (id, title, created_at, updated_at, user_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params!["sess-b", "User B Session", now, now, "user-b"],
+            )
+            .expect("seed owned session b");
+        (store, tmp)
+    }
+
     #[test]
     fn create_and_get_report() {
         let (store, _tmp) = create_store();
         let id = store
-            .create_report(
-                "Auth Analysis",
-                "sess-1",
-                Some("/home/user/project"),
-                None,
-                "# Auth\nDetailed analysis...",
-                "OAuth2 flow review",
-                &["auth".into(), "security".into()],
-                &["RFC 6749".into()],
-            )
+            .create_report(CreateReportInput {
+                title: "Auth Analysis",
+                session_id: "sess-1",
+                project_dir: Some("/home/user/project"),
+                report_root: None,
+                content: "# Auth\nDetailed analysis...",
+                summary: "OAuth2 flow review",
+                tags: &["auth".into(), "security".into()],
+                sources: &["RFC 6749".into()],
+            })
             .unwrap();
 
         let report = store.get_report(&id).unwrap().unwrap();
@@ -234,40 +353,40 @@ mod tests {
     fn list_reports_by_project() {
         let (store, _tmp) = create_store();
         store
-            .create_report(
-                "Report A",
-                "sess-1",
-                Some("/proj-a"),
-                None,
-                "content a",
-                "",
-                &[],
-                &[],
-            )
+            .create_report(CreateReportInput {
+                title: "Report A",
+                session_id: "sess-1",
+                project_dir: Some("/proj-a"),
+                report_root: None,
+                content: "content a",
+                summary: "",
+                tags: &[],
+                sources: &[],
+            })
             .unwrap();
         store
-            .create_report(
-                "Report B",
-                "sess-1",
-                Some("/proj-b"),
-                None,
-                "content b",
-                "",
-                &[],
-                &[],
-            )
+            .create_report(CreateReportInput {
+                title: "Report B",
+                session_id: "sess-1",
+                project_dir: Some("/proj-b"),
+                report_root: None,
+                content: "content b",
+                summary: "",
+                tags: &[],
+                sources: &[],
+            })
             .unwrap();
         store
-            .create_report(
-                "Report C",
-                "sess-1",
-                Some("/proj-a"),
-                None,
-                "content c",
-                "",
-                &[],
-                &[],
-            )
+            .create_report(CreateReportInput {
+                title: "Report C",
+                session_id: "sess-1",
+                project_dir: Some("/proj-a"),
+                report_root: None,
+                content: "content c",
+                summary: "",
+                tags: &[],
+                sources: &[],
+            })
             .unwrap();
 
         let proj_a = store.list_reports(Some("/proj-a")).unwrap();
@@ -281,28 +400,28 @@ mod tests {
     fn search_reports_by_title_and_tags() {
         let (store, _tmp) = create_store();
         store
-            .create_report(
-                "Database Migration Guide",
-                "sess-1",
-                None,
-                None,
-                "content",
-                "",
-                &["database".into(), "migration".into()],
-                &[],
-            )
+            .create_report(CreateReportInput {
+                title: "Database Migration Guide",
+                session_id: "sess-1",
+                project_dir: None,
+                report_root: None,
+                content: "content",
+                summary: "",
+                tags: &["database".into(), "migration".into()],
+                sources: &[],
+            })
             .unwrap();
         store
-            .create_report(
-                "API Design",
-                "sess-1",
-                None,
-                None,
-                "content",
-                "",
-                &["api".into()],
-                &[],
-            )
+            .create_report(CreateReportInput {
+                title: "API Design",
+                session_id: "sess-1",
+                project_dir: None,
+                report_root: None,
+                content: "content",
+                summary: "",
+                tags: &["api".into()],
+                sources: &[],
+            })
             .unwrap();
 
         let results = store.search_reports("migration", None).unwrap();
@@ -318,7 +437,16 @@ mod tests {
     fn delete_report() {
         let (store, _tmp) = create_store();
         let id = store
-            .create_report("Temporary", "sess-1", None, None, "content", "", &[], &[])
+            .create_report(CreateReportInput {
+                title: "Temporary",
+                session_id: "sess-1",
+                project_dir: None,
+                report_root: None,
+                content: "content",
+                summary: "",
+                tags: &[],
+                sources: &[],
+            })
             .unwrap();
         assert!(store.get_report(&id).unwrap().is_some());
 
@@ -333,16 +461,16 @@ mod tests {
         std::fs::create_dir_all(&project_root).unwrap();
 
         store
-            .create_report(
-                "Workspace Report",
-                "sess-1",
-                Some(project_root.to_str().unwrap()),
-                Some(&project_root),
-                "content",
-                "",
-                &[],
-                &[],
-            )
+            .create_report(CreateReportInput {
+                title: "Workspace Report",
+                session_id: "sess-1",
+                project_dir: Some(project_root.to_str().unwrap()),
+                report_root: Some(&project_root),
+                content: "content",
+                summary: "",
+                tags: &[],
+                sources: &[],
+            })
             .unwrap();
 
         let reports_dir = crate::paths::project_reports_dir(&project_root);
@@ -359,5 +487,72 @@ mod tests {
         assert_eq!(slugify("Hello, World!"), "hello-world");
         assert_eq!(slugify("  spaces  "), "spaces");
         assert_eq!(slugify("a--b"), "a-b");
+    }
+
+    #[test]
+    fn list_reports_for_user_filters_via_session_owner() {
+        let (store, _tmp) = create_store_with_users();
+        store
+            .create_report(CreateReportInput {
+                title: "A Report",
+                session_id: "sess-a",
+                project_dir: Some("/proj-a"),
+                report_root: None,
+                content: "content a",
+                summary: "",
+                tags: &[],
+                sources: &[],
+            })
+            .unwrap();
+        store
+            .create_report(CreateReportInput {
+                title: "B Report",
+                session_id: "sess-b",
+                project_dir: Some("/proj-b"),
+                report_root: None,
+                content: "content b",
+                summary: "",
+                tags: &[],
+                sources: &[],
+            })
+            .unwrap();
+
+        let user_a_reports = store.list_reports_for_user(None, Some("user-a")).unwrap();
+        assert_eq!(user_a_reports.len(), 1);
+        assert_eq!(user_a_reports[0].title, "A Report");
+
+        let project_scoped = store
+            .list_reports_for_user(Some("/proj-a"), Some("user-a"))
+            .unwrap();
+        assert_eq!(project_scoped.len(), 1);
+        assert_eq!(project_scoped[0].title, "A Report");
+    }
+
+    #[test]
+    fn get_report_for_user_hides_foreign_reports() {
+        let (store, _tmp) = create_store_with_users();
+        let report_id = store
+            .create_report(CreateReportInput {
+                title: "A Report",
+                session_id: "sess-a",
+                project_dir: Some("/proj-a"),
+                report_root: None,
+                content: "content a",
+                summary: "",
+                tags: &[],
+                sources: &[],
+            })
+            .unwrap();
+
+        let owned = store
+            .get_report_for_user(&report_id, Some("user-a"))
+            .unwrap()
+            .expect("owned report should load");
+        assert_eq!(owned.title, "A Report");
+
+        let hidden = store
+            .get_report_for_user(&report_id, Some("user-b"))
+            .unwrap();
+        assert!(hidden.is_none());
     }
 }

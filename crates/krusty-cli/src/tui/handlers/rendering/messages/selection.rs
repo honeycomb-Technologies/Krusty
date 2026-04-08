@@ -14,6 +14,17 @@ use std::sync::LazyLock;
 pub(super) static FILE_REF_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[(Image|PDF): ([^\]]+)\]").unwrap());
 
+pub(super) struct UserLineFileRefOptions<'a> {
+    pub line_idx: usize,
+    pub selection: Option<((usize, usize), (usize, usize))>,
+    pub base_style: Style,
+    pub link_color: Color,
+    pub sel_bg: Color,
+    pub sel_fg: Color,
+    pub msg_idx: usize,
+    pub hovered_file_ref: Option<&'a (usize, String)>,
+}
+
 /// Apply selection highlighting to a pre-rendered markdown line (preserves existing styles)
 /// Uses CHARACTER indexing (not byte indexing) to handle UTF-8 safely
 #[inline]
@@ -167,18 +178,21 @@ pub(super) fn apply_selection_to_line(
 
 /// Style a user message line with file references highlighted
 /// File references like [filename.png] get link styling with hover effects
-#[allow(clippy::too_many_arguments)]
 pub(super) fn style_user_line_with_file_refs(
     text: &str,
-    line_idx: usize,
-    selection: Option<((usize, usize), (usize, usize))>,
-    base_style: Style,
-    link_color: Color,
-    sel_bg: Color,
-    sel_fg: Color,
-    msg_idx: usize,
-    hovered_file_ref: Option<&(usize, String)>,
+    options: UserLineFileRefOptions<'_>,
 ) -> Line<'static> {
+    let UserLineFileRefOptions {
+        line_idx,
+        selection,
+        base_style,
+        link_color,
+        sel_bg,
+        sel_fg,
+        msg_idx,
+        hovered_file_ref,
+    } = options;
+
     let link_style = Style::default()
         .fg(link_color)
         .add_modifier(Modifier::UNDERLINED);

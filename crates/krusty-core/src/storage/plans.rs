@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rusqlite::params;
+use rusqlite::{params, Row};
 
 use super::database::Database;
 use crate::plan::{PlanFile, PlanStatus};
@@ -169,22 +169,42 @@ impl<'a> PlanStore<'a> {
              ORDER BY p.updated_at DESC",
         )?;
 
-        let plans = stmt.query_map([], |row| {
-            Ok(PlanSummary {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                title: row.get(2)?,
-                status: row
-                    .get::<_, String>(3)?
-                    .parse()
-                    .unwrap_or(PlanStatus::InProgress),
-                created_at: row.get(4)?,
-                working_dir: row.get(5)?,
-            })
-        })?;
+        let plans = stmt.query_map([], plan_summary_from_row)?;
 
         plans.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+
+    /// List completed plans scoped to a working directory.
+    pub fn list_completed_for_working_dir(&self, working_dir: &str) -> Result<Vec<PlanSummary>> {
+        let mut stmt = self.db.conn().prepare(
+            "SELECT p.id, p.session_id, p.title, p.status, p.created_at, s.working_dir
+             FROM plans p
+             INNER JOIN sessions s ON p.session_id = s.id
+             WHERE p.status = ?1 AND s.working_dir = ?2
+             ORDER BY p.updated_at DESC",
+        )?;
+
+        let plans = stmt.query_map(
+            params![PlanStatus::Completed.to_string(), working_dir],
+            plan_summary_from_row,
+        )?;
+
+        plans.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+}
+
+fn plan_summary_from_row(row: &Row<'_>) -> rusqlite::Result<PlanSummary> {
+    Ok(PlanSummary {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        title: row.get(2)?,
+        status: row
+            .get::<_, String>(3)?
+            .parse()
+            .unwrap_or(PlanStatus::InProgress),
+        created_at: row.get(4)?,
+        working_dir: row.get(5)?,
+    })
 }
 
 /// Internal row type for plan queries

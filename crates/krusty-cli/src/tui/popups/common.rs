@@ -12,10 +12,7 @@ use crate::tui::themes::Theme;
 
 /// Standard popup sizes (fixed width x height in characters)
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub enum PopupSize {
-    /// Small popup - auth method, provider selection
-    Small,
     /// Medium popup - theme, session list
     Medium,
     /// Large popup - help, model selection, lsp browser
@@ -26,7 +23,6 @@ impl PopupSize {
     /// Get fixed dimensions (width, height) in characters
     pub fn dimensions(&self) -> (u16, u16) {
         match self {
-            PopupSize::Small => (50, 18),
             PopupSize::Medium => (60, 22),
             PopupSize::Large => (70, 28),
         }

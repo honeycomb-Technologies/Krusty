@@ -10,10 +10,10 @@ use agent_client_protocol::{
     Error as AcpSchemaError, ExtNotification, ExtRequest, ExtResponse, Implementation,
     InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
     McpCapabilities, ModelId, ModelInfo as AcpModelInfo, NewSessionRequest, NewSessionResponse,
-    PromptCapabilities, PromptRequest, PromptResponse, Result as AcpResult, SessionCapabilities,
-    SessionId, SessionMode, SessionModeState, SessionModelState, SessionNotification,
-    SessionUpdate, SetSessionModeRequest, SetSessionModeResponse, SetSessionModelRequest,
-    SetSessionModelResponse,
+    PromptCapabilities, PromptRequest, PromptResponse, ProtocolVersion, Result as AcpResult,
+    SessionCapabilities, SessionId, SessionMode, SessionModeState, SessionModelState,
+    SessionNotification, SessionUpdate, SetSessionModeRequest, SetSessionModeResponse,
+    SetSessionModelRequest, SetSessionModelResponse,
 };
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
@@ -27,10 +27,6 @@ use crate::auth::{resolve_anthropic_auth, resolve_openai_auth};
 use crate::storage::credentials::CredentialStore;
 use crate::tools::ToolRegistry;
 
-/// ACP protocol version supported by this agent (10 is current)
-#[allow(dead_code)]
-pub const PROTOCOL_VERSION_NUM: u16 = 10;
-
 /// Current model configuration
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
@@ -40,6 +36,14 @@ pub struct ModelConfig {
 
 /// (model_id, provider, actual_model_id, api_key, display_name)
 type AvailableModelRecord = (String, ProviderId, String, String, String);
+
+fn negotiate_protocol_version(requested: ProtocolVersion) -> ProtocolVersion {
+    if requested < ProtocolVersion::V1 || requested > ProtocolVersion::LATEST {
+        ProtocolVersion::LATEST
+    } else {
+        requested
+    }
+}
 
 /// Krusty's ACP Agent implementation
 pub struct KrustyAgent {
@@ -352,8 +356,14 @@ impl Agent for KrustyAgent {
         // Store client capabilities
         *self.client_capabilities.write().await = Some(request.client_capabilities);
 
-        // Negotiate protocol version (use client's version, we support up to PROTOCOL_VERSION_NUM)
-        let protocol_version = request.protocol_version;
+        let requested_version = request.protocol_version;
+        let protocol_version = negotiate_protocol_version(requested_version.clone());
+        if protocol_version != requested_version {
+            warn!(
+                "ACP client requested unsupported protocol version {}, responding with {}",
+                requested_version, protocol_version
+            );
+        }
 
         let mut response = InitializeResponse::new(protocol_version);
         response.agent_capabilities = self.agent_capabilities();
@@ -790,6 +800,7 @@ fn build_workspace_context(cwd: &std::path::Path) -> String {
 mod tests {
     use std::sync::Arc;
 
+    use agent_client_protocol::ProtocolVersion;
     use tempfile::tempdir;
     use tokio::sync::Mutex;
 
@@ -830,6 +841,28 @@ mod tests {
         let response = agent.new_session(request).await?;
 
         assert!(agent.sessions().has_session(&response.session_id));
+        Ok(())
+    }
+
+    #[test]
+    fn negotiate_protocol_version_rejects_legacy_and_future_versions() {
+        let legacy: ProtocolVersion = serde_json::from_str("\"1.0.0\"").expect("legacy version");
+        let future: ProtocolVersion = serde_json::from_str("2").expect("future version");
+
+        assert_eq!(negotiate_protocol_version(legacy), ProtocolVersion::LATEST);
+        assert_eq!(negotiate_protocol_version(future), ProtocolVersion::LATEST);
+    }
+
+    #[tokio::test]
+    async fn initialize_negotiates_to_supported_protocol_version() -> anyhow::Result<()> {
+        let agent = KrustyAgent::new();
+        let future_version: ProtocolVersion = serde_json::from_str("2")?;
+
+        let response = agent
+            .initialize(InitializeRequest::new(future_version))
+            .await?;
+
+        assert_eq!(response.protocol_version, ProtocolVersion::LATEST);
         Ok(())
     }
 

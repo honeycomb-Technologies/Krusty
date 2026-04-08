@@ -19,6 +19,18 @@ pub struct StyledInputRenderOptions {
     pub hover_range: Option<(usize, usize)>,
 }
 
+struct CursorLineRenderOptions<'a> {
+    cursor_col: usize,
+    selection: Option<(usize, usize)>,
+    accent_color: Color,
+    sel_bg: Color,
+    sel_fg: Color,
+    link_color: Option<Color>,
+    file_ref_ranges: &'a [(usize, usize)],
+    hover_range: Option<(usize, usize)>,
+    line_byte_start: usize,
+}
+
 impl MultiLineInput {
     /// Render with optional file reference styling
     pub fn render_styled_with_file_refs(&self, options: StyledInputRenderOptions) -> Paragraph<'_> {
@@ -62,15 +74,17 @@ impl MultiLineInput {
                     render_line_with_cursor_and_file_refs(
                         &mut spans,
                         line,
-                        cursor_col,
-                        line_selection,
-                        accent_color,
-                        sel_bg,
-                        sel_fg,
-                        link_color,
-                        &file_ref_ranges,
-                        hover_range,
-                        line_byte_start,
+                        CursorLineRenderOptions {
+                            cursor_col,
+                            selection: line_selection,
+                            accent_color,
+                            sel_bg,
+                            sel_fg,
+                            link_color,
+                            file_ref_ranges: &file_ref_ranges,
+                            hover_range,
+                            line_byte_start,
+                        },
                     );
                 } else if let Some((sel_start, sel_end)) = line_selection {
                     // Line has selection but no cursor
@@ -246,20 +260,23 @@ fn get_line_selection(
 
 /// Render a line with cursor, optional selection, AND file reference styling
 /// `line_byte_start` is the byte offset of this line's start in the original content
-#[allow(clippy::too_many_arguments)]
 fn render_line_with_cursor_and_file_refs(
     spans: &mut Vec<Span<'static>>,
     line: &str,
-    cursor_col: usize,
-    selection: Option<(usize, usize)>,
-    accent_color: Color,
-    sel_bg: Color,
-    sel_fg: Color,
-    link_color: Option<Color>,
-    file_ref_ranges: &[(usize, usize)],
-    hover_range: Option<(usize, usize)>,
-    line_byte_start: usize,
+    options: CursorLineRenderOptions<'_>,
 ) {
+    let CursorLineRenderOptions {
+        cursor_col,
+        selection,
+        accent_color,
+        sel_bg,
+        sel_fg,
+        link_color,
+        file_ref_ranges,
+        hover_range,
+        line_byte_start,
+    } = options;
+
     let base_style = Style::default().fg(accent_color);
     let sel_style = Style::default()
         .bg(sel_bg)

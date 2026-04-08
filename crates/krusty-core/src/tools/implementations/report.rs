@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::storage::reports::CreateReportInput;
 use crate::storage::{Database, ReportStore};
 use crate::tools::parse_params;
 use crate::tools::registry::{Tool, ToolContext, ToolResult};
@@ -117,16 +118,16 @@ Structure:
         let tags = params.tags.unwrap_or_default();
         let sources = params.sources.unwrap_or_default();
 
-        match store.create_report(
-            &params.title,
+        match store.create_report(CreateReportInput {
+            title: &params.title,
             session_id,
-            project_dir.as_deref(),
-            Some(report_root),
-            &params.content,
+            project_dir: project_dir.as_deref(),
+            report_root: Some(report_root),
+            content: &params.content,
             summary,
-            &tags,
-            &sources,
-        ) {
+            tags: &tags,
+            sources: &sources,
+        }) {
             Ok(report_id) => ToolResult::success_data(json!({
                 "report_id": report_id,
                 "title": params.title,

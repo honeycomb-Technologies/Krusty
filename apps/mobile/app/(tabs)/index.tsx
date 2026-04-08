@@ -2,17 +2,12 @@ import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import {
   AppState,
   View,
-  FlatList,
   StyleSheet,
   Text,
   Pressable,
   Alert,
-  Keyboard,
 } from "react-native";
-import {
-  SafeAreaView,
-  useSafeAreaInsets,
-} from "react-native-safe-area-context";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
 import { Menu, FileSearch } from "lucide-react-native";
 import * as Haptics from "../../platform/haptics";
@@ -24,8 +19,9 @@ import {
   useSessionStore,
   useSessionsStore,
   useStores,
+  useWorkspaceStore,
 } from "../../hooks/useStores";
-import { MessageBubble } from "../../components/chat/MessageBubble";
+import { ChatTranscript } from "../../components/chat/ChatTranscript";
 import { KrustyLogo } from "../../components/ui/KrustyLogo";
 import {
   ChatBar,
@@ -34,18 +30,21 @@ import {
 import { SessionDrawer } from "../../components/chat/SessionDrawer";
 import { DesktopShell } from "../../components/layout/DesktopShell";
 import { ReportsViewer } from "../../components/ReportsViewer";
-import { PlanTracker } from "../../components/chat/PlanTracker";
-import { LinearGradient } from "../../platform/linear-gradient";
+import { MakoScreen } from "../../components/mako/MakoScreen";
 import { useSplashState } from "../../hooks/useSplashState";
 import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
 import { useLiveActivity } from "../../hooks/useLiveActivity";
 import { useWidgetSync } from "../../hooks/useWidgetSync";
 import { useNotifications } from "../../hooks/useNotifications";
 import Animated from "react-native-reanimated";
-import type { ModelInfo, SessionResponse, SessionType } from "@krusty/api";
+import type {
+  ChatMessage,
+  ModelInfo,
+  SessionResponse,
+  SessionType,
+} from "@krusty/api";
 import type {
   Attachment as SessionAttachment,
-  ChatMessage,
   PermissionMode,
   ThinkingLevel,
   ToolCall,
@@ -140,17 +139,22 @@ export default function ChatScreen() {
   const sessions = useSessionsStore(
     (state) => state.sessions,
   ) as SessionResponse[];
-  const sessionId = useSessionStore((state) => state.sessionId);
-  const sessionTitle = useSessionStore((state) => state.title);
-  const messages = useSessionStore((state) => state.messages);
-  const isStreaming = useSessionStore((state) => state.isStreaming);
-  const isThinking = useSessionStore((state) => state.isThinking);
-  const model = useSessionStore((state) => state.model);
-  const thinkingLevel = useSessionStore((state) => state.thinkingLevel);
-  const permissionMode = useSessionStore((state) => state.permissionMode);
-  const mode = useSessionStore((state) => state.mode);
-  const tokenCount = useSessionStore((state) => state.tokenCount);
-  const error = useSessionStore((state) => state.error);
+  const sessionId = useSessionStore((state) => state.sessionId) ?? null;
+  const sessionTitle = useSessionStore((state) => state.title) ?? null;
+  const messages = useSessionStore((state) => state.messages) ?? [];
+  const isStreaming = useSessionStore((state) => state.isStreaming) ?? false;
+  const isThinking = useSessionStore((state) => state.isThinking) ?? false;
+  const model = useSessionStore((state) => state.model) ?? null;
+  const thinkingLevel =
+    useSessionStore((state) => state.thinkingLevel) ?? "medium";
+  const permissionMode =
+    useSessionStore((state) => state.permissionMode) ?? "supervised";
+  const mode = useSessionStore((state) => state.mode) ?? "build";
+  const tokenCount = useSessionStore((state) => state.tokenCount) ?? 0;
+  const error = useSessionStore((state) => state.error) ?? null;
+  const isLoading = useSessionStore((state) => state.isLoading) ?? false;
+  const workspaceDirectory =
+    useWorkspaceStore((state) => state.directory) ?? null;
   const fastModeSupported = supportsFastMode(model);
   const fastModeEnabled = isFastModeModel(model);
 
@@ -160,10 +164,9 @@ export default function ChatScreen() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [reportsOpen, setReportsOpen] = useState(false);
   const [researchEnabled, setResearchEnabled] = useState(false);
+  const [composerReserveHeight, setComposerReserveHeight] =
+    useState(CHAT_BAR_ZONE);
 
-  const flatListRef = useRef<FlatList>(null);
-  const listHeightRef = useRef(0);
-  const contentHeightRef = useRef(0);
   const previousStreamingRef = useRef(false);
   const currentStreamSessionIdRef = useRef<string | null>(null);
   const streamStartedAtRef = useRef<number | null>(null);
@@ -235,26 +238,7 @@ export default function ChatScreen() {
     serverConnected: isConnected,
   });
 
-  const insets = useSafeAreaInsets();
   const t = theme.colors;
-  const msgLen = messages.length;
-  const lastMsgContent = messages[msgLen - 1]?.content?.length ?? 0;
-
-  const scrollToBottom = useCallback(() => {
-    const content = contentHeightRef.current;
-    const viewport = listHeightRef.current;
-    if (!content || !viewport || content <= viewport) {
-      return;
-    }
-
-    flatListRef.current?.scrollToEnd({ animated: !isStreaming });
-  }, [isStreaming]);
-
-  useEffect(() => {
-    if (msgLen > 0) {
-      requestAnimationFrame(scrollToBottom);
-    }
-  }, [lastMsgContent, msgLen, scrollToBottom]);
 
   useEffect(() => {
     if (!client || !isConnected) {
@@ -522,6 +506,16 @@ export default function ChatScreen() {
     [sessionStore, stopCurrentStream],
   );
 
+  const loadSessionById = useCallback(
+    async (id: string) => {
+      stopCurrentStream();
+      setDrawerOpen(false);
+      setActiveTab(2);
+      await sessionStore.getState().loadSession(id);
+    },
+    [sessionStore, stopCurrentStream],
+  );
+
   const handleNewSession = useCallback(async () => {
     await createSessionForCurrentTab();
   }, [createSessionForCurrentTab]);
@@ -611,6 +605,13 @@ export default function ChatScreen() {
         .sendMessage(trimmed, attachments as SessionAttachment[]);
     },
     [client, ensureSessionForSend, sessionStore],
+  );
+
+  const handleSessionToolApproval = useCallback(
+    (targetSessionId: string, toolCallId: string, approved: boolean) => {
+      void handleToolApprovalAction(targetSessionId, toolCallId, approved);
+    },
+    [handleToolApprovalAction],
   );
 
   const handleStop = useCallback(() => {
@@ -727,83 +728,43 @@ export default function ChatScreen() {
       </Animated.View>
 
       <Animated.View style={[styles.flex, entrance.contentStyle]}>
-        {messages.length === 0 ? (
-          <Pressable style={styles.empty} onPress={Keyboard.dismiss}>
-            <KrustyLogo />
-            {error ? (
-              <Text style={[styles.emptyHint, { color: t.error }]}>
-                {error}
-              </Text>
-            ) : null}
-          </Pressable>
-        ) : (
-          <View style={styles.flex}>
-            <FlatList
-              ref={flatListRef}
-              data={messages}
-              keyExtractor={(_, index) => String(index)}
-              onScrollBeginDrag={Keyboard.dismiss}
-              renderItem={({
-                item,
-                index,
-              }: {
-                item: ChatMessage;
-                index: number;
-              }) => (
-                <MessageBubble
-                  message={item}
-                  isLast={index === messages.length - 1}
-                  isStreaming={isStreaming && index === messages.length - 1}
-                  isThinking={isThinking && index === messages.length - 1}
-                  activeToolCallId={activeToolCallId}
-                  onApproveTool={(toolCallId) =>
-                    void handleToolApprovalAction(toolCallId, true)
-                  }
-                  onDenyTool={(toolCallId) =>
-                    void handleToolApprovalAction(toolCallId, false)
-                  }
-                  onSubmitToolResult={(toolCallId, result) =>
-                    void handleInteractiveToolResult(toolCallId, result)
-                  }
-                  onPlanConfirm={(toolCallId, choice) =>
-                    void handlePlanConfirm(toolCallId, choice)
-                  }
-                />
-              )}
-              style={styles.flex}
-              contentContainerStyle={[
-                styles.list,
-                isDesktop && styles.listDesktop,
-                { paddingBottom: CHAT_BAR_ZONE + insets.bottom },
-              ]}
-              onLayout={(event) => {
-                listHeightRef.current = event.nativeEvent.layout.height;
-              }}
-              onContentSizeChange={(_width, height) => {
-                contentHeightRef.current = height;
-              }}
-              keyboardDismissMode="interactive"
-              keyboardShouldPersistTaps="handled"
-            />
-            <LinearGradient
-              colors={[t.background, t.background + "00"]}
-              style={styles.fadeTop}
-              pointerEvents="none"
-            />
-            {!isDesktop && <PlanTracker />}
-            <LinearGradient
-              colors={[t.background + "00", t.background]}
-              style={styles.fadeBottom}
-              pointerEvents="none"
-            />
-          </View>
-        )}
+        <ChatTranscript
+          messages={messages}
+          sessionId={sessionId}
+          isStreaming={isStreaming}
+          isThinking={isThinking}
+          activeToolCallId={activeToolCallId}
+          onApproveTool={(targetSessionId, toolCallId) =>
+            handleSessionToolApproval(targetSessionId, toolCallId, true)
+          }
+          onDenyTool={(targetSessionId, toolCallId) =>
+            handleSessionToolApproval(targetSessionId, toolCallId, false)
+          }
+          onSubmitToolResult={(toolCallId, result) =>
+            void handleInteractiveToolResult(toolCallId, result)
+          }
+          onPlanConfirm={(toolCallId, choice) =>
+            void handlePlanConfirm(toolCallId, choice)
+          }
+          emptyState={
+            <View style={styles.empty}>
+              <KrustyLogo />
+              {error ? (
+                <Text style={[styles.emptyHint, { color: t.error }]}>
+                  {error}
+                </Text>
+              ) : null}
+            </View>
+          }
+          bottomPadding={composerReserveHeight}
+        />
       </Animated.View>
 
       <Animated.View style={[entrance.bottomBarStyle, { overflow: "visible" }]}>
         <ChatBar
           onSend={handleSend}
           onStop={handleStop}
+          onHeightChange={setComposerReserveHeight}
           isStreaming={isStreaming}
           disabled={!isConnected}
           thinkingLevel={thinkingLevel as ThinkingLevel}
@@ -838,6 +799,58 @@ export default function ChatScreen() {
     </SafeAreaView>
   );
 
+  const makoContent = (
+    <Animated.View style={[styles.flex, entrance.contentStyle]}>
+      <MakoScreen
+        workspaceDirectory={workspaceDirectory}
+        activeRunId={sessionId}
+        onOpenRunById={loadSessionById}
+        onDeleteRun={handleDeleteSession}
+        onOpenMenu={() => {
+          void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          setDrawerOpen(true);
+        }}
+        chat={{
+          sessionId,
+          title: sessionTitle,
+          messages,
+          isLoading,
+          isStreaming,
+          isThinking,
+          activeToolCallId,
+          thinkingLevel: thinkingLevel as ThinkingLevel,
+          permissionMode: permissionMode as PermissionMode,
+          fastModeEnabled,
+          fastModeSupported,
+          mode,
+          model,
+          models,
+          researchEnabled,
+          tokenCount,
+          onApproveTool: (targetSessionId, toolCallId) =>
+            handleSessionToolApproval(targetSessionId, toolCallId, true),
+          onDenyTool: (targetSessionId, toolCallId) =>
+            handleSessionToolApproval(targetSessionId, toolCallId, false),
+          onSubmitToolResult: (toolCallId, result) =>
+            void handleInteractiveToolResult(toolCallId, result),
+          onPlanConfirm: (toolCallId, choice) =>
+            void handlePlanConfirm(toolCallId, choice),
+          onSend: handleSend,
+          onStop: handleStop,
+          onThinkingChange: (level) =>
+            sessionStore.getState().setThinkingLevel(level),
+          onPermissionModeToggle: () =>
+            sessionStore.getState().togglePermissionMode(),
+          onFastModeToggle: handleFastModeToggle,
+          onModeToggle: () =>
+            sessionStore.getState().setMode(mode === "build" ? "plan" : "build"),
+          onModelSelect: handleModelSelect,
+          onResearchToggle: () => setResearchEnabled((current) => !current),
+        }}
+      />
+    </Animated.View>
+  );
+
   return (
     <DesktopShell
       sessions={sessions}
@@ -850,7 +863,7 @@ export default function ChatScreen() {
       activeTab={activeTab}
       onTabChange={handleTabChange}
     >
-      {chatContent}
+      {activeTab === 2 ? makoContent : chatContent}
 
       {!isDesktop && (
         <SessionDrawer

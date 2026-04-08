@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -15,7 +16,7 @@ use crate::agent::agent_types::{PlanConfig, VerifyConfig};
 use crate::agent::context::build_subagent_project_context;
 use crate::agent::subagent::{
     execute_single_agent, execute_single_explorer, AgentProgress, AgentProgressStatus,
-    SubAgentPool, SubAgentTask,
+    SubAgentPool, SubAgentResult, SubAgentTask,
 };
 use crate::agent::{AgentCancellation, DelegatedRunStage, SharedBuildContext};
 use crate::ai::client::AiClient;
@@ -418,82 +419,29 @@ impl AgentTool {
                 )
                 .await;
 
-                // Finalize the delegated run in DB
+                let artifact = build_single_agent_artifact(
+                    &bg_delegated_run_id,
+                    &result,
+                    &bg_delegation_policy,
+                );
+
                 if let Some(ref db_path) = bg_db_path {
-                    match Database::new(db_path) {
-                        Ok(db) => {
-                            let store = DelegatedRunStore::new(db);
-                            let human_review = truncate_utf8(&result.output, 500).to_string();
-                            let payload = json!({
-                                "delegated_run_id": bg_delegated_run_id,
-                                "findings": result.output,
-                                "files_examined": result.files_examined,
-                                "files_examined_count": result.files_examined.len(),
-                                "duration_ms": result.duration_ms,
-                                "turns_used": result.turns_used,
-                                "success": result.success,
-                                "outcome": if result.success { "success" } else { "failed" },
-                                "delegation_policy": bg_delegation_policy.audit_json(),
-                            });
-                            let final_stage = if result.success {
-                                DelegatedRunStage::Complete
-                            } else {
-                                DelegatedRunStage::Failed
-                            };
-                            if let Err(err) = store.finalize_run(
-                                &bg_delegated_run_id,
-                                final_stage,
-                                &payload,
-                                Some(&human_review),
-                                true,
-                            ) {
-                                warn!(
-                                    delegated_run_id = %bg_delegated_run_id,
-                                    error = %err,
-                                    "Background explore: failed to persist final artifact"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                delegated_run_id = %bg_delegated_run_id,
-                                error = %e,
-                                "Failed to open database for background explore finalization"
-                            );
-                        }
-                    }
+                    persist_single_agent_artifact_from_db_path(
+                        db_path,
+                        &bg_delegated_run_id,
+                        &artifact,
+                        true,
+                        "explore",
+                    );
                 }
 
-                // Emit completion event so the parent sees the result
-                if let Some(ref tx) = progress_tx {
-                    let status = if result.success {
-                        AgentProgressStatus::Complete
-                    } else {
-                        AgentProgressStatus::Failed
-                    };
-                    if tx
-                        .send(AgentProgress {
-                            delegated_run_id: Some(bg_delegated_run_id.clone()),
-                            task_id: result.task_id.clone(),
-                            name: "explore".to_string(),
-                            status,
-                            tool_count: 0,
-                            tokens: 0,
-                            current_action: None,
-                            completion_summary: Some(
-                                truncate_utf8(&result.output, 500).to_string(),
-                            ),
-                            lines_added: 0,
-                            lines_removed: 0,
-                            completed_plan_task: None,
-                        })
-                        .is_err()
-                    {
-                        debug!(
-                            "Background explore progress channel disconnected (parent returned)"
-                        );
-                    }
-                }
+                emit_single_agent_completion(
+                    &progress_tx,
+                    &bg_delegated_run_id,
+                    "explore",
+                    &result,
+                    &artifact.review_summary,
+                );
             });
 
             return background_started_result(&delegated_run_id, "explore", params.name.as_deref());
@@ -512,55 +460,22 @@ impl AgentTool {
         )
         .await;
 
-        let success = result.success;
-        let findings = result.output.clone();
-        let files_examined = result.files_examined.clone();
-        let duration_ms = result.duration_ms;
-        let turns_used = result.turns_used;
-        let error = result.error;
-
-        let human_review = truncate_utf8(&findings, 500).to_string();
-
-        let payload = json!({
-            "delegated_run_id": delegated_run_id,
-            "findings": findings,
-            "files_examined": files_examined,
-            "files_examined_count": files_examined.len(),
-            "duration_ms": duration_ms,
-            "turns_used": turns_used,
-            "success": success,
-            "outcome": if success { "success" } else { "failed" },
-            "delegation_policy": delegation_policy.audit_json(),
-        });
+        let artifact = build_single_agent_artifact(&delegated_run_id, &result, &delegation_policy);
 
         // Finalize the delegated run
         if let Some(store) = delegated_store.as_ref() {
-            let final_stage = if success {
-                DelegatedRunStage::Complete
-            } else {
-                DelegatedRunStage::Failed
-            };
-            if let Err(err) = store.finalize_run(
+            persist_single_agent_artifact(
+                store,
                 &delegated_run_id,
-                final_stage,
-                &payload,
-                Some(&human_review),
+                &artifact,
                 true,
-            ) {
-                warn!(delegated_run_id = %delegated_run_id, error = %err, "Failed to persist delegated explore run final artifact");
-            }
+                "Failed to persist delegated explore run final artifact",
+            );
         }
 
-        let mut warnings = Vec::new();
-        if !success {
-            if let Some(err) = &error {
-                warnings.push(format!("Exploration failed: {}", err));
-            } else {
-                warnings.push("Exploration completed without usable results.".to_string());
-            }
-        }
+        let warnings = build_single_agent_warnings(&result, "Exploration");
 
-        ToolResult::success_data_with(payload, warnings, None, None)
+        ToolResult::success_data_with(artifact.payload, warnings, None, None)
     }
 
     // -----------------------------------------------------------------------
@@ -660,79 +575,29 @@ impl AgentTool {
                 )
                 .await;
 
+                let artifact = build_single_agent_artifact(
+                    &bg_delegated_run_id,
+                    &result,
+                    &bg_delegation_policy,
+                );
+
                 if let Some(ref db_path) = bg_db_path {
-                    match Database::new(db_path) {
-                        Ok(db) => {
-                            let store = DelegatedRunStore::new(db);
-                            let human_review = truncate_utf8(&result.output, 500).to_string();
-                            let payload = json!({
-                                "delegated_run_id": bg_delegated_run_id,
-                                "findings": result.output,
-                                "files_examined": result.files_examined,
-                                "files_examined_count": result.files_examined.len(),
-                                "duration_ms": result.duration_ms,
-                                "turns_used": result.turns_used,
-                                "success": result.success,
-                                "outcome": if result.success { "success" } else { "failed" },
-                                "delegation_policy": bg_delegation_policy.audit_json(),
-                            });
-                            let final_stage = if result.success {
-                                DelegatedRunStage::Complete
-                            } else {
-                                DelegatedRunStage::Failed
-                            };
-                            if let Err(err) = store.finalize_run(
-                                &bg_delegated_run_id,
-                                final_stage,
-                                &payload,
-                                Some(&human_review),
-                                false,
-                            ) {
-                                warn!(
-                                    delegated_run_id = %bg_delegated_run_id,
-                                    error = %err,
-                                    "Background plan: failed to persist final artifact"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                delegated_run_id = %bg_delegated_run_id,
-                                error = %e,
-                                "Failed to open database for background plan finalization"
-                            );
-                        }
-                    }
+                    persist_single_agent_artifact_from_db_path(
+                        db_path,
+                        &bg_delegated_run_id,
+                        &artifact,
+                        false,
+                        "plan",
+                    );
                 }
 
-                // Emit completion event so the parent sees the result
-                if let Some(ref tx) = progress_tx {
-                    let status = if result.success {
-                        AgentProgressStatus::Complete
-                    } else {
-                        AgentProgressStatus::Failed
-                    };
-                    if tx
-                        .send(AgentProgress {
-                            delegated_run_id: Some(bg_delegated_run_id.clone()),
-                            task_id: result.task_id.clone(),
-                            name: "plan".to_string(),
-                            status,
-                            tool_count: 0,
-                            tokens: 0,
-                            current_action: None,
-                            completion_summary: Some(
-                                truncate_utf8(&result.output, 500).to_string(),
-                            ),
-                            lines_added: 0,
-                            lines_removed: 0,
-                            completed_plan_task: None,
-                        })
-                        .is_err()
-                    {
-                        debug!("Background plan progress channel disconnected (parent returned)");
-                    }
-                }
+                emit_single_agent_completion(
+                    &progress_tx,
+                    &bg_delegated_run_id,
+                    "plan",
+                    &result,
+                    &artifact.review_summary,
+                );
             });
 
             return background_started_result(&delegated_run_id, "plan", params.name.as_deref());
@@ -751,54 +616,21 @@ impl AgentTool {
         )
         .await;
 
-        let success = result.success;
-        let findings = result.output.clone();
-        let files_examined = result.files_examined.clone();
-        let duration_ms = result.duration_ms;
-        let turns_used = result.turns_used;
-        let error = result.error;
-
-        let human_review = truncate_utf8(&findings, 500).to_string();
-
-        let payload = json!({
-            "delegated_run_id": delegated_run_id,
-            "findings": findings,
-            "files_examined": files_examined,
-            "files_examined_count": files_examined.len(),
-            "duration_ms": duration_ms,
-            "turns_used": turns_used,
-            "success": success,
-            "outcome": if success { "success" } else { "failed" },
-            "delegation_policy": delegation_policy.audit_json(),
-        });
+        let artifact = build_single_agent_artifact(&delegated_run_id, &result, &delegation_policy);
 
         if let Some(store) = delegated_store.as_ref() {
-            let final_stage = if success {
-                DelegatedRunStage::Complete
-            } else {
-                DelegatedRunStage::Failed
-            };
-            if let Err(err) = store.finalize_run(
+            persist_single_agent_artifact(
+                store,
                 &delegated_run_id,
-                final_stage,
-                &payload,
-                Some(&human_review),
+                &artifact,
                 false,
-            ) {
-                warn!(delegated_run_id = %delegated_run_id, error = %err, "Failed to persist delegated plan run final artifact");
-            }
+                "Failed to persist delegated plan run final artifact",
+            );
         }
 
-        let mut warnings = Vec::new();
-        if !success {
-            if let Some(err) = &error {
-                warnings.push(format!("Planning failed: {}", err));
-            } else {
-                warnings.push("Planning completed without usable results.".to_string());
-            }
-        }
+        let warnings = build_single_agent_warnings(&result, "Planning");
 
-        ToolResult::success_data_with(payload, warnings, None, None)
+        ToolResult::success_data_with(artifact.payload, warnings, None, None)
     }
 
     // -----------------------------------------------------------------------
@@ -899,79 +731,29 @@ impl AgentTool {
                 )
                 .await;
 
+                let artifact = build_single_agent_artifact(
+                    &bg_delegated_run_id,
+                    &result,
+                    &bg_delegation_policy,
+                );
+
                 if let Some(ref db_path) = bg_db_path {
-                    match Database::new(db_path) {
-                        Ok(db) => {
-                            let store = DelegatedRunStore::new(db);
-                            let human_review = truncate_utf8(&result.output, 500).to_string();
-                            let payload = json!({
-                                "delegated_run_id": bg_delegated_run_id,
-                                "findings": result.output,
-                                "files_examined": result.files_examined,
-                                "files_examined_count": result.files_examined.len(),
-                                "duration_ms": result.duration_ms,
-                                "turns_used": result.turns_used,
-                                "success": result.success,
-                                "outcome": if result.success { "success" } else { "failed" },
-                                "delegation_policy": bg_delegation_policy.audit_json(),
-                            });
-                            let final_stage = if result.success {
-                                DelegatedRunStage::Complete
-                            } else {
-                                DelegatedRunStage::Failed
-                            };
-                            if let Err(err) = store.finalize_run(
-                                &bg_delegated_run_id,
-                                final_stage,
-                                &payload,
-                                Some(&human_review),
-                                false,
-                            ) {
-                                warn!(
-                                    delegated_run_id = %bg_delegated_run_id,
-                                    error = %err,
-                                    "Background verify: failed to persist final artifact"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                delegated_run_id = %bg_delegated_run_id,
-                                error = %e,
-                                "Failed to open database for background verify finalization"
-                            );
-                        }
-                    }
+                    persist_single_agent_artifact_from_db_path(
+                        db_path,
+                        &bg_delegated_run_id,
+                        &artifact,
+                        false,
+                        "verify",
+                    );
                 }
 
-                // Emit completion event so the parent sees the result
-                if let Some(ref tx) = progress_tx {
-                    let status = if result.success {
-                        AgentProgressStatus::Complete
-                    } else {
-                        AgentProgressStatus::Failed
-                    };
-                    if tx
-                        .send(AgentProgress {
-                            delegated_run_id: Some(bg_delegated_run_id.clone()),
-                            task_id: result.task_id.clone(),
-                            name: "verify".to_string(),
-                            status,
-                            tool_count: 0,
-                            tokens: 0,
-                            current_action: None,
-                            completion_summary: Some(
-                                truncate_utf8(&result.output, 500).to_string(),
-                            ),
-                            lines_added: 0,
-                            lines_removed: 0,
-                            completed_plan_task: None,
-                        })
-                        .is_err()
-                    {
-                        debug!("Background verify progress channel disconnected (parent returned)");
-                    }
-                }
+                emit_single_agent_completion(
+                    &progress_tx,
+                    &bg_delegated_run_id,
+                    "verify",
+                    &result,
+                    &artifact.review_summary,
+                );
             });
 
             return background_started_result(&delegated_run_id, "verify", params.name.as_deref());
@@ -990,54 +772,21 @@ impl AgentTool {
         )
         .await;
 
-        let success = result.success;
-        let findings = result.output.clone();
-        let files_examined = result.files_examined.clone();
-        let duration_ms = result.duration_ms;
-        let turns_used = result.turns_used;
-        let error = result.error;
-
-        let human_review = truncate_utf8(&findings, 500).to_string();
-
-        let payload = json!({
-            "delegated_run_id": delegated_run_id,
-            "findings": findings,
-            "files_examined": files_examined,
-            "files_examined_count": files_examined.len(),
-            "duration_ms": duration_ms,
-            "turns_used": turns_used,
-            "success": success,
-            "outcome": if success { "success" } else { "failed" },
-            "delegation_policy": delegation_policy.audit_json(),
-        });
+        let artifact = build_single_agent_artifact(&delegated_run_id, &result, &delegation_policy);
 
         if let Some(store) = delegated_store.as_ref() {
-            let final_stage = if success {
-                DelegatedRunStage::Complete
-            } else {
-                DelegatedRunStage::Failed
-            };
-            if let Err(err) = store.finalize_run(
+            persist_single_agent_artifact(
+                store,
                 &delegated_run_id,
-                final_stage,
-                &payload,
-                Some(&human_review),
+                &artifact,
                 false,
-            ) {
-                warn!(delegated_run_id = %delegated_run_id, error = %err, "Failed to persist delegated verify run final artifact");
-            }
+                "Failed to persist delegated verify run final artifact",
+            );
         }
 
-        let mut warnings = Vec::new();
-        if !success {
-            if let Some(err) = &error {
-                warnings.push(format!("Verification failed: {}", err));
-            } else {
-                warnings.push("Verification completed without usable results.".to_string());
-            }
-        }
+        let warnings = build_single_agent_warnings(&result, "Verification");
 
-        ToolResult::success_data_with(payload, warnings, None, None)
+        ToolResult::success_data_with(artifact.payload, warnings, None, None)
     }
 
     // -----------------------------------------------------------------------
@@ -1472,6 +1221,144 @@ impl AgentTool {
 // Helper functions (ported from explore.rs and build.rs)
 // ---------------------------------------------------------------------------
 
+struct SingleAgentArtifact {
+    payload: Value,
+    review_summary: String,
+    final_stage: DelegatedRunStage,
+}
+
+fn build_single_agent_artifact(
+    delegated_run_id: &str,
+    result: &SubAgentResult,
+    delegation_policy: &DelegationPolicy,
+) -> SingleAgentArtifact {
+    let review_summary = truncate_utf8(&result.output, 500).to_string();
+    let payload = json!({
+        "delegated_run_id": delegated_run_id,
+        "findings": result.output,
+        "files_examined": result.files_examined,
+        "files_examined_count": result.files_examined.len(),
+        "duration_ms": result.duration_ms,
+        "turns_used": result.turns_used,
+        "success": result.success,
+        "outcome": if result.success { "success" } else { "failed" },
+        "delegation_policy": delegation_policy.audit_json(),
+    });
+
+    SingleAgentArtifact {
+        payload,
+        review_summary,
+        final_stage: single_agent_final_stage(result.success),
+    }
+}
+
+fn single_agent_final_stage(success: bool) -> DelegatedRunStage {
+    if success {
+        DelegatedRunStage::Complete
+    } else {
+        DelegatedRunStage::Failed
+    }
+}
+
+fn persist_single_agent_artifact(
+    store: &DelegatedRunStore,
+    delegated_run_id: &str,
+    artifact: &SingleAgentArtifact,
+    resumable: bool,
+    error_message: &str,
+) {
+    if let Err(err) = store.finalize_run(
+        delegated_run_id,
+        artifact.final_stage,
+        &artifact.payload,
+        Some(&artifact.review_summary),
+        resumable,
+    ) {
+        warn!(delegated_run_id = %delegated_run_id, error = %err, "{}", error_message);
+    }
+}
+
+fn persist_single_agent_artifact_from_db_path(
+    db_path: &Path,
+    delegated_run_id: &str,
+    artifact: &SingleAgentArtifact,
+    resumable: bool,
+    agent_type: &str,
+) {
+    match Database::new(db_path) {
+        Ok(db) => {
+            let store = DelegatedRunStore::new(db);
+            let error_message = format!(
+                "Background {}: failed to persist final artifact",
+                agent_type
+            );
+            persist_single_agent_artifact(
+                &store,
+                delegated_run_id,
+                artifact,
+                resumable,
+                &error_message,
+            );
+        }
+        Err(err) => {
+            tracing::error!(
+                delegated_run_id = %delegated_run_id,
+                error = %err,
+                "Failed to open database for background {} finalization",
+                agent_type
+            );
+        }
+    }
+}
+
+fn emit_single_agent_completion(
+    progress_tx: &Option<mpsc::UnboundedSender<AgentProgress>>,
+    delegated_run_id: &str,
+    agent_type: &str,
+    result: &SubAgentResult,
+    review_summary: &str,
+) {
+    if let Some(tx) = progress_tx {
+        let status = if result.success {
+            AgentProgressStatus::Complete
+        } else {
+            AgentProgressStatus::Failed
+        };
+        if tx
+            .send(AgentProgress {
+                delegated_run_id: Some(delegated_run_id.to_string()),
+                task_id: result.task_id.clone(),
+                name: agent_type.to_string(),
+                status,
+                tool_count: 0,
+                tokens: 0,
+                current_action: None,
+                completion_summary: Some(review_summary.to_string()),
+                lines_added: 0,
+                lines_removed: 0,
+                completed_plan_task: None,
+            })
+            .is_err()
+        {
+            debug!(
+                "Background {} progress channel disconnected (parent returned)",
+                agent_type
+            );
+        }
+    }
+}
+
+fn build_single_agent_warnings(result: &SubAgentResult, action: &str) -> Vec<String> {
+    if result.success {
+        return Vec::new();
+    }
+
+    match result.error.as_deref() {
+        Some(err) => vec![format!("{} failed: {}", action, err)],
+        None => vec![format!("{} completed without usable results.", action)],
+    }
+}
+
 fn concise_target_label(target: &str, index: usize) -> String {
     let trimmed = target.trim_matches('/');
     if trimmed.is_empty() {
@@ -1545,7 +1432,19 @@ fn delegated_scope(label: &str, path: &Path, kind: &str, project_dir: &Path) -> 
 
 fn open_delegated_run_store(ctx: &ToolContext) -> Option<DelegatedRunStore> {
     let db_path = ctx.db_path.as_ref()?;
-    Database::new(db_path).ok().map(DelegatedRunStore::new)
+    match Database::new(db_path) {
+        Ok(db) => Some(DelegatedRunStore::new(db)),
+        Err(error) => {
+            warn!(
+                session_id = ?ctx.session_id,
+                tool_use_id = ?ctx.tool_use_id,
+                db_path = %db_path.display(),
+                error = %error,
+                "Failed to open delegated run store"
+            );
+            None
+        }
+    }
 }
 
 fn build_resume_seed(previous: &DelegatedRunRecord, target_label: &str) -> Option<String> {
@@ -1752,10 +1651,35 @@ fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_parent_context_brief, concise_target_label, resolve_explore_target, truncate_utf8,
+        build_parent_context_brief, build_single_agent_artifact, build_single_agent_warnings,
+        concise_target_label, emit_single_agent_completion, open_delegated_run_store,
+        resolve_explore_target, truncate_utf8,
     };
+    use crate::agent::subagent::{AgentProgressStatus, SubAgentResult};
+    use crate::agent::DelegatedRunStage;
     use crate::ai::types::{Content, ModelMessage, Role};
+    use crate::storage::WorkspaceMode;
+    use crate::tools::registry::{DelegationPolicy, PermissionMode};
+    use crate::tools::ToolContext;
+    use crate::Database;
     use std::fs;
+    use tempfile::TempDir;
+    use tokio::sync::mpsc;
+
+    fn sample_result(success: bool, error: Option<&str>) -> SubAgentResult {
+        SubAgentResult {
+            task_id: "agent-1".to_string(),
+            agent_name: "planner".to_string(),
+            delegated_run_id: Some("run-123".to_string()),
+            success,
+            output: "Found the relevant code paths".to_string(),
+            files_examined: vec!["src/lib.rs".to_string(), "src/main.rs".to_string()],
+            duration_ms: 1200,
+            turns_used: 3,
+            error: error.map(ToString::to_string),
+            policy_violations: vec![],
+        }
+    }
 
     #[test]
     fn concise_target_label_uses_stable_readable_segments() {
@@ -1836,6 +1760,105 @@ mod tests {
     fn parent_context_brief_empty_on_no_messages() {
         let brief = build_parent_context_brief(&[], 10);
         assert!(brief.is_empty());
+    }
+
+    #[test]
+    fn open_delegated_run_store_returns_none_without_db_path() {
+        let ctx = ToolContext::default();
+
+        assert!(open_delegated_run_store(&ctx).is_none());
+    }
+
+    #[test]
+    fn open_delegated_run_store_opens_valid_database() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let db_path = temp_dir.path().join("delegated.db");
+        Database::new(&db_path).expect("database");
+
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            workspace_mode: WorkspaceMode::Neutral,
+            db_path: Some(db_path),
+            ..Default::default()
+        };
+
+        assert!(open_delegated_run_store(&ctx).is_some());
+    }
+
+    #[test]
+    fn open_delegated_run_store_returns_none_for_unopenable_database() {
+        let temp_dir = TempDir::new().expect("tempdir");
+        let invalid_db_path = temp_dir.path().join("not-a-db-file");
+        std::fs::create_dir_all(&invalid_db_path).expect("directory path should exist");
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            workspace_mode: WorkspaceMode::Neutral,
+            db_path: Some(invalid_db_path),
+            session_id: Some("session-1".to_string()),
+            tool_use_id: Some("tool-1".to_string()),
+            ..Default::default()
+        };
+
+        assert!(open_delegated_run_store(&ctx).is_none());
+    }
+
+    #[test]
+    fn single_agent_artifact_keeps_payload_shape() {
+        let result = sample_result(true, None);
+        let policy = DelegationPolicy::for_subagent_plan(PermissionMode::Autonomous, Some(8));
+
+        let artifact = build_single_agent_artifact("run-123", &result, &policy);
+
+        assert_eq!(artifact.review_summary, "Found the relevant code paths");
+        assert_eq!(artifact.final_stage, DelegatedRunStage::Complete);
+        assert_eq!(artifact.payload["delegated_run_id"], "run-123");
+        assert_eq!(
+            artifact.payload["findings"],
+            "Found the relevant code paths"
+        );
+        assert_eq!(artifact.payload["files_examined_count"], 2);
+        assert_eq!(artifact.payload["success"], true);
+        assert_eq!(artifact.payload["outcome"], "success");
+        assert_eq!(
+            artifact.payload["delegation_policy"]["surface"],
+            "subagent_plan"
+        );
+    }
+
+    #[test]
+    fn single_agent_warnings_preserve_failure_wording() {
+        let errored = sample_result(false, Some("tool timeout"));
+        assert_eq!(
+            build_single_agent_warnings(&errored, "Verification"),
+            vec!["Verification failed: tool timeout".to_string()]
+        );
+
+        let empty = sample_result(false, None);
+        assert_eq!(
+            build_single_agent_warnings(&empty, "Planning"),
+            vec!["Planning completed without usable results.".to_string()]
+        );
+
+        let ok = sample_result(true, Some("ignored"));
+        assert!(build_single_agent_warnings(&ok, "Exploration").is_empty());
+    }
+
+    #[test]
+    fn emit_single_agent_completion_reports_summary_and_status() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let result = sample_result(false, Some("lint failed"));
+
+        emit_single_agent_completion(&Some(tx), "run-999", "verify", &result, "short summary");
+
+        let progress = rx.try_recv().expect("completion event");
+        assert_eq!(progress.delegated_run_id.as_deref(), Some("run-999"));
+        assert_eq!(progress.task_id, "agent-1");
+        assert_eq!(progress.name, "verify");
+        assert_eq!(progress.status, AgentProgressStatus::Failed);
+        assert_eq!(
+            progress.completion_summary.as_deref(),
+            Some("short summary")
+        );
     }
 
     #[test]

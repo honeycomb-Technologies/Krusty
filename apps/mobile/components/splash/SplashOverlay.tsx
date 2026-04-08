@@ -1,4 +1,10 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import {
+  useEffect,
+  useState,
+  useCallback,
+  useRef,
+  type ComponentRef,
+} from 'react';
 import { View, StyleSheet } from 'react-native';
 import LottieView from 'lottie-react-native';
 import * as SplashScreen from 'expo-splash-screen';
@@ -14,7 +20,7 @@ interface Props {
 
 export function SplashOverlay({ children, onComplete }: Props) {
   const [done, setDone] = useState(false);
-  const lottieRef = useRef<LottieView>(null);
+  const lottieRef = useRef<ComponentRef<typeof LottieView>>(null);
 
   const handleLayout = useCallback(() => {
     SplashScreen.hideAsync();

@@ -2,6 +2,7 @@
 
 # Internal configuration
 CLAUDE.md
+.claude/worktrees/
 
 # Build outputs
 target/

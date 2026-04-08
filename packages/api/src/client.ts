@@ -26,9 +26,14 @@ import type {
   McpServerResponse,
   McpToolResponse,
   SkillInfo,
+  AgentMemory,
   Report,
   ReportSummary,
+  MemoryType,
+  PromoteReportToMemoryResponse,
   MakoDispatchResponse,
+  MakoCurrentResponse,
+  MakoRunPriority,
   MakoSessionSummary,
   MakoSessionStatus,
   SimpleOkResponse,
@@ -385,16 +390,49 @@ export class KrustyClient {
     return this.request(`/reports/${id}`);
   }
 
+  async promoteReportToMemory(
+    id: string,
+    options?: { memoryType?: MemoryType },
+  ): Promise<PromoteReportToMemoryResponse> {
+    return this.request(`/reports/${id}/promote`, {
+      method: 'POST',
+      body: JSON.stringify({
+        memory_type: options?.memoryType ?? undefined,
+      }),
+    });
+  }
+
+  async getMemories(
+    projectDir?: string,
+    memoryType?: MemoryType,
+  ): Promise<{ memories: AgentMemory[] }> {
+    const params: string[] = [];
+    if (projectDir) {
+      params.push(`project_dir=${encodeURIComponent(projectDir)}`);
+    }
+    if (memoryType) {
+      params.push(`memory_type=${encodeURIComponent(memoryType)}`);
+    }
+    const q = params.join('&');
+    return this.request(`/memories${q ? `?${q}` : ''}`);
+  }
+
   // Mako
-  async dispatchMako(task: string, options?: { projectDir?: string; model?: string }): Promise<MakoDispatchResponse> {
+  async dispatchMako(task: string, options?: { projectDir?: string; model?: string; startAt?: string; priority?: MakoRunPriority }): Promise<MakoDispatchResponse> {
     return this.request('/mako/dispatch', {
       method: 'POST',
       body: JSON.stringify({
         task,
         project_dir: options?.projectDir ?? undefined,
         model: options?.model ?? undefined,
+        start_at: options?.startAt ?? undefined,
+        priority: options?.priority ?? undefined,
       }),
     });
+  }
+
+  async getMakoCurrent(): Promise<MakoCurrentResponse> {
+    return this.request('/mako/current');
   }
 
   async listMakoSessions(): Promise<MakoSessionSummary[]> {
@@ -409,6 +447,20 @@ export class KrustyClient {
     return this.request(`/mako/sessions/${id}/message`, {
       method: 'POST',
       body: JSON.stringify({ message }),
+    });
+  }
+
+  async scheduleMakoSession(id: string, startAt: string): Promise<SimpleOkResponse> {
+    return this.request(`/mako/sessions/${id}/schedule`, {
+      method: 'POST',
+      body: JSON.stringify({ start_at: startAt }),
+    });
+  }
+
+  async setMakoSessionPriority(id: string, priority: MakoRunPriority): Promise<SimpleOkResponse> {
+    return this.request(`/mako/sessions/${id}/priority`, {
+      method: 'POST',
+      body: JSON.stringify({ priority }),
     });
   }
 

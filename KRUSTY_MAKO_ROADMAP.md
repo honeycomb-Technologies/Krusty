@@ -8,7 +8,7 @@ Three session modes:
 
 - **Chat** — Conversational AI with web search and toggleable research (produces Reports). No file tools. Like claude.ai or ChatGPT.
 - **Code** — Full agentic coding assistant. Current Krusty experience. TUI-first.
-- **Mako** — Autonomous daemon. Dispatched tasks, tick engine, swarm of teammates, auto-classifier. Fire and forget.
+- **Mako** — Autonomous daemon. Always-on project buddy with `Current`, `Runs`, `Reports`, and `Status`. Fire and forget.
 
 Research is a capability within Chat and Mako, not a separate mode. When research completes, it produces **Reports** — structured markdown documents stored in `.krusty/reports/` that persist as project knowledge.
 
@@ -45,6 +45,24 @@ Research is a capability within Chat and Mako, not a separate mode. When researc
    │      │   │ mako) │   │       │   │      │   │      │
    └──────┘   └───────┘   └───────┘   └──────┘   └──────┘
 ```
+
+## User-Facing Information Architecture
+
+User-facing Mako vocabulary should be:
+
+- Top-level navigation: `Current`, `Runs`, `Reports`, `Status`
+- Primary action: `Set course`
+- Run-level navigation: `Overview`, `Wake`, `Tasks`, `Chat`, `Artifacts`
+
+Important distinction:
+
+- `Set course` is the user-facing term
+- `dispatch` can remain the internal API and queue term
+
+Future design follow-ons:
+
+- `MAKO.md` should become the Mako-specific identity file for tone, proactivity, and working relationship
+- OpenClaw-style background memory consolidation is worth borrowing, but Mako should brand that capability separately rather than copying `Dreaming`
 
 ## Existing Infrastructure
 
@@ -183,7 +201,7 @@ Injected when `session_type == Mako`. Defines phases (Research → Synthesis →
 
 ---
 
-## Phase 7 — Dispatch Interface
+## Phase 7 — Set Course Interface (Dispatch APIs)
 
 **Delivers**: Fire-and-forget task submission from any surface.
 
@@ -205,7 +223,7 @@ GET    /api/mako/sessions/:id/events        SSE observe stream
 ```
 
 ### Expo App
-- Mako tab: dispatch input + session list
+- Mako tab: `Current` home with `Set course` plus run list/status links
 - Push notifications on milestones
 
 ---

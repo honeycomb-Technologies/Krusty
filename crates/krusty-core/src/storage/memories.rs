@@ -215,6 +215,117 @@ impl MemoryStore {
         }
     }
 
+    /// Find a memory by exact title within project/user scope.
+    ///
+    /// When `project_dir` is set, both project-scoped and global memories are
+    /// considered. When `user_id` is set, both user-scoped and global memories
+    /// are considered.
+    pub fn find_by_title_for_user(
+        &self,
+        title: &str,
+        project_dir: Option<&str>,
+        user_id: Option<&str>,
+    ) -> Option<AgentMemory> {
+        let mut sql = String::from(
+            "SELECT id, memory_type, title, content, project_dir, user_id, created_at, updated_at
+             FROM agent_memories
+             WHERE title = ?1",
+        );
+        let mut bound = vec![title.to_string()];
+
+        if let Some(pd) = project_dir {
+            bound.push(pd.to_string());
+            sql.push_str(&format!(
+                " AND (project_dir = ?{} OR project_dir IS NULL)",
+                bound.len()
+            ));
+        } else {
+            sql.push_str(" AND project_dir IS NULL");
+        }
+
+        if let Some(uid) = user_id {
+            bound.push(uid.to_string());
+            sql.push_str(&format!(
+                " AND (user_id = ?{} OR user_id IS NULL)",
+                bound.len()
+            ));
+        }
+
+        sql.push_str(" ORDER BY updated_at DESC LIMIT 1");
+
+        let mut stmt = self.db.conn().prepare(&sql).ok()?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = bound
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+
+        stmt.query_row(params.as_slice(), |row| Ok(row_to_memory(row)))
+            .ok()
+    }
+
+    /// Save a new memory or update an existing exact-title match within the
+    /// same effective scope.
+    ///
+    /// Returns the memory plus a flag indicating whether it was newly created.
+    pub fn save_or_update_by_title(
+        &self,
+        memory_type: MemoryType,
+        title: &str,
+        content: &str,
+        project_dir: Option<&str>,
+        user_id: Option<&str>,
+    ) -> Result<(AgentMemory, bool)> {
+        if let Some(existing) = self.find_by_title_in_exact_scope(title, project_dir, user_id) {
+            self.update(&existing.id, Some(title), Some(content))?;
+            let updated = self
+                .get(&existing.id)?
+                .ok_or_else(|| anyhow::anyhow!("memory not found after update"))?;
+            return Ok((updated, false));
+        }
+
+        let created = self.save(memory_type, title, content, project_dir, user_id)?;
+        Ok((created, true))
+    }
+
+    fn find_by_title_in_exact_scope(
+        &self,
+        title: &str,
+        project_dir: Option<&str>,
+        user_id: Option<&str>,
+    ) -> Option<AgentMemory> {
+        let mut sql = String::from(
+            "SELECT id, memory_type, title, content, project_dir, user_id, created_at, updated_at
+             FROM agent_memories
+             WHERE title = ?1",
+        );
+        let mut bound = vec![title.to_string()];
+
+        if let Some(pd) = project_dir {
+            bound.push(pd.to_string());
+            sql.push_str(&format!(" AND project_dir = ?{}", bound.len()));
+        } else {
+            sql.push_str(" AND project_dir IS NULL");
+        }
+
+        if let Some(uid) = user_id {
+            bound.push(uid.to_string());
+            sql.push_str(&format!(" AND user_id = ?{}", bound.len()));
+        } else {
+            sql.push_str(" AND user_id IS NULL");
+        }
+
+        sql.push_str(" ORDER BY updated_at DESC LIMIT 1");
+
+        let mut stmt = self.db.conn().prepare(&sql).ok()?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = bound
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+
+        stmt.query_row(params.as_slice(), |row| Ok(row_to_memory(row)))
+            .ok()
+    }
+
     fn query_memories(&self, sql: &str, bound: &[String]) -> Vec<AgentMemory> {
         let mut stmt = match self.db.conn().prepare(sql) {
             Ok(s) => s,
@@ -407,5 +518,94 @@ mod tests {
 
         let missing = store.find_by_title("Nonexistent", None);
         assert!(missing.is_none());
+    }
+
+    #[test]
+    fn find_by_title_for_user_respects_scope_and_owner() {
+        let (store, _tmp) = create_store();
+        store
+            .save(
+                MemoryType::Project,
+                "Deployment",
+                "Blue/green",
+                Some("/proj-a"),
+                Some("alice"),
+            )
+            .unwrap();
+        store
+            .save(
+                MemoryType::Project,
+                "Deployment",
+                "Canary",
+                Some("/proj-a"),
+                Some("bob"),
+            )
+            .unwrap();
+
+        let alice = store.find_by_title_for_user("Deployment", Some("/proj-a"), Some("alice"));
+        let bob = store.find_by_title_for_user("Deployment", Some("/proj-a"), Some("bob"));
+
+        assert_eq!(alice.unwrap().content, "Blue/green");
+        assert_eq!(bob.unwrap().content, "Canary");
+    }
+
+    #[test]
+    fn save_or_update_by_title_updates_existing_memory() {
+        let (store, _tmp) = create_store();
+        let (created, created_new) = store
+            .save_or_update_by_title(
+                MemoryType::Project,
+                "Architecture",
+                "Use typed boundaries",
+                Some("/proj-a"),
+                Some("alice"),
+            )
+            .unwrap();
+        let (updated, updated_new) = store
+            .save_or_update_by_title(
+                MemoryType::Project,
+                "Architecture",
+                "Use typed boundaries and explicit contracts",
+                Some("/proj-a"),
+                Some("alice"),
+            )
+            .unwrap();
+
+        assert!(created_new);
+        assert!(!updated_new);
+        assert_eq!(created.id, updated.id);
+        assert_eq!(
+            updated.content,
+            "Use typed boundaries and explicit contracts"
+        );
+    }
+
+    #[test]
+    fn save_or_update_by_title_does_not_overwrite_global_memory_for_project_scope() {
+        let (store, _tmp) = create_store();
+        let global = store
+            .save_or_update_by_title(
+                MemoryType::Project,
+                "Architecture",
+                "Global guidance",
+                None,
+                Some("alice"),
+            )
+            .unwrap()
+            .0;
+        let scoped = store
+            .save_or_update_by_title(
+                MemoryType::Project,
+                "Architecture",
+                "Project-specific guidance",
+                Some("/proj-a"),
+                Some("alice"),
+            )
+            .unwrap()
+            .0;
+
+        assert_ne!(global.id, scoped.id);
+        assert_eq!(store.list(None, Some("alice")).len(), 1);
+        assert_eq!(store.list(Some("/proj-a"), Some("alice")).len(), 2);
     }
 }

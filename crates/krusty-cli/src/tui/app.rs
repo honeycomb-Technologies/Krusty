@@ -181,9 +181,8 @@ pub struct AppServices {
     pub cached_ai_tools: Vec<AiTool>,
     pub user_hook_manager: Arc<RwLock<UserHookManager>>,
 
-    // Extensions (not yet wired into tool dispatch)
-    #[allow(dead_code)]
-    pub wasm_host: Option<Arc<WasmHost>>,
+    // Extensions (initialized for future tool dispatch wiring)
+    pub _wasm_host: Option<Arc<WasmHost>>,
     pub plugin_manager: Option<Arc<PluginManager>>,
 
     // Skills/MCP
@@ -706,7 +705,7 @@ impl App {
         self.runtime.active_plan.as_ref().map(|plan| {
             let (completed, total) = plan.progress();
             crate::tui::components::PlanInfo {
-                title: &plan.title,
+                _title: &plan.title,
                 completed,
                 total,
             }

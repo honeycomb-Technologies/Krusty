@@ -403,6 +403,20 @@ fn should_replace_forced_summary(text: &str) -> bool {
     summary_looks_non_substantive(trimmed)
 }
 
+fn synthesized_explorer_output(
+    task_name: &str,
+    final_output: &str,
+    files_examined: &[String],
+) -> String {
+    if final_output.trim().is_empty() || should_replace_forced_summary(final_output) {
+        synthesize_explore_report_from_paths(task_name, files_examined)
+            .map(|report| render_explore_report(&report))
+            .unwrap_or_else(|| fallback_explorer_summary(files_examined))
+    } else {
+        final_output.to_string()
+    }
+}
+
 fn normalize_explorer_result(mut result: SubAgentResult, task: &SubAgentTask) -> SubAgentResult {
     if result.delegated_run_id.is_none() {
         result.delegated_run_id = task.delegated_run_id.clone();
@@ -589,6 +603,23 @@ fn tool_result_has_positive_evidence(name: &str, output: &str, is_error: bool) -
             .and_then(|value| value.as_str())
             .is_some_and(|value| !value.trim().is_empty()),
         _ => false,
+    }
+}
+
+fn timeout_partial_output(final_output: &str, files_examined: &[String]) -> String {
+    if final_output.trim().is_empty() && !files_examined.is_empty() {
+        format!(
+            "Sub-agent timed out before producing final output. {} files were examined: {}",
+            files_examined.len(),
+            files_examined
+                .iter()
+                .take(20)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        final_output.to_string()
     }
 }
 
@@ -796,17 +827,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     files_examined = files_examined.len(),
                     "Sub-agent API call timed out"
                 );
-                // If we have evidence but no text output yet, produce a fallback summary
-                let output =
-                    if final_output.trim().is_empty() && !files_examined.is_empty() {
-                        format!(
-                        "Explorer timed out before producing findings. {} files were examined: {}",
-                        files_examined.len(),
-                        files_examined.iter().take(20).cloned().collect::<Vec<_>>().join(", ")
-                    )
-                    } else {
-                        final_output
-                    };
+                let output = timeout_partial_output(&final_output, &files_examined);
                 let has_evidence = !files_examined.is_empty();
                 send_progress(
                     if has_evidence {
@@ -1012,13 +1033,8 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             && forced_summary_requested
             && all_read_only_tools
         {
-            let synthesized = if should_replace_forced_summary(&final_output) {
-                synthesize_explore_report_from_paths(&task.name, &files_examined)
-                    .map(|report| render_explore_report(&report))
-                    .unwrap_or_else(|| fallback_explorer_summary(&files_examined))
-            } else {
-                final_output.clone()
-            };
+            let synthesized =
+                synthesized_explorer_output(&task.name, &final_output, &files_examined);
             let result = normalize_explorer_result(
                 SubAgentResult {
                     task_id: task_id.clone(),
@@ -1214,17 +1230,8 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     continue;
                 }
 
-                let synthesized = if final_output.trim().is_empty() {
-                    synthesize_explore_report_from_paths(&task.name, &files_examined)
-                        .map(|report| render_explore_report(&report))
-                        .unwrap_or_else(|| fallback_explorer_summary(&files_examined))
-                } else if should_replace_forced_summary(&final_output) {
-                    synthesize_explore_report_from_paths(&task.name, &files_examined)
-                        .map(|report| render_explore_report(&report))
-                        .unwrap_or_else(|| fallback_explorer_summary(&files_examined))
-                } else {
-                    final_output.clone()
-                };
+                let synthesized =
+                    synthesized_explorer_output(&task.name, &final_output, &files_examined);
                 let result = normalize_explorer_result(
                     SubAgentResult {
                         task_id: task_id.clone(),
@@ -1531,7 +1538,8 @@ pub(crate) async fn execute_builder_with_progress(
 mod tests {
     use super::{
         build_subagent_tool_context, collect_paths_from_tool_result, delegated_turn_budget,
-        should_replace_forced_summary, text_claims_tool_empty, tool_result_has_positive_evidence,
+        should_replace_forced_summary, synthesized_explorer_output, text_claims_tool_empty,
+        timeout_partial_output, tool_result_has_positive_evidence,
     };
     use crate::agent::subagent::SubAgentTask;
     use crate::agent::AgentConfig as RuntimeAgentConfig;
@@ -1674,5 +1682,37 @@ mod tests {
         assert!(!should_replace_forced_summary(
             "<explore_report>{\"summary\":\"The module centers runtime orchestration in orchestrator.rs and failure containment in failure.rs.\",\"paths_examined\":[\"agent/\",\"orchestrator.rs\",\"failure.rs\"],\"files_examined\":[\"orchestrator.rs\",\"failure.rs\"],\"key_findings\":[\"The orchestrator owns the main loop and continuation handling.\"],\"design_patterns\":[\"Event-driven orchestration\"],\"concerns\":[\"Failure policy remains centralized.\"],\"confidence\":\"medium\"}</explore_report>"
         ));
+    }
+
+    #[test]
+    fn synthesized_explorer_output_replaces_placeholder_with_report() {
+        let files = vec!["src/lib.rs".to_string(), "src/main.rs".to_string()];
+
+        let output =
+            synthesized_explorer_output("explorer", "Let me inspect a few files first.", &files);
+
+        assert!(output.contains("<explore_report>"));
+        assert!(output.contains("src/lib.rs"));
+        assert!(output.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn synthesized_explorer_output_preserves_substantive_summary() {
+        let substantive = "<explore_report>{\"summary\":\"The module centers runtime orchestration in orchestrator.rs.\",\"paths_examined\":[\"orchestrator.rs\"],\"files_examined\":[\"orchestrator.rs\"],\"key_findings\":[\"The orchestrator owns the main loop.\"],\"design_patterns\":[\"Event-driven orchestration\"],\"concerns\":[],\"confidence\":\"medium\"}</explore_report>";
+
+        assert_eq!(
+            synthesized_explorer_output("explorer", substantive, &["orchestrator.rs".to_string()]),
+            substantive
+        );
+    }
+
+    #[test]
+    fn timeout_partial_output_is_agent_neutral() {
+        let output =
+            timeout_partial_output("", &["src/lib.rs".to_string(), "src/main.rs".to_string()]);
+
+        assert!(output.starts_with("Sub-agent timed out before producing final output."));
+        assert!(output.contains("src/lib.rs"));
+        assert!(!output.contains("Explorer timed out"));
     }
 }

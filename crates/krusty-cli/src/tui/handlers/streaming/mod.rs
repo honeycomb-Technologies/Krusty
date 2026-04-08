@@ -17,6 +17,7 @@ use crate::ai::types::{
     Content, ContextManagement, ModelMessage, Role, ThinkingConfig, WebFetchConfig, WebSearchConfig,
 };
 use crate::paths;
+use crate::storage::SessionType;
 use crate::tools::{load_from_clipboard_rgba, load_from_path, load_from_url};
 use crate::tui::app::{App, ThinkingLevel, View};
 use crate::tui::input::{has_image_references, parse_input, InputSegment};
@@ -313,6 +314,7 @@ impl App {
             session_id,
             working_dir: self.runtime.working_dir.clone(),
             project_dir: Some(self.runtime.working_dir.clone()),
+            session_type: SessionType::Code,
             permission_mode: self.runtime.permission_mode,
             max_iterations: self.runtime.agent_config.primary_max_turns(),
             stream_idle_timeout: self.runtime.agent_config.stream_idle_timeout(),
