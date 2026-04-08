@@ -29,7 +29,7 @@ use krusty_core::ai::client::{
 use krusty_core::ai::providers::ProviderId;
 use krusty_core::ai::types::{AiTool, Content, ImageContent, ModelMessage, Role, ThinkingConfig};
 use krusty_core::plan::PlanManager;
-use krusty_core::storage::{Database, SessionType, WorkMode, WorkspaceMode};
+use krusty_core::storage::{Database, ProjectSettings, SessionType, WorkMode, WorkspaceMode};
 use krusty_core::tools::registry::PermissionMode;
 use krusty_core::SessionManager;
 
@@ -619,6 +619,7 @@ async fn start_orchestrator_sse(
         db_path: (*state.db_path).clone(),
         skills_manager: Arc::clone(&state.skills_manager),
     };
+    let mako_settings = ProjectSettings::load_mako_settings(ctx.project_dir.as_deref());
 
     let config = OrchestratorConfig {
         session_id: ctx.session_id.clone(),
@@ -635,8 +636,8 @@ async fn start_orchestrator_sse(
     let (mut event_rx, input_tx) = if ctx.session_type == SessionType::Mako {
         use krusty_core::agent::tick_engine::{TickEngine, TickEngineConfig};
         let tick_config = TickEngineConfig {
-            tick_interval: std::time::Duration::from_secs(30),
-            max_ticks: 1000,
+            tick_interval: std::time::Duration::from_secs(mako_settings.tick_interval_secs),
+            max_ticks: mako_settings.max_ticks,
             enabled: true,
         };
         TickEngine::run(services, config, tick_config, ctx.conversation, ctx.options)

@@ -19,7 +19,8 @@ use krusty_core::ai::client::CallOptions;
 use krusty_core::ai::types::{ModelMessage, Role};
 use krusty_core::plan::PlanManager;
 use krusty_core::storage::{
-    Database, MakoRuntimeStateStatus, MakoRuntimeStateStore, SessionManager, SessionType,
+    Database, MakoRuntimeStateStatus, MakoRuntimeStateStore, ProjectSettings, SessionManager,
+    SessionType,
 };
 use krusty_core::tools::registry::PermissionMode;
 
@@ -447,6 +448,7 @@ async fn run_mako_session_inner(
         .map(PathBuf::from)
         .unwrap_or_else(|| (*state.working_dir).clone());
     let project_dir = resolve_persisted_project_dir(session.project_dir.as_deref(), &working_dir);
+    let mako_settings = ProjectSettings::load_mako_settings(project_dir.as_deref());
 
     let options = CallOptions {
         tools: Some(state.tool_registry.get_ai_tools().await),
@@ -481,8 +483,8 @@ async fn run_mako_session_inner(
             services,
             config,
             TickEngineConfig {
-                tick_interval: Duration::from_secs(30),
-                max_ticks: 1000,
+                tick_interval: Duration::from_secs(mako_settings.tick_interval_secs),
+                max_ticks: mako_settings.max_ticks,
                 enabled: true,
             },
             conversation,
