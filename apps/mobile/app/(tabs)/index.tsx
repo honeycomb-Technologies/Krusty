@@ -8,10 +8,11 @@ import {
   Pressable,
   Alert,
   Keyboard,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
 } from "react-native";
 import {
   SafeAreaView,
-  useSafeAreaInsets,
 } from "react-native-safe-area-context";
 import { router } from "expo-router";
 import { Menu, FileSearch } from "lucide-react-native";
@@ -57,8 +58,12 @@ import {
 } from "@krusty/state";
 
 const TAB_TYPES: SessionType[] = ["chat", "code", "mako"];
-const CHAT_BAR_ZONE = 130;
 const SELECTED_MODEL_KEY = "krusty_selected_model";
+const TOP_EDGE_HEIGHT = 64;
+const BOTTOM_EDGE_HEIGHT = 88;
+const EDGE_GAP = 12;
+const TRACKER_GAP = 10;
+const SCROLL_FOLLOW_THRESHOLD = 72;
 
 type WorkspaceMode = "neutral" | "selected" | "created";
 
@@ -116,6 +121,14 @@ function getWorkspaceMode(path: string | null): WorkspaceMode {
   return path ? "selected" : "neutral";
 }
 
+function distanceFromBottom(
+  contentHeight: number,
+  viewportHeight: number,
+  offsetY: number,
+) {
+  return Math.max(0, contentHeight - (offsetY + viewportHeight));
+}
+
 export default function ChatScreen() {
   const { theme } = useThemeContext();
   const { client, isConnected } = useConnection();
@@ -140,17 +153,19 @@ export default function ChatScreen() {
   const sessions = useSessionsStore(
     (state) => state.sessions,
   ) as SessionResponse[];
-  const sessionId = useSessionStore((state) => state.sessionId);
-  const sessionTitle = useSessionStore((state) => state.title);
-  const messages = useSessionStore((state) => state.messages);
-  const isStreaming = useSessionStore((state) => state.isStreaming);
-  const isThinking = useSessionStore((state) => state.isThinking);
-  const model = useSessionStore((state) => state.model);
-  const thinkingLevel = useSessionStore((state) => state.thinkingLevel);
-  const permissionMode = useSessionStore((state) => state.permissionMode);
-  const mode = useSessionStore((state) => state.mode);
-  const tokenCount = useSessionStore((state) => state.tokenCount);
-  const error = useSessionStore((state) => state.error);
+  const sessionId = useSessionStore((state) => state.sessionId) ?? null;
+  const sessionTitle = useSessionStore((state) => state.title) ?? null;
+  const messages = useSessionStore((state) => state.messages) ?? [];
+  const isStreaming = useSessionStore((state) => state.isStreaming) ?? false;
+  const isThinking = useSessionStore((state) => state.isThinking) ?? false;
+  const model = useSessionStore((state) => state.model) ?? null;
+  const thinkingLevel =
+    useSessionStore((state) => state.thinkingLevel) ?? "medium";
+  const permissionMode =
+    useSessionStore((state) => state.permissionMode) ?? "supervised";
+  const mode = useSessionStore((state) => state.mode) ?? "build";
+  const tokenCount = useSessionStore((state) => state.tokenCount) ?? 0;
+  const error = useSessionStore((state) => state.error) ?? null;
   const fastModeSupported = supportsFastMode(model);
   const fastModeEnabled = isFastModeModel(model);
 
@@ -164,12 +179,18 @@ export default function ChatScreen() {
   const flatListRef = useRef<FlatList>(null);
   const listHeightRef = useRef(0);
   const contentHeightRef = useRef(0);
+  const scrollOffsetRef = useRef(0);
   const previousStreamingRef = useRef(false);
   const currentStreamSessionIdRef = useRef<string | null>(null);
   const streamStartedAtRef = useRef<number | null>(null);
   const liveActivityOpenRef = useRef(false);
   const notifiedApprovalIdsRef = useRef<Set<string>>(new Set());
   const suppressCompletionRef = useRef(false);
+  const autoFollowRef = useRef(true);
+  const pendingAutoScrollRef = useRef(false);
+  const pendingAutoScrollAnimatedRef = useRef(false);
+  const isUserDraggingRef = useRef(false);
+  const loadedSessionIdRef = useRef<string | null>(null);
 
   const lastAssistantMessage = useMemo(
     () => getLastAssistantMessage(messages),
@@ -235,26 +256,130 @@ export default function ChatScreen() {
     serverConnected: isConnected,
   });
 
-  const insets = useSafeAreaInsets();
   const t = theme.colors;
+  const isDark = theme.scheme === "dark";
+  const edgeTint = isDark
+    ? ("systemChromeMaterialDark" as const)
+    : ("systemChromeMaterialLight" as const);
+  const jumpTint = isDark
+    ? ("systemMaterialDark" as const)
+    : ("systemMaterialLight" as const);
+  const edgeOverlay = isDark
+    ? "rgba(11,17,25,0.18)"
+    : "rgba(255,255,255,0.18)";
+  const jumpOverlay = isDark
+    ? "rgba(11,17,25,0.78)"
+    : "rgba(255,255,255,0.78)";
   const msgLen = messages.length;
   const lastMsgContent = messages[msgLen - 1]?.content?.length ?? 0;
+  const effectivePlanTrackerHeight = isDesktop ? 0 : planTrackerHeight;
+  const listTopPadding =
+    TOP_EDGE_HEIGHT +
+    EDGE_GAP +
+    (effectivePlanTrackerHeight > 0
+      ? effectivePlanTrackerHeight + TRACKER_GAP
+      : 0);
+  const listBottomPadding = chatBarHeight + BOTTOM_EDGE_HEIGHT + EDGE_GAP;
+  const showJumpToLatest = messages.length > 0 && isStreaming && !isNearBottom;
 
-  const scrollToBottom = useCallback(() => {
-    const content = contentHeightRef.current;
-    const viewport = listHeightRef.current;
-    if (!content || !viewport || content <= viewport) {
+  const scrollToBottom = useCallback((animated: boolean) => {
+    if (!flatListRef.current) {
       return;
     }
 
-    flatListRef.current?.scrollToEnd({ animated: !isStreaming });
-  }, [isStreaming]);
+    scrollOffsetRef.current = Math.max(
+      0,
+      contentHeightRef.current - listHeightRef.current,
+    );
+    setIsNearBottom(true);
+    flatListRef.current.scrollToEnd({ animated });
+  }, []);
+
+  const queueAutoScroll = useCallback((animated: boolean) => {
+    pendingAutoScrollRef.current = true;
+    pendingAutoScrollAnimatedRef.current = animated;
+  }, []);
+
+  const flushAutoScroll = useCallback(() => {
+    if (
+      !pendingAutoScrollRef.current ||
+      !flatListRef.current ||
+      isUserDraggingRef.current
+    ) {
+      return;
+    }
+
+    if (!autoFollowRef.current) {
+      pendingAutoScrollRef.current = false;
+      return;
+    }
+
+    pendingAutoScrollRef.current = false;
+    const animated = pendingAutoScrollAnimatedRef.current;
+    requestAnimationFrame(() => {
+      scrollToBottom(animated);
+    });
+  }, [scrollToBottom]);
+
+  const updateNearBottom = useCallback((offsetY = scrollOffsetRef.current) => {
+    const nextNearBottom =
+      distanceFromBottom(
+        contentHeightRef.current,
+        listHeightRef.current,
+        offsetY,
+      ) <= SCROLL_FOLLOW_THRESHOLD;
+
+    setIsNearBottom((current) =>
+      current === nextNearBottom ? current : nextNearBottom,
+    );
+
+    if (nextNearBottom) {
+      autoFollowRef.current = true;
+    } else if (isUserDraggingRef.current) {
+      autoFollowRef.current = false;
+    }
+
+    return nextNearBottom;
+  }, []);
 
   useEffect(() => {
-    if (msgLen > 0) {
-      requestAnimationFrame(scrollToBottom);
+    if (!sessionId) {
+      loadedSessionIdRef.current = null;
+      autoFollowRef.current = true;
+      pendingAutoScrollRef.current = false;
+      scrollOffsetRef.current = 0;
+      setIsNearBottom(true);
+      return;
     }
-  }, [lastMsgContent, msgLen, scrollToBottom]);
+
+    if (loadedSessionIdRef.current === sessionId) {
+      return;
+    }
+
+    loadedSessionIdRef.current = sessionId;
+    autoFollowRef.current = true;
+    scrollOffsetRef.current = 0;
+    setIsNearBottom(true);
+    queueAutoScroll(false);
+  }, [queueAutoScroll, sessionId]);
+
+  useEffect(() => {
+    if (msgLen === 0) {
+      return;
+    }
+
+    if (autoFollowRef.current) {
+      queueAutoScroll(!isStreaming);
+    }
+  }, [isStreaming, lastMsgContent, msgLen, queueAutoScroll]);
+
+  useEffect(() => {
+    if (msgLen === 0 || !autoFollowRef.current) {
+      return;
+    }
+
+    queueAutoScroll(false);
+  }, [chatBarHeight, msgLen, queueAutoScroll]);
 
   useEffect(() => {
     if (!client || !isConnected) {
@@ -606,11 +731,14 @@ export default function ChatScreen() {
         return;
       }
 
+      autoFollowRef.current = true;
+      setIsNearBottom(true);
+      queueAutoScroll(false);
       await sessionStore
         .getState()
         .sendMessage(trimmed, attachments as SessionAttachment[]);
     },
-    [client, ensureSessionForSend, sessionStore],
+    [client, ensureSessionForSend, queueAutoScroll, sessionStore],
   );
 
   const handleStop = useCallback(() => {
@@ -742,7 +870,22 @@ export default function ChatScreen() {
               ref={flatListRef}
               data={messages}
               keyExtractor={(_, index) => String(index)}
-              onScrollBeginDrag={Keyboard.dismiss}
+              onScrollBeginDrag={() => {
+                isUserDraggingRef.current = true;
+                Keyboard.dismiss();
+              }}
+              onScrollEndDrag={() => {
+                isUserDraggingRef.current = false;
+                updateNearBottom();
+                flushAutoScroll();
+              }}
+              onMomentumScrollEnd={() => {
+                isUserDraggingRef.current = false;
+                updateNearBottom();
+                flushAutoScroll();
+              }}
+              onScroll={handleListScroll}
+              scrollEventThrottle={16}
               renderItem={({
                 item,
                 index,
@@ -757,10 +900,14 @@ export default function ChatScreen() {
                   isThinking={isThinking && index === messages.length - 1}
                   activeToolCallId={activeToolCallId}
                   onApproveTool={(toolCallId) =>
-                    void handleToolApprovalAction(toolCallId, true)
+                    sessionId
+                      ? void handleToolApprovalAction(sessionId, toolCallId, true)
+                      : undefined
                   }
                   onDenyTool={(toolCallId) =>
-                    void handleToolApprovalAction(toolCallId, false)
+                    sessionId
+                      ? void handleToolApprovalAction(sessionId, toolCallId, false)
+                      : undefined
                   }
                   onSubmitToolResult={(toolCallId, result) =>
                     void handleInteractiveToolResult(toolCallId, result)
@@ -774,28 +921,70 @@ export default function ChatScreen() {
               contentContainerStyle={[
                 styles.list,
                 isDesktop && styles.listDesktop,
-                { paddingBottom: CHAT_BAR_ZONE + insets.bottom },
+                {
+                  paddingTop: listTopPadding,
+                  paddingBottom: listBottomPadding,
+                },
               ]}
               onLayout={(event) => {
                 listHeightRef.current = event.nativeEvent.layout.height;
+                updateNearBottom();
+                flushAutoScroll();
               }}
               onContentSizeChange={(_width, height) => {
                 contentHeightRef.current = height;
+                updateNearBottom();
+                flushAutoScroll();
               }}
               keyboardDismissMode="interactive"
               keyboardShouldPersistTaps="handled"
             />
-            <LinearGradient
-              colors={[t.background, t.background + "00"]}
-              style={styles.fadeTop}
+            <View pointerEvents="none" style={[styles.edgeChrome, styles.edgeTop]}>
+              <BlurView intensity={40} tint={edgeTint} style={StyleSheet.absoluteFill} />
+              <View style={[StyleSheet.absoluteFill, { backgroundColor: edgeOverlay }]} />
+              <LinearGradient
+                colors={[`${t.background}F0`, `${t.background}C8`, `${t.background}00`]}
+                style={StyleSheet.absoluteFill}
+              />
+            </View>
+            {!isDesktop && <PlanTracker onHeightChange={setPlanTrackerHeight} />}
+            <View
               pointerEvents="none"
-            />
-            {!isDesktop && <PlanTracker />}
-            <LinearGradient
-              colors={[t.background + "00", t.background]}
-              style={styles.fadeBottom}
-              pointerEvents="none"
-            />
+              style={[
+                styles.edgeChrome,
+                styles.edgeBottom,
+                { bottom: chatBarHeight },
+              ]}
+            >
+              <BlurView intensity={40} tint={edgeTint} style={StyleSheet.absoluteFill} />
+              <View style={[StyleSheet.absoluteFill, { backgroundColor: edgeOverlay }]} />
+              <LinearGradient
+                colors={[`${t.background}00`, `${t.background}C8`, `${t.background}F0`]}
+                style={StyleSheet.absoluteFill}
+              />
+            </View>
+            {showJumpToLatest && (
+              <Pressable
+                onPress={handleJumpToLatest}
+                style={[styles.jumpToLatest, { bottom: chatBarHeight + EDGE_GAP }]}
+              >
+                <BlurView
+                  intensity={28}
+                  tint={jumpTint}
+                  style={StyleSheet.absoluteFill}
+                />
+                <View
+                  style={[
+                    StyleSheet.absoluteFill,
+                    { backgroundColor: jumpOverlay },
+                  ]}
+                />
+                <ArrowDown size={15} color={t.foreground} strokeWidth={2} />
+                <Text style={[styles.jumpToLatestText, { color: t.foreground }]}>
+                  Jump to latest
+                </Text>
+              </Pressable>
+            )}
           </View>
         )}
       </Animated.View>
@@ -806,6 +995,7 @@ export default function ChatScreen() {
           onStop={handleStop}
           isStreaming={isStreaming}
           disabled={!isConnected}
+          onHeightChange={setChatBarHeight}
           thinkingLevel={thinkingLevel as ThinkingLevel}
           onThinkingChange={(level) =>
             sessionStore.getState().setThinkingLevel(level)
@@ -902,26 +1092,42 @@ const styles = StyleSheet.create({
   },
   list: {
     paddingHorizontal: 16,
-    paddingTop: 8,
   },
   listDesktop: {
     maxWidth: 800,
     alignSelf: "center",
     width: "100%",
   },
-  fadeTop: {
+  edgeChrome: {
     position: "absolute",
-    top: 0,
     left: 0,
     right: 0,
-    height: 64,
   },
-  fadeBottom: {
+  edgeTop: {
+    top: 0,
+    height: TOP_EDGE_HEIGHT,
+  },
+  edgeBottom: {
+    height: BOTTOM_EDGE_HEIGHT,
+  },
+  jumpToLatest: {
     position: "absolute",
-    bottom: 0,
-    left: 0,
-    right: 0,
-    height: 120,
+    left: 16,
+    alignSelf: "flex-start",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 999,
+    overflow: "hidden",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(255,255,255,0.12)",
+    zIndex: 60,
+  },
+  jumpToLatestText: {
+    fontSize: 13,
+    fontWeight: "600",
   },
   empty: {
     flex: 1,

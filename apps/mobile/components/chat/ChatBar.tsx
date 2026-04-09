@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View,
   TextInput,
@@ -12,7 +12,7 @@ import {
   FlatList,
 } from 'react-native';
 import { BlurView } from '../../platform/blur';
-import { ArrowUp, Square, X, Mic, FlaskConical } from 'lucide-react-native';
+import { ArrowUp, Square, X, Mic } from 'lucide-react-native';
 import * as Haptics from '../../platform/haptics';
 import * as ImagePicker from '../../platform/image-picker';
 import * as DocumentPicker from '../../platform/document-picker';
@@ -45,6 +45,7 @@ interface ChatBarProps {
   onStop: () => void;
   isStreaming: boolean;
   disabled: boolean;
+  onHeightChange?: (height: number) => void;
   thinkingLevel: ThinkingLevel;
   onThinkingChange: (level: ThinkingLevel) => void;
   permissionMode: PermissionMode;
@@ -70,6 +71,7 @@ const GAP = 10;
 export function ChatBar(props: ChatBarProps) {
   const {
     onSend, onStop, isStreaming, disabled,
+    onHeightChange,
     thinkingLevel, onThinkingChange,
     permissionMode, onPermissionModeToggle,
     fastModeEnabled, fastModeSupported, onFastModeToggle,
@@ -95,6 +97,7 @@ export function ChatBar(props: ChatBarProps) {
   const transcriptRef = useRef('');
   const inputRef = useRef<TextInput>(null);
   const accordionOpenRef = useRef(false);
+  const lastReportedHeightRef = useRef(0);
   useEffect(() => { accordionOpenRef.current = accordionOpen; }, [accordionOpen]);
 
   const t = theme.colors;
@@ -276,9 +279,21 @@ export function ChatBar(props: ChatBarProps) {
   const gaugeTokens = tokenCount ?? 0;
   const gaugePct = Math.min(100, (gaugeTokens / 200000) * 100);
   const gaugeColor = gaugeTokens > 180000 ? t.error : gaugeTokens > 120000 ? t.warning : t.mutedForeground + '60';
+  const handleRootLayout = useCallback(({ nativeEvent }: any) => {
+    const nextHeight = Math.ceil(nativeEvent.layout.height);
+    if (lastReportedHeightRef.current === nextHeight) {
+      return;
+    }
+
+    lastReportedHeightRef.current = nextHeight;
+    onHeightChange?.(nextHeight);
+  }, [onHeightChange]);
 
   return (
-    <View style={[styles.root, { paddingBottom: bottomOffset }]}>
+    <View
+      style={[styles.root, { paddingBottom: bottomOffset }]}
+      onLayout={handleRootLayout}
+    >
       {/* Attachment previews */}
       {attachments.length > 0 && (
         <View style={styles.attachRow}>
