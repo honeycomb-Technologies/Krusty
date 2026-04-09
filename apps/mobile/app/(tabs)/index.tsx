@@ -15,7 +15,7 @@ import {
   SafeAreaView,
 } from "react-native-safe-area-context";
 import { router } from "expo-router";
-import { Menu, FileSearch } from "lucide-react-native";
+import { Menu, FileSearch, ArrowDown } from "lucide-react-native";
 import * as Haptics from "../../platform/haptics";
 import * as SecureStore from "../../platform/secure-store";
 import { useThemeContext } from "../../hooks/useTheme";
@@ -36,6 +36,7 @@ import { SessionDrawer } from "../../components/chat/SessionDrawer";
 import { DesktopShell } from "../../components/layout/DesktopShell";
 import { ReportsViewer } from "../../components/ReportsViewer";
 import { PlanTracker } from "../../components/chat/PlanTracker";
+import { BlurView } from "../../platform/blur";
 import { LinearGradient } from "../../platform/linear-gradient";
 import { useSplashState } from "../../hooks/useSplashState";
 import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
@@ -175,6 +176,9 @@ export default function ChatScreen() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [reportsOpen, setReportsOpen] = useState(false);
   const [researchEnabled, setResearchEnabled] = useState(false);
+  const [chatBarHeight, setChatBarHeight] = useState(0);
+  const [planTrackerHeight, setPlanTrackerHeight] = useState(0);
+  const [isNearBottom, setIsNearBottom] = useState(true);
 
   const flatListRef = useRef<FlatList>(null);
   const listHeightRef = useRef(0);
@@ -808,6 +812,22 @@ export default function ChatScreen() {
       sessionTitle,
     );
   }, [sessionId, sessionStore, sessionTitle]);
+
+  const handleListScroll = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      scrollOffsetRef.current = event.nativeEvent.contentOffset.y;
+      updateNearBottom(event.nativeEvent.contentOffset.y);
+    },
+    [updateNearBottom],
+  );
+
+  const handleJumpToLatest = useCallback(() => {
+    autoFollowRef.current = true;
+    setIsNearBottom(true);
+    queueAutoScroll(false);
+    scrollToBottom(false);
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  }, [queueAutoScroll, scrollToBottom]);
 
   const chatContent = (
     <SafeAreaView
