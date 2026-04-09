@@ -6,10 +6,8 @@ import {
   Text,
   View,
 } from "react-native";
-import { GlassCard } from "../ui/GlassCard";
 import { useThemeContext } from "../../hooks/useTheme";
 import { MakoApprovalList } from "./MakoApprovalList";
-import { MakoInsightCard } from "./MakoInsightCard";
 import { MakoRunList } from "./MakoRunList";
 import {
   describeRunDrift,
@@ -90,134 +88,113 @@ export function MakoStatusView({
       }
     >
       <Text style={[styles.description, { color: t.mutedForeground }]}>
-        Status keeps the control-plane truth compact: what is awake, what is queued, what is blocked, and when the next wake is expected.
+        Details keeps the control-plane truth compact: what is awake, what is blocked, how healthy the daemon is, and what may need intervention next.
       </Text>
-
-      <View style={styles.grid}>
-        <StatusCard label="Home state" value={status?.home_status ?? "idle"} />
-        <StatusCard
-          label="Approvals"
-          value={String(status?.pending_approvals_count ?? 0)}
-        />
-        <StatusCard label="Running" value={String(status?.running_count ?? 0)} />
-        <StatusCard
-          label="Sleeping"
-          value={String(status?.sleeping_count ?? 0)}
-        />
-        <StatusCard
-          label="Scheduled"
-          value={String(status?.scheduled_count ?? 0)}
-        />
-        <StatusCard
-          label="High priority"
-          value={String(status?.high_priority_count ?? 0)}
-        />
-        <StatusCard
-          label="Drifting"
-          value={String(diagnostics?.stalled_count ?? staleRuns.length)}
-        />
-        <StatusCard label="Paused" value={String(status?.paused_count ?? 0)} />
-        <StatusCard label="Failed" value={String(status?.failed_count ?? 0)} />
-        <StatusCard label="Tick interval" value={cadence.tickIntervalLabel} />
-        <StatusCard label="Tick budget" value={cadence.tickBudgetLabel} />
-        <StatusCard
+      <View
+        style={[
+          styles.summaryStrip,
+          {
+            borderTopColor: t.border,
+            borderBottomColor: t.border,
+          },
+        ]}
+      >
+        <SummaryCell
           label="Health"
           value={formatHealthState(diagnostics?.health_state)}
         />
-        <StatusCard
-          label="Daemon uptime"
-          value={formatElapsedSeconds(daemon?.uptime_secs)}
-        />
-        <StatusCard
-          label="Latest trace"
-          value={formatTimestamp(diagnostics?.latest_trace_at)}
-        />
-        <StatusCard
-          label="Snapshot coverage"
-          value={knowledgeHealth.value}
-        />
-      </View>
-
-      <GlassCard style={styles.card}>
-        <Text style={[styles.cardLabel, { color: t.mutedForeground }]}>
-          Next wake
-        </Text>
-        <Text style={[styles.cardValue, { color: t.foreground }]}>
-          {formatTimestamp(status?.next_wake_at)}
-        </Text>
-      </GlassCard>
-
-      <GlassCard style={styles.card}>
-        <Text style={[styles.cardLabel, { color: t.mutedForeground }]}>
-          Cadence
-        </Text>
-        <Text style={[styles.cardBody, { color: t.foreground }]}>
-          {cadence.detail}
-        </Text>
-      </GlassCard>
-
-      <View style={styles.insights}>
-        <MakoInsightCard
-          label="Queue health"
-          value={queueHealth.value}
-          detail={queueHealth.detail}
-          tone={queueHealth.tone}
-        />
-        <MakoInsightCard
-          label="Priority mix"
-          value={priorityProfile.value}
-          detail={priorityProfile.detail}
-          tone={priorityProfile.tone}
-        />
-        <MakoInsightCard
-          label="Runtime drift"
-          value={runtimeDrift.value}
-          detail={runtimeDrift.detail}
-          tone={runtimeDrift.tone}
-        />
-        <MakoInsightCard
-          label="Knowledge"
-          value={knowledgeHealth.value}
-          detail={knowledgeHealth.detail}
-          tone={knowledgeHealth.tone}
-        />
-        <MakoInsightCard
-          label="Daemon"
-          value={daemonHealth.value}
-          detail={daemonHealth.detail}
-          tone={daemonHealth.tone}
+        <SummaryCell label="Running" value={String(status?.running_count ?? 0)} />
+        <SummaryCell label="Waiting" value={String(status?.pending_approvals_count ?? 0)} />
+        <SummaryCell
+          label="Next wake"
+          value={
+            status?.next_wake_at
+              ? new Date(status.next_wake_at).toLocaleTimeString([], {
+                  hour: "numeric",
+                  minute: "2-digit",
+                })
+              : "None"
+          }
         />
       </View>
 
-      <GlassCard style={styles.card}>
-        <Text style={[styles.cardLabel, { color: t.mutedForeground }]}>
-          Daemon recovery
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: t.foreground }]}>Signals</Text>
+        <View style={[styles.sectionBody, { borderTopColor: t.border }]}>
+          <SignalRow
+            label="Queue health"
+            value={queueHealth.value}
+            detail={queueHealth.detail}
+            tone={queueHealth.tone}
+          />
+          <SignalRow
+            label="Priority mix"
+            value={priorityProfile.value}
+            detail={priorityProfile.detail}
+            tone={priorityProfile.tone}
+          />
+          <SignalRow
+            label="Runtime drift"
+            value={runtimeDrift.value}
+            detail={runtimeDrift.detail}
+            tone={runtimeDrift.tone}
+          />
+          <SignalRow
+            label="Knowledge"
+            value={knowledgeHealth.value}
+            detail={knowledgeHealth.detail}
+            tone={knowledgeHealth.tone}
+          />
+          <SignalRow
+            label="Daemon"
+            value={daemonHealth.value}
+            detail={daemonHealth.detail}
+            tone={daemonHealth.tone}
+          />
+        </View>
+      </View>
+
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: t.foreground }]}>
+          Diagnostics
         </Text>
-        <Text style={[styles.cardBody, { color: t.foreground }]}>
-          Recoverable sessions are persisted runtime states that can be rescheduled or resumed without waiting for another user action.
-        </Text>
+        <View style={[styles.sectionBody, { borderTopColor: t.border }]}>
+          <DetailRow label="Home state" value={status?.home_status ?? "idle"} />
+          <DetailRow
+            label="Daemon uptime"
+            value={formatElapsedSeconds(daemon?.uptime_secs)}
+          />
+          <DetailRow label="Tick interval" value={cadence.tickIntervalLabel} />
+          <DetailRow label="Tick budget" value={cadence.tickBudgetLabel} />
+          <DetailRow
+            label="Latest trace"
+            value={formatTimestamp(diagnostics?.latest_trace_at)}
+          />
+          <DetailRow label="Snapshot coverage" value={knowledgeHealth.value} />
+          <DetailRow label="Paused" value={String(status?.paused_count ?? 0)} />
+          <DetailRow label="Failed" value={String(status?.failed_count ?? 0)} />
+          <DetailRow label="Scheduled" value={String(status?.scheduled_count ?? 0)} />
+          <DetailRow label="High priority" value={String(status?.high_priority_count ?? 0)} />
+          <Text style={[styles.helperText, { color: t.mutedForeground }]}>
+            Recoverable sessions can be resumed without another user prompt when the daemon is restarted.
+          </Text>
+        </View>
         <View style={styles.actionRow}>
           <Pressable
             onPress={() => {
               void state.recoverDaemon();
             }}
             disabled={state.isRecovering}
-            style={[
-              styles.actionButton,
-              {
-                backgroundColor:
-                  daemon?.recoverable_session_count
-                    ? t.userMessage
-                    : t.glass.backgroundElevated,
-                opacity: state.isRecovering ? 0.6 : 1,
-              },
-            ]}
+            style={styles.inlineAction}
           >
             <Text
               style={[
-                styles.actionLabel,
+                styles.inlineActionText,
                 {
-                  color: daemon?.recoverable_session_count ? "#ffffff" : t.foreground,
+                  color:
+                    daemon?.recoverable_session_count || state.isRecovering
+                      ? t.userMessage
+                      : t.mutedForeground,
                 },
               ]}
             >
@@ -225,7 +202,7 @@ export function MakoStatusView({
             </Text>
           </Pressable>
         </View>
-      </GlassCard>
+      </View>
 
       <View style={styles.section}>
         <Text style={[styles.sectionTitle, { color: t.foreground }]}>
@@ -548,7 +525,7 @@ function summarizeDaemonHealth(
   };
 }
 
-function StatusCard({
+function SummaryCell({
   label,
   value,
 }: {
@@ -559,10 +536,70 @@ function StatusCard({
   const t = theme.colors;
 
   return (
-    <GlassCard style={styles.statusCard}>
-      <Text style={[styles.cardLabel, { color: t.mutedForeground }]}>{label}</Text>
-      <Text style={[styles.cardValue, { color: t.foreground }]}>{value}</Text>
-    </GlassCard>
+    <View style={styles.summaryCell}>
+      <Text style={[styles.summaryLabel, { color: t.mutedForeground }]}>{label}</Text>
+      <Text style={[styles.summaryValue, { color: t.foreground }]}>{value}</Text>
+    </View>
+  );
+}
+
+function DetailRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  const { theme } = useThemeContext();
+  const t = theme.colors;
+
+  return (
+    <View style={[styles.detailRow, { borderBottomColor: t.border }]}>
+      <Text style={[styles.detailLabel, { color: t.mutedForeground }]}>{label}</Text>
+      <Text style={[styles.detailValue, { color: t.foreground }]}>{value}</Text>
+    </View>
+  );
+}
+
+function SignalRow({
+  label,
+  value,
+  detail,
+  tone = "default",
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  tone?: "default" | "accent" | "warning" | "danger" | "success";
+}) {
+  const { theme } = useThemeContext();
+  const t = theme.colors;
+
+  const valueColor = (() => {
+    switch (tone) {
+      case "accent":
+        return t.userMessage;
+      case "warning":
+        return t.warning;
+      case "danger":
+        return t.error;
+      case "success":
+        return t.success;
+      default:
+        return t.foreground;
+    }
+  })();
+
+  return (
+    <View style={[styles.signalRow, { borderBottomColor: t.border }]}>
+      <View style={styles.signalCopy}>
+        <Text style={[styles.signalLabel, { color: t.foreground }]}>{label}</Text>
+        <Text style={[styles.signalDetail, { color: t.mutedForeground }]}>
+          {detail}
+        </Text>
+      </View>
+      <Text style={[styles.signalValue, { color: valueColor }]}>{value}</Text>
+    </View>
   );
 }
 
@@ -579,56 +616,102 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
   },
-  grid: {
+  summaryStrip: {
     flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  statusCard: {
-    width: "47%",
-    marginBottom: 0,
+  summaryCell: {
+    flex: 1,
+    minHeight: 64,
+    justifyContent: "center",
+    paddingHorizontal: 8,
+    paddingVertical: 10,
   },
-  card: {
-    marginBottom: 0,
-  },
-  insights: {
-    gap: 12,
-  },
-  cardLabel: {
-    fontSize: 12,
+  summaryLabel: {
+    fontSize: 11,
     fontWeight: "600",
     textTransform: "uppercase",
     letterSpacing: 0.3,
+    textAlign: "center",
   },
-  cardValue: {
-    marginTop: 10,
-    fontSize: 22,
-    fontWeight: "700",
-    letterSpacing: -0.5,
-  },
-  cardBody: {
-    marginTop: 10,
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  section: {
-    gap: 10,
-  },
-  actionRow: {
-    marginTop: 14,
-  },
-  actionButton: {
-    borderRadius: 16,
-    paddingVertical: 12,
-    alignItems: "center",
-  },
-  actionLabel: {
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  sectionTitle: {
-    fontSize: 18,
+  summaryValue: {
+    marginTop: 6,
+    fontSize: 17,
     fontWeight: "700",
     letterSpacing: -0.3,
+    textAlign: "center",
+  },
+  section: {
+    gap: 8,
+  },
+  sectionBody: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  signalRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  signalCopy: {
+    flex: 1,
+    gap: 3,
+  },
+  signalLabel: {
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  signalDetail: {
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  signalValue: {
+    fontSize: 13,
+    fontWeight: "700",
+    lineHeight: 18,
+    textAlign: "right",
+    maxWidth: 116,
+  },
+  detailRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 12,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  detailLabel: {
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  detailValue: {
+    fontSize: 13,
+    fontWeight: "600",
+    lineHeight: 18,
+    textAlign: "right",
+    maxWidth: 148,
+  },
+  helperText: {
+    paddingTop: 10,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  actionRow: {
+    marginTop: 2,
+  },
+  inlineAction: {
+    alignSelf: "flex-start",
+    paddingVertical: 6,
+  },
+  inlineActionText: {
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  sectionTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    letterSpacing: -0.2,
   },
 });

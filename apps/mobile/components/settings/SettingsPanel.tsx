@@ -1543,7 +1543,6 @@ const styles = StyleSheet.create({
   closeBtn: {
     width: 34,
     height: 34,
-    borderRadius: 17,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -1553,9 +1552,7 @@ const styles = StyleSheet.create({
   },
   sectionTitle: {
     fontSize: 14,
-    fontWeight: "700",
-    letterSpacing: 0.4,
-    textTransform: "uppercase",
+    fontWeight: "600",
   },
   sectionSubtitle: {
     fontSize: 12,
@@ -1600,14 +1597,13 @@ const styles = StyleSheet.create({
     gap: 14,
   },
   inputWrap: {
-    borderRadius: 14,
+    borderRadius: 8,
     borderWidth: StyleSheet.hairlineWidth,
     padding: 12,
   },
   inputLabel: {
     fontSize: 11,
-    fontWeight: "700",
-    letterSpacing: 0.5,
+    fontWeight: "600",
     marginBottom: 6,
   },
   input: {
@@ -1615,7 +1611,7 @@ const styles = StyleSheet.create({
     padding: 0,
   },
   inlineInput: {
-    borderRadius: 14,
+    borderRadius: 8,
     borderWidth: StyleSheet.hairlineWidth,
     paddingHorizontal: 12,
     paddingVertical: 12,
@@ -1625,7 +1621,7 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   connectBtn: {
-    borderRadius: 16,
+    borderRadius: 10,
     paddingVertical: 14,
     alignItems: "center",
   },
@@ -1647,7 +1643,7 @@ const styles = StyleSheet.create({
     gap: 6,
     paddingVertical: 10,
     paddingHorizontal: 14,
-    borderRadius: 14,
+    borderRadius: 8,
     borderWidth: StyleSheet.hairlineWidth,
   },
   schemeBtnText: {
@@ -1656,7 +1652,7 @@ const styles = StyleSheet.create({
   },
   banner: {
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 14,
+    borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 10,
   },
@@ -1677,8 +1673,8 @@ const styles = StyleSheet.create({
   },
   subsection: {
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 16,
-    padding: 14,
+    borderRadius: 10,
+    padding: 12,
     gap: 10,
   },
   subsectionHeader: {
@@ -1699,12 +1695,11 @@ const styles = StyleSheet.create({
   pill: {
     paddingHorizontal: 10,
     paddingVertical: 5,
-    borderRadius: 999,
+    borderRadius: 8,
   },
   pillText: {
     fontSize: 11,
-    fontWeight: "700",
-    letterSpacing: 0.3,
+    fontWeight: "600",
   },
   actionsWrap: {
     flexDirection: "row",
@@ -1714,7 +1709,7 @@ const styles = StyleSheet.create({
   smallActionBtn: {
     minHeight: 36,
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 12,
+    borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 8,
     flexDirection: "row",
@@ -1735,13 +1730,13 @@ const styles = StyleSheet.create({
   },
   toggle: {
     width: 48,
-    borderRadius: 999,
+    borderRadius: 12,
     padding: 3,
   },
   toggleKnob: {
     width: 20,
     height: 20,
-    borderRadius: 10,
+    borderRadius: 8,
     backgroundColor: "#fff",
   },
   portRow: {

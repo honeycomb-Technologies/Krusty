@@ -8,6 +8,7 @@ import { MakoCurrentView } from "./MakoCurrentView";
 import { MakoReportsView } from "./MakoReportsView";
 import { MakoRunView } from "./MakoRunView";
 import { MakoRunsView } from "./MakoRunsView";
+import { MakoScheduleView } from "./MakoScheduleView";
 import { MakoStatusView } from "./MakoStatusView";
 import { MakoTopBar } from "./MakoTopBar";
 import { MakoTopNav } from "./MakoTopNav";
@@ -82,11 +83,9 @@ export function MakoScreen({
 
           <MakoTopNav
             items={[
-              { id: "current", label: "Current" },
-              { id: "chat", label: "Chat" },
-              { id: "runs", label: "Runs" },
-              { id: "reports", label: "Reports" },
-              { id: "status", label: "Status" },
+              { id: "current", label: "Mako" },
+              { id: "schedule", label: "Schedule" },
+              { id: "reports", label: "Logbook" },
             ]}
             active={navigation.topLevel}
             onSelect={navigation.setTopLevel}
@@ -98,16 +97,34 @@ export function MakoScreen({
               workspaceDirectory={workspaceDirectory}
               model={chat.model ?? null}
               activeToolCallId={chat.activeToolCallId}
+              chat={chat}
               onSelectRun={(runId) => {
                 void handleOpenRun(runId);
               }}
+              onOpenChat={() => {
+                navigation.setTopLevel("chat");
+              }}
+              onOpenRuns={() => {
+                navigation.setTopLevel("runs");
+              }}
+              onOpenDetails={() => {
+                navigation.setTopLevel("status");
+              }}
               onCourseSet={handleOpenRun}
               onApproveTool={chat.onApproveTool}
-              onDenyTool={chat.onDenyTool}
             />
           ) : null}
 
           {navigation.topLevel === "chat" ? <MakoChatView chat={chat} /> : null}
+
+          {navigation.topLevel === "schedule" ? (
+            <MakoScheduleView
+              state={current}
+              onSelectRun={(runId) => {
+                void handleOpenRun(runId);
+              }}
+            />
+          ) : null}
 
           {navigation.topLevel === "runs" ? (
             <MakoRunsView

@@ -165,7 +165,7 @@ const styles = StyleSheet.create({
   tagPill: {
     paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: 999,
+    borderRadius: 8,
     borderWidth: StyleSheet.hairlineWidth,
   },
   tagText: {

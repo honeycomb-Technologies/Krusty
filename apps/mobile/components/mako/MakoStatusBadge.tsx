@@ -77,15 +77,14 @@ export function MakoStatusBadge({ status }: MakoStatusBadgeProps) {
 
 const styles = StyleSheet.create({
   badge: {
-    borderRadius: 999,
+    borderRadius: 8,
     borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
   },
   label: {
-    fontSize: 12,
-    fontWeight: "700",
+    fontSize: 11,
+    fontWeight: "600",
     textTransform: "lowercase",
-    letterSpacing: 0.2,
   },
 });

@@ -15,7 +15,6 @@ import { useBreakpoint } from "../../hooks/useBreakpoint";
 import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";
 import { ReportDetailContent } from "../reports/ReportDetailContent";
-import { GlassCard } from "../ui/GlassCard";
 import { MakoInsightCard } from "./MakoInsightCard";
 import { MakoKnowledgeScopeToggle } from "./MakoKnowledgeScopeToggle";
 import { MakoMemoryView } from "./MakoMemoryView";
@@ -85,7 +84,15 @@ function ReportCard({
 
   return (
     <Pressable onPress={onPress}>
-      <GlassCard style={styles.card} elevated={selected}>
+      <View
+        style={[
+          styles.card,
+          {
+            borderColor: t.border,
+            backgroundColor: selected ? t.glass.backgroundElevated : "transparent",
+          },
+        ]}
+      >
         <Text style={[styles.title, { color: t.foreground }]} numberOfLines={2}>
           {report.title}
         </Text>
@@ -114,7 +121,7 @@ function ReportCard({
             </Text>
           ) : null}
         </View>
-      </GlassCard>
+      </View>
     </Pressable>
   );
 }
@@ -145,14 +152,14 @@ function ReportDetailPane({
 
   if (!report) {
     return (
-      <GlassCard style={styles.detailCard} elevated>
+      <View style={[styles.detailCard, { borderColor: t.border }]}>
         <Text style={[styles.detailTitle, { color: t.foreground }]}>
           No report selected
         </Text>
         <Text style={[styles.detailCopy, { color: t.mutedForeground }]}>
           Open any report to inspect the written brief, sources, and project context.
         </Text>
-      </GlassCard>
+      </View>
     );
   }
 
@@ -164,7 +171,7 @@ function ReportDetailPane({
         : t.userMessage;
 
   return (
-    <GlassCard style={styles.detailCard} elevated>
+    <View style={[styles.detailCard, { borderColor: t.border }]}>
       <Text style={[styles.detailTitle, { color: t.foreground }]}>{report.title}</Text>
       {report.summary ? (
         <Text style={[styles.detailCopy, { color: t.mutedForeground }]}>
@@ -196,7 +203,7 @@ function ReportDetailPane({
       ) : null}
 
       <ReportDetailContent report={report} />
-    </GlassCard>
+    </View>
   );
 }
 
@@ -290,7 +297,7 @@ export function MakoReportsView({ workspaceDirectory }: MakoReportsViewProps) {
       <>
         <MakoTopNav
           items={[
-            { id: "reports", label: "Reports" },
+            { id: "reports", label: "Recent" },
             { id: "memory", label: "Memory" },
           ]}
           active={knowledgeView}
@@ -305,7 +312,7 @@ export function MakoReportsView({ workspaceDirectory }: MakoReportsViewProps) {
     <>
       <MakoTopNav
         items={[
-          { id: "reports", label: "Reports" },
+          { id: "reports", label: "Recent" },
           { id: "memory", label: "Memory" },
         ]}
         active={knowledgeView}
@@ -313,12 +320,12 @@ export function MakoReportsView({ workspaceDirectory }: MakoReportsViewProps) {
       />
 
       <Text style={[styles.description, { color: t.mutedForeground }]}>
-        Reports are Mako&apos;s durable writeups. This surface should make it easy to scan what has already been learned, then reopen the full brief without leaving the workspace.
+        Logbook keeps Mako&apos;s recent durable writeups close at hand. Scan recent briefs here, then open the full writeup without leaving the workspace.
       </Text>
 
       <View style={styles.metricsRow}>
         <MakoInsightCard
-          label="Reports"
+          label="Recent"
           value={String(visibleReports.length)}
           detail={query.trim() ? "matching this filter" : "visible in this scope"}
           style={styles.metricCard}
@@ -375,7 +382,7 @@ export function MakoReportsView({ workspaceDirectory }: MakoReportsViewProps) {
       ) : null}
 
       {visibleReports.length === 0 ? (
-        <GlassCard style={styles.emptyCard}>
+        <View style={[styles.emptyCard, { borderColor: t.border }]}>
           <Text style={[styles.emptyTitle, { color: t.foreground }]}>
             {reports.reports.length === 0 && !reports.debouncedQuery
               ? "No reports yet"
@@ -386,7 +393,7 @@ export function MakoReportsView({ workspaceDirectory }: MakoReportsViewProps) {
               ? "Mako has not written any durable briefs for this scope yet."
               : "Try a different search term or switch scopes."}
           </Text>
-        </GlassCard>
+        </View>
       ) : (
         visibleReports.map((report) => (
           <ReportCard
@@ -466,7 +473,7 @@ export function MakoReportsView({ workspaceDirectory }: MakoReportsViewProps) {
       >
         <MakoTopNav
           items={[
-            { id: "reports", label: "Reports" },
+            { id: "reports", label: "Recent" },
             { id: "memory", label: "Memory" },
           ]}
           active={knowledgeView}
@@ -481,7 +488,7 @@ export function MakoReportsView({ workspaceDirectory }: MakoReportsViewProps) {
           style={styles.backButton}
         >
           <Text style={[styles.backLabel, { color: t.userMessage }]}>
-            Back to reports
+            Back to logbook
           </Text>
         </Pressable>
 
@@ -559,9 +566,9 @@ const styles = StyleSheet.create({
   },
   searchInput: {
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 16,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     fontSize: 14,
   },
   error: {
@@ -570,14 +577,17 @@ const styles = StyleSheet.create({
   },
   card: {
     marginBottom: 0,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 8,
+    padding: 12,
   },
   title: {
-    fontSize: 16,
-    fontWeight: "700",
+    fontSize: 14,
+    fontWeight: "600",
     lineHeight: 22,
   },
   summary: {
-    marginTop: 10,
+    marginTop: 8,
     fontSize: 13,
     lineHeight: 18,
   },
@@ -610,10 +620,13 @@ const styles = StyleSheet.create({
   },
   emptyCard: {
     marginBottom: 0,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 8,
+    padding: 12,
   },
   emptyTitle: {
-    fontSize: 16,
-    fontWeight: "700",
+    fontSize: 14,
+    fontWeight: "600",
   },
   emptyBody: {
     marginTop: 8,
@@ -630,28 +643,31 @@ const styles = StyleSheet.create({
   },
   detailCard: {
     marginBottom: 0,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 8,
+    padding: 12,
   },
   detailTitle: {
-    fontSize: 22,
-    fontWeight: "700",
-    lineHeight: 28,
+    fontSize: 18,
+    fontWeight: "600",
+    lineHeight: 24,
   },
   detailCopy: {
-    marginTop: 10,
-    marginBottom: 18,
+    marginTop: 8,
+    marginBottom: 14,
     fontSize: 13,
     lineHeight: 18,
   },
   promoteButton: {
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     marginBottom: 10,
   },
   promoteLabel: {
-    fontSize: 13,
-    fontWeight: "700",
+    fontSize: 12,
+    fontWeight: "600",
   },
   promotionMessage: {
     marginBottom: 14,
