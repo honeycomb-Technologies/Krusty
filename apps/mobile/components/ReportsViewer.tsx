@@ -34,6 +34,10 @@ interface ReportsViewerProps {
   onClose: () => void;
 }
 
+interface ReportsContentProps {
+  visible: boolean;
+}
+
 function formatRelativeTime(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const mins = Math.floor(diff / 60000);
@@ -238,6 +242,135 @@ export function ReportsViewer({ visible, onClose }: ReportsViewerProps) {
   );
 }
 
+export function ReportsContent({ visible }: ReportsContentProps) {
+  const { theme } = useThemeContext();
+  const { client } = useConnection();
+  const t = theme.colors;
+
+  const [reports, setReports] = useState<ReportSummary[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [selectedReport, setSelectedReport] = useState<Report | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+
+  useEffect(() => {
+    if (visible && client) {
+      setLoading(true);
+      client
+        .getReports()
+        .then((res) => setReports(res.reports))
+        .catch(() => {})
+        .finally(() => setLoading(false));
+    }
+  }, [visible, client]);
+
+  const handleSelectReport = useCallback(
+    async (id: string) => {
+      if (!client) return;
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      setDetailLoading(true);
+      try {
+        const report = await client.getReport(id);
+        setSelectedReport(report);
+      } catch {
+        // silent
+      } finally {
+        setDetailLoading(false);
+      }
+    },
+    [client],
+  );
+
+  const handleBack = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setSelectedReport(null);
+  }, []);
+
+  const renderReportCard = ({ item }: { item: ReportSummary }) => (
+    <Pressable
+      onPress={() => handleSelectReport(item.id)}
+      style={[styles.card, { borderColor: t.border }]}
+    >
+      <Text style={[styles.cardTitle, { color: t.foreground }]} numberOfLines={2}>
+        {item.title}
+      </Text>
+      {item.summary ? (
+        <Text
+          style={[styles.cardSummary, { color: t.mutedForeground }]}
+          numberOfLines={3}
+        >
+          {item.summary}
+        </Text>
+      ) : null}
+      <View style={styles.cardFooter}>
+        <View style={styles.tagsRow}>
+          {item.tags.slice(0, 4).map((tag) => (
+            <View
+              key={tag}
+              style={[styles.tagPill, { backgroundColor: t.userMessage + '18', borderColor: t.userMessage + '30' }]}
+            >
+              <Text style={[styles.tagText, { color: t.userMessage }]}>{tag}</Text>
+            </View>
+          ))}
+        </View>
+        <Text style={[styles.cardDate, { color: t.mutedForeground }]}>
+          {formatRelativeTime(item.created_at)}
+        </Text>
+      </View>
+    </Pressable>
+  );
+
+  if (!visible) return null;
+
+  return (
+    <View style={styles.reportsContentContainer}>
+      {selectedReport ? (
+        <>
+          <View style={[styles.contentHeader, { borderBottomColor: t.border }]}>
+            <Pressable onPress={handleBack} style={styles.headerBtn}>
+              <ArrowLeft size={22} color={t.foreground} strokeWidth={1.8} />
+            </Pressable>
+            <Text style={[styles.headerTitle, { color: t.foreground }]} numberOfLines={1}>
+              {selectedReport.title}
+            </Text>
+            <View style={styles.headerBtn} />
+          </View>
+          <ScrollView
+            style={styles.detailScroll}
+            contentContainerStyle={styles.detailContent}
+            showsVerticalScrollIndicator={false}
+          >
+            <ReportDetailContent report={selectedReport} />
+          </ScrollView>
+        </>
+      ) : loading ? (
+        <View style={styles.centered}>
+          <ActivityIndicator color={t.mutedForeground} />
+        </View>
+      ) : reports.length === 0 ? (
+        <View style={styles.centered}>
+          <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
+            No papers yet
+          </Text>
+        </View>
+      ) : (
+        <FlatList
+          data={reports}
+          keyExtractor={(item) => item.id}
+          renderItem={renderReportCard}
+          contentContainerStyle={styles.listContent}
+          showsVerticalScrollIndicator={false}
+        />
+      )}
+
+      {detailLoading && (
+        <View style={styles.detailOverlay}>
+          <ActivityIndicator color={t.mutedForeground} />
+        </View>
+      )}
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   backdrop: {
     ...StyleSheet.absoluteFillObject,
@@ -338,5 +471,16 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.3)',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  reportsContentContainer: {
+    flex: 1,
+  },
+  contentHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    gap: 12,
   },
 });

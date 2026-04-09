@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import {
   AppState,
+  Dimensions,
   View,
   StyleSheet,
   Text,
@@ -10,7 +11,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
-import { Menu, FileSearch } from "lucide-react-native";
+import { Menu, Toolbox } from "lucide-react-native";
 import * as Haptics from "../../platform/haptics";
 import * as SecureStore from "../../platform/secure-store";
 import { useThemeContext } from "../../hooks/useTheme";
@@ -30,14 +31,25 @@ import {
 } from "../../components/chat/ChatBar";
 import { SessionDrawer } from "../../components/chat/SessionDrawer";
 import { DesktopShell } from "../../components/layout/DesktopShell";
-import { ReportsViewer } from "../../components/ReportsViewer";
+import { ToolboxPanel } from "../../components/ToolboxPanel";
 import { MakoScreen } from "../../components/mako/MakoScreen";
 import { useSplashState } from "../../hooks/useSplashState";
 import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
 import { useLiveActivity } from "../../hooks/useLiveActivity";
 import { useWidgetSync } from "../../hooks/useWidgetSync";
 import { useNotifications } from "../../hooks/useNotifications";
-import Animated from "react-native-reanimated";
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  interpolate,
+  withSpring,
+  withTiming,
+  runOnJS,
+} from "react-native-reanimated";
+
+const SCREEN_HEIGHT = Dimensions.get("window").height;
+const SPLIT_PANEL_HEIGHT = SCREEN_HEIGHT * 0.42;
+
 import type {
   ChatMessage,
   ModelInfo,
@@ -270,7 +282,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const [activeToolCallId, setActiveToolCallId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState(1);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [reportsOpen, setReportsOpen] = useState(false);
+  const [toolboxOpen, setToolboxOpen] = useState(false);
+  const [toolboxTab, setToolboxTab] = useState(2);
+  const splitProgress = useSharedValue(0);
+  const [isSplit, setIsSplit] = useState(false);
   const [researchEnabled, setResearchEnabled] = useState(false);
   const [composerReserveHeight, setComposerReserveHeight] =
     useState(CHAT_BAR_ZONE);
@@ -339,7 +354,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         setActiveTab(2);
       }
       if (shouldOpenReports) {
-        setReportsOpen(true);
+        setToolboxOpen(true);
       }
       if (!targetSessionId) {
         return;
@@ -915,136 +930,162 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     );
   }, [sessionId, sessionStore, sessionTitle]);
 
+  const handleToolboxPin = useCallback(() => {
+    setIsSplit(true);
+    splitProgress.value = withSpring(1, { damping: 22, stiffness: 280, mass: 0.8 });
+  }, [splitProgress]);
+
+  const handleToolboxUnpin = useCallback(() => {
+    splitProgress.value = withTiming(0, { duration: 300 });
+    setIsSplit(false);
+  }, [splitProgress]);
+
+  const closeToolbox = useCallback(() => {
+    setToolboxOpen(false);
+    setIsSplit(false);
+  }, []);
+
+  const handleToolboxClose = useCallback(() => {
+    if (splitProgress.value > 0.1) {
+      splitProgress.value = withTiming(0, { duration: 250 }, (finished) => {
+        if (finished) runOnJS(closeToolbox)();
+      });
+    } else {
+      setToolboxOpen(false);
+    }
+  }, [splitProgress, closeToolbox]);
+
+  const chatOffsetStyle = useAnimatedStyle(() => ({
+    marginTop: interpolate(splitProgress.value, [0, 1], [0, SPLIT_PANEL_HEIGHT]),
+  }));
+
+  const topBar = (
+    <Animated.View style={[styles.topBar, entrance.topBarStyle]}>
+      {!isDesktop && (
+        <Pressable
+          onPress={() => {
+            void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            setDrawerOpen(true);
+          }}
+          style={styles.menuBtn}
+        >
+          <Menu size={22} color={t.foreground} strokeWidth={1.8} />
+        </Pressable>
+      )}
+
+      <Pressable
+        onPress={handleRenameSession}
+        style={styles.titleBtn}
+        disabled={!sessionTitle}
+      >
+        <Text
+          style={[
+            styles.title,
+            { color: sessionTitle ? t.foreground : "transparent" },
+          ]}
+          numberOfLines={1}
+        >
+          {sessionTitle || " "}
+        </Text>
+      </Pressable>
+
+      <Pressable
+        onPress={() => {
+          void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          setToolboxOpen(true);
+        }}
+        style={styles.menuBtn}
+      >
+        <Toolbox size={20} color={toolboxOpen ? t.userMessage : t.mutedForeground} strokeWidth={1.8} />
+      </Pressable>
+    </Animated.View>
+  );
+
   const chatContent = (
     <SafeAreaView
       style={[styles.container, { backgroundColor: t.background }]}
       edges={isDesktop ? [] : ["top"]}
     >
-      <Animated.View style={[styles.topBar, entrance.topBarStyle]}>
-        {!isDesktop && (
-          <Pressable
-            onPress={() => {
-              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-              setDrawerOpen(true);
-            }}
-            style={styles.menuBtn}
-          >
-            <Menu size={22} color={t.foreground} strokeWidth={1.8} />
-          </Pressable>
+      {topBar}
+
+      <View style={styles.flex}>
+        <Animated.View style={[styles.flex, entrance.contentStyle, chatOffsetStyle]}>
+          <ChatTranscript
+            messages={messages}
+            sessionId={sessionId}
+            isStreaming={isStreaming}
+            isThinking={isThinking}
+            activeToolCallId={activeToolCallId}
+            onApproveTool={(targetSessionId, toolCallId) =>
+              handleSessionToolApproval(targetSessionId, toolCallId, true)
+            }
+            onDenyTool={(targetSessionId, toolCallId) =>
+              handleSessionToolApproval(targetSessionId, toolCallId, false)
+            }
+            onSubmitToolResult={(toolCallId, result) =>
+              void handleInteractiveToolResult(toolCallId, result)
+            }
+            onPlanConfirm={(toolCallId, choice) =>
+              void handlePlanConfirm(toolCallId, choice)
+            }
+            emptyState={
+              <View style={styles.empty}>
+                <KrustyLogo />
+                {error ? (
+                  <Text style={[styles.emptyHint, { color: t.error }]}>
+                    {error}
+                  </Text>
+                ) : null}
+              </View>
+            }
+            bottomPadding={composerReserveHeight}
+          />
+        </Animated.View>
+
+        {(!toolboxOpen || isSplit) && (
+          <Animated.View style={[entrance.bottomBarStyle, { overflow: "visible", zIndex: 300 }]}>
+            <ChatBar
+              onSend={handleSend}
+              onStop={handleStop}
+              onHeightChange={setComposerReserveHeight}
+              isStreaming={isStreaming}
+              disabled={!isConnected}
+              thinkingLevel={thinkingLevel as ThinkingLevel}
+              onThinkingChange={(level) =>
+                sessionStore.getState().setThinkingLevel(level)
+              }
+              permissionMode={permissionMode as PermissionMode}
+              onPermissionModeToggle={() =>
+                sessionStore.getState().togglePermissionMode()
+              }
+              fastModeEnabled={fastModeEnabled}
+              fastModeSupported={fastModeSupported}
+              onFastModeToggle={handleFastModeToggle}
+              mode={mode}
+              onModeToggle={() =>
+                sessionStore.getState().setMode(mode === "build" ? "plan" : "build")
+              }
+              onModelSelect={handleModelSelect}
+              model={model}
+              models={models}
+              sessionType={sessionTypeForTab(activeTab)}
+              researchEnabled={researchEnabled}
+              onResearchToggle={() => setResearchEnabled((current) => !current)}
+              tokenCount={tokenCount}
+            />
+          </Animated.View>
         )}
 
-        <Pressable
-          onPress={handleRenameSession}
-          style={styles.titleBtn}
-          disabled={!sessionTitle}
-        >
-          <Text
-            style={[
-              styles.title,
-              { color: sessionTitle ? t.foreground : "transparent" },
-            ]}
-            numberOfLines={1}
-          >
-            {sessionTitle || " "}
-          </Text>
-        </Pressable>
-
-        <Pressable
-          onPress={() => {
-            void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-            setReportsOpen(true);
-          }}
-          style={styles.menuBtn}
-        >
-          <FileSearch size={20} color={t.mutedForeground} strokeWidth={1.8} />
-        </Pressable>
-      </Animated.View>
-
-      <Animated.View style={[styles.flex, entrance.contentStyle]}>
-        <ChatTranscript
-          messages={messages}
-          sessionId={sessionId}
-          isStreaming={isStreaming}
-          isThinking={isThinking}
-          activeToolCallId={activeToolCallId}
-          onApproveTool={(targetSessionId, toolCallId) =>
-            handleSessionToolApproval(targetSessionId, toolCallId, true)
-          }
-          onDenyTool={(targetSessionId, toolCallId) =>
-            handleSessionToolApproval(targetSessionId, toolCallId, false)
-          }
-          onSubmitToolResult={(toolCallId, result) =>
-            void handleInteractiveToolResult(toolCallId, result)
-          }
-          onPlanConfirm={(toolCallId, choice) =>
-            void handlePlanConfirm(toolCallId, choice)
-          }
-          emptyState={
-            <View style={styles.empty}>
-              <KrustyLogo />
-              {error ? (
-                <Text style={[styles.emptyHint, { color: t.error }]}>
-                  {error}
-                </Text>
-              ) : null}
-            </View>
-          }
-          bottomPadding={composerReserveHeight}
+        <ToolboxPanel
+          visible={toolboxOpen}
+          onClose={handleToolboxClose}
+          onTogglePin={isSplit ? handleToolboxUnpin : handleToolboxPin}
+          isSplit={isSplit}
+          splitProgress={splitProgress}
+          activeTab={toolboxTab}
+          onTabChange={setToolboxTab}
         />
-      </Animated.View>
-
-      {messages.length > 0 && error ? (
-        <View
-          style={[
-            styles.errorBanner,
-            {
-              borderColor: `${t.error}40`,
-              backgroundColor: `${t.error}14`,
-            },
-          ]}
-        >
-          <Text style={[styles.errorBannerText, { color: t.error }]}>
-            {error}
-          </Text>
-        </View>
-      ) : null}
-
-      <Animated.View style={[entrance.bottomBarStyle, { overflow: "visible" }]}>
-        <ChatBar
-          onSend={handleSend}
-          onStop={handleStop}
-          onHeightChange={setComposerReserveHeight}
-          isStreaming={isStreaming}
-          disabled={!isConnected}
-          thinkingLevel={thinkingLevel as ThinkingLevel}
-          onThinkingChange={(level) =>
-            sessionStore.getState().setThinkingLevel(level)
-          }
-          permissionMode={permissionMode as PermissionMode}
-          onPermissionModeToggle={() =>
-            sessionStore.getState().togglePermissionMode()
-          }
-          fastModeEnabled={fastModeEnabled}
-          fastModeSupported={fastModeSupported}
-          onFastModeToggle={handleFastModeToggle}
-          mode={mode}
-          onModeToggle={() =>
-            sessionStore.getState().setMode(mode === "build" ? "plan" : "build")
-          }
-          onModelSelect={handleModelSelect}
-          model={model}
-          models={models}
-          sessionType={sessionTypeForTab(activeTab)}
-          researchEnabled={researchEnabled}
-          onResearchToggle={() => setResearchEnabled((current) => !current)}
-          tokenCount={tokenCount}
-        />
-      </Animated.View>
-
-      <ReportsViewer
-        visible={reportsOpen}
-        onClose={() => setReportsOpen(false)}
-      />
+      </View>
     </SafeAreaView>
   );
 

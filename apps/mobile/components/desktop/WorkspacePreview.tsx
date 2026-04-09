@@ -47,6 +47,7 @@ type PreviewTab = PersistedPreviewTab & {
 
 interface WorkspacePreviewProps {
   visible: boolean;
+  style?: import("react-native").ViewStyle;
 }
 
 function createPreviewTabId(): string {
@@ -159,7 +160,7 @@ function normalizeProxyUrl(
   return parsed.toString();
 }
 
-export function WorkspacePreview({ visible }: WorkspacePreviewProps) {
+export function WorkspacePreview({ visible, style }: WorkspacePreviewProps) {
   const { theme } = useThemeContext();
   const { client, serverUrl } = useConnection();
 
@@ -484,7 +485,7 @@ export function WorkspacePreview({ visible }: WorkspacePreviewProps) {
   }
 
   return (
-    <View style={[styles.container, { backgroundColor: t.background, borderTopColor: t.border }]}>
+    <View style={[styles.container, { backgroundColor: t.background, borderTopColor: t.border }, style]}>
       <View style={[styles.tabBar, { borderBottomColor: t.border }]}>
         <Globe size={16} color={t.mutedForeground} strokeWidth={1.8} />
 
