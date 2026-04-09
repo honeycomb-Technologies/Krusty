@@ -2,6 +2,7 @@ export interface KrustyStorage {
   get(key: string): string | null;
   set(key: string, value: string): void;
   delete(key: string): void;
+  hydrate?(keys: string[]): Promise<void>;
 }
 
 export class MemoryStorage implements KrustyStorage {

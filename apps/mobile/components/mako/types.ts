@@ -11,7 +11,7 @@ import type {
 } from "@krusty/api";
 import type { Attachment as ChatBarAttachment } from "../chat/ChatBar";
 
-export type MakoTopLevelView = "current" | "runs" | "reports" | "status";
+export type MakoTopLevelView = "current" | "chat" | "runs" | "reports" | "status";
 export type MakoRunSection = "overview" | "wake" | "tasks" | "chat" | "artifacts";
 export type MakoKnowledgeView = "reports" | "memory";
 export type MakoKnowledgeScope = "workspace" | "all";
@@ -21,6 +21,7 @@ export interface MakoChatContext {
   sessionId: string | null;
   title: string | null;
   messages: ChatMessage[];
+  error: string | null;
   isLoading: boolean;
   isStreaming: boolean;
   isThinking: boolean;
@@ -58,6 +59,7 @@ export interface MakoCurrentState {
   current: MakoCurrentResponse | null;
   isLoading: boolean;
   isRefreshing: boolean;
+  isRecovering: boolean;
   error: string | null;
   refresh: () => Promise<void>;
   setCourse: (task: string, options?: {
@@ -66,6 +68,7 @@ export interface MakoCurrentState {
     startAt?: string | null;
     priority?: MakoRunPriority | null;
   }) => Promise<string | null>;
+  recoverDaemon: () => Promise<number>;
   isDispatching: boolean;
 }
 

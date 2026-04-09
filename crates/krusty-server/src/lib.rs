@@ -56,6 +56,7 @@ pub mod apns;
 pub mod auth;
 pub mod error;
 pub mod mako_runtime;
+pub mod notifications;
 pub mod presence;
 pub mod push;
 pub mod remote_access;

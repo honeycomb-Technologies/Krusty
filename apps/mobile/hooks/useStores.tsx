@@ -1,8 +1,8 @@
 import {
   createContext,
   useContext,
-  useMemo,
   useEffect,
+  useState,
   type ReactNode,
 } from "react";
 import {
@@ -45,29 +45,66 @@ interface StoresProviderProps {
   children: ReactNode;
 }
 
+const STORAGE_HYDRATION_KEYS = [
+  "krusty:workspace",
+  "krusty-permission-mode",
+  "krusty:presence-client-id",
+] as const;
+
+function buildStores(client: KrustyClient, storage: ReturnType<typeof createStorage>) {
+  const workspace = createWorkspaceStore(storage);
+  const sessions = createSessionsStore(client, workspace);
+  const plan = createPlanStore();
+  const session = createSessionStore(
+    client,
+    storage,
+    workspace,
+    sessions,
+    plan,
+  );
+  const getDirectory = () => workspace.getState().directory;
+  const git = createGitStore(client, getDirectory);
+
+  return { sessions, session, workspace, git, plan };
+}
+
 export function StoresProvider({ client, children }: StoresProviderProps) {
-  const stores = useMemo(() => {
-    if (!client) return null;
-    const storage = createStorage();
-    const workspace = createWorkspaceStore(storage);
-    const sessions = createSessionsStore(client, workspace);
-    const plan = createPlanStore();
-    const session = createSessionStore(
-      client,
-      storage,
-      workspace,
-      sessions,
-      plan,
-    );
+  const [stores, setStores] = useState<StoresContextValue | null>(null);
 
-    const getDirectory = () => workspace.getState().directory;
-    const git = createGitStore(client, getDirectory);
+  useEffect(() => {
+    let cancelled = false;
 
-    return { sessions, session, workspace, git, plan };
+    if (!client) {
+      setStores(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setStores(null);
+
+    void (async () => {
+      const storage = createStorage();
+      if (typeof storage.hydrate === "function") {
+        try {
+          await storage.hydrate([...STORAGE_HYDRATION_KEYS]);
+        } catch {}
+      }
+      if (cancelled) {
+        return;
+      }
+
+      setStores(buildStores(client, storage));
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [client]);
 
   useEffect(() => {
-    stores?.sessions.getState().loadSessions();
+    if (!stores) return;
+    void stores.sessions.getState().loadSessions();
   }, [stores]);
 
   useEffect(() => {
@@ -85,40 +122,43 @@ function useStoresContext() {
   return useContext(StoresContext);
 }
 
+function useRequiredStoresContext(): StoresContextValue {
+  const ctx = useStoresContext();
+  if (!ctx) {
+    throw new Error("Stores are not ready");
+  }
+  return ctx;
+}
+
 export function useSessionsStore<T>(
   selector: (state: SessionsStoreState) => T,
-): T | undefined {
-  const ctx = useStoresContext();
-  const store = ctx?.sessions;
-  return store ? useStore(store, selector) : undefined;
+): T {
+  const store = useRequiredStoresContext().sessions;
+  return useStore(store, selector);
 }
 
 export function useSessionStore<T>(
   selector: (state: SessionStoreState) => T,
-): T | undefined {
-  const ctx = useStoresContext();
-  const store = ctx?.session;
-  return store ? useStore(store, selector) : undefined;
+): T {
+  const store = useRequiredStoresContext().session;
+  return useStore(store, selector);
 }
 
 export function useWorkspaceStore<T>(
   selector: (state: WorkspaceStoreState) => T,
-): T | undefined {
-  const ctx = useStoresContext();
-  const store = ctx?.workspace;
-  return store ? useStore(store, selector) : undefined;
+): T {
+  const store = useRequiredStoresContext().workspace;
+  return useStore(store, selector);
 }
 
-export function useGitStore<T>(selector: (state: GitStoreState) => T): T | undefined {
-  const ctx = useStoresContext();
-  const store = ctx?.git;
-  return store ? useStore(store, selector) : undefined;
+export function useGitStore<T>(selector: (state: GitStoreState) => T): T {
+  const store = useRequiredStoresContext().git;
+  return useStore(store, selector);
 }
 
-export function usePlanStore<T>(selector: (state: PlanStoreState) => T): T | undefined {
-  const ctx = useStoresContext();
-  const store = ctx?.plan;
-  return store ? useStore(store, selector) : undefined;
+export function usePlanStore<T>(selector: (state: PlanStoreState) => T): T {
+  const store = useRequiredStoresContext().plan;
+  return useStore(store, selector);
 }
 
 export function useStores() {

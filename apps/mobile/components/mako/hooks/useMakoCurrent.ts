@@ -8,6 +8,7 @@ export function useMakoCurrent(enabled: boolean) {
   const [isLoading, setIsLoading] = useState(enabled);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isDispatching, setIsDispatching] = useState(false);
+  const [isRecovering, setIsRecovering] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -73,6 +74,29 @@ export function useMakoCurrent(enabled: boolean) {
     [client, isConnected, refresh],
   );
 
+  const recoverDaemon = useCallback(async () => {
+    if (!client || !isConnected) {
+      return 0;
+    }
+
+    setIsRecovering(true);
+    setError(null);
+    try {
+      const response = await client.recoverMakoDaemon();
+      await refresh();
+      return response.recovered_count;
+    } catch (recoverError) {
+      setError(
+        recoverError instanceof Error
+          ? recoverError.message
+          : "Failed to recover daemon",
+      );
+      return 0;
+    } finally {
+      setIsRecovering(false);
+    }
+  }, [client, isConnected, refresh]);
+
   useEffect(() => {
     if (!enabled) {
       return;
@@ -84,9 +108,11 @@ export function useMakoCurrent(enabled: boolean) {
     current,
     isLoading,
     isRefreshing,
+    isRecovering,
     error,
     refresh,
     setCourse,
+    recoverDaemon,
     isDispatching,
   };
 }

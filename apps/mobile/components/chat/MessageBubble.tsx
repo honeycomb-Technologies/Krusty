@@ -69,6 +69,16 @@ export function MessageBubble({
       toolCall.name !== "PlanConfirm" &&
       !INTERNAL_TOOL_NAMES.has(toolCall.name),
   );
+  const showStreamingPlaceholder =
+    !isUser &&
+    isLast &&
+    isStreaming &&
+    !message.content.length &&
+    !message.thinking &&
+    delegatedTools.length === 0 &&
+    standardTools.length === 0 &&
+    questionTools.length === 0 &&
+    planConfirmTools.length === 0;
 
   return (
     <View style={[styles.container, isUser && styles.containerUser]}>
@@ -157,6 +167,19 @@ export function MessageBubble({
                   style={[styles.cursor, { backgroundColor: t.userMessage }]}
                 />
               )}
+            </View>
+          )}
+
+          {showStreamingPlaceholder && (
+            <View style={styles.assistantText}>
+              <Text
+                style={[styles.placeholderText, { color: t.mutedForeground }]}
+              >
+                Replying...
+              </Text>
+              <View
+                style={[styles.cursor, { backgroundColor: t.userMessage }]}
+              />
             </View>
           )}
 
@@ -268,6 +291,10 @@ const styles = StyleSheet.create({
   assistantText: {
     paddingLeft: 2,
     paddingVertical: 2,
+  },
+  placeholderText: {
+    fontSize: 14,
+    fontWeight: "500",
   },
   cursor: {
     width: 2,

@@ -55,9 +55,19 @@ enum Commands {
     },
 
     /// Mako autonomous agent
+    #[command(args_conflicts_with_subcommands = true)]
     Mako {
         #[command(subcommand)]
-        command: MakoCommand,
+        command: Option<MakoCommand>,
+        /// Submit a task directly without specifying `run`
+        #[arg(value_name = "TASK")]
+        task: Option<String>,
+        /// Project directory (shorthand task submission only)
+        #[arg(long, requires = "task")]
+        project_dir: Option<String>,
+        /// Attach to the live event stream after shorthand task submission
+        #[arg(long, requires = "task")]
+        attach: bool,
     },
 }
 
@@ -594,7 +604,24 @@ async fn main() -> Result<()> {
     }
 
     // Mako subcommand runs HTTP requests and exits, no TUI needed
-    if let Some(Commands::Mako { command }) = cli.command {
+    if let Some(Commands::Mako {
+        command,
+        task,
+        project_dir,
+        attach,
+    }) = cli.command
+    {
+        let command = if let Some(command) = command {
+            command
+        } else if let Some(task) = task {
+            MakoCommand::Run {
+                task,
+                project_dir,
+                attach,
+            }
+        } else {
+            anyhow::bail!("Provide a task or a Mako subcommand");
+        };
         return run_mako_command(command).await;
     }
 

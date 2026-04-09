@@ -1,7 +1,7 @@
 //! Chat endpoint with SSE streaming via core orchestrator.
 
 use std::convert::Infallible;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,7 +17,7 @@ use serde_json::json;
 use tokio::sync::{mpsc, Mutex, OwnedMutexGuard};
 use tokio_stream::wrappers::ReceiverStream;
 
-use krusty_core::agent::coordinator_prompt::COORDINATOR_SYSTEM_PROMPT;
+use krusty_core::agent::coordinator_prompt::system_prompt_for_session;
 use krusty_core::agent::loop_events::LoopStopReason;
 use krusty_core::agent::plan_handler::parse_plan_confirm_choice;
 use krusty_core::agent::{
@@ -36,10 +36,11 @@ use krusty_core::SessionManager;
 use super::session_access::{
     current_user_id, ensure_owned_session, load_owned_session, request_workspace_scope,
 };
-use crate::apns::{ApnsEventType, ApnsPayload, ApnsService};
+use crate::apns::{ApnsEventType, ApnsPayload};
 use crate::auth::CurrentUser;
 use crate::error::AppError;
-use crate::push::{PushEventType, PushPayload, PushService};
+use crate::notifications::{fire_apns, fire_push, session_title};
+use crate::push::{PushEventType, PushPayload};
 use crate::types::{
     AgenticEvent, ChatRequest, ContentBlock, ThinkingLevel, ToolApprovalRequest, ToolResultRequest,
 };
@@ -241,7 +242,7 @@ async fn setup_chat_session(
                  If the user needs coding help, suggest they switch to Code mode. \
                  Be helpful, natural, and conversational.".to_string()
             ),
-            SessionType::Mako => Some(COORDINATOR_SYSTEM_PROMPT.to_string()),
+            SessionType::Mako => system_prompt_for_session(SessionType::Mako),
             SessionType::Code => None, // uses default Krusty coding assistant prompt
         },
         ..Default::default()
@@ -700,7 +701,10 @@ async fn start_orchestrator_sse(
                         body: "Krusty needs your input".into(),
                         session_id: Some(session_id.clone()),
                         category: Some("TOOL_APPROVAL".into()),
-                        data: None,
+                        data: Some(json!({
+                            "type": "awaiting_input",
+                            "sessionId": session_id.clone(),
+                        })),
                     },
                     ApnsEventType::AwaitingInput,
                 );
@@ -721,6 +725,7 @@ async fn start_orchestrator_sse(
                         category: Some("TOOL_APPROVAL".into()),
                         data: Some(serde_json::json!({
                             "requestId": id,
+                            "sessionId": session_id.clone(),
                             "toolName": name,
                             "type": "tool_approval",
                         })),
@@ -764,7 +769,10 @@ async fn start_orchestrator_sse(
                         body: "Session encountered an error".into(),
                         session_id: Some(session_id.clone()),
                         category: None,
-                        data: None,
+                        data: Some(json!({
+                            "type": "error",
+                            "sessionId": session_id.clone(),
+                        })),
                     },
                     ApnsEventType::Error,
                 );
@@ -796,6 +804,7 @@ async fn start_orchestrator_sse(
                         category: Some("STREAM_COMPLETE".into()),
                         data: Some(serde_json::json!({
                             "type": "stream_complete",
+                            "sessionId": session_id.clone(),
                         })),
                     },
                     ApnsEventType::Completion,
@@ -921,73 +930,6 @@ fn apply_thinking_config(
     }
 }
 
-fn session_title(db_path: &Path, session_id: &str) -> String {
-    match Database::new(db_path) {
-        Ok(db) => {
-            let session_manager = SessionManager::new(db);
-            match session_manager.get_session(session_id) {
-                Ok(Some(session)) => session.title,
-                Ok(None) => "Session".to_string(),
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        "Failed to load session title: {}", e
-                    );
-                    "Session".to_string()
-                }
-            }
-        }
-        Err(e) => {
-            tracing::error!("Failed to open database while loading session title: {}", e);
-            "Session".to_string()
-        }
-    }
-}
-
-fn fire_push(
-    push_service: &Option<Arc<PushService>>,
-    user_id: Option<&str>,
-    payload: PushPayload,
-    event_type: PushEventType,
-) {
-    if let Some(svc) = push_service.clone() {
-        let uid = user_id.map(String::from);
-        tokio::spawn(async move {
-            let stats = svc.notify_user(uid.as_deref(), payload, event_type).await;
-            tracing::info!(
-                event_type = event_type.as_str(),
-                attempted = stats.attempted,
-                sent = stats.sent,
-                stale_removed = stats.stale_removed,
-                failed = stats.failed,
-                "Push event dispatched"
-            );
-        });
-    }
-}
-
-fn fire_apns(
-    apns_service: &Option<Arc<ApnsService>>,
-    user_id: Option<&str>,
-    payload: ApnsPayload,
-    event_type: ApnsEventType,
-) {
-    if let Some(svc) = apns_service.clone() {
-        let uid = user_id.map(String::from);
-        tokio::spawn(async move {
-            let stats = svc.notify_user(uid.as_deref(), payload, event_type).await;
-            tracing::info!(
-                event_type = event_type.as_str(),
-                attempted = stats.attempted,
-                sent = stats.sent,
-                stale_removed = stats.stale_removed,
-                failed = stats.failed,
-                "APNs event dispatched"
-            );
-        });
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1007,7 +949,7 @@ mod tests {
     use krusty_core::process::ProcessRegistry;
     use krusty_core::skills::SkillsManager;
     use krusty_core::storage::credentials::CredentialStore;
-    use krusty_core::storage::Database;
+    use krusty_core::storage::{Database, SessionType, WorkspaceMode};
     use krusty_core::tools::registry::ToolRegistry;
     use krusty_core::SessionManager;
 
@@ -1272,6 +1214,57 @@ mod tests {
             .expect("session lookup should succeed")
             .expect("session should exist");
         assert_eq!(reloaded.model.as_deref(), Some("minimax/m2"));
+    }
+
+    #[tokio::test]
+    async fn chat_creates_code_session_in_fresh_workspace_before_ai_setup() {
+        let (state, temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        let user_root = temp_dir.join("alice-home");
+        let parent_dir = user_root.join("projects");
+        std::fs::create_dir_all(&parent_dir).expect("parent dir should exist");
+        let fresh_project_dir = parent_dir.join("fresh-chat-repo");
+
+        let result = chat(
+            State(state.clone()),
+            Some(current_user("alice", &user_root)),
+            Json(ChatRequest {
+                session_id: None,
+                message: "scan this workspace".to_string(),
+                content: Vec::new(),
+                project_dir: Some(fresh_project_dir.to_string_lossy().to_string()),
+                working_dir: None,
+                workspace_mode: Some(WorkspaceMode::Selected),
+                session_type: Some(SessionType::Code),
+                model: None,
+                thinking_enabled: crate::types::ThinkingLevel::Off,
+                mode: None,
+                permission_mode: krusty_core::tools::registry::PermissionMode::default(),
+                research_enabled: None,
+            }),
+        )
+        .await;
+
+        match result {
+            Err(AppError::BadRequest(message)) => {
+                assert_eq!(message, "No AI credentials configured");
+            }
+            Ok(_) => panic!("chat request should fail without configured AI credentials"),
+            Err(_) => panic!("chat request should fail with bad request"),
+        }
+
+        let expected = fresh_project_dir.to_string_lossy().to_string();
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let sessions = session_manager
+            .list_sessions_for_user(Some(expected.as_str()), Some("alice"))
+            .expect("session listing should succeed");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_type, SessionType::Code);
+        assert_eq!(sessions[0].workspace_mode, WorkspaceMode::Selected);
+        assert_eq!(sessions[0].project_dir.as_deref(), Some(expected.as_str()));
+        assert_eq!(sessions[0].working_dir.as_deref(), Some(expected.as_str()));
     }
 
     #[tokio::test]

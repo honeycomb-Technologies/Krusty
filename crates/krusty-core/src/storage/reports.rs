@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use super::database::Database;
@@ -66,8 +66,18 @@ impl ReportStore {
             ],
         )?;
 
-        if let Err(e) = write_report_to_disk(input.title, input.content, input.report_root) {
-            tracing::warn!("Failed to write report to disk: {e}");
+        match self.get_report(&id) {
+            Ok(Some(report)) => {
+                if let Err(error) = write_report_to_disk(&report, input.report_root) {
+                    tracing::warn!(report_id = %id, "Failed to write report to disk: {error}");
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(report_id = %id, "Created report could not be reloaded for disk write");
+            }
+            Err(error) => {
+                tracing::warn!(report_id = %id, "Failed to reload report for disk write: {error}");
+            }
         }
 
         Ok(id)
@@ -183,13 +193,13 @@ impl ReportStore {
     }
 
     pub fn search_reports(&self, query: &str, project_dir: Option<&str>) -> Result<Vec<Report>> {
-        let pattern = format!("%{query}%");
+        let pattern = report_search_pattern(query);
 
         let (sql, bound) = if let Some(pd) = project_dir {
             (
                 "SELECT id, title, session_id, project_dir, content, summary, tags, sources, created_at
                  FROM reports
-                 WHERE (title LIKE ?1 OR tags LIKE ?1)
+                 WHERE (title LIKE ?1 OR summary LIKE ?1 OR tags LIKE ?1 OR sources LIKE ?1)
                    AND project_dir = ?2
                  ORDER BY created_at DESC",
                 vec![pattern, pd.to_string()],
@@ -198,7 +208,7 @@ impl ReportStore {
             (
                 "SELECT id, title, session_id, project_dir, content, summary, tags, sources, created_at
                  FROM reports
-                 WHERE title LIKE ?1 OR tags LIKE ?1
+                 WHERE title LIKE ?1 OR summary LIKE ?1 OR tags LIKE ?1 OR sources LIKE ?1
                  ORDER BY created_at DESC",
                 vec![pattern],
             )
@@ -214,12 +224,93 @@ impl ReportStore {
             .context("searching reports")
     }
 
+    pub fn search_reports_for_user(
+        &self,
+        query: &str,
+        project_dir: Option<&str>,
+        user_id: Option<&str>,
+    ) -> Result<Vec<Report>> {
+        let pattern = report_search_pattern(query);
+
+        let (sql, bound) = match (project_dir, user_id) {
+            (Some(project_dir), Some(user_id)) => (
+                "SELECT reports.id, reports.title, reports.session_id, reports.project_dir,
+                        reports.content, reports.summary, reports.tags, reports.sources,
+                        reports.created_at
+                 FROM reports
+                 INNER JOIN sessions ON sessions.id = reports.session_id
+                 WHERE (reports.title LIKE ?1 OR reports.summary LIKE ?1 OR reports.tags LIKE ?1 OR reports.sources LIKE ?1)
+                   AND reports.project_dir = ?2
+                   AND sessions.user_id = ?3
+                 ORDER BY reports.created_at DESC"
+                    .to_string(),
+                vec![pattern, project_dir.to_string(), user_id.to_string()],
+            ),
+            (Some(project_dir), None) => (
+                "SELECT id, title, session_id, project_dir, content, summary, tags, sources, created_at
+                 FROM reports
+                 WHERE (title LIKE ?1 OR summary LIKE ?1 OR tags LIKE ?1 OR sources LIKE ?1)
+                   AND project_dir = ?2
+                 ORDER BY created_at DESC"
+                    .to_string(),
+                vec![pattern, project_dir.to_string()],
+            ),
+            (None, Some(user_id)) => (
+                "SELECT reports.id, reports.title, reports.session_id, reports.project_dir,
+                        reports.content, reports.summary, reports.tags, reports.sources,
+                        reports.created_at
+                 FROM reports
+                 INNER JOIN sessions ON sessions.id = reports.session_id
+                 WHERE (reports.title LIKE ?1 OR reports.summary LIKE ?1 OR reports.tags LIKE ?1 OR reports.sources LIKE ?1)
+                   AND sessions.user_id = ?2
+                 ORDER BY reports.created_at DESC"
+                    .to_string(),
+                vec![pattern, user_id.to_string()],
+            ),
+            (None, None) => (
+                "SELECT id, title, session_id, project_dir, content, summary, tags, sources, created_at
+                 FROM reports
+                 WHERE (title LIKE ?1 OR summary LIKE ?1 OR tags LIKE ?1 OR sources LIKE ?1)
+                 ORDER BY created_at DESC"
+                    .to_string(),
+                vec![pattern],
+            ),
+        };
+
+        let mut stmt = self.db.conn().prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = bound
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt.query_map(params.as_slice(), row_to_report)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("searching reports for user")
+    }
+
     pub fn delete_report(&self, id: &str) -> Result<()> {
         self.db
             .conn()
             .execute("DELETE FROM reports WHERE id = ?1", params![id])?;
         Ok(())
     }
+}
+
+pub fn promote_report_content(report: &Report) -> String {
+    let summary = report.summary.trim();
+    if !summary.is_empty() {
+        return summary.to_string();
+    }
+
+    let mut collapsed = report
+        .content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.len() > 600 {
+        collapsed.truncate(600);
+        collapsed.push_str("...");
+    }
+    collapsed
 }
 
 fn row_to_report(row: &rusqlite::Row<'_>) -> rusqlite::Result<Report> {
@@ -239,8 +330,12 @@ fn row_to_report(row: &rusqlite::Row<'_>) -> rusqlite::Result<Report> {
     })
 }
 
+fn report_search_pattern(query: &str) -> String {
+    format!("%{}%", query.trim())
+}
+
 fn slugify(title: &str) -> String {
-    title
+    let slug = title
         .to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
@@ -248,22 +343,88 @@ fn slugify(title: &str) -> String {
         .split('-')
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
-        .join("-")
+        .join("-");
+
+    if slug.is_empty() {
+        "report".to_string()
+    } else {
+        slug
+    }
 }
 
-fn write_report_to_disk(title: &str, content: &str, report_root: Option<&Path>) -> Result<()> {
+#[derive(Serialize)]
+struct ReportFrontmatter<'a> {
+    title: &'a str,
+    created: &'a str,
+    session_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_dir: Option<&'a str>,
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    tags: &'a [String],
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    sources: &'a [String],
+}
+
+fn slice_is_empty(values: &[String]) -> bool {
+    values.is_empty()
+}
+
+fn write_report_to_disk(report: &Report, report_root: Option<&Path>) -> Result<PathBuf> {
     let reports_dir = report_root
         .map(paths::project_reports_dir)
         .unwrap_or_else(|| paths::config_dir().join("reports"));
     std::fs::create_dir_all(&reports_dir).context("creating reports directory")?;
 
-    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    let slug = slugify(title);
-    let filename = format!("{date}-{slug}.md");
-    let path = reports_dir.join(filename);
+    let path = next_report_path(report, &reports_dir);
+    let markdown = render_report_markdown(report)?;
 
-    std::fs::write(&path, content).context("writing report file")?;
-    Ok(())
+    std::fs::write(&path, markdown).context("writing report file")?;
+    Ok(path)
+}
+
+fn report_date_prefix(created_at: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|_| chrono::Utc::now().format("%Y-%m-%d").to_string())
+}
+
+fn next_report_path(report: &Report, reports_dir: &Path) -> PathBuf {
+    let date = report_date_prefix(&report.created_at);
+    let slug = slugify(&report.title);
+    let base = reports_dir.join(format!("{date}-{slug}.md"));
+    if !base.exists() {
+        return base;
+    }
+
+    let short_id: String = report.id.chars().filter(|c| *c != '-').take(8).collect();
+    let fallback = reports_dir.join(format!("{date}-{slug}-{short_id}.md"));
+    if !fallback.exists() {
+        return fallback;
+    }
+
+    for index in 2.. {
+        let candidate = reports_dir.join(format!("{date}-{slug}-{short_id}-{index}.md"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    unreachable!("report path search should always find an available file name");
+}
+
+fn render_report_markdown(report: &Report) -> Result<String> {
+    let frontmatter = ReportFrontmatter {
+        title: &report.title,
+        created: &report.created_at,
+        session_id: &report.session_id,
+        project_dir: report.project_dir.as_deref(),
+        tags: &report.tags,
+        sources: &report.sources,
+    };
+    let yaml = serde_yaml::to_string(&frontmatter).context("serializing report frontmatter")?;
+    let yaml = yaml.strip_prefix("---\n").unwrap_or(yaml.as_str());
+    let body = report.content.trim_start_matches('\n');
+    Ok(format!("---\n{}---\n\n{}", yaml, body))
 }
 
 #[cfg(test)]
@@ -397,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn search_reports_by_title_and_tags() {
+    fn search_reports_by_title_summary_tags_and_sources() {
         let (store, _tmp) = create_store();
         store
             .create_report(CreateReportInput {
@@ -406,9 +567,9 @@ mod tests {
                 project_dir: None,
                 report_root: None,
                 content: "content",
-                summary: "",
+                summary: "Steps for a safe schema rollout",
                 tags: &["database".into(), "migration".into()],
-                sources: &[],
+                sources: &["docs/schema.md".into()],
             })
             .unwrap();
         store
@@ -431,6 +592,14 @@ mod tests {
         let results = store.search_reports("api", None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "API Design");
+
+        let results = store.search_reports("safe schema", None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Database Migration Guide");
+
+        let results = store.search_reports("docs/schema", None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Database Migration Guide");
     }
 
     #[test]
@@ -479,6 +648,53 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(entries.len(), 1);
+        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+        assert!(content.contains("title: Workspace Report"));
+        assert!(content.contains("session_id: sess-1"));
+        assert!(content.contains("project_dir:"));
+        assert!(content.contains("\n---\n\ncontent"));
+    }
+
+    #[test]
+    fn duplicate_titles_do_not_overwrite_report_files() {
+        let (store, tmp) = create_store();
+        let project_root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&project_root).unwrap();
+
+        store
+            .create_report(CreateReportInput {
+                title: "Repeated Title",
+                session_id: "sess-1",
+                project_dir: Some(project_root.to_str().unwrap()),
+                report_root: Some(&project_root),
+                content: "first",
+                summary: "",
+                tags: &[],
+                sources: &[],
+            })
+            .unwrap();
+        store
+            .create_report(CreateReportInput {
+                title: "Repeated Title",
+                session_id: "sess-1",
+                project_dir: Some(project_root.to_str().unwrap()),
+                report_root: Some(&project_root),
+                content: "second",
+                summary: "",
+                tags: &[],
+                sources: &[],
+            })
+            .unwrap();
+
+        let reports_dir = crate::paths::project_reports_dir(&project_root);
+        let mut names = std::fs::read_dir(reports_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        names.sort();
+
+        assert_eq!(names.len(), 2);
+        assert_ne!(names[0], names[1]);
     }
 
     #[test]
@@ -487,6 +703,7 @@ mod tests {
         assert_eq!(slugify("Hello, World!"), "hello-world");
         assert_eq!(slugify("  spaces  "), "spaces");
         assert_eq!(slugify("a--b"), "a-b");
+        assert_eq!(slugify("!!!"), "report");
     }
 
     #[test]
@@ -554,5 +771,52 @@ mod tests {
             .get_report_for_user(&report_id, Some("user-b"))
             .unwrap();
         assert!(hidden.is_none());
+    }
+
+    #[test]
+    fn search_reports_for_user_honors_owner_scope() {
+        let (store, _tmp) = create_store_with_users();
+        store
+            .create_report(CreateReportInput {
+                title: "Alice Architecture",
+                session_id: "sess-a",
+                project_dir: Some("/proj-a"),
+                report_root: None,
+                content: "content a",
+                summary: "queue policy notes",
+                tags: &["ops".into()],
+                sources: &["alice.md".into()],
+            })
+            .unwrap();
+        store
+            .create_report(CreateReportInput {
+                title: "Bob Architecture",
+                session_id: "sess-b",
+                project_dir: Some("/proj-b"),
+                report_root: None,
+                content: "content b",
+                summary: "queue policy notes",
+                tags: &["ops".into()],
+                sources: &["bob.md".into()],
+            })
+            .unwrap();
+
+        let user_a_results = store
+            .search_reports_for_user("queue policy", None, Some("user-a"))
+            .unwrap();
+        assert_eq!(user_a_results.len(), 1);
+        assert_eq!(user_a_results[0].title, "Alice Architecture");
+
+        let scoped_results = store
+            .search_reports_for_user("alice.md", Some("/proj-a"), Some("user-a"))
+            .unwrap();
+        assert_eq!(scoped_results.len(), 1);
+        assert_eq!(scoped_results[0].title, "Alice Architecture");
+
+        let hidden_results = store
+            .search_reports_for_user("queue policy", None, Some("user-b"))
+            .unwrap();
+        assert_eq!(hidden_results.len(), 1);
+        assert_eq!(hidden_results[0].title, "Bob Architecture");
     }
 }

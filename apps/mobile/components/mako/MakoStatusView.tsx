@@ -1,4 +1,5 @@
 import {
+  Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -11,13 +12,24 @@ import { MakoApprovalList } from "./MakoApprovalList";
 import { MakoInsightCard } from "./MakoInsightCard";
 import { MakoRunList } from "./MakoRunList";
 import {
+  describeRunDrift,
   formatTimestamp,
   getAttentionRuns,
   getQueueHeadRuns,
   getRunNextWakeAt,
   getRunPriority,
+  getStaleRuns,
 } from "./utils";
-import type { MakoCurrentRunSummary, MakoCurrentState } from "./types";
+import type {
+  MakoCurrentRunSummary,
+  MakoCurrentState,
+} from "./types";
+import type {
+  MakoDaemonSummary,
+  MakoDiagnosticsSummary,
+  MakoHealthState,
+  MakoKnowledgeHealthSummary,
+} from "@krusty/api";
 
 interface MakoStatusViewProps {
   state: MakoCurrentState;
@@ -37,13 +49,19 @@ export function MakoStatusView({
   const { theme } = useThemeContext();
   const t = theme.colors;
   const status = state.current?.status;
+  const diagnostics = state.current?.diagnostics;
+  const daemon = diagnostics?.daemon;
   const runs = state.current?.runs ?? [];
   const approvals = state.current?.approvals ?? [];
   const attentionRuns = getAttentionRuns(runs);
+  const staleRuns = getStaleRuns(runs);
   const queueHead = getQueueHeadRuns(runs);
   const cadence = summarizeCadence(runs);
-  const queueHealth = summarizeQueueHealth(runs, approvals.length);
+  const queueHealth = summarizeQueueHealth(runs, approvals.length, diagnostics);
   const priorityProfile = summarizePriorityProfile(queueHead);
+  const runtimeDrift = summarizeRuntimeDrift(staleRuns, diagnostics);
+  const knowledgeHealth = summarizeKnowledgeHealth(diagnostics?.knowledge);
+  const daemonHealth = summarizeDaemonHealth(daemon, diagnostics?.health_state);
   const scheduledRuns = runs
     .filter(
       (run) =>
@@ -94,10 +112,30 @@ export function MakoStatusView({
           label="High priority"
           value={String(status?.high_priority_count ?? 0)}
         />
+        <StatusCard
+          label="Drifting"
+          value={String(diagnostics?.stalled_count ?? staleRuns.length)}
+        />
         <StatusCard label="Paused" value={String(status?.paused_count ?? 0)} />
         <StatusCard label="Failed" value={String(status?.failed_count ?? 0)} />
         <StatusCard label="Tick interval" value={cadence.tickIntervalLabel} />
         <StatusCard label="Tick budget" value={cadence.tickBudgetLabel} />
+        <StatusCard
+          label="Health"
+          value={formatHealthState(diagnostics?.health_state)}
+        />
+        <StatusCard
+          label="Daemon uptime"
+          value={formatElapsedSeconds(daemon?.uptime_secs)}
+        />
+        <StatusCard
+          label="Latest trace"
+          value={formatTimestamp(diagnostics?.latest_trace_at)}
+        />
+        <StatusCard
+          label="Snapshot coverage"
+          value={knowledgeHealth.value}
+        />
       </View>
 
       <GlassCard style={styles.card}>
@@ -131,7 +169,63 @@ export function MakoStatusView({
           detail={priorityProfile.detail}
           tone={priorityProfile.tone}
         />
+        <MakoInsightCard
+          label="Runtime drift"
+          value={runtimeDrift.value}
+          detail={runtimeDrift.detail}
+          tone={runtimeDrift.tone}
+        />
+        <MakoInsightCard
+          label="Knowledge"
+          value={knowledgeHealth.value}
+          detail={knowledgeHealth.detail}
+          tone={knowledgeHealth.tone}
+        />
+        <MakoInsightCard
+          label="Daemon"
+          value={daemonHealth.value}
+          detail={daemonHealth.detail}
+          tone={daemonHealth.tone}
+        />
       </View>
+
+      <GlassCard style={styles.card}>
+        <Text style={[styles.cardLabel, { color: t.mutedForeground }]}>
+          Daemon recovery
+        </Text>
+        <Text style={[styles.cardBody, { color: t.foreground }]}>
+          Recoverable sessions are persisted runtime states that can be rescheduled or resumed without waiting for another user action.
+        </Text>
+        <View style={styles.actionRow}>
+          <Pressable
+            onPress={() => {
+              void state.recoverDaemon();
+            }}
+            disabled={state.isRecovering}
+            style={[
+              styles.actionButton,
+              {
+                backgroundColor:
+                  daemon?.recoverable_session_count
+                    ? t.userMessage
+                    : t.glass.backgroundElevated,
+                opacity: state.isRecovering ? 0.6 : 1,
+              },
+            ]}
+          >
+            <Text
+              style={[
+                styles.actionLabel,
+                {
+                  color: daemon?.recoverable_session_count ? "#ffffff" : t.foreground,
+                },
+              ]}
+            >
+              {state.isRecovering ? "Recovering..." : "Recover daemon"}
+            </Text>
+          </Pressable>
+        </View>
+      </GlassCard>
 
       <View style={styles.section}>
         <Text style={[styles.sectionTitle, { color: t.foreground }]}>
@@ -155,6 +249,18 @@ export function MakoStatusView({
           runs={attentionRuns}
           emptyLabel="Nothing is blocked or failed right now."
           onSelectRun={onSelectRun}
+        />
+      </View>
+
+      <View style={styles.section}>
+        <Text style={[styles.sectionTitle, { color: t.foreground }]}>
+          Stalled or overdue
+        </Text>
+        <MakoRunList
+          runs={staleRuns}
+          emptyLabel="No runs look stalled right now."
+          onSelectRun={onSelectRun}
+          detailOverride={describeRunDrift}
         />
       </View>
 
@@ -206,7 +312,31 @@ function summarizeCadence(runs: MakoCurrentRunSummary[]) {
 function summarizeQueueHealth(
   runs: MakoCurrentRunSummary[],
   approvalCount: number,
+  diagnostics?: MakoDiagnosticsSummary | null,
 ) {
+  if (diagnostics) {
+    switch (diagnostics.queue_pressure) {
+      case "attention":
+        return {
+          value: "Attention",
+          detail: `${diagnostics.attention_run_count} runs need intervention • ${approvalCount} approvals waiting • ${diagnostics.due_soon_wake_count} wake within 1h`,
+          tone: "warning" as const,
+        };
+      case "busy":
+        return {
+          value: "Busy",
+          detail: `${diagnostics.open_run_count} open runs are moving • ${diagnostics.due_soon_wake_count} wake within 1h`,
+          tone: "accent" as const,
+        };
+      default:
+        return {
+          value: "Calm",
+          detail: `${diagnostics.open_run_count} open runs • ${diagnostics.due_soon_wake_count} near-term wakes`,
+          tone: "success" as const,
+        };
+    }
+  }
+
   const openRuns = getQueueHeadRuns(runs);
   const attentionRuns = getAttentionRuns(runs);
   const dueSoonCount = openRuns.filter((run) => {
@@ -241,6 +371,35 @@ function summarizeQueueHealth(
   };
 }
 
+function formatHealthState(state?: MakoHealthState | null): string {
+  switch (state) {
+    case "healthy":
+      return "Healthy";
+    case "attention":
+      return "Attention";
+    case "degraded":
+      return "Degraded";
+    default:
+      return "Pending";
+  }
+}
+
+function formatElapsedSeconds(value?: number | null): string {
+  if (!value || value < 60) {
+    return `${value ?? 0}s`;
+  }
+  const minutes = Math.floor(value / 60);
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h`;
+  }
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
+}
+
 function summarizePriorityProfile(runs: MakoCurrentRunSummary[]) {
   const counts = {
     high: runs.filter((run) => getRunPriority(run) === "high").length,
@@ -263,6 +422,129 @@ function summarizePriorityProfile(runs: MakoCurrentRunSummary[]) {
         ? "High-priority runs will stay ahead of the rest of the queue."
         : "No high-priority pressure is pushing on the queue right now.",
     tone: counts.high > 0 ? ("warning" as const) : ("default" as const),
+  };
+}
+
+function summarizeRuntimeDrift(
+  runs: MakoCurrentRunSummary[],
+  diagnostics?: MakoDiagnosticsSummary | null,
+) {
+  if (diagnostics) {
+    if (diagnostics.stalled_count === 0 && diagnostics.overdue_wake_count === 0) {
+      return {
+        value: "Healthy",
+        detail: "No runs are currently drifting or overdue.",
+        tone: "success" as const,
+      };
+    }
+
+    const staleCount = Math.max(
+      diagnostics.stalled_count - diagnostics.overdue_wake_count,
+      0,
+    );
+
+    return {
+      value: `${diagnostics.stalled_count} drifting`,
+      detail: `${diagnostics.overdue_wake_count} overdue wakes • ${staleCount} stale active or queued runs`,
+      tone:
+        diagnostics.overdue_wake_count > 0
+          ? ("warning" as const)
+          : diagnostics.repeating_failure_count > 0
+            ? ("danger" as const)
+            : ("accent" as const),
+    };
+  }
+
+  const overdueWakeCount = runs.filter(
+    (run) =>
+      run.runtime?.status === "sleeping" &&
+      run.runtime.sleep_reason === "scheduled" &&
+      run.runtime.next_wake_at &&
+      new Date(run.runtime.next_wake_at).getTime() < Date.now(),
+  ).length;
+
+  if (runs.length === 0) {
+    return {
+      value: "Healthy",
+      detail: "No runs are currently drifting or overdue.",
+      tone: "success" as const,
+    };
+  }
+
+  return {
+    value: `${runs.length} drifting`,
+    detail: `${overdueWakeCount} overdue wakes • ${runs.length - overdueWakeCount} stale active or queued runs`,
+    tone: overdueWakeCount > 0 ? ("warning" as const) : ("accent" as const),
+  };
+}
+
+function summarizeKnowledgeHealth(
+  health?: MakoKnowledgeHealthSummary | null,
+) {
+  if (!health || health.scope_count === 0) {
+    return {
+      value: "Pending",
+      detail: "Knowledge snapshots will appear after Mako has enough workspace history to consolidate.",
+      tone: "default" as const,
+    };
+  }
+
+  if (health.missing_snapshot_count > 0) {
+    return {
+      value: `${health.healthy_scope_count}/${health.scope_count}`,
+      detail: `${health.missing_snapshot_count} workspace snapshots are still missing.`,
+      tone: "warning" as const,
+    };
+  }
+
+  if (health.stale_snapshot_count > 0) {
+    return {
+      value: `${health.healthy_scope_count}/${health.scope_count}`,
+      detail: `${health.stale_snapshot_count} workspace snapshots are behind the latest reports or runs.`,
+      tone: "accent" as const,
+    };
+  }
+
+  return {
+    value: `${health.healthy_scope_count}/${health.scope_count}`,
+    detail: `All workspace snapshots are current. Latest snapshot ${formatTimestamp(
+      health.latest_snapshot_at,
+    )}.`,
+    tone: "success" as const,
+  };
+}
+
+function summarizeDaemonHealth(
+  daemon?: MakoDaemonSummary | null,
+  healthState?: MakoHealthState | null,
+) {
+  if (!daemon) {
+    return {
+      value: "Pending",
+      detail: "Daemon stats will appear once Mako has loaded current workspace state.",
+      tone: "default" as const,
+    };
+  }
+
+  const detail = `${daemon.active_runtime_count} active • ${daemon.scheduled_wake_count} scheduled • ${daemon.event_stream_count} streams • ${daemon.recoverable_session_count} recoverable`;
+  if (healthState === "degraded") {
+    return {
+      value: formatElapsedSeconds(daemon.uptime_secs),
+      detail,
+      tone: "danger" as const,
+    };
+  }
+  if (daemon.recoverable_session_count > 0 || daemon.scheduled_wake_count > 0) {
+    return {
+      value: formatElapsedSeconds(daemon.uptime_secs),
+      detail,
+      tone: "accent" as const,
+    };
+  }
+  return {
+    value: formatElapsedSeconds(daemon.uptime_secs),
+    detail,
+    tone: "success" as const,
   };
 }
 
@@ -331,6 +613,18 @@ const styles = StyleSheet.create({
   },
   section: {
     gap: 10,
+  },
+  actionRow: {
+    marginTop: 14,
+  },
+  actionButton: {
+    borderRadius: 16,
+    paddingVertical: 12,
+    alignItems: "center",
+  },
+  actionLabel: {
+    fontSize: 13,
+    fontWeight: "700",
   },
   sectionTitle: {
     fontSize: 18,

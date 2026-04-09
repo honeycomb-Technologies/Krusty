@@ -30,12 +30,16 @@ import type {
   Report,
   ReportSummary,
   MemoryType,
+  MemorySnapshotResponse,
   PromoteReportToMemoryResponse,
   MakoDispatchResponse,
   MakoCurrentResponse,
+  MakoRecoverDaemonResponse,
   MakoRunPriority,
   MakoSessionSummary,
   MakoSessionStatus,
+  ApnsRegisterResponse,
+  ApnsStatusResponse,
   SimpleOkResponse,
 } from './types';
 
@@ -101,6 +105,21 @@ export class KrustyClient {
     // The current server authenticates each API request with the bearer token
     // directly and does not expose a separate bootstrap route.
     return true;
+  }
+
+  // Notifications
+  async registerApnsDevice(deviceToken: string, bundleId?: string): Promise<ApnsRegisterResponse> {
+    return this.request('/apns/register', {
+      method: 'POST',
+      body: JSON.stringify({
+        device_token: deviceToken,
+        bundle_id: bundleId ?? undefined,
+      }),
+    });
+  }
+
+  async getApnsStatus(): Promise<ApnsStatusResponse> {
+    return this.request('/apns/status');
   }
 
   // Sessions
@@ -381,8 +400,18 @@ export class KrustyClient {
   }
 
   // Reports
-  async getReports(projectDir?: string): Promise<{ reports: ReportSummary[] }> {
-    const q = projectDir ? `?project_dir=${encodeURIComponent(projectDir)}` : '';
+  async getReports(options?: {
+    projectDir?: string;
+    query?: string;
+  }): Promise<{ reports: ReportSummary[] }> {
+    const params: string[] = [];
+    if (options?.projectDir) {
+      params.push(`project_dir=${encodeURIComponent(options.projectDir)}`);
+    }
+    if (options?.query) {
+      params.push(`query=${encodeURIComponent(options.query)}`);
+    }
+    const q = params.length > 0 ? `?${params.join('&')}` : '';
     return this.request(`/reports${q}`);
   }
 
@@ -417,6 +446,11 @@ export class KrustyClient {
     return this.request(`/memories${q ? `?${q}` : ''}`);
   }
 
+  async getMemorySnapshot(projectDir?: string): Promise<MemorySnapshotResponse> {
+    const q = projectDir ? `?project_dir=${encodeURIComponent(projectDir)}` : '';
+    return this.request(`/memories/snapshot${q}`);
+  }
+
   // Mako
   async dispatchMako(task: string, options?: { projectDir?: string; model?: string; startAt?: string; priority?: MakoRunPriority }): Promise<MakoDispatchResponse> {
     return this.request('/mako/dispatch', {
@@ -433,6 +467,10 @@ export class KrustyClient {
 
   async getMakoCurrent(): Promise<MakoCurrentResponse> {
     return this.request('/mako/current');
+  }
+
+  async recoverMakoDaemon(): Promise<MakoRecoverDaemonResponse> {
+    return this.request('/mako/daemon/recover', { method: 'POST' });
   }
 
   async listMakoSessions(): Promise<MakoSessionSummary[]> {
@@ -528,9 +566,14 @@ export class KrustyClient {
       return;
     }
 
-    const reader = response.body?.getReader();
+    const reader = response.body?.getReader?.();
     if (!reader) {
-      callbacks.onError('No response body');
+      const fallbackText = await response.text().catch(() => '');
+      if (!fallbackText) {
+        callbacks.onError('No response body');
+        return;
+      }
+      this.processSSEChunk(fallbackText, callbacks, true);
       return;
     }
 
@@ -552,44 +595,48 @@ export class KrustyClient {
         if (done) break;
 
         lastActivity = Date.now();
-        buffer += decoder.decode(value, { stream: true });
-
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed.startsWith(':')) continue;
-
-          if (trimmed.startsWith('data: ')) {
-            const data = trimmed.slice(6);
-            try {
-              const event = JSON.parse(data) as StreamEvent;
-              this.handleEvent(event, callbacks);
-            } catch {
-              // Skip malformed events
-            }
-          }
-        }
+        buffer = this.processSSEChunk(
+          buffer + decoder.decode(value, { stream: true }),
+          callbacks,
+        );
       }
 
-      if (buffer.trim()) {
-        const trimmed = buffer.trim();
-        if (trimmed.startsWith('data: ')) {
-          try {
-            const event = JSON.parse(trimmed.slice(6)) as StreamEvent;
-            this.handleEvent(event, callbacks);
-          } catch {
-            // Skip malformed events
-          }
-        }
-      }
+      this.processSSEChunk(buffer, callbacks, true);
     } catch (err) {
       if (signal?.aborted) return;
       callbacks.onError(err instanceof Error ? err.message : 'Stream error');
     } finally {
       clearInterval(activityCheck);
     }
+  }
+
+  private processSSEChunk(
+    chunk: string,
+    callbacks: StreamCallbacks,
+    flush = false,
+  ): string {
+    const lines = chunk.split('\n');
+    let remainder = lines.pop() ?? '';
+
+    if (flush && remainder) {
+      lines.push(remainder);
+      remainder = '';
+    }
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith(':')) continue;
+      if (!trimmed.startsWith('data: ')) continue;
+
+      try {
+        const event = JSON.parse(trimmed.slice(6)) as StreamEvent;
+        this.handleEvent(event, callbacks);
+      } catch {
+        // Skip malformed events
+      }
+    }
+
+    return remainder;
   }
 
   private handleEvent(event: StreamEvent, callbacks: StreamCallbacks): void {

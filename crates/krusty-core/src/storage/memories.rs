@@ -287,7 +287,7 @@ impl MemoryStore {
         Ok((created, true))
     }
 
-    fn find_by_title_in_exact_scope(
+    pub fn find_by_title_in_exact_scope(
         &self,
         title: &str,
         project_dir: Option<&str>,

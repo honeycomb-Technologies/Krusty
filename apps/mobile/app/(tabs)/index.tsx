@@ -6,6 +6,7 @@ import {
   Text,
   Pressable,
   Alert,
+  ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
@@ -60,6 +61,32 @@ const CHAT_BAR_ZONE = 130;
 const SELECTED_MODEL_KEY = "krusty_selected_model";
 
 type WorkspaceMode = "neutral" | "selected" | "created";
+type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
+
+function normalizeProviderId(provider: string | null | undefined): string {
+  return (provider ?? "").trim().toLowerCase();
+}
+
+function isModelUsable(
+  modelId: string | null | undefined,
+  catalog: ModelInfo[],
+  configuredProviders: string[],
+): boolean {
+  if (!modelId) {
+    return false;
+  }
+
+  const match = catalog.find((candidate) => candidate.id === modelId);
+  if (!match) {
+    return false;
+  }
+
+  if (configuredProviders.length === 0) {
+    return true;
+  }
+
+  return configuredProviders.includes(normalizeProviderId(match.provider));
+}
 
 function sessionTypeForTab(index: number): SessionType {
   return TAB_TYPES[index] ?? "code";
@@ -117,22 +144,101 @@ function getWorkspaceMode(path: string | null): WorkspaceMode {
 
 export default function ChatScreen() {
   const { theme } = useThemeContext();
-  const { client, isConnected } = useConnection();
-  const { isDesktop } = useBreakpoint();
-  const { splashDone } = useSplashState();
-  const entrance = useEntranceAnimation(splashDone);
+  const {
+    status,
+    error: connectionError,
+    reconnect,
+    isConfigured,
+  } = useConnection();
   const stores = useStores();
 
-  // Stores not ready yet (before connection)
   if (!stores) {
+    const t = theme.colors;
+    const isRetryable = status === "error" || status === "disconnected";
+
     return (
-      <SafeAreaView style={[{ flex: 1, backgroundColor: theme.colors.background }]}>
-        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+      <SafeAreaView style={[styles.bootScreen, { backgroundColor: t.background }]}>
+        <View style={styles.bootInner}>
           <KrustyLogo />
+          {status === "connecting" ? (
+            <>
+              <ActivityIndicator
+                size="small"
+                color={t.userMessage}
+                style={styles.bootSpinner}
+              />
+              <Text style={[styles.bootMessage, { color: t.mutedForeground }]}>
+                Reconnecting to your server...
+              </Text>
+            </>
+          ) : null}
+          {isRetryable ? (
+            <View style={styles.bootActions}>
+              <Text
+                style={[
+                  styles.bootMessage,
+                  {
+                    color: isConfigured ? t.error : t.mutedForeground,
+                    marginTop: 0,
+                  },
+                ]}
+              >
+                {connectionError ||
+                  (isConfigured
+                    ? "Could not reconnect to your server."
+                    : "Server connection is not configured.")}
+              </Text>
+              <Pressable
+                onPress={() => {
+                  if (isConfigured) {
+                    void reconnect();
+                  } else {
+                    router.replace("/onboarding");
+                  }
+                }}
+                style={[
+                  styles.bootButton,
+                  { backgroundColor: t.userMessage },
+                ]}
+              >
+                <Text style={styles.bootButtonText}>
+                  {isConfigured ? "Retry Connection" : "Open Setup"}
+                </Text>
+              </Pressable>
+              {isConfigured ? (
+                <Pressable
+                  onPress={() => router.replace("/onboarding")}
+                  style={[
+                    styles.bootButtonSecondary,
+                    { borderColor: t.border },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.bootButtonSecondaryText,
+                      { color: t.foreground },
+                    ]}
+                  >
+                    Server Setup
+                  </Text>
+                </Pressable>
+              ) : null}
+            </View>
+          ) : null}
         </View>
       </SafeAreaView>
     );
   }
+
+  return <ChatScreenContent stores={stores} />;
+}
+
+function ChatScreenContent({ stores }: { stores: LoadedStores }) {
+  const { theme } = useThemeContext();
+  const { client, isConnected } = useConnection();
+  const { isDesktop } = useBreakpoint();
+  const { splashDone } = useSplashState();
+  const entrance = useEntranceAnimation(splashDone);
 
   const { sessions: sessionsStore, session: sessionStore, workspace } = stores;
 
@@ -159,6 +265,8 @@ export default function ChatScreen() {
   const fastModeEnabled = isFastModeModel(model);
 
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [defaultModelId, setDefaultModelId] = useState<string | null>(null);
+  const [configuredProviders, setConfiguredProviders] = useState<string[]>([]);
   const [activeToolCallId, setActiveToolCallId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState(1);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -221,11 +329,51 @@ export default function ChatScreen() {
     [activeToolCallId, client, sessionStore],
   );
 
+  const handleNotificationNavigate = useCallback(
+    async (_route: string, params?: Record<string, string>) => {
+      const focus = params?.focus;
+      const targetSessionId = params?.sessionId;
+      const shouldOpenReports = params?.openReports === "true";
+
+      if (focus === "mako") {
+        setActiveTab(2);
+      }
+      if (shouldOpenReports) {
+        setReportsOpen(true);
+      }
+      if (!targetSessionId) {
+        return;
+      }
+
+      try {
+        await sessionStore.getState().loadSession(targetSessionId, true);
+      } catch {
+        void sessionsStore.getState().loadSessions();
+      }
+    },
+    [sessionStore, sessionsStore],
+  );
+
+  const handleRegisterNativeDevice = useCallback(
+    async (deviceToken: string) => {
+      if (!client || !isConnected || !deviceToken) {
+        return;
+      }
+
+      try {
+        await client.registerApnsDevice(deviceToken);
+      } catch {}
+    },
+    [client, isConnected],
+  );
+
   const { startActivity, updateActivity, endActivity } = useLiveActivity({
     onToolApproval: handleToolApprovalAction,
   });
   const { notifyToolApproval, notifyStreamComplete } = useNotifications({
     onToolApproval: handleToolApprovalAction,
+    onNavigate: handleNotificationNavigate,
+    onRegisterNativeDevice: handleRegisterNativeDevice,
   });
 
   useWidgetSync({
@@ -240,30 +388,92 @@ export default function ChatScreen() {
 
   const t = theme.colors;
 
+  const loadModelCatalog = useCallback(async () => {
+    if (!client || !isConnected) {
+      return null;
+    }
+
+    const [response, credentials] = await Promise.all([
+      client.getModels(),
+      client.getCredentials().catch(() => []),
+    ]);
+    const nextConfiguredProviders = credentials
+      .filter((provider) => provider.configured || provider.has_oauth)
+      .map((provider) => normalizeProviderId(provider.name));
+    setModels(response.models);
+    setDefaultModelId(response.default_model ?? null);
+    setConfiguredProviders(nextConfiguredProviders);
+    return {
+      response,
+      configuredProviders: nextConfiguredProviders,
+    };
+  }, [client, isConnected]);
+
+  const ensureModelReady = useCallback(async () => {
+    const existingModel = sessionStore.getState().model;
+    let catalog = models;
+    let fallbackDefault = defaultModelId;
+    let allowedProviders = configuredProviders;
+
+    if (catalog.length === 0) {
+      const result = await loadModelCatalog().catch(() => null);
+      if (!result) {
+        return null;
+      }
+      catalog = result.response.models;
+      fallbackDefault = result.response.default_model ?? null;
+      allowedProviders = result.configuredProviders;
+    }
+
+    if (isModelUsable(existingModel, catalog, allowedProviders)) {
+      return existingModel;
+    }
+
+    const saved = await SecureStore.getItemAsync(SELECTED_MODEL_KEY);
+    const firstUsableModel =
+      catalog.find((candidate) =>
+        allowedProviders.length === 0
+          ? true
+          : allowedProviders.includes(normalizeProviderId(candidate.provider)),
+      )?.id ?? null;
+    const selectedModel = isModelUsable(saved, catalog, allowedProviders)
+      ? saved
+      : isModelUsable(fallbackDefault, catalog, allowedProviders)
+        ? fallbackDefault
+        : firstUsableModel;
+
+    if (selectedModel) {
+      sessionStore.getState().setModel(selectedModel);
+      if (saved !== selectedModel) {
+        await SecureStore.setItemAsync(SELECTED_MODEL_KEY, selectedModel);
+      }
+    }
+
+    return selectedModel;
+  }, [configuredProviders, defaultModelId, loadModelCatalog, models, sessionStore]);
+
   useEffect(() => {
     if (!client || !isConnected) {
       return;
     }
 
     void sessionsStore.getState().loadSessions();
-    void client
-      .getModels()
-      .then(async (response) => {
-        setModels(response.models);
-        if (!sessionStore.getState().model) {
-          const saved = await SecureStore.getItemAsync(SELECTED_MODEL_KEY);
-          const selectedModel =
-            saved && response.models.some((candidate) => candidate.id === saved)
-              ? saved
-              : response.default_model;
+    void ensureModelReady();
+  }, [client, ensureModelReady, isConnected, sessionsStore]);
 
-          if (selectedModel) {
-            sessionStore.getState().setModel(selectedModel);
-          }
-        }
-      })
-      .catch(() => {});
-  }, [client, isConnected, model, sessionStore, sessionsStore]);
+  useEffect(() => {
+    if (!client || !isConnected) {
+      return;
+    }
+
+    const refreshHandle = setInterval(() => {
+      if (AppState.currentState === "active") {
+        void sessionsStore.getState().loadSessions();
+      }
+    }, 5000);
+
+    return () => clearInterval(refreshHandle);
+  }, [client, isConnected, sessionsStore]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextState) => {
@@ -450,6 +660,7 @@ export default function ChatScreen() {
       stopCurrentStream();
 
       try {
+        await ensureModelReady();
         const session = await client.createSession(
           undefined,
           directory,
@@ -468,7 +679,7 @@ export default function ChatScreen() {
         return null;
       }
     },
-    [activeTab, bootstrapSession, client, stopCurrentStream],
+    [activeTab, bootstrapSession, client, ensureModelReady, stopCurrentStream],
   );
 
   const ensureSessionForSend = useCallback(async () => {
@@ -529,34 +740,34 @@ export default function ChatScreen() {
 
   const handleDeleteSession = useCallback(
     (id: string) => {
-      if (!client) {
-        return;
-      }
-
       Alert.alert("Delete Session", "Delete this session?", [
         { text: "Cancel", style: "cancel" },
         {
           text: "Delete",
           style: "destructive",
           onPress: async () => {
-            try {
-              if (sessionStore.getState().sessionId === id) {
-                stopCurrentStream();
-              }
-              await client.deleteSession(id);
-              await sessionsStore.getState().loadSessions();
-              if (sessionStore.getState().sessionId === id) {
-                sessionStore.getState().clearSession();
-                setActiveToolCallId(null);
-              }
-            } catch {
-              // silent
+            const isActiveSession = sessionStore.getState().sessionId === id;
+
+            if (isActiveSession) {
+              stopCurrentStream();
             }
+
+            const deleted = await sessionsStore.getState().deleteSession(id);
+            if (!deleted) {
+              return;
+            }
+
+            if (isActiveSession) {
+              sessionStore.getState().clearSession();
+              setActiveToolCallId(null);
+            }
+
+            void sessionsStore.getState().loadSessions();
           },
         },
       ]);
     },
-    [client, sessionsStore, stopCurrentStream, sessionStore],
+    [sessionsStore, stopCurrentStream, sessionStore],
   );
 
   const handleInteractiveToolResult = useCallback(
@@ -595,16 +806,38 @@ export default function ChatScreen() {
         return;
       }
 
+      const resolvedModel = await ensureModelReady();
+      if (!resolvedModel) {
+        sessionStore.setState({
+          error:
+            "No model is available yet. Check your model settings and try again.",
+        });
+        return;
+      }
+
       const ensuredSessionId = await ensureSessionForSend();
       if (!ensuredSessionId) {
         return;
       }
 
-      await sessionStore
-        .getState()
-        .sendMessage(trimmed, attachments as SessionAttachment[]);
+      try {
+        await sessionStore
+          .getState()
+          .sendMessage(
+            trimmed,
+            attachments as SessionAttachment[],
+            researchEnabled,
+          );
+      } catch (err) {
+        sessionStore.setState({
+          error:
+            err instanceof Error
+              ? err.message
+              : "Failed to send message.",
+        });
+      }
     },
-    [client, ensureSessionForSend, sessionStore],
+    [client, ensureModelReady, ensureSessionForSend, researchEnabled, sessionStore],
   );
 
   const handleSessionToolApproval = useCallback(
@@ -760,6 +993,22 @@ export default function ChatScreen() {
         />
       </Animated.View>
 
+      {messages.length > 0 && error ? (
+        <View
+          style={[
+            styles.errorBanner,
+            {
+              borderColor: `${t.error}40`,
+              backgroundColor: `${t.error}14`,
+            },
+          ]}
+        >
+          <Text style={[styles.errorBannerText, { color: t.error }]}>
+            {error}
+          </Text>
+        </View>
+      ) : null}
+
       <Animated.View style={[entrance.bottomBarStyle, { overflow: "visible" }]}>
         <ChatBar
           onSend={handleSend}
@@ -814,6 +1063,7 @@ export default function ChatScreen() {
           sessionId,
           title: sessionTitle,
           messages,
+          error,
           isLoading,
           isStreaming,
           isThinking,
@@ -888,6 +1138,54 @@ export default function ChatScreen() {
 }
 
 const styles = StyleSheet.create({
+  bootScreen: { flex: 1 },
+  bootInner: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 28,
+  },
+  bootSpinner: {
+    marginTop: 20,
+  },
+  bootActions: {
+    marginTop: 24,
+    alignItems: "center",
+    gap: 12,
+    width: "100%",
+    maxWidth: 320,
+  },
+  bootMessage: {
+    marginTop: 14,
+    fontSize: 15,
+    lineHeight: 21,
+    textAlign: "center",
+  },
+  bootButton: {
+    marginTop: 4,
+    borderRadius: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 18,
+    width: "100%",
+    alignItems: "center",
+  },
+  bootButtonText: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  bootButtonSecondary: {
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingVertical: 14,
+    paddingHorizontal: 18,
+    width: "100%",
+    alignItems: "center",
+  },
+  bootButtonSecondaryText: {
+    fontSize: 16,
+    fontWeight: "600",
+  },
   container: { flex: 1 },
   flex: { flex: 1 },
   topBar: {
@@ -950,6 +1248,19 @@ const styles = StyleSheet.create({
   },
   emptyHint: {
     fontSize: 17,
+  },
+  errorBanner: {
+    marginHorizontal: 16,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  errorBannerText: {
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: "500",
   },
   stubTitle: {
     fontSize: 24,

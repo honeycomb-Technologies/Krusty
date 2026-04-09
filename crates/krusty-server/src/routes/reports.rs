@@ -7,7 +7,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use krusty_core::storage::{Database, MemoryStore, MemoryType, ReportStore};
+use krusty_core::storage::reports::promote_report_content;
+use krusty_core::storage::{
+    refresh_current_snapshot, Database, MemoryStore, MemoryType, ReportStore,
+};
 
 use super::memories::{memory_to_response, MemoryResponse};
 use super::session_access::{current_user_id, request_workspace_scope};
@@ -19,6 +22,7 @@ use crate::AppState;
 #[derive(Debug, Deserialize)]
 pub struct ListReportsQuery {
     pub project_dir: Option<String>,
+    pub query: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -80,7 +84,17 @@ async fn list_reports(
         &workspace_scope.allowed_root,
     )?;
     let user_id = current_user_id(user.as_ref());
-    let reports = store.list_reports_for_user(project_dir.as_deref(), user_id)?;
+    let reports = match query
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(search_query) => {
+            store.search_reports_for_user(search_query, project_dir.as_deref(), user_id)?
+        }
+        None => store.list_reports_for_user(project_dir.as_deref(), user_id)?,
+    };
 
     let summaries = reports
         .into_iter()
@@ -147,29 +161,12 @@ async fn promote_report(
         report.project_dir.as_deref(),
         user_id,
     )?;
+    refresh_current_snapshot(&state.db_path, report.project_dir.as_deref(), user_id)?;
 
     Ok(Json(PromoteReportResponse {
         created,
         memory: memory_to_response(memory),
     }))
-}
-
-fn promote_report_content(report: &krusty_core::storage::Report) -> String {
-    let summary = report.summary.trim();
-    if !summary.is_empty() {
-        return summary.to_string();
-    }
-
-    let mut collapsed = report
-        .content
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if collapsed.len() > 600 {
-        collapsed.truncate(600);
-        collapsed.push_str("...");
-    }
-    collapsed
 }
 
 #[cfg(test)]
@@ -190,8 +187,8 @@ mod tests {
     use krusty_core::process::ProcessRegistry;
     use krusty_core::skills::SkillsManager;
     use krusty_core::storage::{
-        credentials::CredentialStore, reports::CreateReportInput, Database, MemoryStore,
-        MemoryType, ReportStore,
+        credentials::CredentialStore, is_current_snapshot, reports::CreateReportInput, Database,
+        MemoryStore, MemoryType, ReportStore,
     };
     use krusty_core::tools::registry::ToolRegistry;
     use krusty_core::SessionManager;
@@ -311,6 +308,7 @@ mod tests {
             Some(current_user("alice", &user_root)),
             Query(ListReportsQuery {
                 project_dir: Some("repo".to_string()),
+                query: None,
             }),
         )
         .await
@@ -341,7 +339,10 @@ mod tests {
         let Json(response) = list_reports(
             State(state),
             Some(current_user("alice", &alice_root)),
-            Query(ListReportsQuery { project_dir: None }),
+            Query(ListReportsQuery {
+                project_dir: None,
+                query: None,
+            }),
         )
         .await
         .unwrap_or_else(|_| panic!("report listing should succeed"));
@@ -363,6 +364,7 @@ mod tests {
             Some(current_user("alice", &user_root)),
             Query(ListReportsQuery {
                 project_dir: Some(outside_root.to_string_lossy().to_string()),
+                query: None,
             }),
         )
         .await;
@@ -435,8 +437,37 @@ mod tests {
             Some(alice_project.to_string_lossy().as_ref()),
             Some("alice"),
         );
-        assert_eq!(memories.len(), 1);
-        assert_eq!(memories[0].title, "Architecture Report");
-        assert_eq!(memories[0].content, "summary");
+        let durable_memories: Vec<_> = memories
+            .iter()
+            .filter(|memory| !is_current_snapshot(memory))
+            .collect();
+        assert_eq!(durable_memories.len(), 1);
+        assert_eq!(durable_memories[0].title, "Architecture Report");
+        assert_eq!(durable_memories[0].content, "summary");
+    }
+
+    #[tokio::test]
+    async fn list_reports_supports_query_filter() {
+        let (state, temp_dir) = create_test_state();
+        let user_root = temp_dir.join("user");
+        let project_dir = user_root.join("repo");
+        std::fs::create_dir_all(&project_dir).expect("project dir should exist");
+        create_test_user(&state, "alice");
+        seed_report(&state, "alice", "Queue Health Review", &project_dir);
+        seed_report(&state, "alice", "Runtime Notes", &project_dir);
+
+        let Json(response) = list_reports(
+            State(state),
+            Some(current_user("alice", &user_root)),
+            Query(ListReportsQuery {
+                project_dir: Some("repo".to_string()),
+                query: Some("queue".to_string()),
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("report search should succeed"));
+
+        assert_eq!(response.reports.len(), 1);
+        assert_eq!(response.reports[0].title, "Queue Health Review");
     }
 }

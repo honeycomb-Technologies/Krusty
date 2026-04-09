@@ -129,6 +129,7 @@ export interface Attachment {
 interface QueuedMessage {
   content: string;
   attachments: Attachment[];
+  researchEnabled: boolean;
 }
 
 interface FastModelPair {
@@ -261,7 +262,11 @@ export interface SessionStoreState {
   error: string | null;
   model: string | null;
 
-  sendMessage: (content: string, attachments?: Attachment[]) => Promise<void>;
+  sendMessage: (
+    content: string,
+    attachments?: Attachment[],
+    researchEnabled?: boolean,
+  ) => Promise<void>;
   loadSession: (sessionId: string, isRefresh?: boolean) => Promise<void>;
   clearSession: () => void;
   initSession: (sessionId: string, title: string) => void;
@@ -290,8 +295,21 @@ function toErrorMessage(err: unknown, fallback = "Unknown error"): string {
   return err instanceof Error ? err.message : fallback;
 }
 
+function generateRuntimeId(prefix: string): string {
+  const randomUuid = globalThis.crypto?.randomUUID?.();
+  if (typeof randomUuid === "string" && randomUuid.length > 0) {
+    return `${prefix}-${randomUuid}`;
+  }
+
+  return [
+    prefix,
+    Date.now().toString(36),
+    Math.random().toString(36).slice(2, 10),
+  ].join("-");
+}
+
 function createChatMessageId(prefix: string): string {
-  return `${prefix}-${crypto.randomUUID()}`;
+  return generateRuntimeId(prefix);
 }
 
 function buildStoredMessageId(index: number, message: ChatMessage): string {
@@ -345,6 +363,20 @@ function finalizeTransientAssistantMessages(
       ? { ...message, kind: undefined }
       : message,
   );
+}
+
+function pruneEmptyAssistantMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.filter((message) => {
+    if (message.role !== "assistant") {
+      return true;
+    }
+
+    return (
+      message.content.trim().length > 0 ||
+      (message.thinking?.trim().length ?? 0) > 0 ||
+      (message.toolCalls?.length ?? 0) > 0
+    );
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1196,7 +1228,7 @@ export function createSessionStore(
         presenceClientId = existing;
         return existing;
       }
-      const generated = crypto.randomUUID();
+      const generated = generateRuntimeId("presence");
       storage.set(PRESENCE_CLIENT_STORAGE_KEY, generated);
       presenceClientId = generated;
       return generated;
@@ -1470,7 +1502,7 @@ export function createSessionStore(
 
         set({
           sessionId,
-          messages,
+          messages: pruneEmptyAssistantMessages(messages),
           queuedMessages: [],
           isStreaming: false,
           isThinking: false,
@@ -1481,8 +1513,14 @@ export function createSessionStore(
         if (queued.length > 0) {
           const combinedContent = queued.map((q) => q.content).join("\n\n");
           const combinedAttachments = queued.flatMap((q) => q.attachments);
+          const queuedResearchEnabled = queued.some((q) => q.researchEnabled);
           setTimeout(
-            () => get().sendMessage(combinedContent, combinedAttachments),
+            () =>
+              get().sendMessage(
+                combinedContent,
+                combinedAttachments,
+                queuedResearchEnabled,
+              ),
             50,
           );
         }
@@ -1494,7 +1532,9 @@ export function createSessionStore(
           isStreaming: false,
           isThinking: false,
           thinkingContent: "",
-          messages: finalizeTransientAssistantMessages(s.messages),
+          messages: pruneEmptyAssistantMessages(
+            finalizeTransientAssistantMessages(s.messages),
+          ),
           error,
         }));
       },
@@ -1621,7 +1661,11 @@ export function createSessionStore(
 
     // -- sendMessage --------------------------------------------------------
 
-    async sendMessage(content: string, attachments: Attachment[] = []) {
+    async sendMessage(
+      content: string,
+      attachments: Attachment[] = [],
+      researchEnabled = false,
+    ) {
       const state = get();
       const ws = workspace.getState();
       const normalizedContent = content.trim();
@@ -1651,7 +1695,10 @@ export function createSessionStore(
             };
           }
           return {
-            queuedMessages: [...s.queuedMessages, { content, attachments }],
+            queuedMessages: [
+              ...s.queuedMessages,
+              { content, attachments, researchEnabled },
+            ],
             messages: [
               ...s.messages,
               {
@@ -1666,6 +1713,17 @@ export function createSessionStore(
         return;
       }
 
+      const ref: AssistantMessageRef = {
+        current: {
+          id: createChatMessageId("assistant-stream"),
+          role: "assistant",
+          content: "",
+          thinking: "",
+          toolCalls: [],
+          kind: "streaming",
+        },
+      };
+
       set((s) => ({
         messages: [
           ...s.messages,
@@ -1674,6 +1732,7 @@ export function createSessionStore(
             role: "user",
             content: displayContent,
           },
+          ref.current,
         ],
         isLoading: true,
         isStreaming: true,
@@ -1693,17 +1752,6 @@ export function createSessionStore(
             ? buildContentBlocks(requestMessage, attachments)
             : undefined;
 
-        const ref: AssistantMessageRef = {
-          current: {
-            id: createChatMessageId("assistant-stream"),
-            role: "assistant",
-            content: "",
-            thinking: "",
-            toolCalls: [],
-            kind: "streaming",
-          },
-        };
-
         await client.streamChat(
           {
             session_id: state.sessionId ?? undefined,
@@ -1712,6 +1760,7 @@ export function createSessionStore(
             project_dir: state.sessionId ? undefined : ws.directory,
             working_dir: state.sessionId ? undefined : ws.directory,
             workspace_mode: state.sessionId ? undefined : ws.mode,
+            research_enabled: researchEnabled || undefined,
             model: state.model ?? undefined,
             thinking_enabled: thinkingLevelToApiValue(state.thinkingLevel),
             permission_mode: state.permissionMode,
@@ -1721,11 +1770,16 @@ export function createSessionStore(
           abortController.signal,
         );
       } catch (err) {
-        set({
+        set((s) => ({
           isLoading: false,
           isStreaming: false,
+          isThinking: false,
+          thinkingContent: "",
+          messages: pruneEmptyAssistantMessages(
+            finalizeTransientAssistantMessages(s.messages),
+          ),
           error: toErrorMessage(err),
-        });
+        }));
       } finally {
         get().stopStatePolling();
       }
@@ -1753,7 +1807,7 @@ export function createSessionStore(
           sessionId: data.session.id,
           title: data.session.title || "Untitled",
           mode,
-          model: data.session.model ?? null,
+          model: data.session.model ?? s.model,
           tokenCount: data.session.token_count ?? 0,
           messages: applyLivePartialAssistant(
             applyRecoveryParity(
@@ -1794,17 +1848,27 @@ export function createSessionStore(
     clearSession() {
       const current = get();
       get().stopPresenceHeartbeat(current.sessionId);
-      set({ ...initialState, permissionMode: loadPermissionMode() });
+      set({
+        ...initialState,
+        permissionMode: current.permissionMode,
+        model: current.model,
+        thinkingLevel: current.thinkingLevel,
+        thinkingEnabled: current.thinkingEnabled,
+      });
       workspace.getState().clear();
     },
 
     // -- initSession --------------------------------------------------------
 
     initSession(sessionId: string, title: string) {
-      get().stopPresenceHeartbeat(get().sessionId);
+      const current = get();
+      get().stopPresenceHeartbeat(current.sessionId);
       set({
         ...initialState,
-        permissionMode: loadPermissionMode(),
+        permissionMode: current.permissionMode,
+        model: current.model,
+        thinkingLevel: current.thinkingLevel,
+        thinkingEnabled: current.thinkingEnabled,
         sessionId,
         title,
       });
@@ -1930,11 +1994,16 @@ export function createSessionStore(
           abortController.signal,
         );
       } catch (err) {
-        set({
+        set((s) => ({
           isLoading: false,
           isStreaming: false,
+          isThinking: false,
+          thinkingContent: "",
+          messages: pruneEmptyAssistantMessages(
+            finalizeTransientAssistantMessages(s.messages),
+          ),
           error: toErrorMessage(err),
-        });
+        }));
       } finally {
         get().stopStatePolling();
       }
@@ -1978,7 +2047,9 @@ export function createSessionStore(
         isStreaming: false,
         isThinking: false,
         thinkingContent: "",
-        messages: finalizeTransientAssistantMessages(s.messages),
+        messages: pruneEmptyAssistantMessages(
+          finalizeTransientAssistantMessages(s.messages),
+        ),
       }));
     },
 

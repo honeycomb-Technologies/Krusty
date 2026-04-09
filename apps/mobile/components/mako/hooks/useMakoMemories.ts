@@ -12,6 +12,7 @@ export function useMakoMemories(
     workspaceDirectory ? "workspace" : "all",
   );
   const [typeFilter, setTypeFilter] = useState<MemoryType | "all">("all");
+  const [snapshot, setSnapshot] = useState<AgentMemory | null>(null);
   const [memories, setMemories] = useState<AgentMemory[]>([]);
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(enabled);
@@ -26,6 +27,7 @@ export function useMakoMemories(
 
   const fetchMemories = useCallback(async () => {
     if (!client || !isConnected) {
+      setSnapshot(null);
       setMemories([]);
       setSelectedMemoryId(null);
       setIsLoading(false);
@@ -35,17 +37,24 @@ export function useMakoMemories(
 
     setError(null);
     try {
-      const response = await client.getMemories(
-        scope === "workspace" ? workspaceDirectory ?? undefined : undefined,
-        typeFilter === "all" ? undefined : typeFilter,
-      );
-      setMemories(response.memories);
+      const projectDir =
+        scope === "workspace" ? workspaceDirectory ?? undefined : undefined;
+      const [memoriesResponse, snapshotResponse] = await Promise.all([
+        client.getMemories(
+          projectDir,
+          typeFilter === "all" ? undefined : typeFilter,
+        ),
+        client.getMemorySnapshot(projectDir),
+      ]);
+      setMemories(memoriesResponse.memories);
+      setSnapshot(snapshotResponse.snapshot);
     } catch (loadError) {
       setError(
         loadError instanceof Error
           ? loadError.message
           : "Failed to load memories.",
       );
+      setSnapshot(null);
       setMemories([]);
       setSelectedMemoryId(null);
     } finally {
@@ -91,6 +100,7 @@ export function useMakoMemories(
     typeFilter,
     setTypeFilter,
     memories,
+    snapshot,
     selectedMemoryId,
     selectedMemory,
     isLoading,

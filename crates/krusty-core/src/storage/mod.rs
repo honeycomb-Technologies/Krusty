@@ -19,6 +19,7 @@ mod database;
 mod database_tests;
 mod delegated_runs;
 mod file_activity;
+mod knowledge;
 mod mako_runtime_state;
 mod memories;
 mod messages;
@@ -43,6 +44,10 @@ pub use delegated_runs::{
     DelegatedRunScope, DelegatedRunSnapshot, DelegatedRunStartInput, DelegatedRunStore,
 };
 pub use file_activity::{FileActivityTracker, RankedFile};
+pub use knowledge::{
+    is_current_snapshot, is_current_snapshot_title, refresh_current_snapshot,
+    CURRENT_SNAPSHOT_TITLE,
+};
 pub use mako_runtime_state::{
     MakoRunPriority, MakoRuntimeState, MakoRuntimeStateStatus, MakoRuntimeStateStore,
 };
