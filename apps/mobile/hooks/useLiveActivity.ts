@@ -15,6 +15,9 @@ if (Platform.OS === 'ios') {
 }
 
 type LiveActivity = any;
+type LiveActivityInteractionEvent = {
+  target?: unknown;
+};
 
 interface StreamState {
   chatTitle: string;
@@ -67,7 +70,7 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
   useEffect(() => {
     if (Platform.OS !== 'ios') return;
 
-    const sub = addUserInteractionListener((event) => {
+    const sub = addUserInteractionListener((event: LiveActivityInteractionEvent) => {
       const target = event.target;
       if (typeof target !== 'string') {
         return;

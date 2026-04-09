@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use tracing::info;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 27;
+const SCHEMA_VERSION: i32 = 28;
 
 /// Shared database handle for connection reuse
 ///
@@ -79,16 +79,6 @@ impl Database {
                 |row| row.get(0),
             )
             .unwrap_or(0)
-    }
-
-    /// Set schema version after successful migration
-    #[allow(dead_code)]
-    fn set_schema_version(&self, version: i32) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO schema_version (version) VALUES (?1)",
-            [version],
-        )?;
-        Ok(())
     }
 
     /// Set schema version within a transaction
@@ -907,6 +897,18 @@ impl Database {
             )
             .context("Migration 27: Mako runtime state")?;
             self.set_schema_version_tx(&tx, 27)?;
+        }
+
+        // Migration 28: Persisted Mako run priority
+        if current_version < 28 {
+            info!("Running migration 28: Mako run priority");
+            if !Self::column_exists(&tx, "mako_runtime_state", "priority") {
+                tx.execute_batch(
+                    "ALTER TABLE mako_runtime_state
+                     ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal';",
+                )?;
+            }
+            self.set_schema_version_tx(&tx, 28)?;
         }
 
         tx.commit()?;

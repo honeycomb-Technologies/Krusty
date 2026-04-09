@@ -24,6 +24,19 @@ pub struct PlanManager {
 }
 
 impl PlanManager {
+    fn with_store<T>(&self, f: impl FnOnce(&PlanStore<'_>) -> Result<T>) -> Result<T> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let store = PlanStore::new(&db);
+        f(&store)
+    }
+
+    fn parse_created_at_or_now(created_at: &str) -> chrono::DateTime<chrono::Utc> {
+        created_at.parse().unwrap_or_else(|_| Utc::now())
+    }
+
     /// Create a new plan manager with shared database
     pub fn with_shared_db(db: SharedDatabase) -> Result<Self> {
         let plans_dir = paths::ensure_plans_dir()?;
@@ -43,12 +56,7 @@ impl PlanManager {
     /// This is the primary method for loading plans. Plans are strictly
     /// linked to sessions via the database.
     pub fn get_plan(&self, session_id: &str) -> Result<Option<PlanFile>> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let store = PlanStore::new(&db);
-        store.get_plan_for_session(session_id)
+        self.with_store(|store| store.get_plan_for_session(session_id))
     }
 
     /// Get the active in-progress plan for a session, filtering out archived plans.
@@ -72,42 +80,26 @@ impl PlanManager {
     ///
     /// If session already has a plan, it will be replaced.
     pub fn save_plan_for_session(&self, session_id: &str, plan: &PlanFile) -> Result<()> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let store = PlanStore::new(&db);
-        store.upsert_plan(session_id, plan)?;
-        Ok(())
+        self.with_store(|store| {
+            store.upsert_plan(session_id, plan)?;
+            Ok(())
+        })
     }
 
     /// Abandon plan for a session (deletes from database)
     pub fn abandon_plan(&self, session_id: &str) -> Result<bool> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let store = PlanStore::new(&db);
-        store.abandon_plan(session_id)
+        self.with_store(|store| store.abandon_plan(session_id))
     }
 
     /// Check if session has an active plan
     pub fn has_plan(&self, session_id: &str) -> bool {
-        let Ok(db) = self.db.lock() else {
-            return false;
-        };
-        let store = PlanStore::new(&db);
-        store.has_plan(session_id)
+        self.with_store(|store| Ok(store.has_plan(session_id)))
+            .unwrap_or(false)
     }
 
     /// Update plan content for a session
     pub fn update_plan(&self, session_id: &str, plan: &PlanFile) -> Result<()> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let store = PlanStore::new(&db);
-        store.update_content(session_id, plan)
+        self.with_store(|store| store.update_content(session_id, plan))
     }
 
     /// Create a new plan for a session
@@ -147,27 +139,21 @@ impl PlanManager {
     /// Queries the database for completed plans where the linked session
     /// is in the specified working directory.
     pub fn list_completed_for_dir(&self, working_dir: &str) -> Result<Vec<PlanSummary>> {
-        let db = self
-            .db
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        let store = PlanStore::new(&db);
-
-        let all_plans = store.list_all()?;
-        Ok(all_plans
-            .into_iter()
-            .filter(|p| p.status == PlanStatus::Completed)
-            .filter(|p| p.working_dir.as_deref() == Some(working_dir))
-            .map(|p| PlanSummary {
-                id: p.id,
-                session_id: Some(p.session_id),
-                title: p.title,
-                status: p.status,
-                progress: (0, 0), // Not stored in summary
-                created_at: p.created_at.parse().unwrap_or_else(|_| Utc::now()),
-                working_dir: p.working_dir,
-            })
-            .collect())
+        self.with_store(|store| {
+            Ok(store
+                .list_completed_for_working_dir(working_dir)?
+                .into_iter()
+                .map(|p| PlanSummary {
+                    id: p.id,
+                    session_id: Some(p.session_id),
+                    title: p.title,
+                    status: p.status,
+                    progress: (0, 0), // Not stored in summary
+                    created_at: Self::parse_created_at_or_now(&p.created_at),
+                    working_dir: p.working_dir,
+                })
+                .collect())
+        })
     }
 
     // =========================================================================
@@ -458,5 +444,68 @@ mod tests {
 
         assert!(manager.get_active_plan("session-123").unwrap().is_none());
         assert!(manager.get_plan("session-123").unwrap().is_some());
+    }
+
+    #[test]
+    fn test_list_completed_for_dir_scopes_to_completed_plans_in_same_working_dir() {
+        let (manager, _temp) = setup_test_manager();
+
+        let db = manager.db.lock().unwrap();
+        db.conn()
+            .execute(
+                "UPDATE sessions SET working_dir = ?1 WHERE id = ?2",
+                rusqlite::params!["/tmp/project-a", "session-123"],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "UPDATE sessions SET working_dir = ?1 WHERE id = ?2",
+                rusqlite::params!["/tmp/project-a", "session-456"],
+            )
+            .unwrap();
+        drop(db);
+
+        let mut completed = manager
+            .create_plan("Completed Here", "session-123", Some("/tmp/project-a"))
+            .unwrap();
+        let phase = completed.add_phase("Phase 1");
+        phase.add_task("Done task");
+        completed.complete_task("1.1", "Implemented").unwrap();
+        manager.save_plan(&completed).unwrap();
+
+        let mut active = manager
+            .create_plan("Active Here", "session-456", Some("/tmp/project-a"))
+            .unwrap();
+        active.add_phase("Phase 1").add_task("Not done");
+        manager.save_plan(&active).unwrap();
+
+        let db = manager.db.lock().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO sessions (id, title, working_dir, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    "session-789",
+                    "Test Session 3",
+                    "/tmp/project-b",
+                    Utc::now().to_rfc3339(),
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .unwrap();
+        drop(db);
+
+        let mut other_dir = manager
+            .create_plan("Completed Elsewhere", "session-789", Some("/tmp/project-b"))
+            .unwrap();
+        let phase = other_dir.add_phase("Phase 1");
+        phase.add_task("Done task");
+        other_dir.complete_task("1.1", "Implemented").unwrap();
+        manager.save_plan(&other_dir).unwrap();
+
+        let plans = manager.list_completed_for_dir("/tmp/project-a").unwrap();
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].title, "Completed Here");
+        assert_eq!(plans[0].working_dir.as_deref(), Some("/tmp/project-a"));
     }
 }

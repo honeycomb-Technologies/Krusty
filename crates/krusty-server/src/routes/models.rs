@@ -16,6 +16,32 @@ pub fn router() -> Router<AppState> {
         .route("/:id", get(get_model))
 }
 
+fn resolve_default_model(
+    models: &[ModelResponse],
+    active_model: Option<&str>,
+    providers_with_auth: &[ProviderId],
+) -> String {
+    if let Some(model) = active_model {
+        return model.to_string();
+    }
+
+    if let Some(configured_model) = models.iter().find(|model| {
+        ProviderId::all()
+            .iter()
+            .find(|provider| provider.to_string() == model.provider)
+            .map(|provider| providers_with_auth.contains(provider))
+            .unwrap_or(false)
+    }) {
+        return configured_model.id.clone();
+    }
+
+    if let Some(first) = models.first() {
+        return first.id.clone();
+    }
+
+    constants::ai::DEFAULT_MODEL.to_string()
+}
+
 /// List all available models from configured providers
 async fn list_models(State(state): State<AppState>) -> Result<Json<ModelsListResponse>, AppError> {
     let configured_providers: Vec<ProviderId> = ProviderId::all().to_vec();
@@ -63,14 +89,19 @@ async fn list_models(State(state): State<AppState>) -> Result<Json<ModelsListRes
         }
     }
 
-    // Pick the best default: active provider's model, or first available, or hardcoded fallback
-    let default_model = if let Some(ref client) = state.ai_client {
-        client.config().model.clone()
-    } else if let Some(first) = models.first() {
-        first.id.clone()
-    } else {
-        constants::ai::DEFAULT_MODEL.to_string()
+    let providers_with_auth = {
+        let store = state.credential_store.read().await;
+        store.providers_with_auth()
     };
+
+    let default_model = resolve_default_model(
+        &models,
+        state
+            .ai_client
+            .as_ref()
+            .map(|client| client.config().model.as_str()),
+        &providers_with_auth,
+    );
 
     Ok(Json(ModelsListResponse {
         models,
@@ -96,4 +127,46 @@ async fn get_model(
     }
 
     Err(AppError::NotFound(format!("Model {} not found", id)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_default_model;
+    use crate::types::ModelResponse;
+    use krusty_core::ai::providers::ProviderId;
+
+    fn model(id: &str, provider: &str) -> ModelResponse {
+        ModelResponse {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            provider: provider.to_string(),
+            context_window: 1,
+            max_output: 1,
+            supports_thinking: false,
+            supports_tools: true,
+        }
+    }
+
+    #[test]
+    fn resolve_default_model_prefers_active_model() {
+        let models = vec![
+            model("MiniMax-M2.5", "MiniMax"),
+            model("claude-opus-4.6", "Anthropic"),
+        ];
+        let default_model =
+            resolve_default_model(&models, Some("claude-opus-4.6"), &[ProviderId::Anthropic]);
+
+        assert_eq!(default_model, "claude-opus-4.6");
+    }
+
+    #[test]
+    fn resolve_default_model_prefers_configured_provider_when_no_active_model() {
+        let models = vec![
+            model("MiniMax-M2.5", "MiniMax"),
+            model("claude-opus-4.6", "Anthropic"),
+        ];
+        let default_model = resolve_default_model(&models, None, &[ProviderId::Anthropic]);
+
+        assert_eq!(default_model, "claude-opus-4.6");
+    }
 }

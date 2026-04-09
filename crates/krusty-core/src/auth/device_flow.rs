@@ -218,9 +218,8 @@ struct TokenResponse {
     id_token: Option<String>,
     #[serde(default)]
     expires_in: Option<u64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    token_type: Option<String>,
+    #[serde(rename = "token_type", default)]
+    _token_type: Option<String>,
 }
 
 /// Error response from the OAuth server
@@ -235,20 +234,6 @@ struct ErrorResponse {
 mod tests {
     use super::*;
     use crate::ai::providers::ProviderId;
-
-    #[allow(dead_code)] // Helper for future tests
-    fn test_config() -> OAuthConfig {
-        OAuthConfig {
-            provider_id: ProviderId::OpenAI,
-            client_id: "test-client".to_string(),
-            authorization_url: "https://auth.example.com/authorize".to_string(),
-            token_url: "https://auth.example.com/token".to_string(),
-            device_auth_url: Some("https://auth.example.com/device/code".to_string()),
-            scopes: vec!["openid".to_string(), "profile".to_string()],
-            refresh_days: 28,
-            extra_auth_params: vec![],
-        }
-    }
 
     #[test]
     fn test_device_code_response_deserialization() {

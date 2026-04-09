@@ -222,8 +222,8 @@ struct UserCodeResponse {
 struct DeviceAuthTokenResponse {
     authorization_code: String,
     code_verifier: String,
-    #[allow(dead_code)]
-    code_challenge: String,
+    #[serde(rename = "code_challenge")]
+    _code_challenge: String,
 }
 
 #[derive(Debug, Deserialize)]

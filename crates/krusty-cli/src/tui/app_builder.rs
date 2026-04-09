@@ -135,7 +135,7 @@ pub async fn init_services(
         tool_registry,
         cached_ai_tools,
         user_hook_manager,
-        wasm_host,
+        _wasm_host: wasm_host,
         plugin_manager,
         skills_manager,
         mcp_manager,

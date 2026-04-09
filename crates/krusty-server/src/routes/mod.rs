@@ -12,6 +12,7 @@ mod git;
 mod hooks;
 mod mako;
 mod mcp;
+mod memories;
 mod models;
 pub mod oauth;
 mod ports;
@@ -20,6 +21,7 @@ mod processes;
 mod push;
 mod reports;
 mod server;
+mod session_access;
 mod sessions;
 mod skills;
 mod tools;
@@ -36,6 +38,7 @@ pub fn api_router() -> Router<AppState> {
         .nest("/credentials", credentials::router())
         .nest("/mako", mako::router())
         .nest("/mcp", mcp::router())
+        .nest("/memories", memories::router())
         .nest("/processes", processes::router())
         .nest("/ports", ports::router())
         .nest("/settings/preview", preview_settings::router())

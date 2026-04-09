@@ -36,6 +36,7 @@ interface TerminalTab {
 
 interface TerminalProps {
   visible: boolean;
+  style?: import("react-native").ViewStyle;
 }
 
 function createTerminalId(): string {
@@ -76,7 +77,7 @@ function escapeShellPath(path: string): string {
   return path.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-export function Terminal({ visible }: TerminalProps) {
+export function Terminal({ visible, style }: TerminalProps) {
   const { theme } = useThemeContext();
   const { serverUrl } = useConnection();
   const workspaceDirectory = useWorkspaceStore((state) => state.directory) ?? null;
@@ -140,7 +141,7 @@ export function Terminal({ visible }: TerminalProps) {
   }
 
   return (
-    <View style={[styles.container, { backgroundColor: t.background, borderTopColor: t.border }]}>
+    <View style={[styles.container, { backgroundColor: t.background, borderTopColor: t.border }, style]}>
       <View style={[styles.tabBar, { borderBottomColor: t.border }]}>
         <TerminalSquare size={16} color={t.mutedForeground} strokeWidth={1.8} />
 

@@ -13,7 +13,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "io.krusty.mobile",
-      "buildNumber": "203",
+      "buildNumber": "212",
       "backgroundColor": "#0b1119",
       "icon": {
         "light": "./assets/icons/ios-light.png",
@@ -24,7 +24,11 @@
         "UIBackgroundModes": [
           "remote-notification",
           "fetch"
-        ]
+        ],
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true,
+          "NSAllowsArbitraryLoads": true
+        }
       },
       "config": {
         "usesNonExemptEncryption": false

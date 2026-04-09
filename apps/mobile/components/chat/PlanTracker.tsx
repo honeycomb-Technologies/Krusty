@@ -18,9 +18,10 @@ export function PlanTracker({ onHeightChange }: PlanTrackerProps) {
   const isDark = theme.scheme === "dark";
   const lastReportedHeightRef = useRef(0);
 
-  const items = usePlanStore((s) => s.items) ?? [];
-  const isVisible = usePlanStore((s) => s.isVisible) ?? false;
-  const trackerVisible = isVisible && items.length > 0;
+  const planItems = usePlanStore((s) => s.items);
+  const items = planItems ?? [];
+  const isVisible = usePlanStore((s) => s.isVisible);
+  const trackerVisible = Boolean(isVisible) && items.length > 0;
 
   useEffect(() => {
     if (trackerVisible || lastReportedHeightRef.current === 0) {

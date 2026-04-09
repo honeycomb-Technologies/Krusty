@@ -105,12 +105,13 @@ export interface DelegatedArtifactState {
 }
 
 export interface ChatMessage {
+  id: string;
   role: "user" | "assistant";
   content: string;
   thinking?: string;
   toolCalls?: ToolCall[];
   isQueued?: boolean;
-  kind?: "recovery_notice" | "live_partial";
+  kind?: "recovery_notice" | "live_partial" | "streaming";
 }
 
 export type SessionMode = "build" | "plan";
@@ -128,6 +129,7 @@ export interface Attachment {
 interface QueuedMessage {
   content: string;
   attachments: Attachment[];
+  researchEnabled: boolean;
 }
 
 interface FastModelPair {
@@ -260,7 +262,11 @@ export interface SessionStoreState {
   error: string | null;
   model: string | null;
 
-  sendMessage: (content: string, attachments?: Attachment[]) => Promise<void>;
+  sendMessage: (
+    content: string,
+    attachments?: Attachment[],
+    researchEnabled?: boolean,
+  ) => Promise<void>;
   loadSession: (sessionId: string, isRefresh?: boolean) => Promise<void>;
   clearSession: () => void;
   initSession: (sessionId: string, title: string) => void;
@@ -287,6 +293,90 @@ export interface SessionStoreState {
 
 function toErrorMessage(err: unknown, fallback = "Unknown error"): string {
   return err instanceof Error ? err.message : fallback;
+}
+
+function generateRuntimeId(prefix: string): string {
+  const randomUuid = globalThis.crypto?.randomUUID?.();
+  if (typeof randomUuid === "string" && randomUuid.length > 0) {
+    return `${prefix}-${randomUuid}`;
+  }
+
+  return [
+    prefix,
+    Date.now().toString(36),
+    Math.random().toString(36).slice(2, 10),
+  ].join("-");
+}
+
+function createChatMessageId(prefix: string): string {
+  return generateRuntimeId(prefix);
+}
+
+function buildStoredMessageId(index: number, message: ChatMessage): string {
+  const firstToolId = message.toolCalls?.[0]?.id;
+  if (firstToolId) {
+    return `stored-${index}-${message.role}-${firstToolId}`;
+  }
+
+  return [
+    "stored",
+    index,
+    message.role,
+    message.content.length,
+    message.thinking?.length ?? 0,
+  ].join("-");
+}
+
+function isTransientAssistantKind(
+  kind: ChatMessage["kind"] | undefined,
+): kind is "live_partial" | "streaming" {
+  return kind === "live_partial" || kind === "streaming";
+}
+
+function isTransientAssistantMessage(
+  message: ChatMessage | undefined,
+): boolean {
+  return message?.role === "assistant" && isTransientAssistantKind(message.kind);
+}
+
+function upsertTransientAssistantMessage(
+  messages: ChatMessage[],
+  message: ChatMessage,
+): ChatMessage[] {
+  const nextMessages = messages.filter((entry) => entry.kind !== "live_partial");
+  const lastIndex = nextMessages.length - 1;
+  const lastMessage = nextMessages[lastIndex];
+
+  if (lastIndex >= 0 && isTransientAssistantMessage(lastMessage)) {
+    nextMessages[lastIndex] = { ...message, id: lastMessage.id };
+    return nextMessages;
+  }
+
+  return [...nextMessages, message];
+}
+
+function finalizeTransientAssistantMessages(
+  messages: ChatMessage[],
+): ChatMessage[] {
+  return messages.map((message) =>
+    isTransientAssistantMessage(message)
+      ? { ...message, kind: undefined }
+      : message,
+  );
+}
+
+function pruneEmptyAssistantMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.filter((message) => {
+    if (message.role !== "assistant") {
+      return true;
+    }
+
+    return (
+      message.content.trim().length > 0 ||
+      (message.thinking?.trim().length ?? 0) > 0 ||
+      (message.toolCalls?.length ?? 0) > 0
+    );
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -344,6 +434,12 @@ function applyRecoveryParity(
     }));
 
     nextMessages.unshift({
+      id: [
+        "recovery-notice",
+        recovery.schema_version,
+        recovery.status,
+        recovery.stop_reason ?? "unknown",
+      ].join("-"),
       role: "assistant",
       content: `[Recovery Notice] ${buildRecoveryNotice(recovery)}`,
       kind: "recovery_notice",
@@ -793,16 +889,14 @@ function applyLivePartialAssistant(
     return nextMessages;
   }
 
-  return [
-    ...nextMessages,
-    {
-      role: "assistant",
-      content: livePartial.text,
-      thinking: livePartial.thinking,
-      toolCalls,
-      kind: "live_partial",
-    },
-  ];
+  return upsertTransientAssistantMessage(nextMessages, {
+    id: createChatMessageId("live-partial"),
+    role: "assistant",
+    content: livePartial.text,
+    thinking: livePartial.thinking,
+    toolCalls,
+    kind: "live_partial",
+  });
 }
 
 function applyDelegatedSessionState(
@@ -946,7 +1040,13 @@ function parseStoredMessage(
 ): ChatMessage {
   const role: "user" | "assistant" =
     m.role === "user" || m.role === "assistant" ? m.role : "assistant";
-  const msg: ChatMessage = { role, content: "", thinking: "", toolCalls: [] };
+  const msg: ChatMessage = {
+    id: "",
+    role,
+    content: "",
+    thinking: "",
+    toolCalls: [],
+  };
   const contentArray = Array.isArray(m.content) ? m.content : [];
 
   for (const block of contentArray) {
@@ -1036,6 +1136,7 @@ function processStoredMessages(
     const hasThinking = (msg.thinking?.trim().length ?? 0) > 0;
     const hasToolCalls = (msg.toolCalls?.length ?? 0) > 0;
     if (hasContent || hasThinking || hasToolCalls) {
+      msg.id = buildStoredMessageId(result.length, msg);
       result.push(msg);
     }
   }
@@ -1127,7 +1228,7 @@ export function createSessionStore(
         presenceClientId = existing;
         return existing;
       }
-      const generated = crypto.randomUUID();
+      const generated = generateRuntimeId("presence");
       storage.set(PRESENCE_CLIENT_STORAGE_KEY, generated);
       presenceClientId = generated;
       return generated;
@@ -1203,13 +1304,10 @@ export function createSessionStore(
       updater?: (s: SessionStoreState) => Partial<SessionStoreState>,
     ) {
       set((s) => {
-        const messages = [...s.messages];
-        const lastIdx = messages.length - 1;
-        if (messages[lastIdx]?.role === "assistant") {
-          messages[lastIdx] = { ...ref.current };
-        } else {
-          messages.push({ ...ref.current });
-        }
+        const messages = upsertTransientAssistantMessage(
+          s.messages,
+          { ...ref.current },
+        );
         return { messages, ...updater?.(s) };
       });
     }
@@ -1396,13 +1494,15 @@ export function createSessionStore(
         const currentState = get();
         const queued = currentState.queuedMessages;
 
-        const messages = currentState.messages.map((m) =>
-          m.isQueued ? { ...m, isQueued: false } : m,
+        const messages = finalizeTransientAssistantMessages(
+          currentState.messages.map((m) =>
+            m.isQueued ? { ...m, isQueued: false } : m,
+          ),
         );
 
         set({
           sessionId,
-          messages,
+          messages: pruneEmptyAssistantMessages(messages),
           queuedMessages: [],
           isStreaming: false,
           isThinking: false,
@@ -1413,15 +1513,30 @@ export function createSessionStore(
         if (queued.length > 0) {
           const combinedContent = queued.map((q) => q.content).join("\n\n");
           const combinedAttachments = queued.flatMap((q) => q.attachments);
+          const queuedResearchEnabled = queued.some((q) => q.researchEnabled);
           setTimeout(
-            () => get().sendMessage(combinedContent, combinedAttachments),
+            () =>
+              get().sendMessage(
+                combinedContent,
+                combinedAttachments,
+                queuedResearchEnabled,
+              ),
             50,
           );
         }
       },
 
       onError: (error) => {
-        set({ isLoading: false, isStreaming: false, error });
+        set((s) => ({
+          isLoading: false,
+          isStreaming: false,
+          isThinking: false,
+          thinkingContent: "",
+          messages: pruneEmptyAssistantMessages(
+            finalizeTransientAssistantMessages(s.messages),
+          ),
+          error,
+        }));
       },
     };
   }
@@ -1546,7 +1661,11 @@ export function createSessionStore(
 
     // -- sendMessage --------------------------------------------------------
 
-    async sendMessage(content: string, attachments: Attachment[] = []) {
+    async sendMessage(
+      content: string,
+      attachments: Attachment[] = [],
+      researchEnabled = false,
+    ) {
       const state = get();
       const ws = workspace.getState();
       const normalizedContent = content.trim();
@@ -1576,18 +1695,45 @@ export function createSessionStore(
             };
           }
           return {
-            queuedMessages: [...s.queuedMessages, { content, attachments }],
+            queuedMessages: [
+              ...s.queuedMessages,
+              { content, attachments, researchEnabled },
+            ],
             messages: [
               ...s.messages,
-              { role: "user", content: displayContent, isQueued: true },
+              {
+                id: createChatMessageId("user-queued"),
+                role: "user",
+                content: displayContent,
+                isQueued: true,
+              },
             ],
           };
         });
         return;
       }
 
+      const ref: AssistantMessageRef = {
+        current: {
+          id: createChatMessageId("assistant-stream"),
+          role: "assistant",
+          content: "",
+          thinking: "",
+          toolCalls: [],
+          kind: "streaming",
+        },
+      };
+
       set((s) => ({
-        messages: [...s.messages, { role: "user", content: displayContent }],
+        messages: [
+          ...s.messages,
+          {
+            id: createChatMessageId("user"),
+            role: "user",
+            content: displayContent,
+          },
+          ref.current,
+        ],
         isLoading: true,
         isStreaming: true,
         error: null,
@@ -1606,15 +1752,6 @@ export function createSessionStore(
             ? buildContentBlocks(requestMessage, attachments)
             : undefined;
 
-        const ref: AssistantMessageRef = {
-          current: {
-            role: "assistant",
-            content: "",
-            thinking: "",
-            toolCalls: [],
-          },
-        };
-
         await client.streamChat(
           {
             session_id: state.sessionId ?? undefined,
@@ -1623,6 +1760,7 @@ export function createSessionStore(
             project_dir: state.sessionId ? undefined : ws.directory,
             working_dir: state.sessionId ? undefined : ws.directory,
             workspace_mode: state.sessionId ? undefined : ws.mode,
+            research_enabled: researchEnabled || undefined,
             model: state.model ?? undefined,
             thinking_enabled: thinkingLevelToApiValue(state.thinkingLevel),
             permission_mode: state.permissionMode,
@@ -1632,11 +1770,16 @@ export function createSessionStore(
           abortController.signal,
         );
       } catch (err) {
-        set({
+        set((s) => ({
           isLoading: false,
           isStreaming: false,
+          isThinking: false,
+          thinkingContent: "",
+          messages: pruneEmptyAssistantMessages(
+            finalizeTransientAssistantMessages(s.messages),
+          ),
           error: toErrorMessage(err),
-        });
+        }));
       } finally {
         get().stopStatePolling();
       }
@@ -1664,7 +1807,7 @@ export function createSessionStore(
           sessionId: data.session.id,
           title: data.session.title || "Untitled",
           mode,
-          model: data.session.model ?? null,
+          model: data.session.model ?? s.model,
           tokenCount: data.session.token_count ?? 0,
           messages: applyLivePartialAssistant(
             applyRecoveryParity(
@@ -1705,17 +1848,27 @@ export function createSessionStore(
     clearSession() {
       const current = get();
       get().stopPresenceHeartbeat(current.sessionId);
-      set({ ...initialState, permissionMode: loadPermissionMode() });
+      set({
+        ...initialState,
+        permissionMode: current.permissionMode,
+        model: current.model,
+        thinkingLevel: current.thinkingLevel,
+        thinkingEnabled: current.thinkingEnabled,
+      });
       workspace.getState().clear();
     },
 
     // -- initSession --------------------------------------------------------
 
     initSession(sessionId: string, title: string) {
-      get().stopPresenceHeartbeat(get().sessionId);
+      const current = get();
+      get().stopPresenceHeartbeat(current.sessionId);
       set({
         ...initialState,
-        permissionMode: loadPermissionMode(),
+        permissionMode: current.permissionMode,
+        model: current.model,
+        thinkingLevel: current.thinkingLevel,
+        thinkingEnabled: current.thinkingEnabled,
         sessionId,
         title,
       });
@@ -1817,15 +1970,17 @@ export function createSessionStore(
 
       const ref: AssistantMessageRef = {
         current: {
+          id: createChatMessageId("assistant-stream"),
           role: "assistant",
           content: "",
           thinking: "",
           toolCalls: [],
+          kind: "streaming",
         },
       };
 
       set((s) => ({
-        messages: [...s.messages, ref.current],
+        messages: upsertTransientAssistantMessage(s.messages, ref.current),
       }));
 
       try {
@@ -1839,11 +1994,16 @@ export function createSessionStore(
           abortController.signal,
         );
       } catch (err) {
-        set({
+        set((s) => ({
           isLoading: false,
           isStreaming: false,
+          isThinking: false,
+          thinkingContent: "",
+          messages: pruneEmptyAssistantMessages(
+            finalizeTransientAssistantMessages(s.messages),
+          ),
           error: toErrorMessage(err),
-        });
+        }));
       } finally {
         get().stopStatePolling();
       }
@@ -1882,7 +2042,15 @@ export function createSessionStore(
     stopStreaming() {
       abortController?.abort();
       get().stopStatePolling();
-      set({ isLoading: false, isStreaming: false, isThinking: false });
+      set((s) => ({
+        isLoading: false,
+        isStreaming: false,
+        isThinking: false,
+        thinkingContent: "",
+        messages: pruneEmptyAssistantMessages(
+          finalizeTransientAssistantMessages(s.messages),
+        ),
+      }));
     },
 
     // -- state polling ------------------------------------------------------

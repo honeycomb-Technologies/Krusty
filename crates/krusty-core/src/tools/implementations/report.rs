@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::storage::{Database, ReportStore};
+use crate::storage::reports::promote_report_content;
+use crate::storage::reports::CreateReportInput;
+use crate::storage::{refresh_current_snapshot, Database, MemoryStore, MemoryType, ReportStore};
 use crate::tools::parse_params;
 use crate::tools::registry::{Tool, ToolContext, ToolResult};
 
@@ -22,6 +24,10 @@ struct CreateReportParams {
     tags: Option<Vec<String>>,
     #[serde(default)]
     sources: Option<Vec<String>>,
+    #[serde(default)]
+    promote_to_memory: bool,
+    #[serde(default)]
+    memory_type: Option<String>,
 }
 
 #[async_trait]
@@ -48,7 +54,9 @@ Structure:
 - content: Full Markdown content (can be lengthy)
 - summary: One-line summary for listing views
 - tags: Categorization labels for search (e.g., "auth", "database", "api")
-- sources: References consulted (files, URLs, RFCs, etc.)"#,
+- sources: References consulted (files, URLs, RFCs, etc.)
+- promote_to_memory: Set true when the finding should become durable project memory
+- memory_type: Optional memory type for promoted reports (defaults to "project")"#,
         )
     }
 
@@ -77,6 +85,15 @@ Structure:
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "References consulted (files, URLs, RFCs)"
+                },
+                "promote_to_memory": {
+                    "type": "boolean",
+                    "description": "Also promote the report summary into persistent memory"
+                },
+                "memory_type": {
+                    "type": "string",
+                    "enum": ["user", "feedback", "project", "reference"],
+                    "description": "Memory type to use when promote_to_memory is true"
                 }
             },
             "required": ["title", "content"],
@@ -116,21 +133,90 @@ Structure:
         let summary = params.summary.as_deref().unwrap_or("");
         let tags = params.tags.unwrap_or_default();
         let sources = params.sources.unwrap_or_default();
+        let user_id = ctx.user_id.as_deref();
+        let promotion_memory_type = if params.promote_to_memory {
+            match params.memory_type.as_deref() {
+                Some(raw) => match raw.parse::<MemoryType>() {
+                    Ok(memory_type) => Some(memory_type),
+                    Err(_) => {
+                        return ToolResult::invalid_parameters(format!(
+                            "Invalid memory_type '{}'. Valid types: user, feedback, project, reference",
+                            raw
+                        ));
+                    }
+                },
+                None => Some(MemoryType::Project),
+            }
+        } else {
+            None
+        };
 
-        match store.create_report(
-            &params.title,
+        match store.create_report(CreateReportInput {
+            title: &params.title,
             session_id,
-            project_dir.as_deref(),
-            Some(report_root),
-            &params.content,
+            project_dir: project_dir.as_deref(),
+            report_root: Some(report_root),
+            content: &params.content,
             summary,
-            &tags,
-            &sources,
-        ) {
-            Ok(report_id) => ToolResult::success_data(json!({
-                "report_id": report_id,
-                "title": params.title,
-            })),
+            tags: &tags,
+            sources: &sources,
+        }) {
+            Ok(report_id) => {
+                let promoted_memory = if let Some(memory_type) = promotion_memory_type {
+                    let memory_store = MemoryStore::new(match Database::new(db_path) {
+                        Ok(db) => db,
+                        Err(e) => return ToolResult::error(format!("Database error: {e}")),
+                    });
+                    let report = match store.get_report(&report_id) {
+                        Ok(Some(report)) => report,
+                        Ok(None) => {
+                            return ToolResult::error(format!(
+                                "Report '{}' was created but could not be reloaded for promotion",
+                                report_id
+                            ));
+                        }
+                        Err(e) => {
+                            return ToolResult::error(format!(
+                                "Failed to reload created report for promotion: {e}"
+                            ));
+                        }
+                    };
+                    let memory_content = promote_report_content(&report);
+                    match memory_store.save_or_update_by_title(
+                        memory_type,
+                        &report.title,
+                        &memory_content,
+                        project_dir.as_deref(),
+                        user_id,
+                    ) {
+                        Ok((memory, created)) => Some(json!({
+                            "id": memory.id,
+                            "memory_type": memory.memory_type.as_str(),
+                            "title": memory.title,
+                            "created": created,
+                        })),
+                        Err(e) => {
+                            return ToolResult::error(format!(
+                                "Report created but memory promotion failed: {e}"
+                            ));
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                if let Err(e) = refresh_current_snapshot(db_path, project_dir.as_deref(), user_id) {
+                    return ToolResult::error(format!(
+                        "report created but snapshot refresh failed: {e}"
+                    ));
+                }
+
+                ToolResult::success_data(json!({
+                    "report_id": report_id,
+                    "title": params.title,
+                    "promoted_memory": promoted_memory,
+                }))
+            }
             Err(e) => ToolResult::error(format!("Failed to create report: {e}")),
         }
     }
@@ -160,7 +246,7 @@ impl Tool for ListReportsTool {
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            r#"Query existing reports for context from prior research. Omit query to list all reports for the current project. Provide a query string to search by title or tags.
+            r#"Query existing reports for context from prior research. Omit query to list all reports for the current project. Provide a query string to search by title, summary, tags, or sources.
 
 Use this to check if relevant research already exists before starting a new investigation."#,
         )
@@ -172,7 +258,7 @@ Use this to check if relevant research already exists before starting a new inve
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query to filter by title or tags (omit for all reports)"
+                    "description": "Search query to filter by title, summary, tags, or sources (omit for all reports)"
                 }
             },
             "additionalProperties": false
@@ -313,9 +399,28 @@ impl Tool for ReadReportTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    use crate::storage::{MemoryStore, SessionManager, WorkspaceMode};
 
     fn default_ctx() -> ToolContext {
         ToolContext::default()
+    }
+
+    fn session_ctx() -> (ToolContext, TempDir) {
+        let temp = TempDir::new().expect("temp dir");
+        let db_path = temp.path().join("krusty.db");
+        let session_id = SessionManager::new(Database::new(&db_path).expect("db"))
+            .create_session(
+                "report test",
+                None,
+                Some(temp.path().to_string_lossy().as_ref()),
+            )
+            .expect("session");
+        let ctx = ToolContext::default()
+            .with_workspace(Some(temp.path().to_path_buf()), WorkspaceMode::Selected)
+            .with_session_metadata(session_id, db_path);
+        (ctx, temp)
     }
 
     #[tokio::test]
@@ -377,6 +482,72 @@ mod tests {
     async fn create_report_missing_fields() {
         let result = CreateReportTool.execute(json!({}), &default_ctx()).await;
         assert!(result.is_error);
+    }
+
+    #[tokio::test]
+    async fn create_report_promotes_memory_when_requested() {
+        let (ctx, _temp) = session_ctx();
+
+        let result = CreateReportTool
+            .execute(
+                json!({
+                    "title": "Wake audit",
+                    "content": "# Wake\nThe wake flow is stable.",
+                    "summary": "Wake flow is stable.",
+                    "promote_to_memory": true,
+                    "memory_type": "project"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(!result.is_error);
+        let payload: Value = serde_json::from_str(&result.output).expect("json tool result");
+        let promoted = payload
+            .get("data")
+            .and_then(|value| value.as_object())
+            .and_then(|data| data.get("promoted_memory"))
+            .and_then(|value| value.as_object())
+            .expect("promoted memory object");
+        assert_eq!(
+            promoted.get("memory_type").and_then(|value| value.as_str()),
+            Some("project")
+        );
+        assert_eq!(
+            promoted.get("title").and_then(|value| value.as_str()),
+            Some("Wake audit")
+        );
+
+        let memories = MemoryStore::new(Database::new(ctx.db_path.as_ref().expect("db")).unwrap())
+            .list(
+                ctx.project_dir.as_ref().and_then(|path| path.to_str()),
+                None,
+            );
+        let durable = memories
+            .iter()
+            .find(|memory| memory.title == "Wake audit")
+            .expect("durable promoted memory");
+        assert_eq!(durable.content, "Wake flow is stable.");
+    }
+
+    #[tokio::test]
+    async fn create_report_rejects_invalid_promoted_memory_type() {
+        let (ctx, _temp) = session_ctx();
+
+        let result = CreateReportTool
+            .execute(
+                json!({
+                    "title": "Wake audit",
+                    "content": "# Wake\nThe wake flow is stable.",
+                    "promote_to_memory": true,
+                    "memory_type": "unknown"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.output.contains("Invalid memory_type"));
     }
 
     #[tokio::test]

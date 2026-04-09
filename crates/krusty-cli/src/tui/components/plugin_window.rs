@@ -148,17 +148,6 @@ impl PluginWindowState {
     pub fn unfocus(&mut self) {
         self.focused = false;
     }
-
-    /// Check if a point is within the plugin window area
-    #[allow(dead_code)]
-    pub fn contains_point(&self, x: u16, y: u16) -> bool {
-        if let Some(area) = self.last_area {
-            x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height
-        } else {
-            false
-        }
-    }
-
     /// Set the active plugin
     pub fn set_plugin(&mut self, plugin: Option<Box<dyn Plugin>>) {
         // Clear graphics from old plugin

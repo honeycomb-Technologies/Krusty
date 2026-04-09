@@ -1,27 +1,33 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use serde_json::json;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use krusty_core::agent::coordinator_prompt::COORDINATOR_SYSTEM_PROMPT;
+use krusty_core::agent::coordinator_prompt::system_prompt_for_session;
 use krusty_core::agent::loop_events::LoopStopReason;
 use krusty_core::agent::{LoopEvent, LoopInput, OrchestratorConfig, OrchestratorServices};
 use krusty_core::ai::client::CallOptions;
 use krusty_core::ai::types::{ModelMessage, Role};
 use krusty_core::plan::PlanManager;
 use krusty_core::storage::{
-    Database, MakoRuntimeStateStatus, MakoRuntimeStateStore, SessionManager, SessionType,
+    refresh_current_snapshot, Database, MakoRunPriority, MakoRuntimeStateStatus,
+    MakoRuntimeStateStore, ProjectSettings, SessionManager, SessionType,
 };
 use krusty_core::tools::registry::PermissionMode;
 
+use crate::apns::{ApnsEventType, ApnsPayload};
+use crate::notifications::{fire_apns, fire_push, session_title};
+use crate::push::{PushEventType, PushPayload};
 use crate::types::AgenticEvent;
 use crate::AppState;
 
@@ -35,6 +41,7 @@ pub struct MakoRuntimeManager {
     event_streams: RwLock<HashMap<String, broadcast::Sender<AgenticEvent>>>,
     scheduled_wakes: RwLock<HashMap<String, JoinHandle<()>>>,
     wake_tx: mpsc::UnboundedSender<WakeCommand>,
+    started_at: Instant,
 }
 
 struct ActiveMakoRuntime {
@@ -48,6 +55,14 @@ struct WakeCommand {
     wake_reason: String,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MakoRuntimeStats {
+    pub active_runtime_count: usize,
+    pub scheduled_wake_count: usize,
+    pub event_stream_count: usize,
+    pub uptime_secs: u64,
+}
+
 impl MakoRuntimeManager {
     pub fn new() -> Arc<Self> {
         let (wake_tx, mut wake_rx) = mpsc::unbounded_channel();
@@ -56,6 +71,7 @@ impl MakoRuntimeManager {
             event_streams: RwLock::new(HashMap::new()),
             scheduled_wakes: RwLock::new(HashMap::new()),
             wake_tx,
+            started_at: Instant::now(),
         });
 
         let weak_manager = Arc::downgrade(&manager);
@@ -119,58 +135,113 @@ impl MakoRuntimeManager {
                 continue;
             }
 
-            match runtime_state.status {
-                MakoRuntimeStateStatus::Running => {
-                    tracing::info!(
-                        session_id = %runtime_state.session_id,
-                        "Recovering running Mako session after server startup"
-                    );
-                    self.start_or_restart_session(
-                        state.clone(),
-                        runtime_state.session_id.clone(),
-                        "startup_recover_running",
-                    )
-                    .await?;
-                }
-                MakoRuntimeStateStatus::Sleeping => {
-                    let wake_at = runtime_state
-                        .next_wake_at
-                        .as_deref()
-                        .and_then(parse_wake_at);
-                    match wake_at {
-                        Some(wake_at) if wake_at > chrono::Utc::now() => {
-                            tracing::info!(
-                                session_id = %runtime_state.session_id,
-                                wake_at = %wake_at,
-                                "Scheduling persisted sleeping Mako session after server startup"
-                            );
-                            self.schedule_wake_at(
-                                state.clone(),
-                                runtime_state.session_id.clone(),
-                                wake_at,
-                                "startup_resume_sleep",
-                            )
-                            .await;
-                        }
-                        _ => {
-                            tracing::info!(
-                                session_id = %runtime_state.session_id,
-                                "Resuming persisted sleeping Mako session immediately after server startup"
-                            );
-                            self.start_or_restart_session(
-                                state.clone(),
-                                runtime_state.session_id.clone(),
-                                "startup_resume_sleep",
-                            )
-                            .await?;
-                        }
-                    }
-                }
-                _ => {}
-            }
+            self.recover_persisted_state(state.clone(), &runtime_state, "startup_recover")
+                .await?;
         }
 
         Ok(())
+    }
+
+    pub async fn recover_persisted_state(
+        &self,
+        state: AppState,
+        runtime_state: &krusty_core::storage::MakoRuntimeState,
+        wake_reason: &'static str,
+    ) -> Result<()> {
+        match runtime_state.status {
+            MakoRuntimeStateStatus::Running => {
+                tracing::info!(
+                    session_id = %runtime_state.session_id,
+                    "Recovering persisted running Mako session"
+                );
+                self.start_or_restart_session(state, runtime_state.session_id.clone(), wake_reason)
+                    .await
+            }
+            MakoRuntimeStateStatus::Sleeping => {
+                let wake_at = runtime_state
+                    .next_wake_at
+                    .as_deref()
+                    .and_then(parse_wake_at);
+                match wake_at {
+                    Some(wake_at) if wake_at > chrono::Utc::now() => {
+                        tracing::info!(
+                            session_id = %runtime_state.session_id,
+                            wake_at = %wake_at,
+                            "Scheduling persisted sleeping Mako session"
+                        );
+                        self.stop_active_run(&state, &runtime_state.session_id)
+                            .await;
+                        ensure_runnable_mako_session(&state.db_path, &runtime_state.session_id)?;
+                        persist_runtime_state(
+                            &state.db_path,
+                            &runtime_state.session_id,
+                            MakoRuntimeStateStatus::Sleeping,
+                            Some(&wake_at.to_rfc3339()),
+                            runtime_state.sleep_reason.as_deref(),
+                            None,
+                            None,
+                            Some(wake_reason),
+                        )?;
+                        self.schedule_wake_at(
+                            state,
+                            runtime_state.session_id.clone(),
+                            wake_at,
+                            wake_reason,
+                        )
+                        .await;
+                        Ok(())
+                    }
+                    _ => {
+                        tracing::info!(
+                            session_id = %runtime_state.session_id,
+                            "Resuming persisted sleeping Mako session immediately"
+                        );
+                        self.start_or_restart_session(
+                            state,
+                            runtime_state.session_id.clone(),
+                            wake_reason,
+                        )
+                        .await
+                    }
+                }
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub async fn stats_for_sessions(&self, session_ids: &[String]) -> MakoRuntimeStats {
+        let session_ids = session_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        let active_runtime_count = self
+            .runtimes
+            .read()
+            .await
+            .keys()
+            .filter(|session_id| session_ids.contains(session_id.as_str()))
+            .count();
+        let scheduled_wake_count = self
+            .scheduled_wakes
+            .read()
+            .await
+            .keys()
+            .filter(|session_id| session_ids.contains(session_id.as_str()))
+            .count();
+        let event_stream_count = self
+            .event_streams
+            .read()
+            .await
+            .keys()
+            .filter(|session_id| session_ids.contains(session_id.as_str()))
+            .count();
+
+        MakoRuntimeStats {
+            active_runtime_count,
+            scheduled_wake_count,
+            event_stream_count,
+            uptime_secs: self.started_at.elapsed().as_secs(),
+        }
     }
 
     pub async fn start_or_restart_session(
@@ -180,8 +251,7 @@ impl MakoRuntimeManager {
         wake_reason: &str,
     ) -> Result<()> {
         self.stop_active_run(&state, &session_id).await;
-
-        let event_tx = self.event_sender(&session_id).await;
+        ensure_runnable_mako_session(&state.db_path, &session_id)?;
         let run_id = Uuid::new_v4().to_string();
         persist_runtime_state(
             &state.db_path,
@@ -194,6 +264,7 @@ impl MakoRuntimeManager {
             Some(wake_reason),
         )?;
 
+        let event_tx = self.event_sender(&session_id).await;
         let state_clone = state.clone();
         let session_id_clone = session_id.clone();
         let run_id_clone = run_id.clone();
@@ -265,6 +336,31 @@ impl MakoRuntimeManager {
         )
     }
 
+    pub async fn schedule_session(
+        &self,
+        state: &AppState,
+        session_id: String,
+        wake_at: chrono::DateTime<chrono::Utc>,
+        wake_reason: &'static str,
+        sleep_reason: &'static str,
+    ) -> Result<()> {
+        self.stop_active_run(state, &session_id).await;
+        ensure_runnable_mako_session(&state.db_path, &session_id)?;
+        persist_runtime_state(
+            &state.db_path,
+            &session_id,
+            MakoRuntimeStateStatus::Sleeping,
+            Some(&wake_at.to_rfc3339()),
+            Some(sleep_reason),
+            None,
+            None,
+            Some(wake_reason),
+        )?;
+        self.schedule_wake_at(state.clone(), session_id, wake_at, wake_reason)
+            .await;
+        Ok(())
+    }
+
     pub async fn stop_active_run(&self, state: &AppState, session_id: &str) {
         self.cancel_scheduled_wake(session_id).await;
 
@@ -288,6 +384,7 @@ impl MakoRuntimeManager {
             join_handle.abort();
         }
         let _ = join_handle.await;
+        state.session_inputs.write().await.remove(session_id);
     }
 
     pub async fn finish_run(&self, session_id: &str, run_id: &str) {
@@ -444,12 +541,14 @@ async fn run_mako_session_inner(
         .as_deref()
         .map(PathBuf::from)
         .unwrap_or_else(|| (*state.working_dir).clone());
+    let project_dir = resolve_persisted_project_dir(session.project_dir.as_deref(), &working_dir);
+    let mako_settings = ProjectSettings::load_mako_settings(project_dir.as_deref());
 
     let options = CallOptions {
         tools: Some(state.tool_registry.get_ai_tools().await),
         session_id: Some(session_id.clone()),
         codex_parallel_tool_calls: true,
-        system_prompt: Some(COORDINATOR_SYSTEM_PROMPT.to_string()),
+        system_prompt: system_prompt_for_session(SessionType::Mako),
         ..Default::default()
     };
 
@@ -463,6 +562,8 @@ async fn run_mako_session_inner(
     let config = OrchestratorConfig {
         session_id: session_id.clone(),
         working_dir,
+        project_dir,
+        session_type: SessionType::Mako,
         permission_mode: PermissionMode::Autonomous,
         user_id: session.user_id.clone(),
         initial_work_mode: work_mode,
@@ -476,8 +577,8 @@ async fn run_mako_session_inner(
             services,
             config,
             TickEngineConfig {
-                tick_interval: Duration::from_secs(30),
-                max_ticks: 1000,
+                tick_interval: Duration::from_secs(mako_settings.tick_interval_secs),
+                max_ticks: mako_settings.max_ticks,
                 enabled: true,
             },
             conversation,
@@ -485,29 +586,164 @@ async fn run_mako_session_inner(
         )
     };
 
-    state
-        .session_inputs
+    let session_inputs = Arc::clone(&state.session_inputs);
+    let push_service = state.push_service.clone();
+    let apns_service = state.apns_service.clone();
+    let user_id = session.user_id.clone();
+    let project_scope = session.project_dir.clone();
+    with_registered_session_input(session_inputs, session_id.clone(), input_tx, async {
+        let mut awaiting_input = false;
+        let mut had_error = false;
+        let mut stop_reason: Option<LoopStopReason> = None;
+        let mut sent_user_message = false;
+
+        while let Some(loop_event) = event_rx.recv().await {
+            if let LoopEvent::Finished {
+                stop_reason: ref reason,
+                ..
+            } = loop_event
+            {
+                stop_reason = Some(reason.clone());
+            }
+
+            if let LoopEvent::AgentSleeping { duration_secs, .. } = &loop_event {
+                let wake_at = chrono::Utc::now() + chrono::Duration::seconds(*duration_secs as i64);
+                manager
+                    .schedule_wake_at(state.clone(), session_id.clone(), wake_at, "sleep")
+                    .await;
+            }
+
+            if matches!(loop_event, LoopEvent::AwaitingInput { .. }) {
+                awaiting_input = true;
+                notify_mako_awaiting_input(
+                    &push_service,
+                    &apns_service,
+                    user_id.as_deref(),
+                    &session_id,
+                );
+            }
+
+            if let LoopEvent::ToolApprovalRequired {
+                ref id, ref name, ..
+            } = loop_event
+            {
+                notify_mako_tool_approval(&apns_service, user_id.as_deref(), &session_id, id, name);
+            }
+
+            if let LoopEvent::UserMessage {
+                ref title,
+                ref message,
+                ref level,
+            } = loop_event
+            {
+                sent_user_message = true;
+                notify_mako_user_message(
+                    &state.db_path,
+                    &push_service,
+                    &apns_service,
+                    user_id.as_deref(),
+                    &session_id,
+                    title.as_deref(),
+                    message,
+                    level,
+                );
+            }
+
+            if let LoopEvent::Error { .. } = &loop_event {
+                had_error = true;
+            }
+
+            apply_runtime_event_state(&state.db_path, &session_id, &run_id, &loop_event)?;
+            let is_finished = matches!(loop_event, LoopEvent::Finished { .. });
+            let _ = event_tx.send(loop_event.into());
+            if is_finished {
+                break;
+            }
+        }
+
+        refresh_snapshot_after_run(
+            &state.db_path,
+            project_scope.as_deref(),
+            user_id.as_deref(),
+            stop_reason.as_ref(),
+        );
+
+        if !awaiting_input {
+            if had_error {
+                notify_mako_error(
+                    &state.db_path,
+                    &push_service,
+                    &apns_service,
+                    user_id.as_deref(),
+                    &session_id,
+                );
+            } else if stop_reason == Some(LoopStopReason::Sleeping) {
+                tracing::info!(
+                    session_id = %session_id,
+                    "Mako session entered sleeping state; skipping completion push"
+                );
+            } else if !sent_user_message {
+                notify_mako_completion(
+                    &state.db_path,
+                    &push_service,
+                    &apns_service,
+                    user_id.as_deref(),
+                    &session_id,
+                );
+            }
+        }
+
+        Ok(())
+    })
+    .await
+}
+
+fn refresh_snapshot_after_run(
+    db_path: &Path,
+    project_dir: Option<&str>,
+    user_id: Option<&str>,
+    stop_reason: Option<&LoopStopReason>,
+) {
+    if matches!(stop_reason, Some(LoopStopReason::Sleeping) | None) {
+        return;
+    }
+
+    if let Err(error) = refresh_current_snapshot(db_path, project_dir, user_id) {
+        tracing::warn!(
+            ?error,
+            project_dir,
+            "Failed to refresh Mako current snapshot after run"
+        );
+    }
+}
+
+fn ensure_runnable_mako_session(db_path: &Path, session_id: &str) -> Result<()> {
+    let session_manager = SessionManager::new(Database::new(db_path)?);
+    let session = session_manager
+        .get_session(session_id)?
+        .ok_or_else(|| anyhow::anyhow!("session not found"))?;
+    if session.session_type != SessionType::Mako {
+        anyhow::bail!("session is not a mako session");
+    }
+    Ok(())
+}
+
+async fn with_registered_session_input<T, F>(
+    session_inputs: Arc<RwLock<crate::SessionInputMap>>,
+    session_id: String,
+    input_tx: tokio::sync::mpsc::UnboundedSender<LoopInput>,
+    future: F,
+) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    session_inputs
         .write()
         .await
         .insert(session_id.clone(), input_tx);
-
-    while let Some(loop_event) = event_rx.recv().await {
-        if let LoopEvent::AgentSleeping { duration_secs, .. } = &loop_event {
-            let wake_at = chrono::Utc::now() + chrono::Duration::seconds(*duration_secs as i64);
-            manager
-                .schedule_wake_at(state.clone(), session_id.clone(), wake_at, "sleep")
-                .await;
-        }
-        apply_runtime_event_state(&state.db_path, &session_id, &run_id, &loop_event)?;
-        let is_finished = matches!(loop_event, LoopEvent::Finished { .. });
-        let _ = event_tx.send(loop_event.into());
-        if is_finished {
-            break;
-        }
-    }
-
-    state.session_inputs.write().await.remove(&session_id);
-    Ok(())
+    let result = future.await;
+    session_inputs.write().await.remove(&session_id);
+    result
 }
 
 fn load_conversation(raw_messages: Vec<(String, String)>) -> Vec<ModelMessage> {
@@ -526,39 +762,64 @@ fn load_conversation(raw_messages: Vec<(String, String)>) -> Vec<ModelMessage> {
         .collect()
 }
 
+fn resolve_persisted_project_dir(
+    stored_project_dir: Option<&str>,
+    workspace_base: &Path,
+) -> Option<PathBuf> {
+    let raw = stored_project_dir
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let candidate = PathBuf::from(raw);
+    Some(if candidate.is_absolute() {
+        candidate
+    } else {
+        workspace_base.join(candidate)
+    })
+}
+
 fn apply_runtime_event_state(
     db_path: &Path,
     session_id: &str,
     run_id: &str,
     event: &LoopEvent,
 ) -> Result<()> {
+    let store = MakoRuntimeStateStore::new(Database::new(db_path)?);
+    let existing_state = store.get_state(session_id)?;
+    let existing_wake_reason = existing_state
+        .as_ref()
+        .and_then(|state| state.last_wake_reason.as_deref());
+    let existing_priority = existing_state
+        .as_ref()
+        .map(|state| state.priority)
+        .unwrap_or(MakoRunPriority::Normal);
+
     match event {
         LoopEvent::AgentSleeping {
             duration_secs,
             reason,
         } => {
             let wake_at = chrono::Utc::now() + chrono::Duration::seconds(*duration_secs as i64);
-            persist_runtime_state(
-                db_path,
+            store.set_state(
                 session_id,
                 MakoRuntimeStateStatus::Sleeping,
                 Some(&wake_at.to_rfc3339()),
                 Some(reason),
                 None,
-                None,
-                Some("sleep"),
+                Some(run_id),
+                existing_wake_reason.or(Some("sleep")),
+                existing_priority,
             )?;
         }
         LoopEvent::AwaitingInput { .. } => {
-            persist_runtime_state(
-                db_path,
+            store.set_state(
                 session_id,
                 MakoRuntimeStateStatus::AwaitingInput,
                 None,
                 None,
                 None,
                 Some(run_id),
-                Some("awaiting_input"),
+                existing_wake_reason.or(Some("awaiting_input")),
+                existing_priority,
             )?;
         }
         LoopEvent::Finished { stop_reason, .. } => {
@@ -570,30 +831,39 @@ fn apply_runtime_event_state(
                 }
                 _ => MakoRuntimeStateStatus::Idle,
             };
-            persist_runtime_state(db_path, session_id, status, None, None, None, None, None)?;
+            store.set_state(
+                session_id,
+                status,
+                None,
+                None,
+                None,
+                None,
+                existing_wake_reason,
+                existing_priority,
+            )?;
         }
         LoopEvent::Error { error } => {
-            persist_runtime_state(
-                db_path,
+            store.set_state(
                 session_id,
                 MakoRuntimeStateStatus::Error,
                 None,
                 None,
                 Some(error),
                 Some(run_id),
-                Some("error"),
+                existing_wake_reason.or(Some("error")),
+                existing_priority,
             )?;
         }
         _ => {
-            persist_runtime_state(
-                db_path,
+            store.set_state(
                 session_id,
                 MakoRuntimeStateStatus::Running,
                 None,
                 None,
                 None,
                 Some(run_id),
-                Some("running"),
+                existing_wake_reason.or(Some("running")),
+                existing_priority,
             )?;
         }
     }
@@ -604,6 +874,198 @@ fn parse_wake_at(next_wake_at: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(next_wake_at)
         .ok()
         .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
+fn mako_notification_title(title: Option<&str>, session_label: &str) -> String {
+    let label = title
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(session_label);
+    format!("Mako — {label}")
+}
+
+fn notify_mako_user_message(
+    db_path: &Path,
+    push_service: &Option<Arc<crate::push::PushService>>,
+    apns_service: &Option<Arc<crate::apns::ApnsService>>,
+    user_id: Option<&str>,
+    session_id: &str,
+    title: Option<&str>,
+    message: &str,
+    level: &str,
+) {
+    let session_label = session_title(db_path, session_id);
+    let notification_title = mako_notification_title(title, &session_label);
+    fire_push(
+        push_service,
+        user_id,
+        PushPayload {
+            title: notification_title.clone(),
+            body: message.to_string(),
+            session_id: Some(session_id.to_string()),
+            tag: Some(format!("mako-{session_id}")),
+        },
+        PushEventType::MakoUpdate,
+    );
+    fire_apns(
+        apns_service,
+        user_id,
+        ApnsPayload {
+            title: notification_title,
+            body: message.to_string(),
+            session_id: Some(session_id.to_string()),
+            category: Some("MAKO_UPDATE".into()),
+            data: Some(json!({
+                "type": "mako_update",
+                "sessionId": session_id,
+                "level": level,
+                "title": title,
+            })),
+        },
+        ApnsEventType::MakoUpdate,
+    );
+}
+
+fn notify_mako_awaiting_input(
+    push_service: &Option<Arc<crate::push::PushService>>,
+    apns_service: &Option<Arc<crate::apns::ApnsService>>,
+    user_id: Option<&str>,
+    session_id: &str,
+) {
+    fire_push(
+        push_service,
+        user_id,
+        PushPayload {
+            title: "Mako".into(),
+            body: "Mako needs your input".into(),
+            session_id: Some(session_id.to_string()),
+            tag: Some(format!("mako-{session_id}")),
+        },
+        PushEventType::AwaitingInput,
+    );
+    fire_apns(
+        apns_service,
+        user_id,
+        ApnsPayload {
+            title: "Mako".into(),
+            body: "Mako needs your input".into(),
+            session_id: Some(session_id.to_string()),
+            category: Some("MAKO_UPDATE".into()),
+            data: Some(json!({
+                "type": "mako_update",
+                "sessionId": session_id,
+                "level": "warning",
+            })),
+        },
+        ApnsEventType::AwaitingInput,
+    );
+}
+
+fn notify_mako_tool_approval(
+    apns_service: &Option<Arc<crate::apns::ApnsService>>,
+    user_id: Option<&str>,
+    session_id: &str,
+    request_id: &str,
+    tool_name: &str,
+) {
+    fire_apns(
+        apns_service,
+        user_id,
+        ApnsPayload {
+            title: "Tool Approval Required".into(),
+            body: format!("Mako wants to run \"{tool_name}\"."),
+            session_id: Some(session_id.to_string()),
+            category: Some("TOOL_APPROVAL".into()),
+            data: Some(json!({
+                "requestId": request_id,
+                "sessionId": session_id,
+                "toolName": tool_name,
+                "type": "tool_approval",
+            })),
+        },
+        ApnsEventType::ToolApproval,
+    );
+}
+
+fn notify_mako_error(
+    db_path: &Path,
+    push_service: &Option<Arc<crate::push::PushService>>,
+    apns_service: &Option<Arc<crate::apns::ApnsService>>,
+    user_id: Option<&str>,
+    session_id: &str,
+) {
+    let session_label = session_title(db_path, session_id);
+    fire_push(
+        push_service,
+        user_id,
+        PushPayload {
+            title: "Mako".into(),
+            body: format!("{session_label} encountered an error"),
+            session_id: Some(session_id.to_string()),
+            tag: Some(format!("mako-{session_id}")),
+        },
+        PushEventType::Error,
+    );
+    fire_apns(
+        apns_service,
+        user_id,
+        ApnsPayload {
+            title: format!(
+                "{} — Attention needed",
+                mako_notification_title(None, &session_label)
+            ),
+            body: "Run encountered an error".into(),
+            session_id: Some(session_id.to_string()),
+            category: Some("MAKO_UPDATE".into()),
+            data: Some(json!({
+                "type": "mako_update",
+                "sessionId": session_id,
+                "level": "error",
+            })),
+        },
+        ApnsEventType::Error,
+    );
+}
+
+fn notify_mako_completion(
+    db_path: &Path,
+    push_service: &Option<Arc<crate::push::PushService>>,
+    apns_service: &Option<Arc<crate::apns::ApnsService>>,
+    user_id: Option<&str>,
+    session_id: &str,
+) {
+    let session_label = session_title(db_path, session_id);
+    let notification_title = format!(
+        "{} — Complete",
+        mako_notification_title(None, &session_label)
+    );
+    fire_push(
+        push_service,
+        user_id,
+        PushPayload {
+            title: "Mako".into(),
+            body: format!("{session_label} is complete"),
+            session_id: Some(session_id.to_string()),
+            tag: Some(format!("mako-{session_id}")),
+        },
+        PushEventType::MakoUpdate,
+    );
+    fire_apns(
+        apns_service,
+        user_id,
+        ApnsPayload {
+            title: notification_title,
+            body: "Run finished".into(),
+            session_id: Some(session_id.to_string()),
+            category: Some("MAKO_UPDATE".into()),
+            data: Some(json!({
+                "type": "mako_update",
+                "sessionId": session_id,
+                "level": "success",
+            })),
+        },
+        ApnsEventType::MakoUpdate,
+    );
 }
 
 fn persist_runtime_state(
@@ -617,6 +1079,10 @@ fn persist_runtime_state(
     last_wake_reason: Option<&str>,
 ) -> Result<()> {
     let store = MakoRuntimeStateStore::new(Database::new(db_path)?);
+    let priority = store
+        .get_state(session_id)?
+        .map(|state| state.priority)
+        .unwrap_or(MakoRunPriority::Normal);
     store.set_state(
         session_id,
         status,
@@ -625,5 +1091,379 @@ fn persist_runtime_state(
         last_error,
         current_run_id,
         last_wake_reason,
+        priority,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use tokio::sync::{Mutex, RwLock};
+
+    use krusty_core::agent::loop_events::LoopStopReason;
+    use krusty_core::agent::{AgentCancellation, LoopEvent, LoopInput, UserHookManager};
+    use krusty_core::ai::models::create_model_registry;
+    use krusty_core::mcp::McpManager;
+    use krusty_core::process::ProcessRegistry;
+    use krusty_core::skills::SkillsManager;
+    use krusty_core::storage::credentials::CredentialStore;
+    use krusty_core::storage::reports::CreateReportInput;
+    use krusty_core::storage::{
+        Database, MakoRuntimeStateStatus, MakoRuntimeStateStore, MemoryStore, MemoryType,
+        ReportStore, SessionType, WorkspaceMode, CURRENT_SNAPSHOT_TITLE,
+    };
+    use krusty_core::tools::registry::ToolRegistry;
+    use krusty_core::SessionManager;
+
+    use super::{
+        apply_runtime_event_state, mako_notification_title, persist_runtime_state,
+        refresh_snapshot_after_run, resolve_persisted_project_dir, with_registered_session_input,
+        ActiveMakoRuntime, MakoRuntimeManager,
+    };
+    use crate::AppState;
+
+    fn create_test_state() -> (AppState, PathBuf) {
+        let temp_dir =
+            std::env::temp_dir().join(format!("krusty-server-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        let db_path = temp_dir.join("krusty.db");
+        Database::new(&db_path).expect("database should initialize");
+        let working_dir = temp_dir.join("workspace");
+        std::fs::create_dir_all(&working_dir).expect("workspace should exist");
+
+        (
+            AppState {
+                server_port: 3000,
+                db_path: Arc::new(db_path),
+                working_dir: Arc::new(working_dir.clone()),
+                ai_client: None,
+                tool_registry: Arc::new(ToolRegistry::new()),
+                process_registry: Arc::new(ProcessRegistry::new()),
+                model_registry: create_model_registry(),
+                credential_store: Arc::new(RwLock::new(CredentialStore::default())),
+                mcp_manager: Arc::new(McpManager::new(working_dir.clone())),
+                hook_manager: Arc::new(RwLock::new(UserHookManager::new())),
+                skills_manager: Arc::new(RwLock::new(SkillsManager::with_defaults(&working_dir))),
+                cancellation: AgentCancellation::new(),
+                session_locks: Arc::new(RwLock::new(HashMap::new())),
+                session_inputs: Arc::new(RwLock::new(HashMap::new())),
+                session_presence: Arc::new(RwLock::new(HashMap::new())),
+                delegated_state: Arc::new(RwLock::new(HashMap::new())),
+                remote_access: Arc::new(RwLock::new(crate::remote_access::RemoteAccessConfig {
+                    enabled: true,
+                    token: "test-token".to_string(),
+                })),
+                active_agent_streams: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                peak_rss_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                peak_virtual_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                push_service: None,
+                apns_service: None,
+                oauth_flows: Arc::new(Mutex::new(HashMap::new())),
+                mako_runtime: MakoRuntimeManager::new(),
+            },
+            temp_dir,
+        )
+    }
+
+    #[test]
+    fn mako_notification_title_prefers_explicit_title() {
+        assert_eq!(
+            mako_notification_title(Some("Verification complete"), "Auth refactor"),
+            "Mako — Verification complete"
+        );
+    }
+
+    #[test]
+    fn mako_notification_title_falls_back_to_session_label() {
+        assert_eq!(
+            mako_notification_title(Some("   "), "Auth refactor"),
+            "Mako — Auth refactor"
+        );
+        assert_eq!(
+            mako_notification_title(None, "Auth refactor"),
+            "Mako — Auth refactor"
+        );
+    }
+
+    fn create_session(state: &AppState, session_type: SessionType) -> String {
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        session_manager
+            .create_session_for_user_with_config(
+                "Test Session",
+                None,
+                None,
+                None,
+                WorkspaceMode::Neutral,
+                None,
+                None,
+                session_type,
+            )
+            .expect("session should create")
+    }
+
+    fn create_test_user(state: &AppState, user_id: &str) {
+        let db = Database::new(&state.db_path).expect("database should open");
+        db.conn()
+            .execute(
+                "INSERT INTO users (id, email, license_tier) VALUES (?1, ?2, ?3)",
+                (user_id, format!("{user_id}@example.com"), "free"),
+            )
+            .expect("user should insert");
+    }
+
+    #[test]
+    fn resolve_persisted_project_dir_supports_relative_and_absolute_paths() {
+        let workspace = Path::new("/workspace");
+
+        assert_eq!(
+            resolve_persisted_project_dir(Some("repo"), workspace),
+            Some(workspace.join("repo"))
+        );
+        assert_eq!(
+            resolve_persisted_project_dir(Some("/tmp/project"), workspace),
+            Some(PathBuf::from("/tmp/project"))
+        );
+        assert_eq!(resolve_persisted_project_dir(Some("   "), workspace), None);
+    }
+
+    #[tokio::test]
+    async fn start_or_restart_session_rejects_missing_session_without_leaking_runtime_state() {
+        let (state, _temp_dir) = create_test_state();
+
+        let result = state
+            .mako_runtime
+            .start_or_restart_session(state.clone(), "missing-session".to_string(), "test")
+            .await;
+
+        assert!(result.is_err());
+        assert!(!state
+            .mako_runtime
+            .event_streams
+            .read()
+            .await
+            .contains_key("missing-session"));
+        assert!(!state
+            .mako_runtime
+            .runtimes
+            .read()
+            .await
+            .contains_key("missing-session"));
+
+        let runtime_store = MakoRuntimeStateStore::new(
+            Database::new(&state.db_path).expect("database should open"),
+        );
+        assert!(runtime_store
+            .get_state("missing-session")
+            .expect("runtime state lookup should succeed")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn start_or_restart_session_rejects_non_mako_session_without_persisting_runtime_state() {
+        let (state, _temp_dir) = create_test_state();
+        let session_id = create_session(&state, SessionType::Code);
+
+        let result = state
+            .mako_runtime
+            .start_or_restart_session(state.clone(), session_id.clone(), "test")
+            .await;
+
+        assert!(result.is_err());
+        assert!(!state
+            .mako_runtime
+            .event_streams
+            .read()
+            .await
+            .contains_key(&session_id));
+        assert!(!state
+            .mako_runtime
+            .runtimes
+            .read()
+            .await
+            .contains_key(&session_id));
+
+        let runtime_store = MakoRuntimeStateStore::new(
+            Database::new(&state.db_path).expect("database should open"),
+        );
+        assert!(runtime_store
+            .get_state(&session_id)
+            .expect("runtime state lookup should succeed")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn with_registered_session_input_clears_entry_on_error() {
+        let session_inputs = Arc::new(RwLock::new(HashMap::new()));
+        let (input_tx, _input_rx) = tokio::sync::mpsc::unbounded_channel::<LoopInput>();
+
+        let result: anyhow::Result<()> = with_registered_session_input(
+            Arc::clone(&session_inputs),
+            "session-1".to_string(),
+            input_tx,
+            async { anyhow::bail!("boom") },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(session_inputs.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stop_active_run_clears_session_input_when_runtime_is_aborted() {
+        let (state, _temp_dir) = create_test_state();
+        let session_id = "session-1".to_string();
+        let join_handle = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+
+        state.mako_runtime.runtimes.write().await.insert(
+            session_id.clone(),
+            ActiveMakoRuntime {
+                run_id: "run-1".to_string(),
+                join_handle,
+            },
+        );
+
+        let (input_tx, input_rx) = tokio::sync::mpsc::unbounded_channel::<LoopInput>();
+        drop(input_rx);
+        state
+            .session_inputs
+            .write()
+            .await
+            .insert(session_id.clone(), input_tx);
+
+        state
+            .mako_runtime
+            .stop_active_run(&state, &session_id)
+            .await;
+
+        assert!(!state
+            .mako_runtime
+            .runtimes
+            .read()
+            .await
+            .contains_key(&session_id));
+        assert!(state.session_inputs.read().await.get(&session_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn apply_runtime_event_state_preserves_existing_wake_reason_for_running_updates() {
+        let (state, _temp_dir) = create_test_state();
+        let session_id = create_session(&state, SessionType::Mako);
+        persist_runtime_state(
+            &state.db_path,
+            &session_id,
+            MakoRuntimeStateStatus::Running,
+            None,
+            None,
+            None,
+            Some("run-1"),
+            Some("dispatch"),
+        )
+        .expect("seed runtime state");
+
+        apply_runtime_event_state(
+            &state.db_path,
+            &session_id,
+            "run-2",
+            &LoopEvent::ToolCallStart {
+                id: "tool-1".to_string(),
+                name: "read".to_string(),
+            },
+        )
+        .expect("running update should persist");
+
+        let runtime_store = MakoRuntimeStateStore::new(
+            Database::new(&state.db_path).expect("database should open"),
+        );
+        let runtime = runtime_store
+            .get_state(&session_id)
+            .expect("runtime lookup should succeed")
+            .expect("runtime state should exist");
+
+        assert_eq!(runtime.status, MakoRuntimeStateStatus::Running);
+        assert_eq!(runtime.current_run_id.as_deref(), Some("run-2"));
+        assert_eq!(runtime.last_wake_reason.as_deref(), Some("dispatch"));
+    }
+
+    #[tokio::test]
+    async fn refresh_snapshot_after_run_updates_stale_snapshot_content() {
+        let (state, temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        let user_root = temp_dir.join("alice-home");
+        let project_dir = user_root.join("repo");
+        std::fs::create_dir_all(&project_dir).expect("project dir should exist");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let session_id = session_manager
+            .create_session_for_user_with_config(
+                "Knowledge Run",
+                None,
+                Some(project_dir.to_string_lossy().as_ref()),
+                Some(project_dir.to_string_lossy().as_ref()),
+                WorkspaceMode::Selected,
+                Some("alice"),
+                None,
+                SessionType::Mako,
+            )
+            .expect("session should create");
+
+        let report_store =
+            ReportStore::new(Database::new(&state.db_path).expect("database should open"));
+        report_store
+            .create_report(CreateReportInput {
+                title: "Fresh findings",
+                session_id: session_id.as_str(),
+                project_dir: Some(project_dir.to_string_lossy().as_ref()),
+                report_root: None,
+                content: "Fresh findings",
+                summary: "Fresh findings",
+                tags: &[],
+                sources: &[],
+            })
+            .expect("report should persist");
+
+        let memory_store =
+            MemoryStore::new(Database::new(&state.db_path).expect("database should open"));
+        let snapshot = memory_store
+            .save(
+                MemoryType::Project,
+                CURRENT_SNAPSHOT_TITLE,
+                "Stale snapshot",
+                Some(project_dir.to_string_lossy().as_ref()),
+                Some("alice"),
+            )
+            .expect("snapshot should persist");
+        Database::new(&state.db_path)
+            .expect("database should open")
+            .conn()
+            .execute(
+                "UPDATE agent_memories SET updated_at = ?1 WHERE id = ?2",
+                ("2025-01-01T00:00:00Z", snapshot.id.as_str()),
+            )
+            .expect("snapshot should backdate");
+
+        refresh_snapshot_after_run(
+            &state.db_path,
+            Some(project_dir.to_string_lossy().as_ref()),
+            Some("alice"),
+            Some(&LoopStopReason::Completed),
+        );
+
+        let refreshed = memory_store
+            .find_by_title_in_exact_scope(
+                CURRENT_SNAPSHOT_TITLE,
+                Some(project_dir.to_string_lossy().as_ref()),
+                Some("alice"),
+            )
+            .expect("snapshot should still exist");
+
+        assert_ne!(refreshed.updated_at, "2025-01-01T00:00:00Z");
+        assert!(refreshed.content.contains("Fresh findings"));
+    }
 }

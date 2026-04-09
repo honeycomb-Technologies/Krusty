@@ -1,21 +1,17 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import {
   AppState,
+  Dimensions,
   View,
-  FlatList,
   StyleSheet,
   Text,
   Pressable,
   Alert,
-  Keyboard,
-  NativeScrollEvent,
-  NativeSyntheticEvent,
+  ActivityIndicator,
 } from "react-native";
-import {
-  SafeAreaView,
-} from "react-native-safe-area-context";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
-import { Menu, FileSearch, ArrowDown } from "lucide-react-native";
+import { Menu, Toolbox } from "lucide-react-native";
 import * as Haptics from "../../platform/haptics";
 import * as SecureStore from "../../platform/secure-store";
 import { useThemeContext } from "../../hooks/useTheme";
@@ -25,8 +21,9 @@ import {
   useSessionStore,
   useSessionsStore,
   useStores,
+  useWorkspaceStore,
 } from "../../hooks/useStores";
-import { MessageBubble } from "../../components/chat/MessageBubble";
+import { ChatTranscript } from "../../components/chat/ChatTranscript";
 import { KrustyLogo } from "../../components/ui/KrustyLogo";
 import {
   ChatBar,
@@ -34,20 +31,33 @@ import {
 } from "../../components/chat/ChatBar";
 import { SessionDrawer } from "../../components/chat/SessionDrawer";
 import { DesktopShell } from "../../components/layout/DesktopShell";
-import { ReportsViewer } from "../../components/ReportsViewer";
-import { PlanTracker } from "../../components/chat/PlanTracker";
-import { BlurView } from "../../platform/blur";
-import { LinearGradient } from "../../platform/linear-gradient";
+import { ToolboxPanel } from "../../components/ToolboxPanel";
+import { MakoScreen } from "../../components/mako/MakoScreen";
 import { useSplashState } from "../../hooks/useSplashState";
 import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
 import { useLiveActivity } from "../../hooks/useLiveActivity";
 import { useWidgetSync } from "../../hooks/useWidgetSync";
 import { useNotifications } from "../../hooks/useNotifications";
-import Animated from "react-native-reanimated";
-import type { ModelInfo, SessionResponse, SessionType } from "@krusty/api";
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  interpolate,
+  withSpring,
+  withTiming,
+  runOnJS,
+} from "react-native-reanimated";
+
+const SCREEN_HEIGHT = Dimensions.get("window").height;
+const SPLIT_PANEL_HEIGHT = SCREEN_HEIGHT * 0.42;
+
+import type {
+  ChatMessage,
+  ModelInfo,
+  SessionResponse,
+  SessionType,
+} from "@krusty/api";
 import type {
   Attachment as SessionAttachment,
-  ChatMessage,
   PermissionMode,
   ThinkingLevel,
   ToolCall,
@@ -59,14 +69,36 @@ import {
 } from "@krusty/state";
 
 const TAB_TYPES: SessionType[] = ["chat", "code", "mako"];
+const CHAT_BAR_ZONE = 130;
 const SELECTED_MODEL_KEY = "krusty_selected_model";
-const TOP_EDGE_HEIGHT = 64;
-const BOTTOM_EDGE_HEIGHT = 88;
-const EDGE_GAP = 12;
-const TRACKER_GAP = 10;
-const SCROLL_FOLLOW_THRESHOLD = 72;
 
 type WorkspaceMode = "neutral" | "selected" | "created";
+type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
+
+function normalizeProviderId(provider: string | null | undefined): string {
+  return (provider ?? "").trim().toLowerCase();
+}
+
+function isModelUsable(
+  modelId: string | null | undefined,
+  catalog: ModelInfo[],
+  configuredProviders: string[],
+): boolean {
+  if (!modelId) {
+    return false;
+  }
+
+  const match = catalog.find((candidate) => candidate.id === modelId);
+  if (!match) {
+    return false;
+  }
+
+  if (configuredProviders.length === 0) {
+    return true;
+  }
+
+  return configuredProviders.includes(normalizeProviderId(match.provider));
+}
 
 function sessionTypeForTab(index: number): SessionType {
   return TAB_TYPES[index] ?? "code";
@@ -122,32 +154,103 @@ function getWorkspaceMode(path: string | null): WorkspaceMode {
   return path ? "selected" : "neutral";
 }
 
-function distanceFromBottom(
-  contentHeight: number,
-  viewportHeight: number,
-  offsetY: number,
-) {
-  return Math.max(0, contentHeight - (offsetY + viewportHeight));
+export default function ChatScreen() {
+  const { theme } = useThemeContext();
+  const {
+    status,
+    error: connectionError,
+    reconnect,
+    isConfigured,
+  } = useConnection();
+  const stores = useStores();
+
+  if (!stores) {
+    const t = theme.colors;
+    const isRetryable = status === "error" || status === "disconnected";
+
+    return (
+      <SafeAreaView style={[styles.bootScreen, { backgroundColor: t.background }]}>
+        <View style={styles.bootInner}>
+          <KrustyLogo />
+          {status === "connecting" ? (
+            <>
+              <ActivityIndicator
+                size="small"
+                color={t.userMessage}
+                style={styles.bootSpinner}
+              />
+              <Text style={[styles.bootMessage, { color: t.mutedForeground }]}>
+                Reconnecting to your server...
+              </Text>
+            </>
+          ) : null}
+          {isRetryable ? (
+            <View style={styles.bootActions}>
+              <Text
+                style={[
+                  styles.bootMessage,
+                  {
+                    color: isConfigured ? t.error : t.mutedForeground,
+                    marginTop: 0,
+                  },
+                ]}
+              >
+                {connectionError ||
+                  (isConfigured
+                    ? "Could not reconnect to your server."
+                    : "Server connection is not configured.")}
+              </Text>
+              <Pressable
+                onPress={() => {
+                  if (isConfigured) {
+                    void reconnect();
+                  } else {
+                    router.replace("/onboarding");
+                  }
+                }}
+                style={[
+                  styles.bootButton,
+                  { backgroundColor: t.userMessage },
+                ]}
+              >
+                <Text style={styles.bootButtonText}>
+                  {isConfigured ? "Retry Connection" : "Open Setup"}
+                </Text>
+              </Pressable>
+              {isConfigured ? (
+                <Pressable
+                  onPress={() => router.replace("/onboarding")}
+                  style={[
+                    styles.bootButtonSecondary,
+                    { borderColor: t.border },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.bootButtonSecondaryText,
+                      { color: t.foreground },
+                    ]}
+                  >
+                    Server Setup
+                  </Text>
+                </Pressable>
+              ) : null}
+            </View>
+          ) : null}
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  return <ChatScreenContent stores={stores} />;
 }
 
-export default function ChatScreen() {
+function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const { theme } = useThemeContext();
   const { client, isConnected } = useConnection();
   const { isDesktop } = useBreakpoint();
   const { splashDone } = useSplashState();
   const entrance = useEntranceAnimation(splashDone);
-  const stores = useStores();
-
-  // Stores not ready yet (before connection)
-  if (!stores) {
-    return (
-      <SafeAreaView style={[{ flex: 1, backgroundColor: theme.colors.background }]}>
-        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-          <KrustyLogo />
-        </View>
-      </SafeAreaView>
-    );
-  }
 
   const { sessions: sessionsStore, session: sessionStore, workspace } = stores;
 
@@ -167,34 +270,32 @@ export default function ChatScreen() {
   const mode = useSessionStore((state) => state.mode) ?? "build";
   const tokenCount = useSessionStore((state) => state.tokenCount) ?? 0;
   const error = useSessionStore((state) => state.error) ?? null;
+  const isLoading = useSessionStore((state) => state.isLoading) ?? false;
+  const workspaceDirectory =
+    useWorkspaceStore((state) => state.directory) ?? null;
   const fastModeSupported = supportsFastMode(model);
   const fastModeEnabled = isFastModeModel(model);
 
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [defaultModelId, setDefaultModelId] = useState<string | null>(null);
+  const [configuredProviders, setConfiguredProviders] = useState<string[]>([]);
   const [activeToolCallId, setActiveToolCallId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState(1);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [reportsOpen, setReportsOpen] = useState(false);
+  const [toolboxOpen, setToolboxOpen] = useState(false);
+  const [toolboxTab, setToolboxTab] = useState(2);
+  const splitProgress = useSharedValue(0);
+  const [isSplit, setIsSplit] = useState(false);
   const [researchEnabled, setResearchEnabled] = useState(false);
-  const [chatBarHeight, setChatBarHeight] = useState(0);
-  const [planTrackerHeight, setPlanTrackerHeight] = useState(0);
-  const [isNearBottom, setIsNearBottom] = useState(true);
+  const [composerReserveHeight, setComposerReserveHeight] =
+    useState(CHAT_BAR_ZONE);
 
-  const flatListRef = useRef<FlatList>(null);
-  const listHeightRef = useRef(0);
-  const contentHeightRef = useRef(0);
-  const scrollOffsetRef = useRef(0);
   const previousStreamingRef = useRef(false);
   const currentStreamSessionIdRef = useRef<string | null>(null);
   const streamStartedAtRef = useRef<number | null>(null);
   const liveActivityOpenRef = useRef(false);
   const notifiedApprovalIdsRef = useRef<Set<string>>(new Set());
   const suppressCompletionRef = useRef(false);
-  const autoFollowRef = useRef(true);
-  const pendingAutoScrollRef = useRef(false);
-  const pendingAutoScrollAnimatedRef = useRef(false);
-  const isUserDraggingRef = useRef(false);
-  const loadedSessionIdRef = useRef<string | null>(null);
 
   const lastAssistantMessage = useMemo(
     () => getLastAssistantMessage(messages),
@@ -243,11 +344,51 @@ export default function ChatScreen() {
     [activeToolCallId, client, sessionStore],
   );
 
+  const handleNotificationNavigate = useCallback(
+    async (_route: string, params?: Record<string, string>) => {
+      const focus = params?.focus;
+      const targetSessionId = params?.sessionId;
+      const shouldOpenReports = params?.openReports === "true";
+
+      if (focus === "mako") {
+        setActiveTab(2);
+      }
+      if (shouldOpenReports) {
+        setToolboxOpen(true);
+      }
+      if (!targetSessionId) {
+        return;
+      }
+
+      try {
+        await sessionStore.getState().loadSession(targetSessionId, true);
+      } catch {
+        void sessionsStore.getState().loadSessions();
+      }
+    },
+    [sessionStore, sessionsStore],
+  );
+
+  const handleRegisterNativeDevice = useCallback(
+    async (deviceToken: string) => {
+      if (!client || !isConnected || !deviceToken) {
+        return;
+      }
+
+      try {
+        await client.registerApnsDevice(deviceToken);
+      } catch {}
+    },
+    [client, isConnected],
+  );
+
   const { startActivity, updateActivity, endActivity } = useLiveActivity({
     onToolApproval: handleToolApprovalAction,
   });
   const { notifyToolApproval, notifyStreamComplete } = useNotifications({
     onToolApproval: handleToolApprovalAction,
+    onNavigate: handleNotificationNavigate,
+    onRegisterNativeDevice: handleRegisterNativeDevice,
   });
 
   useWidgetSync({
@@ -261,129 +402,70 @@ export default function ChatScreen() {
   });
 
   const t = theme.colors;
-  const isDark = theme.scheme === "dark";
-  const edgeTint = isDark
-    ? ("systemChromeMaterialDark" as const)
-    : ("systemChromeMaterialLight" as const);
-  const jumpTint = isDark
-    ? ("systemMaterialDark" as const)
-    : ("systemMaterialLight" as const);
-  const edgeOverlay = isDark
-    ? "rgba(11,17,25,0.18)"
-    : "rgba(255,255,255,0.18)";
-  const jumpOverlay = isDark
-    ? "rgba(11,17,25,0.78)"
-    : "rgba(255,255,255,0.78)";
-  const msgLen = messages.length;
-  const lastMsgContent = messages[msgLen - 1]?.content?.length ?? 0;
-  const effectivePlanTrackerHeight = isDesktop ? 0 : planTrackerHeight;
-  const listTopPadding =
-    TOP_EDGE_HEIGHT +
-    EDGE_GAP +
-    (effectivePlanTrackerHeight > 0
-      ? effectivePlanTrackerHeight + TRACKER_GAP
-      : 0);
-  const listBottomPadding = chatBarHeight + BOTTOM_EDGE_HEIGHT + EDGE_GAP;
-  const showJumpToLatest = messages.length > 0 && isStreaming && !isNearBottom;
 
-  const scrollToBottom = useCallback((animated: boolean) => {
-    if (!flatListRef.current) {
-      return;
+  const loadModelCatalog = useCallback(async () => {
+    if (!client || !isConnected) {
+      return null;
     }
 
-    scrollOffsetRef.current = Math.max(
-      0,
-      contentHeightRef.current - listHeightRef.current,
-    );
-    setIsNearBottom(true);
-    flatListRef.current.scrollToEnd({ animated });
-  }, []);
+    const [response, credentials] = await Promise.all([
+      client.getModels(),
+      client.getCredentials().catch(() => []),
+    ]);
+    const nextConfiguredProviders = credentials
+      .filter((provider) => provider.configured || provider.has_oauth)
+      .map((provider) => normalizeProviderId(provider.name));
+    setModels(response.models);
+    setDefaultModelId(response.default_model ?? null);
+    setConfiguredProviders(nextConfiguredProviders);
+    return {
+      response,
+      configuredProviders: nextConfiguredProviders,
+    };
+  }, [client, isConnected]);
 
-  const queueAutoScroll = useCallback((animated: boolean) => {
-    pendingAutoScrollRef.current = true;
-    pendingAutoScrollAnimatedRef.current = animated;
-  }, []);
+  const ensureModelReady = useCallback(async () => {
+    const existingModel = sessionStore.getState().model;
+    let catalog = models;
+    let fallbackDefault = defaultModelId;
+    let allowedProviders = configuredProviders;
 
-  const flushAutoScroll = useCallback(() => {
-    if (
-      !pendingAutoScrollRef.current ||
-      !flatListRef.current ||
-      isUserDraggingRef.current
-    ) {
-      return;
+    if (catalog.length === 0) {
+      const result = await loadModelCatalog().catch(() => null);
+      if (!result) {
+        return null;
+      }
+      catalog = result.response.models;
+      fallbackDefault = result.response.default_model ?? null;
+      allowedProviders = result.configuredProviders;
     }
 
-    if (!autoFollowRef.current) {
-      pendingAutoScrollRef.current = false;
-      return;
+    if (isModelUsable(existingModel, catalog, allowedProviders)) {
+      return existingModel;
     }
 
-    pendingAutoScrollRef.current = false;
-    const animated = pendingAutoScrollAnimatedRef.current;
-    requestAnimationFrame(() => {
-      scrollToBottom(animated);
-    });
-  }, [scrollToBottom]);
+    const saved = await SecureStore.getItemAsync(SELECTED_MODEL_KEY);
+    const firstUsableModel =
+      catalog.find((candidate) =>
+        allowedProviders.length === 0
+          ? true
+          : allowedProviders.includes(normalizeProviderId(candidate.provider)),
+      )?.id ?? null;
+    const selectedModel = isModelUsable(saved, catalog, allowedProviders)
+      ? saved
+      : isModelUsable(fallbackDefault, catalog, allowedProviders)
+        ? fallbackDefault
+        : firstUsableModel;
 
-  const updateNearBottom = useCallback((offsetY = scrollOffsetRef.current) => {
-    const nextNearBottom =
-      distanceFromBottom(
-        contentHeightRef.current,
-        listHeightRef.current,
-        offsetY,
-      ) <= SCROLL_FOLLOW_THRESHOLD;
-
-    setIsNearBottom((current) =>
-      current === nextNearBottom ? current : nextNearBottom,
-    );
-
-    if (nextNearBottom) {
-      autoFollowRef.current = true;
-    } else if (isUserDraggingRef.current) {
-      autoFollowRef.current = false;
+    if (selectedModel) {
+      sessionStore.getState().setModel(selectedModel);
+      if (saved !== selectedModel) {
+        await SecureStore.setItemAsync(SELECTED_MODEL_KEY, selectedModel);
+      }
     }
 
-    return nextNearBottom;
-  }, []);
-
-  useEffect(() => {
-    if (!sessionId) {
-      loadedSessionIdRef.current = null;
-      autoFollowRef.current = true;
-      pendingAutoScrollRef.current = false;
-      scrollOffsetRef.current = 0;
-      setIsNearBottom(true);
-      return;
-    }
-
-    if (loadedSessionIdRef.current === sessionId) {
-      return;
-    }
-
-    loadedSessionIdRef.current = sessionId;
-    autoFollowRef.current = true;
-    scrollOffsetRef.current = 0;
-    setIsNearBottom(true);
-    queueAutoScroll(false);
-  }, [queueAutoScroll, sessionId]);
-
-  useEffect(() => {
-    if (msgLen === 0) {
-      return;
-    }
-
-    if (autoFollowRef.current) {
-      queueAutoScroll(!isStreaming);
-    }
-  }, [isStreaming, lastMsgContent, msgLen, queueAutoScroll]);
-
-  useEffect(() => {
-    if (msgLen === 0 || !autoFollowRef.current) {
-      return;
-    }
-
-    queueAutoScroll(false);
-  }, [chatBarHeight, msgLen, queueAutoScroll]);
+    return selectedModel;
+  }, [configuredProviders, defaultModelId, loadModelCatalog, models, sessionStore]);
 
   useEffect(() => {
     if (!client || !isConnected) {
@@ -391,24 +473,22 @@ export default function ChatScreen() {
     }
 
     void sessionsStore.getState().loadSessions();
-    void client
-      .getModels()
-      .then(async (response) => {
-        setModels(response.models);
-        if (!sessionStore.getState().model) {
-          const saved = await SecureStore.getItemAsync(SELECTED_MODEL_KEY);
-          const selectedModel =
-            saved && response.models.some((candidate) => candidate.id === saved)
-              ? saved
-              : response.default_model;
+    void ensureModelReady();
+  }, [client, ensureModelReady, isConnected, sessionsStore]);
 
-          if (selectedModel) {
-            sessionStore.getState().setModel(selectedModel);
-          }
-        }
-      })
-      .catch(() => {});
-  }, [client, isConnected, model, sessionStore, sessionsStore]);
+  useEffect(() => {
+    if (!client || !isConnected) {
+      return;
+    }
+
+    const refreshHandle = setInterval(() => {
+      if (AppState.currentState === "active") {
+        void sessionsStore.getState().loadSessions();
+      }
+    }, 5000);
+
+    return () => clearInterval(refreshHandle);
+  }, [client, isConnected, sessionsStore]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextState) => {
@@ -595,6 +675,7 @@ export default function ChatScreen() {
       stopCurrentStream();
 
       try {
+        await ensureModelReady();
         const session = await client.createSession(
           undefined,
           directory,
@@ -613,7 +694,7 @@ export default function ChatScreen() {
         return null;
       }
     },
-    [activeTab, bootstrapSession, client, stopCurrentStream],
+    [activeTab, bootstrapSession, client, ensureModelReady, stopCurrentStream],
   );
 
   const ensureSessionForSend = useCallback(async () => {
@@ -651,6 +732,16 @@ export default function ChatScreen() {
     [sessionStore, stopCurrentStream],
   );
 
+  const loadSessionById = useCallback(
+    async (id: string) => {
+      stopCurrentStream();
+      setDrawerOpen(false);
+      setActiveTab(2);
+      await sessionStore.getState().loadSession(id);
+    },
+    [sessionStore, stopCurrentStream],
+  );
+
   const handleNewSession = useCallback(async () => {
     await createSessionForCurrentTab();
   }, [createSessionForCurrentTab]);
@@ -664,34 +755,34 @@ export default function ChatScreen() {
 
   const handleDeleteSession = useCallback(
     (id: string) => {
-      if (!client) {
-        return;
-      }
-
       Alert.alert("Delete Session", "Delete this session?", [
         { text: "Cancel", style: "cancel" },
         {
           text: "Delete",
           style: "destructive",
           onPress: async () => {
-            try {
-              if (sessionStore.getState().sessionId === id) {
-                stopCurrentStream();
-              }
-              await client.deleteSession(id);
-              await sessionsStore.getState().loadSessions();
-              if (sessionStore.getState().sessionId === id) {
-                sessionStore.getState().clearSession();
-                setActiveToolCallId(null);
-              }
-            } catch {
-              // silent
+            const isActiveSession = sessionStore.getState().sessionId === id;
+
+            if (isActiveSession) {
+              stopCurrentStream();
             }
+
+            const deleted = await sessionsStore.getState().deleteSession(id);
+            if (!deleted) {
+              return;
+            }
+
+            if (isActiveSession) {
+              sessionStore.getState().clearSession();
+              setActiveToolCallId(null);
+            }
+
+            void sessionsStore.getState().loadSessions();
           },
         },
       ]);
     },
-    [client, sessionsStore, stopCurrentStream, sessionStore],
+    [sessionsStore, stopCurrentStream, sessionStore],
   );
 
   const handleInteractiveToolResult = useCallback(
@@ -730,19 +821,45 @@ export default function ChatScreen() {
         return;
       }
 
+      const resolvedModel = await ensureModelReady();
+      if (!resolvedModel) {
+        sessionStore.setState({
+          error:
+            "No model is available yet. Check your model settings and try again.",
+        });
+        return;
+      }
+
       const ensuredSessionId = await ensureSessionForSend();
       if (!ensuredSessionId) {
         return;
       }
 
-      autoFollowRef.current = true;
-      setIsNearBottom(true);
-      queueAutoScroll(false);
-      await sessionStore
-        .getState()
-        .sendMessage(trimmed, attachments as SessionAttachment[]);
+      try {
+        await sessionStore
+          .getState()
+          .sendMessage(
+            trimmed,
+            attachments as SessionAttachment[],
+            researchEnabled,
+          );
+      } catch (err) {
+        sessionStore.setState({
+          error:
+            err instanceof Error
+              ? err.message
+              : "Failed to send message.",
+        });
+      }
     },
-    [client, ensureSessionForSend, queueAutoScroll, sessionStore],
+    [client, ensureModelReady, ensureSessionForSend, researchEnabled, sessionStore],
+  );
+
+  const handleSessionToolApproval = useCallback(
+    (targetSessionId: string, toolCallId: string, approved: boolean) => {
+      void handleToolApprovalAction(targetSessionId, toolCallId, approved);
+    },
+    [handleToolApprovalAction],
   );
 
   const handleStop = useCallback(() => {
@@ -813,239 +930,216 @@ export default function ChatScreen() {
     );
   }, [sessionId, sessionStore, sessionTitle]);
 
-  const handleListScroll = useCallback(
-    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      scrollOffsetRef.current = event.nativeEvent.contentOffset.y;
-      updateNearBottom(event.nativeEvent.contentOffset.y);
-    },
-    [updateNearBottom],
-  );
+  const handleToolboxPin = useCallback(() => {
+    setIsSplit(true);
+    splitProgress.value = withSpring(1, { damping: 22, stiffness: 280, mass: 0.8 });
+  }, [splitProgress]);
 
-  const handleJumpToLatest = useCallback(() => {
-    autoFollowRef.current = true;
-    setIsNearBottom(true);
-    queueAutoScroll(false);
-    scrollToBottom(false);
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-  }, [queueAutoScroll, scrollToBottom]);
+  const handleToolboxUnpin = useCallback(() => {
+    splitProgress.value = withTiming(0, { duration: 300 });
+    setIsSplit(false);
+  }, [splitProgress]);
+
+  const closeToolbox = useCallback(() => {
+    setToolboxOpen(false);
+    setIsSplit(false);
+  }, []);
+
+  const handleToolboxClose = useCallback(() => {
+    if (splitProgress.value > 0.1) {
+      splitProgress.value = withTiming(0, { duration: 250 }, (finished) => {
+        if (finished) runOnJS(closeToolbox)();
+      });
+    } else {
+      setToolboxOpen(false);
+    }
+  }, [splitProgress, closeToolbox]);
+
+  const chatOffsetStyle = useAnimatedStyle(() => ({
+    marginTop: interpolate(splitProgress.value, [0, 1], [0, SPLIT_PANEL_HEIGHT]),
+  }));
+
+  const topBar = (
+    <Animated.View style={[styles.topBar, entrance.topBarStyle]}>
+      {!isDesktop && (
+        <Pressable
+          onPress={() => {
+            void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            setDrawerOpen(true);
+          }}
+          style={styles.menuBtn}
+        >
+          <Menu size={22} color={t.foreground} strokeWidth={1.8} />
+        </Pressable>
+      )}
+
+      <Pressable
+        onPress={handleRenameSession}
+        style={styles.titleBtn}
+        disabled={!sessionTitle}
+      >
+        <Text
+          style={[
+            styles.title,
+            { color: sessionTitle ? t.foreground : "transparent" },
+          ]}
+          numberOfLines={1}
+        >
+          {sessionTitle || " "}
+        </Text>
+      </Pressable>
+
+      <Pressable
+        onPress={() => {
+          void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          setToolboxOpen(true);
+        }}
+        style={styles.menuBtn}
+      >
+        <Toolbox size={20} color={toolboxOpen ? t.userMessage : t.mutedForeground} strokeWidth={1.8} />
+      </Pressable>
+    </Animated.View>
+  );
 
   const chatContent = (
     <SafeAreaView
       style={[styles.container, { backgroundColor: t.background }]}
       edges={isDesktop ? [] : ["top"]}
     >
-      <Animated.View style={[styles.topBar, entrance.topBarStyle]}>
-        {!isDesktop && (
-          <Pressable
-            onPress={() => {
-              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-              setDrawerOpen(true);
-            }}
-            style={styles.menuBtn}
-          >
-            <Menu size={22} color={t.foreground} strokeWidth={1.8} />
-          </Pressable>
-        )}
+      {topBar}
 
-        <Pressable
-          onPress={handleRenameSession}
-          style={styles.titleBtn}
-          disabled={!sessionTitle}
-        >
-          <Text
-            style={[
-              styles.title,
-              { color: sessionTitle ? t.foreground : "transparent" },
-            ]}
-            numberOfLines={1}
-          >
-            {sessionTitle || " "}
-          </Text>
-        </Pressable>
+      <View style={styles.flex}>
+        <Animated.View style={[styles.flex, entrance.contentStyle, chatOffsetStyle]}>
+          <ChatTranscript
+            messages={messages}
+            sessionId={sessionId}
+            isStreaming={isStreaming}
+            isThinking={isThinking}
+            activeToolCallId={activeToolCallId}
+            onApproveTool={(targetSessionId, toolCallId) =>
+              handleSessionToolApproval(targetSessionId, toolCallId, true)
+            }
+            onDenyTool={(targetSessionId, toolCallId) =>
+              handleSessionToolApproval(targetSessionId, toolCallId, false)
+            }
+            onSubmitToolResult={(toolCallId, result) =>
+              void handleInteractiveToolResult(toolCallId, result)
+            }
+            onPlanConfirm={(toolCallId, choice) =>
+              void handlePlanConfirm(toolCallId, choice)
+            }
+            emptyState={
+              <View style={styles.empty}>
+                <KrustyLogo />
+                {error ? (
+                  <Text style={[styles.emptyHint, { color: t.error }]}>
+                    {error}
+                  </Text>
+                ) : null}
+              </View>
+            }
+            bottomPadding={composerReserveHeight}
+          />
+        </Animated.View>
 
-        <Pressable
-          onPress={() => {
-            void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-            setReportsOpen(true);
-          }}
-          style={styles.menuBtn}
-        >
-          <FileSearch size={20} color={t.mutedForeground} strokeWidth={1.8} />
-        </Pressable>
-      </Animated.View>
-
-      <Animated.View style={[styles.flex, entrance.contentStyle]}>
-        {messages.length === 0 ? (
-          <Pressable style={styles.empty} onPress={Keyboard.dismiss}>
-            <KrustyLogo />
-            {error ? (
-              <Text style={[styles.emptyHint, { color: t.error }]}>
-                {error}
-              </Text>
-            ) : null}
-          </Pressable>
-        ) : (
-          <View style={styles.flex}>
-            <FlatList
-              ref={flatListRef}
-              data={messages}
-              keyExtractor={(_, index) => String(index)}
-              onScrollBeginDrag={() => {
-                isUserDraggingRef.current = true;
-                Keyboard.dismiss();
-              }}
-              onScrollEndDrag={() => {
-                isUserDraggingRef.current = false;
-                updateNearBottom();
-                flushAutoScroll();
-              }}
-              onMomentumScrollEnd={() => {
-                isUserDraggingRef.current = false;
-                updateNearBottom();
-                flushAutoScroll();
-              }}
-              onScroll={handleListScroll}
-              scrollEventThrottle={16}
-              renderItem={({
-                item,
-                index,
-              }: {
-                item: ChatMessage;
-                index: number;
-              }) => (
-                <MessageBubble
-                  message={item}
-                  isLast={index === messages.length - 1}
-                  isStreaming={isStreaming && index === messages.length - 1}
-                  isThinking={isThinking && index === messages.length - 1}
-                  activeToolCallId={activeToolCallId}
-                  onApproveTool={(toolCallId) =>
-                    sessionId
-                      ? void handleToolApprovalAction(sessionId, toolCallId, true)
-                      : undefined
-                  }
-                  onDenyTool={(toolCallId) =>
-                    sessionId
-                      ? void handleToolApprovalAction(sessionId, toolCallId, false)
-                      : undefined
-                  }
-                  onSubmitToolResult={(toolCallId, result) =>
-                    void handleInteractiveToolResult(toolCallId, result)
-                  }
-                  onPlanConfirm={(toolCallId, choice) =>
-                    void handlePlanConfirm(toolCallId, choice)
-                  }
-                />
-              )}
-              style={styles.flex}
-              contentContainerStyle={[
-                styles.list,
-                isDesktop && styles.listDesktop,
-                {
-                  paddingTop: listTopPadding,
-                  paddingBottom: listBottomPadding,
-                },
-              ]}
-              onLayout={(event) => {
-                listHeightRef.current = event.nativeEvent.layout.height;
-                updateNearBottom();
-                flushAutoScroll();
-              }}
-              onContentSizeChange={(_width, height) => {
-                contentHeightRef.current = height;
-                updateNearBottom();
-                flushAutoScroll();
-              }}
-              keyboardDismissMode="interactive"
-              keyboardShouldPersistTaps="handled"
+        {(!toolboxOpen || isSplit) && (
+          <Animated.View style={[entrance.bottomBarStyle, { overflow: "visible", zIndex: 300 }]}>
+            <ChatBar
+              onSend={handleSend}
+              onStop={handleStop}
+              onHeightChange={setComposerReserveHeight}
+              isStreaming={isStreaming}
+              disabled={!isConnected}
+              thinkingLevel={thinkingLevel as ThinkingLevel}
+              onThinkingChange={(level) =>
+                sessionStore.getState().setThinkingLevel(level)
+              }
+              permissionMode={permissionMode as PermissionMode}
+              onPermissionModeToggle={() =>
+                sessionStore.getState().togglePermissionMode()
+              }
+              fastModeEnabled={fastModeEnabled}
+              fastModeSupported={fastModeSupported}
+              onFastModeToggle={handleFastModeToggle}
+              mode={mode}
+              onModeToggle={() =>
+                sessionStore.getState().setMode(mode === "build" ? "plan" : "build")
+              }
+              onModelSelect={handleModelSelect}
+              model={model}
+              models={models}
+              sessionType={sessionTypeForTab(activeTab)}
+              researchEnabled={researchEnabled}
+              onResearchToggle={() => setResearchEnabled((current) => !current)}
+              tokenCount={tokenCount}
             />
-            <View pointerEvents="none" style={[styles.edgeChrome, styles.edgeTop]}>
-              <BlurView intensity={40} tint={edgeTint} style={StyleSheet.absoluteFill} />
-              <View style={[StyleSheet.absoluteFill, { backgroundColor: edgeOverlay }]} />
-              <LinearGradient
-                colors={[`${t.background}F0`, `${t.background}C8`, `${t.background}00`]}
-                style={StyleSheet.absoluteFill}
-              />
-            </View>
-            {!isDesktop && <PlanTracker onHeightChange={setPlanTrackerHeight} />}
-            <View
-              pointerEvents="none"
-              style={[
-                styles.edgeChrome,
-                styles.edgeBottom,
-                { bottom: chatBarHeight },
-              ]}
-            >
-              <BlurView intensity={40} tint={edgeTint} style={StyleSheet.absoluteFill} />
-              <View style={[StyleSheet.absoluteFill, { backgroundColor: edgeOverlay }]} />
-              <LinearGradient
-                colors={[`${t.background}00`, `${t.background}C8`, `${t.background}F0`]}
-                style={StyleSheet.absoluteFill}
-              />
-            </View>
-            {showJumpToLatest && (
-              <Pressable
-                onPress={handleJumpToLatest}
-                style={[styles.jumpToLatest, { bottom: chatBarHeight + EDGE_GAP }]}
-              >
-                <BlurView
-                  intensity={28}
-                  tint={jumpTint}
-                  style={StyleSheet.absoluteFill}
-                />
-                <View
-                  style={[
-                    StyleSheet.absoluteFill,
-                    { backgroundColor: jumpOverlay },
-                  ]}
-                />
-                <ArrowDown size={15} color={t.foreground} strokeWidth={2} />
-                <Text style={[styles.jumpToLatestText, { color: t.foreground }]}>
-                  Jump to latest
-                </Text>
-              </Pressable>
-            )}
-          </View>
+          </Animated.View>
         )}
-      </Animated.View>
 
-      <Animated.View style={[entrance.bottomBarStyle, { overflow: "visible" }]}>
-        <ChatBar
-          onSend={handleSend}
-          onStop={handleStop}
-          isStreaming={isStreaming}
-          disabled={!isConnected}
-          onHeightChange={setChatBarHeight}
-          thinkingLevel={thinkingLevel as ThinkingLevel}
-          onThinkingChange={(level) =>
-            sessionStore.getState().setThinkingLevel(level)
-          }
-          permissionMode={permissionMode as PermissionMode}
-          onPermissionModeToggle={() =>
-            sessionStore.getState().togglePermissionMode()
-          }
-          fastModeEnabled={fastModeEnabled}
-          fastModeSupported={fastModeSupported}
-          onFastModeToggle={handleFastModeToggle}
-          mode={mode}
-          onModeToggle={() =>
-            sessionStore.getState().setMode(mode === "build" ? "plan" : "build")
-          }
-          onModelSelect={handleModelSelect}
-          model={model}
-          models={models}
-          sessionType={sessionTypeForTab(activeTab)}
-          researchEnabled={researchEnabled}
-          onResearchToggle={() => setResearchEnabled((current) => !current)}
-          tokenCount={tokenCount}
+        <ToolboxPanel
+          visible={toolboxOpen}
+          onClose={handleToolboxClose}
+          onTogglePin={isSplit ? handleToolboxUnpin : handleToolboxPin}
+          isSplit={isSplit}
+          splitProgress={splitProgress}
+          activeTab={toolboxTab}
+          onTabChange={setToolboxTab}
         />
-      </Animated.View>
-
-      <ReportsViewer
-        visible={reportsOpen}
-        onClose={() => setReportsOpen(false)}
-      />
+      </View>
     </SafeAreaView>
+  );
+
+  const makoContent = (
+    <Animated.View style={[styles.flex, entrance.contentStyle]}>
+      <MakoScreen
+        workspaceDirectory={workspaceDirectory}
+        activeRunId={sessionId}
+        onOpenRunById={loadSessionById}
+        onDeleteRun={handleDeleteSession}
+        onOpenMenu={() => {
+          void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          setDrawerOpen(true);
+        }}
+        chat={{
+          sessionId,
+          title: sessionTitle,
+          messages,
+          error,
+          isLoading,
+          isStreaming,
+          isThinking,
+          activeToolCallId,
+          thinkingLevel: thinkingLevel as ThinkingLevel,
+          permissionMode: permissionMode as PermissionMode,
+          fastModeEnabled,
+          fastModeSupported,
+          mode,
+          model,
+          models,
+          researchEnabled,
+          tokenCount,
+          onApproveTool: (targetSessionId, toolCallId) =>
+            handleSessionToolApproval(targetSessionId, toolCallId, true),
+          onDenyTool: (targetSessionId, toolCallId) =>
+            handleSessionToolApproval(targetSessionId, toolCallId, false),
+          onSubmitToolResult: (toolCallId, result) =>
+            void handleInteractiveToolResult(toolCallId, result),
+          onPlanConfirm: (toolCallId, choice) =>
+            void handlePlanConfirm(toolCallId, choice),
+          onSend: handleSend,
+          onStop: handleStop,
+          onThinkingChange: (level) =>
+            sessionStore.getState().setThinkingLevel(level),
+          onPermissionModeToggle: () =>
+            sessionStore.getState().togglePermissionMode(),
+          onFastModeToggle: handleFastModeToggle,
+          onModeToggle: () =>
+            sessionStore.getState().setMode(mode === "build" ? "plan" : "build"),
+          onModelSelect: handleModelSelect,
+          onResearchToggle: () => setResearchEnabled((current) => !current),
+        }}
+      />
+    </Animated.View>
   );
 
   return (
@@ -1060,7 +1154,7 @@ export default function ChatScreen() {
       activeTab={activeTab}
       onTabChange={handleTabChange}
     >
-      {chatContent}
+      {activeTab === 2 ? makoContent : chatContent}
 
       {!isDesktop && (
         <SessionDrawer
@@ -1085,6 +1179,54 @@ export default function ChatScreen() {
 }
 
 const styles = StyleSheet.create({
+  bootScreen: { flex: 1 },
+  bootInner: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 28,
+  },
+  bootSpinner: {
+    marginTop: 20,
+  },
+  bootActions: {
+    marginTop: 24,
+    alignItems: "center",
+    gap: 12,
+    width: "100%",
+    maxWidth: 320,
+  },
+  bootMessage: {
+    marginTop: 14,
+    fontSize: 15,
+    lineHeight: 21,
+    textAlign: "center",
+  },
+  bootButton: {
+    marginTop: 4,
+    borderRadius: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 18,
+    width: "100%",
+    alignItems: "center",
+  },
+  bootButtonText: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  bootButtonSecondary: {
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingVertical: 14,
+    paddingHorizontal: 18,
+    width: "100%",
+    alignItems: "center",
+  },
+  bootButtonSecondaryText: {
+    fontSize: 16,
+    fontWeight: "600",
+  },
   container: { flex: 1 },
   flex: { flex: 1 },
   topBar: {
@@ -1112,42 +1254,26 @@ const styles = StyleSheet.create({
   },
   list: {
     paddingHorizontal: 16,
+    paddingTop: 8,
   },
   listDesktop: {
     maxWidth: 800,
     alignSelf: "center",
     width: "100%",
   },
-  edgeChrome: {
+  fadeTop: {
     position: "absolute",
+    top: 0,
     left: 0,
     right: 0,
+    height: 64,
   },
-  edgeTop: {
-    top: 0,
-    height: TOP_EDGE_HEIGHT,
-  },
-  edgeBottom: {
-    height: BOTTOM_EDGE_HEIGHT,
-  },
-  jumpToLatest: {
+  fadeBottom: {
     position: "absolute",
-    left: 16,
-    alignSelf: "flex-start",
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 999,
-    overflow: "hidden",
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "rgba(255,255,255,0.12)",
-    zIndex: 60,
-  },
-  jumpToLatestText: {
-    fontSize: 13,
-    fontWeight: "600",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 120,
   },
   empty: {
     flex: 1,
@@ -1163,6 +1289,19 @@ const styles = StyleSheet.create({
   },
   emptyHint: {
     fontSize: 17,
+  },
+  errorBanner: {
+    marginHorizontal: 16,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  errorBannerText: {
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: "500",
   },
   stubTitle: {
     fontSize: 24,

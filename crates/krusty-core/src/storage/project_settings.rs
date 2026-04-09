@@ -6,6 +6,39 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Resolved Mako cadence settings after project overrides are applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MakoSettings {
+    pub tick_interval_secs: u64,
+    pub max_ticks: usize,
+}
+
+impl Default for MakoSettings {
+    fn default() -> Self {
+        Self {
+            tick_interval_secs: 30,
+            max_ticks: 1000,
+        }
+    }
+}
+
+/// Optional project-level overrides for Mako cadence behavior.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ProjectMakoSettings {
+    /// Seconds between autonomous wake ticks while Mako is active.
+    pub tick_interval_secs: Option<u64>,
+
+    /// Maximum autonomous wake ticks to execute before stopping.
+    pub max_ticks: Option<usize>,
+}
+
+impl ProjectMakoSettings {
+    fn is_empty(&self) -> bool {
+        self.tick_interval_secs.is_none() && self.max_ticks.is_none()
+    }
+}
+
 /// Per-project settings loaded from `.krusty/settings.json`.
 ///
 /// All fields are optional — only specified values override the defaults.
@@ -29,6 +62,9 @@ pub struct ProjectSettings {
 
     /// Disable specific tools by name.
     pub disabled_tools: Option<Vec<String>>,
+
+    /// Optional Mako-specific cadence settings.
+    pub mako: Option<ProjectMakoSettings>,
 }
 
 impl ProjectSettings {
@@ -55,6 +91,31 @@ impl ProjectSettings {
             && self.subagent_max_turns.is_none()
             && self.conventions.is_none()
             && self.disabled_tools.is_none()
+            && self.mako.as_ref().is_none_or(ProjectMakoSettings::is_empty)
+    }
+
+    /// Resolve Mako cadence settings with defaults and basic zero-value rejection.
+    pub fn mako_settings(&self) -> MakoSettings {
+        let mut resolved = MakoSettings::default();
+
+        if let Some(mako) = &self.mako {
+            if let Some(tick_interval_secs) = mako.tick_interval_secs.filter(|secs| *secs > 0) {
+                resolved.tick_interval_secs = tick_interval_secs;
+            }
+            if let Some(max_ticks) = mako.max_ticks.filter(|max_ticks| *max_ticks > 0) {
+                resolved.max_ticks = max_ticks;
+            }
+        }
+
+        resolved
+    }
+
+    /// Load resolved Mako cadence settings directly from the active project directory.
+    pub fn load_mako_settings(project_dir: Option<&Path>) -> MakoSettings {
+        project_dir
+            .map(Self::load)
+            .unwrap_or_default()
+            .mako_settings()
     }
 }
 
@@ -71,13 +132,20 @@ mod tests {
         fs::create_dir_all(&krusty_dir).unwrap();
         fs::write(
             krusty_dir.join("settings.json"),
-            r#"{ "model": "claude-opus-4-6-20250320", "subagent_max_turns": 50 }"#,
+            r#"{ "model": "claude-opus-4-6-20250320", "subagent_max_turns": 50, "mako": { "tick_interval_secs": 45 } }"#,
         )
         .unwrap();
 
         let settings = ProjectSettings::load(temp.path());
         assert_eq!(settings.model.as_deref(), Some("claude-opus-4-6-20250320"));
         assert_eq!(settings.subagent_max_turns, Some(50));
+        assert_eq!(
+            settings
+                .mako
+                .as_ref()
+                .and_then(|mako| mako.tick_interval_secs),
+            Some(45)
+        );
         assert!(settings.permission_mode.is_none());
         assert!(!settings.is_empty());
     }
@@ -128,7 +196,11 @@ mod tests {
                 "system_prompt_append": "Always use Rust idioms.",
                 "subagent_max_turns": 100,
                 "conventions": ["no-unwrap", "error-chain"],
-                "disabled_tools": ["bash"]
+                "disabled_tools": ["bash"],
+                "mako": {
+                    "tick_interval_secs": 20,
+                    "max_ticks": 200
+                }
             }"#,
         )
         .unwrap();
@@ -149,5 +221,27 @@ mod tests {
             settings.disabled_tools.as_deref(),
             Some(&["bash".to_string()][..])
         );
+        assert_eq!(settings.mako_settings().tick_interval_secs, 20);
+        assert_eq!(settings.mako_settings().max_ticks, 200);
+    }
+
+    #[test]
+    fn mako_settings_return_defaults_when_missing() {
+        let settings = ProjectSettings::default();
+
+        assert_eq!(settings.mako_settings(), MakoSettings::default());
+    }
+
+    #[test]
+    fn mako_settings_ignore_zero_values() {
+        let settings = ProjectSettings {
+            mako: Some(ProjectMakoSettings {
+                tick_interval_secs: Some(0),
+                max_ticks: Some(0),
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(settings.mako_settings(), MakoSettings::default());
     }
 }

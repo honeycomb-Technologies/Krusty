@@ -55,8 +55,7 @@ fn get_spinner_frame() -> &'static str {
 
 /// Plan info for toolbar display
 pub struct PlanInfo<'a> {
-    #[allow(dead_code)]
-    pub title: &'a str,
+    pub _title: &'a str,
     pub completed: usize,
     pub total: usize,
 }

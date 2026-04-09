@@ -1462,7 +1462,7 @@ export function SettingsPanel({
               Delivery level
             </Text>
             <Text style={[styles.rowSubtitle, { color: t.mutedForeground }]}>
-              Expo push token: {pushToken ? "registered" : "not registered"}
+              Notification token: {pushToken ? "registered" : "not registered"}
             </Text>
           </View>
         </View>

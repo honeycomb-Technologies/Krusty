@@ -51,10 +51,11 @@ impl<'a> BlockUiStore<'a> {
             )?;
 
             let states = stmt.query_map([session_id], |row| {
+                let scroll_offset = row.get::<_, i32>(2)?;
                 Ok(BlockUiState {
                     block_id: row.get(0)?,
                     collapsed: row.get::<_, i32>(1)? != 0,
-                    scroll_offset: row.get::<_, i32>(2)? as u16,
+                    scroll_offset: decode_scroll_offset(scroll_offset),
                 })
             })?;
 
@@ -63,17 +64,10 @@ impl<'a> BlockUiStore<'a> {
 
         result.unwrap_or_default()
     }
+}
 
-    /// Delete all block UI states for a session
-    /// Called automatically when session is deleted via CASCADE
-    #[allow(dead_code)]
-    pub fn delete_session_block_states(&self, session_id: &str) -> Result<()> {
-        self.db.conn().execute(
-            "DELETE FROM block_ui_state WHERE session_id = ?1",
-            [session_id],
-        )?;
-        Ok(())
-    }
+fn decode_scroll_offset(value: i32) -> u16 {
+    u16::try_from(value).unwrap_or(if value < 0 { 0 } else { u16::MAX })
 }
 
 #[cfg(test)]
@@ -125,5 +119,44 @@ mod tests {
         assert_eq!(states[0].scroll_offset, 42);
         assert_eq!(states[1].block_id, "block-2");
         assert_eq!(states[1].collapsed, false);
+    }
+
+    #[test]
+    fn test_load_block_ui_state_clamps_corrupt_scroll_offsets() {
+        let (db, _temp) = create_test_db();
+        let store = BlockUiStore::new(&db);
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        db.conn()
+            .execute(
+                "INSERT INTO sessions (id, title, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![session_id, "Test", now, now],
+            )
+            .expect("Failed to create session");
+
+        db.conn()
+            .execute(
+                "INSERT INTO block_ui_state (session_id, block_id, block_type, collapsed, scroll_offset)
+                 VALUES (?1, ?2, '', ?3, ?4), (?1, ?5, '', ?3, ?6)",
+                rusqlite::params![
+                    session_id,
+                    "negative",
+                    0,
+                    -7,
+                    "overflow",
+                    i32::from(u16::MAX) + 1
+                ],
+            )
+            .expect("Failed to insert corrupt block UI state");
+
+        let states = store.load_block_ui_states(&session_id);
+
+        assert_eq!(states.len(), 2);
+        assert_eq!(states[0].block_id, "negative");
+        assert_eq!(states[0].scroll_offset, 0);
+        assert_eq!(states[1].block_id, "overflow");
+        assert_eq!(states[1].scroll_offset, u16::MAX);
     }
 }

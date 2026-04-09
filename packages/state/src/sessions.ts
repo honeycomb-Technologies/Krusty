@@ -23,7 +23,7 @@ export interface SessionsStoreState {
   loadSessions: () => Promise<void>;
   loadDirectories: () => Promise<void>;
   createSession: (title?: string, workingDir?: string, targetBranch?: string) => Promise<SessionListItem | null>;
-  deleteSession: (id: string) => Promise<void>;
+  deleteSession: (id: string) => Promise<boolean>;
   selectSession: (id: string) => Promise<void>;
 }
 
@@ -112,11 +112,13 @@ export function createSessionsStore(
         if (wsState.sessionId === id) {
           wsState.clear();
         }
+        return true;
       } catch (err) {
         set((s) => ({
           ...s,
           error: err instanceof Error ? err.message : 'Failed to delete session',
         }));
+        return false;
       }
     },
 
