@@ -1,40 +1,36 @@
 import {
   ActivityIndicator,
   Pressable,
-  RefreshControl,
-  ScrollView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
 import { useThemeContext } from "../../hooks/useTheme";
-import { MakoSetCourseComposer } from "./MakoSetCourseComposer";
+import { MakoThreadSurface } from "./MakoThreadSurface";
 import {
   describeRun,
   formatProjectLabel,
   formatRelativeTime,
-  formatTimestamp,
   getRunGroup,
   getRunNextWakeAt,
 } from "./utils";
-import type { MakoChatContext, MakoCurrentState } from "./types";
-import type { ChatMessage } from "@krusty/api";
+import type {
+  MakoChatContext,
+  MakoCurrentState,
+  MakoHomeState,
+} from "./types";
 
 interface MakoCurrentViewProps {
   state: MakoCurrentState;
-  workspaceDirectory?: string | null;
-  model?: string | null;
-  activeToolCallId?: string | null;
+  homeState: MakoHomeState;
   chat: MakoChatContext;
   onSelectRun: (runId: string) => void;
-  onOpenChat: () => void;
   onOpenRuns: () => void;
   onOpenDetails: () => void;
-  onCourseSet: (runId: string) => Promise<void>;
-  onApproveTool: (sessionId: string, toolCallId: string) => void;
+  onOpenSchedule: () => void;
 }
 
-function SummaryCard({
+function SummaryCell({
   label,
   value,
   hint,
@@ -47,14 +43,7 @@ function SummaryCard({
   const t = theme.colors;
 
   return (
-    <View
-      style={[
-        styles.metricCell,
-        {
-          borderColor: t.border,
-        },
-      ]}
-    >
+    <View style={styles.metricCell}>
       <Text style={[styles.metricLabel, { color: t.mutedForeground }]}>{label}</Text>
       <Text style={[styles.metricValue, { color: t.foreground }]}>{value}</Text>
       {hint ? (
@@ -64,12 +53,29 @@ function SummaryCard({
   );
 }
 
-function SectionTitle({ title }: { title: string }) {
+function SectionTitle({
+  title,
+  actionLabel,
+  onAction,
+}: {
+  title: string;
+  actionLabel?: string;
+  onAction?: () => void;
+}) {
   const { theme } = useThemeContext();
+  const t = theme.colors;
+
   return (
-    <Text style={[styles.sectionTitle, { color: theme.colors.foreground }]}>
-      {title}
-    </Text>
+    <View style={styles.sectionHeader}>
+      <Text style={[styles.sectionTitle, { color: t.foreground }]}>{title}</Text>
+      {actionLabel && onAction ? (
+        <Pressable onPress={onAction} style={styles.headerAction}>
+          <Text style={[styles.headerActionText, { color: t.userMessage }]}>
+            {actionLabel}
+          </Text>
+        </Pressable>
+      ) : null}
+    </View>
   );
 }
 
@@ -79,96 +85,83 @@ function FocusRow({
   detail,
   primaryLabel,
   onPrimaryPress,
-  secondaryLabel,
-  onSecondaryPress,
-  disabled = false,
 }: {
   tag: string;
   title: string;
   detail: string;
-  primaryLabel?: string;
-  onPrimaryPress?: () => void;
-  secondaryLabel?: string;
-  onSecondaryPress?: () => void;
-  disabled?: boolean;
+  primaryLabel: string;
+  onPrimaryPress: () => void;
 }) {
   const { theme } = useThemeContext();
   const t = theme.colors;
 
   return (
-    <View style={[styles.focusRow, { borderColor: t.border }]}>
-      <View style={styles.focusCopy}>
-        <Text style={[styles.focusTag, { color: t.mutedForeground }]}>{tag}</Text>
-        <Text style={[styles.focusTitle, { color: t.foreground }]} numberOfLines={1}>
+    <View style={[styles.row, { borderColor: t.border }]}>
+      <View style={styles.rowCopy}>
+        <Text style={[styles.rowTag, { color: t.mutedForeground }]}>{tag}</Text>
+        <Text style={[styles.rowTitle, { color: t.foreground }]} numberOfLines={1}>
           {title}
         </Text>
-        <Text style={[styles.focusDetail, { color: t.mutedForeground }]} numberOfLines={2}>
+        <Text style={[styles.rowDetail, { color: t.mutedForeground }]} numberOfLines={2}>
           {detail}
         </Text>
       </View>
-      <View style={styles.focusActions}>
-        {secondaryLabel && onSecondaryPress ? (
-          <Pressable
-            disabled={disabled}
-            onPress={onSecondaryPress}
-            style={styles.focusAction}
-          >
-            <Text
-              style={[
-                styles.focusActionText,
-                { color: disabled ? `${t.mutedForeground}88` : t.mutedForeground },
-              ]}
-            >
-              {secondaryLabel}
-            </Text>
-          </Pressable>
-        ) : null}
-        {primaryLabel && onPrimaryPress ? (
-          <Pressable
-            disabled={disabled}
-            onPress={onPrimaryPress}
-            style={styles.focusAction}
-          >
-            <Text
-              style={[
-                styles.focusActionText,
-                { color: disabled ? `${t.userMessage}88` : t.userMessage },
-              ]}
-            >
-              {primaryLabel}
-            </Text>
-          </Pressable>
-        ) : null}
-      </View>
+      <Pressable onPress={onPrimaryPress} style={styles.rowAction}>
+        <Text style={[styles.rowActionText, { color: t.userMessage }]}>
+          {primaryLabel}
+        </Text>
+      </Pressable>
     </View>
   );
 }
 
-function messagePreview(message: ChatMessage): string {
-  const content = message.content.trim();
-  if (!content) {
-    return message.role === "assistant" ? "Working..." : "No content";
+function PresenceRow({
+  label,
+  value,
+  onPress,
+}: {
+  label: string;
+  value: string;
+  onPress?: () => void;
+}) {
+  const { theme } = useThemeContext();
+  const t = theme.colors;
+
+  return (
+    <Pressable
+      disabled={!onPress}
+      onPress={onPress}
+      style={[styles.presenceRow, { borderColor: t.border }]}
+    >
+      <Text style={[styles.presenceLabel, { color: t.mutedForeground }]}>{label}</Text>
+      <Text style={[styles.presenceValue, { color: t.foreground }]} numberOfLines={2}>
+        {value}
+      </Text>
+    </Pressable>
+  );
+}
+
+function previewText(value?: string | null, fallback = "Not configured yet.") {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return fallback;
   }
-  return content.replace(/\s+/g, " ");
+  return trimmed;
 }
 
 export function MakoCurrentView({
   state,
-  workspaceDirectory,
-  model,
-  activeToolCallId,
+  homeState,
   chat,
   onSelectRun,
-  onOpenChat,
   onOpenRuns,
   onOpenDetails,
-  onCourseSet,
-  onApproveTool,
+  onOpenSchedule,
 }: MakoCurrentViewProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
 
-  if (state.isLoading && !state.current) {
+  if (state.isLoading && !state.current && homeState.isLoading && !homeState.home) {
     return (
       <View style={styles.loading}>
         <ActivityIndicator color={t.userMessage} />
@@ -192,305 +185,353 @@ export function MakoCurrentView({
         const rightValue = getRunNextWakeAt(right) ?? "9999";
         return leftValue.localeCompare(rightValue);
       })[0] ?? null;
-  const recentMessages = chat.messages.slice(-3);
+
+  const home = homeState.home;
+  const crew = homeState.crew?.members ?? [];
+  const runningCrew = crew.filter((member) => member.status === "running").length;
+  const waitingCrew = crew.filter((member) => member.status === "waiting").length;
+  const degradedCrew = crew.filter((member) => member.status === "degraded").length;
+  const needsBootstrap =
+    !homeState.isLoading &&
+    !home?.soul &&
+    !home?.identity &&
+    !home?.heartbeat &&
+    !home?.channels &&
+    (home?.crew_count ?? 0) === 0;
+
+  const topError = state.error ?? homeState.error;
 
   return (
-    <ScrollView
-      style={styles.scroll}
-      contentContainerStyle={styles.content}
-      refreshControl={
-        <RefreshControl
-          refreshing={state.isRefreshing}
-          onRefresh={() => {
-            void state.refresh();
-          }}
-          tintColor={t.userMessage}
-        />
-      }
-      showsVerticalScrollIndicator={false}
-    >
-      <Pressable
-        onPress={onOpenDetails}
-        style={[
-          styles.metricsStrip,
-          {
-            borderTopColor: t.border,
-            borderBottomColor: t.border,
-          },
-        ]}
-      >
-        <SummaryCard
-          label="Running"
-          value={String(status?.running_count ?? 0)}
-          hint="awake now"
-        />
-        <SummaryCard
-          label="Waiting"
-          value={String(status?.waiting_count ?? 0)}
-          hint="needs you"
-        />
-        <SummaryCard
-          label="Next wake"
-          value={
-            status?.next_wake_at
-              ? new Date(status.next_wake_at).toLocaleTimeString([], {
-                  hour: "numeric",
-                  minute: "2-digit",
-                })
-              : "None"
-          }
-          hint="scheduled"
-        />
-        <SummaryCard
-          label="Health"
-          value={status?.home_status ?? "idle"}
-          hint="runtime"
-        />
-      </Pressable>
+    <View style={styles.container}>
+      <View style={[styles.headerBlock, { borderBottomColor: t.border }]}>
+        <Pressable
+          onPress={onOpenDetails}
+          style={[
+            styles.metricsStrip,
+            {
+              borderTopColor: t.border,
+              borderBottomColor: t.border,
+            },
+          ]}
+        >
+          <SummaryCell
+            label="Running"
+            value={String(status?.running_count ?? 0)}
+            hint="awake now"
+          />
+          <SummaryCell
+            label="Waiting"
+            value={String(status?.waiting_count ?? 0)}
+            hint="needs you"
+          />
+          <SummaryCell
+            label="Next wake"
+            value={
+              status?.next_wake_at
+                ? new Date(status.next_wake_at).toLocaleTimeString([], {
+                    hour: "numeric",
+                    minute: "2-digit",
+                  })
+                : "None"
+            }
+            hint="scheduled"
+          />
+          <SummaryCell
+            label="State"
+            value={status?.home_status ?? "idle"}
+            hint="details"
+          />
+        </Pressable>
 
-      <View style={styles.section}>
-        <SectionTitle title="Focus" />
-        <View style={[styles.sectionBody, { borderTopColor: t.border }]}>
-          {focusApproval ? (
-            <FocusRow
-              tag="Approval"
-              title={focusApproval.tool_name}
-              detail={`${formatProjectLabel(focusApproval.project_dir)} • requested ${formatRelativeTime(focusApproval.requested_at)}`}
-              primaryLabel={activeToolCallId === null ? "Approve" : "Working..."}
-              onPrimaryPress={() => {
-                onApproveTool(focusApproval.session_id, focusApproval.tool_call_id);
-              }}
-              secondaryLabel="Open"
-              onSecondaryPress={() => {
-                onSelectRun(focusApproval.session_id);
-              }}
-              disabled={activeToolCallId !== null}
-            />
-          ) : null}
-
-          {focusRun ? (
-            <FocusRow
-              tag="Run"
-              title={focusRun.title || "Untitled run"}
-              detail={describeRun(focusRun)}
-              primaryLabel="Open"
-              onPrimaryPress={() => {
-                onSelectRun(focusRun.session_id);
-              }}
-            />
-          ) : null}
-
-          {nextScheduledRun ? (
-            <FocusRow
-              tag="Next"
-              title={nextScheduledRun.title || "Untitled run"}
-              detail={getRunNextWakeAt(nextScheduledRun)
-                ? `scheduled ${formatTimestamp(getRunNextWakeAt(nextScheduledRun))}`
-                : describeRun(nextScheduledRun)}
-              primaryLabel="Open"
-              onPrimaryPress={() => {
-                onSelectRun(nextScheduledRun.session_id);
-              }}
-            />
-          ) : null}
-
-          {!focusApproval && !focusRun && !nextScheduledRun ? (
-            <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
-              Nothing urgent right now.
+        <View style={styles.quickActions}>
+          <Pressable onPress={onOpenRuns} style={styles.quickAction}>
+            <Text style={[styles.quickActionText, { color: t.mutedForeground }]}>
+              Runs
             </Text>
-          ) : null}
+          </Pressable>
+          <Pressable onPress={onOpenSchedule} style={styles.quickAction}>
+            <Text style={[styles.quickActionText, { color: t.mutedForeground }]}>
+              Schedule
+            </Text>
+          </Pressable>
+          <Pressable onPress={onOpenDetails} style={styles.quickAction}>
+            <Text style={[styles.quickActionText, { color: t.userMessage }]}>
+              Details
+            </Text>
+          </Pressable>
         </View>
-      </View>
 
-      <View style={styles.section}>
-        <View style={styles.threadHeader}>
-          <SectionTitle title="Thread" />
-          <View style={styles.inlineActions}>
-            <Pressable onPress={onOpenRuns} style={styles.inlineAction}>
-              <Text style={[styles.inlineActionText, { color: t.mutedForeground }]}>
-                Runs
+        {topError ? (
+          <Text style={[styles.errorText, { color: t.error }]}>{topError}</Text>
+        ) : null}
+
+        <View style={styles.section}>
+          <SectionTitle title="Focus" />
+          <View style={styles.rows}>
+            {focusApproval ? (
+              <FocusRow
+                tag="Approval"
+                title={focusApproval.tool_name}
+                detail={`${formatProjectLabel(focusApproval.project_dir)} • requested ${formatRelativeTime(focusApproval.requested_at)}`}
+                primaryLabel="Open"
+                onPrimaryPress={() => {
+                  onSelectRun(focusApproval.session_id);
+                }}
+              />
+            ) : null}
+
+            {focusRun ? (
+              <FocusRow
+                tag="Run"
+                title={focusRun.title || "Untitled run"}
+                detail={describeRun(focusRun)}
+                primaryLabel="Open"
+                onPrimaryPress={() => {
+                  onSelectRun(focusRun.session_id);
+                }}
+              />
+            ) : null}
+
+            {nextScheduledRun ? (
+              <FocusRow
+                tag="Next wake"
+                title={nextScheduledRun.title || "Untitled run"}
+                detail={getRunNextWakeAt(nextScheduledRun)
+                  ? `scheduled ${new Date(getRunNextWakeAt(nextScheduledRun) as string).toLocaleString([], {
+                      month: "short",
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit",
+                    })}`
+                  : describeRun(nextScheduledRun)}
+                primaryLabel="Open"
+                onPrimaryPress={() => {
+                  onSelectRun(nextScheduledRun.session_id);
+                }}
+              />
+            ) : null}
+
+            {!focusApproval && !focusRun && !nextScheduledRun ? (
+              <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
+                Nothing urgent right now.
               </Text>
-            </Pressable>
-            <Pressable onPress={onOpenChat} style={styles.inlineAction}>
-              <Text style={[styles.inlineActionText, { color: t.userMessage }]}>
-                Open chat
-              </Text>
-            </Pressable>
+            ) : null}
           </View>
         </View>
-        <View style={[styles.sectionBody, { borderTopColor: t.border }]}>
-          {recentMessages.length ? (
-            recentMessages.map((message) => (
-              <View key={message.id} style={[styles.threadRow, { borderColor: t.border }]}>
-                <Text style={[styles.threadRole, { color: t.mutedForeground }]}>
-                  {message.role === "assistant" ? "Mako" : "You"}
-                </Text>
-                <Text
-                  style={[styles.threadText, { color: t.foreground }]}
-                  numberOfLines={2}
+
+        <View style={styles.section}>
+          <SectionTitle
+            title="Presence"
+            actionLabel={needsBootstrap ? "Initialize" : "Manage"}
+            onAction={() => {
+              if (needsBootstrap) {
+                void homeState.bootstrap();
+              } else {
+                onOpenDetails();
+              }
+            }}
+          />
+          <View style={styles.rows}>
+            {needsBootstrap ? (
+              <View style={[styles.row, { borderColor: t.border }]}>
+                <View style={styles.rowCopy}>
+                  <Text style={[styles.rowTitle, { color: t.foreground }]}>
+                    Mako home is not initialized yet.
+                  </Text>
+                  <Text style={[styles.rowDetail, { color: t.mutedForeground }]}>
+                    Create the soul, identity, heartbeat, memory, channels, and default crew files.
+                  </Text>
+                </View>
+                <Pressable
+                  onPress={() => {
+                    void homeState.bootstrap();
+                  }}
+                  style={styles.rowAction}
+                  disabled={homeState.isBootstrapping}
                 >
-                  {messagePreview(message)}
-                </Text>
+                  <Text style={[styles.rowActionText, { color: t.userMessage }]}>
+                    {homeState.isBootstrapping ? "Initializing..." : "Initialize"}
+                  </Text>
+                </Pressable>
               </View>
-            ))
-          ) : (
-            <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
-              No thread yet. Start with a direction, follow-up, or question.
-            </Text>
-          )}
+            ) : (
+              <>
+                <PresenceRow
+                  label="Soul"
+                  value={previewText(home?.soul?.preview)}
+                  onPress={onOpenDetails}
+                />
+                <PresenceRow
+                  label="Heartbeat"
+                  value={previewText(home?.heartbeat?.preview)}
+                  onPress={onOpenDetails}
+                />
+                <PresenceRow
+                  label="Crew"
+                  value={
+                    crew.length
+                      ? `${crew.length} crew • ${runningCrew} active • ${waitingCrew} waiting${degradedCrew > 0 ? ` • ${degradedCrew} degraded` : ""}`
+                      : "No crew configured yet."
+                  }
+                  onPress={onOpenDetails}
+                />
+              </>
+            )}
+          </View>
         </View>
       </View>
 
-      <MakoSetCourseComposer
-        projectDir={workspaceDirectory}
-        isSubmitting={state.isDispatching}
-        onSubmit={async (task, options) => {
-          const runId = await state.setCourse(task, {
-            projectDir: workspaceDirectory ?? undefined,
-            model: model ?? undefined,
-            startAt: options?.startAt ?? undefined,
-            priority: options?.priority ?? undefined,
-          });
-          if (runId) {
-            await onCourseSet(runId);
-          }
-        }}
-      />
-
-      {state.error ? (
-        <Text style={[styles.error, { color: t.error }]}>{state.error}</Text>
-      ) : null}
-    </ScrollView>
+      <View style={styles.threadWrap}>
+        <MakoThreadSurface
+          chat={chat}
+          emptyTitle="This is the main Mako thread"
+          emptyBody="Use this conversation to steer Mako, ask what it is doing, approve work, or redirect the next move."
+        />
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  scroll: {
+  container: {
     flex: 1,
-  },
-  content: {
-    paddingBottom: 32,
-    gap: 18,
   },
   loading: {
     flex: 1,
-    justifyContent: "center",
     alignItems: "center",
+    justifyContent: "center",
+  },
+  headerBlock: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingBottom: 8,
   },
   metricsStrip: {
     flexDirection: "row",
-    paddingHorizontal: 16,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
   },
   metricCell: {
     flex: 1,
-    paddingVertical: 10,
-    paddingHorizontal: 10,
-    borderRightWidth: StyleSheet.hairlineWidth,
+    minWidth: 0,
+    gap: 2,
   },
   metricLabel: {
     fontSize: 11,
     fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
   },
   metricValue: {
-    marginTop: 4,
     fontSize: 15,
     fontWeight: "600",
   },
   metricHint: {
-    marginTop: 2,
     fontSize: 11,
     lineHeight: 14,
   },
-  section: {
-    paddingHorizontal: 16,
-  },
-  sectionTitle: {
-    fontSize: 15,
-    fontWeight: "600",
-  },
-  sectionBody: {
-    marginTop: 10,
-    borderTopWidth: StyleSheet.hairlineWidth,
-  },
-  focusRow: {
-    flexDirection: "row",
-    gap: 12,
-    paddingVertical: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  focusCopy: {
-    flex: 1,
-    minWidth: 0,
-  },
-  focusTag: {
-    fontSize: 11,
-    fontWeight: "600",
-  },
-  focusTitle: {
-    marginTop: 2,
-    fontSize: 14,
-    fontWeight: "600",
-  },
-  focusDetail: {
-    marginTop: 4,
-    fontSize: 12,
-    lineHeight: 17,
-  },
-  focusActions: {
-    alignItems: "flex-end",
-    justifyContent: "center",
-    gap: 8,
-  },
-  focusAction: {
-    minHeight: 24,
-    justifyContent: "center",
-  },
-  focusActionText: {
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  threadHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 12,
-  },
-  inlineActions: {
+  quickActions: {
     flexDirection: "row",
     alignItems: "center",
     gap: 14,
+    paddingHorizontal: 16,
+    paddingTop: 8,
   },
-  inlineAction: {
-    minHeight: 24,
-    justifyContent: "center",
+  quickAction: {
+    paddingVertical: 2,
   },
-  inlineActionText: {
+  quickActionText: {
     fontSize: 12,
     fontWeight: "600",
   },
-  threadRow: {
-    paddingVertical: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    gap: 4,
+  errorText: {
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    fontSize: 12,
+    lineHeight: 18,
   },
-  threadRole: {
-    fontSize: 11,
+  section: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    gap: 8,
+  },
+  sectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  sectionTitle: {
+    fontSize: 13,
     fontWeight: "600",
   },
-  threadText: {
+  headerAction: {
+    paddingVertical: 2,
+  },
+  headerActionText: {
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  rows: {
+    gap: 6,
+  },
+  row: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: 10,
+    paddingBottom: 4,
+  },
+  rowCopy: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  rowTag: {
+    fontSize: 11,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.45,
+  },
+  rowTitle: {
     fontSize: 14,
-    lineHeight: 19,
+    fontWeight: "600",
+  },
+  rowDetail: {
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  rowAction: {
+    paddingVertical: 4,
+  },
+  rowActionText: {
+    fontSize: 12,
+    fontWeight: "600",
   },
   emptyText: {
-    paddingVertical: 12,
-    fontSize: 14,
-    lineHeight: 19,
-  },
-  error: {
-    paddingHorizontal: 16,
-    fontSize: 13,
+    fontSize: 12,
     lineHeight: 18,
+    paddingVertical: 6,
+  },
+  presenceRow: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: 10,
+    paddingBottom: 4,
+    gap: 4,
+  },
+  presenceLabel: {
+    fontSize: 11,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.45,
+  },
+  presenceValue: {
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  threadWrap: {
+    flex: 1,
+    minHeight: 0,
   },
 });

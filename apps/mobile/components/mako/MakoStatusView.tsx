@@ -8,6 +8,7 @@ import {
 } from "react-native";
 import { useThemeContext } from "../../hooks/useTheme";
 import { MakoApprovalList } from "./MakoApprovalList";
+import { MakoPresenceDetails } from "./MakoPresenceDetails";
 import { MakoRunList } from "./MakoRunList";
 import {
   describeRunDrift,
@@ -21,6 +22,7 @@ import {
 import type {
   MakoCurrentRunSummary,
   MakoCurrentState,
+  MakoHomeState,
 } from "./types";
 import type {
   MakoDaemonSummary,
@@ -31,6 +33,7 @@ import type {
 
 interface MakoStatusViewProps {
   state: MakoCurrentState;
+  homeState: MakoHomeState;
   activeToolCallId?: string | null;
   onSelectRun: (runId: string) => void;
   onApproveTool: (sessionId: string, toolCallId: string) => void;
@@ -39,6 +42,7 @@ interface MakoStatusViewProps {
 
 export function MakoStatusView({
   state,
+  homeState,
   activeToolCallId,
   onSelectRun,
   onApproveTool,
@@ -90,6 +94,9 @@ export function MakoStatusView({
       <Text style={[styles.description, { color: t.mutedForeground }]}>
         Details keeps the control-plane truth compact: what is awake, what is blocked, how healthy the daemon is, and what may need intervention next.
       </Text>
+
+      <MakoPresenceDetails state={homeState} />
+
       <View
         style={[
           styles.summaryStrip,

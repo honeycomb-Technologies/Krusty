@@ -23,6 +23,19 @@ function paletteForStatus(status: string, theme: ReturnType<typeof useThemeConte
         border: `${t.warning}38`,
         color: t.warning,
       };
+    case "waiting":
+    case "blocked":
+      return {
+        background: `${t.warning}18`,
+        border: `${t.warning}38`,
+        color: t.warning,
+      };
+    case "degraded":
+      return {
+        background: `${t.error}18`,
+        border: `${t.error}38`,
+        color: t.error,
+      };
     case "paused":
     case "pending":
     case "idle":

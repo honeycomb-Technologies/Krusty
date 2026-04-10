@@ -3,7 +3,6 @@ import { StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useBreakpoint } from "../../hooks/useBreakpoint";
 import { useThemeContext } from "../../hooks/useTheme";
-import { MakoChatView } from "./MakoChatView";
 import { MakoCurrentView } from "./MakoCurrentView";
 import { MakoReportsView } from "./MakoReportsView";
 import { MakoRunView } from "./MakoRunView";
@@ -13,6 +12,7 @@ import { MakoStatusView } from "./MakoStatusView";
 import { MakoTopBar } from "./MakoTopBar";
 import { MakoTopNav } from "./MakoTopNav";
 import { useMakoCurrent } from "./hooks/useMakoCurrent";
+import { useMakoHome } from "./hooks/useMakoHome";
 import { useMakoNavigation } from "./hooks/useMakoNavigation";
 import type { MakoChatContext } from "./types";
 
@@ -36,6 +36,7 @@ export function MakoScreen({
   const { theme } = useThemeContext();
   const { isDesktop } = useBreakpoint();
   const current = useMakoCurrent(true);
+  const home = useMakoHome(true);
   const navigation = useMakoNavigation(activeRunId);
 
   const selectedRun =
@@ -46,8 +47,9 @@ export function MakoScreen({
   useEffect(() => {
     if (!navigation.selectedRunId) {
       void current.refresh();
+      void home.refresh();
     }
-  }, [current.refresh, navigation.selectedRunId]);
+  }, [current.refresh, home.refresh, navigation.selectedRunId]);
 
   const handleOpenRun = async (runId: string) => {
     navigation.openRun(runId);
@@ -94,28 +96,22 @@ export function MakoScreen({
           {navigation.topLevel === "current" ? (
             <MakoCurrentView
               state={current}
-              workspaceDirectory={workspaceDirectory}
-              model={chat.model ?? null}
-              activeToolCallId={chat.activeToolCallId}
+              homeState={home}
               chat={chat}
               onSelectRun={(runId) => {
                 void handleOpenRun(runId);
               }}
-              onOpenChat={() => {
-                navigation.setTopLevel("chat");
-              }}
               onOpenRuns={() => {
                 navigation.setTopLevel("runs");
+              }}
+              onOpenSchedule={() => {
+                navigation.setTopLevel("schedule");
               }}
               onOpenDetails={() => {
                 navigation.setTopLevel("status");
               }}
-              onCourseSet={handleOpenRun}
-              onApproveTool={chat.onApproveTool}
             />
           ) : null}
-
-          {navigation.topLevel === "chat" ? <MakoChatView chat={chat} /> : null}
 
           {navigation.topLevel === "schedule" ? (
             <MakoScheduleView
@@ -141,6 +137,7 @@ export function MakoScreen({
           {navigation.topLevel === "status" ? (
             <MakoStatusView
               state={current}
+              homeState={home}
               activeToolCallId={chat.activeToolCallId}
               onSelectRun={(runId) => {
                 void handleOpenRun(runId);

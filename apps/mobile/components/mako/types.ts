@@ -1,7 +1,11 @@
 import type {
   ChatMessage,
+  MakoCrewDocumentKind,
+  MakoCrewResponse,
   MakoCurrentRunSummary,
   MakoCurrentResponse,
+  MakoHomeDocumentKind,
+  MakoHomeResponse,
   MakoRunPriority,
   MakoRunWakeEvent,
   MakoSessionStatus,
@@ -76,6 +80,27 @@ export interface MakoCurrentState {
   }) => Promise<string | null>;
   recoverDaemon: () => Promise<number>;
   isDispatching: boolean;
+}
+
+export interface MakoHomeState {
+  home: MakoHomeResponse | null;
+  crew: MakoCrewResponse | null;
+  isLoading: boolean;
+  isRefreshing: boolean;
+  isBootstrapping: boolean;
+  isSaving: boolean;
+  error: string | null;
+  refresh: () => Promise<void>;
+  bootstrap: () => Promise<void>;
+  updateHomeDocument: (
+    kind: MakoHomeDocumentKind,
+    content: string,
+  ) => Promise<void>;
+  updateCrewDocument: (
+    slug: string,
+    kind: MakoCrewDocumentKind,
+    content: string,
+  ) => Promise<void>;
 }
 
 export interface MakoRunState {
