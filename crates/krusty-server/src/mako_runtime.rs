@@ -543,6 +543,8 @@ async fn run_mako_session_inner(
         .unwrap_or_else(|| (*state.working_dir).clone());
     let project_dir = resolve_persisted_project_dir(session.project_dir.as_deref(), &working_dir);
     let mako_settings = ProjectSettings::load_mako_settings(project_dir.as_deref());
+    let runtime_state =
+        MakoRuntimeStateStore::new(Database::new(&state.db_path)?).get_state(&session_id)?;
 
     let options = CallOptions {
         tools: Some(state.tool_registry.get_ai_tools().await),
@@ -563,6 +565,7 @@ async fn run_mako_session_inner(
         session_id: session_id.clone(),
         working_dir,
         project_dir,
+        mako_crew_slug: runtime_state.and_then(|state| state.crew_slug),
         session_type: SessionType::Mako,
         permission_mode: PermissionMode::Autonomous,
         user_id: session.user_id.clone(),

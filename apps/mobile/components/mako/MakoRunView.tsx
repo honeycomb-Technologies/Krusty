@@ -12,6 +12,7 @@ import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";
 import { ChatBar } from "../chat/ChatBar";
 import { ChatTranscript } from "../chat/ChatTranscript";
+import { MakoCrewPicker } from "./MakoCrewPicker";
 import { MakoPriorityPicker } from "./MakoPriorityPicker";
 import { MakoSchedulePicker } from "./MakoSchedulePicker";
 import { MakoWakeTimeline } from "./MakoWakeTimeline";
@@ -34,11 +35,12 @@ import {
   getRuntimeLabel,
 } from "./utils";
 import type { MakoChatContext, MakoCurrentRunSummary } from "./types";
-import type { ChatMessage } from "@krusty/api";
+import type { ChatMessage, MakoCrewRuntimeMember } from "@krusty/api";
 
 interface MakoRunViewProps {
   runId: string;
   summary: MakoCurrentRunSummary | null;
+  crewMembers: MakoCrewRuntimeMember[];
   chat: MakoChatContext;
   onBack: () => void;
   onDeleteRun: (id: string) => void;
@@ -150,6 +152,7 @@ function messagePreview(message: ChatMessage): string {
 export function MakoRunView({
   runId,
   summary,
+  crewMembers,
   chat,
   onBack,
   onDeleteRun,
@@ -161,8 +164,10 @@ export function MakoRunView({
   const [schedulePreset, setSchedulePreset] = useState<MakoSchedulePreset>("30m");
   const [customSchedule, setCustomSchedule] = useState("");
   const [priority, setPriority] = useState(getRunPriority(summary ?? { runtime: null }));
+  const [crewSlug, setCrewSlug] = useState(summary?.runtime?.crew_slug ?? null);
   const [isScheduling, setIsScheduling] = useState(false);
   const [isSavingPriority, setIsSavingPriority] = useState(false);
+  const [isSavingCrew, setIsSavingCrew] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [composerReserveHeight, setComposerReserveHeight] = useState(150);
   const { status, wake, isLoading, refresh } = useMakoRun(runId, true);
@@ -190,6 +195,7 @@ export function MakoRunView({
   };
   const runtimeStatus = status?.runtime?.status ?? null;
   const runtimePriority = status?.runtime?.priority ?? summary?.runtime?.priority ?? "normal";
+  const runtimeCrewSlug = status?.runtime?.crew_slug ?? summary?.runtime?.crew_slug ?? null;
   const nextWakeAt = status?.runtime?.next_wake_at ?? summary?.runtime?.next_wake_at;
   const schedule = resolveScheduleSelection(schedulePreset, customSchedule);
   const resumeLabel = runtimeStatus === "sleeping" ? "Wake now" : "Resume";
@@ -201,6 +207,10 @@ export function MakoRunView({
   useEffect(() => {
     setPriority(runtimePriority);
   }, [runtimePriority]);
+
+  useEffect(() => {
+    setCrewSlug(runtimeCrewSlug);
+  }, [runtimeCrewSlug]);
 
   useEffect(() => {
     setCustomSchedule(formatScheduleInputValue(nextWakeAt));
@@ -282,6 +292,26 @@ export function MakoRunView({
       );
     } finally {
       setIsSavingPriority(false);
+    }
+  };
+
+  const handleCrewChange = async (nextCrewSlug: string | null) => {
+    if (!client) {
+      return;
+    }
+    setCrewSlug(nextCrewSlug);
+    setActionError(null);
+    setIsSavingCrew(true);
+    try {
+      await client.setMakoSessionCrew(runId, nextCrewSlug);
+      await refresh();
+    } catch (error) {
+      setCrewSlug(runtimeCrewSlug);
+      setActionError(
+        error instanceof Error ? error.message : "Failed to update crew.",
+      );
+    } finally {
+      setIsSavingCrew(false);
     }
   };
 
@@ -394,9 +424,9 @@ export function MakoRunView({
               hint={`${taskStats.completed} done`}
             />
             <SummaryCell
-              label="Cadence"
-              value={`${cadence.tick_interval_secs}s`}
-              hint={`${cadence.max_ticks} max`}
+              label="Crew"
+              value={runtimeCrewSlug ?? "Mako"}
+              hint={`${cadence.tick_interval_secs}s cadence`}
             />
           </View>
 
@@ -463,6 +493,30 @@ export function MakoRunView({
               {isSavingPriority ? (
                 <Text style={[styles.metaText, { color: t.mutedForeground }]}>
                   Saving priority...
+                </Text>
+              ) : null}
+            </View>
+          </View>
+
+          <View style={styles.section}>
+            <SectionTitle title="Crew" />
+            <View style={[styles.sectionBody, { borderTopColor: t.border }]}>
+              <Text style={[styles.bodyText, { color: t.mutedForeground }]}>
+                Assign this run to Mako or a specific crew member. The selected crew identity shapes the run&apos;s working presence and context layers.
+              </Text>
+              <View style={styles.controlBlock}>
+                <MakoCrewPicker
+                  members={crewMembers}
+                  selectedSlug={crewSlug}
+                  isSaving={isSavingCrew}
+                  onSelect={(nextCrewSlug) => {
+                    void handleCrewChange(nextCrewSlug);
+                  }}
+                />
+              </View>
+              {isSavingCrew ? (
+                <Text style={[styles.metaText, { color: t.mutedForeground }]}>
+                  Saving crew...
                 </Text>
               ) : null}
             </View>

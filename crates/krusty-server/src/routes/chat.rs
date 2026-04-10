@@ -29,7 +29,9 @@ use krusty_core::ai::client::{
 use krusty_core::ai::providers::ProviderId;
 use krusty_core::ai::types::{AiTool, Content, ImageContent, ModelMessage, Role, ThinkingConfig};
 use krusty_core::plan::PlanManager;
-use krusty_core::storage::{Database, ProjectSettings, SessionType, WorkMode, WorkspaceMode};
+use krusty_core::storage::{
+    Database, MakoRuntimeStateStore, ProjectSettings, SessionType, WorkMode, WorkspaceMode,
+};
 use krusty_core::tools::registry::PermissionMode;
 use krusty_core::SessionManager;
 
@@ -73,6 +75,7 @@ struct ChatSessionContext {
     project_dir: Option<PathBuf>,
     work_mode: WorkMode,
     session_type: SessionType,
+    mako_crew_slug: Option<String>,
     user_id: Option<String>,
     guard: OwnedMutexGuard<()>,
 }
@@ -256,6 +259,11 @@ async fn setup_chat_session(
         .and_then(|pm| pm.get_lifecycle_state(session_id, session.work_mode).ok())
         .map(|state| state.effective_work_mode)
         .unwrap_or(session.work_mode);
+    let mako_runtime = if session.session_type == SessionType::Mako {
+        MakoRuntimeStateStore::new(Database::new(&state.db_path)?).get_state(session_id)?
+    } else {
+        None
+    };
 
     Ok(ChatSessionContext {
         ai_client,
@@ -267,6 +275,7 @@ async fn setup_chat_session(
         project_dir,
         work_mode: effective_work_mode,
         session_type: session.session_type,
+        mako_crew_slug: mako_runtime.and_then(|runtime| runtime.crew_slug),
         user_id,
         guard,
     })
@@ -626,6 +635,7 @@ async fn start_orchestrator_sse(
         session_id: ctx.session_id.clone(),
         working_dir: ctx.working_dir,
         project_dir: ctx.project_dir,
+        mako_crew_slug: ctx.mako_crew_slug.clone(),
         session_type: ctx.session_type,
         permission_mode,
         user_id: ctx.user_id.clone(),

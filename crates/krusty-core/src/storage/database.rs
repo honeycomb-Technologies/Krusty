@@ -911,6 +911,18 @@ impl Database {
             self.set_schema_version_tx(&tx, 28)?;
         }
 
+        // Migration 29: Persisted Mako crew assignment
+        if current_version < 29 {
+            info!("Running migration 29: Mako crew assignment");
+            if !Self::column_exists(&tx, "mako_runtime_state", "crew_slug") {
+                tx.execute_batch(
+                    "ALTER TABLE mako_runtime_state
+                     ADD COLUMN crew_slug TEXT;",
+                )?;
+            }
+            self.set_schema_version_tx(&tx, 29)?;
+        }
+
         tx.commit()?;
 
         info!("Migrations complete");

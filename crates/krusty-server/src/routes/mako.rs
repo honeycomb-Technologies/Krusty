@@ -56,6 +56,7 @@ pub fn router() -> Router<AppState> {
         .route("/sessions/:id/message", post(send_message))
         .route("/sessions/:id/schedule", post(schedule_session))
         .route("/sessions/:id/priority", post(set_priority))
+        .route("/sessions/:id/crew", post(set_crew))
         .route("/sessions/:id/pause", post(pause_session))
         .route("/sessions/:id/resume", post(resume_session))
         .route("/sessions/:id", delete(cancel_session))
@@ -68,6 +69,7 @@ struct DispatchRequest {
     model: Option<String>,
     start_at: Option<String>,
     priority: Option<MakoRunPriority>,
+    crew_slug: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,6 +85,11 @@ struct ScheduleRequest {
 #[derive(Debug, Deserialize)]
 struct PriorityRequest {
     priority: MakoRunPriority,
+}
+
+#[derive(Debug, Deserialize)]
+struct CrewRequest {
+    crew_slug: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -343,6 +350,17 @@ async fn dispatch(
     let start_at = parse_requested_wake_at(req.start_at.as_deref())?;
     let model = trimmed_nonempty(req.model.as_deref());
     let priority = req.priority.unwrap_or(MakoRunPriority::Normal);
+    let crew_slug = req
+        .crew_slug
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    if let Some(crew_slug) = crew_slug.as_deref() {
+        if !is_valid_crew_slug(crew_slug) {
+            return Err(AppError::BadRequest("invalid crew slug".to_string()));
+        }
+    }
 
     let session_id = session_manager.create_session_for_user_with_config(
         task,
@@ -354,8 +372,9 @@ async fn dispatch(
         None,
         SessionType::Mako,
     )?;
-    MakoRuntimeStateStore::new(Database::new(&state.db_path)?)
-        .set_priority(&session_id, priority)?;
+    let runtime_store = MakoRuntimeStateStore::new(Database::new(&state.db_path)?);
+    runtime_store.set_priority(&session_id, priority)?;
+    runtime_store.set_crew_slug(&session_id, crew_slug.as_deref())?;
 
     let content_json = serde_json::json!([{ "type": "text", "text": task }]).to_string();
     session_manager.save_message(&session_id, "user", &content_json)?;
@@ -487,9 +506,18 @@ async fn crew(
     user: Option<CurrentUser>,
 ) -> Result<Json<MakoCrewResponse>, AppError> {
     let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
-    let sessions = {
+    let (sessions, runtime_states) = {
         let session_manager = open_session_manager(&state)?;
-        session_manager.list_sessions_for_user_by_type(None, user_id, SessionType::Mako)?
+        let sessions =
+            session_manager.list_sessions_for_user_by_type(None, user_id, SessionType::Mako)?;
+        let runtime_states = MakoRuntimeStateStore::new(Database::new(&state.db_path)?)
+            .list_states_for_sessions(
+                &sessions
+                    .iter()
+                    .map(|session| session.id.clone())
+                    .collect::<Vec<_>>(),
+            )?;
+        (sessions, runtime_states)
     };
     let task_store = AutonomousTaskStore::new(Database::new(&state.db_path)?);
     let delegated_store = DelegatedRunStore::new(Database::new(&state.db_path)?);
@@ -497,6 +525,7 @@ async fn crew(
     Ok(Json(build_mako_crew_response_from_dir_and_sessions(
         &mako_home_dir_for_user(user.as_ref()),
         &sessions,
+        &runtime_states,
         &task_store,
         &delegated_store,
     )?))
@@ -940,6 +969,38 @@ async fn set_priority(
     Ok(Json(OkResponse { ok: true }))
 }
 
+async fn set_crew(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Path(id): Path<String>,
+    Json(req): Json<CrewRequest>,
+) -> Result<Json<OkResponse>, AppError> {
+    let session_manager = open_session_manager(&state)?;
+    ensure_owned_session_of_type(
+        &session_manager,
+        &id,
+        SessionType::Mako,
+        "Mako",
+        user.as_ref(),
+    )?;
+
+    let crew_slug = req
+        .crew_slug
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    if let Some(crew_slug) = crew_slug.as_deref() {
+        if !is_valid_crew_slug(crew_slug) {
+            return Err(AppError::BadRequest("invalid crew slug".to_string()));
+        }
+    }
+
+    let store = MakoRuntimeStateStore::new(Database::new(&state.db_path)?);
+    store.set_crew_slug(&id, crew_slug.as_deref())?;
+    Ok(Json(OkResponse { ok: true }))
+}
+
 async fn resume_session(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
@@ -1032,6 +1093,7 @@ fn build_mako_home_response_from_dir(mako_home: &std::path::Path) -> MakoHomeRes
 fn build_mako_crew_response_from_dir_and_sessions(
     mako_home: &std::path::Path,
     sessions: &[SessionInfo],
+    runtime_states: &std::collections::HashMap<String, MakoRuntimeState>,
     task_store: &AutonomousTaskStore,
     delegated_store: &DelegatedRunStore,
 ) -> Result<MakoCrewResponse, AppError> {
@@ -1041,8 +1103,14 @@ fn build_mako_crew_response_from_dir_and_sessions(
         .iter()
         .map(|member| (member.slug.as_str(), member))
         .collect::<BTreeMap<_, _>>();
-    let runtime = summarize_crew_runtime(&profile, sessions, task_store, delegated_store)
-        .map_err(|error| AppError::Internal(format!("Failed to summarize Mako crew: {}", error)))?;
+    let runtime = summarize_crew_runtime(
+        &profile,
+        sessions,
+        runtime_states,
+        task_store,
+        delegated_store,
+    )
+    .map_err(|error| AppError::Internal(format!("Failed to summarize Mako crew: {}", error)))?;
 
     Ok(MakoCrewResponse {
         members: runtime
@@ -2008,6 +2076,7 @@ mod tests {
                 model: Some("  openai/gpt-5  ".to_string()),
                 start_at: None,
                 priority: None,
+                crew_slug: None,
             }),
         )
         .await
@@ -2179,6 +2248,15 @@ mod tests {
         let delegated_store = krusty_core::storage::DelegatedRunStore::new(
             Database::new(&db_path).expect("db should open"),
         );
+        let runtime_states =
+            MakoRuntimeStateStore::new(Database::new(&db_path).expect("db should open"))
+                .list_states_for_sessions(
+                    &sessions
+                        .iter()
+                        .map(|session| session.id.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .expect("runtime states should load");
         let task_id = task_store
             .create_task(&session_id, "Review", "Review current run", &[])
             .expect("task should create");
@@ -2189,6 +2267,7 @@ mod tests {
         let response = build_mako_crew_response_from_dir_and_sessions(
             &temp_dir,
             &sessions,
+            &runtime_states,
             &task_store,
             &delegated_store,
         )
@@ -2235,6 +2314,7 @@ mod tests {
                 model: None,
                 start_at: None,
                 priority: None,
+                crew_slug: None,
             }),
         )
         .await
@@ -2265,6 +2345,7 @@ mod tests {
                 model: None,
                 start_at: None,
                 priority: None,
+                crew_slug: None,
             }),
         )
         .await;
@@ -2294,6 +2375,7 @@ mod tests {
                 model: None,
                 start_at: None,
                 priority: None,
+                crew_slug: None,
             }),
         )
         .await;
@@ -2316,6 +2398,7 @@ mod tests {
                 model: None,
                 start_at: Some(wake_at.to_rfc3339()),
                 priority: None,
+                crew_slug: None,
             }),
         )
         .await
@@ -2363,6 +2446,7 @@ mod tests {
                 model: None,
                 start_at: None,
                 priority: Some(MakoRunPriority::High),
+                crew_slug: None,
             }),
         )
         .await
@@ -2392,6 +2476,7 @@ mod tests {
                 model: None,
                 start_at: None,
                 priority: None,
+                crew_slug: None,
             }),
         )
         .await

@@ -77,6 +77,7 @@ export interface MakoCurrentState {
     model?: string | null;
     startAt?: string | null;
     priority?: MakoRunPriority | null;
+    crewSlug?: string | null;
   }) => Promise<string | null>;
   recoverDaemon: () => Promise<number>;
   isDispatching: boolean;

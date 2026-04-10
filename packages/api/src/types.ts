@@ -333,6 +333,7 @@ export interface MakoRuntimeState {
   last_error?: string | null;
   current_run_id?: string | null;
   last_wake_reason?: string | null;
+  crew_slug?: string | null;
   priority: MakoRunPriority;
   updated_at: string;
 }

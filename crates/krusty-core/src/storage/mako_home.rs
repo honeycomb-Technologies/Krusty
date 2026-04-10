@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -6,7 +6,10 @@ use anyhow::Result;
 use chrono::{DateTime, NaiveDateTime};
 use tracing::warn;
 
-use super::{AutonomousTaskStore, DelegatedRunStore, SessionInfo, TaskStatus};
+use super::{
+    AutonomousTaskStore, DelegatedRunStore, MakoRuntimeState, MakoRuntimeStateStatus, SessionInfo,
+    TaskStatus,
+};
 use crate::agent::DelegatedRunStage;
 use crate::paths;
 
@@ -349,6 +352,7 @@ pub fn is_valid_crew_slug(value: &str) -> bool {
 pub fn summarize_crew_runtime(
     profile: &MakoHomeProfile,
     sessions: &[SessionInfo],
+    runtime_states: &HashMap<String, MakoRuntimeState>,
     task_store: &AutonomousTaskStore,
     delegated_store: &DelegatedRunStore,
 ) -> Result<Vec<MakoCrewRuntimeSummary>> {
@@ -371,6 +375,33 @@ pub fn summarize_crew_runtime(
     }
 
     for session in sessions {
+        if let Some(runtime_state) = runtime_states.get(session.id.as_str()) {
+            if let Some(crew_slug) = runtime_state.crew_slug.as_deref() {
+                let key = normalize_agent_key(crew_slug);
+                if !key.is_empty() {
+                    let summary = summaries.entry(key.clone()).or_insert_with(|| {
+                        new_runtime_summary(crew_slug, known_slugs.contains(&key))
+                    });
+                    summary.recent_run_count += 1;
+                    match runtime_state.status {
+                        MakoRuntimeStateStatus::Running
+                        | MakoRuntimeStateStatus::AwaitingInput
+                        | MakoRuntimeStateStatus::Paused => {
+                            summary.active_run_count += 1;
+                        }
+                        MakoRuntimeStateStatus::Error => {
+                            summary.failed_run_count += 1;
+                        }
+                        _ => {}
+                    }
+                    record_latest_activity(
+                        &mut summary.latest_activity_at,
+                        runtime_state.updated_at.as_str(),
+                    );
+                }
+            }
+        }
+
         for task in task_store.list_tasks(&session.id)? {
             let Some(owner) = task.owner.as_deref() else {
                 continue;
@@ -621,6 +652,7 @@ mod tests {
         DelegatedRunScope, DelegatedRunSnapshot, DelegatedRunStartInput, DelegatedRunStore,
         SessionManager, SessionType, WorkspaceMode,
     };
+    use std::collections::HashMap;
     use std::fs;
     use tempfile::TempDir;
 
@@ -836,8 +868,14 @@ mod tests {
 
         let profile = MakoHomeProfile::load_from(temp.path());
         let sessions = vec![session_manager.get_session(&session_id).unwrap().unwrap()];
-        let summary =
-            summarize_crew_runtime(&profile, &sessions, &task_store, &delegated_store).unwrap();
+        let summary = summarize_crew_runtime(
+            &profile,
+            &sessions,
+            &HashMap::new(),
+            &task_store,
+            &delegated_store,
+        )
+        .unwrap();
 
         let builder = summary
             .iter()

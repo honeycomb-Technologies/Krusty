@@ -457,7 +457,7 @@ export class KrustyClient {
   }
 
   // Mako
-  async dispatchMako(task: string, options?: { projectDir?: string; model?: string; startAt?: string; priority?: MakoRunPriority }): Promise<MakoDispatchResponse> {
+  async dispatchMako(task: string, options?: { projectDir?: string; model?: string; startAt?: string; priority?: MakoRunPriority; crewSlug?: string | null }): Promise<MakoDispatchResponse> {
     return this.request('/mako/dispatch', {
       method: 'POST',
       body: JSON.stringify({
@@ -466,6 +466,7 @@ export class KrustyClient {
         model: options?.model ?? undefined,
         start_at: options?.startAt ?? undefined,
         priority: options?.priority ?? undefined,
+        crew_slug: options?.crewSlug ?? undefined,
       }),
     });
   }
@@ -540,6 +541,13 @@ export class KrustyClient {
     return this.request(`/mako/sessions/${id}/priority`, {
       method: 'POST',
       body: JSON.stringify({ priority }),
+    });
+  }
+
+  async setMakoSessionCrew(id: string, crewSlug?: string | null): Promise<SimpleOkResponse> {
+    return this.request(`/mako/sessions/${id}/crew`, {
+      method: 'POST',
+      body: JSON.stringify({ crew_slug: crewSlug ?? null }),
     });
   }
 

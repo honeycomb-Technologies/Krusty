@@ -53,6 +53,7 @@ pub fn inject_context(
     skills_manager: &RwLock<SkillsManager>,
     model_id: Option<&str>,
     session_type: Option<&str>,
+    mako_crew_slug: Option<&str>,
 ) -> Vec<ModelMessage> {
     let is_chat = session_type == Some("chat");
 
@@ -111,7 +112,7 @@ pub fn inject_context(
     let skills_ctx = build_skills_context(skills_manager, project_dir.is_some());
     let project_ctx = project_dir.map(build_project_context).unwrap_or_default();
     let mako_ctx_sections = if is_mako {
-        build_mako_context_sections(project_dir.unwrap_or(working_dir))
+        build_mako_context_sections(project_dir.unwrap_or(working_dir), mako_crew_slug)
     } else {
         Vec::new()
     };
@@ -1155,13 +1156,18 @@ pub fn build_project_context(working_dir: &Path) -> String {
     sections.join("\n\n")
 }
 
-fn build_mako_context_sections(project_root: &Path) -> Vec<String> {
+fn build_mako_context_sections(project_root: &Path, mako_crew_slug: Option<&str>) -> Vec<String> {
     let mako_home = paths::mako_dir();
-    build_mako_context_sections_with_home(project_root, &mako_home)
+    build_mako_context_sections_with_home(project_root, &mako_home, mako_crew_slug)
 }
 
-fn build_mako_context_sections_with_home(project_root: &Path, mako_home: &Path) -> Vec<String> {
-    let mut sections = MakoHomeProfile::load_from(mako_home)
+fn build_mako_context_sections_with_home(
+    project_root: &Path,
+    mako_home: &Path,
+    mako_crew_slug: Option<&str>,
+) -> Vec<String> {
+    let profile = MakoHomeProfile::load_from(mako_home);
+    let mut sections = profile
         .context_layers()
         .into_iter()
         .map(|layer| {
@@ -1171,6 +1177,26 @@ fn build_mako_context_sections_with_home(project_root: &Path, mako_home: &Path) 
             )
         })
         .collect::<Vec<_>>();
+
+    if let Some(crew_slug) = mako_crew_slug
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Some(member) = profile.crew.iter().find(|member| member.slug == crew_slug) {
+            for (kind, document) in [
+                ("CREW IDENTITY", member.identity.as_ref()),
+                ("CREW SOUL", member.soul.as_ref()),
+                ("CREW MEMORY", member.memory.as_ref()),
+            ] {
+                if let Some(document) = document {
+                    sections.push(format!(
+                        "[MAKO {} - {} - {}]\n\n{}\n\n[END MAKO {}]",
+                        kind, member.slug, document.file_name, document.content, kind
+                    ));
+                }
+            }
+        }
+    }
 
     if let Some(path) = discover_named_file(project_root, MAKO_FILES) {
         if let Some(content) = load_mako_context_file(&path, "Mako project overlay") {
@@ -1313,7 +1339,7 @@ mod tests {
         .unwrap();
         fs::write(repo.join("MAKO.md"), "Project-specific operating notes.").unwrap();
 
-        let context = build_mako_context_sections_with_home(&repo, &mako_home).join("\n\n");
+        let context = build_mako_context_sections_with_home(&repo, &mako_home, None).join("\n\n");
 
         assert!(context.contains("[MAKO SOUL - MAKO_SOUL.md]"));
         assert!(context.contains("Keep moving."));
@@ -1334,7 +1360,7 @@ mod tests {
         fs::create_dir_all(&mako_home).unwrap();
         fs::write(repo.join("MAKO.md"), "Always Swimming.").unwrap();
 
-        let context = build_mako_context_sections_with_home(&repo, &mako_home).join("\n\n");
+        let context = build_mako_context_sections_with_home(&repo, &mako_home, None).join("\n\n");
 
         assert!(context.contains("[MAKO PROJECT OVERLAY - MAKO.md]"));
         assert!(context.contains("Always Swimming."));
@@ -1351,7 +1377,7 @@ mod tests {
         fs::write(mako_home.join("SOUL.md"), "Legacy soul.").unwrap();
         fs::write(mako_home.join("IDENTITY.md"), "Legacy identity.").unwrap();
 
-        let context = build_mako_context_sections_with_home(&repo, &mako_home).join("\n\n");
+        let context = build_mako_context_sections_with_home(&repo, &mako_home, None).join("\n\n");
 
         assert!(context.contains("[MAKO SOUL - SOUL.md]"));
         assert!(context.contains("Legacy soul."));
@@ -1366,7 +1392,7 @@ mod tests {
         fs::create_dir_all(&repo).unwrap();
         fs::write(repo.join("MAKO.md"), "Always Swimming.").unwrap();
 
-        let context = build_mako_context_sections(&repo).join("\n\n");
+        let context = build_mako_context_sections(&repo, None).join("\n\n");
 
         assert!(context.contains("Always Swimming."));
     }
@@ -1386,7 +1412,7 @@ mod tests {
         fs::write(mako_home.join(paths::MAKO_CHANNELS_FILE), "Channels.").unwrap();
         fs::write(repo.join("MAKO.md"), "Overlay.").unwrap();
 
-        let sections = build_mako_context_sections_with_home(&repo, &mako_home);
+        let sections = build_mako_context_sections_with_home(&repo, &mako_home, None);
         let labels = sections
             .iter()
             .map(|section| {
@@ -1489,6 +1515,7 @@ mod tests {
             &skills,
             None,
             None,
+            None,
         );
 
         assert_eq!(injected.len(), 3);
@@ -1531,6 +1558,7 @@ mod tests {
             &skills,
             None,
             Some("mako"),
+            None,
         );
         let code_injected = inject_context(
             &conversation,
@@ -1542,6 +1570,7 @@ mod tests {
             &skills,
             None,
             Some("code"),
+            None,
         );
 
         assert!(mako_injected.iter().any(|message| {
@@ -1596,6 +1625,7 @@ mod tests {
             &skills,
             None,
             Some("mako"),
+            None,
         );
 
         let texts = injected
@@ -1644,6 +1674,7 @@ mod tests {
             &skills,
             None,
             Some("mako"),
+            None,
         );
 
         assert!(!injected.iter().any(|message| {
@@ -1710,6 +1741,7 @@ mod tests {
             &skills,
             None,
             Some("mako"),
+            None,
         );
 
         assert!(injected.iter().any(|message| {
@@ -1783,6 +1815,7 @@ mod tests {
             &skills,
             None,
             Some("code"),
+            None,
         );
 
         assert!(injected.iter().any(|message| {
@@ -1859,6 +1892,7 @@ mod tests {
             &skills,
             None,
             Some("mako"),
+            None,
         );
 
         assert!(injected.iter().any(|message| {
@@ -1928,6 +1962,7 @@ mod tests {
             &skills,
             None,
             Some("mako"),
+            None,
         );
 
         let texts = injected
@@ -2001,6 +2036,7 @@ mod tests {
             Some(repo),
             WorkMode::Build,
             &skills,
+            None,
             None,
             None,
         );

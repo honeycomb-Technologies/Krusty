@@ -329,6 +329,7 @@ impl CloneForTick for OrchestratorConfig {
             session_id: self.session_id.clone(),
             working_dir: self.working_dir.clone(),
             project_dir: self.project_dir.clone(),
+            mako_crew_slug: self.mako_crew_slug.clone(),
             session_type: self.session_type,
             permission_mode: self.permission_mode,
             max_iterations: self.max_iterations,

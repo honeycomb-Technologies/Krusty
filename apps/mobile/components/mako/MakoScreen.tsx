@@ -68,6 +68,7 @@ export function MakoScreen({
           key={navigation.selectedRunId}
           runId={navigation.selectedRunId}
           summary={selectedRun}
+          crewMembers={home.crew?.members ?? []}
           chat={chat}
           onBack={navigation.closeRun}
           onDeleteRun={onDeleteRun}
