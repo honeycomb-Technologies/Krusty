@@ -12,6 +12,8 @@ import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
 import { SegmentControl } from '../ui/SegmentControl';
 import type { SessionResponse } from '@krusty/api';
+import { MAKO_DRAWER_ITEMS } from './makoDrawerItems';
+import type { MakoTopLevelView } from '../mako/types';
 
 interface DirEntry { name: string; path: string }
 interface DirCache { current: string; parent: string | null; directories: DirEntry[] }
@@ -41,6 +43,8 @@ export interface SessionListProps {
   onNewSessionWithDir: (path: string) => void;
   activeTab: number;
   onTabChange: (index: number) => void;
+  activeMakoView?: MakoTopLevelView;
+  onSelectMakoView?: (view: MakoTopLevelView) => void;
   showPicker?: boolean;
   onPickerDone?: () => void;
 }
@@ -54,6 +58,8 @@ export function SessionList({
   onNewSessionWithDir,
   activeTab,
   onTabChange,
+  activeMakoView,
+  onSelectMakoView,
   showPicker,
   onPickerDone,
 }: SessionListProps) {
@@ -61,6 +67,7 @@ export function SessionList({
   const { client } = useConnection();
   const t = theme.colors;
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
+  const [makoAttentionBadge, setMakoAttentionBadge] = useState(0);
 
   // Directory picker state
   const [pickerPath, setPickerPath] = useState('');
@@ -70,7 +77,7 @@ export function SessionList({
   const dirCache = useRef<Map<string, DirCache>>(new Map());
 
   useEffect(() => {
-    if (client && activeTab !== 0 && !pickerReady) {
+    if (client && activeTab === 1 && !pickerReady) {
       client.browseDirectories().then(result => {
         const entry: DirCache = { current: result.current, parent: result.parent, directories: result.directories };
         dirCache.current.set('', entry);
@@ -82,6 +89,36 @@ export function SessionList({
       }).catch(() => {});
     }
   }, [client, activeTab, pickerReady]);
+
+  useEffect(() => {
+    if (!client || activeTab !== 2) {
+      return;
+    }
+
+    let cancelled = false;
+    const loadAttention = async () => {
+      try {
+        const response = await client.getMakoAttention();
+        if (!cancelled) {
+          setMakoAttentionBadge(response.badge_count);
+        }
+      } catch {
+        if (!cancelled) {
+          setMakoAttentionBadge(0);
+        }
+      }
+    };
+
+    void loadAttention();
+    const intervalId = setInterval(() => {
+      void loadAttention();
+    }, 30000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [activeTab, client]);
 
   const navigatePicker = useCallback(async (path: string) => {
     if (!client) return;
@@ -130,8 +167,6 @@ export function SessionList({
   };
 
   const codeDirGroups = useMemo(() => groupSessionsByDirectory('code'), [sessions]);
-  const makoDirGroups = useMemo(() => groupSessionsByDirectory('mako'), [sessions]);
-
   const toggleDir = (dir: string) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setExpandedDirs(prev => {
@@ -187,6 +222,53 @@ export function SessionList({
           );
         });
 
+  const renderMakoList = () => (
+    <View>
+      {MAKO_DRAWER_ITEMS.map((item) => {
+        const isActive = activeMakoView === item.id;
+        const badgeCount = item.id === "attention" ? makoAttentionBadge : 0;
+        return (
+          <Pressable
+            key={item.id}
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              onSelectMakoView?.(item.id);
+            }}
+            style={[
+              styles.makoItem,
+              isActive && { backgroundColor: t.userMessage + '12' },
+            ]}
+            >
+              <View style={styles.makoCopy}>
+                <Text
+                style={[
+                  styles.makoTitle,
+                  { color: isActive ? t.userMessage : t.foreground },
+                ]}
+              >
+                {item.label}
+              </Text>
+                <Text style={[styles.makoDetail, { color: t.mutedForeground }]}>
+                  {item.detail}
+                </Text>
+              </View>
+              {badgeCount > 0 ? (
+                <View
+                  style={[
+                    styles.makoBadge,
+                    { backgroundColor: t.userMessage },
+                  ]}
+                >
+                  <Text style={styles.makoBadgeText}>{badgeCount}</Text>
+                </View>
+              ) : null}
+              <ChevronRight size={16} color={t.mutedForeground} />
+            </Pressable>
+          );
+        })}
+    </View>
+  );
+
   return (
     <View style={styles.container}>
       <View style={styles.segmentWrap}>
@@ -200,11 +282,11 @@ export function SessionList({
             : chatSessions.map(renderSessionItem)
         )}
         {activeTab === 1 && renderDirAccordion(codeDirGroups, t.thinking)}
-        {activeTab === 2 && renderDirAccordion(makoDirGroups, t.userMessage)}
+        {activeTab === 2 && renderMakoList()}
       </ScrollView>
 
       {/* Inline directory picker */}
-      {showPicker && pickerReady && (
+      {activeTab === 1 && showPicker && pickerReady && (
         <View style={[styles.pickerContainer, { borderTopColor: t.border, backgroundColor: t.background }]}>
           <View style={styles.pickerHeader}>
             <View>
@@ -259,6 +341,40 @@ const styles = StyleSheet.create({
   sessionMeta: { flexDirection: 'row', gap: 8, marginTop: 3 },
   sessionTime: { fontSize: 12 },
   sessionModel: { fontSize: 12 },
+  makoItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderRadius: 10,
+    marginBottom: 2,
+  },
+  makoCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  makoTitle: {
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  makoDetail: {
+    marginTop: 3,
+    fontSize: 12,
+  },
+  makoBadge: {
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    paddingHorizontal: 5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  makoBadgeText: {
+    color: '#081018',
+    fontSize: 11,
+    fontWeight: '700',
+  },
   pickerContainer: { borderTopWidth: StyleSheet.hairlineWidth, paddingHorizontal: 16, paddingTop: 14 },
   pickerHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8 },
   pickerTitle: { fontSize: 16, fontWeight: '700' },

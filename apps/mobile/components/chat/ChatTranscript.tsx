@@ -44,6 +44,8 @@ interface ChatTranscriptProps {
   emptyState?: ReactNode;
   bottomPadding?: number;
   showPlanTracker?: boolean;
+  scrollToMessageId?: string | null;
+  onScrollTargetHandled?: () => void;
 }
 
 const TOP_EDGE_HEIGHT = 64;
@@ -100,6 +102,8 @@ export function ChatTranscript({
   emptyState,
   bottomPadding = 130,
   showPlanTracker = true,
+  scrollToMessageId,
+  onScrollTargetHandled,
 }: ChatTranscriptProps) {
   const { theme } = useThemeContext();
   const { isDesktop } = useBreakpoint();
@@ -280,6 +284,30 @@ export function ChatTranscript({
     queueAutoScroll,
   ]);
 
+  useEffect(() => {
+    if (!scrollToMessageId) {
+      return;
+    }
+
+    const targetIndex = messages.findIndex(
+      (message) => message.id === scrollToMessageId,
+    );
+    if (targetIndex < 0) {
+      onScrollTargetHandled?.();
+      return;
+    }
+
+    autoFollowRef.current = false;
+    requestAnimationFrame(() => {
+      flatListRef.current?.scrollToIndex({
+        index: targetIndex,
+        animated: true,
+        viewPosition: 0.35,
+      });
+      onScrollTargetHandled?.();
+    });
+  }, [messages, onScrollTargetHandled, scrollToMessageId]);
+
   if (messages.length === 0) {
     return (
       <Pressable style={styles.empty} onPress={Keyboard.dismiss}>
@@ -349,6 +377,16 @@ export function ChatTranscript({
           contentHeightRef.current = height;
           updateNearBottom();
           flushAutoScroll();
+        }}
+        onScrollToIndexFailed={({ index }) => {
+          const clampedIndex = Math.max(0, Math.min(index, messages.length - 1));
+          requestAnimationFrame(() => {
+            flatListRef.current?.scrollToIndex({
+              index: clampedIndex,
+              animated: true,
+              viewPosition: 0.35,
+            });
+          });
         }}
         keyboardDismissMode="interactive"
         keyboardShouldPersistTaps="handled"

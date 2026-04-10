@@ -32,6 +32,7 @@ import type {
   MemoryType,
   MemorySnapshotResponse,
   PromoteReportToMemoryResponse,
+  MakoAttentionResponse,
   MakoDispatchResponse,
   MakoBootstrapResponse,
   MakoCrewDocumentKind,
@@ -474,6 +475,33 @@ export class KrustyClient {
 
   async getMakoCurrent(): Promise<MakoCurrentResponse> {
     return this.request('/mako/current');
+  }
+
+  async getMakoAttention(options?: {
+    threadSessionId?: string | null;
+  }): Promise<MakoAttentionResponse> {
+    const params: string[] = [];
+    if (options?.threadSessionId) {
+      params.push(
+        `thread_session_id=${encodeURIComponent(options.threadSessionId)}`,
+      );
+    }
+    const q = params.length > 0 ? `?${params.join('&')}` : '';
+    return this.request(`/mako/attention${q}`);
+  }
+
+  async setMakoAttentionRead(itemId: string, read: boolean): Promise<SimpleOkResponse> {
+    return this.request(`/mako/attention/${encodeURIComponent(itemId)}/read`, {
+      method: 'POST',
+      body: JSON.stringify({ read }),
+    });
+  }
+
+  async setMakoAttentionCleared(itemId: string, cleared: boolean): Promise<SimpleOkResponse> {
+    return this.request(`/mako/attention/${encodeURIComponent(itemId)}/clear`, {
+      method: 'POST',
+      body: JSON.stringify({ cleared }),
+    });
   }
 
   async getMakoHome(): Promise<MakoHomeResponse> {

@@ -1,17 +1,24 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
+  Modal,
   Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import * as Haptics from "../../platform/haptics";
+import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";
 import type { MakoCrewRuntimeMember, MakoCurrentRunSummary } from "@krusty/api";
 import { MakoSetCourseComposer } from "./MakoSetCourseComposer";
 import type { MakoCurrentState } from "./types";
+import {
+  formatScheduleInputValue,
+  resolveScheduleSelection,
+} from "./schedule";
 import { formatProjectLabel, getRunNextWakeAt } from "./utils";
 
 interface MakoScheduleViewProps {
@@ -20,14 +27,38 @@ interface MakoScheduleViewProps {
   model?: string | null;
   crewMembers?: MakoCrewRuntimeMember[];
   onSelectRun: (runId: string) => void;
+  onOpenProject?: (projectDir: string) => Promise<void> | void;
 }
 
-type ScheduleMode = "agenda" | "calendar";
+type ScheduleMode = "month_day" | "week" | "month";
 
-function dayKey(value: string): string {
-  const date = new Date(value);
-  return dayKeyFromDate(date);
+interface ScheduledRunItem {
+  run: MakoCurrentRunSummary;
+  wakeAt: string;
+  scheduledAt: Date;
+  dayKey: string;
+  timeValue: string;
+  title: string;
+  detail: string;
+  seriesKey: string;
 }
+
+interface WeekLaneBar {
+  id: string;
+  item: ScheduledRunItem;
+  startIndex: number;
+  span: number;
+  dayCount: number;
+}
+
+interface ScheduleDetailTarget {
+  item: ScheduledRunItem;
+  patternDays: number[];
+  spanLabel: string | null;
+}
+
+const WEEKDAY_LABELS = ["S", "M", "T", "W", "T", "F", "S"] as const;
+const WEEKDAY_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 
 function dayKeyFromDate(date: Date): string {
   const year = date.getFullYear();
@@ -36,12 +67,15 @@ function dayKeyFromDate(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
-function dayLabel(value: string): string {
-  return new Date(value).toLocaleDateString([], {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-  });
+function dayKey(value: string): string {
+  return dayKeyFromDate(new Date(value));
+}
+
+function timeValue(value: string): string {
+  const parsed = new Date(value);
+  const hour = `${parsed.getHours()}`.padStart(2, "0");
+  const minute = `${parsed.getMinutes()}`.padStart(2, "0");
+  return `${hour}:${minute}`;
 }
 
 function timeLabel(value: string): string {
@@ -51,30 +85,12 @@ function timeLabel(value: string): string {
   });
 }
 
-function buildAgendaBuckets(runs: MakoCurrentRunSummary[]) {
-  const grouped = new Map<string, MakoCurrentRunSummary[]>();
-  for (const run of runs) {
-    const wakeAt = getRunNextWakeAt(run);
-    if (!wakeAt) {
-      continue;
-    }
-    const key = dayKey(wakeAt);
-    const bucket = grouped.get(key) ?? [];
-    bucket.push(run);
-    grouped.set(key, bucket);
-  }
-
-  return [...grouped.entries()]
-    .sort((left, right) => left[0].localeCompare(right[0]))
-    .map(([key, entries]) => ({
-      key,
-      label: dayLabel(`${key}T00:00:00`),
-      entries: entries.sort((left, right) => {
-        const leftValue = getRunNextWakeAt(left) ?? "";
-        const rightValue = getRunNextWakeAt(right) ?? "";
-        return leftValue.localeCompare(rightValue);
-      }),
-    }));
+function dayLabel(date: Date): string {
+  return date.toLocaleDateString([], {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  });
 }
 
 function monthStart(date: Date): Date {
@@ -93,53 +109,476 @@ function sameDay(left: Date, right: Date): boolean {
   );
 }
 
+function addDays(date: Date, delta: number): Date {
+  const next = new Date(date);
+  next.setDate(date.getDate() + delta);
+  return next;
+}
+
+function startOfWeek(date: Date): Date {
+  return addDays(date, -date.getDay());
+}
+
+function diffInDays(left: Date, right: Date): number {
+  const leftOnly = new Date(left.getFullYear(), left.getMonth(), left.getDate()).getTime();
+  const rightOnly = new Date(
+    right.getFullYear(),
+    right.getMonth(),
+    right.getDate(),
+  ).getTime();
+  return Math.round((leftOnly - rightOnly) / (24 * 60 * 60 * 1000));
+}
+
 function buildCalendarDays(baseMonth: Date): Date[] {
   const start = monthStart(baseMonth);
   const offset = start.getDay();
-  const gridStart = new Date(start);
-  gridStart.setDate(start.getDate() - offset);
+  const gridStart = addDays(start, -offset);
 
-  return Array.from({ length: 42 }, (_, index) => {
-    const date = new Date(gridStart);
-    date.setDate(gridStart.getDate() + index);
-    return date;
+  return Array.from({ length: 42 }, (_, index) => addDays(gridStart, index));
+}
+
+function scheduleSeriesKey(run: MakoCurrentRunSummary, wakeAt: string): string {
+  const title = (run.title || "Untitled run").trim().toLowerCase();
+  const project = run.project_dir?.trim().toLowerCase() ?? "";
+  const crew = run.runtime?.crew_slug?.trim().toLowerCase() ?? "";
+  return [title, project, crew, timeValue(wakeAt)].join("|");
+}
+
+function buildScheduledItems(runs: MakoCurrentRunSummary[]): ScheduledRunItem[] {
+  return runs
+    .flatMap((run) => {
+      const wakeAt = getRunNextWakeAt(run);
+      if (!wakeAt) {
+        return [];
+      }
+
+      const detailParts: string[] = [];
+      if (run.project_dir) {
+        detailParts.push(formatProjectLabel(run.project_dir));
+      }
+      if (run.runtime?.crew_slug) {
+        detailParts.push(`${run.runtime.crew_slug} crew`);
+      }
+
+      return [
+        {
+          run,
+          wakeAt,
+          scheduledAt: new Date(wakeAt),
+          dayKey: dayKey(wakeAt),
+          timeValue: timeValue(wakeAt),
+          title: run.title || "Untitled run",
+          detail: detailParts.join(" • ") || "Scheduled by Mako",
+          seriesKey: scheduleSeriesKey(run, wakeAt),
+        },
+      ];
+    })
+    .sort((left, right) => left.wakeAt.localeCompare(right.wakeAt));
+}
+
+function buildSeriesDayMap(items: ScheduledRunItem[]): Map<string, number[]> {
+  const map = new Map<string, Set<number>>();
+  for (const item of items) {
+    const bucket = map.get(item.seriesKey) ?? new Set<number>();
+    bucket.add(item.scheduledAt.getDay());
+    map.set(item.seriesKey, bucket);
+  }
+
+  return new Map(
+    [...map.entries()].map(([key, days]) => [
+      key,
+      [...days].sort((left, right) => left - right),
+    ]),
+  );
+}
+
+function formatPatternLabel(days: number[]): string | null {
+  if (days.length <= 1) {
+    return null;
+  }
+  if (days.length === 7) {
+    return "daily";
+  }
+  if (days.join(",") === "1,2,3,4,5") {
+    return "weekdays";
+  }
+  return days.map((day) => WEEKDAY_SHORT[day]).join(" ");
+}
+
+function buildWeekLanes(items: ScheduledRunItem[], weekStartDate: Date): WeekLaneBar[] {
+  const weekEnd = addDays(weekStartDate, 7);
+  const grouped = new Map<string, ScheduledRunItem[]>();
+
+  for (const item of items) {
+    if (item.scheduledAt < weekStartDate || item.scheduledAt >= weekEnd) {
+      continue;
+    }
+    const bucket = grouped.get(item.seriesKey) ?? [];
+    bucket.push(item);
+    grouped.set(item.seriesKey, bucket);
+  }
+
+  const bars: WeekLaneBar[] = [];
+  for (const bucket of grouped.values()) {
+    const sorted = [...bucket].sort((left, right) => left.wakeAt.localeCompare(right.wakeAt));
+    let segmentStart = sorted[0];
+    let previousIndex = diffInDays(sorted[0].scheduledAt, weekStartDate);
+    let count = 1;
+
+    for (let index = 1; index < sorted.length; index += 1) {
+      const current = sorted[index];
+      const currentIndex = diffInDays(current.scheduledAt, weekStartDate);
+      if (currentIndex === previousIndex + 1) {
+        previousIndex = currentIndex;
+        count += 1;
+        continue;
+      }
+
+      bars.push({
+        id: `${segmentStart.run.session_id}:${diffInDays(segmentStart.scheduledAt, weekStartDate)}`,
+        item: segmentStart,
+        startIndex: diffInDays(segmentStart.scheduledAt, weekStartDate),
+        span: count,
+        dayCount: count,
+      });
+      segmentStart = current;
+      previousIndex = currentIndex;
+      count = 1;
+    }
+
+    bars.push({
+      id: `${segmentStart.run.session_id}:${diffInDays(segmentStart.scheduledAt, weekStartDate)}`,
+      item: segmentStart,
+      startIndex: diffInDays(segmentStart.scheduledAt, weekStartDate),
+      span: count,
+      dayCount: count,
+    });
+  }
+
+  return bars.sort((left, right) => {
+    if (left.startIndex !== right.startIndex) {
+      return left.startIndex - right.startIndex;
+    }
+    if (left.span !== right.span) {
+      return right.span - left.span;
+    }
+    return left.item.wakeAt.localeCompare(right.item.wakeAt);
   });
 }
 
-function ScheduleRow({
-  run,
-  onSelect,
+function packWeekLanes(bars: WeekLaneBar[]): WeekLaneBar[][] {
+  const lanes: WeekLaneBar[][] = [];
+
+  for (const bar of bars) {
+    let placed = false;
+    for (const lane of lanes) {
+      const overlaps = lane.some((candidate) => {
+        const candidateEnd = candidate.startIndex + candidate.span;
+        const currentEnd = bar.startIndex + bar.span;
+        return bar.startIndex < candidateEnd && currentEnd > candidate.startIndex;
+      });
+      if (!overlaps) {
+        lane.push(bar);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) {
+      lanes.push([bar]);
+    }
+  }
+
+  return lanes;
+}
+
+function monthMarkerColor(count: number, colors: ReturnType<typeof useThemeContext>["theme"]["colors"]) {
+  if (count > 2) {
+    return colors.userMessage;
+  }
+  return colors.mutedForeground;
+}
+
+function ScheduleModeToggle({
+  mode,
+  onChange,
 }: {
-  run: MakoCurrentRunSummary;
-  onSelect: () => void;
+  mode: ScheduleMode;
+  onChange: (mode: ScheduleMode) => void;
 }) {
   const { theme } = useThemeContext();
   const t = theme.colors;
-  const wakeAt = getRunNextWakeAt(run);
+
+  const items: Array<{ id: ScheduleMode; label: string }> = [
+    { id: "month_day", label: "Month + day" },
+    { id: "week", label: "Week" },
+    { id: "month", label: "Month" },
+  ];
+
+  return (
+    <View style={[styles.toggleRow, { borderColor: t.border }]}>
+      {items.map((item) => {
+        const active = item.id === mode;
+        return (
+          <Pressable
+            key={item.id}
+            onPress={() => {
+              if (active) {
+                return;
+              }
+              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              onChange(item.id);
+            }}
+            style={[
+              styles.toggleButton,
+              {
+                backgroundColor: active ? t.card : "transparent",
+              },
+            ]}
+          >
+            <Text
+              style={[
+                styles.toggleLabel,
+                { color: active ? t.foreground : t.mutedForeground },
+              ]}
+            >
+              {item.label}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+function ScheduleRow({
+  item,
+  patternLabel,
+  onPress,
+}: {
+  item: ScheduledRunItem;
+  patternLabel: string | null;
+  onPress: () => void;
+}) {
+  const { theme } = useThemeContext();
+  const t = theme.colors;
 
   return (
     <Pressable
       onPress={() => {
         void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        onSelect();
+        onPress();
       }}
       style={[styles.row, { borderColor: t.border }]}
     >
       <View style={styles.rowCopy}>
         <Text style={[styles.rowTitle, { color: t.foreground }]} numberOfLines={1}>
-          {run.title || "Untitled run"}
+          {item.title}
         </Text>
-        <Text style={[styles.rowMeta, { color: t.mutedForeground }]} numberOfLines={1}>
-          {formatProjectLabel(run.project_dir)}
+        <Text style={[styles.rowDetail, { color: t.mutedForeground }]} numberOfLines={1}>
+          {item.detail}
         </Text>
+        <View style={styles.metaRow}>
+          <Text style={[styles.rowMeta, { color: t.mutedForeground }]}>
+            {timeLabel(item.wakeAt)}
+          </Text>
+          {patternLabel ? (
+            <Text style={[styles.rowMeta, { color: t.mutedForeground }]}>
+              {patternLabel}
+            </Text>
+          ) : null}
+        </View>
       </View>
-      <View style={styles.rowAside}>
-        <Text style={[styles.rowTime, { color: t.foreground }]}>
-          {wakeAt ? timeLabel(wakeAt) : "Later"}
-        </Text>
-        <Text style={[styles.rowMeta, { color: t.mutedForeground }]}>Open</Text>
-      </View>
+      <Text style={[styles.rowAction, { color: t.userMessage }]}>Details</Text>
     </Pressable>
+  );
+}
+
+function ScheduleDetailSheet({
+  visible,
+  target,
+  titleValue,
+  wakeInput,
+  onChangeTitle,
+  onChangeWakeInput,
+  onSave,
+  onClose,
+  onWakeNow,
+  onOpenRun,
+  onOpenProject,
+  isSaving,
+  error,
+}: {
+  visible: boolean;
+  target: ScheduleDetailTarget | null;
+  titleValue: string;
+  wakeInput: string;
+  onChangeTitle: (value: string) => void;
+  onChangeWakeInput: (value: string) => void;
+  onSave: () => void;
+  onClose: () => void;
+  onWakeNow: () => void;
+  onOpenRun: () => void;
+  onOpenProject: () => void;
+  isSaving: boolean;
+  error: string | null;
+}) {
+  const { theme } = useThemeContext();
+  const t = theme.colors;
+
+  if (!target) {
+    return null;
+  }
+
+  return (
+    <Modal visible={visible} animationType="fade" transparent onRequestClose={onClose}>
+      <View style={styles.sheetOverlay}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
+        <View
+          style={[
+            styles.sheet,
+            {
+              backgroundColor: t.background,
+              borderColor: t.border,
+            },
+          ]}
+        >
+          <View style={styles.sheetHeader}>
+            <View style={styles.sheetCopy}>
+              <Text style={[styles.sheetTitle, { color: t.foreground }]}>Schedule item</Text>
+              <Text style={[styles.sheetSubtitle, { color: t.mutedForeground }]}>
+                Minimal timing and naming controls
+              </Text>
+            </View>
+            <Pressable onPress={onClose} style={styles.sheetClose}>
+              <Text style={[styles.sheetCloseLabel, { color: t.mutedForeground }]}>Close</Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.fieldBlock}>
+            <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>Title</Text>
+            <TextInput
+              value={titleValue}
+              onChangeText={onChangeTitle}
+              placeholder="Schedule title"
+              placeholderTextColor={`${t.mutedForeground}aa`}
+              style={[
+                styles.fieldInput,
+                {
+                  color: t.foreground,
+                  backgroundColor: t.card,
+                  borderColor: t.border,
+                },
+              ]}
+            />
+          </View>
+
+          <View style={styles.fieldBlock}>
+            <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>Detail</Text>
+            <Text style={[styles.readonlyValue, { color: t.foreground }]}>
+              {target.item.detail}
+            </Text>
+          </View>
+
+          <View style={styles.fieldBlock}>
+            <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>Time</Text>
+            <TextInput
+              value={wakeInput}
+              onChangeText={onChangeWakeInput}
+              placeholder="2026-04-11 09:30"
+              placeholderTextColor={`${t.mutedForeground}aa`}
+              autoCapitalize="none"
+              autoCorrect={false}
+              style={[
+                styles.fieldInput,
+                {
+                  color: t.foreground,
+                  backgroundColor: t.card,
+                  borderColor: t.border,
+                },
+              ]}
+            />
+          </View>
+
+          <View style={styles.fieldBlock}>
+            <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>Pattern</Text>
+            <View style={styles.dayButtonRow}>
+              {WEEKDAY_LABELS.map((label, index) => {
+                const active = target.patternDays.includes(index);
+                return (
+                  <View
+                    key={`${label}-${index}`}
+                    style={[
+                      styles.dayButton,
+                      {
+                        backgroundColor: active ? t.card : "transparent",
+                        borderColor: active ? t.userMessage : t.border,
+                      },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.dayButtonLabel,
+                        { color: active ? t.foreground : t.mutedForeground },
+                      ]}
+                    >
+                      {label}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+            {target.spanLabel ? (
+              <Text style={[styles.patternHint, { color: t.mutedForeground }]}>
+                {target.spanLabel}
+              </Text>
+            ) : null}
+          </View>
+
+          <View style={styles.fieldBlock}>
+            <Text style={[styles.fieldLabel, { color: t.mutedForeground }]}>Project</Text>
+            <Pressable onPress={onOpenProject} style={styles.linkRow}>
+              <Text style={[styles.linkText, { color: t.userMessage }]}>
+                {target.item.run.project_dir
+                  ? `Open ${formatProjectLabel(target.item.run.project_dir)}`
+                  : "No project"}
+              </Text>
+            </Pressable>
+          </View>
+
+          {error ? (
+            <Text style={[styles.errorText, { color: t.error }]}>{error}</Text>
+          ) : null}
+
+          <View style={styles.sheetActions}>
+            <Pressable
+              onPress={onSave}
+              style={[styles.primaryAction, { backgroundColor: t.userMessage }]}
+              disabled={isSaving}
+            >
+              <Text style={styles.primaryActionLabel}>
+                {isSaving ? "Saving..." : "Save"}
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={onWakeNow}
+              style={[styles.secondaryAction, { borderColor: t.border }]}
+            >
+              <Text style={[styles.secondaryActionLabel, { color: t.foreground }]}>
+                Wake now
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={onOpenRun}
+              style={[styles.secondaryAction, { borderColor: t.border }]}
+            >
+              <Text style={[styles.secondaryActionLabel, { color: t.foreground }]}>
+                Open run
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -149,177 +588,225 @@ export function MakoScheduleView({
   model,
   crewMembers = [],
   onSelectRun,
+  onOpenProject,
 }: MakoScheduleViewProps) {
+  const { client } = useConnection();
   const { theme } = useThemeContext();
   const t = theme.colors;
-  const [mode, setMode] = useState<ScheduleMode>("agenda");
 
-  const runs = useMemo(
-    () =>
-      (state.current?.runs ?? [])
-        .filter((run) => Boolean(getRunNextWakeAt(run)))
-        .sort((left, right) => {
-          const leftValue = getRunNextWakeAt(left) ?? "";
-          const rightValue = getRunNextWakeAt(right) ?? "";
-          return leftValue.localeCompare(rightValue);
-        }),
+  const scheduledItems = useMemo(
+    () => buildScheduledItems(state.current?.runs ?? []),
     [state.current?.runs],
   );
+  const seriesDayMap = useMemo(
+    () => buildSeriesDayMap(scheduledItems),
+    [scheduledItems],
+  );
 
-  const agenda = useMemo(() => buildAgendaBuckets(runs), [runs]);
-  const firstScheduledDate = runs[0]
-    ? new Date(getRunNextWakeAt(runs[0]) as string)
-    : new Date();
+  const firstScheduledDate = scheduledItems[0]?.scheduledAt ?? new Date();
+  const [mode, setMode] = useState<ScheduleMode>("month_day");
   const [visibleMonth, setVisibleMonth] = useState(monthStart(firstScheduledDate));
-  const [selectedDate, setSelectedDate] = useState<Date>(monthStart(firstScheduledDate));
+  const [selectedDate, setSelectedDate] = useState(firstScheduledDate);
+  const [hasInitializedSelection, setHasInitializedSelection] = useState(false);
+  const [detailTarget, setDetailTarget] = useState<ScheduleDetailTarget | null>(null);
+  const [detailTitle, setDetailTitle] = useState("");
+  const [detailWakeInput, setDetailWakeInput] = useState("");
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [isSavingDetail, setIsSavingDetail] = useState(false);
+
+  useEffect(() => {
+    if (!detailTarget) {
+      setDetailTitle("");
+      setDetailWakeInput("");
+      setDetailError(null);
+      return;
+    }
+    setDetailTitle(detailTarget.item.title);
+    setDetailWakeInput(formatScheduleInputValue(detailTarget.item.wakeAt));
+    setDetailError(null);
+  }, [detailTarget]);
+
+  useEffect(() => {
+    if (hasInitializedSelection || !scheduledItems[0]) {
+      return;
+    }
+
+    setSelectedDate(scheduledItems[0].scheduledAt);
+    setVisibleMonth(monthStart(scheduledItems[0].scheduledAt));
+    setHasInitializedSelection(true);
+  }, [hasInitializedSelection, scheduledItems]);
 
   const calendarDays = useMemo(() => buildCalendarDays(visibleMonth), [visibleMonth]);
   const selectedKey = dayKeyFromDate(selectedDate);
-  const selectedRuns = runs.filter((run) => {
-    const wakeAt = getRunNextWakeAt(run);
-    return wakeAt ? dayKey(wakeAt) === selectedKey : false;
-  });
+  const selectedItems = useMemo(
+    () => scheduledItems.filter((item) => item.dayKey === selectedKey),
+    [scheduledItems, selectedKey],
+  );
+  const weekStartDate = useMemo(() => startOfWeek(selectedDate), [selectedDate]);
+  const weekDays = useMemo(
+    () => Array.from({ length: 7 }, (_, index) => addDays(weekStartDate, index)),
+    [weekStartDate],
+  );
+  const weekLaneRows = useMemo(
+    () => packWeekLanes(buildWeekLanes(scheduledItems, weekStartDate)),
+    [scheduledItems, weekStartDate],
+  );
+
+  const selectedDayCount = selectedItems.length;
+  const nextWake = scheduledItems[0]?.wakeAt ?? null;
+
+  const openItemDetail = (item: ScheduledRunItem, dayCount = 1) => {
+    const patternDays = seriesDayMap.get(item.seriesKey) ?? [item.scheduledAt.getDay()];
+    setDetailTarget({
+      item,
+      patternDays,
+      spanLabel:
+        dayCount > 1
+          ? `This series spans ${dayCount} days in the current week.`
+          : formatPatternLabel(patternDays),
+    });
+  };
+
+  const handleSaveDetail = async () => {
+    if (!client || !detailTarget) {
+      return;
+    }
+
+    const nextTitle = detailTitle.trim();
+    if (!nextTitle) {
+      setDetailError("Title cannot be empty.");
+      return;
+    }
+
+    const schedule = resolveScheduleSelection("custom", detailWakeInput);
+    if (schedule.error || !schedule.startAt) {
+      setDetailError(schedule.error ?? "Enter a valid future time.");
+      return;
+    }
+
+    setIsSavingDetail(true);
+    setDetailError(null);
+    try {
+      if (nextTitle !== detailTarget.item.run.title) {
+        await client.updateSession(detailTarget.item.run.session_id, { title: nextTitle });
+      }
+      if (schedule.startAt !== detailTarget.item.wakeAt) {
+        await client.scheduleMakoSession(detailTarget.item.run.session_id, schedule.startAt);
+      }
+      await state.refresh();
+      setDetailTarget(null);
+    } catch (error) {
+      setDetailError(
+        error instanceof Error ? error.message : "Failed to update this schedule item.",
+      );
+    } finally {
+      setIsSavingDetail(false);
+    }
+  };
+
+  const handleWakeNow = async () => {
+    if (!client || !detailTarget) {
+      return;
+    }
+    setIsSavingDetail(true);
+    setDetailError(null);
+    try {
+      await client.resumeMakoSession(detailTarget.item.run.session_id);
+      await state.refresh();
+      setDetailTarget(null);
+    } catch (error) {
+      setDetailError(
+        error instanceof Error ? error.message : "Failed to wake this run.",
+      );
+    } finally {
+      setIsSavingDetail(false);
+    }
+  };
 
   return (
-    <ScrollView
-      style={styles.scroll}
-      contentContainerStyle={styles.content}
-      showsVerticalScrollIndicator={false}
-      refreshControl={
-        <RefreshControl
-          refreshing={state.isRefreshing}
-          onRefresh={() => {
-            void state.refresh();
-          }}
-          tintColor={t.userMessage}
-        />
-      }
-    >
-      <Text style={[styles.description, { color: t.mutedForeground }]}>
-        Schedule keeps future work visible across time. Use agenda to scan quickly or calendar to place runs on a real date.
-      </Text>
-
-      <MakoSetCourseComposer
-        projectDir={workspaceDirectory}
-        crewMembers={crewMembers}
-        isSubmitting={state.isDispatching}
-        onSubmit={async (task, options) => {
-          const runId = await state.setCourse(task, {
-            projectDir: workspaceDirectory ?? undefined,
-            model: model ?? undefined,
-            startAt: options?.startAt ?? undefined,
-            priority: options?.priority ?? undefined,
-            crewSlug: options?.crewSlug ?? undefined,
-          });
-          if (runId) {
-            onSelectRun(runId);
-          }
-        }}
-      />
-
-      <View style={[styles.modeSwitch, { borderColor: t.border }]}>
-        {([
-          { id: "agenda", label: "Agenda" },
-          { id: "calendar", label: "Calendar" },
-        ] as const).map((item, index) => {
-          const active = item.id === mode;
-          return (
-            <Pressable
-              key={item.id}
-              onPress={() => {
-                if (!active) {
-                  void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  setMode(item.id);
-                }
-              }}
-              style={[
-                styles.modeButton,
-                {
-                  backgroundColor: active ? t.glass.backgroundElevated : "transparent",
-                  borderRightWidth: index === 0 ? StyleSheet.hairlineWidth : 0,
-                  borderRightColor: t.border,
-                },
-              ]}
-            >
-              <Text
-                style={[
-                  styles.modeLabel,
-                  { color: active ? t.foreground : t.mutedForeground },
-                ]}
-              >
-                {item.label}
-              </Text>
-            </Pressable>
-          );
-        })}
-      </View>
-
-      <View
-        style={[
-          styles.summaryStrip,
-          {
-            borderTopColor: t.border,
-            borderBottomColor: t.border,
-          },
-        ]}
+    <>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={state.isRefreshing}
+            onRefresh={() => {
+              void state.refresh();
+            }}
+            tintColor={t.userMessage}
+          />
+        }
       >
-        <View style={styles.summaryCell}>
-          <Text style={[styles.summaryLabel, { color: t.mutedForeground }]}>
-            Scheduled
-          </Text>
-          <Text style={[styles.summaryValue, { color: t.foreground }]}>
-            {runs.length}
-          </Text>
-        </View>
-        <View style={styles.summaryCell}>
-          <Text style={[styles.summaryLabel, { color: t.mutedForeground }]}>
-            Next
-          </Text>
-          <Text style={[styles.summaryValue, { color: t.foreground }]}>
-            {runs[0] && getRunNextWakeAt(runs[0])
-              ? timeLabel(getRunNextWakeAt(runs[0]) as string)
-              : "None"}
-          </Text>
-        </View>
-      </View>
+        <Text style={[styles.description, { color: t.mutedForeground }]}>
+          Schedule is Mako’s planner. Use the month to place work, the day list to scan it, and week lanes to understand the shape of the plan.
+        </Text>
 
-      {mode === "agenda" ? (
-        <View style={styles.section}>
-          {agenda.length === 0 ? (
-            <Text style={[styles.empty, { color: t.mutedForeground }]}>
-              No scheduled runs yet.
+        <MakoSetCourseComposer
+          projectDir={workspaceDirectory}
+          crewMembers={crewMembers}
+          isSubmitting={state.isDispatching}
+          onSubmit={async (task, options) => {
+            const runId = await state.setCourse(task, {
+              projectDir: workspaceDirectory ?? undefined,
+              model: model ?? undefined,
+              startAt: options?.startAt ?? undefined,
+              priority: options?.priority ?? undefined,
+              crewSlug: options?.crewSlug ?? undefined,
+            });
+            if (runId) {
+              onSelectRun(runId);
+            }
+          }}
+        />
+
+        <ScheduleModeToggle mode={mode} onChange={setMode} />
+
+        <View
+          style={[
+            styles.summaryStrip,
+            {
+              borderColor: t.border,
+            },
+          ]}
+        >
+          <View style={styles.summaryCell}>
+            <Text style={[styles.summaryLabel, { color: t.mutedForeground }]}>
+              Upcoming
             </Text>
-          ) : (
-            agenda.map((bucket) => (
-              <View key={bucket.key} style={styles.bucket}>
-                <Text style={[styles.bucketTitle, { color: t.foreground }]}>
-                  {bucket.label}
-                </Text>
-                <View style={[styles.bucketBody, { borderTopColor: t.border }]}>
-                  {bucket.entries.map((run) => (
-                    <ScheduleRow
-                      key={run.session_id}
-                      run={run}
-                      onSelect={() => {
-                        onSelectRun(run.session_id);
-                      }}
-                    />
-                  ))}
-                </View>
-              </View>
-            ))
-          )}
+            <Text style={[styles.summaryValue, { color: t.foreground }]}>
+              {scheduledItems.length}
+            </Text>
+          </View>
+          <View style={[styles.summaryCell, styles.summaryDivider, { borderColor: t.border }]}>
+            <Text style={[styles.summaryLabel, { color: t.mutedForeground }]}>
+              Day plan
+            </Text>
+            <Text style={[styles.summaryValue, { color: t.foreground }]}>
+              {selectedDayCount}
+            </Text>
+          </View>
+          <View style={[styles.summaryCell, styles.summaryDivider, { borderColor: t.border }]}>
+            <Text style={[styles.summaryLabel, { color: t.mutedForeground }]}>
+              Next wake
+            </Text>
+            <Text style={[styles.summaryValue, { color: t.foreground }]}>
+              {nextWake ? timeLabel(nextWake) : "None"}
+            </Text>
+          </View>
         </View>
-      ) : (
-        <View style={styles.section}>
+
+        <View style={[styles.sectionBlock, { borderColor: t.border, backgroundColor: t.card }]}>
           <View style={styles.monthHeader}>
             <Pressable
               onPress={() => {
+                void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                 setVisibleMonth((current) => shiftMonth(current, -1));
               }}
               style={styles.monthAction}
             >
-              <Text style={[styles.monthActionText, { color: t.userMessage }]}>Prev</Text>
+              <Text style={[styles.monthActionText, { color: t.userMessage }]}>‹</Text>
             </Pressable>
             <Text style={[styles.monthLabel, { color: t.foreground }]}>
               {visibleMonth.toLocaleDateString([], {
@@ -329,95 +816,253 @@ export function MakoScheduleView({
             </Text>
             <Pressable
               onPress={() => {
+                void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                 setVisibleMonth((current) => shiftMonth(current, 1));
               }}
               style={styles.monthAction}
             >
-              <Text style={[styles.monthActionText, { color: t.userMessage }]}>Next</Text>
+              <Text style={[styles.monthActionText, { color: t.userMessage }]}>›</Text>
             </Pressable>
           </View>
 
-          <View style={styles.weekdays}>
-            {["S", "M", "T", "W", "T", "F", "S"].map((label, index) => (
-              <Text key={`${label}-${index}`} style={[styles.weekday, { color: t.mutedForeground }]}>
-                {label}
-              </Text>
-            ))}
-          </View>
-
-          <View style={styles.calendarGrid}>
-            {calendarDays.map((date) => {
-              const currentMonth = date.getMonth() === visibleMonth.getMonth();
-              const hasRun = runs.some((run) => {
-                const wakeAt = getRunNextWakeAt(run);
-                return wakeAt ? dayKey(wakeAt) === dayKeyFromDate(date) : false;
-              });
-              const active = sameDay(date, selectedDate);
-              return (
-                <Pressable
-                  key={date.toISOString()}
-                  onPress={() => {
-                    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                    setSelectedDate(date);
-                  }}
-                  style={[
-                    styles.dayCell,
-                    {
-                      borderColor: active ? t.userMessage : t.border,
-                      backgroundColor: active ? `${t.userMessage}16` : "transparent",
-                    },
-                  ]}
-                >
+          {mode !== "week" ? (
+            <>
+              <View style={styles.weekdays}>
+                {WEEKDAY_LABELS.map((label, index) => (
                   <Text
-                    style={[
-                      styles.dayLabel,
-                      { color: currentMonth ? t.foreground : t.mutedForeground },
-                    ]}
+                    key={`${label}-${index}`}
+                    style={[styles.weekday, { color: t.mutedForeground }]}
                   >
-                    {date.getDate()}
+                    {label}
                   </Text>
-                  {hasRun ? (
-                    <View
-                      style={[
-                        styles.dayDot,
-                        { backgroundColor: active ? t.userMessage : t.mutedForeground },
-                      ]}
-                    />
-                  ) : null}
-                </Pressable>
-              );
-            })}
-          </View>
+                ))}
+              </View>
 
-          <View style={styles.bucket}>
-            <Text style={[styles.bucketTitle, { color: t.foreground }]}>
-              {selectedDate.toLocaleDateString([], {
-                weekday: "long",
-                month: "short",
-                day: "numeric",
-              })}
-            </Text>
-            <View style={[styles.bucketBody, { borderTopColor: t.border }]}>
-              {selectedRuns.length === 0 ? (
-                <Text style={[styles.empty, { color: t.mutedForeground }]}>
-                  Nothing scheduled for this day.
+              <View style={styles.calendarGrid}>
+                {calendarDays.map((date) => {
+                  const currentMonth = date.getMonth() === visibleMonth.getMonth();
+                  const markerCount = scheduledItems.filter(
+                    (item) => item.dayKey === dayKeyFromDate(date),
+                  ).length;
+                  const active = sameDay(date, selectedDate);
+                  return (
+                    <Pressable
+                      key={date.toISOString()}
+                      onPress={() => {
+                        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                        setSelectedDate(date);
+                      }}
+                      style={[
+                        styles.dayCell,
+                        {
+                          borderColor: active ? t.userMessage : t.border,
+                          backgroundColor: active ? `${t.userMessage}16` : "transparent",
+                        },
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.dayLabel,
+                          { color: currentMonth ? t.foreground : `${t.mutedForeground}99` },
+                        ]}
+                      >
+                        {date.getDate()}
+                      </Text>
+                      {markerCount > 0 ? (
+                        <View
+                          style={[
+                            styles.dayMarker,
+                            { backgroundColor: monthMarkerColor(markerCount, theme.colors) },
+                          ]}
+                        />
+                      ) : null}
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </>
+          ) : (
+            <View style={styles.weekBlock}>
+              <View style={styles.weekHeaderRow}>
+                {weekDays.map((date) => {
+                  const active = sameDay(date, selectedDate);
+                  return (
+                    <Pressable
+                      key={date.toISOString()}
+                      onPress={() => {
+                        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                        setSelectedDate(date);
+                      }}
+                      style={[
+                        styles.weekHeaderCell,
+                        active && { backgroundColor: theme.colors.background },
+                      ]}
+                    >
+                      <Text style={[styles.weekHeaderDay, { color: t.mutedForeground }]}>
+                        {date.toLocaleDateString([], { weekday: "short" })}
+                      </Text>
+                      <Text style={[styles.weekHeaderDate, { color: t.foreground }]}>
+                        {date.getDate()}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              <View style={styles.weekLanes}>
+                {weekLaneRows.length === 0 ? (
+                  <Text style={[styles.empty, { color: t.mutedForeground }]}>
+                    Nothing is scheduled for this week.
+                  </Text>
+                ) : (
+                  weekLaneRows.map((lane, index) => (
+                    <View key={`lane-${index}`} style={styles.weekLaneRow}>
+                      <View style={styles.weekLaneCells}>
+                        {weekDays.map((date) => (
+                          <View
+                            key={`${date.toISOString()}-${index}`}
+                            style={[styles.weekLaneCell, { borderColor: t.border }]}
+                          />
+                        ))}
+                      </View>
+                      {lane.map((bar) => {
+                        const left = `${(bar.startIndex / 7) * 100}%`;
+                        const width = `${(bar.span / 7) * 100}%`;
+                        return (
+                          <Pressable
+                            key={bar.id}
+                            onPress={() => {
+                              openItemDetail(bar.item, bar.dayCount);
+                            }}
+                            style={[
+                              styles.weekBar,
+                              {
+                                left,
+                                width,
+                                backgroundColor:
+                                  bar.span > 1 ? `${t.userMessage}22` : theme.colors.background,
+                                borderColor: bar.span > 1 ? t.userMessage : t.border,
+                              },
+                            ]}
+                          >
+                            <Text
+                              style={[styles.weekBarText, { color: t.foreground }]}
+                              numberOfLines={1}
+                            >
+                              {`${timeLabel(bar.item.wakeAt)} • ${bar.item.title}`}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  ))
+                )}
+              </View>
+            </View>
+          )}
+        </View>
+
+        {mode === "month" ? (
+          <View style={[styles.monthFooter, { borderColor: t.border }]}>
+            <View style={styles.monthFooterCopy}>
+              <Text style={[styles.monthFooterTitle, { color: t.foreground }]}>
+                {dayLabel(selectedDate)}
+              </Text>
+              <Text style={[styles.monthFooterDetail, { color: t.mutedForeground }]}>
+                {selectedDayCount === 0
+                  ? "No scheduled work"
+                  : `${selectedDayCount} item${selectedDayCount === 1 ? "" : "s"} planned`}
+              </Text>
+            </View>
+            <Pressable
+              onPress={() => {
+                setMode("month_day");
+              }}
+            >
+              <Text style={[styles.monthFooterLink, { color: t.userMessage }]}>
+                View day
+              </Text>
+            </Pressable>
+          </View>
+        ) : (
+          <View style={[styles.sectionBlock, { borderColor: t.border, backgroundColor: t.card }]}>
+            <View style={styles.agendaHeader}>
+              <View>
+                <Text style={[styles.agendaTitle, { color: t.foreground }]}>
+                  {dayLabel(selectedDate)}
                 </Text>
-              ) : (
-                selectedRuns.map((run) => (
+                <Text style={[styles.agendaSubtitle, { color: t.mutedForeground }]}>
+                  Daily agenda
+                </Text>
+              </View>
+              <Pressable
+                onPress={() => {
+                  setMode("month");
+                }}
+              >
+                <Text style={[styles.monthFooterLink, { color: t.userMessage }]}>
+                  Full month
+                </Text>
+              </Pressable>
+            </View>
+
+            {selectedItems.length === 0 ? (
+              <Text style={[styles.empty, { color: t.mutedForeground }]}>
+                No work is scheduled for this day.
+              </Text>
+            ) : (
+              <View style={styles.agendaList}>
+                {selectedItems.map((item) => (
                   <ScheduleRow
-                    key={run.session_id}
-                    run={run}
-                    onSelect={() => {
-                      onSelectRun(run.session_id);
+                    key={item.run.session_id}
+                    item={item}
+                    patternLabel={formatPatternLabel(seriesDayMap.get(item.seriesKey) ?? [])}
+                    onPress={() => {
+                      openItemDetail(item);
                     }}
                   />
-                ))
-              )}
-            </View>
+                ))}
+              </View>
+            )}
           </View>
-        </View>
-      )}
-    </ScrollView>
+        )}
+      </ScrollView>
+
+      <ScheduleDetailSheet
+        visible={detailTarget !== null}
+        target={detailTarget}
+        titleValue={detailTitle}
+        wakeInput={detailWakeInput}
+        onChangeTitle={setDetailTitle}
+        onChangeWakeInput={setDetailWakeInput}
+        onSave={() => {
+          void handleSaveDetail();
+        }}
+        onClose={() => {
+          setDetailTarget(null);
+        }}
+        onWakeNow={() => {
+          void handleWakeNow();
+        }}
+        onOpenRun={() => {
+          if (!detailTarget) {
+            return;
+          }
+          setDetailTarget(null);
+          onSelectRun(detailTarget.item.run.session_id);
+        }}
+        onOpenProject={() => {
+          const projectDir = detailTarget?.item.run.project_dir;
+          if (!projectDir || !onOpenProject) {
+            return;
+          }
+          setDetailTarget(null);
+          void onOpenProject(projectDir);
+        }}
+        isSaving={isSavingDetail}
+        error={detailError}
+      />
+    </>
   );
 }
 
@@ -428,37 +1073,43 @@ const styles = StyleSheet.create({
   content: {
     paddingHorizontal: 16,
     paddingBottom: 28,
-    gap: 16,
+    gap: 14,
   },
   description: {
     fontSize: 13,
     lineHeight: 18,
   },
-  modeSwitch: {
+  toggleRow: {
     flexDirection: "row",
     borderWidth: StyleSheet.hairlineWidth,
     borderRadius: 10,
-    overflow: "hidden",
+    padding: 3,
+    gap: 4,
   },
-  modeButton: {
+  toggleButton: {
     flex: 1,
-    minHeight: 40,
+    minHeight: 36,
+    borderRadius: 8,
     alignItems: "center",
     justifyContent: "center",
   },
-  modeLabel: {
-    fontSize: 13,
+  toggleLabel: {
+    fontSize: 12,
     fontWeight: "600",
   },
   summaryStrip: {
     flexDirection: "row",
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 12,
+    overflow: "hidden",
   },
   summaryCell: {
     flex: 1,
-    paddingVertical: 10,
     paddingHorizontal: 10,
+    paddingVertical: 10,
+  },
+  summaryDivider: {
+    borderLeftWidth: StyleSheet.hairlineWidth,
   },
   summaryLabel: {
     fontSize: 11,
@@ -469,64 +1120,25 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "600",
   },
-  section: {
-    gap: 16,
-  },
-  bucket: {
-    gap: 8,
-  },
-  bucketTitle: {
-    fontSize: 15,
-    fontWeight: "600",
-  },
-  bucketBody: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-  },
-  row: {
-    flexDirection: "row",
-    gap: 12,
-    alignItems: "center",
-    paddingVertical: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  rowCopy: {
-    flex: 1,
-    minWidth: 0,
-  },
-  rowTitle: {
-    fontSize: 14,
-    fontWeight: "600",
-  },
-  rowMeta: {
-    marginTop: 3,
-    fontSize: 12,
-    lineHeight: 16,
-  },
-  rowAside: {
-    alignItems: "flex-end",
-    gap: 4,
-  },
-  rowTime: {
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  empty: {
-    paddingVertical: 12,
-    fontSize: 14,
-    lineHeight: 19,
+  sectionBlock: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 14,
+    padding: 10,
+    gap: 10,
   },
   monthHeader: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 12,
   },
   monthAction: {
-    minHeight: 32,
+    minHeight: 34,
+    minWidth: 34,
+    alignItems: "center",
     justifyContent: "center",
   },
   monthActionText: {
-    fontSize: 12,
+    fontSize: 18,
     fontWeight: "600",
   },
   monthLabel: {
@@ -545,23 +1157,273 @@ const styles = StyleSheet.create({
   calendarGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
+    marginHorizontal: -2,
   },
   dayCell: {
     width: "14.2857%",
     aspectRatio: 1,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 0,
+    paddingVertical: 6,
     alignItems: "center",
-    justifyContent: "center",
-    gap: 4,
+    justifyContent: "space-between",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 10,
   },
   dayLabel: {
     fontSize: 12,
     fontWeight: "600",
   },
-  dayDot: {
-    width: 4,
-    height: 4,
-    borderRadius: 2,
+  dayMarker: {
+    width: 10,
+    height: 10,
+    borderRadius: 3,
+  },
+  monthFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  monthFooterCopy: {
+    flex: 1,
+  },
+  monthFooterTitle: {
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  monthFooterDetail: {
+    marginTop: 2,
+    fontSize: 12,
+  },
+  monthFooterLink: {
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  weekBlock: {
+    gap: 10,
+  },
+  weekHeaderRow: {
+    flexDirection: "row",
+    gap: 4,
+  },
+  weekHeaderCell: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 3,
+    paddingVertical: 7,
+    borderRadius: 10,
+  },
+  weekHeaderDay: {
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  weekHeaderDate: {
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  weekLanes: {
+    gap: 8,
+  },
+  weekLaneRow: {
+    position: "relative",
+    minHeight: 38,
+    justifyContent: "center",
+  },
+  weekLaneCells: {
+    flexDirection: "row",
+    gap: 4,
+  },
+  weekLaneCell: {
+    flex: 1,
+    height: 34,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 10,
+  },
+  weekBar: {
+    position: "absolute",
+    top: 1,
+    bottom: 1,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    alignItems: "flex-start",
+    justifyContent: "center",
+  },
+  weekBarText: {
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  agendaHeader: {
+    flexDirection: "row",
+    alignItems: "flex-end",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  agendaTitle: {
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  agendaSubtitle: {
+    marginTop: 2,
+    fontSize: 12,
+  },
+  agendaList: {
+    gap: 0,
+  },
+  row: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingVertical: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  rowCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  rowTitle: {
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  rowDetail: {
+    marginTop: 3,
+    fontSize: 12,
+  },
+  metaRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 4,
+  },
+  rowMeta: {
+    fontSize: 12,
+  },
+  rowAction: {
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  empty: {
+    paddingVertical: 12,
+    fontSize: 14,
+    lineHeight: 18,
+  },
+  sheetOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.42)",
+    justifyContent: "flex-end",
+    padding: 12,
+  },
+  sheet: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 18,
+    padding: 14,
+    gap: 12,
+  },
+  sheetHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  sheetCopy: {
+    flex: 1,
+  },
+  sheetTitle: {
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  sheetSubtitle: {
+    marginTop: 3,
+    fontSize: 12,
+  },
+  sheetClose: {
+    minHeight: 32,
+    justifyContent: "center",
+  },
+  sheetCloseLabel: {
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  fieldBlock: {
+    gap: 6,
+  },
+  fieldLabel: {
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  fieldInput: {
+    minHeight: 42,
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 14,
+  },
+  readonlyValue: {
+    fontSize: 14,
+    lineHeight: 19,
+  },
+  dayButtonRow: {
+    flexDirection: "row",
+    gap: 6,
+  },
+  dayButton: {
+    flex: 1,
+    minHeight: 34,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 10,
+  },
+  dayButtonLabel: {
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  patternHint: {
+    fontSize: 12,
+  },
+  linkRow: {
+    minHeight: 34,
+    justifyContent: "center",
+  },
+  linkText: {
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  errorText: {
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  sheetActions: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  primaryAction: {
+    flex: 1,
+    minHeight: 40,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  primaryActionLabel: {
+    color: "#ffffff",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  secondaryAction: {
+    flex: 1,
+    minHeight: 40,
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  secondaryActionLabel: {
+    fontSize: 13,
+    fontWeight: "600",
   },
 });

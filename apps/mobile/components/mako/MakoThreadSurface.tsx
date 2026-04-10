@@ -9,12 +9,16 @@ interface MakoThreadSurfaceProps {
   chat: MakoChatContext;
   emptyTitle: string;
   emptyBody: string;
+  scrollToMessageId?: string | null;
+  onScrollTargetHandled?: () => void;
 }
 
 export function MakoThreadSurface({
   chat,
   emptyTitle,
   emptyBody,
+  scrollToMessageId,
+  onScrollTargetHandled,
 }: MakoThreadSurfaceProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
@@ -34,6 +38,8 @@ export function MakoThreadSurface({
         onPlanConfirm={chat.onPlanConfirm}
         bottomPadding={composerReserveHeight}
         showPlanTracker={false}
+        scrollToMessageId={scrollToMessageId}
+        onScrollTargetHandled={onScrollTargetHandled}
         emptyState={
           <View style={styles.emptyState}>
             <Text style={[styles.emptyTitle, { color: t.foreground }]}>

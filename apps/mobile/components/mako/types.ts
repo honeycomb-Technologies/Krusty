@@ -18,6 +18,7 @@ import type { Attachment as ChatBarAttachment } from "../chat/ChatBar";
 
 export type MakoTopLevelView =
   | "mako"
+  | "attention"
   | "schedule"
   | "logbook"
   | "runs"
@@ -27,6 +28,16 @@ export type MakoTopLevelView =
 export type MakoRunSection = "overview" | "wake" | "tasks" | "chat" | "artifacts";
 export type MakoKnowledgeView = "recent" | "memory";
 export type MakoKnowledgeScope = "workspace" | "all";
+export type MakoAttentionItemKind =
+  | "approval_required"
+  | "input_required"
+  | "run_completed"
+  | "run_failed"
+  | "run_stalled"
+  | "scheduled_run_started"
+  | "scheduled_run_completed"
+  | "delegated_task_completed";
+export type MakoAttentionSection = "needs_action" | "updates";
 export type { MakoCurrentRunSummary };
 
 export interface MakoChatContext {
@@ -125,4 +136,22 @@ export interface MakoRunState {
 export interface MakoSelectedRun {
   runId: string;
   summary: MakoCurrentRunSummary | null;
+}
+
+export interface MakoAttentionItem {
+  id: string;
+  kind: MakoAttentionItemKind;
+  section: MakoAttentionSection;
+  title: string;
+  summary: string;
+  detail: string;
+  createdAt: string;
+  read: boolean;
+  active: boolean;
+  runId?: string | null;
+  projectDir?: string | null;
+  toolCallId?: string | null;
+  sessionId?: string | null;
+  threadSessionId?: string | null;
+  threadMessageId?: string | null;
 }

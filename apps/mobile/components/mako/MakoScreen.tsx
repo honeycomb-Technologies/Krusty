@@ -1,8 +1,9 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useBreakpoint } from "../../hooks/useBreakpoint";
 import { useThemeContext } from "../../hooks/useTheme";
+import { MakoAttentionView } from "./MakoAttentionView";
 import { MakoChannelsView } from "./MakoChannelsView";
 import { MakoCurrentView } from "./MakoCurrentView";
 import { MakoCrewView } from "./MakoCrewView";
@@ -12,34 +13,40 @@ import { MakoRunsView } from "./MakoRunsView";
 import { MakoScheduleView } from "./MakoScheduleView";
 import { MakoStatusView } from "./MakoStatusView";
 import { MakoTopBar } from "./MakoTopBar";
-import { MakoTopNav } from "./MakoTopNav";
 import { useMakoCurrent } from "./hooks/useMakoCurrent";
 import { useMakoHome } from "./hooks/useMakoHome";
 import { useMakoNavigation } from "./hooks/useMakoNavigation";
-import type { MakoChatContext } from "./types";
+import type { MakoChatContext, MakoTopLevelView } from "./types";
 
 interface MakoScreenProps {
   workspaceDirectory?: string | null;
   activeRunId?: string | null;
+  requestedTopLevel?: MakoTopLevelView;
   chat: MakoChatContext;
   onOpenRunById: (runId: string) => Promise<void>;
+  onOpenProject?: (projectDir: string) => Promise<void> | void;
   onDeleteRun: (runId: string) => void;
   onOpenMenu?: () => void;
+  onTopLevelChange?: (view: MakoTopLevelView) => void;
 }
 
 export function MakoScreen({
   workspaceDirectory,
   activeRunId,
+  requestedTopLevel,
   chat,
   onOpenRunById,
+  onOpenProject,
   onDeleteRun,
   onOpenMenu,
+  onTopLevelChange,
 }: MakoScreenProps) {
   const { theme } = useThemeContext();
   const { isDesktop } = useBreakpoint();
   const current = useMakoCurrent(true);
   const home = useMakoHome(true);
   const navigation = useMakoNavigation(activeRunId);
+  const [threadJumpMessageId, setThreadJumpMessageId] = useState<string | null>(null);
 
   const selectedRun =
     navigation.selectedRunId
@@ -53,18 +60,45 @@ export function MakoScreen({
     }
   }, [current.refresh, home.refresh, navigation.selectedRunId]);
 
+  useEffect(() => {
+    if (!requestedTopLevel) {
+      return;
+    }
+
+    if (navigation.selectedRunId) {
+      navigation.closeRun();
+    }
+
+    navigation.setTopLevel(requestedTopLevel);
+  }, [
+    navigation.closeRun,
+    navigation.selectedRunId,
+    navigation.setTopLevel,
+    requestedTopLevel,
+  ]);
+
+  useEffect(() => {
+    onTopLevelChange?.(navigation.topLevel);
+  }, [navigation.topLevel, onTopLevelChange]);
+
   const handleOpenRun = async (runId: string) => {
     navigation.openRun(runId);
     await onOpenRunById(runId);
   };
 
   const status = current.current?.status.home_status ?? "idle";
-  const navActive: "mako" | "schedule" | "logbook" =
-    navigation.topLevel === "schedule"
-      ? "schedule"
-      : navigation.topLevel === "logbook"
-        ? "logbook"
-        : "mako";
+  const topLevelTitles: Record<MakoTopLevelView, string> = {
+    mako: "Mako",
+    attention: "Attention",
+    schedule: "Schedule",
+    logbook: "Logbook",
+    runs: "Runs",
+    details: "Details",
+    crew: "Crew",
+    channels: "Channels",
+  };
+  const title = topLevelTitles[navigation.topLevel] ?? "Mako";
+  const subtitle = navigation.topLevel === "mako" ? "Always Swimming." : undefined;
 
   return (
     <SafeAreaView
@@ -84,22 +118,12 @@ export function MakoScreen({
       ) : (
         <>
           <MakoTopBar
-            title="Mako"
-            subtitle="Always Swimming."
+            title={title}
+            subtitle={subtitle}
             status={status}
-            titleStatus={status}
+            titleStatus={navigation.topLevel === "mako" ? status : null}
             showStatusBadge={false}
             onOpenMenu={!isDesktop ? onOpenMenu : undefined}
-          />
-
-          <MakoTopNav
-            items={[
-              { id: "mako", label: "Mako" },
-              { id: "schedule", label: "Schedule" },
-              { id: "logbook", label: "Logbook" },
-            ]}
-            active={navActive}
-            onSelect={navigation.setTopLevel}
           />
 
           {navigation.topLevel === "mako" ? (
@@ -107,17 +131,12 @@ export function MakoScreen({
               state={current}
               homeState={home}
               chat={chat}
+              threadJumpMessageId={threadJumpMessageId}
+              onThreadJumpHandled={() => {
+                setThreadJumpMessageId(null);
+              }}
               onSelectRun={(runId) => {
                 void handleOpenRun(runId);
-              }}
-              onOpenRuns={() => {
-                navigation.setTopLevel("runs");
-              }}
-              onOpenCrew={() => {
-                navigation.setTopLevel("crew");
-              }}
-              onOpenChannels={() => {
-                navigation.setTopLevel("channels");
               }}
               onOpenSchedule={() => {
                 navigation.setTopLevel("schedule");
@@ -128,12 +147,27 @@ export function MakoScreen({
             />
           ) : null}
 
+          {navigation.topLevel === "attention" ? (
+            <MakoAttentionView
+              state={current}
+              chat={chat}
+              onSelectRun={(runId) => {
+                void handleOpenRun(runId);
+              }}
+              onOpenThread={(messageId) => {
+                setThreadJumpMessageId(messageId ?? null);
+                navigation.setTopLevel("mako");
+              }}
+            />
+          ) : null}
+
           {navigation.topLevel === "schedule" ? (
             <MakoScheduleView
               state={current}
               workspaceDirectory={workspaceDirectory}
               model={chat.model ?? null}
               crewMembers={home.crew?.members ?? []}
+              onOpenProject={onOpenProject}
               onSelectRun={(runId) => {
                 void handleOpenRun(runId);
               }}

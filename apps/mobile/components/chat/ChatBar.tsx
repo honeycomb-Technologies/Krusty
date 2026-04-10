@@ -102,6 +102,7 @@ export function ChatBar(props: ChatBarProps) {
 
   const t = theme.colors;
   const isDark = theme.scheme === 'dark';
+  const isMako = sessionType === 'mako';
   const borderColor = 'rgba(255,255,255,0.08)';
   const bgOverlay = isDark ? 'rgba(11,17,25,0.6)' : 'rgba(255,255,255,0.6)';
   const blurTint = isDark ? 'systemChromeMaterialDark' as const : 'systemChromeMaterialLight' as const;
@@ -341,7 +342,7 @@ export function ChatBar(props: ChatBarProps) {
                   value={text}
                   onChangeText={setText}
                   onFocus={() => { if (accordionOpen) setAccordionOpen(false); }}
-                  placeholder="Message Krusty..."
+                  placeholder={isMako ? "Message Mako..." : "Message Krusty..."}
                   placeholderTextColor={t.mutedForeground + '50'}
                   multiline
                   maxLength={500000}

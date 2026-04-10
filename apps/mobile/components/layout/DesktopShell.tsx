@@ -28,6 +28,7 @@ export function DesktopShell({
   onNewSession,
   onNewSessionWithDir,
   activeTab,
+  onSelectMakoView,
   ...sessionListProps
 }: DesktopShellProps) {
   const { isDesktop } = useBreakpoint();
@@ -51,10 +52,12 @@ export function DesktopShell({
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     if (activeTab === 0) {
       onNewSession();
-    } else {
+    } else if (activeTab === 1) {
       setPickerVisible(true);
+    } else {
+      onSelectMakoView?.("mako");
     }
-  }, [activeTab, onNewSession]);
+  }, [activeTab, onNewSession, onSelectMakoView]);
 
   const toggleSidebar = useCallback(() => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);

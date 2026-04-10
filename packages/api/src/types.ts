@@ -405,6 +405,43 @@ export interface MakoPendingApproval {
   priority: MakoRunPriority;
 }
 
+export type MakoAttentionItemKind =
+  | 'approval_required'
+  | 'input_required'
+  | 'run_completed'
+  | 'run_failed'
+  | 'run_stalled'
+  | 'scheduled_run_started'
+  | 'scheduled_run_completed'
+  | 'delegated_task_completed';
+
+export type MakoAttentionSection = 'needs_action' | 'updates';
+
+export interface MakoAttentionItem {
+  id: string;
+  kind: MakoAttentionItemKind;
+  section: MakoAttentionSection;
+  title: string;
+  summary: string;
+  detail: string;
+  created_at: string;
+  read: boolean;
+  cleared: boolean;
+  active: boolean;
+  session_id?: string | null;
+  run_id?: string | null;
+  project_dir?: string | null;
+  tool_call_id?: string | null;
+  thread_session_id?: string | null;
+  thread_message_id?: string | null;
+}
+
+export interface MakoAttentionResponse {
+  items: MakoAttentionItem[];
+  unread_count: number;
+  badge_count: number;
+}
+
 export interface MakoStatusSummary {
   home_status: MakoHomeStatus;
   total_count: number;
