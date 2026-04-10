@@ -20,6 +20,7 @@ mod database_tests;
 mod delegated_runs;
 mod file_activity;
 mod knowledge;
+mod mako_home;
 mod mako_runtime_state;
 mod memories;
 mod messages;
@@ -47,6 +48,12 @@ pub use file_activity::{FileActivityTracker, RankedFile};
 pub use knowledge::{
     is_current_snapshot, is_current_snapshot_title, refresh_current_snapshot,
     CURRENT_SNAPSHOT_TITLE,
+};
+pub use mako_home::{
+    bootstrap_mako_home, is_valid_crew_slug, summarize_crew_runtime, write_mako_crew_document,
+    write_mako_home_document, MakoBootstrapResult, MakoContextLayer, MakoCrewDocumentKind,
+    MakoCrewProfile, MakoCrewRuntimeStatus, MakoCrewRuntimeSummary, MakoHomeDocument,
+    MakoHomeDocumentKind, MakoHomeProfile,
 };
 pub use mako_runtime_state::{
     MakoRunPriority, MakoRuntimeState, MakoRuntimeStateStatus, MakoRuntimeStateStore,

@@ -1371,13 +1371,13 @@ mod tests {
             matches!(
                 &message.content[0],
                 Content::Text { text }
-                    if text.contains("[MAKO IDENTITY - MAKO.md]") && text.contains("Always Swimming.")
+                    if text.contains("[MAKO PROJECT OVERLAY - MAKO.md]") && text.contains("Always Swimming.")
             )
         }));
         assert!(!code_injected.iter().any(|message| {
             matches!(
                 &message.content[0],
-                Content::Text { text } if text.contains("[MAKO IDENTITY - MAKO.md]")
+                Content::Text { text } if text.contains("[MAKO PROJECT OVERLAY - MAKO.md]")
             )
         }));
     }

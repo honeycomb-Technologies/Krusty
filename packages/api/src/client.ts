@@ -33,7 +33,12 @@ import type {
   MemorySnapshotResponse,
   PromoteReportToMemoryResponse,
   MakoDispatchResponse,
+  MakoBootstrapResponse,
+  MakoCrewDocumentKind,
+  MakoCrewResponse,
   MakoCurrentResponse,
+  MakoHomeDocumentKind,
+  MakoHomeResponse,
   MakoRecoverDaemonResponse,
   MakoRunPriority,
   MakoSessionSummary,
@@ -467,6 +472,42 @@ export class KrustyClient {
 
   async getMakoCurrent(): Promise<MakoCurrentResponse> {
     return this.request('/mako/current');
+  }
+
+  async getMakoHome(): Promise<MakoHomeResponse> {
+    return this.request('/mako/home');
+  }
+
+  async bootstrapMakoHome(): Promise<MakoBootstrapResponse> {
+    return this.request('/mako/home/bootstrap', { method: 'POST' });
+  }
+
+  async updateMakoHomeDocument(
+    kind: MakoHomeDocumentKind,
+    content: string,
+  ): Promise<MakoHomeResponse> {
+    return this.request(`/mako/home/${encodeURIComponent(kind)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    });
+  }
+
+  async updateMakoCrewDocument(
+    slug: string,
+    kind: MakoCrewDocumentKind,
+    content: string,
+  ): Promise<MakoHomeResponse> {
+    return this.request(
+      `/mako/home/crew/${encodeURIComponent(slug)}/${encodeURIComponent(kind)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ content }),
+      },
+    );
+  }
+
+  async getMakoCrew(): Promise<MakoCrewResponse> {
+    return this.request('/mako/crew');
   }
 
   async recoverMakoDaemon(): Promise<MakoRecoverDaemonResponse> {

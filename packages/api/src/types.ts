@@ -453,6 +453,60 @@ export interface MakoCurrentResponse {
   approvals: MakoPendingApproval[];
 }
 
+export interface MakoHomeDocument {
+  file_name: string;
+  content: string;
+  preview: string;
+}
+
+export interface MakoCrewMember {
+  slug: string;
+  identity?: MakoHomeDocument | null;
+  soul?: MakoHomeDocument | null;
+  memory?: MakoHomeDocument | null;
+}
+
+export interface MakoHomeResponse {
+  soul?: MakoHomeDocument | null;
+  identity?: MakoHomeDocument | null;
+  heartbeat?: MakoHomeDocument | null;
+  memory?: MakoHomeDocument | null;
+  channels?: MakoHomeDocument | null;
+  crew: MakoCrewMember[];
+  crew_count: number;
+}
+
+export type MakoHomeDocumentKind = 'soul' | 'identity' | 'heartbeat' | 'memory' | 'channels';
+export type MakoCrewDocumentKind = 'identity' | 'soul' | 'memory';
+export type MakoCrewRuntimeStatus = 'idle' | 'running' | 'waiting' | 'degraded';
+
+export interface MakoBootstrapResponse {
+  ok: boolean;
+  created_files: string[];
+  home: MakoHomeResponse;
+}
+
+export interface MakoCrewRuntimeMember {
+  slug: string;
+  known_to_home: boolean;
+  status: MakoCrewRuntimeStatus;
+  active_run_count: number;
+  recent_run_count: number;
+  failed_run_count: number;
+  queued_task_count: number;
+  active_task_count: number;
+  completed_task_count: number;
+  failed_task_count: number;
+  latest_activity_at?: string | null;
+  identity?: MakoHomeDocument | null;
+  soul?: MakoHomeDocument | null;
+  memory?: MakoHomeDocument | null;
+}
+
+export interface MakoCrewResponse {
+  members: MakoCrewRuntimeMember[];
+}
+
 export interface MakoRecoverDaemonResponse {
   ok: boolean;
   recovered_count: number;

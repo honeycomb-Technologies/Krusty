@@ -8,7 +8,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::sse::{Event, KeepAlive, Sse},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -17,16 +17,20 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
 use krusty_core::agent::loop_events::LoopStopReason;
+use krusty_core::paths as core_paths;
 use krusty_core::storage::{
-    AutonomousTask, AutonomousTaskStore, Database, MakoRunPriority, MakoRuntimeState,
-    MakoRuntimeStateStatus, MakoRuntimeStateStore, MemoryStore, ProjectSettings, ReportStore,
-    RuntimeTraceEvent, RuntimeTraceStore, RuntimeTraceSummary, SessionInfo, SessionType,
-    TaskStatus, TraceFailureCategory, WorkspaceMode, CURRENT_SNAPSHOT_TITLE,
+    bootstrap_mako_home, is_valid_crew_slug, summarize_crew_runtime, write_mako_crew_document,
+    write_mako_home_document, AutonomousTask, AutonomousTaskStore, Database, DelegatedRunStore,
+    MakoCrewDocumentKind, MakoCrewRuntimeSummary, MakoHomeDocument, MakoHomeDocumentKind,
+    MakoHomeProfile, MakoRunPriority, MakoRuntimeState, MakoRuntimeStateStatus,
+    MakoRuntimeStateStore, MemoryStore, ProjectSettings, ReportStore, RuntimeTraceEvent,
+    RuntimeTraceStore, RuntimeTraceSummary, SessionInfo, SessionType, TaskStatus,
+    TraceFailureCategory, WorkspaceMode, CURRENT_SNAPSHOT_TITLE,
 };
 use krusty_core::SessionManager;
 
 use super::session_access::{
-    current_user_id, ensure_owned_session_of_type, load_agent_state_or_idle,
+    current_user_home_dir, current_user_id, ensure_owned_session_of_type, load_agent_state_or_idle,
     load_owned_session_of_type, request_workspace_scope,
 };
 use crate::auth::CurrentUser;
@@ -39,6 +43,11 @@ use crate::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/dispatch", post(dispatch))
+        .route("/home", get(home))
+        .route("/home/bootstrap", post(bootstrap_home))
+        .route("/home/:kind", put(update_home_document))
+        .route("/home/crew/:slug/:kind", put(update_crew_document))
+        .route("/crew", get(crew))
         .route("/current", get(current))
         .route("/daemon/recover", post(recover_daemon))
         .route("/sessions", get(list_sessions))
@@ -77,6 +86,11 @@ struct PriorityRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct DocumentWriteRequest {
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ObserveEventsQuery {
     replay_limit: Option<usize>,
     after_sequence: Option<i64>,
@@ -89,6 +103,7 @@ const ACTIVE_STALE_SECS: i64 = 30 * 60;
 const WAITING_STALE_SECS: i64 = 15 * 60;
 const QUEUED_STALE_SECS: i64 = 60 * 60;
 const OVERDUE_WAKE_GRACE_SECS: i64 = 5 * 60;
+const MAKO_HOME_PREVIEW_CHARS: usize = 160;
 
 #[derive(Debug, Serialize)]
 struct DispatchResponse {
@@ -224,6 +239,62 @@ struct MakoCurrentResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct MakoHomeDocumentSummary {
+    file_name: String,
+    content: String,
+    preview: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MakoCrewMemberSummary {
+    slug: String,
+    identity: Option<MakoHomeDocumentSummary>,
+    soul: Option<MakoHomeDocumentSummary>,
+    memory: Option<MakoHomeDocumentSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct MakoHomeResponse {
+    soul: Option<MakoHomeDocumentSummary>,
+    identity: Option<MakoHomeDocumentSummary>,
+    heartbeat: Option<MakoHomeDocumentSummary>,
+    memory: Option<MakoHomeDocumentSummary>,
+    channels: Option<MakoHomeDocumentSummary>,
+    crew: Vec<MakoCrewMemberSummary>,
+    crew_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct MakoBootstrapResponse {
+    ok: bool,
+    created_files: Vec<String>,
+    home: MakoHomeResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct MakoCrewResponse {
+    members: Vec<MakoCrewRuntimeMemberSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct MakoCrewRuntimeMemberSummary {
+    slug: String,
+    known_to_home: bool,
+    status: String,
+    active_run_count: usize,
+    recent_run_count: usize,
+    failed_run_count: usize,
+    queued_task_count: usize,
+    active_task_count: usize,
+    completed_task_count: usize,
+    failed_task_count: usize,
+    latest_activity_at: Option<String>,
+    identity: Option<MakoHomeDocumentSummary>,
+    soul: Option<MakoHomeDocumentSummary>,
+    memory: Option<MakoHomeDocumentSummary>,
+}
+
+#[derive(Debug, Serialize)]
 struct OkResponse {
     ok: bool,
 }
@@ -350,6 +421,85 @@ async fn list_sessions(
     }
 
     Ok(Json(mako_sessions))
+}
+
+async fn home(
+    State(_state): State<AppState>,
+    user: Option<CurrentUser>,
+) -> Result<Json<MakoHomeResponse>, AppError> {
+    Ok(Json(build_mako_home_response_from_dir(
+        &mako_home_dir_for_user(user.as_ref()),
+    )))
+}
+
+async fn bootstrap_home(
+    State(_state): State<AppState>,
+    user: Option<CurrentUser>,
+) -> Result<Json<MakoBootstrapResponse>, AppError> {
+    Ok(Json(build_mako_bootstrap_response_from_dir(
+        &mako_home_dir_for_user(user.as_ref()),
+    )?))
+}
+
+async fn update_home_document(
+    State(_state): State<AppState>,
+    user: Option<CurrentUser>,
+    Path(kind): Path<String>,
+    Json(req): Json<DocumentWriteRequest>,
+) -> Result<Json<MakoHomeResponse>, AppError> {
+    let kind = MakoHomeDocumentKind::parse(&kind)
+        .ok_or_else(|| AppError::BadRequest("invalid Mako home document kind".to_string()))?;
+    let content = trimmed_nonempty(Some(req.content.as_str()))
+        .ok_or_else(|| AppError::BadRequest("content must not be empty".to_string()))?;
+    let mako_home = mako_home_dir_for_user(user.as_ref());
+
+    write_mako_home_document(&mako_home, kind, content).map_err(|error| {
+        AppError::Internal(format!("Failed to update Mako home document: {}", error))
+    })?;
+
+    Ok(Json(build_mako_home_response_from_dir(&mako_home)))
+}
+
+async fn update_crew_document(
+    State(_state): State<AppState>,
+    user: Option<CurrentUser>,
+    Path((slug, kind)): Path<(String, String)>,
+    Json(req): Json<DocumentWriteRequest>,
+) -> Result<Json<MakoHomeResponse>, AppError> {
+    if !is_valid_crew_slug(&slug) {
+        return Err(AppError::BadRequest("invalid crew slug".to_string()));
+    }
+    let kind = MakoCrewDocumentKind::parse(&kind)
+        .ok_or_else(|| AppError::BadRequest("invalid Mako crew document kind".to_string()))?;
+    let content = trimmed_nonempty(Some(req.content.as_str()))
+        .ok_or_else(|| AppError::BadRequest("content must not be empty".to_string()))?;
+    let mako_home = mako_home_dir_for_user(user.as_ref());
+
+    write_mako_crew_document(&mako_home, &slug, kind, content).map_err(|error| {
+        AppError::Internal(format!("Failed to update Mako crew document: {}", error))
+    })?;
+
+    Ok(Json(build_mako_home_response_from_dir(&mako_home)))
+}
+
+async fn crew(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+) -> Result<Json<MakoCrewResponse>, AppError> {
+    let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
+    let sessions = {
+        let session_manager = open_session_manager(&state)?;
+        session_manager.list_sessions_for_user_by_type(None, user_id, SessionType::Mako)?
+    };
+    let task_store = AutonomousTaskStore::new(Database::new(&state.db_path)?);
+    let delegated_store = DelegatedRunStore::new(Database::new(&state.db_path)?);
+
+    Ok(Json(build_mako_crew_response_from_dir_and_sessions(
+        &mako_home_dir_for_user(user.as_ref()),
+        &sessions,
+        &task_store,
+        &delegated_store,
+    )?))
 }
 
 async fn current(
@@ -836,6 +986,114 @@ async fn cancel_session(
 
 fn open_session_manager(state: &AppState) -> Result<SessionManager, AppError> {
     Ok(SessionManager::new(Database::new(&state.db_path)?))
+}
+
+fn mako_home_dir_for_user(user: Option<&CurrentUser>) -> PathBuf {
+    current_user_home_dir(user)
+        .map(core_paths::mako_dir_for_home)
+        .unwrap_or_else(core_paths::mako_dir)
+}
+
+fn build_mako_bootstrap_response_from_dir(
+    mako_home: &std::path::Path,
+) -> Result<MakoBootstrapResponse, AppError> {
+    let result = bootstrap_mako_home(mako_home)
+        .map_err(|error| AppError::Internal(format!("Failed to bootstrap Mako home: {}", error)))?;
+    Ok(MakoBootstrapResponse {
+        ok: true,
+        created_files: result.created_files,
+        home: build_mako_home_response_from_dir(mako_home),
+    })
+}
+
+fn build_mako_home_response_from_dir(mako_home: &std::path::Path) -> MakoHomeResponse {
+    let profile = MakoHomeProfile::load_from(mako_home);
+
+    MakoHomeResponse {
+        soul: summarize_mako_home_document(profile.soul),
+        identity: summarize_mako_home_document(profile.identity),
+        heartbeat: summarize_mako_home_document(profile.heartbeat),
+        memory: summarize_mako_home_document(profile.memory),
+        channels: summarize_mako_home_document(profile.channels),
+        crew_count: profile.crew.len(),
+        crew: profile
+            .crew
+            .into_iter()
+            .map(|member| MakoCrewMemberSummary {
+                slug: member.slug,
+                identity: summarize_mako_home_document(member.identity),
+                soul: summarize_mako_home_document(member.soul),
+                memory: summarize_mako_home_document(member.memory),
+            })
+            .collect(),
+    }
+}
+
+fn build_mako_crew_response_from_dir_and_sessions(
+    mako_home: &std::path::Path,
+    sessions: &[SessionInfo],
+    task_store: &AutonomousTaskStore,
+    delegated_store: &DelegatedRunStore,
+) -> Result<MakoCrewResponse, AppError> {
+    let profile = MakoHomeProfile::load_from(mako_home);
+    let profile_map = profile
+        .crew
+        .iter()
+        .map(|member| (member.slug.as_str(), member))
+        .collect::<BTreeMap<_, _>>();
+    let runtime = summarize_crew_runtime(&profile, sessions, task_store, delegated_store)
+        .map_err(|error| AppError::Internal(format!("Failed to summarize Mako crew: {}", error)))?;
+
+    Ok(MakoCrewResponse {
+        members: runtime
+            .into_iter()
+            .map(|member| {
+                let profile = profile_map.get(member.slug.as_str());
+                summarize_mako_crew_member(member, profile.copied())
+            })
+            .collect(),
+    })
+}
+
+fn summarize_mako_crew_member(
+    runtime: MakoCrewRuntimeSummary,
+    profile: Option<&krusty_core::storage::MakoCrewProfile>,
+) -> MakoCrewRuntimeMemberSummary {
+    MakoCrewRuntimeMemberSummary {
+        slug: runtime.slug,
+        known_to_home: runtime.known_to_home,
+        status: runtime.status.as_str().to_string(),
+        active_run_count: runtime.active_run_count,
+        recent_run_count: runtime.recent_run_count,
+        failed_run_count: runtime.failed_run_count,
+        queued_task_count: runtime.queued_task_count,
+        active_task_count: runtime.active_task_count,
+        completed_task_count: runtime.completed_task_count,
+        failed_task_count: runtime.failed_task_count,
+        latest_activity_at: runtime.latest_activity_at,
+        identity: summarize_mako_home_document(profile.and_then(|member| member.identity.clone())),
+        soul: summarize_mako_home_document(profile.and_then(|member| member.soul.clone())),
+        memory: summarize_mako_home_document(profile.and_then(|member| member.memory.clone())),
+    }
+}
+
+fn summarize_mako_home_document(
+    document: Option<MakoHomeDocument>,
+) -> Option<MakoHomeDocumentSummary> {
+    document.map(|document| MakoHomeDocumentSummary {
+        preview: truncate_preview(&document.content, MAKO_HOME_PREVIEW_CHARS),
+        file_name: document.file_name,
+        content: document.content,
+    })
+}
+
+fn truncate_preview(value: &str, max_chars: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value.to_string();
+    }
+    let truncated = value.chars().take(max_chars).collect::<String>();
+    format!("{}...", truncated)
 }
 
 fn load_mako_replay_events(
@@ -1652,22 +1910,25 @@ mod tests {
     use krusty_core::agent::{AgentCancellation, LoopEvent, UserHookManager};
     use krusty_core::ai::models::create_model_registry;
     use krusty_core::mcp::McpManager;
+    use krusty_core::paths;
     use krusty_core::process::ProcessRegistry;
     use krusty_core::skills::SkillsManager;
     use krusty_core::storage::credentials::CredentialStore;
     use krusty_core::storage::reports::CreateReportInput;
     use krusty_core::storage::{
-        Database, MakoRunPriority, MakoRuntimeStateStatus, MakoRuntimeStateStore, MemoryStore,
-        MemoryType, ReportStore, RuntimeTraceEvent, RuntimeTraceStore, SessionType, WorkspaceMode,
-        CURRENT_SNAPSHOT_TITLE,
+        bootstrap_mako_home, AutonomousTaskStore, Database, MakoRunPriority,
+        MakoRuntimeStateStatus, MakoRuntimeStateStore, MemoryStore, MemoryType, ReportStore,
+        RuntimeTraceEvent, RuntimeTraceStore, SessionType, WorkspaceMode, CURRENT_SNAPSHOT_TITLE,
     };
     use krusty_core::tools::registry::ToolRegistry;
     use krusty_core::SessionManager;
 
     use super::{
-        current, dispatch, list_sessions, map_runtime_trace_event, recover_daemon,
-        schedule_session, session_status, set_priority, DispatchRequest, PriorityRequest,
-        ScheduleRequest,
+        build_mako_bootstrap_response_from_dir, build_mako_crew_response_from_dir_and_sessions,
+        build_mako_home_response_from_dir, current, dispatch, list_sessions,
+        mako_home_dir_for_user, map_runtime_trace_event, recover_daemon, schedule_session,
+        session_status, set_priority, update_crew_document, update_home_document, DispatchRequest,
+        DocumentWriteRequest, PriorityRequest, ScheduleRequest,
     };
     use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::error::AppError;
@@ -1759,6 +2020,203 @@ mod tests {
             .expect("session lookup should succeed")
             .expect("session should exist");
         assert_eq!(session.model.as_deref(), Some("openai/gpt-5"));
+    }
+
+    #[test]
+    fn mako_home_response_surfaces_documents_and_sorted_crew() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("krusty-mako-home-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        let crew_builder = temp_dir.join("crew").join("builder");
+        let crew_reviewer = temp_dir.join("crew").join("reviewer");
+        std::fs::create_dir_all(&crew_builder).expect("builder dir should exist");
+        std::fs::create_dir_all(&crew_reviewer).expect("reviewer dir should exist");
+
+        std::fs::write(
+            temp_dir.join(krusty_core::paths::MAKO_SOUL_FILE),
+            "Always Swimming.",
+        )
+        .expect("soul should write");
+        std::fs::write(temp_dir.join("CHANNELS.md"), "Signal line").expect("channels should write");
+        std::fs::write(crew_reviewer.join("IDENTITY.md"), "Reviewer").expect("reviewer identity");
+        std::fs::write(crew_builder.join("SOUL.md"), "Builder soul").expect("builder soul");
+
+        let response = build_mako_home_response_from_dir(&temp_dir);
+
+        assert_eq!(
+            response
+                .soul
+                .as_ref()
+                .map(|document| document.file_name.as_str()),
+            Some("MAKO_SOUL.md")
+        );
+        assert_eq!(
+            response
+                .channels
+                .as_ref()
+                .map(|document| document.file_name.as_str()),
+            Some("CHANNELS.md")
+        );
+        assert_eq!(response.crew_count, 2);
+        assert_eq!(response.crew[0].slug, "builder");
+        assert_eq!(response.crew[1].slug, "reviewer");
+    }
+
+    #[test]
+    fn mako_bootstrap_response_creates_default_home_and_crew() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("krusty-mako-bootstrap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+
+        let response = build_mako_bootstrap_response_from_dir(&temp_dir)
+            .unwrap_or_else(|_| panic!("bootstrap should work"));
+
+        assert!(response.ok);
+        assert!(response
+            .created_files
+            .iter()
+            .any(|path| path == paths::MAKO_SOUL_FILE));
+        assert!(response
+            .created_files
+            .iter()
+            .any(|path| path == "crew/reviewer/SOUL.md"));
+        assert_eq!(response.home.crew_count, 3);
+        assert_eq!(
+            response
+                .home
+                .soul
+                .as_ref()
+                .map(|document| document.file_name.as_str()),
+            Some(paths::MAKO_SOUL_FILE)
+        );
+    }
+
+    #[tokio::test]
+    async fn update_home_document_writes_to_user_scoped_mako_home() {
+        let (state, temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        let user_home = temp_dir.join("alice-home");
+        std::fs::create_dir_all(&user_home).expect("user home should exist");
+
+        let Json(response) = update_home_document(
+            State(state),
+            Some(current_user("alice", &user_home)),
+            Path("soul".to_string()),
+            Json(DocumentWriteRequest {
+                content: "Stay watchful.".to_string(),
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("document update should succeed"));
+
+        let expected = paths::mako_dir_for_home(&user_home).join(paths::MAKO_SOUL_FILE);
+        assert_eq!(
+            std::fs::read_to_string(expected).expect("scoped mako soul should exist"),
+            "Stay watchful."
+        );
+        assert_eq!(
+            response
+                .soul
+                .as_ref()
+                .map(|document| document.file_name.as_str()),
+            Some(paths::MAKO_SOUL_FILE)
+        );
+    }
+
+    #[tokio::test]
+    async fn update_crew_document_rejects_invalid_slug() {
+        let (state, temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        let user_home = temp_dir.join("alice-home");
+        std::fs::create_dir_all(&user_home).expect("user home should exist");
+
+        let result = update_crew_document(
+            State(state),
+            Some(current_user("alice", &user_home)),
+            Path(("../oops".to_string(), "soul".to_string())),
+            Json(DocumentWriteRequest {
+                content: "Nope".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(AppError::BadRequest(message)) if message == "invalid crew slug")
+        );
+    }
+
+    #[test]
+    fn mako_crew_response_merges_home_profiles_with_runtime_state() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("krusty-mako-crew-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        bootstrap_mako_home(&temp_dir).expect("bootstrap should work");
+        let db_path = temp_dir.join("krusty.db");
+        let db = Database::new(&db_path).expect("db should open");
+        db.conn()
+            .execute(
+                "INSERT INTO users (id, email, license_tier) VALUES (?1, ?2, ?3)",
+                ("alice", "alice@example.com", "free"),
+            )
+            .expect("user should insert");
+        let session_manager = SessionManager::new(Database::new(&db_path).expect("db should open"));
+        let session_id = session_manager
+            .create_session_for_user_with_config(
+                "Crew runtime",
+                None,
+                Some(temp_dir.to_string_lossy().as_ref()),
+                Some(temp_dir.to_string_lossy().as_ref()),
+                WorkspaceMode::Selected,
+                Some("alice"),
+                None,
+                SessionType::Mako,
+            )
+            .expect("session should create");
+        let sessions = session_manager
+            .list_sessions_for_user_by_type(None, Some("alice"), SessionType::Mako)
+            .expect("sessions should load");
+        let task_store = AutonomousTaskStore::new(Database::new(&db_path).expect("db should open"));
+        let delegated_store = krusty_core::storage::DelegatedRunStore::new(
+            Database::new(&db_path).expect("db should open"),
+        );
+        let task_id = task_store
+            .create_task(&session_id, "Review", "Review current run", &[])
+            .expect("task should create");
+        task_store
+            .claim_task(&task_id, "reviewer")
+            .expect("task should claim");
+
+        let response = build_mako_crew_response_from_dir_and_sessions(
+            &temp_dir,
+            &sessions,
+            &task_store,
+            &delegated_store,
+        )
+        .unwrap_or_else(|_| panic!("crew response should build"));
+
+        let reviewer = response
+            .members
+            .iter()
+            .find(|member| member.slug == "reviewer")
+            .expect("reviewer should exist");
+        assert!(reviewer.known_to_home);
+        assert_eq!(reviewer.status, "running");
+        assert_eq!(reviewer.active_task_count, 1);
+        assert!(reviewer.identity.is_some());
+        assert!(reviewer.soul.is_some());
+    }
+
+    #[test]
+    fn user_scoped_mako_home_dir_prefers_current_user_home() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("krusty-mako-user-home-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        let user = current_user("alice", &temp_dir);
+
+        assert_eq!(
+            mako_home_dir_for_user(Some(&user)),
+            paths::mako_dir_for_home(&temp_dir)
+        );
     }
 
     #[tokio::test]
