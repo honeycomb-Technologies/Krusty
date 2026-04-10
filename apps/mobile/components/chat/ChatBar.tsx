@@ -10,6 +10,7 @@ import {
   LayoutAnimation,
   Image,
   FlatList,
+  Alert,
 } from 'react-native';
 import { BlurView } from '../../platform/blur';
 import { ArrowUp, X, Mic, FlaskConical } from 'lucide-react-native';
@@ -17,6 +18,7 @@ import * as Haptics from '../../platform/haptics';
 import * as ImagePicker from '../../platform/image-picker';
 import * as DocumentPicker from '../../platform/document-picker';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -67,6 +69,121 @@ interface ChatBarProps {
 const PILL = 56;
 const RADIUS = 18;
 const GAP = 10;
+
+interface PickedImageAsset {
+  uri: string;
+  fileName?: string | null;
+  mimeType?: string | null;
+  base64?: string | null;
+}
+
+function normalizeSupportedImageMimeType(
+  mimeType?: string | null,
+  fileName?: string | null,
+  uri?: string | null,
+): string | null {
+  const normalizedMime = mimeType?.trim().toLowerCase();
+  switch (normalizedMime) {
+    case 'image/jpeg':
+    case 'image/jpg':
+    case 'image/pjpeg':
+      return 'image/jpeg';
+    case 'image/png':
+      return 'image/png';
+    case 'image/gif':
+      return 'image/gif';
+    case 'image/webp':
+      return 'image/webp';
+    default:
+      break;
+  }
+
+  const candidate = fileName || uri || '';
+  const extMatch = candidate.match(/\.([a-z0-9]+)(?:[?#].*)?$/i);
+  const ext = extMatch?.[1]?.toLowerCase();
+  switch (ext) {
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg';
+    case 'png':
+      return 'image/png';
+    case 'gif':
+      return 'image/gif';
+    case 'webp':
+      return 'image/webp';
+    default:
+      return null;
+  }
+}
+
+function buildJpegFileName(fileName: string | null | undefined, fallbackBaseName: string): string {
+  const source = fileName?.trim() || fallbackBaseName;
+  const baseName = source.replace(/\.[^.]+$/, '');
+  return `${baseName || fallbackBaseName}.jpg`;
+}
+
+function extensionForImageMimeType(mimeType: string): string {
+  switch (mimeType) {
+    case 'image/png':
+      return 'png';
+    case 'image/gif':
+      return 'gif';
+    case 'image/webp':
+      return 'webp';
+    default:
+      return 'jpg';
+  }
+}
+
+function defaultImageFileName(mimeType: string, fallbackBaseName: string): string {
+  return `${fallbackBaseName}.${extensionForImageMimeType(mimeType)}`;
+}
+
+async function prepareImageAttachment(
+  asset: PickedImageAsset,
+  fallbackBaseName: string,
+): Promise<Attachment> {
+  const supportedMimeType = normalizeSupportedImageMimeType(
+    asset.mimeType,
+    asset.fileName,
+    asset.uri,
+  );
+
+  if (supportedMimeType && asset.base64) {
+    return {
+      uri: asset.uri,
+      type: 'image',
+      name: asset.fileName ?? defaultImageFileName(supportedMimeType, fallbackBaseName),
+      mimeType: supportedMimeType,
+      base64: asset.base64 ?? undefined,
+    };
+  }
+
+  try {
+    const result = await manipulateAsync(
+      asset.uri,
+      [],
+      { compress: 0.82, format: SaveFormat.JPEG, base64: true },
+    );
+
+    if (!result.base64) {
+      throw new Error('Image conversion completed without base64 output.');
+    }
+
+    return {
+      uri: result.uri,
+      type: 'image',
+      name: buildJpegFileName(asset.fileName, fallbackBaseName),
+      mimeType: 'image/jpeg',
+      base64: result.base64,
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : 'Unknown conversion failure.';
+    throw new Error(
+      `Could not prepare '${asset.fileName ?? fallbackBaseName}' for upload. ${reason}`,
+    );
+  }
+}
 
 export function ChatBar(props: ChatBarProps) {
   const {
@@ -199,13 +316,33 @@ export function ChatBar(props: ChatBarProps) {
   const pickPhoto = async () => {
     closeAttachPicker();
     const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], base64: true, quality: 0.8 });
-    if (!r.canceled && r.assets[0]) { const a = r.assets[0]; setAttachments(p => [...p, { uri: a.uri, type: 'image', name: a.fileName ?? 'image.jpg', mimeType: a.mimeType ?? 'image/jpeg', base64: a.base64 ?? undefined }]); }
+    if (!r.canceled && r.assets[0]) {
+      try {
+        const attachment = await prepareImageAttachment(r.assets[0], 'image');
+        setAttachments(p => [...p, attachment]);
+      } catch (error) {
+        Alert.alert(
+          'Could not attach image',
+          error instanceof Error ? error.message : 'Image preparation failed.',
+        );
+      }
+    }
   };
   const pickCamera = async () => {
     closeAttachPicker();
     const perm = await ImagePicker.requestCameraPermissionsAsync(); if (!perm.granted) return;
     const r = await ImagePicker.launchCameraAsync({ base64: true, quality: 0.8 });
-    if (!r.canceled && r.assets[0]) { const a = r.assets[0]; setAttachments(p => [...p, { uri: a.uri, type: 'image', name: a.fileName ?? 'photo.jpg', mimeType: a.mimeType ?? 'image/jpeg', base64: a.base64 ?? undefined }]); }
+    if (!r.canceled && r.assets[0]) {
+      try {
+        const attachment = await prepareImageAttachment(r.assets[0], 'photo');
+        setAttachments(p => [...p, attachment]);
+      } catch (error) {
+        Alert.alert(
+          'Could not attach image',
+          error instanceof Error ? error.message : 'Image preparation failed.',
+        );
+      }
+    }
   };
   const pickFile = async () => {
     closeAttachPicker();
