@@ -16,6 +16,7 @@ It is where the user and Mako can see planned work across time.
 
 The agent has full control over creating, updating, and managing scheduled work.
 The user should be able to review, adjust, and understand the plan without being forced into a heavy scheduler workflow.
+Creation should happen through the main `Mako` thread, not through a second command surface inside `Schedule`.
 
 ## Main Questions This Tab Answers
 
@@ -301,18 +302,18 @@ It does not mean:
 
 ## Creation Model
 
-There are two ways items should appear:
+Schedule items should appear because Mako created them from conversation.
 
-1. Mako creates them from conversation
-2. user creates or adjusts them directly in `Schedule`
-
-Examples:
+Example:
 
 - user tells Mako: `Run a repo health check every weekday morning`
-- Mako creates the recurring schedule item
+- Mako creates the scheduled item
 - user later opens `Schedule` and shifts it from `9:00 AM` to `9:30 AM`
 
-This is the correct collaboration model.
+This is the correct collaboration model:
+
+- creation in `Mako`
+- visualization and light adjustment in `Schedule`
 
 ## Editing Model
 

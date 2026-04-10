@@ -12,8 +12,7 @@ import {
 import * as Haptics from "../../platform/haptics";
 import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";
-import type { MakoCrewRuntimeMember, MakoCurrentRunSummary } from "@krusty/api";
-import { MakoSetCourseComposer } from "./MakoSetCourseComposer";
+import type { MakoCurrentRunSummary } from "@krusty/api";
 import type { MakoCurrentState } from "./types";
 import {
   formatScheduleInputValue,
@@ -23,9 +22,6 @@ import { formatProjectLabel, getRunNextWakeAt } from "./utils";
 
 interface MakoScheduleViewProps {
   state: MakoCurrentState;
-  workspaceDirectory?: string | null;
-  model?: string | null;
-  crewMembers?: MakoCrewRuntimeMember[];
   onSelectRun: (runId: string) => void;
   onOpenProject?: (projectDir: string) => Promise<void> | void;
 }
@@ -584,9 +580,6 @@ function ScheduleDetailSheet({
 
 export function MakoScheduleView({
   state,
-  workspaceDirectory,
-  model,
-  crewMembers = [],
   onSelectRun,
   onOpenProject,
 }: MakoScheduleViewProps) {
@@ -740,26 +733,8 @@ export function MakoScheduleView({
         }
       >
         <Text style={[styles.description, { color: t.mutedForeground }]}>
-          Schedule is Mako’s planner. Use the month to place work, the day list to scan it, and week lanes to understand the shape of the plan.
+          Schedule keeps future work visible. Use the month to place it, the day list to scan it, and week lanes to understand the shape of the plan.
         </Text>
-
-        <MakoSetCourseComposer
-          projectDir={workspaceDirectory}
-          crewMembers={crewMembers}
-          isSubmitting={state.isDispatching}
-          onSubmit={async (task, options) => {
-            const runId = await state.setCourse(task, {
-              projectDir: workspaceDirectory ?? undefined,
-              model: model ?? undefined,
-              startAt: options?.startAt ?? undefined,
-              priority: options?.priority ?? undefined,
-              crewSlug: options?.crewSlug ?? undefined,
-            });
-            if (runId) {
-              onSelectRun(runId);
-            }
-          }}
-        />
 
         <ScheduleModeToggle mode={mode} onChange={setMode} />
 
