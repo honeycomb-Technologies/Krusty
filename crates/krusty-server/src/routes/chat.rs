@@ -172,6 +172,96 @@ fn build_user_content(message: &str, content_blocks: &[ContentBlock]) -> Vec<Con
     contents
 }
 
+fn content_blocks_include_images(content_blocks: &[ContentBlock]) -> bool {
+    content_blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image { .. }))
+}
+
+async fn model_supports_vision(state: &AppState, model_id: &str) -> bool {
+    if let Some(metadata) = state.model_registry.get_model(model_id).await {
+        return metadata.supports_vision;
+    }
+
+    let Some(ai_client) = state.resolve_ai_client(Some(model_id)).await else {
+        return false;
+    };
+
+    krusty_core::ai::models::resolve_model_metadata(
+        ai_client.provider_id(),
+        model_id,
+        ai_client.config().api_format,
+    )
+    .supports_vision
+}
+
+async fn resolve_default_vision_model(state: &AppState) -> Option<String> {
+    let providers_with_auth = {
+        let store = state.credential_store.read().await;
+        store.providers_with_auth()
+    };
+
+    let (recent_models, models_by_provider) = state
+        .model_registry
+        .get_organized_models(&providers_with_auth)
+        .await;
+
+    if let Some(model) = recent_models.iter().find(|model| model.supports_vision) {
+        return Some(model.id.clone());
+    }
+
+    for provider in ProviderId::all() {
+        if !providers_with_auth.contains(provider) {
+            continue;
+        }
+        if let Some(models) = models_by_provider.get(provider) {
+            if let Some(model) = models.iter().find(|model| model.supports_vision) {
+                return Some(model.id.clone());
+            }
+        }
+    }
+
+    None
+}
+
+async fn select_model_for_chat_request(
+    state: &AppState,
+    requested_model: RequestedModel<'_>,
+    session_model: Option<&str>,
+    requires_vision: bool,
+) -> Result<Option<String>, AppError> {
+    let effective_model = requested_model
+        .effective(session_model)
+        .map(ToOwned::to_owned);
+    if !requires_vision {
+        return Ok(effective_model);
+    }
+
+    if let RequestedModel::Set(model) = requested_model {
+        if !model_supports_vision(state, model).await {
+            return Err(AppError::BadRequest(format!(
+                "Model '{}' does not support image input. Select a vision-capable model and try again.",
+                model
+            )));
+        }
+    }
+
+    if let Some(model_id) = effective_model.as_deref() {
+        if model_supports_vision(state, model_id).await {
+            return Ok(effective_model);
+        }
+    }
+
+    resolve_default_vision_model(state)
+        .await
+        .map(Some)
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "No vision-capable model is configured. Configure OpenAI, Anthropic, or another vision model before sending images.".to_string(),
+            )
+        })
+}
+
 async fn setup_chat_session(
     state: &AppState,
     user: Option<&CurrentUser>,
@@ -179,6 +269,7 @@ async fn setup_chat_session(
     requested_model: RequestedModel<'_>,
     thinking_level: ThinkingLevel,
     research_enabled: bool,
+    requires_vision: bool,
 ) -> Result<ChatSessionContext, AppError> {
     let user_id = current_user_id(user).map(ToOwned::to_owned);
     let workspace_scope = request_workspace_scope(state, user);
@@ -187,11 +278,18 @@ async fn setup_chat_session(
     let session_manager = SessionManager::new(db);
     let session = load_owned_session(&session_manager, session_id, user)?;
 
-    let effective_model = requested_model.effective(session.model.as_deref());
+    let session_model = trimmed_nonempty(session.model.as_deref());
+    let effective_model =
+        select_model_for_chat_request(state, requested_model, session_model, requires_vision)
+            .await?;
     let ai_client = state
-        .resolve_ai_client(effective_model)
+        .resolve_ai_client(effective_model.as_deref())
         .await
         .ok_or_else(|| AppError::BadRequest("No AI credentials configured".to_string()))?;
+
+    if requires_vision && effective_model.as_deref() != session_model {
+        session_manager.update_session_model(session_id, effective_model.as_deref())?;
+    }
 
     let working_dir = resolve_session_working_dir(
         session.working_dir.as_deref(),
@@ -292,6 +390,7 @@ async fn chat(
     let workspace_scope = request_workspace_scope(&state, user.as_ref());
     let requested_model = RequestedModel::from_request(req.model.as_deref());
     let requested_session_type = req.session_type.unwrap_or(SessionType::Code);
+    let requires_vision = content_blocks_include_images(&req.content);
 
     let (session_id, is_first_message, pending_model_update) = match req.session_id {
         Some(id) => {
@@ -343,6 +442,7 @@ async fn chat(
         requested_model,
         req.thinking_enabled,
         req.research_enabled.unwrap_or(false),
+        requires_vision,
     )
     .await?;
 
@@ -391,6 +491,7 @@ async fn tool_result(
         &req.session_id,
         RequestedModel::Unspecified,
         ThinkingLevel::Off,
+        false,
         false,
     )
     .await?;
@@ -953,7 +1054,8 @@ mod tests {
 
     use krusty_core::agent::loop_events::LoopStopReason;
     use krusty_core::agent::{AgentCancellation, LoopEvent, LoopInput, UserHookManager};
-    use krusty_core::ai::models::create_model_registry;
+    use krusty_core::ai::models::{create_model_registry, ApiFormat, ModelMetadata};
+    use krusty_core::ai::providers::ProviderId;
     use krusty_core::ai::types::Content;
     use krusty_core::mcp::McpManager;
     use krusty_core::process::ProcessRegistry;
@@ -963,7 +1065,10 @@ mod tests {
     use krusty_core::tools::registry::ToolRegistry;
     use krusty_core::SessionManager;
 
-    use super::{build_user_content, chat, forward_loop_event, tool_approval, RequestedModel};
+    use super::{
+        build_user_content, chat, forward_loop_event, select_model_for_chat_request, tool_approval,
+        RequestedModel,
+    };
     use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::error::AppError;
     use crate::types::{ChatRequest, ContentBlock, ToolApprovalRequest};
@@ -1027,6 +1132,19 @@ mod tests {
             user_id: Some(user_id.to_string()),
             home_dir: Some(home_dir.to_path_buf()),
         })
+    }
+
+    fn model(
+        id: &str,
+        provider: ProviderId,
+        api_format: ApiFormat,
+        supports_vision: bool,
+    ) -> ModelMetadata {
+        let mut model = ModelMetadata::new(id, id, provider).with_context(200_000, 32_768);
+        model.supports_tools = true;
+        model.supports_vision = supports_vision;
+        model.api_format = api_format;
+        model
     }
 
     #[test]
@@ -1101,6 +1219,86 @@ mod tests {
         assert!(matches!(
             content.first(),
             Some(Content::Text { text }) if text == "block text"
+        ));
+    }
+
+    #[tokio::test]
+    async fn select_model_for_chat_request_falls_back_to_configured_vision_model() {
+        let (state, _temp_dir) = create_test_state();
+        {
+            let mut credentials = state.credential_store.write().await;
+            credentials.set(ProviderId::MiniMax, "minimax-test-key".to_string());
+            credentials.set(ProviderId::OpenAI, "openai-test-key".to_string());
+        }
+
+        state
+            .model_registry
+            .set_models(
+                ProviderId::MiniMax,
+                vec![model(
+                    "MiniMax-M2.5",
+                    ProviderId::MiniMax,
+                    ApiFormat::Anthropic,
+                    false,
+                )],
+            )
+            .await;
+        state
+            .model_registry
+            .set_models(
+                ProviderId::OpenAI,
+                vec![model(
+                    "gpt-4.1",
+                    ProviderId::OpenAI,
+                    ApiFormat::OpenAI,
+                    true,
+                )],
+            )
+            .await;
+
+        let selected = select_model_for_chat_request(
+            &state,
+            RequestedModel::Unspecified,
+            Some("MiniMax-M2.5"),
+            true,
+        )
+        .await;
+
+        match selected {
+            Ok(selected) => assert_eq!(selected.as_deref(), Some("gpt-4.1")),
+            Err(_) => panic!("vision fallback should resolve"),
+        }
+    }
+
+    #[tokio::test]
+    async fn select_model_for_chat_request_rejects_explicit_non_vision_model() {
+        let (state, _temp_dir) = create_test_state();
+        {
+            let mut credentials = state.credential_store.write().await;
+            credentials.set(ProviderId::MiniMax, "minimax-test-key".to_string());
+        }
+
+        state
+            .model_registry
+            .set_models(
+                ProviderId::MiniMax,
+                vec![model(
+                    "MiniMax-M2.5",
+                    ProviderId::MiniMax,
+                    ApiFormat::Anthropic,
+                    false,
+                )],
+            )
+            .await;
+
+        let result =
+            select_model_for_chat_request(&state, RequestedModel::Set("MiniMax-M2.5"), None, true)
+                .await;
+
+        assert!(matches!(
+            result,
+            Err(AppError::BadRequest(message))
+                if message.contains("does not support image input")
         ));
     }
 

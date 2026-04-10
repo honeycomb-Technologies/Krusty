@@ -796,6 +796,7 @@ export interface ModelInfo {
   max_output: number;
   supports_thinking: boolean;
   supports_tools: boolean;
+  supports_vision: boolean;
 }
 
 export interface ModelsResponse {

@@ -65,6 +65,7 @@ async fn list_models(State(state): State<AppState>) -> Result<Json<ModelsListRes
             max_output: m.max_output,
             supports_thinking: m.supports_thinking,
             supports_tools: m.supports_tools,
+            supports_vision: m.supports_vision,
         });
     }
 
@@ -84,6 +85,7 @@ async fn list_models(State(state): State<AppState>) -> Result<Json<ModelsListRes
                     max_output: m.max_output,
                     supports_thinking: m.supports_thinking,
                     supports_tools: m.supports_tools,
+                    supports_vision: m.supports_vision,
                 });
             }
         }
@@ -123,6 +125,7 @@ async fn get_model(
             max_output: model.max_output,
             supports_thinking: model.supports_thinking,
             supports_tools: model.supports_tools,
+            supports_vision: model.supports_vision,
         }));
     }
 
@@ -144,6 +147,7 @@ mod tests {
             max_output: 1,
             supports_thinking: false,
             supports_tools: true,
+            supports_vision: false,
         }
     }
 

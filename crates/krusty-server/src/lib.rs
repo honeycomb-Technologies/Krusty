@@ -32,7 +32,9 @@ use krusty_core::agent::{
     UserPreToolHook,
 };
 use krusty_core::ai::client::{AiClient, AiClientConfig};
-use krusty_core::ai::models::{create_model_registry, ModelMetadata, SharedModelRegistry};
+use krusty_core::ai::models::{
+    create_model_registry, resolve_model_metadata, ApiFormat, ModelMetadata, SharedModelRegistry,
+};
 use krusty_core::ai::providers::{builtin_providers, get_provider, ProviderId};
 use krusty_core::constants;
 use krusty_core::mcp::McpManager;
@@ -282,12 +284,15 @@ async fn initialize_models(registry: &SharedModelRegistry, credentials: &Credent
             .map(|m| {
                 let mut model = ModelMetadata::new(&m.id, &m.display_name, provider.id)
                     .with_context(m.context_window, m.max_output);
+                let inferred = resolve_model_metadata(provider.id, &m.id, ApiFormat::Anthropic);
 
                 if let Some(reasoning) = m.reasoning {
                     model = model.with_thinking(reasoning);
                 }
 
                 model.supports_tools = provider.supports_tools;
+                model.supports_vision = inferred.supports_vision;
+                model.api_format = inferred.api_format;
                 model
             })
             .collect();
