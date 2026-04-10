@@ -117,6 +117,9 @@ export function MakoScreen({
           {navigation.topLevel === "schedule" ? (
             <MakoScheduleView
               state={current}
+              workspaceDirectory={workspaceDirectory}
+              model={chat.model ?? null}
+              crewMembers={home.crew?.members ?? []}
               onSelectRun={(runId) => {
                 void handleOpenRun(runId);
               }}

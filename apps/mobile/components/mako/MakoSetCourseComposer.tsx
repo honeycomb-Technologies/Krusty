@@ -8,9 +8,10 @@ import {
 } from "react-native";
 import * as Haptics from "../../platform/haptics";
 import { useThemeContext } from "../../hooks/useTheme";
+import { MakoCrewPicker } from "./MakoCrewPicker";
 import { MakoPriorityPicker } from "./MakoPriorityPicker";
 import { MakoSchedulePicker } from "./MakoSchedulePicker";
-import type { MakoRunPriority } from "@krusty/api";
+import type { MakoCrewRuntimeMember, MakoRunPriority } from "@krusty/api";
 import {
   resolveScheduleSelection,
   type MakoSchedulePreset,
@@ -19,12 +20,21 @@ import { formatProjectLabel } from "./utils";
 
 interface MakoSetCourseComposerProps {
   projectDir?: string | null;
+  crewMembers?: MakoCrewRuntimeMember[];
   isSubmitting: boolean;
-  onSubmit: (task: string, options?: { startAt?: string | null; priority?: MakoRunPriority | null }) => Promise<void>;
+  onSubmit: (
+    task: string,
+    options?: {
+      startAt?: string | null;
+      priority?: MakoRunPriority | null;
+      crewSlug?: string | null;
+    },
+  ) => Promise<void>;
 }
 
 export function MakoSetCourseComposer({
   projectDir,
+  crewMembers = [],
   isSubmitting,
   onSubmit,
 }: MakoSetCourseComposerProps) {
@@ -34,6 +44,7 @@ export function MakoSetCourseComposer({
   const [schedulePreset, setSchedulePreset] = useState<MakoSchedulePreset>("now");
   const [customSchedule, setCustomSchedule] = useState("");
   const [priority, setPriority] = useState<MakoRunPriority>("normal");
+  const [crewSlug, setCrewSlug] = useState<string | null>(null);
   const schedule = resolveScheduleSelection(schedulePreset, customSchedule);
 
   return (
@@ -88,6 +99,17 @@ export function MakoSetCourseComposer({
         customError={schedulePreset === "custom" ? schedule.error : null}
       />
       <MakoPriorityPicker value={priority} onChange={setPriority} />
+      {crewMembers.length > 0 ? (
+        <View style={styles.crewBlock}>
+          <Text style={[styles.crewTitle, { color: t.foreground }]}>Run as</Text>
+          <MakoCrewPicker
+            members={crewMembers}
+            selectedSlug={crewSlug}
+            isSaving={isSubmitting}
+            onSelect={setCrewSlug}
+          />
+        </View>
+      ) : null}
 
       <View style={styles.actions}>
         <Pressable
@@ -108,11 +130,13 @@ export function MakoSetCourseComposer({
             await onSubmit(task, {
               startAt: schedule.startAt,
               priority,
+              crewSlug,
             });
             setValue("");
             setSchedulePreset("now");
             setCustomSchedule("");
             setPriority("normal");
+            setCrewSlug(null);
           }}
           style={[
             styles.button,
@@ -199,6 +223,14 @@ const styles = StyleSheet.create({
   buttonLabel: {
     color: "#ffffff",
     fontSize: 13,
+    fontWeight: "600",
+  },
+  crewBlock: {
+    marginTop: 12,
+    gap: 8,
+  },
+  crewTitle: {
+    fontSize: 12,
     fontWeight: "600",
   },
 });

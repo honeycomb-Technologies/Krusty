@@ -9,12 +9,16 @@ import {
 } from "react-native";
 import * as Haptics from "../../platform/haptics";
 import { useThemeContext } from "../../hooks/useTheme";
-import type { MakoCurrentRunSummary } from "@krusty/api";
+import type { MakoCrewRuntimeMember, MakoCurrentRunSummary } from "@krusty/api";
+import { MakoSetCourseComposer } from "./MakoSetCourseComposer";
 import type { MakoCurrentState } from "./types";
 import { formatProjectLabel, getRunNextWakeAt } from "./utils";
 
 interface MakoScheduleViewProps {
   state: MakoCurrentState;
+  workspaceDirectory?: string | null;
+  model?: string | null;
+  crewMembers?: MakoCrewRuntimeMember[];
   onSelectRun: (runId: string) => void;
 }
 
@@ -141,6 +145,9 @@ function ScheduleRow({
 
 export function MakoScheduleView({
   state,
+  workspaceDirectory,
+  model,
+  crewMembers = [],
   onSelectRun,
 }: MakoScheduleViewProps) {
   const { theme } = useThemeContext();
@@ -191,6 +198,24 @@ export function MakoScheduleView({
       <Text style={[styles.description, { color: t.mutedForeground }]}>
         Schedule keeps future work visible across time. Use agenda to scan quickly or calendar to place runs on a real date.
       </Text>
+
+      <MakoSetCourseComposer
+        projectDir={workspaceDirectory}
+        crewMembers={crewMembers}
+        isSubmitting={state.isDispatching}
+        onSubmit={async (task, options) => {
+          const runId = await state.setCourse(task, {
+            projectDir: workspaceDirectory ?? undefined,
+            model: model ?? undefined,
+            startAt: options?.startAt ?? undefined,
+            priority: options?.priority ?? undefined,
+            crewSlug: options?.crewSlug ?? undefined,
+          });
+          if (runId) {
+            onSelectRun(runId);
+          }
+        }}
+      />
 
       <View style={[styles.modeSwitch, { borderColor: t.border }]}>
         {([
