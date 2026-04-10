@@ -57,6 +57,8 @@ use crate::AppState;
 const SSE_CHANNEL_BUFFER: usize = 256;
 const SESSION_LOCK_MAX_ENTRIES: usize = 1000;
 const SESSION_LOCK_MAX_AGE: Duration = Duration::from_secs(3600);
+const SUPPORTED_BASE64_IMAGE_MEDIA_TYPES: [&str; 4] =
+    ["image/jpeg", "image/png", "image/gif", "image/webp"];
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -114,8 +116,52 @@ impl<'a> RequestedModel<'a> {
     }
 }
 
+fn normalize_supported_base64_image_media_type(media_type: &str) -> Option<&'static str> {
+    match media_type.trim().to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" | "image/pjpeg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+fn unsupported_image_media_type_error(media_type: &str) -> AppError {
+    let normalized = media_type.trim().to_ascii_lowercase();
+    let hint = if matches!(normalized.as_str(), "image/heic" | "image/heif") {
+        " Convert HEIC/HEIF images to JPEG or PNG before uploading."
+    } else {
+        ""
+    };
+
+    AppError::BadRequest(format!(
+        "Image format '{}' is not supported. Supported formats: {}.{}",
+        media_type.trim(),
+        SUPPORTED_BASE64_IMAGE_MEDIA_TYPES.join(", "),
+        hint
+    ))
+}
+
+fn validate_content_blocks(content_blocks: &[ContentBlock]) -> Result<(), AppError> {
+    for block in content_blocks {
+        if let ContentBlock::Image {
+            source: crate::types::ImageSource::Base64 { media_type, .. },
+        } = block
+        {
+            if normalize_supported_base64_image_media_type(media_type).is_none() {
+                return Err(unsupported_image_media_type_error(media_type));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Build user message content from content blocks (images) and text message.
-fn build_user_content(message: &str, content_blocks: &[ContentBlock]) -> Vec<Content> {
+fn build_user_content(
+    message: &str,
+    content_blocks: &[ContentBlock],
+) -> Result<Vec<Content>, AppError> {
     let mut contents = Vec::with_capacity(content_blocks.len() + usize::from(!message.is_empty()));
     let mut has_text_block = false;
 
@@ -129,6 +175,8 @@ fn build_user_content(message: &str, content_blocks: &[ContentBlock]) -> Vec<Con
             ContentBlock::Image { source } => {
                 let image = match source {
                     crate::types::ImageSource::Base64 { media_type, data } => {
+                        let media_type = normalize_supported_base64_image_media_type(media_type)
+                            .ok_or_else(|| unsupported_image_media_type_error(media_type))?;
                         tracing::debug!(
                             "Content block: Image (base64, media_type={}, data_len={})",
                             media_type,
@@ -137,7 +185,7 @@ fn build_user_content(message: &str, content_blocks: &[ContentBlock]) -> Vec<Con
                         ImageContent {
                             base64: Some(data.clone()),
                             url: None,
-                            media_type: Some(media_type.clone()),
+                            media_type: Some(media_type.to_string()),
                         }
                     }
                     crate::types::ImageSource::Url { url } => {
@@ -169,7 +217,7 @@ fn build_user_content(message: &str, content_blocks: &[ContentBlock]) -> Vec<Con
         });
     }
 
-    contents
+    Ok(contents)
 }
 
 fn content_blocks_include_images(content_blocks: &[ContentBlock]) -> bool {
@@ -386,6 +434,8 @@ async fn chat(
     user: Option<CurrentUser>,
     Json(req): Json<ChatRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
+    validate_content_blocks(&req.content)?;
+
     let user_id = current_user_id(user.as_ref()).map(ToOwned::to_owned);
     let workspace_scope = request_workspace_scope(&state, user.as_ref());
     let requested_model = RequestedModel::from_request(req.model.as_deref());
@@ -460,7 +510,7 @@ async fn chat(
         }
     }
 
-    let user_content = build_user_content(&req.message, &req.content);
+    let user_content = build_user_content(&req.message, &req.content)?;
     let user_content_json = serde_json::to_string(&user_content)?;
 
     ctx.conversation.push(ModelMessage {
@@ -1190,14 +1240,17 @@ mod tests {
 
     #[test]
     fn build_user_content_appends_message_when_only_images_are_provided() {
-        let content = build_user_content(
+        let content = match build_user_content(
             "describe this",
             &[ContentBlock::Image {
                 source: crate::types::ImageSource::Url {
                     url: "https://example.com/image.png".to_string(),
                 },
             }],
-        );
+        ) {
+            Ok(content) => content,
+            Err(_) => panic!("image url content should build"),
+        };
 
         assert!(matches!(content.first(), Some(Content::Image { .. })));
         assert!(matches!(
@@ -1208,17 +1261,39 @@ mod tests {
 
     #[test]
     fn build_user_content_does_not_duplicate_message_when_text_block_exists() {
-        let content = build_user_content(
+        let content = match build_user_content(
             "fallback message",
             &[ContentBlock::Text {
                 text: "block text".to_string(),
             }],
-        );
+        ) {
+            Ok(content) => content,
+            Err(_) => panic!("text content should build"),
+        };
 
         assert_eq!(content.len(), 1);
         assert!(matches!(
             content.first(),
             Some(Content::Text { text }) if text == "block text"
+        ));
+    }
+
+    #[test]
+    fn build_user_content_rejects_unsupported_image_media_type() {
+        let result = build_user_content(
+            "describe this",
+            &[ContentBlock::Image {
+                source: crate::types::ImageSource::Base64 {
+                    media_type: "image/heic".to_string(),
+                    data: "ZmFrZQ==".to_string(),
+                },
+            }],
+        );
+
+        assert!(matches!(
+            result,
+            Err(AppError::BadRequest(message))
+                if message.contains("image/heic") && message.contains("Convert HEIC/HEIF")
         ));
     }
 
@@ -1473,6 +1548,51 @@ mod tests {
         assert_eq!(sessions[0].workspace_mode, WorkspaceMode::Selected);
         assert_eq!(sessions[0].project_dir.as_deref(), Some(expected.as_str()));
         assert_eq!(sessions[0].working_dir.as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
+    async fn chat_rejects_unsupported_image_before_creating_session() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let result = chat(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Json(ChatRequest {
+                session_id: None,
+                message: "what is this?".to_string(),
+                content: vec![ContentBlock::Image {
+                    source: crate::types::ImageSource::Base64 {
+                        media_type: "image/heic".to_string(),
+                        data: "ZmFrZQ==".to_string(),
+                    },
+                }],
+                project_dir: None,
+                working_dir: None,
+                workspace_mode: None,
+                session_type: Some(SessionType::Chat),
+                model: None,
+                thinking_enabled: crate::types::ThinkingLevel::Off,
+                mode: None,
+                permission_mode: krusty_core::tools::registry::PermissionMode::default(),
+                research_enabled: None,
+            }),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(AppError::BadRequest(message))
+                if message.contains("image/heic") && message.contains("Supported formats")
+        ));
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let sessions = session_manager
+            .list_sessions_for_user(None, Some("alice"))
+            .expect("session listing should succeed");
+
+        assert!(sessions.is_empty());
     }
 
     #[tokio::test]
