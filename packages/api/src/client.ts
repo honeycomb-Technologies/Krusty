@@ -36,6 +36,7 @@ import type {
   MakoBootstrapResponse,
   MakoCrewDocumentKind,
   MakoCrewResponse,
+  MakoChannelsResponse,
   MakoCurrentResponse,
   MakoHomeDocumentKind,
   MakoHomeResponse,
@@ -509,6 +510,10 @@ export class KrustyClient {
 
   async getMakoCrew(): Promise<MakoCrewResponse> {
     return this.request('/mako/crew');
+  }
+
+  async getMakoChannels(): Promise<MakoChannelsResponse> {
+    return this.request('/mako/channels');
   }
 
   async recoverMakoDaemon(): Promise<MakoRecoverDaemonResponse> {

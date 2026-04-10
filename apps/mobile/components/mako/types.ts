@@ -1,5 +1,6 @@
 import type {
   ChatMessage,
+  MakoChannelsResponse,
   MakoCrewDocumentKind,
   MakoCrewResponse,
   MakoCurrentRunSummary,
@@ -16,14 +17,15 @@ import type {
 import type { Attachment as ChatBarAttachment } from "../chat/ChatBar";
 
 export type MakoTopLevelView =
-  | "current"
-  | "chat"
-  | "runs"
+  | "mako"
   | "schedule"
-  | "reports"
-  | "status";
+  | "logbook"
+  | "runs"
+  | "details"
+  | "crew"
+  | "channels";
 export type MakoRunSection = "overview" | "wake" | "tasks" | "chat" | "artifacts";
-export type MakoKnowledgeView = "reports" | "memory";
+export type MakoKnowledgeView = "recent" | "memory";
 export type MakoKnowledgeScope = "workspace" | "all";
 export type { MakoCurrentRunSummary };
 
@@ -102,6 +104,14 @@ export interface MakoHomeState {
     kind: MakoCrewDocumentKind,
     content: string,
   ) => Promise<void>;
+}
+
+export interface MakoChannelsState {
+  channels: MakoChannelsResponse | null;
+  isLoading: boolean;
+  isRefreshing: boolean;
+  error: string | null;
+  refresh: () => Promise<void>;
 }
 
 export interface MakoRunState {

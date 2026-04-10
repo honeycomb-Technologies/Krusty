@@ -259,6 +259,15 @@ export interface DelegatedRunResponse {
 export type MakoRuntimeStatus = 'idle' | 'running' | 'sleeping' | 'awaiting_input' | 'paused' | 'error' | 'cancelled';
 export type MakoHomeStatus = 'awake' | 'sleeping' | 'paused' | 'blocked' | 'idle';
 export type MakoRunPriority = 'low' | 'normal' | 'high';
+export type MakoChannelKind =
+  | 'main_thread'
+  | 'mobile_push'
+  | 'crew'
+  | 'web'
+  | 'email'
+  | 'webhook'
+  | 'unknown';
+export type MakoChannelStatus = 'ready' | 'configured' | 'attention' | 'inactive';
 export type AutonomousTaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 export type MakoDiagnosticSeverity = 'info' | 'warning' | 'critical';
 export type MakoRunDiagnosticKind =
@@ -506,6 +515,22 @@ export interface MakoCrewRuntimeMember {
 
 export interface MakoCrewResponse {
   members: MakoCrewRuntimeMember[];
+}
+
+export interface MakoChannelItem {
+  id: string;
+  label: string;
+  kind: MakoChannelKind;
+  source: string;
+  enabled: boolean;
+  status: MakoChannelStatus;
+  detail: string;
+}
+
+export interface MakoChannelsResponse {
+  items: MakoChannelItem[];
+  apns_configured: boolean;
+  apns_device_count: number;
 }
 
 export interface MakoRecoverDaemonResponse {

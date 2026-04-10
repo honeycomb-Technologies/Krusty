@@ -212,11 +212,11 @@ export function MakoReportsView({ workspaceDirectory }: MakoReportsViewProps) {
   const { isDesktop } = useBreakpoint();
   const { client } = useConnection();
   const t = theme.colors;
-  const [knowledgeView, setKnowledgeView] = useState<MakoKnowledgeView>("reports");
+  const [knowledgeView, setKnowledgeView] = useState<MakoKnowledgeView>("recent");
   const [query, setQuery] = useState("");
   const [isPromoting, setIsPromoting] = useState(false);
   const [promotionState, setPromotionState] = useState<PromotionState | null>(null);
-  const reports = useMakoReports(knowledgeView === "reports", workspaceDirectory, query);
+  const reports = useMakoReports(knowledgeView === "recent", workspaceDirectory, query);
   const memories = useMakoMemories(knowledgeView === "memory", workspaceDirectory);
   const visibleReports = reports.reports;
   const visibleReportIds = visibleReports.map((report) => report.id).join("|");
@@ -232,7 +232,7 @@ export function MakoReportsView({ workspaceDirectory }: MakoReportsViewProps) {
   }, [reports.selectedReportId]);
 
   useEffect(() => {
-    if (knowledgeView !== "reports") {
+    if (knowledgeView !== "recent") {
       return;
     }
 
@@ -297,7 +297,7 @@ export function MakoReportsView({ workspaceDirectory }: MakoReportsViewProps) {
       <>
         <MakoTopNav
           items={[
-            { id: "reports", label: "Recent" },
+            { id: "recent", label: "Recent" },
             { id: "memory", label: "Memory" },
           ]}
           active={knowledgeView}
@@ -312,7 +312,7 @@ export function MakoReportsView({ workspaceDirectory }: MakoReportsViewProps) {
     <>
       <MakoTopNav
         items={[
-          { id: "reports", label: "Recent" },
+          { id: "recent", label: "Recent" },
           { id: "memory", label: "Memory" },
         ]}
         active={knowledgeView}
@@ -473,7 +473,7 @@ export function MakoReportsView({ workspaceDirectory }: MakoReportsViewProps) {
       >
         <MakoTopNav
           items={[
-            { id: "reports", label: "Recent" },
+            { id: "recent", label: "Recent" },
             { id: "memory", label: "Memory" },
           ]}
           active={knowledgeView}

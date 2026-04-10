@@ -50,10 +50,11 @@ pub use knowledge::{
     CURRENT_SNAPSHOT_TITLE,
 };
 pub use mako_home::{
-    bootstrap_mako_home, is_valid_crew_slug, summarize_crew_runtime, write_mako_crew_document,
-    write_mako_home_document, MakoBootstrapResult, MakoContextLayer, MakoCrewDocumentKind,
-    MakoCrewProfile, MakoCrewRuntimeStatus, MakoCrewRuntimeSummary, MakoHomeDocument,
-    MakoHomeDocumentKind, MakoHomeProfile,
+    bootstrap_mako_home, is_valid_crew_slug, summarize_channel_bindings, summarize_crew_runtime,
+    write_mako_crew_document, write_mako_home_document, MakoBootstrapResult, MakoChannelBinding,
+    MakoChannelKind, MakoContextLayer, MakoCrewDocumentKind, MakoCrewProfile,
+    MakoCrewRuntimeStatus, MakoCrewRuntimeSummary, MakoHomeDocument, MakoHomeDocumentKind,
+    MakoHomeProfile,
 };
 pub use mako_runtime_state::{
     MakoRunPriority, MakoRuntimeState, MakoRuntimeStateStatus, MakoRuntimeStateStore,

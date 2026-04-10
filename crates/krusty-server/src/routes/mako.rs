@@ -19,8 +19,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use krusty_core::agent::loop_events::LoopStopReason;
 use krusty_core::paths as core_paths;
 use krusty_core::storage::{
-    bootstrap_mako_home, is_valid_crew_slug, summarize_crew_runtime, write_mako_crew_document,
-    write_mako_home_document, AutonomousTask, AutonomousTaskStore, Database, DelegatedRunStore,
+    bootstrap_mako_home, is_valid_crew_slug, summarize_channel_bindings, summarize_crew_runtime,
+    write_mako_crew_document, write_mako_home_document, ApnsDeviceStore, AutonomousTask,
+    AutonomousTaskStore, Database, DelegatedRunStore, MakoChannelBinding, MakoChannelKind,
     MakoCrewDocumentKind, MakoCrewRuntimeSummary, MakoHomeDocument, MakoHomeDocumentKind,
     MakoHomeProfile, MakoRunPriority, MakoRuntimeState, MakoRuntimeStateStatus,
     MakoRuntimeStateStore, MemoryStore, ProjectSettings, ReportStore, RuntimeTraceEvent,
@@ -48,6 +49,7 @@ pub fn router() -> Router<AppState> {
         .route("/home/:kind", put(update_home_document))
         .route("/home/crew/:slug/:kind", put(update_crew_document))
         .route("/crew", get(crew))
+        .route("/channels", get(channels))
         .route("/current", get(current))
         .route("/daemon/recover", post(recover_daemon))
         .route("/sessions", get(list_sessions))
@@ -258,6 +260,24 @@ struct MakoCrewMemberSummary {
     identity: Option<MakoHomeDocumentSummary>,
     soul: Option<MakoHomeDocumentSummary>,
     memory: Option<MakoHomeDocumentSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct MakoChannelSummary {
+    id: String,
+    label: String,
+    kind: String,
+    source: String,
+    enabled: bool,
+    status: String,
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MakoChannelsResponse {
+    items: Vec<MakoChannelSummary>,
+    apns_configured: bool,
+    apns_device_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -529,6 +549,23 @@ async fn crew(
         &task_store,
         &delegated_store,
     )?))
+}
+
+async fn channels(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+) -> Result<Json<MakoChannelsResponse>, AppError> {
+    let mako_home = mako_home_dir_for_user(user.as_ref());
+    let db = Database::new(&state.db_path)?;
+    let apns_store = ApnsDeviceStore::new(&db);
+    let user_id = current_user_id(user.as_ref());
+    let apns_device_count = apns_store.count_for_user(user_id)?;
+
+    Ok(Json(build_mako_channels_response_from_dir(
+        &state,
+        &mako_home,
+        apns_device_count,
+    )))
 }
 
 async fn current(
@@ -1123,6 +1160,24 @@ fn build_mako_crew_response_from_dir_and_sessions(
     })
 }
 
+fn build_mako_channels_response_from_dir(
+    state: &AppState,
+    mako_home: &std::path::Path,
+    apns_device_count: usize,
+) -> MakoChannelsResponse {
+    let profile = MakoHomeProfile::load_from(mako_home);
+    let apns_configured = state.apns_service.is_some();
+
+    MakoChannelsResponse {
+        items: summarize_channel_bindings(&profile)
+            .into_iter()
+            .map(|binding| summarize_mako_channel(binding, apns_configured, apns_device_count))
+            .collect(),
+        apns_configured,
+        apns_device_count,
+    }
+}
+
 fn summarize_mako_crew_member(
     runtime: MakoCrewRuntimeSummary,
     profile: Option<&krusty_core::storage::MakoCrewProfile>,
@@ -1142,6 +1197,65 @@ fn summarize_mako_crew_member(
         identity: summarize_mako_home_document(profile.and_then(|member| member.identity.clone())),
         soul: summarize_mako_home_document(profile.and_then(|member| member.soul.clone())),
         memory: summarize_mako_home_document(profile.and_then(|member| member.memory.clone())),
+    }
+}
+
+fn summarize_mako_channel(
+    binding: MakoChannelBinding,
+    apns_configured: bool,
+    apns_device_count: usize,
+) -> MakoChannelSummary {
+    let (status, detail) = match binding.kind {
+        MakoChannelKind::MainThread => ("ready", binding.detail),
+        MakoChannelKind::Crew => {
+            if binding.enabled {
+                ("ready", binding.detail)
+            } else {
+                ("inactive", binding.detail)
+            }
+        }
+        MakoChannelKind::MobilePush => {
+            if !binding.enabled {
+                ("inactive", binding.detail)
+            } else if !apns_configured {
+                (
+                    "attention",
+                    format!("{} APNs is not configured on this server.", binding.detail),
+                )
+            } else if apns_device_count == 0 {
+                (
+                    "attention",
+                    format!("{} No iPhone devices are registered yet.", binding.detail),
+                )
+            } else {
+                (
+                    "ready",
+                    format!(
+                        "{} {} device{} ready for push delivery.",
+                        binding.detail,
+                        apns_device_count,
+                        if apns_device_count == 1 { "" } else { "s" }
+                    ),
+                )
+            }
+        }
+        _ => {
+            if binding.enabled {
+                ("configured", binding.detail)
+            } else {
+                ("inactive", binding.detail)
+            }
+        }
+    };
+
+    MakoChannelSummary {
+        id: binding.id,
+        label: binding.label,
+        kind: binding.kind.as_str().to_string(),
+        source: binding.source.to_string(),
+        enabled: binding.enabled,
+        status: status.to_string(),
+        detail: detail.trim().to_string(),
     }
 }
 
@@ -1992,11 +2106,11 @@ mod tests {
     use krusty_core::SessionManager;
 
     use super::{
-        build_mako_bootstrap_response_from_dir, build_mako_crew_response_from_dir_and_sessions,
-        build_mako_home_response_from_dir, current, dispatch, list_sessions,
-        mako_home_dir_for_user, map_runtime_trace_event, recover_daemon, schedule_session,
-        session_status, set_priority, update_crew_document, update_home_document, DispatchRequest,
-        DocumentWriteRequest, PriorityRequest, ScheduleRequest,
+        build_mako_bootstrap_response_from_dir, build_mako_channels_response_from_dir,
+        build_mako_crew_response_from_dir_and_sessions, build_mako_home_response_from_dir, current,
+        dispatch, list_sessions, mako_home_dir_for_user, map_runtime_trace_event, recover_daemon,
+        schedule_session, session_status, set_priority, update_crew_document, update_home_document,
+        DispatchRequest, DocumentWriteRequest, PriorityRequest, ScheduleRequest,
     };
     use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::error::AppError;
@@ -2158,6 +2272,27 @@ mod tests {
                 .map(|document| document.file_name.as_str()),
             Some(paths::MAKO_SOUL_FILE)
         );
+    }
+
+    #[tokio::test]
+    async fn mako_channels_response_surfaces_runtime_delivery_state() {
+        let (state, temp_dir) = create_test_state();
+        std::fs::write(
+            temp_dir.join("CHANNELS.md"),
+            "# Mako Channels\n- [x] iPhone push: urgent approvals only",
+        )
+        .expect("channels should write");
+
+        let response = build_mako_channels_response_from_dir(&state, &temp_dir, 0);
+        assert!(response.items.iter().any(|item| item.id == "main-thread"));
+
+        let push = response
+            .items
+            .iter()
+            .find(|item| item.id == "iphone-push")
+            .expect("push channel should exist");
+        assert_eq!(push.status, "attention");
+        assert_eq!(push.kind, "mobile_push");
     }
 
     #[tokio::test]

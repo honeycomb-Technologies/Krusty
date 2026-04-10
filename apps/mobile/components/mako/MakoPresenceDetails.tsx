@@ -17,6 +17,7 @@ import type { MakoHomeState } from "./types";
 
 interface MakoPresenceDetailsProps {
   state: MakoHomeState;
+  showChannelsRow?: boolean;
 }
 
 type EditorTarget =
@@ -83,6 +84,7 @@ function CrewMemberRow({
   identity,
   soul,
   memory,
+  activitySummary,
   onEditIdentity,
   onEditSoul,
   onEditMemory,
@@ -92,6 +94,7 @@ function CrewMemberRow({
   identity?: string | null;
   soul?: string | null;
   memory?: string | null;
+  activitySummary?: string | null;
   onEditIdentity: () => void;
   onEditSoul: () => void;
   onEditMemory: () => void;
@@ -109,6 +112,11 @@ function CrewMemberRow({
         <Text style={[styles.detailValue, { color: t.mutedForeground }]} numberOfLines={2}>
           {previewText(identity, "No identity yet.")}
         </Text>
+        {activitySummary ? (
+          <Text style={[styles.crewMeta, { color: t.mutedForeground }]} numberOfLines={2}>
+            {activitySummary}
+          </Text>
+        ) : null}
         <Text style={[styles.crewMeta, { color: t.mutedForeground }]} numberOfLines={2}>
           Soul: {previewText(soul, "Not configured")} • Memory: {previewText(memory, "Not configured")}
         </Text>
@@ -128,7 +136,24 @@ function CrewMemberRow({
   );
 }
 
-export function MakoPresenceDetails({ state }: MakoPresenceDetailsProps) {
+function crewActivitySummary(member: NonNullable<MakoHomeState["crew"]>["members"][number]) {
+  const parts: string[] = [];
+  if (member.active_run_count > 0) {
+    parts.push(`${member.active_run_count} active`);
+  }
+  if (member.queued_task_count > 0) {
+    parts.push(`${member.queued_task_count} queued`);
+  }
+  if (member.failed_run_count > 0 || member.failed_task_count > 0) {
+    parts.push(`${member.failed_run_count + member.failed_task_count} failed`);
+  }
+  return parts.length > 0 ? parts.join(" • ") : "No active work";
+}
+
+export function MakoPresenceDetails({
+  state,
+  showChannelsRow = true,
+}: MakoPresenceDetailsProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
   const [editorTarget, setEditorTarget] = useState<EditorTarget | null>(null);
@@ -247,20 +272,22 @@ export function MakoPresenceDetails({ state }: MakoPresenceDetailsProps) {
               });
             }}
           />
-          <DetailRow
-            label="Channels"
-            value={previewText(home?.channels?.preview)}
-            actionLabel="Edit"
-            onAction={() => {
-              setEditorTarget({
-                scope: "home",
-                kind: "channels",
-                title: "Edit channels",
-                subtitle: "How Mako routes updates, approvals, and presence across surfaces.",
-                initialValue: home?.channels?.content ?? "",
-              });
-            }}
-          />
+          {showChannelsRow ? (
+            <DetailRow
+              label="Channels"
+              value={previewText(home?.channels?.preview)}
+              actionLabel="Edit"
+              onAction={() => {
+                setEditorTarget({
+                  scope: "home",
+                  kind: "channels",
+                  title: "Edit channels",
+                  subtitle: "How Mako routes updates, approvals, and presence across surfaces.",
+                  initialValue: home?.channels?.content ?? "",
+                });
+              }}
+            />
+          ) : null}
         </>
       ) : null}
 
@@ -288,6 +315,7 @@ export function MakoPresenceDetails({ state }: MakoPresenceDetailsProps) {
             identity={member.identity?.preview}
             soul={member.soul?.preview}
             memory={member.memory?.preview}
+            activitySummary={crewActivitySummary(member)}
             onEditIdentity={() => {
               setEditorTarget({
                 scope: "crew",

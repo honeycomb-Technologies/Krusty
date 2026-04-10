@@ -26,6 +26,8 @@ interface MakoCurrentViewProps {
   chat: MakoChatContext;
   onSelectRun: (runId: string) => void;
   onOpenRuns: () => void;
+  onOpenCrew: () => void;
+  onOpenChannels: () => void;
   onOpenDetails: () => void;
   onOpenSchedule: () => void;
 }
@@ -155,6 +157,8 @@ export function MakoCurrentView({
   chat,
   onSelectRun,
   onOpenRuns,
+  onOpenCrew,
+  onOpenChannels,
   onOpenDetails,
   onOpenSchedule,
 }: MakoCurrentViewProps) {
@@ -249,9 +253,14 @@ export function MakoCurrentView({
               Runs
             </Text>
           </Pressable>
-          <Pressable onPress={onOpenSchedule} style={styles.quickAction}>
+          <Pressable onPress={onOpenCrew} style={styles.quickAction}>
             <Text style={[styles.quickActionText, { color: t.mutedForeground }]}>
-              Schedule
+              Crew
+            </Text>
+          </Pressable>
+          <Pressable onPress={onOpenChannels} style={styles.quickAction}>
+            <Text style={[styles.quickActionText, { color: t.mutedForeground }]}>
+              Channels
             </Text>
           </Pressable>
           <Pressable onPress={onOpenDetails} style={styles.quickAction}>
@@ -266,7 +275,11 @@ export function MakoCurrentView({
         ) : null}
 
         <View style={styles.section}>
-          <SectionTitle title="Focus" />
+          <SectionTitle
+            title="Focus"
+            actionLabel="Schedule"
+            onAction={onOpenSchedule}
+          />
           <View style={styles.rows}>
             {focusApproval ? (
               <FocusRow
@@ -322,12 +335,12 @@ export function MakoCurrentView({
         <View style={styles.section}>
           <SectionTitle
             title="Presence"
-            actionLabel={needsBootstrap ? "Initialize" : "Manage"}
+            actionLabel={needsBootstrap ? "Initialize" : "Crew"}
             onAction={() => {
               if (needsBootstrap) {
                 void homeState.bootstrap();
               } else {
-                onOpenDetails();
+                onOpenCrew();
               }
             }}
           />
@@ -357,14 +370,9 @@ export function MakoCurrentView({
             ) : (
               <>
                 <PresenceRow
-                  label="Soul"
-                  value={previewText(home?.soul?.preview)}
-                  onPress={onOpenDetails}
-                />
-                <PresenceRow
-                  label="Heartbeat"
-                  value={previewText(home?.heartbeat?.preview)}
-                  onPress={onOpenDetails}
+                  label="Identity"
+                  value={previewText(home?.identity?.preview)}
+                  onPress={onOpenCrew}
                 />
                 <PresenceRow
                   label="Crew"
@@ -373,7 +381,16 @@ export function MakoCurrentView({
                       ? `${crew.length} crew • ${runningCrew} active • ${waitingCrew} waiting${degradedCrew > 0 ? ` • ${degradedCrew} degraded` : ""}`
                       : "No crew configured yet."
                   }
-                  onPress={onOpenDetails}
+                  onPress={onOpenCrew}
+                />
+                <PresenceRow
+                  label="Channels"
+                  value={
+                    home?.channels?.preview
+                      ? previewText(home.channels.preview)
+                      : "Thread-first routing with optional push delivery."
+                  }
+                  onPress={onOpenChannels}
                 />
               </>
             )}

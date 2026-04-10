@@ -10,6 +10,7 @@ function paletteForStatus(status: string, theme: ReturnType<typeof useThemeConte
   const t = theme.colors;
   switch (status) {
     case "awake":
+    case "ready":
     case "running":
     case "in_progress":
       return {
@@ -17,7 +18,14 @@ function paletteForStatus(status: string, theme: ReturnType<typeof useThemeConte
         border: `${t.userMessage}3a`,
         color: t.userMessage,
       };
+    case "configured":
+      return {
+        background: `${t.success}18`,
+        border: `${t.success}38`,
+        color: t.success,
+      };
     case "sleeping":
+    case "attention":
       return {
         background: `${t.warning}18`,
         border: `${t.warning}38`,
@@ -39,6 +47,7 @@ function paletteForStatus(status: string, theme: ReturnType<typeof useThemeConte
     case "paused":
     case "pending":
     case "idle":
+    case "inactive":
       return {
         background: `${t.mutedForeground}14`,
         border: `${t.mutedForeground}22`,

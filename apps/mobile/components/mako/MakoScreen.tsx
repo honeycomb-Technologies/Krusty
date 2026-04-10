@@ -3,8 +3,10 @@ import { StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useBreakpoint } from "../../hooks/useBreakpoint";
 import { useThemeContext } from "../../hooks/useTheme";
+import { MakoChannelsView } from "./MakoChannelsView";
 import { MakoCurrentView } from "./MakoCurrentView";
-import { MakoReportsView } from "./MakoReportsView";
+import { MakoCrewView } from "./MakoCrewView";
+import { MakoLogbookView } from "./MakoLogbookView";
 import { MakoRunView } from "./MakoRunView";
 import { MakoRunsView } from "./MakoRunsView";
 import { MakoScheduleView } from "./MakoScheduleView";
@@ -57,6 +59,12 @@ export function MakoScreen({
   };
 
   const status = current.current?.status.home_status ?? "idle";
+  const navActive: "mako" | "schedule" | "logbook" =
+    navigation.topLevel === "schedule"
+      ? "schedule"
+      : navigation.topLevel === "logbook"
+        ? "logbook"
+        : "mako";
 
   return (
     <SafeAreaView
@@ -86,15 +94,15 @@ export function MakoScreen({
 
           <MakoTopNav
             items={[
-              { id: "current", label: "Mako" },
+              { id: "mako", label: "Mako" },
               { id: "schedule", label: "Schedule" },
-              { id: "reports", label: "Logbook" },
+              { id: "logbook", label: "Logbook" },
             ]}
-            active={navigation.topLevel}
+            active={navActive}
             onSelect={navigation.setTopLevel}
           />
 
-          {navigation.topLevel === "current" ? (
+          {navigation.topLevel === "mako" ? (
             <MakoCurrentView
               state={current}
               homeState={home}
@@ -105,11 +113,17 @@ export function MakoScreen({
               onOpenRuns={() => {
                 navigation.setTopLevel("runs");
               }}
+              onOpenCrew={() => {
+                navigation.setTopLevel("crew");
+              }}
+              onOpenChannels={() => {
+                navigation.setTopLevel("channels");
+              }}
               onOpenSchedule={() => {
                 navigation.setTopLevel("schedule");
               }}
               onOpenDetails={() => {
-                navigation.setTopLevel("status");
+                navigation.setTopLevel("details");
               }}
             />
           ) : null}
@@ -135,13 +149,12 @@ export function MakoScreen({
             />
           ) : null}
 
-          {navigation.topLevel === "reports" ? (
-            <MakoReportsView workspaceDirectory={workspaceDirectory} />
+          {navigation.topLevel === "logbook" ? (
+            <MakoLogbookView workspaceDirectory={workspaceDirectory} />
           ) : null}
-          {navigation.topLevel === "status" ? (
+          {navigation.topLevel === "details" ? (
             <MakoStatusView
               state={current}
-              homeState={home}
               activeToolCallId={chat.activeToolCallId}
               onSelectRun={(runId) => {
                 void handleOpenRun(runId);
@@ -150,6 +163,8 @@ export function MakoScreen({
               onDenyTool={chat.onDenyTool}
             />
           ) : null}
+          {navigation.topLevel === "crew" ? <MakoCrewView state={home} /> : null}
+          {navigation.topLevel === "channels" ? <MakoChannelsView state={home} /> : null}
         </>
       )}
     </SafeAreaView>
