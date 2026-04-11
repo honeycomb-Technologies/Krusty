@@ -1279,6 +1279,26 @@ mod tests {
     }
 
     #[test]
+    fn build_user_content_preserves_file_attachment_text_block() {
+        let file_text = "Please review the attached file.\n\n--- notes.txt ---\nhello from file";
+        let content = match build_user_content(
+            "fallback message",
+            &[ContentBlock::Text {
+                text: file_text.to_string(),
+            }],
+        ) {
+            Ok(content) => content,
+            Err(_) => panic!("file attachment text block should build"),
+        };
+
+        assert_eq!(content.len(), 1);
+        assert!(matches!(
+            content.first(),
+            Some(Content::Text { text }) if text == file_text
+        ));
+    }
+
+    #[test]
     fn build_user_content_rejects_unsupported_image_media_type() {
         let result = build_user_content(
             "describe this",
