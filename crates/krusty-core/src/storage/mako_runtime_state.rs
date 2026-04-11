@@ -101,6 +101,7 @@ pub struct MakoRuntimeState {
     pub last_error: Option<String>,
     pub current_run_id: Option<String>,
     pub last_wake_reason: Option<String>,
+    pub crew_slug: Option<String>,
     pub priority: MakoRunPriority,
     pub updated_at: String,
 }
@@ -117,7 +118,7 @@ impl MakoRuntimeStateStore {
     pub fn get_state(&self, session_id: &str) -> Result<Option<MakoRuntimeState>> {
         let mut stmt = self.db.conn().prepare(
             "SELECT session_id, status, next_wake_at, sleep_reason, last_error,
-                    current_run_id, last_wake_reason, priority, updated_at
+                    current_run_id, last_wake_reason, crew_slug, priority, updated_at
              FROM mako_runtime_state
              WHERE session_id = ?1",
         )?;
@@ -130,7 +131,7 @@ impl MakoRuntimeStateStore {
     pub fn list_recoverable_states(&self) -> Result<Vec<MakoRuntimeState>> {
         let mut stmt = self.db.conn().prepare(
             "SELECT session_id, status, next_wake_at, sleep_reason, last_error,
-                    current_run_id, last_wake_reason, priority, updated_at
+                    current_run_id, last_wake_reason, crew_slug, priority, updated_at
              FROM mako_runtime_state
              WHERE status IN ('running', 'sleeping')
              ORDER BY updated_at ASC",
@@ -153,7 +154,7 @@ impl MakoRuntimeStateStore {
         let placeholders = vec!["?"; session_ids.len()].join(", ");
         let sql = format!(
             "SELECT session_id, status, next_wake_at, sleep_reason, last_error,
-                    current_run_id, last_wake_reason, priority, updated_at
+                    current_run_id, last_wake_reason, crew_slug, priority, updated_at
              FROM mako_runtime_state
              WHERE session_id IN ({placeholders})"
         );
@@ -172,9 +173,9 @@ impl MakoRuntimeStateStore {
         self.db.conn().execute(
             "INSERT INTO mako_runtime_state (
                 session_id, status, next_wake_at, sleep_reason, last_error,
-                current_run_id, last_wake_reason, priority, updated_at
+                current_run_id, last_wake_reason, crew_slug, priority, updated_at
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(session_id) DO UPDATE SET
                 status = excluded.status,
                 next_wake_at = excluded.next_wake_at,
@@ -182,6 +183,7 @@ impl MakoRuntimeStateStore {
                 last_error = excluded.last_error,
                 current_run_id = excluded.current_run_id,
                 last_wake_reason = excluded.last_wake_reason,
+                crew_slug = excluded.crew_slug,
                 priority = excluded.priority,
                 updated_at = excluded.updated_at",
             params![
@@ -192,6 +194,7 @@ impl MakoRuntimeStateStore {
                 state.last_error,
                 state.current_run_id,
                 state.last_wake_reason,
+                state.crew_slug,
                 state.priority.to_string(),
                 state.updated_at
             ],
@@ -210,6 +213,7 @@ impl MakoRuntimeStateStore {
         last_wake_reason: Option<&str>,
         priority: MakoRunPriority,
     ) -> Result<()> {
+        let existing = self.get_state(session_id)?;
         let state = MakoRuntimeState {
             session_id: session_id.to_string(),
             status,
@@ -218,6 +222,7 @@ impl MakoRuntimeStateStore {
             last_error: last_error.map(ToOwned::to_owned),
             current_run_id: current_run_id.map(ToOwned::to_owned),
             last_wake_reason: last_wake_reason.map(ToOwned::to_owned),
+            crew_slug: existing.and_then(|state| state.crew_slug),
             priority,
             updated_at: chrono::Utc::now().to_rfc3339(),
         };
@@ -234,12 +239,35 @@ impl MakoRuntimeStateStore {
             last_error: None,
             current_run_id: None,
             last_wake_reason: None,
+            crew_slug: None,
             priority: MakoRunPriority::Normal,
             updated_at: chrono::Utc::now().to_rfc3339(),
         });
 
         self.upsert_state(&MakoRuntimeState {
             priority,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            ..state
+        })
+    }
+
+    pub fn set_crew_slug(&self, session_id: &str, crew_slug: Option<&str>) -> Result<()> {
+        let existing = self.get_state(session_id)?;
+        let state = existing.unwrap_or(MakoRuntimeState {
+            session_id: session_id.to_string(),
+            status: MakoRuntimeStateStatus::Idle,
+            next_wake_at: None,
+            sleep_reason: None,
+            last_error: None,
+            current_run_id: None,
+            last_wake_reason: None,
+            crew_slug: None,
+            priority: MakoRunPriority::Normal,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        });
+
+        self.upsert_state(&MakoRuntimeState {
+            crew_slug: crew_slug.map(ToOwned::to_owned),
             updated_at: chrono::Utc::now().to_rfc3339(),
             ..state
         })
@@ -256,7 +284,7 @@ impl MakoRuntimeStateStore {
 
 fn map_state_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MakoRuntimeState> {
     let status_raw: String = row.get(1)?;
-    let priority_raw: String = row.get(7)?;
+    let priority_raw: String = row.get(8)?;
     Ok(MakoRuntimeState {
         session_id: row.get(0)?,
         status: MakoRuntimeStateStatus::parse(&status_raw).unwrap_or(MakoRuntimeStateStatus::Idle),
@@ -265,8 +293,9 @@ fn map_state_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MakoRuntimeState> 
         last_error: row.get(4)?,
         current_run_id: row.get(5)?,
         last_wake_reason: row.get(6)?,
+        crew_slug: row.get(7)?,
         priority: MakoRunPriority::parse(&priority_raw).unwrap_or_default(),
-        updated_at: row.get(8)?,
+        updated_at: row.get(9)?,
     })
 }
 

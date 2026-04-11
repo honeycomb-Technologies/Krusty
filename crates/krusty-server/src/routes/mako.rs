@@ -1,6 +1,6 @@
 //! Mako dispatch and session management endpoints
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::path::PathBuf;
 
@@ -8,7 +8,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::sse::{Event, KeepAlive, Sse},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -16,17 +16,23 @@ use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
-use krusty_core::agent::loop_events::LoopStopReason;
+use krusty_core::agent::{loop_events::LoopStopReason, DelegatedRunStage};
+use krusty_core::paths as core_paths;
 use krusty_core::storage::{
-    AutonomousTask, AutonomousTaskStore, Database, MakoRunPriority, MakoRuntimeState,
-    MakoRuntimeStateStatus, MakoRuntimeStateStore, MemoryStore, ProjectSettings, ReportStore,
-    RuntimeTraceEvent, RuntimeTraceStore, RuntimeTraceSummary, SessionInfo, SessionType,
-    TaskStatus, TraceFailureCategory, WorkspaceMode, CURRENT_SNAPSHOT_TITLE,
+    bootstrap_mako_home, is_valid_crew_slug, summarize_channel_bindings, summarize_crew_runtime,
+    write_mako_crew_document, write_mako_home_document, ApnsDeviceStore, AutonomousTask,
+    AutonomousTaskStore, Database, DelegatedRunStore, MakoAttentionItemState,
+    MakoAttentionStateStore, MakoChannelBinding, MakoChannelKind, MakoCrewDocumentKind,
+    MakoCrewRuntimeSummary, MakoHomeDocument, MakoHomeDocumentKind, MakoHomeProfile,
+    MakoRunPriority, MakoRuntimeState, MakoRuntimeStateStatus, MakoRuntimeStateStore, MemoryStore,
+    MessageStore, ProjectSettings, ReportStore, RuntimeTraceEvent, RuntimeTraceStore,
+    RuntimeTraceSummary, SessionInfo, SessionType, StoredMessageRecord, TaskStatus,
+    TraceFailureCategory, WorkspaceMode, CURRENT_SNAPSHOT_TITLE,
 };
 use krusty_core::SessionManager;
 
 use super::session_access::{
-    current_user_id, ensure_owned_session_of_type, load_agent_state_or_idle,
+    current_user_home_dir, current_user_id, ensure_owned_session_of_type, load_agent_state_or_idle,
     load_owned_session_of_type, request_workspace_scope,
 };
 use crate::auth::CurrentUser;
@@ -39,7 +45,16 @@ use crate::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/dispatch", post(dispatch))
+        .route("/home", get(home))
+        .route("/home/bootstrap", post(bootstrap_home))
+        .route("/home/:kind", put(update_home_document))
+        .route("/home/crew/:slug/:kind", put(update_crew_document))
+        .route("/crew", get(crew))
+        .route("/channels", get(channels))
         .route("/current", get(current))
+        .route("/attention", get(attention))
+        .route("/attention/:id/read", post(set_attention_read))
+        .route("/attention/:id/clear", post(set_attention_cleared))
         .route("/daemon/recover", post(recover_daemon))
         .route("/sessions", get(list_sessions))
         .route("/sessions/:id/status", get(session_status))
@@ -47,6 +62,7 @@ pub fn router() -> Router<AppState> {
         .route("/sessions/:id/message", post(send_message))
         .route("/sessions/:id/schedule", post(schedule_session))
         .route("/sessions/:id/priority", post(set_priority))
+        .route("/sessions/:id/crew", post(set_crew))
         .route("/sessions/:id/pause", post(pause_session))
         .route("/sessions/:id/resume", post(resume_session))
         .route("/sessions/:id", delete(cancel_session))
@@ -59,6 +75,7 @@ struct DispatchRequest {
     model: Option<String>,
     start_at: Option<String>,
     priority: Option<MakoRunPriority>,
+    crew_slug: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,9 +94,34 @@ struct PriorityRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct CrewRequest {
+    crew_slug: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DocumentWriteRequest {
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ObserveEventsQuery {
     replay_limit: Option<usize>,
     after_sequence: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AttentionQuery {
+    thread_session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AttentionReadRequest {
+    read: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct AttentionClearRequest {
+    cleared: bool,
 }
 
 const DEFAULT_MAKO_REPLAY_LIMIT: usize = 50;
@@ -89,6 +131,7 @@ const ACTIVE_STALE_SECS: i64 = 30 * 60;
 const WAITING_STALE_SECS: i64 = 15 * 60;
 const QUEUED_STALE_SECS: i64 = 60 * 60;
 const OVERDUE_WAKE_GRACE_SECS: i64 = 5 * 60;
+const MAKO_HOME_PREVIEW_CHARS: usize = 160;
 
 #[derive(Debug, Serialize)]
 struct DispatchResponse {
@@ -224,6 +267,107 @@ struct MakoCurrentResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct MakoAttentionResponse {
+    items: Vec<MakoAttentionItemSummary>,
+    unread_count: usize,
+    badge_count: usize,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct MakoAttentionItemSummary {
+    id: String,
+    kind: String,
+    section: String,
+    title: String,
+    summary: String,
+    detail: String,
+    created_at: String,
+    read: bool,
+    cleared: bool,
+    active: bool,
+    session_id: Option<String>,
+    run_id: Option<String>,
+    project_dir: Option<String>,
+    tool_call_id: Option<String>,
+    thread_session_id: Option<String>,
+    thread_message_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MakoHomeDocumentSummary {
+    file_name: String,
+    content: String,
+    preview: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MakoCrewMemberSummary {
+    slug: String,
+    identity: Option<MakoHomeDocumentSummary>,
+    soul: Option<MakoHomeDocumentSummary>,
+    memory: Option<MakoHomeDocumentSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct MakoChannelSummary {
+    id: String,
+    label: String,
+    kind: String,
+    source: String,
+    enabled: bool,
+    status: String,
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MakoChannelsResponse {
+    items: Vec<MakoChannelSummary>,
+    apns_configured: bool,
+    apns_device_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct MakoHomeResponse {
+    soul: Option<MakoHomeDocumentSummary>,
+    identity: Option<MakoHomeDocumentSummary>,
+    heartbeat: Option<MakoHomeDocumentSummary>,
+    memory: Option<MakoHomeDocumentSummary>,
+    channels: Option<MakoHomeDocumentSummary>,
+    crew: Vec<MakoCrewMemberSummary>,
+    crew_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct MakoBootstrapResponse {
+    ok: bool,
+    created_files: Vec<String>,
+    home: MakoHomeResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct MakoCrewResponse {
+    members: Vec<MakoCrewRuntimeMemberSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct MakoCrewRuntimeMemberSummary {
+    slug: String,
+    known_to_home: bool,
+    status: String,
+    active_run_count: usize,
+    recent_run_count: usize,
+    failed_run_count: usize,
+    queued_task_count: usize,
+    active_task_count: usize,
+    completed_task_count: usize,
+    failed_task_count: usize,
+    latest_activity_at: Option<String>,
+    identity: Option<MakoHomeDocumentSummary>,
+    soul: Option<MakoHomeDocumentSummary>,
+    memory: Option<MakoHomeDocumentSummary>,
+}
+
+#[derive(Debug, Serialize)]
 struct OkResponse {
     ok: bool,
 }
@@ -272,6 +416,17 @@ async fn dispatch(
     let start_at = parse_requested_wake_at(req.start_at.as_deref())?;
     let model = trimmed_nonempty(req.model.as_deref());
     let priority = req.priority.unwrap_or(MakoRunPriority::Normal);
+    let crew_slug = req
+        .crew_slug
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    if let Some(crew_slug) = crew_slug.as_deref() {
+        if !is_valid_crew_slug(crew_slug) {
+            return Err(AppError::BadRequest("invalid crew slug".to_string()));
+        }
+    }
 
     let session_id = session_manager.create_session_for_user_with_config(
         task,
@@ -283,8 +438,9 @@ async fn dispatch(
         None,
         SessionType::Mako,
     )?;
-    MakoRuntimeStateStore::new(Database::new(&state.db_path)?)
-        .set_priority(&session_id, priority)?;
+    let runtime_store = MakoRuntimeStateStore::new(Database::new(&state.db_path)?);
+    runtime_store.set_priority(&session_id, priority)?;
+    runtime_store.set_crew_slug(&session_id, crew_slug.as_deref())?;
 
     let content_json = serde_json::json!([{ "type": "text", "text": task }]).to_string();
     session_manager.save_message(&session_id, "user", &content_json)?;
@@ -352,13 +508,193 @@ async fn list_sessions(
     Ok(Json(mako_sessions))
 }
 
+async fn home(
+    State(_state): State<AppState>,
+    user: Option<CurrentUser>,
+) -> Result<Json<MakoHomeResponse>, AppError> {
+    Ok(Json(build_mako_home_response_from_dir(
+        &mako_home_dir_for_user(user.as_ref()),
+    )))
+}
+
+async fn bootstrap_home(
+    State(_state): State<AppState>,
+    user: Option<CurrentUser>,
+) -> Result<Json<MakoBootstrapResponse>, AppError> {
+    Ok(Json(build_mako_bootstrap_response_from_dir(
+        &mako_home_dir_for_user(user.as_ref()),
+    )?))
+}
+
+async fn update_home_document(
+    State(_state): State<AppState>,
+    user: Option<CurrentUser>,
+    Path(kind): Path<String>,
+    Json(req): Json<DocumentWriteRequest>,
+) -> Result<Json<MakoHomeResponse>, AppError> {
+    let kind = MakoHomeDocumentKind::parse(&kind)
+        .ok_or_else(|| AppError::BadRequest("invalid Mako home document kind".to_string()))?;
+    let content = trimmed_nonempty(Some(req.content.as_str()))
+        .ok_or_else(|| AppError::BadRequest("content must not be empty".to_string()))?;
+    let mako_home = mako_home_dir_for_user(user.as_ref());
+
+    write_mako_home_document(&mako_home, kind, content).map_err(|error| {
+        AppError::Internal(format!("Failed to update Mako home document: {}", error))
+    })?;
+
+    Ok(Json(build_mako_home_response_from_dir(&mako_home)))
+}
+
+async fn update_crew_document(
+    State(_state): State<AppState>,
+    user: Option<CurrentUser>,
+    Path((slug, kind)): Path<(String, String)>,
+    Json(req): Json<DocumentWriteRequest>,
+) -> Result<Json<MakoHomeResponse>, AppError> {
+    if !is_valid_crew_slug(&slug) {
+        return Err(AppError::BadRequest("invalid crew slug".to_string()));
+    }
+    let kind = MakoCrewDocumentKind::parse(&kind)
+        .ok_or_else(|| AppError::BadRequest("invalid Mako crew document kind".to_string()))?;
+    let content = trimmed_nonempty(Some(req.content.as_str()))
+        .ok_or_else(|| AppError::BadRequest("content must not be empty".to_string()))?;
+    let mako_home = mako_home_dir_for_user(user.as_ref());
+
+    write_mako_crew_document(&mako_home, &slug, kind, content).map_err(|error| {
+        AppError::Internal(format!("Failed to update Mako crew document: {}", error))
+    })?;
+
+    Ok(Json(build_mako_home_response_from_dir(&mako_home)))
+}
+
+async fn crew(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+) -> Result<Json<MakoCrewResponse>, AppError> {
+    let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
+    let (sessions, runtime_states) = {
+        let session_manager = open_session_manager(&state)?;
+        let sessions =
+            session_manager.list_sessions_for_user_by_type(None, user_id, SessionType::Mako)?;
+        let runtime_states = MakoRuntimeStateStore::new(Database::new(&state.db_path)?)
+            .list_states_for_sessions(
+                &sessions
+                    .iter()
+                    .map(|session| session.id.clone())
+                    .collect::<Vec<_>>(),
+            )?;
+        (sessions, runtime_states)
+    };
+    let task_store = AutonomousTaskStore::new(Database::new(&state.db_path)?);
+    let delegated_store = DelegatedRunStore::new(Database::new(&state.db_path)?);
+
+    Ok(Json(build_mako_crew_response_from_dir_and_sessions(
+        &mako_home_dir_for_user(user.as_ref()),
+        &sessions,
+        &runtime_states,
+        &task_store,
+        &delegated_store,
+    )?))
+}
+
+async fn channels(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+) -> Result<Json<MakoChannelsResponse>, AppError> {
+    let mako_home = mako_home_dir_for_user(user.as_ref());
+    let db = Database::new(&state.db_path)?;
+    let apns_store = ApnsDeviceStore::new(&db);
+    let user_id = current_user_id(user.as_ref());
+    let apns_device_count = apns_store.count_for_user(user_id)?;
+
+    Ok(Json(build_mako_channels_response_from_dir(
+        &state,
+        &mako_home,
+        apns_device_count,
+    )))
+}
+
 async fn current(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
 ) -> Result<Json<MakoCurrentResponse>, AppError> {
-    let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
+    Ok(Json(
+        build_mako_current_response(&state, user.as_ref()).await?,
+    ))
+}
+
+async fn attention(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Query(query): Query<AttentionQuery>,
+) -> Result<Json<MakoAttentionResponse>, AppError> {
+    let thread_context =
+        load_attention_thread_context(&state, user.as_ref(), query.thread_session_id.as_deref())?;
+    let current = build_mako_current_response(&state, user.as_ref()).await?;
+    let db = Database::new(&state.db_path)?;
+    let store = MakoAttentionStateStore::new(&db);
+    let state_by_id = store.list_for_user(current_user_id(user.as_ref()))?;
+    let trace_db = Database::new(&state.db_path)?;
+    let trace_store = RuntimeTraceStore::new(&trace_db);
+    let delegated_store = DelegatedRunStore::new(Database::new(&state.db_path)?);
+    let items = build_attention_items(
+        &current,
+        &state_by_id,
+        thread_context.as_ref(),
+        &trace_store,
+        &delegated_store,
+    )?;
+    let unread_count = items.iter().filter(|item| !item.read).count();
+    let badge_count = items
+        .iter()
+        .filter(|item| {
+            !item.read
+                && item.active
+                && matches!(
+                    item.kind.as_str(),
+                    "approval_required" | "input_required" | "run_failed" | "run_stalled"
+                )
+        })
+        .count();
+
+    Ok(Json(MakoAttentionResponse {
+        items,
+        unread_count,
+        badge_count,
+    }))
+}
+
+async fn set_attention_read(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Path(id): Path<String>,
+    Json(request): Json<AttentionReadRequest>,
+) -> Result<Json<OkResponse>, AppError> {
+    let db = Database::new(&state.db_path)?;
+    let store = MakoAttentionStateStore::new(&db);
+    store.set_read(current_user_id(user.as_ref()), &id, request.read)?;
+    Ok(Json(OkResponse { ok: true }))
+}
+
+async fn set_attention_cleared(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Path(id): Path<String>,
+    Json(request): Json<AttentionClearRequest>,
+) -> Result<Json<OkResponse>, AppError> {
+    let db = Database::new(&state.db_path)?;
+    let store = MakoAttentionStateStore::new(&db);
+    store.set_cleared(current_user_id(user.as_ref()), &id, request.cleared)?;
+    Ok(Json(OkResponse { ok: true }))
+}
+
+async fn build_mako_current_response(
+    state: &AppState,
+    user: Option<&CurrentUser>,
+) -> Result<MakoCurrentResponse, AppError> {
+    let user_id = current_user_id(user);
     let sessions = {
-        let session_manager = open_session_manager(&state)?;
+        let session_manager = open_session_manager(state)?;
         session_manager.list_sessions_for_user_by_type(None, user_id, SessionType::Mako)?
     };
     let session_ids = sessions
@@ -366,14 +702,14 @@ async fn current(
         .map(|session| session.id.clone())
         .collect::<Vec<_>>();
     let daemon_stats = state.mako_runtime.stats_for_sessions(&session_ids).await;
-    let session_manager = open_session_manager(&state)?;
+    let session_manager = open_session_manager(state)?;
     let runtime_store = MakoRuntimeStateStore::new(Database::new(&state.db_path)?);
     let task_store = AutonomousTaskStore::new(Database::new(&state.db_path)?);
     let memory_store = MemoryStore::new(Database::new(&state.db_path)?);
     let report_store = ReportStore::new(Database::new(&state.db_path)?);
     let trace_db = Database::new(&state.db_path)?;
     let trace_store = RuntimeTraceStore::new(&trace_db);
-    let workspace_scope = request_workspace_scope(&state, user.as_ref());
+    let workspace_scope = request_workspace_scope(state, user);
     let runtime_states = runtime_store.list_states_for_sessions(&session_ids)?;
     let recoverable_session_ids = runtime_store
         .list_recoverable_states()?
@@ -509,7 +845,7 @@ async fn current(
     runs.sort_by(compare_run_summaries);
     approvals.sort_by(compare_pending_approvals);
 
-    Ok(Json(MakoCurrentResponse {
+    Ok(MakoCurrentResponse {
         status: MakoStatusSummary {
             home_status: overall_home_status(
                 running_count,
@@ -570,7 +906,7 @@ async fn current(
         },
         runs,
         approvals,
-    }))
+    })
 }
 
 async fn recover_daemon(
@@ -790,6 +1126,38 @@ async fn set_priority(
     Ok(Json(OkResponse { ok: true }))
 }
 
+async fn set_crew(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Path(id): Path<String>,
+    Json(req): Json<CrewRequest>,
+) -> Result<Json<OkResponse>, AppError> {
+    let session_manager = open_session_manager(&state)?;
+    ensure_owned_session_of_type(
+        &session_manager,
+        &id,
+        SessionType::Mako,
+        "Mako",
+        user.as_ref(),
+    )?;
+
+    let crew_slug = req
+        .crew_slug
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    if let Some(crew_slug) = crew_slug.as_deref() {
+        if !is_valid_crew_slug(crew_slug) {
+            return Err(AppError::BadRequest("invalid crew slug".to_string()));
+        }
+    }
+
+    let store = MakoRuntimeStateStore::new(Database::new(&state.db_path)?);
+    store.set_crew_slug(&id, crew_slug.as_deref())?;
+    Ok(Json(OkResponse { ok: true }))
+}
+
 async fn resume_session(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
@@ -836,6 +1204,198 @@ async fn cancel_session(
 
 fn open_session_manager(state: &AppState) -> Result<SessionManager, AppError> {
     Ok(SessionManager::new(Database::new(&state.db_path)?))
+}
+
+fn mako_home_dir_for_user(user: Option<&CurrentUser>) -> PathBuf {
+    current_user_home_dir(user)
+        .map(core_paths::mako_dir_for_home)
+        .unwrap_or_else(core_paths::mako_dir)
+}
+
+fn build_mako_bootstrap_response_from_dir(
+    mako_home: &std::path::Path,
+) -> Result<MakoBootstrapResponse, AppError> {
+    let result = bootstrap_mako_home(mako_home)
+        .map_err(|error| AppError::Internal(format!("Failed to bootstrap Mako home: {}", error)))?;
+    Ok(MakoBootstrapResponse {
+        ok: true,
+        created_files: result.created_files,
+        home: build_mako_home_response_from_dir(mako_home),
+    })
+}
+
+fn build_mako_home_response_from_dir(mako_home: &std::path::Path) -> MakoHomeResponse {
+    let profile = MakoHomeProfile::load_from(mako_home);
+
+    MakoHomeResponse {
+        soul: summarize_mako_home_document(profile.soul),
+        identity: summarize_mako_home_document(profile.identity),
+        heartbeat: summarize_mako_home_document(profile.heartbeat),
+        memory: summarize_mako_home_document(profile.memory),
+        channels: summarize_mako_home_document(profile.channels),
+        crew_count: profile.crew.len(),
+        crew: profile
+            .crew
+            .into_iter()
+            .map(|member| MakoCrewMemberSummary {
+                slug: member.slug,
+                identity: summarize_mako_home_document(member.identity),
+                soul: summarize_mako_home_document(member.soul),
+                memory: summarize_mako_home_document(member.memory),
+            })
+            .collect(),
+    }
+}
+
+fn build_mako_crew_response_from_dir_and_sessions(
+    mako_home: &std::path::Path,
+    sessions: &[SessionInfo],
+    runtime_states: &std::collections::HashMap<String, MakoRuntimeState>,
+    task_store: &AutonomousTaskStore,
+    delegated_store: &DelegatedRunStore,
+) -> Result<MakoCrewResponse, AppError> {
+    let profile = MakoHomeProfile::load_from(mako_home);
+    let profile_map = profile
+        .crew
+        .iter()
+        .map(|member| (member.slug.as_str(), member))
+        .collect::<BTreeMap<_, _>>();
+    let runtime = summarize_crew_runtime(
+        &profile,
+        sessions,
+        runtime_states,
+        task_store,
+        delegated_store,
+    )
+    .map_err(|error| AppError::Internal(format!("Failed to summarize Mako crew: {}", error)))?;
+
+    Ok(MakoCrewResponse {
+        members: runtime
+            .into_iter()
+            .map(|member| {
+                let profile = profile_map.get(member.slug.as_str());
+                summarize_mako_crew_member(member, profile.copied())
+            })
+            .collect(),
+    })
+}
+
+fn build_mako_channels_response_from_dir(
+    state: &AppState,
+    mako_home: &std::path::Path,
+    apns_device_count: usize,
+) -> MakoChannelsResponse {
+    let profile = MakoHomeProfile::load_from(mako_home);
+    let apns_configured = state.apns_service.is_some();
+
+    MakoChannelsResponse {
+        items: summarize_channel_bindings(&profile)
+            .into_iter()
+            .map(|binding| summarize_mako_channel(binding, apns_configured, apns_device_count))
+            .collect(),
+        apns_configured,
+        apns_device_count,
+    }
+}
+
+fn summarize_mako_crew_member(
+    runtime: MakoCrewRuntimeSummary,
+    profile: Option<&krusty_core::storage::MakoCrewProfile>,
+) -> MakoCrewRuntimeMemberSummary {
+    MakoCrewRuntimeMemberSummary {
+        slug: runtime.slug,
+        known_to_home: runtime.known_to_home,
+        status: runtime.status.as_str().to_string(),
+        active_run_count: runtime.active_run_count,
+        recent_run_count: runtime.recent_run_count,
+        failed_run_count: runtime.failed_run_count,
+        queued_task_count: runtime.queued_task_count,
+        active_task_count: runtime.active_task_count,
+        completed_task_count: runtime.completed_task_count,
+        failed_task_count: runtime.failed_task_count,
+        latest_activity_at: runtime.latest_activity_at,
+        identity: summarize_mako_home_document(profile.and_then(|member| member.identity.clone())),
+        soul: summarize_mako_home_document(profile.and_then(|member| member.soul.clone())),
+        memory: summarize_mako_home_document(profile.and_then(|member| member.memory.clone())),
+    }
+}
+
+fn summarize_mako_channel(
+    binding: MakoChannelBinding,
+    apns_configured: bool,
+    apns_device_count: usize,
+) -> MakoChannelSummary {
+    let (status, detail) = match binding.kind {
+        MakoChannelKind::MainThread => ("ready", binding.detail),
+        MakoChannelKind::Crew => {
+            if binding.enabled {
+                ("ready", binding.detail)
+            } else {
+                ("inactive", binding.detail)
+            }
+        }
+        MakoChannelKind::MobilePush => {
+            if !binding.enabled {
+                ("inactive", binding.detail)
+            } else if !apns_configured {
+                (
+                    "attention",
+                    format!("{} APNs is not configured on this server.", binding.detail),
+                )
+            } else if apns_device_count == 0 {
+                (
+                    "attention",
+                    format!("{} No iPhone devices are registered yet.", binding.detail),
+                )
+            } else {
+                (
+                    "ready",
+                    format!(
+                        "{} {} device{} ready for push delivery.",
+                        binding.detail,
+                        apns_device_count,
+                        if apns_device_count == 1 { "" } else { "s" }
+                    ),
+                )
+            }
+        }
+        _ => {
+            if binding.enabled {
+                ("configured", binding.detail)
+            } else {
+                ("inactive", binding.detail)
+            }
+        }
+    };
+
+    MakoChannelSummary {
+        id: binding.id,
+        label: binding.label,
+        kind: binding.kind.as_str().to_string(),
+        source: binding.source.to_string(),
+        enabled: binding.enabled,
+        status: status.to_string(),
+        detail: detail.trim().to_string(),
+    }
+}
+
+fn summarize_mako_home_document(
+    document: Option<MakoHomeDocument>,
+) -> Option<MakoHomeDocumentSummary> {
+    document.map(|document| MakoHomeDocumentSummary {
+        preview: truncate_preview(&document.content, MAKO_HOME_PREVIEW_CHARS),
+        file_name: document.file_name,
+        content: document.content,
+    })
+}
+
+fn truncate_preview(value: &str, max_chars: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value.to_string();
+    }
+    let truncated = value.chars().take(max_chars).collect::<String>();
+    format!("{}...", truncated)
 }
 
 fn load_mako_replay_events(
@@ -1422,6 +1982,662 @@ fn format_duration_seconds(seconds: u64) -> String {
     format!("{days}d")
 }
 
+#[derive(Debug)]
+struct AttentionThreadContext {
+    session_id: String,
+    messages: Vec<AttentionThreadMessage>,
+}
+
+#[derive(Debug)]
+struct AttentionThreadMessage {
+    created_at: chrono::DateTime<chrono::Utc>,
+    role: String,
+    message_id: String,
+}
+
+fn load_attention_thread_context(
+    state: &AppState,
+    user: Option<&CurrentUser>,
+    thread_session_id: Option<&str>,
+) -> Result<Option<AttentionThreadContext>, AppError> {
+    let Some(thread_session_id) = thread_session_id else {
+        return Ok(None);
+    };
+
+    let session_manager = open_session_manager(state)?;
+    let session = load_owned_session_of_type(
+        &session_manager,
+        thread_session_id,
+        SessionType::Mako,
+        "Mako",
+        user,
+    )?;
+    let db = Database::new(&state.db_path)?;
+    let records = MessageStore::new(&db).load_session_message_records(thread_session_id)?;
+
+    Ok(Some(AttentionThreadContext {
+        session_id: session.id,
+        messages: build_attention_thread_messages(&records),
+    }))
+}
+
+fn build_attention_thread_messages(records: &[StoredMessageRecord]) -> Vec<AttentionThreadMessage> {
+    let mut messages = Vec::new();
+
+    for record in records {
+        let Some(parsed) = parse_attention_thread_message(record) else {
+            continue;
+        };
+
+        let index = messages.len();
+        let role = parsed.role;
+        messages.push(AttentionThreadMessage {
+            created_at: parsed.created_at,
+            role: role.clone(),
+            message_id: build_attention_thread_message_id(
+                index,
+                role.as_str(),
+                parsed.content_len,
+                parsed.thinking_len,
+                parsed.first_tool_id.as_deref(),
+            ),
+        });
+    }
+
+    messages
+}
+
+#[derive(Debug)]
+struct ParsedAttentionThreadMessage {
+    role: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    content_len: usize,
+    thinking_len: usize,
+    first_tool_id: Option<String>,
+}
+
+fn parse_attention_thread_message(
+    record: &StoredMessageRecord,
+) -> Option<ParsedAttentionThreadMessage> {
+    let created_at = parse_timestamp(record.created_at.as_str())?;
+    let value: Value = serde_json::from_str(record.content_json.as_str()).ok()?;
+    let content_array = value.as_array()?;
+
+    let mut content = String::new();
+    let mut thinking = String::new();
+    let mut first_tool_id: Option<String> = None;
+
+    for block in content_array {
+        let Some(object) = block.as_object() else {
+            continue;
+        };
+        let block_type = object.get("type").and_then(Value::as_str);
+
+        if block_type == Some("text") || (block_type.is_none() && object.contains_key("text")) {
+            if let Some(text) = object.get("text").and_then(Value::as_str) {
+                if !text.is_empty() {
+                    if !content.is_empty() {
+                        content.push('\n');
+                    }
+                    content.push_str(text);
+                }
+            }
+            continue;
+        }
+
+        if block_type == Some("thinking") || object.contains_key("thinking") {
+            if let Some(text) = object.get("thinking").and_then(Value::as_str) {
+                if !text.is_empty() {
+                    if !thinking.is_empty() {
+                        thinking.push_str("\n\n");
+                    }
+                    thinking.push_str(text);
+                }
+            }
+            continue;
+        }
+
+        let has_tool_fields = object.contains_key("id")
+            && object.contains_key("name")
+            && object.contains_key("input");
+        if (block_type == Some("tool_use") || has_tool_fields) && first_tool_id.is_none() {
+            first_tool_id = object
+                .get("id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+        }
+    }
+
+    if content.trim().is_empty() && thinking.trim().is_empty() && first_tool_id.is_none() {
+        return None;
+    }
+
+    Some(ParsedAttentionThreadMessage {
+        role: record.role.clone(),
+        created_at,
+        content_len: content.encode_utf16().count(),
+        thinking_len: thinking.encode_utf16().count(),
+        first_tool_id,
+    })
+}
+
+fn build_attention_thread_message_id(
+    index: usize,
+    role: &str,
+    content_len: usize,
+    thinking_len: usize,
+    first_tool_id: Option<&str>,
+) -> String {
+    if let Some(first_tool_id) = first_tool_id {
+        return format!("stored-{index}-{role}-{first_tool_id}");
+    }
+
+    format!("stored-{index}-{role}-{content_len}-{thinking_len}")
+}
+
+fn build_attention_items(
+    current: &MakoCurrentResponse,
+    state_by_id: &HashMap<String, MakoAttentionItemState>,
+    thread_context: Option<&AttentionThreadContext>,
+    trace_store: &RuntimeTraceStore<'_>,
+    delegated_store: &DelegatedRunStore,
+) -> Result<Vec<MakoAttentionItemSummary>, AppError> {
+    let mut items = Vec::new();
+
+    for approval in &current.approvals {
+        let item = apply_attention_state(
+            MakoAttentionItemSummary {
+                id: format!("approval:{}:{}", approval.session_id, approval.tool_call_id),
+                kind: "approval_required".to_string(),
+                section: "needs_action".to_string(),
+                title: "Approval request".to_string(),
+                summary: format!(
+                    "{} in {}",
+                    approval.tool_name,
+                    project_label(approval.project_dir.as_deref())
+                ),
+                detail: format!(
+                    "Mako is waiting for approval to continue {}.",
+                    approval.session_title
+                ),
+                created_at: approval.requested_at.clone(),
+                read: false,
+                cleared: false,
+                active: true,
+                session_id: Some(approval.session_id.clone()),
+                run_id: Some(approval.session_id.clone()),
+                project_dir: approval.project_dir.clone(),
+                tool_call_id: Some(approval.tool_call_id.clone()),
+                thread_session_id: thread_context.map(|context| context.session_id.clone()),
+                thread_message_id: thread_context.and_then(|context| {
+                    find_thread_message_id(context, approval.requested_at.as_str())
+                }),
+            },
+            state_by_id.get(&format!(
+                "approval:{}:{}",
+                approval.session_id, approval.tool_call_id
+            )),
+        );
+        items.push(item);
+    }
+
+    for run in &current.runs {
+        for item in build_run_attention_items(run, thread_context, trace_store, delegated_store)? {
+            if let Some(item) = maybe_keep_attention_item(item, state_by_id) {
+                items.push(item);
+            }
+        }
+    }
+
+    items.sort_by(|left, right| {
+        attention_section_rank(left.section.as_str())
+            .cmp(&attention_section_rank(right.section.as_str()))
+            .then_with(|| left.read.cmp(&right.read))
+            .then_with(|| right.created_at.cmp(&left.created_at))
+    });
+    Ok(items)
+}
+
+fn maybe_keep_attention_item(
+    item: MakoAttentionItemSummary,
+    state_by_id: &HashMap<String, MakoAttentionItemState>,
+) -> Option<MakoAttentionItemSummary> {
+    let item_id = item.id.clone();
+    let applied = apply_attention_state(item, state_by_id.get(item_id.as_str()));
+    if applied.cleared && applied.section == "updates" {
+        return None;
+    }
+    Some(applied)
+}
+
+fn apply_attention_state(
+    mut item: MakoAttentionItemSummary,
+    state: Option<&MakoAttentionItemState>,
+) -> MakoAttentionItemSummary {
+    if let Some(state) = state {
+        item.read = state.read;
+        item.cleared = state.cleared;
+    }
+
+    if item.section == "needs_action" && item.active {
+        item.cleared = false;
+    }
+
+    item
+}
+
+fn build_run_attention_items(
+    run: &MakoCurrentRunSummary,
+    thread_context: Option<&AttentionThreadContext>,
+    trace_store: &RuntimeTraceStore<'_>,
+    delegated_store: &DelegatedRunStore,
+) -> Result<Vec<MakoAttentionItemSummary>, AppError> {
+    let trace_events = trace_store.list_events(&run.session_id, Some(200))?;
+    let delegated_runs = delegated_store.list_runs_for_session(&run.session_id, 25)?;
+    let mut items = Vec::new();
+
+    if let Some(item) = build_run_action_attention_item(run, thread_context) {
+        items.push(item);
+    }
+
+    if let Some(item) = build_scheduled_started_attention_item(run, &trace_events, thread_context) {
+        items.push(item);
+    }
+
+    if let Some(item) =
+        build_delegated_completion_attention_item(run, &delegated_runs, thread_context)
+    {
+        items.push(item);
+    }
+
+    if let Some(item) = build_run_completion_attention_item(run, &trace_events, thread_context) {
+        items.push(item);
+    }
+
+    Ok(items)
+}
+
+fn build_run_action_attention_item(
+    run: &MakoCurrentRunSummary,
+    thread_context: Option<&AttentionThreadContext>,
+) -> Option<MakoAttentionItemSummary> {
+    let run_id = run.session_id.clone();
+    let project_dir = run.project_dir.clone();
+    let thread_session_id = thread_context.map(|context| context.session_id.clone());
+    let thread_message_id =
+        thread_context.and_then(|context| find_thread_message_id(context, run.updated_at.as_str()));
+
+    let diagnostic = run.diagnostic.as_ref()?;
+    if !matches!(
+        diagnostic.kind.as_str(),
+        "awaiting_input" | "failed" | "stale_active" | "stale_waiting" | "stale_queued"
+    ) {
+        return None;
+    }
+
+    let (kind, title) = match diagnostic.kind.as_str() {
+        "awaiting_input" => ("input_required", "Reply needed"),
+        "failed" => ("run_failed", "Run error"),
+        _ => ("run_stalled", "Run needs attention"),
+    };
+
+    Some(MakoAttentionItemSummary {
+        id: format!("run:{run_id}:{kind}"),
+        kind: kind.to_string(),
+        section: "needs_action".to_string(),
+        title: title.to_string(),
+        summary: run.title.clone(),
+        detail: diagnostic.detail.clone(),
+        created_at: run.updated_at.clone(),
+        read: false,
+        cleared: false,
+        active: true,
+        session_id: Some(run_id.clone()),
+        run_id: Some(run_id),
+        project_dir,
+        tool_call_id: None,
+        thread_session_id,
+        thread_message_id,
+    })
+}
+
+fn build_scheduled_started_attention_item(
+    run: &MakoCurrentRunSummary,
+    trace_events: &[RuntimeTraceEvent],
+    thread_context: Option<&AttentionThreadContext>,
+) -> Option<MakoAttentionItemSummary> {
+    if !run_has_scheduled_origin(run) || run_is_completed(run) || run_is_pending_schedule(run) {
+        return None;
+    }
+
+    let source_run_id = current_or_latest_trace_run_id(run, trace_events)?;
+    let created_at =
+        run_started_at(trace_events, &source_run_id).unwrap_or_else(|| run.updated_at.clone());
+    let project = project_label(run.project_dir.as_deref());
+
+    Some(MakoAttentionItemSummary {
+        id: format!("run:{}:scheduled_started:{}", run.session_id, source_run_id),
+        kind: "scheduled_run_started".to_string(),
+        section: "updates".to_string(),
+        title: "Scheduled run started".to_string(),
+        summary: format!("Started on schedule: {}", run.title),
+        detail: format!("Mako started this scheduled run in {project}."),
+        created_at: created_at.clone(),
+        read: false,
+        cleared: false,
+        active: false,
+        session_id: Some(run.session_id.clone()),
+        run_id: Some(run.session_id.clone()),
+        project_dir: run.project_dir.clone(),
+        tool_call_id: None,
+        thread_session_id: thread_context.map(|context| context.session_id.clone()),
+        thread_message_id: thread_context
+            .and_then(|context| find_thread_message_id(context, created_at.as_str())),
+    })
+}
+
+fn build_delegated_completion_attention_item(
+    run: &MakoCurrentRunSummary,
+    delegated_runs: &[krusty_core::storage::DelegatedRunRecord],
+    thread_context: Option<&AttentionThreadContext>,
+) -> Option<MakoAttentionItemSummary> {
+    let delegated = delegated_runs.iter().find(|record| {
+        matches!(
+            record.stage,
+            DelegatedRunStage::Complete | DelegatedRunStage::Degraded
+        ) && record.completed_at.is_some()
+    })?;
+    let created_at = delegated.completed_at?.to_rfc3339();
+    let scope_label = delegated_scope_label(&delegated.target_scope);
+    let role_label = delegated_role_label(delegated.role.clone());
+    let status_suffix = if delegated.stage == DelegatedRunStage::Degraded {
+        " with warnings"
+    } else {
+        ""
+    };
+    let detail = delegated_detail(delegated).unwrap_or_else(|| {
+        if scope_label.is_empty() {
+            format!(
+                "{role_label} finished a delegated task{status_suffix} for {}.",
+                run.title
+            )
+        } else {
+            format!("{role_label} finished{status_suffix} for {scope_label}.")
+        }
+    });
+    let summary = if scope_label.is_empty() {
+        format!("{role_label} finished a delegated task")
+    } else {
+        format!("{role_label} finished: {scope_label}")
+    };
+
+    Some(MakoAttentionItemSummary {
+        id: format!("delegated:{}:completed", delegated.delegated_run_id),
+        kind: "delegated_task_completed".to_string(),
+        section: "updates".to_string(),
+        title: "Crew update".to_string(),
+        summary,
+        detail,
+        created_at: created_at.clone(),
+        read: false,
+        cleared: false,
+        active: false,
+        session_id: Some(run.session_id.clone()),
+        run_id: Some(run.session_id.clone()),
+        project_dir: run.project_dir.clone(),
+        tool_call_id: delegated.parent_tool_call_id.clone(),
+        thread_session_id: thread_context.map(|context| context.session_id.clone()),
+        thread_message_id: thread_context
+            .and_then(|context| find_thread_message_id(context, created_at.as_str())),
+    })
+}
+
+fn build_run_completion_attention_item(
+    run: &MakoCurrentRunSummary,
+    trace_events: &[RuntimeTraceEvent],
+    thread_context: Option<&AttentionThreadContext>,
+) -> Option<MakoAttentionItemSummary> {
+    if is_failed_attention_run(run) || !run_is_completed(run) {
+        return None;
+    }
+
+    let completed_run_id =
+        latest_trace_run_id(trace_events).unwrap_or_else(|| run.session_id.clone());
+    let created_at = run_finished_at(trace_events, completed_run_id.as_str())
+        .unwrap_or_else(|| run.updated_at.clone());
+    let scheduled = run_has_scheduled_origin(run);
+
+    Some(MakoAttentionItemSummary {
+        id: if scheduled {
+            format!(
+                "run:{}:scheduled_completed:{}",
+                run.session_id, completed_run_id
+            )
+        } else {
+            format!("run:{}:completed:{}", run.session_id, completed_run_id)
+        },
+        kind: if scheduled {
+            "scheduled_run_completed".to_string()
+        } else {
+            "run_completed".to_string()
+        },
+        section: "updates".to_string(),
+        title: if scheduled {
+            "Scheduled run finished".to_string()
+        } else {
+            "Run completed".to_string()
+        },
+        summary: if scheduled {
+            format!("Finished on schedule: {}", run.title)
+        } else {
+            run.title.clone()
+        },
+        detail: if scheduled {
+            format!(
+                "{} task{} completed for this scheduled run in {}.",
+                run.completed_tasks,
+                if run.completed_tasks == 1 { "" } else { "s" },
+                project_label(run.project_dir.as_deref())
+            )
+        } else {
+            format!(
+                "{} task{} completed in {}.",
+                run.completed_tasks,
+                if run.completed_tasks == 1 { "" } else { "s" },
+                project_label(run.project_dir.as_deref())
+            )
+        },
+        created_at: created_at.clone(),
+        read: false,
+        cleared: false,
+        active: false,
+        session_id: Some(run.session_id.clone()),
+        run_id: Some(run.session_id.clone()),
+        project_dir: run.project_dir.clone(),
+        tool_call_id: None,
+        thread_session_id: thread_context.map(|context| context.session_id.clone()),
+        thread_message_id: thread_context
+            .and_then(|context| find_thread_message_id(context, created_at.as_str())),
+    })
+}
+
+fn run_has_scheduled_origin(run: &MakoCurrentRunSummary) -> bool {
+    matches!(
+        run.runtime
+            .as_ref()
+            .and_then(|runtime| runtime.last_wake_reason.as_deref()),
+        Some("scheduled_dispatch" | "manual_schedule")
+    )
+}
+
+fn run_is_pending_schedule(run: &MakoCurrentRunSummary) -> bool {
+    matches!(
+        run.runtime.as_ref(),
+        Some(runtime)
+            if runtime.status == MakoRuntimeStateStatus::Sleeping
+                && runtime.sleep_reason.as_deref() == Some("scheduled")
+    )
+}
+
+fn current_or_latest_trace_run_id(
+    run: &MakoCurrentRunSummary,
+    trace_events: &[RuntimeTraceEvent],
+) -> Option<String> {
+    run.runtime
+        .as_ref()
+        .and_then(|runtime| runtime.current_run_id.clone())
+        .or_else(|| latest_trace_run_id(trace_events))
+        .or_else(|| Some(run.session_id.clone()))
+}
+
+fn latest_trace_run_id(trace_events: &[RuntimeTraceEvent]) -> Option<String> {
+    trace_events.last().map(|event| event.run_id.clone())
+}
+
+fn run_started_at(trace_events: &[RuntimeTraceEvent], run_id: &str) -> Option<String> {
+    trace_events
+        .iter()
+        .find(|event| event.run_id == run_id)
+        .map(|event| event.created_at.clone())
+}
+
+fn run_finished_at(trace_events: &[RuntimeTraceEvent], run_id: &str) -> Option<String> {
+    trace_events
+        .iter()
+        .rev()
+        .find(|event| event.run_id == run_id && event.event_type == "finished")
+        .or_else(|| {
+            trace_events
+                .iter()
+                .rev()
+                .find(|event| event.run_id == run_id)
+        })
+        .map(|event| event.created_at.clone())
+}
+
+fn delegated_role_label(role: krusty_core::storage::DelegatedRunRole) -> &'static str {
+    match role {
+        krusty_core::storage::DelegatedRunRole::Explore => "Explore",
+        krusty_core::storage::DelegatedRunRole::Build => "Build",
+        krusty_core::storage::DelegatedRunRole::Planner => "Plan",
+        krusty_core::storage::DelegatedRunRole::Verifier => "Verify",
+    }
+}
+
+fn delegated_scope_label(scopes: &[krusty_core::storage::DelegatedRunScope]) -> String {
+    let Some(scope) = scopes.first() else {
+        return String::new();
+    };
+
+    if !scope.label.trim().is_empty() {
+        return scope.label.trim().to_string();
+    }
+
+    if !scope.path.trim().is_empty() {
+        return scope.path.trim().to_string();
+    }
+
+    scope.kind.trim().to_string()
+}
+
+fn delegated_detail(record: &krusty_core::storage::DelegatedRunRecord) -> Option<String> {
+    if let Some(review) = record
+        .human_review
+        .as_deref()
+        .map(str::trim)
+        .filter(|review| !review.is_empty())
+    {
+        return Some(review.to_string());
+    }
+
+    record
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| {
+            snapshot
+                .agents
+                .iter()
+                .find_map(|agent| agent.completion_summary.as_deref())
+        })
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .map(ToString::to_string)
+}
+
+fn project_label(path: Option<&str>) -> String {
+    let Some(path) = path else {
+        return "No project selected".to_string();
+    };
+
+    let parts = path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() <= 2 {
+        return path.to_string();
+    }
+    parts[parts.len().saturating_sub(2)..].join("/")
+}
+
+fn is_failed_attention_run(run: &MakoCurrentRunSummary) -> bool {
+    run.runtime
+        .as_ref()
+        .map(|runtime| runtime.status == MakoRuntimeStateStatus::Error)
+        .unwrap_or(false)
+        || run.agent_state == "error"
+}
+
+fn run_is_completed(run: &MakoCurrentRunSummary) -> bool {
+    if is_failed_attention_run(run) {
+        return false;
+    }
+
+    let has_open_tasks = run.pending_tasks + run.in_progress_tasks + run.blocked_tasks > 0;
+    !has_open_tasks
+        && !matches!(
+            run.runtime.as_ref().map(|runtime| runtime.status),
+            Some(MakoRuntimeStateStatus::Running)
+                | Some(MakoRuntimeStateStatus::Sleeping)
+                | Some(MakoRuntimeStateStatus::Paused)
+                | Some(MakoRuntimeStateStatus::AwaitingInput)
+        )
+}
+
+fn attention_section_rank(section: &str) -> usize {
+    match section {
+        "needs_action" => 0,
+        _ => 1,
+    }
+}
+
+fn find_thread_message_id(context: &AttentionThreadContext, created_at: &str) -> Option<String> {
+    let target = parse_timestamp(created_at)?;
+    let mut fallback_any: Option<&AttentionThreadMessage> = None;
+    let mut fallback_assistant: Option<&AttentionThreadMessage> = None;
+
+    for message in context.messages.iter().rev() {
+        if message.created_at <= target {
+            fallback_any = Some(message);
+            if message.role == "assistant" {
+                fallback_assistant = Some(message);
+                break;
+            }
+        }
+    }
+
+    fallback_assistant
+        .or(fallback_any)
+        .or_else(|| {
+            context
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == "assistant")
+        })
+        .or_else(|| context.messages.last())
+        .map(|message| message.message_id.clone())
+}
+
 fn is_stalled_diagnostic(kind: &str) -> bool {
     matches!(
         kind,
@@ -1645,29 +2861,37 @@ mod tests {
     use std::sync::Arc;
 
     use axum::extract::Path;
+    use axum::extract::Query;
     use axum::extract::State;
     use axum::Json;
     use tokio::sync::{Mutex, RwLock};
 
-    use krusty_core::agent::{AgentCancellation, LoopEvent, UserHookManager};
+    use krusty_core::agent::{
+        loop_events::LoopStopReason, AgentCancellation, DelegatedRunStage, LoopEvent,
+        UserHookManager,
+    };
     use krusty_core::ai::models::create_model_registry;
     use krusty_core::mcp::McpManager;
+    use krusty_core::paths;
     use krusty_core::process::ProcessRegistry;
     use krusty_core::skills::SkillsManager;
     use krusty_core::storage::credentials::CredentialStore;
     use krusty_core::storage::reports::CreateReportInput;
     use krusty_core::storage::{
-        Database, MakoRunPriority, MakoRuntimeStateStatus, MakoRuntimeStateStore, MemoryStore,
-        MemoryType, ReportStore, RuntimeTraceEvent, RuntimeTraceStore, SessionType, WorkspaceMode,
-        CURRENT_SNAPSHOT_TITLE,
+        bootstrap_mako_home, AutonomousTaskStore, Database, DelegatedRunRole, DelegatedRunScope,
+        DelegatedRunStartInput, DelegatedRunStore, MakoRunPriority, MakoRuntimeStateStatus,
+        MakoRuntimeStateStore, MemoryStore, MemoryType, ReportStore, RuntimeTraceEvent,
+        RuntimeTraceStore, SessionType, WorkspaceMode, CURRENT_SNAPSHOT_TITLE,
     };
     use krusty_core::tools::registry::ToolRegistry;
     use krusty_core::SessionManager;
 
     use super::{
-        current, dispatch, list_sessions, map_runtime_trace_event, recover_daemon,
-        schedule_session, session_status, set_priority, DispatchRequest, PriorityRequest,
-        ScheduleRequest,
+        attention, build_mako_bootstrap_response_from_dir, build_mako_channels_response_from_dir,
+        build_mako_crew_response_from_dir_and_sessions, build_mako_home_response_from_dir, current,
+        dispatch, list_sessions, mako_home_dir_for_user, map_runtime_trace_event, recover_daemon,
+        schedule_session, session_status, set_priority, update_crew_document, update_home_document,
+        AttentionQuery, DispatchRequest, DocumentWriteRequest, PriorityRequest, ScheduleRequest,
     };
     use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::error::AppError;
@@ -1747,6 +2971,7 @@ mod tests {
                 model: Some("  openai/gpt-5  ".to_string()),
                 start_at: None,
                 priority: None,
+                crew_slug: None,
             }),
         )
         .await
@@ -1759,6 +2984,234 @@ mod tests {
             .expect("session lookup should succeed")
             .expect("session should exist");
         assert_eq!(session.model.as_deref(), Some("openai/gpt-5"));
+    }
+
+    #[test]
+    fn mako_home_response_surfaces_documents_and_sorted_crew() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("krusty-mako-home-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        let crew_builder = temp_dir.join("crew").join("builder");
+        let crew_reviewer = temp_dir.join("crew").join("reviewer");
+        std::fs::create_dir_all(&crew_builder).expect("builder dir should exist");
+        std::fs::create_dir_all(&crew_reviewer).expect("reviewer dir should exist");
+
+        std::fs::write(
+            temp_dir.join(krusty_core::paths::MAKO_SOUL_FILE),
+            "Always Swimming.",
+        )
+        .expect("soul should write");
+        std::fs::write(temp_dir.join("CHANNELS.md"), "Signal line").expect("channels should write");
+        std::fs::write(crew_reviewer.join("IDENTITY.md"), "Reviewer").expect("reviewer identity");
+        std::fs::write(crew_builder.join("SOUL.md"), "Builder soul").expect("builder soul");
+
+        let response = build_mako_home_response_from_dir(&temp_dir);
+
+        assert_eq!(
+            response
+                .soul
+                .as_ref()
+                .map(|document| document.file_name.as_str()),
+            Some("MAKO_SOUL.md")
+        );
+        assert_eq!(
+            response
+                .channels
+                .as_ref()
+                .map(|document| document.file_name.as_str()),
+            Some("CHANNELS.md")
+        );
+        assert_eq!(response.crew_count, 2);
+        assert_eq!(response.crew[0].slug, "builder");
+        assert_eq!(response.crew[1].slug, "reviewer");
+    }
+
+    #[test]
+    fn mako_bootstrap_response_creates_default_home_and_crew() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("krusty-mako-bootstrap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+
+        let response = build_mako_bootstrap_response_from_dir(&temp_dir)
+            .unwrap_or_else(|_| panic!("bootstrap should work"));
+
+        assert!(response.ok);
+        assert!(response
+            .created_files
+            .iter()
+            .any(|path| path == paths::MAKO_SOUL_FILE));
+        assert!(response
+            .created_files
+            .iter()
+            .any(|path| path == "crew/reviewer/SOUL.md"));
+        assert_eq!(response.home.crew_count, 3);
+        assert_eq!(
+            response
+                .home
+                .soul
+                .as_ref()
+                .map(|document| document.file_name.as_str()),
+            Some(paths::MAKO_SOUL_FILE)
+        );
+    }
+
+    #[tokio::test]
+    async fn mako_channels_response_surfaces_runtime_delivery_state() {
+        let (state, temp_dir) = create_test_state();
+        std::fs::write(
+            temp_dir.join("CHANNELS.md"),
+            "# Mako Channels\n- [x] iPhone push: urgent approvals only",
+        )
+        .expect("channels should write");
+
+        let response = build_mako_channels_response_from_dir(&state, &temp_dir, 0);
+        assert!(response.items.iter().any(|item| item.id == "main-thread"));
+
+        let push = response
+            .items
+            .iter()
+            .find(|item| item.id == "iphone-push")
+            .expect("push channel should exist");
+        assert_eq!(push.status, "attention");
+        assert_eq!(push.kind, "mobile_push");
+    }
+
+    #[tokio::test]
+    async fn update_home_document_writes_to_user_scoped_mako_home() {
+        let (state, temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        let user_home = temp_dir.join("alice-home");
+        std::fs::create_dir_all(&user_home).expect("user home should exist");
+
+        let Json(response) = update_home_document(
+            State(state),
+            Some(current_user("alice", &user_home)),
+            Path("soul".to_string()),
+            Json(DocumentWriteRequest {
+                content: "Stay watchful.".to_string(),
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("document update should succeed"));
+
+        let expected = paths::mako_dir_for_home(&user_home).join(paths::MAKO_SOUL_FILE);
+        assert_eq!(
+            std::fs::read_to_string(expected).expect("scoped mako soul should exist"),
+            "Stay watchful."
+        );
+        assert_eq!(
+            response
+                .soul
+                .as_ref()
+                .map(|document| document.file_name.as_str()),
+            Some(paths::MAKO_SOUL_FILE)
+        );
+    }
+
+    #[tokio::test]
+    async fn update_crew_document_rejects_invalid_slug() {
+        let (state, temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+        let user_home = temp_dir.join("alice-home");
+        std::fs::create_dir_all(&user_home).expect("user home should exist");
+
+        let result = update_crew_document(
+            State(state),
+            Some(current_user("alice", &user_home)),
+            Path(("../oops".to_string(), "soul".to_string())),
+            Json(DocumentWriteRequest {
+                content: "Nope".to_string(),
+            }),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(AppError::BadRequest(message)) if message == "invalid crew slug")
+        );
+    }
+
+    #[test]
+    fn mako_crew_response_merges_home_profiles_with_runtime_state() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("krusty-mako-crew-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        bootstrap_mako_home(&temp_dir).expect("bootstrap should work");
+        let db_path = temp_dir.join("krusty.db");
+        let db = Database::new(&db_path).expect("db should open");
+        db.conn()
+            .execute(
+                "INSERT INTO users (id, email, license_tier) VALUES (?1, ?2, ?3)",
+                ("alice", "alice@example.com", "free"),
+            )
+            .expect("user should insert");
+        let session_manager = SessionManager::new(Database::new(&db_path).expect("db should open"));
+        let session_id = session_manager
+            .create_session_for_user_with_config(
+                "Crew runtime",
+                None,
+                Some(temp_dir.to_string_lossy().as_ref()),
+                Some(temp_dir.to_string_lossy().as_ref()),
+                WorkspaceMode::Selected,
+                Some("alice"),
+                None,
+                SessionType::Mako,
+            )
+            .expect("session should create");
+        let sessions = session_manager
+            .list_sessions_for_user_by_type(None, Some("alice"), SessionType::Mako)
+            .expect("sessions should load");
+        let task_store = AutonomousTaskStore::new(Database::new(&db_path).expect("db should open"));
+        let delegated_store = krusty_core::storage::DelegatedRunStore::new(
+            Database::new(&db_path).expect("db should open"),
+        );
+        let runtime_states =
+            MakoRuntimeStateStore::new(Database::new(&db_path).expect("db should open"))
+                .list_states_for_sessions(
+                    &sessions
+                        .iter()
+                        .map(|session| session.id.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .expect("runtime states should load");
+        let task_id = task_store
+            .create_task(&session_id, "Review", "Review current run", &[])
+            .expect("task should create");
+        task_store
+            .claim_task(&task_id, "reviewer")
+            .expect("task should claim");
+
+        let response = build_mako_crew_response_from_dir_and_sessions(
+            &temp_dir,
+            &sessions,
+            &runtime_states,
+            &task_store,
+            &delegated_store,
+        )
+        .unwrap_or_else(|_| panic!("crew response should build"));
+
+        let reviewer = response
+            .members
+            .iter()
+            .find(|member| member.slug == "reviewer")
+            .expect("reviewer should exist");
+        assert!(reviewer.known_to_home);
+        assert_eq!(reviewer.status, "running");
+        assert_eq!(reviewer.active_task_count, 1);
+        assert!(reviewer.identity.is_some());
+        assert!(reviewer.soul.is_some());
+    }
+
+    #[test]
+    fn user_scoped_mako_home_dir_prefers_current_user_home() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("krusty-mako-user-home-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+        let user = current_user("alice", &temp_dir);
+
+        assert_eq!(
+            mako_home_dir_for_user(Some(&user)),
+            paths::mako_dir_for_home(&temp_dir)
+        );
     }
 
     #[tokio::test]
@@ -1777,6 +3230,7 @@ mod tests {
                 model: None,
                 start_at: None,
                 priority: None,
+                crew_slug: None,
             }),
         )
         .await
@@ -1807,6 +3261,7 @@ mod tests {
                 model: None,
                 start_at: None,
                 priority: None,
+                crew_slug: None,
             }),
         )
         .await;
@@ -1836,6 +3291,7 @@ mod tests {
                 model: None,
                 start_at: None,
                 priority: None,
+                crew_slug: None,
             }),
         )
         .await;
@@ -1858,6 +3314,7 @@ mod tests {
                 model: None,
                 start_at: Some(wake_at.to_rfc3339()),
                 priority: None,
+                crew_slug: None,
             }),
         )
         .await
@@ -1905,6 +3362,7 @@ mod tests {
                 model: None,
                 start_at: None,
                 priority: Some(MakoRunPriority::High),
+                crew_slug: None,
             }),
         )
         .await
@@ -1934,6 +3392,7 @@ mod tests {
                 model: None,
                 start_at: None,
                 priority: None,
+                crew_slug: None,
             }),
         )
         .await
@@ -2296,6 +3755,238 @@ mod tests {
                 .map(|diagnostic| diagnostic.severity.as_str()),
             Some("critical")
         );
+    }
+
+    #[tokio::test]
+    async fn attention_surfaces_scheduled_start_and_delegated_completion_updates() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let session_id = session_manager
+            .create_session_for_user_with_config(
+                "Scheduled Release Watch",
+                None,
+                Some(state.working_dir.to_string_lossy().as_ref()),
+                Some(state.working_dir.to_string_lossy().as_ref()),
+                WorkspaceMode::Selected,
+                Some("alice"),
+                None,
+                SessionType::Mako,
+            )
+            .expect("session should create");
+
+        let runtime_store = MakoRuntimeStateStore::new(
+            Database::new(&state.db_path).expect("database should open"),
+        );
+        runtime_store
+            .set_state(
+                &session_id,
+                MakoRuntimeStateStatus::Running,
+                None,
+                None,
+                None,
+                Some("run-1"),
+                Some("scheduled_dispatch"),
+                MakoRunPriority::Normal,
+            )
+            .expect("runtime state should persist");
+
+        let trace_db = Database::new(&state.db_path).expect("database should open");
+        let trace_store = RuntimeTraceStore::new(&trace_db);
+        let started_event = RuntimeTraceEvent::from_loop_event(
+            "run-1",
+            1,
+            0,
+            &LoopEvent::TickInjected { tick_number: 1 },
+        );
+        trace_store
+            .append_event(&session_id, &started_event)
+            .expect("scheduled run should write trace");
+
+        let delegated_store =
+            DelegatedRunStore::new(Database::new(&state.db_path).expect("database should open"));
+        delegated_store
+            .create_run(&DelegatedRunStartInput {
+                delegated_run_id: "delegated-1".to_string(),
+                parent_session_id: session_id.clone(),
+                parent_tool_call_id: Some("tool-crew-1".to_string()),
+                role: DelegatedRunRole::Build,
+                stage: DelegatedRunStage::Created,
+                provider: None,
+                model: None,
+                resumable: false,
+                resumed_from_run_id: None,
+                target_scope: vec![DelegatedRunScope {
+                    label: "release notes".to_string(),
+                    path: "docs/release.md".to_string(),
+                    kind: "file".to_string(),
+                }],
+            })
+            .expect("delegated run should create");
+        delegated_store
+            .finalize_run(
+                "delegated-1",
+                DelegatedRunStage::Complete,
+                &serde_json::json!({
+                    "human_review": "Release notes review completed."
+                }),
+                Some("Release notes review completed."),
+                false,
+            )
+            .expect("delegated run should finalize");
+
+        let Json(response) = attention(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Query(AttentionQuery {
+                thread_session_id: None,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("attention should succeed"));
+
+        assert!(response
+            .items
+            .iter()
+            .any(|item| item.kind == "scheduled_run_started"));
+        assert!(response
+            .items
+            .iter()
+            .any(|item| item.kind == "delegated_task_completed"));
+    }
+
+    #[tokio::test]
+    async fn attention_uses_scheduled_completion_kind_for_scheduled_run_finishes() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let session_id = session_manager
+            .create_session_for_user_with_config(
+                "Nightly Summary",
+                None,
+                Some(state.working_dir.to_string_lossy().as_ref()),
+                Some(state.working_dir.to_string_lossy().as_ref()),
+                WorkspaceMode::Selected,
+                Some("alice"),
+                None,
+                SessionType::Mako,
+            )
+            .expect("session should create");
+
+        let runtime_store = MakoRuntimeStateStore::new(
+            Database::new(&state.db_path).expect("database should open"),
+        );
+        runtime_store
+            .set_state(
+                &session_id,
+                MakoRuntimeStateStatus::Idle,
+                None,
+                None,
+                None,
+                None,
+                Some("manual_schedule"),
+                MakoRunPriority::Normal,
+            )
+            .expect("runtime state should persist");
+
+        let trace_db = Database::new(&state.db_path).expect("database should open");
+        let trace_store = RuntimeTraceStore::new(&trace_db);
+        let started_event = RuntimeTraceEvent::from_loop_event(
+            "run-2",
+            1,
+            0,
+            &LoopEvent::TickInjected { tick_number: 1 },
+        );
+        trace_store
+            .append_event(&session_id, &started_event)
+            .expect("scheduled run should write start trace");
+        let finished_event = RuntimeTraceEvent::from_loop_event(
+            "run-2",
+            2,
+            1,
+            &LoopEvent::Finished {
+                session_id: session_id.clone(),
+                stop_reason: LoopStopReason::Completed,
+            },
+        );
+        trace_store
+            .append_event(&session_id, &finished_event)
+            .expect("scheduled run should write finish trace");
+
+        let Json(response) = attention(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Query(AttentionQuery {
+                thread_session_id: None,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("attention should succeed"));
+
+        assert!(response
+            .items
+            .iter()
+            .any(|item| item.kind == "scheduled_run_completed"));
+        assert!(!response
+            .items
+            .iter()
+            .any(|item| item.kind == "run_completed"));
+    }
+
+    #[tokio::test]
+    async fn attention_does_not_treat_future_scheduled_sleep_as_started() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let session_id = session_manager
+            .create_session_for_user_with_config(
+                "Tomorrow Morning Check",
+                None,
+                Some(state.working_dir.to_string_lossy().as_ref()),
+                Some(state.working_dir.to_string_lossy().as_ref()),
+                WorkspaceMode::Selected,
+                Some("alice"),
+                None,
+                SessionType::Mako,
+            )
+            .expect("session should create");
+
+        let runtime_store = MakoRuntimeStateStore::new(
+            Database::new(&state.db_path).expect("database should open"),
+        );
+        runtime_store
+            .set_state(
+                &session_id,
+                MakoRuntimeStateStatus::Sleeping,
+                Some(&(chrono::Utc::now() + chrono::Duration::minutes(20)).to_rfc3339()),
+                Some("scheduled"),
+                None,
+                None,
+                Some("scheduled_dispatch"),
+                MakoRunPriority::Normal,
+            )
+            .expect("runtime state should persist");
+
+        let Json(response) = attention(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Query(AttentionQuery {
+                thread_session_id: None,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("attention should succeed"));
+
+        assert!(!response
+            .items
+            .iter()
+            .any(|item| item.kind == "scheduled_run_started"));
     }
 
     #[tokio::test]

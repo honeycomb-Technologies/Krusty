@@ -314,6 +314,7 @@ impl App {
             session_id,
             working_dir: self.runtime.working_dir.clone(),
             project_dir: Some(self.runtime.working_dir.clone()),
+            mako_crew_slug: None,
             session_type: SessionType::Code,
             permission_mode: self.runtime.permission_mode,
             max_iterations: self.runtime.agent_config.primary_max_turns(),

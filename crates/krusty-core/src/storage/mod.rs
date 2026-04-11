@@ -20,6 +20,8 @@ mod database_tests;
 mod delegated_runs;
 mod file_activity;
 mod knowledge;
+mod mako_attention_state;
+mod mako_home;
 mod mako_runtime_state;
 mod memories;
 mod messages;
@@ -48,11 +50,19 @@ pub use knowledge::{
     is_current_snapshot, is_current_snapshot_title, refresh_current_snapshot,
     CURRENT_SNAPSHOT_TITLE,
 };
+pub use mako_attention_state::{MakoAttentionItemState, MakoAttentionStateStore};
+pub use mako_home::{
+    bootstrap_mako_home, is_valid_crew_slug, summarize_channel_bindings, summarize_crew_runtime,
+    write_mako_crew_document, write_mako_home_document, MakoBootstrapResult, MakoChannelBinding,
+    MakoChannelKind, MakoContextLayer, MakoCrewDocumentKind, MakoCrewProfile,
+    MakoCrewRuntimeStatus, MakoCrewRuntimeSummary, MakoHomeDocument, MakoHomeDocumentKind,
+    MakoHomeProfile,
+};
 pub use mako_runtime_state::{
     MakoRunPriority, MakoRuntimeState, MakoRuntimeStateStatus, MakoRuntimeStateStore,
 };
 pub use memories::{AgentMemory, MemoryStore, MemoryType};
-pub use messages::MessageStore;
+pub use messages::{MessageStore, StoredMessageRecord};
 pub use plans::{PlanStore, PlanSummary};
 pub use preferences::Preferences;
 pub use project_settings::ProjectSettings;

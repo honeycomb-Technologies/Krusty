@@ -1,5 +1,10 @@
-import { StyleSheet, Text, type StyleProp, type ViewStyle } from "react-native";
-import { GlassCard } from "../ui/GlassCard";
+import {
+  StyleSheet,
+  Text,
+  View,
+  type StyleProp,
+  type ViewStyle,
+} from "react-native";
 import { useThemeContext } from "../../hooks/useTheme";
 
 interface MakoInsightCardProps {
@@ -36,32 +41,47 @@ export function MakoInsightCard({
   })();
 
   return (
-    <GlassCard style={style}>
+    <View
+      style={[
+        styles.card,
+        {
+          borderColor: t.border,
+          backgroundColor: "transparent",
+        },
+        style,
+      ]}
+    >
       <Text style={[styles.label, { color: t.mutedForeground }]}>{label}</Text>
       <Text style={[styles.value, { color: valueColor }]}>{value}</Text>
       {detail ? (
         <Text style={[styles.detail, { color: t.mutedForeground }]}>{detail}</Text>
       ) : null}
-    </GlassCard>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  card: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+  },
   label: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: "600",
     textTransform: "uppercase",
     letterSpacing: 0.3,
   },
   value: {
-    marginTop: 10,
-    fontSize: 22,
+    marginTop: 8,
+    fontSize: 18,
     fontWeight: "700",
-    letterSpacing: -0.5,
+    letterSpacing: -0.3,
   },
   detail: {
-    marginTop: 8,
+    marginTop: 6,
     fontSize: 12,
-    lineHeight: 17,
+    lineHeight: 16,
   },
 });

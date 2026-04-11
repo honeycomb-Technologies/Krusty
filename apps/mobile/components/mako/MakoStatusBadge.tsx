@@ -10,6 +10,7 @@ function paletteForStatus(status: string, theme: ReturnType<typeof useThemeConte
   const t = theme.colors;
   switch (status) {
     case "awake":
+    case "ready":
     case "running":
     case "in_progress":
       return {
@@ -17,15 +18,36 @@ function paletteForStatus(status: string, theme: ReturnType<typeof useThemeConte
         border: `${t.userMessage}3a`,
         color: t.userMessage,
       };
+    case "configured":
+      return {
+        background: `${t.success}18`,
+        border: `${t.success}38`,
+        color: t.success,
+      };
     case "sleeping":
+    case "attention":
       return {
         background: `${t.warning}18`,
         border: `${t.warning}38`,
         color: t.warning,
       };
+    case "waiting":
+    case "blocked":
+      return {
+        background: `${t.warning}18`,
+        border: `${t.warning}38`,
+        color: t.warning,
+      };
+    case "degraded":
+      return {
+        background: `${t.error}18`,
+        border: `${t.error}38`,
+        color: t.error,
+      };
     case "paused":
     case "pending":
     case "idle":
+    case "inactive":
       return {
         background: `${t.mutedForeground}14`,
         border: `${t.mutedForeground}22`,
@@ -77,15 +99,14 @@ export function MakoStatusBadge({ status }: MakoStatusBadgeProps) {
 
 const styles = StyleSheet.create({
   badge: {
-    borderRadius: 999,
+    borderRadius: 8,
     borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
   },
   label: {
-    fontSize: 12,
-    fontWeight: "700",
+    fontSize: 11,
+    fontWeight: "600",
     textTransform: "lowercase",
-    letterSpacing: 0.2,
   },
 });

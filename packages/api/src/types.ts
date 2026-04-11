@@ -259,6 +259,15 @@ export interface DelegatedRunResponse {
 export type MakoRuntimeStatus = 'idle' | 'running' | 'sleeping' | 'awaiting_input' | 'paused' | 'error' | 'cancelled';
 export type MakoHomeStatus = 'awake' | 'sleeping' | 'paused' | 'blocked' | 'idle';
 export type MakoRunPriority = 'low' | 'normal' | 'high';
+export type MakoChannelKind =
+  | 'main_thread'
+  | 'mobile_push'
+  | 'crew'
+  | 'web'
+  | 'email'
+  | 'webhook'
+  | 'unknown';
+export type MakoChannelStatus = 'ready' | 'configured' | 'attention' | 'inactive';
 export type AutonomousTaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 export type MakoDiagnosticSeverity = 'info' | 'warning' | 'critical';
 export type MakoRunDiagnosticKind =
@@ -333,6 +342,7 @@ export interface MakoRuntimeState {
   last_error?: string | null;
   current_run_id?: string | null;
   last_wake_reason?: string | null;
+  crew_slug?: string | null;
   priority: MakoRunPriority;
   updated_at: string;
 }
@@ -395,6 +405,43 @@ export interface MakoPendingApproval {
   priority: MakoRunPriority;
 }
 
+export type MakoAttentionItemKind =
+  | 'approval_required'
+  | 'input_required'
+  | 'run_completed'
+  | 'run_failed'
+  | 'run_stalled'
+  | 'scheduled_run_started'
+  | 'scheduled_run_completed'
+  | 'delegated_task_completed';
+
+export type MakoAttentionSection = 'needs_action' | 'updates';
+
+export interface MakoAttentionItem {
+  id: string;
+  kind: MakoAttentionItemKind;
+  section: MakoAttentionSection;
+  title: string;
+  summary: string;
+  detail: string;
+  created_at: string;
+  read: boolean;
+  cleared: boolean;
+  active: boolean;
+  session_id?: string | null;
+  run_id?: string | null;
+  project_dir?: string | null;
+  tool_call_id?: string | null;
+  thread_session_id?: string | null;
+  thread_message_id?: string | null;
+}
+
+export interface MakoAttentionResponse {
+  items: MakoAttentionItem[];
+  unread_count: number;
+  badge_count: number;
+}
+
 export interface MakoStatusSummary {
   home_status: MakoHomeStatus;
   total_count: number;
@@ -451,6 +498,76 @@ export interface MakoCurrentResponse {
   diagnostics: MakoDiagnosticsSummary;
   runs: MakoCurrentRunSummary[];
   approvals: MakoPendingApproval[];
+}
+
+export interface MakoHomeDocument {
+  file_name: string;
+  content: string;
+  preview: string;
+}
+
+export interface MakoCrewMember {
+  slug: string;
+  identity?: MakoHomeDocument | null;
+  soul?: MakoHomeDocument | null;
+  memory?: MakoHomeDocument | null;
+}
+
+export interface MakoHomeResponse {
+  soul?: MakoHomeDocument | null;
+  identity?: MakoHomeDocument | null;
+  heartbeat?: MakoHomeDocument | null;
+  memory?: MakoHomeDocument | null;
+  channels?: MakoHomeDocument | null;
+  crew: MakoCrewMember[];
+  crew_count: number;
+}
+
+export type MakoHomeDocumentKind = 'soul' | 'identity' | 'heartbeat' | 'memory' | 'channels';
+export type MakoCrewDocumentKind = 'identity' | 'soul' | 'memory';
+export type MakoCrewRuntimeStatus = 'idle' | 'running' | 'waiting' | 'degraded';
+
+export interface MakoBootstrapResponse {
+  ok: boolean;
+  created_files: string[];
+  home: MakoHomeResponse;
+}
+
+export interface MakoCrewRuntimeMember {
+  slug: string;
+  known_to_home: boolean;
+  status: MakoCrewRuntimeStatus;
+  active_run_count: number;
+  recent_run_count: number;
+  failed_run_count: number;
+  queued_task_count: number;
+  active_task_count: number;
+  completed_task_count: number;
+  failed_task_count: number;
+  latest_activity_at?: string | null;
+  identity?: MakoHomeDocument | null;
+  soul?: MakoHomeDocument | null;
+  memory?: MakoHomeDocument | null;
+}
+
+export interface MakoCrewResponse {
+  members: MakoCrewRuntimeMember[];
+}
+
+export interface MakoChannelItem {
+  id: string;
+  label: string;
+  kind: MakoChannelKind;
+  source: string;
+  enabled: boolean;
+  status: MakoChannelStatus;
+  detail: string;
+}
+
+export interface MakoChannelsResponse {
+  items: MakoChannelItem[];
+  apns_configured: boolean;
+  apns_device_count: number;
 }
 
 export interface MakoRecoverDaemonResponse {
@@ -679,6 +796,7 @@ export interface ModelInfo {
   max_output: number;
   supports_thinking: boolean;
   supports_tools: boolean;
+  supports_vision: boolean;
 }
 
 export interface ModelsResponse {

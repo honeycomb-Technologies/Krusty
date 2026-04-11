@@ -5,12 +5,20 @@
 use anyhow::Result;
 use chrono::Utc;
 use rusqlite::params;
+use serde::{Deserialize, Serialize};
 
 use super::database::Database;
 
 /// Message persistence store
 pub struct MessageStore<'a> {
     db: &'a Database,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredMessageRecord {
+    pub role: String,
+    pub content_json: String,
+    pub created_at: String,
 }
 
 impl<'a> MessageStore<'a> {
@@ -71,6 +79,29 @@ impl<'a> MessageStore<'a> {
     /// Returns (role, content_json) pairs where content_json can be deserialized to Vec<Content>
     pub fn load_session_messages(&self, session_id: &str) -> Result<Vec<(String, String)>> {
         self.load_session_messages_paginated(session_id, 0, None)
+    }
+
+    /// Load all stored message rows with created_at metadata for a session.
+    pub fn load_session_message_records(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<StoredMessageRecord>> {
+        let mut stmt = self.db.conn().prepare(
+            "SELECT role, content, created_at
+             FROM messages
+             WHERE session_id = ?1
+             ORDER BY id",
+        )?;
+
+        let rows = stmt.query_map([session_id], |row| {
+            Ok(StoredMessageRecord {
+                role: row.get(0)?,
+                content_json: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// Load messages for a session with paging support

@@ -13,7 +13,6 @@ import * as Haptics from "../../platform/haptics";
 import type { AgentMemory, MemoryType } from "@krusty/api";
 import { useBreakpoint } from "../../hooks/useBreakpoint";
 import { useThemeContext } from "../../hooks/useTheme";
-import { GlassCard } from "../ui/GlassCard";
 import { MakoInsightCard } from "./MakoInsightCard";
 import { MakoKnowledgeScopeToggle } from "./MakoKnowledgeScopeToggle";
 import { MakoTopNav } from "./MakoTopNav";
@@ -100,7 +99,15 @@ function MemoryCard({
 
   return (
     <Pressable onPress={onPress}>
-      <GlassCard style={styles.card} elevated={selected}>
+      <View
+        style={[
+          styles.card,
+          {
+            borderColor: t.border,
+            backgroundColor: selected ? t.glass.backgroundElevated : "transparent",
+          },
+        ]}
+      >
         <View style={styles.cardHeader}>
           <Text style={[styles.cardTitle, { color: t.foreground }]} numberOfLines={2}>
             {memory.title}
@@ -125,7 +132,7 @@ function MemoryCard({
             {formatRelativeTime(memory.updated_at)}
           </Text>
         </View>
-      </GlassCard>
+      </View>
     </Pressable>
   );
 }
@@ -135,7 +142,7 @@ function SnapshotCard({ snapshot }: { snapshot: AgentMemory }) {
   const t = theme.colors;
 
   return (
-    <GlassCard style={styles.snapshotCard} elevated>
+    <View style={[styles.snapshotCard, { borderColor: t.border }]}>
       <View style={styles.snapshotHeader}>
         <Text style={[styles.snapshotTitle, { color: t.foreground }]}>
           Current Snapshot
@@ -148,7 +155,7 @@ function SnapshotCard({ snapshot }: { snapshot: AgentMemory }) {
       <Text style={[styles.snapshotBody, { color: t.foreground }]}>
         {snapshot.content}
       </Text>
-    </GlassCard>
+    </View>
   );
 }
 
@@ -162,19 +169,19 @@ function MemoryDetailPane({
 
   if (!memory) {
     return (
-      <GlassCard style={styles.detailCard} elevated>
+      <View style={[styles.detailCard, { borderColor: t.border }]}>
         <Text style={[styles.detailTitle, { color: t.foreground }]}>
           No memory selected
         </Text>
         <Text style={[styles.detailBody, { color: t.mutedForeground }]}>
           Memories are the durable facts, decisions, and references Mako should keep carrying across runs.
         </Text>
-      </GlassCard>
+      </View>
     );
   }
 
   return (
-    <GlassCard style={styles.detailCard} elevated>
+    <View style={[styles.detailCard, { borderColor: t.border }]}>
       <Text style={[styles.detailTitle, { color: t.foreground }]}>
         {memory.title}
       </Text>
@@ -200,7 +207,7 @@ function MemoryDetailPane({
           Updated {formatTimestamp(memory.updated_at)}
         </Text>
       </View>
-    </GlassCard>
+    </View>
   );
 }
 
@@ -260,7 +267,7 @@ export function MakoMemoryView({
   const listContent = (
     <>
       <Text style={[styles.description, { color: t.mutedForeground }]}>
-        Memory is where reports turn into durable working knowledge. Keep it concise enough to carry forward, not verbose enough to become another report archive.
+        Memory is the durable layer inside Logbook. Keep it concise enough to carry forward, not verbose enough to become another report archive.
       </Text>
 
       {state.snapshot ? <SnapshotCard snapshot={state.snapshot} /> : null}
@@ -330,7 +337,7 @@ export function MakoMemoryView({
       ) : null}
 
       {visibleMemories.length === 0 && !state.snapshot ? (
-        <GlassCard style={styles.emptyCard}>
+        <View style={[styles.emptyCard, { borderColor: t.border }]}>
           <Text style={[styles.emptyTitle, { color: t.foreground }]}>
             {state.memories.length === 0 ? "No memories yet" : "No matching memories"}
           </Text>
@@ -339,7 +346,7 @@ export function MakoMemoryView({
               ? "Promote an important report or let future automation accumulate durable knowledge here."
               : "Try a different search term or memory type."}
           </Text>
-        </GlassCard>
+        </View>
       ) : visibleMemories.length > 0 ? (
         visibleMemories.map((memory) => (
           <MemoryCard
@@ -411,7 +418,7 @@ export function MakoMemoryView({
           style={styles.backButton}
         >
           <Text style={[styles.backLabel, { color: t.userMessage }]}>
-            Back to memory
+            Back to logbook
           </Text>
         </Pressable>
 
@@ -476,6 +483,9 @@ const styles = StyleSheet.create({
   },
   snapshotCard: {
     marginBottom: 0,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 8,
+    padding: 12,
   },
   snapshotHeader: {
     flexDirection: "row",
@@ -484,14 +494,14 @@ const styles = StyleSheet.create({
     alignItems: "flex-start",
   },
   snapshotTitle: {
-    fontSize: 17,
-    fontWeight: "800",
+    fontSize: 15,
+    fontWeight: "600",
     lineHeight: 22,
     flex: 1,
   },
   snapshotMeta: {
     fontSize: 12,
-    fontWeight: "700",
+    fontWeight: "600",
   },
   snapshotBody: {
     marginTop: 12,
@@ -507,9 +517,9 @@ const styles = StyleSheet.create({
   },
   searchInput: {
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 16,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     fontSize: 14,
   },
   error: {
@@ -518,6 +528,9 @@ const styles = StyleSheet.create({
   },
   card: {
     marginBottom: 0,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 8,
+    padding: 12,
   },
   cardHeader: {
     flexDirection: "row",
@@ -526,16 +539,16 @@ const styles = StyleSheet.create({
   },
   cardTitle: {
     flex: 1,
-    fontSize: 16,
-    fontWeight: "700",
+    fontSize: 14,
+    fontWeight: "600",
     lineHeight: 22,
   },
   cardType: {
-    fontSize: 12,
-    fontWeight: "700",
+    fontSize: 11,
+    fontWeight: "600",
   },
   cardSummary: {
-    marginTop: 10,
+    marginTop: 8,
     fontSize: 13,
     lineHeight: 18,
   },
@@ -551,10 +564,13 @@ const styles = StyleSheet.create({
   },
   emptyCard: {
     marginBottom: 0,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 8,
+    padding: 12,
   },
   emptyTitle: {
-    fontSize: 16,
-    fontWeight: "700",
+    fontSize: 14,
+    fontWeight: "600",
   },
   emptyBody: {
     marginTop: 8,
@@ -571,11 +587,14 @@ const styles = StyleSheet.create({
   },
   detailCard: {
     marginBottom: 0,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 8,
+    padding: 12,
   },
   detailTitle: {
-    fontSize: 22,
-    fontWeight: "700",
-    lineHeight: 28,
+    fontSize: 18,
+    fontWeight: "600",
+    lineHeight: 24,
   },
   detailMetaRow: {
     flexDirection: "row",

@@ -38,12 +38,13 @@ export function useMakoCurrent(enabled: boolean) {
   const setCourse = useCallback(
     async (
       task: string,
-      options?: {
-        projectDir?: string | null;
-        model?: string | null;
-        startAt?: string | null;
-        priority?: MakoRunPriority | null;
-      },
+        options?: {
+          projectDir?: string | null;
+          model?: string | null;
+          startAt?: string | null;
+          priority?: MakoRunPriority | null;
+          crewSlug?: string | null;
+        },
     ) => {
       if (!client || !isConnected) {
         return null;
@@ -57,6 +58,7 @@ export function useMakoCurrent(enabled: boolean) {
           model: options?.model ?? undefined,
           startAt: options?.startAt ?? undefined,
           priority: options?.priority ?? undefined,
+          crewSlug: options?.crewSlug ?? undefined,
         });
         await refresh();
         return response.session_id;

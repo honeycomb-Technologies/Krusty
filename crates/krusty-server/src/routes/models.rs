@@ -65,6 +65,7 @@ async fn list_models(State(state): State<AppState>) -> Result<Json<ModelsListRes
             max_output: m.max_output,
             supports_thinking: m.supports_thinking,
             supports_tools: m.supports_tools,
+            supports_vision: m.supports_vision,
         });
     }
 
@@ -84,6 +85,7 @@ async fn list_models(State(state): State<AppState>) -> Result<Json<ModelsListRes
                     max_output: m.max_output,
                     supports_thinking: m.supports_thinking,
                     supports_tools: m.supports_tools,
+                    supports_vision: m.supports_vision,
                 });
             }
         }
@@ -96,7 +98,10 @@ async fn list_models(State(state): State<AppState>) -> Result<Json<ModelsListRes
 
     let default_model = resolve_default_model(
         &models,
-        state.ai_client.as_ref().map(|client| client.config().model.as_str()),
+        state
+            .ai_client
+            .as_ref()
+            .map(|client| client.config().model.as_str()),
         &providers_with_auth,
     );
 
@@ -120,6 +125,7 @@ async fn get_model(
             max_output: model.max_output,
             supports_thinking: model.supports_thinking,
             supports_tools: model.supports_tools,
+            supports_vision: model.supports_vision,
         }));
     }
 
@@ -141,26 +147,29 @@ mod tests {
             max_output: 1,
             supports_thinking: false,
             supports_tools: true,
+            supports_vision: false,
         }
     }
 
     #[test]
     fn resolve_default_model_prefers_active_model() {
-        let models = vec![model("MiniMax-M2.5", "MiniMax"), model("claude-opus-4.6", "Anthropic")];
-        let default_model = resolve_default_model(
-            &models,
-            Some("claude-opus-4.6"),
-            &[ProviderId::Anthropic],
-        );
+        let models = vec![
+            model("MiniMax-M2.5", "MiniMax"),
+            model("claude-opus-4.6", "Anthropic"),
+        ];
+        let default_model =
+            resolve_default_model(&models, Some("claude-opus-4.6"), &[ProviderId::Anthropic]);
 
         assert_eq!(default_model, "claude-opus-4.6");
     }
 
     #[test]
     fn resolve_default_model_prefers_configured_provider_when_no_active_model() {
-        let models = vec![model("MiniMax-M2.5", "MiniMax"), model("claude-opus-4.6", "Anthropic")];
-        let default_model =
-            resolve_default_model(&models, None, &[ProviderId::Anthropic]);
+        let models = vec![
+            model("MiniMax-M2.5", "MiniMax"),
+            model("claude-opus-4.6", "Anthropic"),
+        ];
+        let default_model = resolve_default_model(&models, None, &[ProviderId::Anthropic]);
 
         assert_eq!(default_model, "claude-opus-4.6");
     }

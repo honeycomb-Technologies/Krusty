@@ -624,6 +624,7 @@ pub struct ModelResponse {
     pub max_output: usize,
     pub supports_thinking: bool,
     pub supports_tools: bool,
+    pub supports_vision: bool,
 }
 
 #[derive(Serialize)]

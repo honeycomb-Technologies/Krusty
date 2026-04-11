@@ -25,6 +25,12 @@ const PRESENCE_HEARTBEAT_INTERVAL = 10_000;
 const MAX_QUEUED_MESSAGES = 50;
 const MAX_MESSAGE_CONTENT_LENGTH = 500_000;
 const PRESENCE_CLIENT_STORAGE_KEY = "krusty:presence-client-id";
+const SUPPORTED_IMAGE_MIME_TYPES = [
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+] as const;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1156,11 +1162,15 @@ function buildContentBlocks(
 
   for (const att of attachments) {
     if (att.type === "image" && att.base64) {
+      const mediaType = normalizeSupportedImageMimeType(att.mimeType);
+      if (!mediaType) {
+        throw new Error(unsupportedImageMimeTypeMessage(att.mimeType));
+      }
       blocks.push({
         type: "image",
         source: {
           type: "base64",
-          media_type: att.mimeType || "image/png",
+          media_type: mediaType,
           data: att.base64,
         },
       });
@@ -1194,6 +1204,46 @@ ${att.text}`);
   });
 
   return blocks;
+}
+
+function normalizeSupportedImageMimeType(
+  mimeType: string | null | undefined,
+): string | null {
+  const normalized = (mimeType || "image/png").trim().toLowerCase();
+  switch (normalized) {
+    case "image/jpeg":
+    case "image/jpg":
+    case "image/pjpeg":
+      return "image/jpeg";
+    case "image/png":
+      return "image/png";
+    case "image/gif":
+      return "image/gif";
+    case "image/webp":
+      return "image/webp";
+    default:
+      return null;
+  }
+}
+
+function unsupportedImageMimeTypeMessage(mimeType: string): string {
+  const normalized = mimeType.trim().toLowerCase();
+  const hint =
+    normalized === "image/heic" || normalized === "image/heif"
+      ? " Convert HEIC/HEIF images to JPEG or PNG before uploading."
+      : "";
+  return `Image format '${mimeType.trim()}' is not supported. Supported formats: ${SUPPORTED_IMAGE_MIME_TYPES.join(", ")}.${hint}`;
+}
+
+function getUnsupportedImageAttachment(
+  attachments: Attachment[],
+): Attachment | undefined {
+  return attachments.find(
+    (att) =>
+      att.type === "image"
+      && Boolean(att.base64)
+      && !normalizeSupportedImageMimeType(att.mimeType),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1675,6 +1725,14 @@ export function createSessionStore(
           : attachments.length > 0
             ? "Please review the attached content."
             : content;
+
+      const unsupportedImage = getUnsupportedImageAttachment(attachments);
+      if (unsupportedImage) {
+        set({
+          error: unsupportedImageMimeTypeMessage(unsupportedImage.mimeType),
+        });
+        return;
+      }
 
       const attachmentLabel =
         attachments.length > 0

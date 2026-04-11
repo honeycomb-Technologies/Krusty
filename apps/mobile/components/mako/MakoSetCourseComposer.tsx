@@ -7,11 +7,11 @@ import {
   View,
 } from "react-native";
 import * as Haptics from "../../platform/haptics";
-import { GlassCard } from "../ui/GlassCard";
 import { useThemeContext } from "../../hooks/useTheme";
+import { MakoCrewPicker } from "./MakoCrewPicker";
 import { MakoPriorityPicker } from "./MakoPriorityPicker";
 import { MakoSchedulePicker } from "./MakoSchedulePicker";
-import type { MakoRunPriority } from "@krusty/api";
+import type { MakoCrewRuntimeMember, MakoRunPriority } from "@krusty/api";
 import {
   resolveScheduleSelection,
   type MakoSchedulePreset,
@@ -20,12 +20,21 @@ import { formatProjectLabel } from "./utils";
 
 interface MakoSetCourseComposerProps {
   projectDir?: string | null;
+  crewMembers?: MakoCrewRuntimeMember[];
   isSubmitting: boolean;
-  onSubmit: (task: string, options?: { startAt?: string | null; priority?: MakoRunPriority | null }) => Promise<void>;
+  onSubmit: (
+    task: string,
+    options?: {
+      startAt?: string | null;
+      priority?: MakoRunPriority | null;
+      crewSlug?: string | null;
+    },
+  ) => Promise<void>;
 }
 
 export function MakoSetCourseComposer({
   projectDir,
+  crewMembers = [],
   isSubmitting,
   onSubmit,
 }: MakoSetCourseComposerProps) {
@@ -35,10 +44,18 @@ export function MakoSetCourseComposer({
   const [schedulePreset, setSchedulePreset] = useState<MakoSchedulePreset>("now");
   const [customSchedule, setCustomSchedule] = useState("");
   const [priority, setPriority] = useState<MakoRunPriority>("normal");
+  const [crewSlug, setCrewSlug] = useState<string | null>(null);
   const schedule = resolveScheduleSelection(schedulePreset, customSchedule);
 
   return (
-    <GlassCard style={styles.card} elevated>
+    <View
+      style={[
+        styles.card,
+        {
+          borderColor: t.border,
+        },
+      ]}
+    >
       <View style={styles.header}>
         <View style={styles.copy}>
           <Text style={[styles.title, { color: t.foreground }]}>Set course</Text>
@@ -48,8 +65,8 @@ export function MakoSetCourseComposer({
         </View>
         <View
           style={[
-            styles.projectPill,
-            { borderColor: t.glass.border, backgroundColor: t.glass.background },
+            styles.projectTag,
+            { borderColor: t.border, backgroundColor: "transparent" },
           ]}
         >
           <Text style={[styles.projectLabel, { color: t.mutedForeground }]}>
@@ -68,8 +85,8 @@ export function MakoSetCourseComposer({
           styles.input,
           {
             color: t.foreground,
-            backgroundColor: t.glass.background,
-            borderColor: t.glass.border,
+            backgroundColor: t.card,
+            borderColor: t.border,
           },
         ]}
       />
@@ -82,6 +99,17 @@ export function MakoSetCourseComposer({
         customError={schedulePreset === "custom" ? schedule.error : null}
       />
       <MakoPriorityPicker value={priority} onChange={setPriority} />
+      {crewMembers.length > 0 ? (
+        <View style={styles.crewBlock}>
+          <Text style={[styles.crewTitle, { color: t.foreground }]}>Run as</Text>
+          <MakoCrewPicker
+            members={crewMembers}
+            selectedSlug={crewSlug}
+            isSaving={isSubmitting}
+            onSelect={setCrewSlug}
+          />
+        </View>
+      ) : null}
 
       <View style={styles.actions}>
         <Pressable
@@ -102,11 +130,13 @@ export function MakoSetCourseComposer({
             await onSubmit(task, {
               startAt: schedule.startAt,
               priority,
+              crewSlug,
             });
             setValue("");
             setSchedulePreset("now");
             setCustomSchedule("");
             setPriority("normal");
+            setCrewSlug(null);
           }}
           style={[
             styles.button,
@@ -129,13 +159,15 @@ export function MakoSetCourseComposer({
           </Text>
         </Pressable>
       </View>
-    </GlassCard>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   card: {
     marginHorizontal: 16,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: 12,
   },
   header: {
     flexDirection: "row",
@@ -146,19 +178,19 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   title: {
-    fontSize: 16,
-    fontWeight: "700",
+    fontSize: 15,
+    fontWeight: "600",
   },
   subtitle: {
     marginTop: 4,
-    fontSize: 13,
-    lineHeight: 18,
+    fontSize: 12,
+    lineHeight: 17,
   },
-  projectPill: {
+  projectTag: {
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 999,
+    borderRadius: 8,
     paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingVertical: 5,
     maxWidth: 150,
   },
   projectLabel: {
@@ -166,31 +198,39 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   input: {
-    minHeight: 110,
-    borderRadius: 18,
+    minHeight: 92,
+    borderRadius: 10,
     borderWidth: StyleSheet.hairlineWidth,
-    marginTop: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-    fontSize: 15,
-    lineHeight: 22,
+    marginTop: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    fontSize: 14,
+    lineHeight: 20,
     textAlignVertical: "top",
   },
   actions: {
-    marginTop: 14,
+    marginTop: 12,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "flex-end",
     gap: 12,
   },
   button: {
-    borderRadius: 999,
-    paddingHorizontal: 16,
+    borderRadius: 10,
+    paddingHorizontal: 14,
     paddingVertical: 10,
   },
   buttonLabel: {
     color: "#ffffff",
     fontSize: 13,
-    fontWeight: "700",
+    fontWeight: "600",
+  },
+  crewBlock: {
+    marginTop: 12,
+    gap: 8,
+  },
+  crewTitle: {
+    fontSize: 12,
+    fontWeight: "600",
   },
 });

@@ -26,7 +26,7 @@ mod tests {
 
         // Database should initialize with schema_version table
         let version = db.get_schema_version();
-        assert_eq!(version, 28, "Expected current schema version to be 28");
+        assert_eq!(version, 30, "Expected current schema version to be 30");
     }
 
     #[test]
@@ -181,6 +181,7 @@ mod tests {
         assert!(columns.contains(&"last_error".to_string()));
         assert!(columns.contains(&"current_run_id".to_string()));
         assert!(columns.contains(&"last_wake_reason".to_string()));
+        assert!(columns.contains(&"crew_slug".to_string()));
         assert!(columns.contains(&"priority".to_string()));
         assert!(columns.contains(&"updated_at".to_string()));
     }
@@ -264,7 +265,7 @@ mod tests {
         let version = db.get_schema_version();
 
         // After all migrations, version should be current
-        assert_eq!(version, 28, "Expected final schema version");
+        assert_eq!(version, 30, "Expected final schema version");
     }
 
     #[test]
@@ -448,5 +449,41 @@ mod tests {
         assert!(columns.contains(&"last_failure_at".to_string()));
         assert!(columns.contains(&"last_failure_reason".to_string()));
         assert!(columns.contains(&"failure_count".to_string()));
+    }
+
+    #[test]
+    fn test_mako_attention_state_table_exists() {
+        let (db, _temp) = create_test_db();
+
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='mako_attention_state'",
+            )
+            .expect("Failed to prepare query");
+
+        let tables: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .expect("Failed to query tables")
+            .filter_map(Result::ok)
+            .collect();
+
+        assert!(tables.contains(&"mako_attention_state".to_string()));
+
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(mako_attention_state)")
+            .expect("Failed to prepare PRAGMA");
+
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("Failed to get columns")
+            .filter_map(Result::ok)
+            .collect();
+
+        assert!(columns.contains(&"user_scope".to_string()));
+        assert!(columns.contains(&"item_id".to_string()));
+        assert!(columns.contains(&"read".to_string()));
+        assert!(columns.contains(&"cleared".to_string()));
+        assert!(columns.contains(&"updated_at".to_string()));
     }
 }

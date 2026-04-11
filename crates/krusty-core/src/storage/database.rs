@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use tracing::info;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 28;
+const SCHEMA_VERSION: i32 = 30;
 
 /// Shared database handle for connection reuse
 ///
@@ -909,6 +909,37 @@ impl Database {
                 )?;
             }
             self.set_schema_version_tx(&tx, 28)?;
+        }
+
+        // Migration 29: Persisted Mako crew assignment
+        if current_version < 29 {
+            info!("Running migration 29: Mako crew assignment");
+            if !Self::column_exists(&tx, "mako_runtime_state", "crew_slug") {
+                tx.execute_batch(
+                    "ALTER TABLE mako_runtime_state
+                     ADD COLUMN crew_slug TEXT;",
+                )?;
+            }
+            self.set_schema_version_tx(&tx, 29)?;
+        }
+
+        // Migration 30: Persisted Mako attention item state
+        if current_version < 30 {
+            info!("Running migration 30: Mako attention state");
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS mako_attention_state (
+                    user_scope TEXT NOT NULL DEFAULT '',
+                    item_id TEXT NOT NULL,
+                    read INTEGER NOT NULL DEFAULT 0,
+                    cleared INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (user_scope, item_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_mako_attention_state_user_scope
+                    ON mako_attention_state(user_scope);",
+            )
+            .context("Migration 30: Mako attention state")?;
+            self.set_schema_version_tx(&tx, 30)?;
         }
 
         tx.commit()?;

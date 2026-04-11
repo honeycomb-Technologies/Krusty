@@ -14,7 +14,7 @@ use axum::{
 };
 use futures::stream::Stream;
 use serde_json::json;
-use tokio::sync::{mpsc, Mutex, OwnedMutexGuard};
+use tokio::sync::{mpsc, Mutex, OwnedMutexGuard, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 
 use krusty_core::agent::coordinator_prompt::system_prompt_for_session;
@@ -29,7 +29,9 @@ use krusty_core::ai::client::{
 use krusty_core::ai::providers::ProviderId;
 use krusty_core::ai::types::{AiTool, Content, ImageContent, ModelMessage, Role, ThinkingConfig};
 use krusty_core::plan::PlanManager;
-use krusty_core::storage::{Database, ProjectSettings, SessionType, WorkMode, WorkspaceMode};
+use krusty_core::storage::{
+    Database, MakoRuntimeStateStore, ProjectSettings, SessionType, WorkMode, WorkspaceMode,
+};
 use krusty_core::tools::registry::PermissionMode;
 use krusty_core::SessionManager;
 
@@ -55,6 +57,8 @@ use crate::AppState;
 const SSE_CHANNEL_BUFFER: usize = 256;
 const SESSION_LOCK_MAX_ENTRIES: usize = 1000;
 const SESSION_LOCK_MAX_AGE: Duration = Duration::from_secs(3600);
+const SUPPORTED_BASE64_IMAGE_MEDIA_TYPES: [&str; 4] =
+    ["image/jpeg", "image/png", "image/gif", "image/webp"];
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -73,6 +77,7 @@ struct ChatSessionContext {
     project_dir: Option<PathBuf>,
     work_mode: WorkMode,
     session_type: SessionType,
+    mako_crew_slug: Option<String>,
     user_id: Option<String>,
     guard: OwnedMutexGuard<()>,
 }
@@ -111,8 +116,52 @@ impl<'a> RequestedModel<'a> {
     }
 }
 
+fn normalize_supported_base64_image_media_type(media_type: &str) -> Option<&'static str> {
+    match media_type.trim().to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" | "image/pjpeg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+fn unsupported_image_media_type_error(media_type: &str) -> AppError {
+    let normalized = media_type.trim().to_ascii_lowercase();
+    let hint = if matches!(normalized.as_str(), "image/heic" | "image/heif") {
+        " Convert HEIC/HEIF images to JPEG or PNG before uploading."
+    } else {
+        ""
+    };
+
+    AppError::BadRequest(format!(
+        "Image format '{}' is not supported. Supported formats: {}.{}",
+        media_type.trim(),
+        SUPPORTED_BASE64_IMAGE_MEDIA_TYPES.join(", "),
+        hint
+    ))
+}
+
+fn validate_content_blocks(content_blocks: &[ContentBlock]) -> Result<(), AppError> {
+    for block in content_blocks {
+        if let ContentBlock::Image {
+            source: crate::types::ImageSource::Base64 { media_type, .. },
+        } = block
+        {
+            if normalize_supported_base64_image_media_type(media_type).is_none() {
+                return Err(unsupported_image_media_type_error(media_type));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Build user message content from content blocks (images) and text message.
-fn build_user_content(message: &str, content_blocks: &[ContentBlock]) -> Vec<Content> {
+fn build_user_content(
+    message: &str,
+    content_blocks: &[ContentBlock],
+) -> Result<Vec<Content>, AppError> {
     let mut contents = Vec::with_capacity(content_blocks.len() + usize::from(!message.is_empty()));
     let mut has_text_block = false;
 
@@ -126,6 +175,8 @@ fn build_user_content(message: &str, content_blocks: &[ContentBlock]) -> Vec<Con
             ContentBlock::Image { source } => {
                 let image = match source {
                     crate::types::ImageSource::Base64 { media_type, data } => {
+                        let media_type = normalize_supported_base64_image_media_type(media_type)
+                            .ok_or_else(|| unsupported_image_media_type_error(media_type))?;
                         tracing::debug!(
                             "Content block: Image (base64, media_type={}, data_len={})",
                             media_type,
@@ -134,7 +185,7 @@ fn build_user_content(message: &str, content_blocks: &[ContentBlock]) -> Vec<Con
                         ImageContent {
                             base64: Some(data.clone()),
                             url: None,
-                            media_type: Some(media_type.clone()),
+                            media_type: Some(media_type.to_string()),
                         }
                     }
                     crate::types::ImageSource::Url { url } => {
@@ -166,7 +217,97 @@ fn build_user_content(message: &str, content_blocks: &[ContentBlock]) -> Vec<Con
         });
     }
 
-    contents
+    Ok(contents)
+}
+
+fn content_blocks_include_images(content_blocks: &[ContentBlock]) -> bool {
+    content_blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image { .. }))
+}
+
+async fn model_supports_vision(state: &AppState, model_id: &str) -> bool {
+    if let Some(metadata) = state.model_registry.get_model(model_id).await {
+        return metadata.supports_vision;
+    }
+
+    let Some(ai_client) = state.resolve_ai_client(Some(model_id)).await else {
+        return false;
+    };
+
+    krusty_core::ai::models::resolve_model_metadata(
+        ai_client.provider_id(),
+        model_id,
+        ai_client.config().api_format,
+    )
+    .supports_vision
+}
+
+async fn resolve_default_vision_model(state: &AppState) -> Option<String> {
+    let providers_with_auth = {
+        let store = state.credential_store.read().await;
+        store.providers_with_auth()
+    };
+
+    let (recent_models, models_by_provider) = state
+        .model_registry
+        .get_organized_models(&providers_with_auth)
+        .await;
+
+    if let Some(model) = recent_models.iter().find(|model| model.supports_vision) {
+        return Some(model.id.clone());
+    }
+
+    for provider in ProviderId::all() {
+        if !providers_with_auth.contains(provider) {
+            continue;
+        }
+        if let Some(models) = models_by_provider.get(provider) {
+            if let Some(model) = models.iter().find(|model| model.supports_vision) {
+                return Some(model.id.clone());
+            }
+        }
+    }
+
+    None
+}
+
+async fn select_model_for_chat_request(
+    state: &AppState,
+    requested_model: RequestedModel<'_>,
+    session_model: Option<&str>,
+    requires_vision: bool,
+) -> Result<Option<String>, AppError> {
+    let effective_model = requested_model
+        .effective(session_model)
+        .map(ToOwned::to_owned);
+    if !requires_vision {
+        return Ok(effective_model);
+    }
+
+    if let RequestedModel::Set(model) = requested_model {
+        if !model_supports_vision(state, model).await {
+            return Err(AppError::BadRequest(format!(
+                "Model '{}' does not support image input. Select a vision-capable model and try again.",
+                model
+            )));
+        }
+    }
+
+    if let Some(model_id) = effective_model.as_deref() {
+        if model_supports_vision(state, model_id).await {
+            return Ok(effective_model);
+        }
+    }
+
+    resolve_default_vision_model(state)
+        .await
+        .map(Some)
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "No vision-capable model is configured. Configure OpenAI, Anthropic, or another vision model before sending images.".to_string(),
+            )
+        })
 }
 
 async fn setup_chat_session(
@@ -176,6 +317,7 @@ async fn setup_chat_session(
     requested_model: RequestedModel<'_>,
     thinking_level: ThinkingLevel,
     research_enabled: bool,
+    requires_vision: bool,
 ) -> Result<ChatSessionContext, AppError> {
     let user_id = current_user_id(user).map(ToOwned::to_owned);
     let workspace_scope = request_workspace_scope(state, user);
@@ -184,11 +326,18 @@ async fn setup_chat_session(
     let session_manager = SessionManager::new(db);
     let session = load_owned_session(&session_manager, session_id, user)?;
 
-    let effective_model = requested_model.effective(session.model.as_deref());
+    let session_model = trimmed_nonempty(session.model.as_deref());
+    let effective_model =
+        select_model_for_chat_request(state, requested_model, session_model, requires_vision)
+            .await?;
     let ai_client = state
-        .resolve_ai_client(effective_model)
+        .resolve_ai_client(effective_model.as_deref())
         .await
         .ok_or_else(|| AppError::BadRequest("No AI credentials configured".to_string()))?;
+
+    if requires_vision && effective_model.as_deref() != session_model {
+        session_manager.update_session_model(session_id, effective_model.as_deref())?;
+    }
 
     let working_dir = resolve_session_working_dir(
         session.working_dir.as_deref(),
@@ -256,6 +405,11 @@ async fn setup_chat_session(
         .and_then(|pm| pm.get_lifecycle_state(session_id, session.work_mode).ok())
         .map(|state| state.effective_work_mode)
         .unwrap_or(session.work_mode);
+    let mako_runtime = if session.session_type == SessionType::Mako {
+        MakoRuntimeStateStore::new(Database::new(&state.db_path)?).get_state(session_id)?
+    } else {
+        None
+    };
 
     Ok(ChatSessionContext {
         ai_client,
@@ -267,6 +421,7 @@ async fn setup_chat_session(
         project_dir,
         work_mode: effective_work_mode,
         session_type: session.session_type,
+        mako_crew_slug: mako_runtime.and_then(|runtime| runtime.crew_slug),
         user_id,
         guard,
     })
@@ -279,10 +434,13 @@ async fn chat(
     user: Option<CurrentUser>,
     Json(req): Json<ChatRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
+    validate_content_blocks(&req.content)?;
+
     let user_id = current_user_id(user.as_ref()).map(ToOwned::to_owned);
     let workspace_scope = request_workspace_scope(&state, user.as_ref());
     let requested_model = RequestedModel::from_request(req.model.as_deref());
     let requested_session_type = req.session_type.unwrap_or(SessionType::Code);
+    let requires_vision = content_blocks_include_images(&req.content);
 
     let (session_id, is_first_message, pending_model_update) = match req.session_id {
         Some(id) => {
@@ -334,6 +492,7 @@ async fn chat(
         requested_model,
         req.thinking_enabled,
         req.research_enabled.unwrap_or(false),
+        requires_vision,
     )
     .await?;
 
@@ -351,7 +510,7 @@ async fn chat(
         }
     }
 
-    let user_content = build_user_content(&req.message, &req.content);
+    let user_content = build_user_content(&req.message, &req.content)?;
     let user_content_json = serde_json::to_string(&user_content)?;
 
     ctx.conversation.push(ModelMessage {
@@ -382,6 +541,7 @@ async fn tool_result(
         &req.session_id,
         RequestedModel::Unspecified,
         ThinkingLevel::Off,
+        false,
         false,
     )
     .await?;
@@ -626,6 +786,7 @@ async fn start_orchestrator_sse(
         session_id: ctx.session_id.clone(),
         working_dir: ctx.working_dir,
         project_dir: ctx.project_dir,
+        mako_crew_slug: ctx.mako_crew_slug.clone(),
         session_type: ctx.session_type,
         permission_mode,
         user_id: ctx.user_id.clone(),
@@ -634,7 +795,7 @@ async fn start_orchestrator_sse(
         ..Default::default()
     };
 
-    let (mut event_rx, input_tx) = if ctx.session_type == SessionType::Mako {
+    let (event_rx, input_tx) = if ctx.session_type == SessionType::Mako {
         use krusty_core::agent::tick_engine::{TickEngine, TickEngineConfig};
         let tick_config = TickEngineConfig {
             tick_interval: std::time::Duration::from_secs(mako_settings.tick_interval_secs),
@@ -665,161 +826,190 @@ async fn start_orchestrator_sse(
     tokio::spawn(async move {
         active_agent_streams.fetch_add(1, Ordering::Relaxed);
         let _guard = guard;
-        let mut awaiting_input = false;
-        let mut had_error = false;
-        let mut stop_reason: Option<LoopStopReason> = None;
-        let mut skipped_events = 0usize;
-
-        while let Some(loop_event) = event_rx.recv().await {
-            if let LoopEvent::Finished {
-                stop_reason: ref reason,
-                ..
-            } = loop_event
-            {
-                stop_reason = Some(reason.clone());
-            }
-            let is_finished = matches!(loop_event, LoopEvent::Finished { .. });
-
-            if matches!(loop_event, LoopEvent::AwaitingInput { .. }) {
-                awaiting_input = true;
-                fire_push(
-                    &push_service,
-                    user_id.as_deref(),
-                    PushPayload {
-                        title: "Krusty".into(),
-                        body: "Krusty needs your input".into(),
-                        session_id: Some(session_id.clone()),
-                        tag: None,
-                    },
-                    PushEventType::AwaitingInput,
-                );
-                fire_apns(
-                    &apns_service,
-                    user_id.as_deref(),
-                    ApnsPayload {
-                        title: "Krusty".into(),
-                        body: "Krusty needs your input".into(),
-                        session_id: Some(session_id.clone()),
-                        category: Some("TOOL_APPROVAL".into()),
-                        data: Some(json!({
-                            "type": "awaiting_input",
-                            "sessionId": session_id.clone(),
-                        })),
-                    },
-                    ApnsEventType::AwaitingInput,
-                );
-            }
-
-            // APNs: tool approval required (not triggered by Web Push currently)
-            if let LoopEvent::ToolApprovalRequired {
-                ref id, ref name, ..
-            } = loop_event
-            {
-                fire_apns(
-                    &apns_service,
-                    user_id.as_deref(),
-                    ApnsPayload {
-                        title: "Permission Required".into(),
-                        body: format!("\"{name}\" is requesting permission to execute."),
-                        session_id: Some(session_id.clone()),
-                        category: Some("TOOL_APPROVAL".into()),
-                        data: Some(serde_json::json!({
-                            "requestId": id,
-                            "sessionId": session_id.clone(),
-                            "toolName": name,
-                            "type": "tool_approval",
-                        })),
-                    },
-                    ApnsEventType::ToolApproval,
-                );
-            }
-
-            if matches!(loop_event, LoopEvent::Error { .. }) {
-                had_error = true;
-            }
-
-            if !forward_loop_event(&sse_tx, &session_id, loop_event, &mut skipped_events).await {
-                break;
-            }
-
-            if is_finished {
-                break;
-            }
-        }
-
-        // Fire push notification based on how the loop ended
-        if !awaiting_input {
-            if had_error {
-                fire_push(
-                    &push_service,
-                    user_id.as_deref(),
-                    PushPayload {
-                        title: "Krusty".into(),
-                        body: "Session encountered an error".into(),
-                        session_id: Some(session_id.clone()),
-                        tag: None,
-                    },
-                    PushEventType::Error,
-                );
-                fire_apns(
-                    &apns_service,
-                    user_id.as_deref(),
-                    ApnsPayload {
-                        title: "Krusty".into(),
-                        body: "Session encountered an error".into(),
-                        session_id: Some(session_id.clone()),
-                        category: None,
-                        data: Some(json!({
-                            "type": "error",
-                            "sessionId": session_id.clone(),
-                        })),
-                    },
-                    ApnsEventType::Error,
-                );
-            } else if stop_reason == Some(LoopStopReason::Sleeping) {
-                tracing::info!(
-                    session_id = %session_id,
-                    "Session entered sleeping state; skipping completion push"
-                );
-            } else {
-                let title = session_title(&db_path, &session_id);
-                fire_push(
-                    &push_service,
-                    user_id.as_deref(),
-                    PushPayload {
-                        title: "Krusty".into(),
-                        body: format!("{title} is complete"),
-                        session_id: Some(session_id.clone()),
-                        tag: Some(format!("session-{session_id}")),
-                    },
-                    PushEventType::Completion,
-                );
-                fire_apns(
-                    &apns_service,
-                    user_id.as_deref(),
-                    ApnsPayload {
-                        title: format!("{title} — Complete"),
-                        body: "Response finished".into(),
-                        session_id: Some(session_id.clone()),
-                        category: Some("STREAM_COMPLETE".into()),
-                        data: Some(serde_json::json!({
-                            "type": "stream_complete",
-                            "sessionId": session_id.clone(),
-                        })),
-                    },
-                    ApnsEventType::Completion,
-                );
-            }
-        }
-
-        // Clean up session input channel
-        let mut inputs = session_inputs.write().await;
-        inputs.remove(&session_id);
+        run_orchestrator_event_bridge(
+            event_rx,
+            sse_tx,
+            session_id,
+            session_inputs,
+            push_service,
+            apns_service,
+            user_id,
+            db_path,
+        )
+        .await;
         active_agent_streams.fetch_sub(1, Ordering::Relaxed);
     });
 
     let stream = ReceiverStream::new(sse_rx);
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+async fn run_orchestrator_event_bridge(
+    mut event_rx: mpsc::UnboundedReceiver<LoopEvent>,
+    sse_tx: mpsc::Sender<Result<Event, Infallible>>,
+    session_id: String,
+    session_inputs: Arc<RwLock<crate::SessionInputMap>>,
+    push_service: Option<Arc<crate::push::PushService>>,
+    apns_service: Option<Arc<crate::apns::ApnsService>>,
+    user_id: Option<String>,
+    db_path: Arc<PathBuf>,
+) {
+    let mut awaiting_input = false;
+    let mut had_error = false;
+    let mut stop_reason: Option<LoopStopReason> = None;
+    let mut skipped_events = 0usize;
+    let mut sse_connected = true;
+
+    while let Some(loop_event) = event_rx.recv().await {
+        if let LoopEvent::Finished {
+            stop_reason: ref reason,
+            ..
+        } = loop_event
+        {
+            stop_reason = Some(reason.clone());
+        }
+        let is_finished = matches!(loop_event, LoopEvent::Finished { .. });
+
+        if matches!(loop_event, LoopEvent::AwaitingInput { .. }) {
+            awaiting_input = true;
+            fire_push(
+                &push_service,
+                user_id.as_deref(),
+                PushPayload {
+                    title: "Krusty".into(),
+                    body: "Krusty needs your input".into(),
+                    session_id: Some(session_id.clone()),
+                    tag: None,
+                },
+                PushEventType::AwaitingInput,
+            );
+            fire_apns(
+                &apns_service,
+                user_id.as_deref(),
+                ApnsPayload {
+                    title: "Krusty".into(),
+                    body: "Krusty needs your input".into(),
+                    session_id: Some(session_id.clone()),
+                    category: Some("TOOL_APPROVAL".into()),
+                    data: Some(json!({
+                        "type": "awaiting_input",
+                        "sessionId": session_id.clone(),
+                    })),
+                },
+                ApnsEventType::AwaitingInput,
+            );
+        }
+
+        // APNs: tool approval required (not triggered by Web Push currently)
+        if let LoopEvent::ToolApprovalRequired {
+            ref id, ref name, ..
+        } = loop_event
+        {
+            fire_apns(
+                &apns_service,
+                user_id.as_deref(),
+                ApnsPayload {
+                    title: "Permission Required".into(),
+                    body: format!("\"{name}\" is requesting permission to execute."),
+                    session_id: Some(session_id.clone()),
+                    category: Some("TOOL_APPROVAL".into()),
+                    data: Some(serde_json::json!({
+                        "requestId": id,
+                        "sessionId": session_id.clone(),
+                        "toolName": name,
+                        "type": "tool_approval",
+                    })),
+                },
+                ApnsEventType::ToolApproval,
+            );
+        }
+
+        if matches!(loop_event, LoopEvent::Error { .. }) {
+            had_error = true;
+        }
+
+        if sse_connected
+            && !forward_loop_event(&sse_tx, &session_id, loop_event, &mut skipped_events).await
+        {
+            sse_connected = false;
+            skipped_events = 0;
+            tracing::info!(
+                session_id = %session_id,
+                "SSE client disconnected; continuing to drain orchestrator events"
+            );
+        }
+
+        if is_finished {
+            break;
+        }
+    }
+
+    // Fire push notification based on how the loop ended
+    if !awaiting_input {
+        if had_error {
+            fire_push(
+                &push_service,
+                user_id.as_deref(),
+                PushPayload {
+                    title: "Krusty".into(),
+                    body: "Session encountered an error".into(),
+                    session_id: Some(session_id.clone()),
+                    tag: None,
+                },
+                PushEventType::Error,
+            );
+            fire_apns(
+                &apns_service,
+                user_id.as_deref(),
+                ApnsPayload {
+                    title: "Krusty".into(),
+                    body: "Session encountered an error".into(),
+                    session_id: Some(session_id.clone()),
+                    category: None,
+                    data: Some(json!({
+                        "type": "error",
+                        "sessionId": session_id.clone(),
+                    })),
+                },
+                ApnsEventType::Error,
+            );
+        } else if stop_reason == Some(LoopStopReason::Sleeping) {
+            tracing::info!(
+                session_id = %session_id,
+                "Session entered sleeping state; skipping completion push"
+            );
+        } else {
+            let title = session_title(&db_path, &session_id);
+            fire_push(
+                &push_service,
+                user_id.as_deref(),
+                PushPayload {
+                    title: "Krusty".into(),
+                    body: format!("{title} is complete"),
+                    session_id: Some(session_id.clone()),
+                    tag: Some(format!("session-{session_id}")),
+                },
+                PushEventType::Completion,
+            );
+            fire_apns(
+                &apns_service,
+                user_id.as_deref(),
+                ApnsPayload {
+                    title: format!("{title} — Complete"),
+                    body: "Response finished".into(),
+                    session_id: Some(session_id.clone()),
+                    category: Some("STREAM_COMPLETE".into()),
+                    data: Some(serde_json::json!({
+                        "type": "stream_complete",
+                        "sessionId": session_id.clone(),
+                    })),
+                },
+                ApnsEventType::Completion,
+            );
+        }
+    }
+
+    session_inputs.write().await.remove(&session_id);
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -940,10 +1130,12 @@ mod tests {
     use axum::Json;
     use tokio::sync::mpsc::error::TryRecvError;
     use tokio::sync::{mpsc, Mutex, RwLock};
+    use tokio::time::{timeout, Duration};
 
     use krusty_core::agent::loop_events::LoopStopReason;
     use krusty_core::agent::{AgentCancellation, LoopEvent, LoopInput, UserHookManager};
-    use krusty_core::ai::models::create_model_registry;
+    use krusty_core::ai::models::{create_model_registry, ApiFormat, ModelMetadata};
+    use krusty_core::ai::providers::ProviderId;
     use krusty_core::ai::types::Content;
     use krusty_core::mcp::McpManager;
     use krusty_core::process::ProcessRegistry;
@@ -953,7 +1145,10 @@ mod tests {
     use krusty_core::tools::registry::ToolRegistry;
     use krusty_core::SessionManager;
 
-    use super::{build_user_content, chat, forward_loop_event, tool_approval, RequestedModel};
+    use super::{
+        build_user_content, chat, forward_loop_event, run_orchestrator_event_bridge,
+        select_model_for_chat_request, tool_approval, RequestedModel,
+    };
     use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::error::AppError;
     use crate::types::{ChatRequest, ContentBlock, ToolApprovalRequest};
@@ -1019,6 +1214,19 @@ mod tests {
         })
     }
 
+    fn model(
+        id: &str,
+        provider: ProviderId,
+        api_format: ApiFormat,
+        supports_vision: bool,
+    ) -> ModelMetadata {
+        let mut model = ModelMetadata::new(id, id, provider).with_context(200_000, 32_768);
+        model.supports_tools = true;
+        model.supports_vision = supports_vision;
+        model.api_format = api_format;
+        model
+    }
+
     #[test]
     fn requested_model_prefers_request_and_trims_input() {
         let requested_model = RequestedModel::from_request(Some("  openai/gpt-5  "));
@@ -1062,14 +1270,17 @@ mod tests {
 
     #[test]
     fn build_user_content_appends_message_when_only_images_are_provided() {
-        let content = build_user_content(
+        let content = match build_user_content(
             "describe this",
             &[ContentBlock::Image {
                 source: crate::types::ImageSource::Url {
                     url: "https://example.com/image.png".to_string(),
                 },
             }],
-        );
+        ) {
+            Ok(content) => content,
+            Err(_) => panic!("image url content should build"),
+        };
 
         assert!(matches!(content.first(), Some(Content::Image { .. })));
         assert!(matches!(
@@ -1080,17 +1291,139 @@ mod tests {
 
     #[test]
     fn build_user_content_does_not_duplicate_message_when_text_block_exists() {
-        let content = build_user_content(
+        let content = match build_user_content(
             "fallback message",
             &[ContentBlock::Text {
                 text: "block text".to_string(),
             }],
-        );
+        ) {
+            Ok(content) => content,
+            Err(_) => panic!("text content should build"),
+        };
 
         assert_eq!(content.len(), 1);
         assert!(matches!(
             content.first(),
             Some(Content::Text { text }) if text == "block text"
+        ));
+    }
+
+    #[test]
+    fn build_user_content_preserves_file_attachment_text_block() {
+        let file_text = "Please review the attached file.\n\n--- notes.txt ---\nhello from file";
+        let content = match build_user_content(
+            "fallback message",
+            &[ContentBlock::Text {
+                text: file_text.to_string(),
+            }],
+        ) {
+            Ok(content) => content,
+            Err(_) => panic!("file attachment text block should build"),
+        };
+
+        assert_eq!(content.len(), 1);
+        assert!(matches!(
+            content.first(),
+            Some(Content::Text { text }) if text == file_text
+        ));
+    }
+
+    #[test]
+    fn build_user_content_rejects_unsupported_image_media_type() {
+        let result = build_user_content(
+            "describe this",
+            &[ContentBlock::Image {
+                source: crate::types::ImageSource::Base64 {
+                    media_type: "image/heic".to_string(),
+                    data: "ZmFrZQ==".to_string(),
+                },
+            }],
+        );
+
+        assert!(matches!(
+            result,
+            Err(AppError::BadRequest(message))
+                if message.contains("image/heic") && message.contains("Convert HEIC/HEIF")
+        ));
+    }
+
+    #[tokio::test]
+    async fn select_model_for_chat_request_falls_back_to_configured_vision_model() {
+        let (state, _temp_dir) = create_test_state();
+        {
+            let mut credentials = state.credential_store.write().await;
+            credentials.set(ProviderId::MiniMax, "minimax-test-key".to_string());
+            credentials.set(ProviderId::OpenAI, "openai-test-key".to_string());
+        }
+
+        state
+            .model_registry
+            .set_models(
+                ProviderId::MiniMax,
+                vec![model(
+                    "MiniMax-M2.5",
+                    ProviderId::MiniMax,
+                    ApiFormat::Anthropic,
+                    false,
+                )],
+            )
+            .await;
+        state
+            .model_registry
+            .set_models(
+                ProviderId::OpenAI,
+                vec![model(
+                    "gpt-4.1",
+                    ProviderId::OpenAI,
+                    ApiFormat::OpenAI,
+                    true,
+                )],
+            )
+            .await;
+
+        let selected = select_model_for_chat_request(
+            &state,
+            RequestedModel::Unspecified,
+            Some("MiniMax-M2.5"),
+            true,
+        )
+        .await;
+
+        match selected {
+            Ok(selected) => assert_eq!(selected.as_deref(), Some("gpt-4.1")),
+            Err(_) => panic!("vision fallback should resolve"),
+        }
+    }
+
+    #[tokio::test]
+    async fn select_model_for_chat_request_rejects_explicit_non_vision_model() {
+        let (state, _temp_dir) = create_test_state();
+        {
+            let mut credentials = state.credential_store.write().await;
+            credentials.set(ProviderId::MiniMax, "minimax-test-key".to_string());
+        }
+
+        state
+            .model_registry
+            .set_models(
+                ProviderId::MiniMax,
+                vec![model(
+                    "MiniMax-M2.5",
+                    ProviderId::MiniMax,
+                    ApiFormat::Anthropic,
+                    false,
+                )],
+            )
+            .await;
+
+        let result =
+            select_model_for_chat_request(&state, RequestedModel::Set("MiniMax-M2.5"), None, true)
+                .await;
+
+        assert!(matches!(
+            result,
+            Err(AppError::BadRequest(message))
+                if message.contains("does not support image input")
         ));
     }
 
@@ -1159,6 +1492,89 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(AppError::Conflict(_))));
+    }
+
+    #[tokio::test]
+    async fn tool_approval_survives_sse_disconnect_until_run_finishes() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let session_id = session_manager
+            .create_session_for_user("Owned Session", None, None, Some("alice"))
+            .expect("session creation should succeed");
+
+        let (input_tx, mut input_rx) = mpsc::unbounded_channel::<LoopInput>();
+        state
+            .session_inputs
+            .write()
+            .await
+            .insert(session_id.clone(), input_tx);
+
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<LoopEvent>();
+        let (sse_tx, sse_rx) = mpsc::channel(1);
+        drop(sse_rx);
+
+        let bridge = tokio::spawn(run_orchestrator_event_bridge(
+            event_rx,
+            sse_tx,
+            session_id.clone(),
+            Arc::clone(&state.session_inputs),
+            None,
+            None,
+            Some("alice".to_string()),
+            Arc::clone(&state.db_path),
+        ));
+
+        event_tx
+            .send(LoopEvent::ToolApprovalRequired {
+                id: "tool-1".to_string(),
+                name: "edit".to_string(),
+                arguments: serde_json::json!({}),
+            })
+            .expect("tool approval event should send");
+
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if state.session_inputs.read().await.contains_key(&session_id) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("session input should stay registered after stream loss");
+
+        let approval = tool_approval(
+            State(state.clone()),
+            Some(current_user("alice", std::path::Path::new("/tmp"))),
+            Json(ToolApprovalRequest {
+                session_id: session_id.clone(),
+                tool_call_id: "tool-1".to_string(),
+                approved: true,
+            }),
+        )
+        .await;
+
+        assert!(approval.is_ok());
+        assert!(matches!(
+            timeout(Duration::from_secs(1), input_rx.recv()).await,
+            Ok(Some(LoopInput::ToolApproval {
+                tool_call_id,
+                approved: true,
+            })) if tool_call_id == "tool-1"
+        ));
+
+        event_tx
+            .send(LoopEvent::Finished {
+                session_id: session_id.clone(),
+                stop_reason: LoopStopReason::Completed,
+            })
+            .expect("finish event should send");
+
+        bridge.await.expect("bridge should finish");
+        assert!(state.session_inputs.read().await.get(&session_id).is_none());
     }
 
     #[tokio::test]
@@ -1265,6 +1681,51 @@ mod tests {
         assert_eq!(sessions[0].workspace_mode, WorkspaceMode::Selected);
         assert_eq!(sessions[0].project_dir.as_deref(), Some(expected.as_str()));
         assert_eq!(sessions[0].working_dir.as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test]
+    async fn chat_rejects_unsupported_image_before_creating_session() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let result = chat(
+            State(state.clone()),
+            Some(current_user("alice", state.working_dir.as_ref())),
+            Json(ChatRequest {
+                session_id: None,
+                message: "what is this?".to_string(),
+                content: vec![ContentBlock::Image {
+                    source: crate::types::ImageSource::Base64 {
+                        media_type: "image/heic".to_string(),
+                        data: "ZmFrZQ==".to_string(),
+                    },
+                }],
+                project_dir: None,
+                working_dir: None,
+                workspace_mode: None,
+                session_type: Some(SessionType::Chat),
+                model: None,
+                thinking_enabled: crate::types::ThinkingLevel::Off,
+                mode: None,
+                permission_mode: krusty_core::tools::registry::PermissionMode::default(),
+                research_enabled: None,
+            }),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(AppError::BadRequest(message))
+                if message.contains("image/heic") && message.contains("Supported formats")
+        ));
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let sessions = session_manager
+            .list_sessions_for_user(None, Some("alice"))
+            .expect("session listing should succeed");
+
+        assert!(sessions.is_empty());
     }
 
     #[tokio::test]

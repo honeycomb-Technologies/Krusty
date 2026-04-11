@@ -13,11 +13,13 @@ use tokio::sync::RwLock;
 use tracing::warn;
 
 use crate::ai::types::{Content, ModelMessage, Role};
+use crate::paths;
 use crate::plan::PlanManager;
 use crate::skills::SkillsManager;
 use crate::storage::{
     is_current_snapshot, refresh_current_snapshot, AutonomousTaskStore, Database,
-    DelegatedRunStore, MemoryStore, MemoryType, ProjectSettings, ReportStore, TaskStatus, WorkMode,
+    DelegatedRunStore, MakoHomeProfile, MemoryStore, MemoryType, ProjectSettings, ReportStore,
+    TaskStatus, WorkMode,
 };
 
 /// Instruction files to search for in the working directory (priority order).
@@ -51,6 +53,7 @@ pub fn inject_context(
     skills_manager: &RwLock<SkillsManager>,
     model_id: Option<&str>,
     session_type: Option<&str>,
+    mako_crew_slug: Option<&str>,
 ) -> Vec<ModelMessage> {
     let is_chat = session_type == Some("chat");
 
@@ -108,10 +111,10 @@ pub fn inject_context(
     };
     let skills_ctx = build_skills_context(skills_manager, project_dir.is_some());
     let project_ctx = project_dir.map(build_project_context).unwrap_or_default();
-    let mako_ctx = if is_mako {
-        build_mako_context(project_dir.unwrap_or(working_dir))
+    let mako_ctx_sections = if is_mako {
+        build_mako_context_sections(project_dir.unwrap_or(working_dir), mako_crew_slug)
     } else {
-        String::new()
+        Vec::new()
     };
     let project_settings = project_dir.map(ProjectSettings::load).unwrap_or_default();
 
@@ -151,10 +154,10 @@ pub fn inject_context(
             content: vec![Content::Text { text: project_ctx }],
         });
     }
-    if !mako_ctx.is_empty() {
+    for text in mako_ctx_sections {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text { text: mako_ctx }],
+            content: vec![Content::Text { text }],
         });
     }
     if let Some(ref append) = project_settings.system_prompt_append {
@@ -1153,31 +1156,83 @@ pub fn build_project_context(working_dir: &Path) -> String {
     sections.join("\n\n")
 }
 
-fn build_mako_context(project_root: &Path) -> String {
-    let Some(path) = discover_named_file(project_root, MAKO_FILES) else {
-        return String::new();
-    };
+fn build_mako_context_sections(project_root: &Path, mako_crew_slug: Option<&str>) -> Vec<String> {
+    let mako_home = paths::mako_dir();
+    build_mako_context_sections_with_home(project_root, &mako_home, mako_crew_slug)
+}
 
-    let content = match std::fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(error) => {
-            warn!(path = %path.display(), error = %error, "Failed to read Mako identity file");
-            return String::new();
+fn build_mako_context_sections_with_home(
+    project_root: &Path,
+    mako_home: &Path,
+    mako_crew_slug: Option<&str>,
+) -> Vec<String> {
+    let profile = MakoHomeProfile::load_from(mako_home);
+    let mut sections = profile
+        .context_layers()
+        .into_iter()
+        .map(|layer| {
+            format!(
+                "[MAKO {} - {}]\n\n{}\n\n[END MAKO {}]",
+                layer.kind, layer.document.file_name, layer.document.content, layer.kind
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if let Some(crew_slug) = mako_crew_slug
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Some(member) = profile.crew.iter().find(|member| member.slug == crew_slug) {
+            for (kind, document) in [
+                ("CREW IDENTITY", member.identity.as_ref()),
+                ("CREW SOUL", member.soul.as_ref()),
+                ("CREW MEMORY", member.memory.as_ref()),
+            ] {
+                if let Some(document) = document {
+                    sections.push(format!(
+                        "[MAKO {} - {} - {}]\n\n{}\n\n[END MAKO {}]",
+                        kind, member.slug, document.file_name, document.content, kind
+                    ));
+                }
+            }
         }
-    };
-    if content.trim().is_empty() {
-        return String::new();
     }
 
-    let label = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("MAKO.md");
+    if let Some(path) = discover_named_file(project_root, MAKO_FILES) {
+        if let Some(content) = load_mako_context_file(&path, "Mako project overlay") {
+            let label = display_context_file_name(&path, "MAKO.md");
+            sections.push(format!(
+                "[MAKO PROJECT OVERLAY - {}]\n\n{}\n\n[END MAKO PROJECT OVERLAY]",
+                label, content
+            ));
+        }
+    }
 
-    format!(
-        "[MAKO IDENTITY - {}]\n\n{}\n\n[END MAKO IDENTITY]",
-        label, content
-    )
+    sections
+}
+
+fn load_mako_context_file(path: &Path, context: &'static str) -> Option<String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) => {
+            warn!(context, path = %path.display(), error = %error, "Failed to read Mako context file");
+            return None;
+        }
+    };
+
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(trimmed.to_string())
+}
+
+fn display_context_file_name(path: &Path, fallback: &str) -> String {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(fallback)
+        .to_string()
 }
 
 fn discover_instruction_files(working_dir: &Path) -> Vec<PathBuf> {
@@ -1234,8 +1289,8 @@ fn discover_project_root(working_dir: &Path) -> &Path {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_mako_context, build_plan_context, build_project_context, build_skills_context,
-        inject_context, summarize_git_status,
+        build_mako_context_sections, build_mako_context_sections_with_home, build_plan_context,
+        build_project_context, build_skills_context, inject_context, summarize_git_status,
     };
     use std::fs;
     use tempfile::TempDir;
@@ -1243,6 +1298,7 @@ mod tests {
 
     use crate::agent::DelegatedRunStage;
     use crate::ai::types::{Content, ModelMessage, Role};
+    use crate::paths;
     use crate::skills::SkillsManager;
     use crate::storage::reports::CreateReportInput;
     use crate::storage::{
@@ -1267,15 +1323,119 @@ mod tests {
     }
 
     #[test]
-    fn build_mako_context_loads_project_root_identity_file() {
+    fn build_mako_context_loads_global_home_files_and_project_overlay() {
         let temp = TempDir::new().unwrap();
-        let repo = temp.path();
+        let repo = temp.path().join("repo");
+        let mako_home = temp.path().join("mako-home");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&mako_home).unwrap();
+
+        fs::write(mako_home.join(paths::MAKO_SOUL_FILE), "Keep moving.").unwrap();
+        fs::write(mako_home.join(paths::MAKO_IDENTITY_FILE), "Name: Mako").unwrap();
+        fs::write(
+            mako_home.join(paths::MAKO_HEARTBEAT_FILE),
+            "Check queued work.",
+        )
+        .unwrap();
+        fs::write(repo.join("MAKO.md"), "Project-specific operating notes.").unwrap();
+
+        let context = build_mako_context_sections_with_home(&repo, &mako_home, None).join("\n\n");
+
+        assert!(context.contains("[MAKO SOUL - MAKO_SOUL.md]"));
+        assert!(context.contains("Keep moving."));
+        assert!(context.contains("[MAKO IDENTITY - MAKO_IDENTITY.md]"));
+        assert!(context.contains("Name: Mako"));
+        assert!(context.contains("[MAKO HEARTBEAT - MAKO_HEARTBEAT.md]"));
+        assert!(context.contains("Check queued work."));
+        assert!(context.contains("[MAKO PROJECT OVERLAY - MAKO.md]"));
+        assert!(context.contains("Project-specific operating notes."));
+    }
+
+    #[test]
+    fn build_mako_context_falls_back_to_project_overlay_when_global_home_is_empty() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path().join("repo");
+        let mako_home = temp.path().join("mako-home");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&mako_home).unwrap();
         fs::write(repo.join("MAKO.md"), "Always Swimming.").unwrap();
 
-        let context = build_mako_context(repo);
+        let context = build_mako_context_sections_with_home(&repo, &mako_home, None).join("\n\n");
 
-        assert!(context.contains("[MAKO IDENTITY - MAKO.md]"));
+        assert!(context.contains("[MAKO PROJECT OVERLAY - MAKO.md]"));
         assert!(context.contains("Always Swimming."));
+    }
+
+    #[test]
+    fn build_mako_context_accepts_legacy_generic_home_file_names() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path().join("repo");
+        let mako_home = temp.path().join("mako-home");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&mako_home).unwrap();
+
+        fs::write(mako_home.join("SOUL.md"), "Legacy soul.").unwrap();
+        fs::write(mako_home.join("IDENTITY.md"), "Legacy identity.").unwrap();
+
+        let context = build_mako_context_sections_with_home(&repo, &mako_home, None).join("\n\n");
+
+        assert!(context.contains("[MAKO SOUL - SOUL.md]"));
+        assert!(context.contains("Legacy soul."));
+        assert!(context.contains("[MAKO IDENTITY - IDENTITY.md]"));
+        assert!(context.contains("Legacy identity."));
+    }
+
+    #[test]
+    fn build_mako_context_uses_global_home_path_helper_without_panic() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("MAKO.md"), "Always Swimming.").unwrap();
+
+        let context = build_mako_context_sections(&repo, None).join("\n\n");
+
+        assert!(context.contains("Always Swimming."));
+    }
+
+    #[test]
+    fn build_mako_context_sections_preserve_layer_order() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path().join("repo");
+        let mako_home = temp.path().join("mako-home");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&mako_home).unwrap();
+
+        fs::write(mako_home.join(paths::MAKO_SOUL_FILE), "Soul.").unwrap();
+        fs::write(mako_home.join(paths::MAKO_IDENTITY_FILE), "Identity.").unwrap();
+        fs::write(mako_home.join(paths::MAKO_HEARTBEAT_FILE), "Heartbeat.").unwrap();
+        fs::write(mako_home.join(paths::MAKO_MEMORY_FILE), "Memory.").unwrap();
+        fs::write(mako_home.join(paths::MAKO_CHANNELS_FILE), "Channels.").unwrap();
+        fs::write(repo.join("MAKO.md"), "Overlay.").unwrap();
+
+        let sections = build_mako_context_sections_with_home(&repo, &mako_home, None);
+        let labels = sections
+            .iter()
+            .map(|section| {
+                section
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            labels,
+            vec![
+                "[MAKO SOUL - MAKO_SOUL.md]".to_string(),
+                "[MAKO IDENTITY - MAKO_IDENTITY.md]".to_string(),
+                "[MAKO HEARTBEAT - MAKO_HEARTBEAT.md]".to_string(),
+                "[MAKO MEMORY - MAKO_MEMORY.md]".to_string(),
+                "[MAKO CHANNELS - MAKO_CHANNELS.md]".to_string(),
+                "[MAKO PROJECT OVERLAY - MAKO.md]".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -1355,6 +1515,7 @@ mod tests {
             &skills,
             None,
             None,
+            None,
         );
 
         assert_eq!(injected.len(), 3);
@@ -1397,6 +1558,7 @@ mod tests {
             &skills,
             None,
             Some("mako"),
+            None,
         );
         let code_injected = inject_context(
             &conversation,
@@ -1408,24 +1570,31 @@ mod tests {
             &skills,
             None,
             Some("code"),
+            None,
         );
 
         assert!(mako_injected.iter().any(|message| {
             matches!(
                 &message.content[0],
-                Content::Text { text } if text.contains("[MAKO IDENTITY - MAKO.md]") && text.contains("Always Swimming.")
+                Content::Text { text } if text.contains("[MAKO PROJECT OVERLAY - MAKO.md]") && text.contains("Always Swimming.")
+            )
+        }));
+        assert!(mako_injected.iter().all(|message| {
+            !matches!(
+                &message.content[0],
+                Content::Text { text } if text.contains("[MAKO HOME ")
             )
         }));
         assert!(!code_injected.iter().any(|message| {
             matches!(
                 &message.content[0],
-                Content::Text { text } if text.contains("[MAKO IDENTITY - MAKO.md]")
+                Content::Text { text } if text.contains("[MAKO PROJECT OVERLAY - MAKO.md]")
             )
         }));
     }
 
     #[test]
-    fn inject_context_places_mako_identity_before_project_settings() {
+    fn inject_context_places_all_mako_layers_before_project_settings() {
         let temp = TempDir::new().unwrap();
         let repo = temp.path();
         fs::create_dir_all(repo.join(".git")).unwrap();
@@ -1456,6 +1625,7 @@ mod tests {
             &skills,
             None,
             Some("mako"),
+            None,
         );
 
         let texts = injected
@@ -1465,16 +1635,18 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let mako_index = texts
-            .iter()
-            .position(|text| text.contains("[MAKO IDENTITY - MAKO.md]"))
-            .unwrap();
         let settings_index = texts
             .iter()
             .position(|text| text.contains("[PROJECT SETTINGS]"))
             .unwrap();
+        let mako_indices = texts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, text)| text.contains("[MAKO ").then_some(index))
+            .collect::<Vec<_>>();
 
-        assert!(mako_index < settings_index);
+        assert!(!mako_indices.is_empty());
+        assert!(mako_indices.iter().all(|index| *index < settings_index));
     }
 
     #[test]
@@ -1502,6 +1674,7 @@ mod tests {
             &skills,
             None,
             Some("mako"),
+            None,
         );
 
         assert!(!injected.iter().any(|message| {
@@ -1568,6 +1741,7 @@ mod tests {
             &skills,
             None,
             Some("mako"),
+            None,
         );
 
         assert!(injected.iter().any(|message| {
@@ -1641,6 +1815,7 @@ mod tests {
             &skills,
             None,
             Some("code"),
+            None,
         );
 
         assert!(injected.iter().any(|message| {
@@ -1717,6 +1892,7 @@ mod tests {
             &skills,
             None,
             Some("mako"),
+            None,
         );
 
         assert!(injected.iter().any(|message| {
@@ -1786,6 +1962,7 @@ mod tests {
             &skills,
             None,
             Some("mako"),
+            None,
         );
 
         let texts = injected
@@ -1859,6 +2036,7 @@ mod tests {
             Some(repo),
             WorkMode::Build,
             &skills,
+            None,
             None,
             None,
         );

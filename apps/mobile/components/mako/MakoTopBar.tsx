@@ -94,7 +94,6 @@ const styles = StyleSheet.create({
   iconButton: {
     width: 32,
     height: 32,
-    borderRadius: 16,
     alignItems: "center",
     justifyContent: "center",
     marginTop: 2,
@@ -112,20 +111,19 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   title: {
-    fontSize: 24,
-    fontWeight: "700",
-    letterSpacing: -0.5,
+    fontSize: 22,
+    fontWeight: "600",
+    letterSpacing: -0.3,
     flexShrink: 1,
   },
   titleStatus: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: "600",
-    letterSpacing: 0.2,
     textTransform: "lowercase",
   },
   subtitle: {
     marginTop: 3,
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: "500",
   },
 });
