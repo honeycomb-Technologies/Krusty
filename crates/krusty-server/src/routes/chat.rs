@@ -14,7 +14,7 @@ use axum::{
 };
 use futures::stream::Stream;
 use serde_json::json;
-use tokio::sync::{mpsc, Mutex, OwnedMutexGuard};
+use tokio::sync::{mpsc, Mutex, OwnedMutexGuard, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 
 use krusty_core::agent::coordinator_prompt::system_prompt_for_session;
@@ -795,7 +795,7 @@ async fn start_orchestrator_sse(
         ..Default::default()
     };
 
-    let (mut event_rx, input_tx) = if ctx.session_type == SessionType::Mako {
+    let (event_rx, input_tx) = if ctx.session_type == SessionType::Mako {
         use krusty_core::agent::tick_engine::{TickEngine, TickEngineConfig};
         let tick_config = TickEngineConfig {
             tick_interval: std::time::Duration::from_secs(mako_settings.tick_interval_secs),
@@ -826,161 +826,190 @@ async fn start_orchestrator_sse(
     tokio::spawn(async move {
         active_agent_streams.fetch_add(1, Ordering::Relaxed);
         let _guard = guard;
-        let mut awaiting_input = false;
-        let mut had_error = false;
-        let mut stop_reason: Option<LoopStopReason> = None;
-        let mut skipped_events = 0usize;
-
-        while let Some(loop_event) = event_rx.recv().await {
-            if let LoopEvent::Finished {
-                stop_reason: ref reason,
-                ..
-            } = loop_event
-            {
-                stop_reason = Some(reason.clone());
-            }
-            let is_finished = matches!(loop_event, LoopEvent::Finished { .. });
-
-            if matches!(loop_event, LoopEvent::AwaitingInput { .. }) {
-                awaiting_input = true;
-                fire_push(
-                    &push_service,
-                    user_id.as_deref(),
-                    PushPayload {
-                        title: "Krusty".into(),
-                        body: "Krusty needs your input".into(),
-                        session_id: Some(session_id.clone()),
-                        tag: None,
-                    },
-                    PushEventType::AwaitingInput,
-                );
-                fire_apns(
-                    &apns_service,
-                    user_id.as_deref(),
-                    ApnsPayload {
-                        title: "Krusty".into(),
-                        body: "Krusty needs your input".into(),
-                        session_id: Some(session_id.clone()),
-                        category: Some("TOOL_APPROVAL".into()),
-                        data: Some(json!({
-                            "type": "awaiting_input",
-                            "sessionId": session_id.clone(),
-                        })),
-                    },
-                    ApnsEventType::AwaitingInput,
-                );
-            }
-
-            // APNs: tool approval required (not triggered by Web Push currently)
-            if let LoopEvent::ToolApprovalRequired {
-                ref id, ref name, ..
-            } = loop_event
-            {
-                fire_apns(
-                    &apns_service,
-                    user_id.as_deref(),
-                    ApnsPayload {
-                        title: "Permission Required".into(),
-                        body: format!("\"{name}\" is requesting permission to execute."),
-                        session_id: Some(session_id.clone()),
-                        category: Some("TOOL_APPROVAL".into()),
-                        data: Some(serde_json::json!({
-                            "requestId": id,
-                            "sessionId": session_id.clone(),
-                            "toolName": name,
-                            "type": "tool_approval",
-                        })),
-                    },
-                    ApnsEventType::ToolApproval,
-                );
-            }
-
-            if matches!(loop_event, LoopEvent::Error { .. }) {
-                had_error = true;
-            }
-
-            if !forward_loop_event(&sse_tx, &session_id, loop_event, &mut skipped_events).await {
-                break;
-            }
-
-            if is_finished {
-                break;
-            }
-        }
-
-        // Fire push notification based on how the loop ended
-        if !awaiting_input {
-            if had_error {
-                fire_push(
-                    &push_service,
-                    user_id.as_deref(),
-                    PushPayload {
-                        title: "Krusty".into(),
-                        body: "Session encountered an error".into(),
-                        session_id: Some(session_id.clone()),
-                        tag: None,
-                    },
-                    PushEventType::Error,
-                );
-                fire_apns(
-                    &apns_service,
-                    user_id.as_deref(),
-                    ApnsPayload {
-                        title: "Krusty".into(),
-                        body: "Session encountered an error".into(),
-                        session_id: Some(session_id.clone()),
-                        category: None,
-                        data: Some(json!({
-                            "type": "error",
-                            "sessionId": session_id.clone(),
-                        })),
-                    },
-                    ApnsEventType::Error,
-                );
-            } else if stop_reason == Some(LoopStopReason::Sleeping) {
-                tracing::info!(
-                    session_id = %session_id,
-                    "Session entered sleeping state; skipping completion push"
-                );
-            } else {
-                let title = session_title(&db_path, &session_id);
-                fire_push(
-                    &push_service,
-                    user_id.as_deref(),
-                    PushPayload {
-                        title: "Krusty".into(),
-                        body: format!("{title} is complete"),
-                        session_id: Some(session_id.clone()),
-                        tag: Some(format!("session-{session_id}")),
-                    },
-                    PushEventType::Completion,
-                );
-                fire_apns(
-                    &apns_service,
-                    user_id.as_deref(),
-                    ApnsPayload {
-                        title: format!("{title} — Complete"),
-                        body: "Response finished".into(),
-                        session_id: Some(session_id.clone()),
-                        category: Some("STREAM_COMPLETE".into()),
-                        data: Some(serde_json::json!({
-                            "type": "stream_complete",
-                            "sessionId": session_id.clone(),
-                        })),
-                    },
-                    ApnsEventType::Completion,
-                );
-            }
-        }
-
-        // Clean up session input channel
-        let mut inputs = session_inputs.write().await;
-        inputs.remove(&session_id);
+        run_orchestrator_event_bridge(
+            event_rx,
+            sse_tx,
+            session_id,
+            session_inputs,
+            push_service,
+            apns_service,
+            user_id,
+            db_path,
+        )
+        .await;
         active_agent_streams.fetch_sub(1, Ordering::Relaxed);
     });
 
     let stream = ReceiverStream::new(sse_rx);
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+async fn run_orchestrator_event_bridge(
+    mut event_rx: mpsc::UnboundedReceiver<LoopEvent>,
+    sse_tx: mpsc::Sender<Result<Event, Infallible>>,
+    session_id: String,
+    session_inputs: Arc<RwLock<crate::SessionInputMap>>,
+    push_service: Option<Arc<crate::push::PushService>>,
+    apns_service: Option<Arc<crate::apns::ApnsService>>,
+    user_id: Option<String>,
+    db_path: Arc<PathBuf>,
+) {
+    let mut awaiting_input = false;
+    let mut had_error = false;
+    let mut stop_reason: Option<LoopStopReason> = None;
+    let mut skipped_events = 0usize;
+    let mut sse_connected = true;
+
+    while let Some(loop_event) = event_rx.recv().await {
+        if let LoopEvent::Finished {
+            stop_reason: ref reason,
+            ..
+        } = loop_event
+        {
+            stop_reason = Some(reason.clone());
+        }
+        let is_finished = matches!(loop_event, LoopEvent::Finished { .. });
+
+        if matches!(loop_event, LoopEvent::AwaitingInput { .. }) {
+            awaiting_input = true;
+            fire_push(
+                &push_service,
+                user_id.as_deref(),
+                PushPayload {
+                    title: "Krusty".into(),
+                    body: "Krusty needs your input".into(),
+                    session_id: Some(session_id.clone()),
+                    tag: None,
+                },
+                PushEventType::AwaitingInput,
+            );
+            fire_apns(
+                &apns_service,
+                user_id.as_deref(),
+                ApnsPayload {
+                    title: "Krusty".into(),
+                    body: "Krusty needs your input".into(),
+                    session_id: Some(session_id.clone()),
+                    category: Some("TOOL_APPROVAL".into()),
+                    data: Some(json!({
+                        "type": "awaiting_input",
+                        "sessionId": session_id.clone(),
+                    })),
+                },
+                ApnsEventType::AwaitingInput,
+            );
+        }
+
+        // APNs: tool approval required (not triggered by Web Push currently)
+        if let LoopEvent::ToolApprovalRequired {
+            ref id, ref name, ..
+        } = loop_event
+        {
+            fire_apns(
+                &apns_service,
+                user_id.as_deref(),
+                ApnsPayload {
+                    title: "Permission Required".into(),
+                    body: format!("\"{name}\" is requesting permission to execute."),
+                    session_id: Some(session_id.clone()),
+                    category: Some("TOOL_APPROVAL".into()),
+                    data: Some(serde_json::json!({
+                        "requestId": id,
+                        "sessionId": session_id.clone(),
+                        "toolName": name,
+                        "type": "tool_approval",
+                    })),
+                },
+                ApnsEventType::ToolApproval,
+            );
+        }
+
+        if matches!(loop_event, LoopEvent::Error { .. }) {
+            had_error = true;
+        }
+
+        if sse_connected
+            && !forward_loop_event(&sse_tx, &session_id, loop_event, &mut skipped_events).await
+        {
+            sse_connected = false;
+            skipped_events = 0;
+            tracing::info!(
+                session_id = %session_id,
+                "SSE client disconnected; continuing to drain orchestrator events"
+            );
+        }
+
+        if is_finished {
+            break;
+        }
+    }
+
+    // Fire push notification based on how the loop ended
+    if !awaiting_input {
+        if had_error {
+            fire_push(
+                &push_service,
+                user_id.as_deref(),
+                PushPayload {
+                    title: "Krusty".into(),
+                    body: "Session encountered an error".into(),
+                    session_id: Some(session_id.clone()),
+                    tag: None,
+                },
+                PushEventType::Error,
+            );
+            fire_apns(
+                &apns_service,
+                user_id.as_deref(),
+                ApnsPayload {
+                    title: "Krusty".into(),
+                    body: "Session encountered an error".into(),
+                    session_id: Some(session_id.clone()),
+                    category: None,
+                    data: Some(json!({
+                        "type": "error",
+                        "sessionId": session_id.clone(),
+                    })),
+                },
+                ApnsEventType::Error,
+            );
+        } else if stop_reason == Some(LoopStopReason::Sleeping) {
+            tracing::info!(
+                session_id = %session_id,
+                "Session entered sleeping state; skipping completion push"
+            );
+        } else {
+            let title = session_title(&db_path, &session_id);
+            fire_push(
+                &push_service,
+                user_id.as_deref(),
+                PushPayload {
+                    title: "Krusty".into(),
+                    body: format!("{title} is complete"),
+                    session_id: Some(session_id.clone()),
+                    tag: Some(format!("session-{session_id}")),
+                },
+                PushEventType::Completion,
+            );
+            fire_apns(
+                &apns_service,
+                user_id.as_deref(),
+                ApnsPayload {
+                    title: format!("{title} — Complete"),
+                    body: "Response finished".into(),
+                    session_id: Some(session_id.clone()),
+                    category: Some("STREAM_COMPLETE".into()),
+                    data: Some(serde_json::json!({
+                        "type": "stream_complete",
+                        "sessionId": session_id.clone(),
+                    })),
+                },
+                ApnsEventType::Completion,
+            );
+        }
+    }
+
+    session_inputs.write().await.remove(&session_id);
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -1101,6 +1130,7 @@ mod tests {
     use axum::Json;
     use tokio::sync::mpsc::error::TryRecvError;
     use tokio::sync::{mpsc, Mutex, RwLock};
+    use tokio::time::{timeout, Duration};
 
     use krusty_core::agent::loop_events::LoopStopReason;
     use krusty_core::agent::{AgentCancellation, LoopEvent, LoopInput, UserHookManager};
@@ -1116,8 +1146,8 @@ mod tests {
     use krusty_core::SessionManager;
 
     use super::{
-        build_user_content, chat, forward_loop_event, select_model_for_chat_request, tool_approval,
-        RequestedModel,
+        build_user_content, chat, forward_loop_event, run_orchestrator_event_bridge,
+        select_model_for_chat_request, tool_approval, RequestedModel,
     };
     use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::error::AppError;
@@ -1462,6 +1492,89 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(AppError::Conflict(_))));
+    }
+
+    #[tokio::test]
+    async fn tool_approval_survives_sse_disconnect_until_run_finishes() {
+        let (state, _temp_dir) = create_test_state();
+        create_test_user(&state, "alice");
+
+        let session_manager =
+            SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+        let session_id = session_manager
+            .create_session_for_user("Owned Session", None, None, Some("alice"))
+            .expect("session creation should succeed");
+
+        let (input_tx, mut input_rx) = mpsc::unbounded_channel::<LoopInput>();
+        state
+            .session_inputs
+            .write()
+            .await
+            .insert(session_id.clone(), input_tx);
+
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<LoopEvent>();
+        let (sse_tx, sse_rx) = mpsc::channel(1);
+        drop(sse_rx);
+
+        let bridge = tokio::spawn(run_orchestrator_event_bridge(
+            event_rx,
+            sse_tx,
+            session_id.clone(),
+            Arc::clone(&state.session_inputs),
+            None,
+            None,
+            Some("alice".to_string()),
+            Arc::clone(&state.db_path),
+        ));
+
+        event_tx
+            .send(LoopEvent::ToolApprovalRequired {
+                id: "tool-1".to_string(),
+                name: "edit".to_string(),
+                arguments: serde_json::json!({}),
+            })
+            .expect("tool approval event should send");
+
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if state.session_inputs.read().await.contains_key(&session_id) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("session input should stay registered after stream loss");
+
+        let approval = tool_approval(
+            State(state.clone()),
+            Some(current_user("alice", std::path::Path::new("/tmp"))),
+            Json(ToolApprovalRequest {
+                session_id: session_id.clone(),
+                tool_call_id: "tool-1".to_string(),
+                approved: true,
+            }),
+        )
+        .await;
+
+        assert!(approval.is_ok());
+        assert!(matches!(
+            timeout(Duration::from_secs(1), input_rx.recv()).await,
+            Ok(Some(LoopInput::ToolApproval {
+                tool_call_id,
+                approved: true,
+            })) if tool_call_id == "tool-1"
+        ));
+
+        event_tx
+            .send(LoopEvent::Finished {
+                session_id: session_id.clone(),
+                stop_reason: LoopStopReason::Completed,
+            })
+            .expect("finish event should send");
+
+        bridge.await.expect("bridge should finish");
+        assert!(state.session_inputs.read().await.get(&session_id).is_none());
     }
 
     #[tokio::test]

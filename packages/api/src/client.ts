@@ -50,7 +50,7 @@ import type {
   SimpleOkResponse,
 } from './types';
 
-const STREAM_ACTIVITY_TIMEOUT = 30_000;
+const STREAM_ACTIVITY_TIMEOUT = 120_000;
 
 export interface KrustyClientConfig {
   baseUrl: string;
@@ -665,7 +665,9 @@ export class KrustyClient {
 
     const activityCheck = setInterval(() => {
       if (Date.now() - lastActivity > STREAM_ACTIVITY_TIMEOUT) {
-        callbacks.onError('Stream timeout — no activity for 30s');
+        callbacks.onError(
+          `Stream timeout — no activity for ${Math.round(STREAM_ACTIVITY_TIMEOUT / 1000)}s`,
+        );
         reader.cancel();
         clearInterval(activityCheck);
       }
