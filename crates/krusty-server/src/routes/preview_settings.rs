@@ -16,7 +16,7 @@ use crate::error::AppError;
 use crate::AppState;
 
 const PREVIEW_SETTINGS_KEY: &str = "preview_settings_v1";
-const DEFAULT_BLOCKED_PORTS: [u16; 3] = [22, 2375, 2376];
+const DEFAULT_BLOCKED_PORTS: [u16; 5] = [22, 2375, 2376, 6443, 10250];
 const AUTO_REFRESH_RANGE_SECS: RangeInclusive<u16> = 2..=60;
 const PROBE_TIMEOUT_RANGE_MS: RangeInclusive<u16> = 300..=1500;
 const DEFAULT_PROBE_TIMEOUT_MS: u16 = 800;

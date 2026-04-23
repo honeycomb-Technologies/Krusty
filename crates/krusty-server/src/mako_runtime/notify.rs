@@ -1,10 +1,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use serde_json::json;
-
 use crate::apns::{ApnsEventType, ApnsPayload};
-use crate::notifications::{fire_apns, fire_push, session_title};
+use crate::notifications::{
+    fire_apns, fire_push, mako_session_notification_data, session_title,
+    tool_approval_notification_data, APNS_CATEGORY_MAKO_SESSION, APNS_CATEGORY_TOOL_APPROVAL,
+};
 use crate::push::{PushEventType, PushPayload};
 
 pub(super) fn mako_notification_title(title: Option<&str>, session_label: &str) -> String {
@@ -45,13 +46,13 @@ pub(super) fn notify_mako_user_message(
             title: notification_title,
             body: message.to_string(),
             session_id: Some(session_id.to_string()),
-            category: Some("MAKO_UPDATE".into()),
-            data: Some(json!({
-                "type": "mako_update",
-                "sessionId": session_id,
-                "level": level,
-                "title": title,
-            })),
+            category: Some(APNS_CATEGORY_MAKO_SESSION.into()),
+            data: Some(mako_session_notification_data(
+                "user_message",
+                session_id,
+                Some(level),
+                title,
+            )),
         },
         ApnsEventType::MakoUpdate,
     );
@@ -81,12 +82,13 @@ pub(super) fn notify_mako_awaiting_input(
             title: "Mako".into(),
             body: "Mako needs your input".into(),
             session_id: Some(session_id.to_string()),
-            category: Some("MAKO_UPDATE".into()),
-            data: Some(json!({
-                "type": "mako_update",
-                "sessionId": session_id,
-                "level": "warning",
-            })),
+            category: Some(APNS_CATEGORY_MAKO_SESSION.into()),
+            data: Some(mako_session_notification_data(
+                "awaiting_input",
+                session_id,
+                Some("warning"),
+                None,
+            )),
         },
         ApnsEventType::AwaitingInput,
     );
@@ -106,13 +108,10 @@ pub(super) fn notify_mako_tool_approval(
             title: "Tool Approval Required".into(),
             body: format!("Mako wants to run \"{tool_name}\"."),
             session_id: Some(session_id.to_string()),
-            category: Some("TOOL_APPROVAL".into()),
-            data: Some(json!({
-                "requestId": request_id,
-                "sessionId": session_id,
-                "toolName": tool_name,
-                "type": "tool_approval",
-            })),
+            category: Some(APNS_CATEGORY_TOOL_APPROVAL.into()),
+            data: Some(tool_approval_notification_data(
+                request_id, session_id, tool_name, "mako",
+            )),
         },
         ApnsEventType::ToolApproval,
     );
@@ -147,12 +146,13 @@ pub(super) fn notify_mako_error(
             ),
             body: "Run encountered an error".into(),
             session_id: Some(session_id.to_string()),
-            category: Some("MAKO_UPDATE".into()),
-            data: Some(json!({
-                "type": "mako_update",
-                "sessionId": session_id,
-                "level": "error",
-            })),
+            category: Some(APNS_CATEGORY_MAKO_SESSION.into()),
+            data: Some(mako_session_notification_data(
+                "error",
+                session_id,
+                Some("error"),
+                None,
+            )),
         },
         ApnsEventType::Error,
     );
@@ -188,12 +188,13 @@ pub(super) fn notify_mako_completion(
             title: notification_title,
             body: "Run finished".into(),
             session_id: Some(session_id.to_string()),
-            category: Some("MAKO_UPDATE".into()),
-            data: Some(json!({
-                "type": "mako_update",
-                "sessionId": session_id,
-                "level": "success",
-            })),
+            category: Some(APNS_CATEGORY_MAKO_SESSION.into()),
+            data: Some(mako_session_notification_data(
+                "completion",
+                session_id,
+                Some("success"),
+                None,
+            )),
         },
         ApnsEventType::MakoUpdate,
     );

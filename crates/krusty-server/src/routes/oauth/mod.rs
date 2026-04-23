@@ -5,14 +5,14 @@ mod exchange;
 mod start;
 mod status;
 
-use std::time::Instant;
-
 use axum::{
     routing::{delete, get, post},
     Router,
 };
 
 use krusty_core::ai::providers::ProviderId;
+
+pub(crate) use crate::oauth_flow::{OAuthFlowKind, OAuthFlowState};
 
 use self::exchange::exchange_code;
 use self::start::start_oauth;
@@ -23,29 +23,6 @@ use crate::AppState;
 const FLOW_TTL_SECS: u64 = 300;
 const OAUTH_RESULT_STORAGE_KEY: &str = "krusty:oauth-result";
 const OAUTH_RESULT_CHANNEL: &str = "krusty:oauth";
-
-/// In-flight OAuth flow state stored on the server.
-#[derive(Clone)]
-pub struct OAuthFlowState {
-    pub started_at: Instant,
-    pub provider_id: ProviderId,
-    pub kind: OAuthFlowKind,
-}
-
-#[derive(Clone)]
-pub enum OAuthFlowKind {
-    PkceVerifier {
-        verifier_str: String,
-    },
-    BrowserCallback {
-        state: String,
-        verifier_str: String,
-        redirect_uri: String,
-    },
-    DeviceFlow {
-        flow_id: String,
-    },
-}
 
 pub fn router() -> Router<AppState> {
     Router::new()

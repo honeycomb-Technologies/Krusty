@@ -43,6 +43,10 @@ pub(super) async fn probe_ports_previewability(
         .collect()
 }
 
+pub(super) async fn probe_port_previewability(port: u16, timeout_ms: u16) -> ProbeResult {
+    probe_previewable_port(port, Duration::from_millis(timeout_ms as u64)).await
+}
+
 async fn probe_previewable_port(port: u16, timeout: Duration) -> ProbeResult {
     let start = Instant::now();
     let request = probe_http_client()

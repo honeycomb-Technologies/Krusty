@@ -19,6 +19,7 @@ use crate::error::AppError;
 use crate::AppState;
 
 use super::super::preview_settings::load_preview_settings;
+use super::probe::probe_port_previewability;
 
 const MAX_PROXY_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
 
@@ -105,6 +106,15 @@ async fn proxy_request(input: ProxyRequest) -> Result<Response<axum::body::Body>
             "Port {} is blocked by preview settings",
             port
         )));
+    }
+    if !settings.allow_force_open_non_http {
+        let probe = probe_port_previewability(port, settings.probe_timeout_ms).await;
+        if !probe.is_previewable_http {
+            return Err(AppError::BadRequest(format!(
+                "Port {} did not pass the HTTP preview probe; enable non-HTTP embed to force open it",
+                port
+            )));
+        }
     }
 
     let upstream_path = build_upstream_path(path.as_deref(), uri.query());
@@ -363,6 +373,7 @@ fn is_hop_by_hop_header(name: &HeaderName) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::preview_settings::PreviewSettings;
 
     #[test]
     fn build_upstream_path_handles_root_and_query() {
@@ -372,5 +383,17 @@ mod tests {
             build_upstream_path(Some("foo"), Some("a=1&b=2")),
             "/foo?a=1&b=2"
         );
+    }
+
+    #[test]
+    fn default_preview_settings_block_sensitive_admin_ports() {
+        let settings = PreviewSettings::default();
+
+        assert!(settings.is_blocked(22));
+        assert!(settings.is_blocked(2375));
+        assert!(settings.is_blocked(2376));
+        assert!(settings.is_blocked(6443));
+        assert!(settings.is_blocked(10250));
+        assert!(!settings.is_blocked(3000));
     }
 }

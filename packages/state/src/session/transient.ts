@@ -119,10 +119,7 @@ function buildRecoveryNotice(recovery: ApiRecoveryState): string {
     details.push(`Last error: ${recovery.last_error.trim()}`);
   }
 
-  return details.length > 0 ? `${headline}
-
-${details.join('
-')}` : headline;
+  return details.length > 0 ? `${headline}\n\n${details.join('\n')}` : headline;
 }
 
 export function applyRecoveryParity(
@@ -192,19 +189,17 @@ export function applyLivePartialAssistant(
 
   const hasContent = livePartial.text.trim().length > 0;
   const hasThinking = (livePartial.thinking?.trim().length ?? 0) > 0;
-  const toolCalls = livePartial.tool_calls.map(
-    (toolCall) => {
-      const delegatedKind = resolveDelegatedKind(toolCall.name);
-      return {
-        id: toolCall.id,
-        name: toolCall.name,
-        delegated: delegatedKind
-          ? createDelegatedArtifactState(delegatedKind)
-          : undefined,
-        status: livePartialToolStatus(agentState),
-      } satisfies ToolCall;
-    },
-  );
+  const toolCalls = livePartial.tool_calls.map((toolCall) => {
+    const delegatedKind = resolveDelegatedKind(toolCall.name);
+    return {
+      id: toolCall.id,
+      name: toolCall.name,
+      delegated: delegatedKind
+        ? createDelegatedArtifactState(delegatedKind)
+        : undefined,
+      status: livePartialToolStatus(agentState),
+    } satisfies ToolCall;
+  });
 
   if (!hasContent && !hasThinking && toolCalls.length === 0) {
     return nextMessages;

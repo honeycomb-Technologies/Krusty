@@ -1,13 +1,14 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use serde_json::json;
-
 use krusty_core::agent::loop_events::LoopStopReason;
 use krusty_core::agent::LoopEvent;
 
 use crate::apns::{ApnsEventType, ApnsPayload};
-use crate::notifications::{fire_apns, fire_push, session_title};
+use crate::notifications::{
+    chat_session_notification_data, fire_apns, fire_push, session_title,
+    tool_approval_notification_data, APNS_CATEGORY_CHAT_SESSION, APNS_CATEGORY_TOOL_APPROVAL,
+};
 use crate::push::{PushEventType, PushPayload, PushService};
 
 #[derive(Default)]
@@ -100,11 +101,8 @@ fn notify_chat_awaiting_input(
             title: "Krusty".into(),
             body: "Krusty needs your input".into(),
             session_id: Some(session_id.to_string()),
-            category: Some("TOOL_APPROVAL".into()),
-            data: Some(json!({
-                "type": "awaiting_input",
-                "sessionId": session_id,
-            })),
+            category: Some(APNS_CATEGORY_CHAT_SESSION.into()),
+            data: Some(chat_session_notification_data("awaiting_input", session_id)),
         },
         ApnsEventType::AwaitingInput,
     );
@@ -124,13 +122,10 @@ fn notify_chat_tool_approval(
             title: "Permission Required".into(),
             body: format!("\"{tool_name}\" is requesting permission to execute."),
             session_id: Some(session_id.to_string()),
-            category: Some("TOOL_APPROVAL".into()),
-            data: Some(json!({
-                "requestId": request_id,
-                "sessionId": session_id,
-                "toolName": tool_name,
-                "type": "tool_approval",
-            })),
+            category: Some(APNS_CATEGORY_TOOL_APPROVAL.into()),
+            data: Some(tool_approval_notification_data(
+                request_id, session_id, tool_name, "chat",
+            )),
         },
         ApnsEventType::ToolApproval,
     );
@@ -160,11 +155,8 @@ fn notify_chat_error(
             title: "Krusty".into(),
             body: "Session encountered an error".into(),
             session_id: Some(session_id.to_string()),
-            category: None,
-            data: Some(json!({
-                "type": "error",
-                "sessionId": session_id,
-            })),
+            category: Some(APNS_CATEGORY_CHAT_SESSION.into()),
+            data: Some(chat_session_notification_data("error", session_id)),
         },
         ApnsEventType::Error,
     );
@@ -196,11 +188,8 @@ fn notify_chat_completion(
             title: format!("{title} — Complete"),
             body: "Response finished".into(),
             session_id: Some(session_id.to_string()),
-            category: Some("STREAM_COMPLETE".into()),
-            data: Some(json!({
-                "type": "stream_complete",
-                "sessionId": session_id,
-            })),
+            category: Some(APNS_CATEGORY_CHAT_SESSION.into()),
+            data: Some(chat_session_notification_data("completion", session_id)),
         },
         ApnsEventType::Completion,
     );

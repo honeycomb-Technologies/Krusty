@@ -16,8 +16,7 @@ function extractTextContent(content: unknown): string {
     for (const block of content) {
       if (!block || typeof block !== 'object') continue;
       if (block.type !== 'text' || typeof block.text !== 'string') continue;
-      text += text ? `
-${block.text}` : block.text;
+      text += text ? `\n${block.text}` : block.text;
     }
     return text;
   }
@@ -52,15 +51,12 @@ function parseStoredMessage(
 
     if (block.type === 'text' || ('text' in block && !block.type)) {
       if (parsed.content.length < MAX_MESSAGE_CONTENT_LENGTH) {
-        parsed.content += (parsed.content ? '
-' : '') + (block.text || '');
+        parsed.content += (parsed.content ? '\n' : '') + (block.text || '');
       }
     } else if (block.type === 'thinking' || 'thinking' in block) {
       const thinkingContent = block.thinking || '';
       parsed.thinking = parsed.thinking
-        ? `${parsed.thinking}
-
-${thinkingContent}`
+        ? `${parsed.thinking}\n\n${thinkingContent}`
         : thinkingContent;
     } else if (
       block.type === 'tool_use'
@@ -175,19 +171,14 @@ export function buildContentBlocks(
     if (attachment.type !== 'file') continue;
     attachedFileNames.push(attachment.name);
     if (attachment.text) {
-      fileSections.push(`
-
---- ${attachment.name} ---
-${attachment.text}`);
+      fileSections.push(`\n\n--- ${attachment.name} ---\n${attachment.text}`);
     }
   }
 
   const fileContent = fileSections.join('');
   const fallbackFileLabel =
     attachedFileNames.length > 0 && fileContent.length === 0
-      ? `
-
-[Attached files: ${attachedFileNames.join(', ')}]`
+      ? `\n\n[Attached files: ${attachedFileNames.join(', ')}]`
       : '';
   const fullText = `${text}${fileContent}${fallbackFileLabel}`.trim();
   blocks.push({

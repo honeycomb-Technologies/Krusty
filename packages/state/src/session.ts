@@ -1,7 +1,6 @@
 import { create } from 'zustand';
 import type {
   KrustyClient,
-  ContentBlock,
   PlanItem,
   SessionContinuationEvent,
   SessionStateResponse as ApiSessionStateResponse,
@@ -87,7 +86,7 @@ export function createSessionStore(
         presenceClientId = existing;
         return existing;
       }
-      const generated = generateRuntimeId("presence");
+      const generated = createChatMessageId("presence");
       storage.set(PRESENCE_CLIENT_STORAGE_KEY, generated);
       presenceClientId = generated;
       return generated;
@@ -159,6 +158,8 @@ export function createSessionStore(
     ) => void,
     get: () => SessionStoreState,
   ): StreamCallbacks {
+    let pinchedSessionId: string | null = null;
+
     function updateLastAssistantMessage(
       updater?: (s: SessionStoreState) => Partial<SessionStoreState>,
     ) {
@@ -196,12 +197,18 @@ export function createSessionStore(
       onThinkingDelta: (thinking) => {
         ref.current.thinking = (ref.current.thinking || "") + thinking;
         const delegatedIndex = (ref.current.toolCalls || []).findIndex((tc) =>
-          isDelegatedToolName(tc.name),
+          resolveDelegatedKind(tc.name, tc.arguments, tc.delegated?.kind)
+            !== undefined,
         );
         if (delegatedIndex >= 0) {
           const toolCalls = [...(ref.current.toolCalls || [])];
           const delegatedTool = toolCalls[delegatedIndex];
-          if (!isDelegatedToolName(delegatedTool.name)) {
+          const delegatedKind = resolveDelegatedKind(
+            delegatedTool.name,
+            delegatedTool.arguments,
+            delegatedTool.delegated?.kind,
+          );
+          if (!delegatedKind) {
             updateLastAssistantMessage(() => ({
               isThinking: true,
               thinkingContent: ref.current.thinking || "",
@@ -213,9 +220,10 @@ export function createSessionStore(
             delegated: mergeDelegatedArtifactState(delegatedTool.delegated, {
               ...(delegatedTool.delegated ||
                 createDelegatedArtifactState(
-                  delegatedTool.name,
+                  delegatedKind,
                   delegatedTool.arguments,
                 )),
+              kind: delegatedKind,
               thinking: ref.current.thinking || "",
             }),
           };
@@ -228,13 +236,14 @@ export function createSessionStore(
       },
 
       onToolCallStart: (id, name) => {
+        const delegatedKind = resolveDelegatedKind(name);
         ref.current.toolCalls = [
           ...(ref.current.toolCalls || []),
           {
             id,
             name,
-            delegated: isDelegatedToolName(name)
-              ? createDelegatedArtifactState(name)
+            delegated: delegatedKind
+              ? createDelegatedArtifactState(delegatedKind)
               : undefined,
             status: "running",
           },
@@ -243,25 +252,41 @@ export function createSessionStore(
       },
 
       onToolCallComplete: (id, _name, args) => {
-        mapToolCalls(id, (tc) => ({
-          ...tc,
-          arguments: args,
-          delegated: isDelegatedToolName(tc.name)
-            ? mergeDelegatedArtifactState(
-                tc.delegated,
-                createDelegatedArtifactState(tc.name, args),
-              )
-            : tc.delegated,
-        }));
+        mapToolCalls(id, (tc) => {
+          const delegatedKind = resolveDelegatedKind(
+            tc.name,
+            args,
+            tc.delegated?.kind,
+          );
+          return {
+            ...tc,
+            arguments: args,
+            delegated: delegatedKind
+              ? mergeDelegatedArtifactState(
+                  tc.delegated,
+                  createDelegatedArtifactState(delegatedKind, args),
+                )
+              : tc.delegated,
+          };
+        });
       },
 
       onToolResult: (id, output, isError) => {
         mapToolCalls(id, (tc) => {
-          const delegated = isDelegatedToolName(tc.name)
+          const delegatedKind = resolveDelegatedKind(
+            tc.name,
+            tc.arguments,
+            tc.delegated?.kind,
+          );
+          const delegated = delegatedKind
             ? mergeDelegatedArtifactState(
                 tc.delegated,
-                parseDelegatedArtifactState(tc.name, output) ||
-                  createDelegatedArtifactState(tc.name, tc.arguments),
+                parseDelegatedArtifactState(
+                  tc.name,
+                  output,
+                  tc.arguments,
+                  delegatedKind,
+                ) || createDelegatedArtifactState(delegatedKind, tc.arguments),
               )
             : tc.delegated;
           const status: ToolCall["status"] =
@@ -344,6 +369,12 @@ export function createSessionStore(
         set({ tokenCount: promptTokens + completionTokens });
       },
 
+      onSessionPinched: (event: SessionContinuationEvent) => {
+        if (event.type === "session_pinched") {
+          pinchedSessionId = event.new_session_id;
+        }
+      },
+
       onTitleUpdate: (title) => {
         set({ title });
         sessionsStore.getState().loadSessions();
@@ -352,6 +383,9 @@ export function createSessionStore(
       onFinish: (sessionId) => {
         const currentState = get();
         const queued = currentState.queuedMessages;
+        const activeSessionId = pinchedSessionId ?? sessionId;
+        const shouldLoadPinchedSession =
+          pinchedSessionId !== null && pinchedSessionId !== sessionId;
 
         const messages = finalizeTransientAssistantMessages(
           currentState.messages.map((m) =>
@@ -360,7 +394,7 @@ export function createSessionStore(
         );
 
         set({
-          sessionId,
+          sessionId: activeSessionId,
           messages: pruneEmptyAssistantMessages(messages),
           queuedMessages: [],
           isStreaming: false,
@@ -368,6 +402,34 @@ export function createSessionStore(
           thinkingContent: "",
         });
         sessionsStore.getState().loadSessions();
+
+        if (shouldLoadPinchedSession) {
+          const nextSessionId = pinchedSessionId;
+          pinchedSessionId = null;
+          if (nextSessionId) {
+            void (async () => {
+              try {
+                await get().loadSession(nextSessionId, true);
+              } catch {
+                // loadSession already updates error state
+              }
+
+              if (queued.length > 0) {
+                const combinedContent = queued.map((q) => q.content).join("\n\n");
+                const combinedAttachments = queued.flatMap((q) => q.attachments);
+                const queuedResearchEnabled = queued.some((q) => q.researchEnabled);
+                void get().sendMessage(
+                  combinedContent,
+                  combinedAttachments,
+                  queuedResearchEnabled,
+                );
+              }
+            })();
+          }
+          return;
+        }
+
+        pinchedSessionId = null;
 
         if (queued.length > 0) {
           const combinedContent = queued.map((q) => q.content).join("\n\n");

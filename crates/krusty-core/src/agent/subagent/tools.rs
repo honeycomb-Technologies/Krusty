@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::ai::types::AiTool;
-use crate::tools::implementations::{BashTool, EditTool, GlobTool, GrepTool, ReadTool, WriteTool};
 use crate::tools::registry::{Tool, ToolContext, ToolResult};
+use crate::tools::{BashTool, EditTool, GlobTool, GrepTool, ReadTool, WriteTool};
 
 use super::build_context::{BuilderInterface, SharedBuildContext};
 

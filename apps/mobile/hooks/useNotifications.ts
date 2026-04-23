@@ -30,8 +30,8 @@ const PUSH_TOKEN_KEY = "krusty_push_token";
 const NOTIFICATION_LEVEL_KEY = "krusty_notification_level";
 
 const TOOL_APPROVAL_CATEGORY = "TOOL_APPROVAL";
-const STREAM_COMPLETE_CATEGORY = "STREAM_COMPLETE";
-const MAKO_UPDATE_CATEGORY = "MAKO_UPDATE";
+const CHAT_SESSION_CATEGORY = "CHAT_SESSION";
+const MAKO_SESSION_CATEGORY = "MAKO_SESSION";
 type NotificationResponseData = {
   requestId?: string;
   sessionId?: string;
@@ -63,15 +63,15 @@ async function registerNotificationCategories() {
     },
   ]);
 
-  await Notifications.setNotificationCategoryAsync(STREAM_COMPLETE_CATEGORY, [
+  await Notifications.setNotificationCategoryAsync(CHAT_SESSION_CATEGORY, [
     {
-      identifier: "VIEW",
+      identifier: "VIEW_CHAT",
       buttonTitle: "View Chat",
       options: { opensAppToForeground: true },
     },
   ]);
 
-  await Notifications.setNotificationCategoryAsync(MAKO_UPDATE_CATEGORY, [
+  await Notifications.setNotificationCategoryAsync(MAKO_SESSION_CATEGORY, [
     {
       identifier: "OPEN_MAKO",
       buttonTitle: "Open Mako",
@@ -168,7 +168,7 @@ export function useNotifications(options?: UseNotificationsOptions) {
           options?.onToolApproval?.(data.sessionId, data.requestId, true);
         } else if (actionId === "DENY" && data.requestId && data.sessionId) {
           options?.onToolApproval?.(data.sessionId, data.requestId, false);
-        } else if (actionId === "VIEW" && data.sessionId) {
+        } else if (actionId === "VIEW_CHAT" && data.sessionId) {
           options?.onNavigate?.("/(tabs)", { sessionId: data.sessionId });
         } else if (actionId === "OPEN_MAKO") {
           const params: Record<string, string> = { focus: "mako" };
@@ -241,8 +241,8 @@ export function useNotifications(options?: UseNotificationsOptions) {
         content: {
           title: `${chatTitle || "Chat"} — Complete`,
           body: `Response finished in ${timeStr} (${tokenCount.toLocaleString()} tokens)`,
-          categoryIdentifier: STREAM_COMPLETE_CATEGORY,
-          data: { sessionId, type: "stream_complete" },
+          categoryIdentifier: CHAT_SESSION_CATEGORY,
+          data: { sessionId, type: "chat_update", kind: "completion", focus: "chat" },
           sound: false,
         },
         trigger: null,
@@ -259,8 +259,8 @@ export function useNotifications(options?: UseNotificationsOptions) {
         content: {
           title: `Mako: ${title}`,
           body,
-          categoryIdentifier: MAKO_UPDATE_CATEGORY,
-          data: { type: "mako_update", sessionId, focus: "mako" },
+          categoryIdentifier: MAKO_SESSION_CATEGORY,
+          data: { type: "mako_update", kind: "user_message", sessionId, focus: "mako" },
           sound: notificationLevel === "all" ? "default" : false,
         },
         trigger: null,

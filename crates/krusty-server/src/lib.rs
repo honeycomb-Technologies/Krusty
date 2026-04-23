@@ -39,10 +39,9 @@ use krusty_core::process::ProcessRegistry;
 use krusty_core::skills::SkillsManager;
 use krusty_core::storage::credentials::CredentialStore;
 use krusty_core::storage::Database;
-use krusty_core::tools::implementations::{
-    register_agent_tool, register_all_tools, register_mako_tools,
+use krusty_core::tools::{
+    register_agent_tool, register_all_tools, register_mako_tools, ToolRegistry,
 };
-use krusty_core::tools::registry::ToolRegistry;
 
 use self::ai_bootstrap::{create_ai_client, create_ai_client_for_model, initialize_models};
 
@@ -58,6 +57,7 @@ pub mod auth;
 pub mod error;
 pub mod mako_runtime;
 pub mod notifications;
+pub(crate) mod oauth_flow;
 pub mod presence;
 pub mod push;
 pub mod remote_access;
@@ -189,7 +189,7 @@ pub struct AppState {
     /// APNs (Apple Push Notification service) for iOS devices.
     pub apns_service: Option<Arc<apns::ApnsService>>,
     /// Active OAuth flows keyed by provider storage key.
-    pub oauth_flows: Arc<Mutex<HashMap<String, routes::oauth::OAuthFlowState>>>,
+    pub oauth_flows: Arc<Mutex<HashMap<String, oauth_flow::OAuthFlowState>>>,
     /// Background runtime owner for autonomous Mako sessions.
     pub mako_runtime: Arc<mako_runtime::MakoRuntimeManager>,
 }
