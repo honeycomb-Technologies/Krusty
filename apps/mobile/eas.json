@@ -1,7 +1,8 @@
 {
   "cli": {
     "version": ">= 14.0.0",
-    "promptToConfigurePushNotifications": false
+    "promptToConfigurePushNotifications": false,
+    "appVersionSource": "remote"
   },
   "build": {
     "development": {
