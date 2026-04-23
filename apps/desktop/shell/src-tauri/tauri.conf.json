@@ -1,13 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Krusty Desktop",
-  "version": "0.5.4",
+  "version": "0.6.0",
   "identifier": "io.krusty.desktop",
   "build": {
     "beforeDevCommand": "cd ../../mobile && npx expo start --web --port 5173",
     "devUrl": "http://localhost:5173",
     "beforeBuildCommand": "cd ../../mobile && npx expo export --platform web",
-    "frontendDist": "../../mobile/dist"
+    "frontendDist": "../../../mobile/dist"
   },
   "app": {
     "withGlobalTauri": true,
