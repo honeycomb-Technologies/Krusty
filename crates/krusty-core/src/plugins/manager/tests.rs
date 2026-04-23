@@ -1,7 +1,7 @@
 use super::*;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use ed25519_dalek::{Signer as _, SigningKey};
-use sha2::Sha256;
+use sha2::{Digest as _, Sha256};
 use tempfile::tempdir;
 use tokio::fs;
 

@@ -1,13 +1,10 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import {
   AppState,
-  Dimensions,
   View,
-  StyleSheet,
   Text,
   Pressable,
   Alert,
-  ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
@@ -47,21 +44,15 @@ import Animated, {
   runOnJS,
 } from "react-native-reanimated";
 
-const SCREEN_HEIGHT = Dimensions.get("window").height;
-const SPLIT_PANEL_HEIGHT = SCREEN_HEIGHT * 0.42;
-
 import type {
-  ChatMessage,
   ModelInfo,
   SessionResponse,
-  SessionType,
 } from "@krusty/api";
 import type { MakoTopLevelView } from "../../components/mako/types";
 import type {
   Attachment as SessionAttachment,
   PermissionMode,
   ThinkingLevel,
-  ToolCall,
 } from "@krusty/state";
 import {
   isFastModeModel,
@@ -69,91 +60,25 @@ import {
   toggleFastModeModel,
 } from "@krusty/state";
 
-const TAB_TYPES: SessionType[] = ["chat", "code", "mako"];
-const CHAT_BAR_ZONE = 130;
-const SELECTED_MODEL_KEY = "krusty_selected_model";
+import { ChatBootScreen } from "./chat-screen/BootScreen";
+import {
+  CHAT_BAR_ZONE,
+  SELECTED_MODEL_KEY,
+  SPLIT_PANEL_HEIGHT,
+  flattenToolCalls,
+  getActiveToolCall,
+  getLastAssistantMessage,
+  getWorkspaceMode,
+  isModelUsable,
+  normalizeProviderId,
+  sessionTypeForTab,
+  tabForSessionType,
+  type WorkspaceMode,
+} from "./chat-screen/helpers";
+import { styles } from "./chat-screen/styles";
+import { useSessionActions } from "./chat-screen/useSessionActions";
 
-type WorkspaceMode = "neutral" | "selected" | "created";
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
-
-function normalizeProviderId(provider: string | null | undefined): string {
-  return (provider ?? "").trim().toLowerCase();
-}
-
-function isModelUsable(
-  modelId: string | null | undefined,
-  catalog: ModelInfo[],
-  configuredProviders: string[],
-): boolean {
-  if (!modelId) {
-    return false;
-  }
-
-  const match = catalog.find((candidate) => candidate.id === modelId);
-  if (!match) {
-    return false;
-  }
-
-  if (configuredProviders.length === 0) {
-    return true;
-  }
-
-  return configuredProviders.includes(normalizeProviderId(match.provider));
-}
-
-function sessionTypeForTab(index: number): SessionType {
-  return TAB_TYPES[index] ?? "code";
-}
-
-function tabForSessionType(type: SessionType): number {
-  switch (type) {
-    case "chat":
-      return 0;
-    case "mako":
-      return 2;
-    default:
-      return 1;
-  }
-}
-
-function getLastAssistantMessage(messages: ChatMessage[]): ChatMessage | null {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message?.role === "assistant") {
-      return message;
-    }
-  }
-  return null;
-}
-
-function flattenToolCalls(messages: ChatMessage[]): ToolCall[] {
-  const toolCalls: ToolCall[] = [];
-  for (const message of messages) {
-    if (message.toolCalls?.length) {
-      toolCalls.push(...message.toolCalls);
-    }
-  }
-  return toolCalls;
-}
-
-function getActiveToolCall(toolCalls: ToolCall[]): ToolCall | null {
-  for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
-    const toolCall = toolCalls[index];
-    if (
-      toolCall &&
-      (toolCall.status === "awaiting_approval" ||
-        toolCall.status === "running" ||
-        toolCall.status === "pending")
-    ) {
-      return toolCall;
-    }
-  }
-  return null;
-}
-
-function getWorkspaceMode(path: string | null): WorkspaceMode {
-  return path ? "selected" : "neutral";
-}
 
 export default function ChatScreen() {
   const { theme } = useThemeContext();
@@ -166,80 +91,18 @@ export default function ChatScreen() {
   const stores = useStores();
 
   if (!stores) {
-    const t = theme.colors;
-    const isRetryable = status === "error" || status === "disconnected";
-
     return (
-      <SafeAreaView style={[styles.bootScreen, { backgroundColor: t.background }]}>
-        <View style={styles.bootInner}>
-          <KrustyLogo />
-          {status === "connecting" ? (
-            <>
-              <ActivityIndicator
-                size="small"
-                color={t.userMessage}
-                style={styles.bootSpinner}
-              />
-              <Text style={[styles.bootMessage, { color: t.mutedForeground }]}>
-                Reconnecting to your server...
-              </Text>
-            </>
-          ) : null}
-          {isRetryable ? (
-            <View style={styles.bootActions}>
-              <Text
-                style={[
-                  styles.bootMessage,
-                  {
-                    color: isConfigured ? t.error : t.mutedForeground,
-                    marginTop: 0,
-                  },
-                ]}
-              >
-                {connectionError ||
-                  (isConfigured
-                    ? "Could not reconnect to your server."
-                    : "Server connection is not configured.")}
-              </Text>
-              <Pressable
-                onPress={() => {
-                  if (isConfigured) {
-                    void reconnect();
-                  } else {
-                    router.replace("/onboarding");
-                  }
-                }}
-                style={[
-                  styles.bootButton,
-                  { backgroundColor: t.userMessage },
-                ]}
-              >
-                <Text style={styles.bootButtonText}>
-                  {isConfigured ? "Retry Connection" : "Open Setup"}
-                </Text>
-              </Pressable>
-              {isConfigured ? (
-                <Pressable
-                  onPress={() => router.replace("/onboarding")}
-                  style={[
-                    styles.bootButtonSecondary,
-                    { borderColor: t.border },
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.bootButtonSecondaryText,
-                      { color: t.foreground },
-                    ]}
-                  >
-                    Server Setup
-                  </Text>
-                </Pressable>
-              ) : null}
-            </View>
-          ) : null}
-        </View>
-      </SafeAreaView>
+      <ChatBootScreen
+        status={status}
+        isConfigured={isConfigured}
+        connectionError={connectionError}
+        onRetryConnection={() => {
+          void reconnect();
+        }}
+        onOpenSetup={() => {
+          router.replace("/onboarding");
+        }}
+      />
     );
   }
 
@@ -624,279 +487,35 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     updateActivity,
   ]);
 
-  const stopCurrentStream = useCallback(
-    (suppressCompletion = true) => {
-      if (sessionStore.getState().isStreaming) {
-        suppressCompletionRef.current = suppressCompletion;
-        sessionStore.getState().stopStreaming();
-      }
-      setActiveToolCallId(null);
-    },
-    [sessionStore],
-  );
-
-  const bootstrapSession = useCallback(
-    async (session: SessionResponse) => {
-      const currentModel = sessionStore.getState().model;
-      const currentThinkingLevel = sessionStore.getState().thinkingLevel;
-      const directory = session.project_dir ?? session.working_dir ?? null;
-      const workspaceMode = (session.workspace_mode ??
-        getWorkspaceMode(directory)) as WorkspaceMode;
-
-      sessionStore.getState().initSession(session.id, session.title || "");
-      workspace
-        .getState()
-        .initFromSession(session.id, directory, workspaceMode);
-
-      if (currentModel) {
-        sessionStore.getState().setModel(currentModel);
-      }
-      if (sessionStore.getState().thinkingLevel !== currentThinkingLevel) {
-        sessionStore.getState().setThinkingLevel(currentThinkingLevel);
-      }
-
-      await sessionsStore.getState().loadSessions();
-    },
-    [sessionStore, sessionsStore, workspace],
-  );
-
-  const createSessionForCurrentTab = useCallback(
-    async (directory?: string) => {
-      if (!client) {
-        return null;
-      }
-
-      stopCurrentStream();
-
-      try {
-        await ensureModelReady();
-        const session = await client.createSession(
-          undefined,
-          directory,
-          undefined,
-          directory ? "selected" : undefined,
-          sessionTypeForTab(activeTab),
-        );
-        await bootstrapSession(session);
-        setActiveToolCallId(null);
-        setDrawerOpen(false);
-        void Haptics.notificationAsync(
-          Haptics.NotificationFeedbackType.Success,
-        );
-        return session;
-      } catch {
-        return null;
-      }
-    },
-    [activeTab, bootstrapSession, client, ensureModelReady, stopCurrentStream],
-  );
-
-  const ensureSessionForSend = useCallback(async () => {
-    const currentSessionId = sessionStore.getState().sessionId;
-    if (currentSessionId) {
-      return currentSessionId;
-    }
-
-    if (!client) {
-      return null;
-    }
-
-    try {
-      const session = await client.createSession(
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        sessionTypeForTab(activeTab),
-      );
-      await bootstrapSession(session);
-      return session.id;
-    } catch {
-      return null;
-    }
-  }, [activeTab, bootstrapSession, client, sessionStore]);
-
-  const loadSession = useCallback(
-    async (session: SessionResponse) => {
-      stopCurrentStream();
-      setDrawerOpen(false);
-      setActiveTab(tabForSessionType(session.session_type));
-      await sessionStore.getState().loadSession(session.id);
-    },
-    [sessionStore, stopCurrentStream],
-  );
-
-  const loadSessionById = useCallback(
-    async (id: string) => {
-      stopCurrentStream();
-      setDrawerOpen(false);
-      setActiveTab(2);
-      await sessionStore.getState().loadSession(id);
-    },
-    [sessionStore, stopCurrentStream],
-  );
-
-  const openProjectInCode = useCallback(
-    async (projectDir: string) => {
-      if (!client) {
-        return;
-      }
-
-      stopCurrentStream();
-      setDrawerOpen(false);
-      setActiveTab(1);
-
-      const existing = sessions.find(
-        (session) =>
-          session.session_type === "code" &&
-          (session.project_dir === projectDir || session.working_dir === projectDir),
-      );
-
-      if (existing) {
-        await sessionStore.getState().loadSession(existing.id);
-        return;
-      }
-
-      try {
-        await ensureModelReady();
-        const session = await client.createSession(
-          undefined,
-          projectDir,
-          undefined,
-          "selected",
-          "code",
-        );
-        await bootstrapSession(session);
-        setActiveToolCallId(null);
-        void Haptics.notificationAsync(
-          Haptics.NotificationFeedbackType.Success,
-        );
-      } catch {
-        return;
-      }
-    },
-    [
-      bootstrapSession,
-      client,
-      ensureModelReady,
-      sessionStore,
-      sessions,
-      stopCurrentStream,
-    ],
-  );
-
-  const handleNewSession = useCallback(async () => {
-    await createSessionForCurrentTab();
-  }, [createSessionForCurrentTab]);
-
-  const handleDirectorySelected = useCallback(
-    async (path: string) => {
-      await createSessionForCurrentTab(path);
-    },
-    [createSessionForCurrentTab],
-  );
-
-  const handleDeleteSession = useCallback(
-    (id: string) => {
-      Alert.alert("Delete Session", "Delete this session?", [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            const isActiveSession = sessionStore.getState().sessionId === id;
-
-            if (isActiveSession) {
-              stopCurrentStream();
-            }
-
-            const deleted = await sessionsStore.getState().deleteSession(id);
-            if (!deleted) {
-              return;
-            }
-
-            if (isActiveSession) {
-              sessionStore.getState().clearSession();
-              setActiveToolCallId(null);
-            }
-
-            void sessionsStore.getState().loadSessions();
-          },
-        },
-      ]);
-    },
-    [sessionsStore, stopCurrentStream, sessionStore],
-  );
-
-  const handleInteractiveToolResult = useCallback(
-    async (toolCallId: string, result: string) => {
-      const currentSessionId = sessionStore.getState().sessionId;
-      if (!currentSessionId || activeToolCallId) {
-        return;
-      }
-
-      setActiveToolCallId(toolCallId);
-      try {
-        await sessionStore.getState().submitToolResult(toolCallId, result);
-      } catch {
-        await sessionStore.getState().loadSession(currentSessionId, true);
-      } finally {
-        setActiveToolCallId(null);
-      }
-    },
-    [activeToolCallId, sessionStore],
-  );
-
-  const handlePlanConfirm = useCallback(
-    async (toolCallId: string, choice: "execute" | "abandon") => {
-      if (choice === "execute") {
-        sessionStore.getState().setMode("build");
-      }
-      await handleInteractiveToolResult(toolCallId, JSON.stringify({ choice }));
-    },
-    [handleInteractiveToolResult, sessionStore],
-  );
-
-  const handleSend = useCallback(
-    async (content: string, attachments: ChatBarAttachment[] = []) => {
-      const trimmed = content.trim();
-      if (!client || (!trimmed && attachments.length === 0)) {
-        return;
-      }
-
-      const resolvedModel = await ensureModelReady();
-      if (!resolvedModel) {
-        sessionStore.setState({
-          error:
-            "No model is available yet. Check your model settings and try again.",
-        });
-        return;
-      }
-
-      const ensuredSessionId = await ensureSessionForSend();
-      if (!ensuredSessionId) {
-        return;
-      }
-
-      try {
-        await sessionStore
-          .getState()
-          .sendMessage(
-            trimmed,
-            attachments as SessionAttachment[],
-            researchEnabled,
-          );
-      } catch (err) {
-        sessionStore.setState({
-          error:
-            err instanceof Error
-              ? err.message
-              : "Failed to send message.",
-        });
-      }
-    },
-    [client, ensureModelReady, ensureSessionForSend, researchEnabled, sessionStore],
-  );
+  const {
+    stopCurrentStream,
+    loadSession,
+    loadSessionById,
+    openProjectInCode,
+    handleNewSession,
+    handleDirectorySelected,
+    handleDeleteSession,
+    handleInteractiveToolResult,
+    handlePlanConfirm,
+    handleSend,
+    handleModelSelect,
+    handleFastModeToggle,
+    handleTabChange,
+  } = useSessionActions({
+    client,
+    activeTab,
+    activeToolCallId,
+    setActiveToolCallId,
+    setActiveTab,
+    setDrawerOpen,
+    ensureModelReady,
+    researchEnabled,
+    sessionStore,
+    sessionsStore,
+    workspace,
+    sessions,
+    suppressCompletionRef,
+  });
 
   const handleSessionToolApproval = useCallback(
     (targetSessionId: string, toolCallId: string, approved: boolean) => {
@@ -909,46 +528,15 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     stopCurrentStream();
   }, [stopCurrentStream]);
 
-  const handleModelSelect = useCallback(
-    (modelId: string) => {
-      sessionStore.getState().setModel(modelId);
-      void SecureStore.setItemAsync(SELECTED_MODEL_KEY, modelId);
+  const handleChatBarSend = useCallback(
+    async (content: string, attachments: ChatBarAttachment[] = []) => {
+      const normalizedAttachments = attachments.map((attachment) => ({
+        ...attachment,
+        mimeType: attachment.mimeType ?? "application/octet-stream",
+      })) as SessionAttachment[];
+      await handleSend(content, normalizedAttachments);
     },
-    [sessionStore],
-  );
-
-  const handleFastModeToggle = useCallback(() => {
-    const currentModel = sessionStore.getState().model;
-    const nextModel = toggleFastModeModel(currentModel);
-    if (!nextModel || nextModel === currentModel) {
-      return;
-    }
-
-    sessionStore.getState().setModel(nextModel);
-    void SecureStore.setItemAsync(SELECTED_MODEL_KEY, nextModel);
-  }, [sessionStore]);
-
-  const handleTabChange = useCallback(
-    (index: number) => {
-      setActiveTab(index);
-
-      const currentSessionId = sessionStore.getState().sessionId;
-      if (!currentSessionId) {
-        return;
-      }
-
-      const currentSession = sessions.find(
-        (session) => session.id === currentSessionId,
-      );
-      if (
-        !currentSession ||
-        currentSession.session_type !== sessionTypeForTab(index)
-      ) {
-        stopCurrentStream();
-        sessionStore.getState().clearSession();
-      }
-    },
-    [sessionStore, sessions, stopCurrentStream],
+    [handleSend],
   );
 
   const handleSelectMakoView = useCallback(
@@ -1097,7 +685,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         {(!toolboxOpen || isSplit) && (
           <Animated.View style={[entrance.bottomBarStyle, { overflow: "visible", zIndex: 300 }]}>
             <ChatBar
-              onSend={handleSend}
+              onSend={handleChatBarSend}
               onStop={handleStop}
               onHeightChange={setComposerReserveHeight}
               isStreaming={isStreaming}
@@ -1181,7 +769,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
             void handleInteractiveToolResult(toolCallId, result),
           onPlanConfirm: (toolCallId, choice) =>
             void handlePlanConfirm(toolCallId, choice),
-          onSend: handleSend,
+          onSend: handleChatBarSend,
           onStop: handleStop,
           onThinkingChange: (level) =>
             sessionStore.getState().setThinkingLevel(level),
@@ -1236,179 +824,3 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     </DesktopShell>
   );
 }
-
-const styles = StyleSheet.create({
-  bootScreen: { flex: 1 },
-  bootInner: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 28,
-  },
-  bootSpinner: {
-    marginTop: 20,
-  },
-  bootActions: {
-    marginTop: 24,
-    alignItems: "center",
-    gap: 12,
-    width: "100%",
-    maxWidth: 320,
-  },
-  bootMessage: {
-    marginTop: 14,
-    fontSize: 15,
-    lineHeight: 21,
-    textAlign: "center",
-  },
-  bootButton: {
-    marginTop: 4,
-    borderRadius: 16,
-    paddingVertical: 14,
-    paddingHorizontal: 18,
-    width: "100%",
-    alignItems: "center",
-  },
-  bootButtonText: {
-    color: "#fff",
-    fontSize: 16,
-    fontWeight: "600",
-  },
-  bootButtonSecondary: {
-    borderRadius: 16,
-    borderWidth: StyleSheet.hairlineWidth,
-    paddingVertical: 14,
-    paddingHorizontal: 18,
-    width: "100%",
-    alignItems: "center",
-  },
-  bootButtonSecondaryText: {
-    fontSize: 16,
-    fontWeight: "600",
-  },
-  container: { flex: 1 },
-  flex: { flex: 1 },
-  topBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    gap: 12,
-  },
-  menuBtn: {
-    padding: 4,
-  },
-  titleBtn: {
-    flex: 1,
-  },
-  title: {
-    fontSize: 17,
-    fontWeight: "600",
-    textAlign: "center",
-  },
-  statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  list: {
-    paddingHorizontal: 16,
-    paddingTop: 8,
-  },
-  listDesktop: {
-    maxWidth: 800,
-    alignSelf: "center",
-    width: "100%",
-  },
-  fadeTop: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    height: 64,
-  },
-  fadeBottom: {
-    position: "absolute",
-    bottom: 0,
-    left: 0,
-    right: 0,
-    height: 120,
-  },
-  empty: {
-    flex: 1,
-    justifyContent: "flex-start",
-    alignItems: "center",
-    paddingTop: "35%",
-    gap: 16,
-  },
-  emptyTitle: {
-    fontSize: 28,
-    fontWeight: "700",
-    letterSpacing: -0.5,
-  },
-  emptyHint: {
-    fontSize: 17,
-  },
-  errorBanner: {
-    marginHorizontal: 16,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-  },
-  errorBannerText: {
-    fontSize: 13,
-    lineHeight: 18,
-    fontWeight: "500",
-  },
-  stubTitle: {
-    fontSize: 24,
-    fontWeight: "700",
-    letterSpacing: -0.3,
-  },
-  stubText: {
-    fontSize: 15,
-    marginTop: 8,
-  },
-  modalBackdrop: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.6)",
-    justifyContent: "flex-end",
-    zIndex: 200,
-  },
-  modelPicker: {
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    maxHeight: "60%",
-    paddingTop: 20,
-    paddingBottom: 40,
-    backgroundColor: "#1a1f2e",
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: "rgba(255,255,255,0.1)",
-  },
-  modelPickerTitle: {
-    fontSize: 18,
-    fontWeight: "700",
-    textAlign: "center",
-    marginBottom: 16,
-  },
-  modelList: {
-    paddingHorizontal: 16,
-  },
-  modelItem: {
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    borderRadius: 12,
-    borderWidth: 1,
-    marginBottom: 8,
-  },
-  modelName: {
-    fontSize: 16,
-    fontWeight: "500",
-  },
-  modelProvider: {
-    fontSize: 13,
-    marginTop: 2,
-  },
-});

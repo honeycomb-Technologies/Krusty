@@ -157,7 +157,7 @@ export class KrustyClient {
     });
   }
 
-  async updateSession(id: string, data: Partial<{ title: string; mode: string; model: string }>): Promise<SessionResponse> {
+  async updateSession(id: string, data: Partial<{ title: string; mode: string; model: string | null }>): Promise<SessionResponse> {
     return this.request(`/sessions/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(data),

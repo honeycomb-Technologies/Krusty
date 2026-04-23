@@ -1,0 +1,90 @@
+import { ActivityIndicator, Pressable, Text, View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+
+import { useThemeContext } from "../../../hooks/useTheme";
+import { KrustyLogo } from "../../../components/ui/KrustyLogo";
+import { styles } from "./styles";
+
+interface ChatBootScreenProps {
+  status: string;
+  isConfigured: boolean;
+  connectionError: string | null;
+  onRetryConnection: () => void;
+  onOpenSetup: () => void;
+}
+
+export function ChatBootScreen({
+  status,
+  isConfigured,
+  connectionError,
+  onRetryConnection,
+  onOpenSetup,
+}: ChatBootScreenProps) {
+  const { theme } = useThemeContext();
+  const t = theme.colors;
+  const isRetryable = status === "error" || status === "disconnected";
+
+  return (
+    <SafeAreaView style={[styles.bootScreen, { backgroundColor: t.background }]}> 
+      <View style={styles.bootInner}>
+        <KrustyLogo />
+        {status === "connecting" ? (
+          <>
+            <ActivityIndicator
+              size="small"
+              color={t.userMessage}
+              style={styles.bootSpinner}
+            />
+            <Text style={[styles.bootMessage, { color: t.mutedForeground }]}> 
+              Reconnecting to your server...
+            </Text>
+          </>
+        ) : null}
+        {isRetryable ? (
+          <View style={styles.bootActions}>
+            <Text
+              style={[
+                styles.bootMessage,
+                {
+                  color: isConfigured ? t.error : t.mutedForeground,
+                  marginTop: 0,
+                },
+              ]}
+            >
+              {connectionError ||
+                (isConfigured
+                  ? "Could not reconnect to your server."
+                  : "Server connection is not configured.")}
+            </Text>
+            <Pressable
+              onPress={isConfigured ? onRetryConnection : onOpenSetup}
+              style={[styles.bootButton, { backgroundColor: t.userMessage }]}
+            >
+              <Text style={styles.bootButtonText}>
+                {isConfigured ? "Retry Connection" : "Open Setup"}
+              </Text>
+            </Pressable>
+            {isConfigured ? (
+              <Pressable
+                onPress={onOpenSetup}
+                style={[
+                  styles.bootButtonSecondary,
+                  { borderColor: t.border },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.bootButtonSecondaryText,
+                    { color: t.foreground },
+                  ]}
+                >
+                  Server Setup
+                </Text>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : null}
+      </View>
+    </SafeAreaView>
+  );
+}

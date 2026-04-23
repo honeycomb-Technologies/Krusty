@@ -95,3 +95,12 @@ Building, testing, deploying, and packaging.
 | Document | Description |
 |----------|-------------|
 | [Build, CI/CD & Packaging](operations/build-and-deploy.md) | Cargo workspace, GitHub Actions, AUR/Homebrew packaging, Expo/Tauri builds |
+
+## Archive
+
+Historical audit, roadmap, tracker, and closure documents that are preserved for reference but no longer represent the main documentation set.
+
+| Document | Description |
+|----------|-------------|
+| [Documentation Archive](archive/README.md) | Historical KRUSTY_* planning, audit, tracker, and closure documents |
+

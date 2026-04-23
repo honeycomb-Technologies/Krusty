@@ -39,7 +39,7 @@ The CI workflow (`.github/workflows/ci.yml`) runs on every push to `main` and on
 | **Rust Test** | `cargo test --workspace` -- runs the full test suite |
 | **Rust Clippy** | `cargo clippy --workspace -- -D warnings` -- lint pass with zero tolerance for warnings |
 | **Rust Format** | `cargo fmt --all -- --check` -- verifies formatting without modifying files |
-| **PWA Check + Build** | Installs Bun, runs `bun run check` and `bun run build` in `apps/pwa/app` |
+| **Mobile Web Export** | Installs Bun and runs `npx expo export --platform web` in `apps/mobile` |
 | **Desktop Linux Bundle** | Full Tauri build on Ubuntu with system dependencies (WebKit, GTK, patchelf) |
 
 The Linux jobs install `libudev-dev` because the CLI uses `gilrs` for gamepad support, which requires the udev headers. The desktop bundle job additionally installs `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, and `patchelf` for the Tauri build.
@@ -60,7 +60,7 @@ Releases are triggered by pushing a Git tag that matches `v*` (for example, `v0.
 | `aarch64-apple-darwin` | `macos-latest` |
 | `x86_64-pc-windows-msvc` | `windows-latest` |
 
-Each job first builds the PWA frontend with Bun (so it can be embedded into the server binary), then compiles Krusty in release mode for the target architecture. Unix builds are packaged as `.tar.gz` archives; the Windows build is packaged as a `.zip`.
+Each job first builds the Expo web frontend from `apps/mobile` (so it can be embedded into the server and desktop bundles), then compiles Krusty in release mode for the target architecture. Unix builds are packaged as `.tar.gz` archives; the Windows build is packaged as a `.zip`.
 
 **2. Desktop Linux bundles.** A separate job builds the Tauri desktop shell on Ubuntu, producing `.deb` and `.rpm` packages from `apps/desktop/shell`.
 
@@ -174,7 +174,7 @@ The `allow_missing = true` attribute is key -- if the `dist` directory does not 
 
 For a full build (as done in the release workflow), the process is:
 
-1. Run `bun install && bun run build` in the frontend directory to produce the static export in `apps/mobile/dist`.
+1. Run `bun install --frozen-lockfile` and `npx expo export --platform web` in `apps/mobile` to produce the static export in `apps/mobile/dist`.
 2. Run `cargo build --release` -- rust-embed picks up the files and bakes them into the binary.
 
 The server handles all non-API routes with SPA fallback: it tries to match the request path to an embedded file, and if nothing matches, serves `index.html` so client-side routing works. Static assets under `_expo/static/` get immutable cache headers (one year), while HTML files are served with `no-cache`.

@@ -58,21 +58,20 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  pwa:
-    name: PWA Check + Build
+  mobile-web-export:
+    name: Mobile Web Export
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: apps/pwa/app
+        working-directory: apps/mobile
     steps:
       - uses: actions/checkout@v4
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - run: bun install
-      - run: bun run check
-      - run: bun run build
+      - run: bun install --frozen-lockfile
+      - run: npx expo export --platform web
 
   desktop-linux-bundle:
     name: Desktop Linux Bundle
@@ -99,5 +98,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
-      - run: bun install
+      - name: Install mobile web dependencies
+        working-directory: apps/mobile
+        run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile
       - run: bun run build

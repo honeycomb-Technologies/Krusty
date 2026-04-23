@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
@@ -16,19 +16,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-          # Linux ARM64 (native runner)
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-          # macOS Intel
           - target: x86_64-apple-darwin
             os: macos-15-intel
-          # macOS Apple Silicon
           - target: aarch64-apple-darwin
             os: macos-latest
-          # Windows
           - target: x86_64-pc-windows-msvc
             os: windows-latest
 
@@ -36,7 +31,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == "Linux"
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
 
       - name: Setup Bun
@@ -44,11 +39,13 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Build PWA frontend
-        run: |
-          cd apps/pwa/app
-          bun install
-          bun run build
+      - name: Install mobile web dependencies
+        working-directory: apps/mobile
+        run: bun install --frozen-lockfile
+
+      - name: Build mobile web frontend
+        working-directory: apps/mobile
+        run: npx expo export --platform web
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -59,13 +56,13 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package (Unix)
-        if: matrix.os != 'windows-latest'
+        if: matrix.os != "windows-latest"
         run: |
           cd target/${{ matrix.target }}/release
           tar czf ../../../krusty-${{ matrix.target }}.tar.gz krusty
 
       - name: Package (Windows)
-        if: matrix.os == 'windows-latest'
+        if: matrix.os == "windows-latest"
         run: |
           cd target/${{ matrix.target }}/release
           7z a ../../../krusty-${{ matrix.target }}.zip krusty.exe
@@ -85,13 +82,7 @@ jobs:
       - name: Install desktop bundling dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libudev-dev \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf
+          sudo apt-get install -y             libudev-dev             libwebkit2gtk-4.1-dev             libgtk-3-dev             libayatana-appindicator3-dev             librsvg2-dev             patchelf
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -101,14 +92,14 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install PWA dependencies
-        working-directory: apps/pwa/app
-        run: bun install
+      - name: Install mobile web dependencies
+        working-directory: apps/mobile
+        run: bun install --frozen-lockfile
 
       - name: Build Linux desktop bundles
         working-directory: apps/desktop/shell
         run: |
-          bun install
+          bun install --frozen-lockfile
           bun run build
 
       - name: Upload desktop Linux artifacts
