@@ -102,9 +102,27 @@ async fn authorize_request_surface(
         .unwrap_or_default();
 
     if addr.ip().is_loopback() && is_local_host(host) {
-        Ok(())
+        authorize_local_browser_origin(headers)
     } else {
         authorize_remote_request(state, headers).await
+    }
+}
+
+fn authorize_local_browser_origin(headers: &HeaderMap) -> Result<(), (StatusCode, &'static str)> {
+    let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Ok(());
+    };
+
+    if is_trusted_local_origin(origin) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            "Loopback API requests must come from a trusted local origin",
+        ))
     }
 }
 
@@ -157,6 +175,22 @@ pub(crate) fn is_local_host(host: &str) -> bool {
     matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1")
 }
 
+pub(crate) fn is_trusted_local_origin(origin: &str) -> bool {
+    let origin = origin.trim().trim_end_matches('/');
+    if origin.is_empty() || origin.eq_ignore_ascii_case("null") {
+        return false;
+    }
+
+    let Some((_, remainder)) = origin.split_once("://") else {
+        return false;
+    };
+
+    let authority = remainder.split('/').next().unwrap_or_default();
+    let host = extract_host_authority(authority).to_ascii_lowercase();
+
+    is_local_host(&host) || host.ends_with(".localhost")
+}
+
 fn extract_host_authority(host: &str) -> &str {
     if let Some(stripped) = host.strip_prefix('[') {
         return stripped
@@ -205,7 +239,9 @@ mod tests {
     use krusty_core::storage::credentials::CredentialStore;
     use krusty_core::tools::registry::ToolRegistry;
 
-    use super::{authorize_request_surface, is_local_host, resolve_workspace_dir};
+    use super::{
+        authorize_request_surface, is_local_host, is_trusted_local_origin, resolve_workspace_dir,
+    };
     use crate::{remote_access::RemoteAccessConfig, AppState};
 
     #[test]
@@ -215,6 +251,16 @@ mod tests {
         assert!(is_local_host("[::1]:3000"));
         assert!(is_local_host("::1"));
         assert!(!is_local_host("krusty.example.ts.net"));
+    }
+
+    #[test]
+    fn is_trusted_local_origin_accepts_first_party_local_surfaces() {
+        assert!(is_trusted_local_origin("http://localhost:5173"));
+        assert!(is_trusted_local_origin("http://127.0.0.1:3000"));
+        assert!(is_trusted_local_origin("tauri://localhost"));
+        assert!(is_trusted_local_origin("https://tauri.localhost"));
+        assert!(!is_trusted_local_origin("https://evil.example"));
+        assert!(!is_trusted_local_origin("null"));
     }
 
     #[test]
@@ -299,6 +345,36 @@ mod tests {
         headers.insert(
             header::AUTHORIZATION,
             HeaderValue::from_static("Bearer secret"),
+        );
+
+        let result = authorize_request_surface(&state, addr, &headers).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn authorize_request_surface_rejects_untrusted_loopback_browser_origin() {
+        let state = test_state();
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:3000"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example"),
+        );
+
+        let result = authorize_request_surface(&state, addr, &headers).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn authorize_request_surface_accepts_trusted_loopback_browser_origin() {
+        let state = test_state();
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:3000"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://localhost:5173"),
         );
 
         let result = authorize_request_surface(&state, addr, &headers).await;

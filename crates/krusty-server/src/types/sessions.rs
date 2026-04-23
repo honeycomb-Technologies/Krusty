@@ -250,7 +250,8 @@ pub struct SessionPresenceResponse {
 pub struct ServerAccessResponse {
     pub local_url: String,
     pub remote_access_enabled: bool,
-    pub remote_access_token: String,
+    pub remote_access_token_available: bool,
+    pub revealed_remote_access_token: Option<String>,
     pub remote_launch_url: Option<String>,
     pub tailscale: TailscaleAccessResponse,
 }
@@ -259,6 +260,7 @@ pub struct ServerAccessResponse {
 pub struct UpdateServerAccessRequest {
     pub enabled: Option<bool>,
     pub rotate_token: Option<bool>,
+    pub reveal_token: Option<bool>,
 }
 
 #[derive(Serialize)]

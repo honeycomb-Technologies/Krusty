@@ -23,7 +23,7 @@ use rust_embed::Embed;
 use serde::Serialize;
 use tokio::sync::{Mutex, RwLock};
 use tower_http::{
-    cors::{Any, CorsLayer},
+    cors::{AllowOrigin, Any, CorsLayer},
     trace::TraceLayer,
 };
 
@@ -81,7 +81,7 @@ pub(crate) const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 100 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 struct ServerHttpPolicy {
-    allow_any_origin: bool,
+    allow_any_browser_origin: bool,
     max_request_body_bytes: usize,
     immutable_asset_max_age_secs: u64,
     mutable_asset_max_age_secs: u64,
@@ -90,7 +90,7 @@ struct ServerHttpPolicy {
 impl Default for ServerHttpPolicy {
     fn default() -> Self {
         Self {
-            allow_any_origin: true,
+            allow_any_browser_origin: false,
             max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
             immutable_asset_max_age_secs: 31_536_000,
             mutable_asset_max_age_secs: 3_600,
@@ -110,10 +110,15 @@ impl ServerHttpPolicy {
             ])
             .allow_headers(Any);
 
-        if self.allow_any_origin {
+        if self.allow_any_browser_origin {
             cors.allow_origin(Any)
         } else {
-            cors
+            cors.allow_origin(AllowOrigin::predicate(|origin, _request_parts| {
+                origin
+                    .to_str()
+                    .ok()
+                    .is_some_and(crate::auth::is_trusted_local_origin)
+            }))
         }
     }
 

@@ -784,7 +784,8 @@ export interface TailscaleAccessResponse {
 export interface ServerAccessResponse {
   local_url: string;
   remote_access_enabled: boolean;
-  remote_access_token: string;
+  remote_access_token_available: boolean;
+  revealed_remote_access_token?: string | null;
   remote_launch_url?: string | null;
   tailscale: TailscaleAccessResponse;
 }

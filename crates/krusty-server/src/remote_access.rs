@@ -20,7 +20,7 @@ impl RemoteAccessConfig {
         let enabled = preferences
             .get(REMOTE_ACCESS_ENABLED_KEY)
             .map(|value| value.eq_ignore_ascii_case("true"))
-            .unwrap_or(true);
+            .unwrap_or(false);
 
         let token = match preferences.get(REMOTE_ACCESS_TOKEN_KEY) {
             Some(token) if !token.trim().is_empty() => token,
@@ -77,6 +77,6 @@ mod tests {
         let second = RemoteAccessConfig::load_or_create(&db_path).expect("reload should succeed");
 
         assert_eq!(first.token, second.token);
-        assert!(second.enabled);
+        assert!(!second.enabled);
     }
 }

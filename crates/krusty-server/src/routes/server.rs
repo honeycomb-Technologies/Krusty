@@ -31,6 +31,7 @@ async fn get_server_access(
     Ok(Json(server_access_response(
         &remote_access,
         state.server_port,
+        false,
     )))
 }
 
@@ -43,15 +44,20 @@ async fn update_server_access(
     if let Some(enabled) = req.enabled {
         remote_access.enabled = enabled;
     }
-    if req.rotate_token.unwrap_or(false) {
+
+    let rotate_token = req.rotate_token.unwrap_or(false);
+    if rotate_token {
         remote_access.rotate(&state.db_path)?;
     } else {
         remote_access.persist(&state.db_path)?;
     }
 
+    let reveal_token = rotate_token || req.reveal_token.unwrap_or(false);
+
     Ok(Json(server_access_response(
         &remote_access,
         state.server_port,
+        reveal_token,
     )))
 }
 
@@ -103,17 +109,20 @@ async fn get_server_status(
 fn server_access_response(
     remote_access: &RemoteAccessConfig,
     server_port: u16,
+    reveal_token: bool,
 ) -> ServerAccessResponse {
     let tailscale = tailscale_status(server_port);
 
     ServerAccessResponse {
         local_url: format!("http://localhost:{server_port}"),
         remote_access_enabled: remote_access.enabled,
-        remote_access_token: remote_access.token.clone(),
-        remote_launch_url: tailscale
-            .url
-            .as_ref()
-            .map(|url| format!("{url}/#krusty-remote-token={}", remote_access.token)),
+        remote_access_token_available: !remote_access.token.trim().is_empty(),
+        revealed_remote_access_token: reveal_token.then(|| remote_access.token.clone()),
+        remote_launch_url: if remote_access.enabled {
+            tailscale.url.clone()
+        } else {
+            None
+        },
         tailscale,
     }
 }
@@ -244,6 +253,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_server_access_hides_remote_token_by_default() {
+        let (state, _temp_dir) = create_test_state();
+
+        let Json(response) = get_server_access(State(state))
+            .await
+            .unwrap_or_else(|_| panic!("access request should succeed"));
+
+        assert!(response.remote_access_token_available);
+        assert!(response.revealed_remote_access_token.is_none());
+        assert!(response.remote_launch_url.is_some());
+    }
+
+    #[tokio::test]
     async fn update_server_access_rotates_token() {
         let (state, _temp_dir) = create_test_state();
         let Json(before) = match get_server_access(State(state.clone())).await {
@@ -256,12 +278,41 @@ mod tests {
             Json(UpdateServerAccessRequest {
                 enabled: None,
                 rotate_token: Some(true),
+                reveal_token: None,
             }),
         )
         .await
         .unwrap_or_else(|_| panic!("rotate request should succeed"));
 
-        assert_ne!(before.remote_access_token, after.remote_access_token);
+        assert!(before.revealed_remote_access_token.is_none());
+        assert!(before.remote_access_token_available);
+        assert!(after.remote_access_token_available);
+        assert!(after.revealed_remote_access_token.is_some());
+        assert_ne!(
+            before.revealed_remote_access_token,
+            after.revealed_remote_access_token
+        );
+    }
+
+    #[tokio::test]
+    async fn update_server_access_reveals_existing_token_without_rotation() {
+        let (state, _temp_dir) = create_test_state();
+
+        let Json(response) = update_server_access(
+            State(state),
+            Json(UpdateServerAccessRequest {
+                enabled: None,
+                rotate_token: Some(false),
+                reveal_token: Some(true),
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("reveal request should succeed"));
+
+        assert_eq!(
+            response.revealed_remote_access_token.as_deref(),
+            Some("test-token")
+        );
     }
 
     #[tokio::test]
