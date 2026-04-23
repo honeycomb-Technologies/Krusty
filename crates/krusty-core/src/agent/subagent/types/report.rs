@@ -37,10 +37,7 @@ pub struct ExploreReport {
 
 fn strip_think_blocks(text: &str) -> String {
     let mut cleaned = text.to_string();
-    loop {
-        let Some(start) = cleaned.find("<think>") else {
-            break;
-        };
+    while let Some(start) = cleaned.find("<think>") {
         let Some(end_rel) = cleaned[start..].find("</think>") else {
             cleaned.replace_range(start.., "");
             break;

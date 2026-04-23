@@ -196,7 +196,7 @@ pub fn get_plugin_by_id(id: &str) -> Option<Box<dyn Plugin>> {
 }
 
 pub fn set_installed_plugins(mut descriptors: Vec<InstalledPluginDescriptor>) {
-    descriptors.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    descriptors.sort_by_key(|descriptor| descriptor.name.to_lowercase());
     if let Ok(mut guard) = INSTALLED_PLUGINS.write() {
         *guard = descriptors;
     }

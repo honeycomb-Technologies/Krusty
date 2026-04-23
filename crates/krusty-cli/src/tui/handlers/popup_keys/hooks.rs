@@ -15,11 +15,10 @@ impl App {
                 KeyCode::Esc => self.ui.popup = Popup::None,
                 KeyCode::Up | KeyCode::Char('k') => self.ui.popups.hooks.prev(),
                 KeyCode::Down | KeyCode::Char('j') => self.ui.popups.hooks.next(),
-                KeyCode::Enter => {
-                    if self.ui.popups.hooks.is_add_new_selected() {
-                        self.ui.popups.hooks.start_add();
-                    }
+                KeyCode::Enter if self.ui.popups.hooks.is_add_new_selected() => {
+                    self.ui.popups.hooks.start_add();
                 }
+                KeyCode::Enter => {}
                 KeyCode::Char(' ') => {
                     self.toggle_selected_hook();
                 }

@@ -150,8 +150,7 @@ impl App {
             if y < inner_area.y + inner_area.height {
                 // Color eyes pink on the second line
                 if i == 1 && (line.contains(" o ") || line.contains("-")) {
-                    let mut x_pos = crab_start_x;
-                    for ch in line.chars() {
+                    for (x_pos, ch) in (crab_start_x..).zip(line.chars()) {
                         if x_pos < inner_area.x + inner_area.width {
                             if let Some(cell) = f.buffer_mut().cell_mut(Position::new(x_pos, y)) {
                                 if ch == 'o' || ch == '-' {
@@ -164,11 +163,9 @@ impl App {
                                 cell.set_bg(self.ui.theme.bg_color);
                             }
                         }
-                        x_pos += 1;
                     }
                 } else {
-                    let mut x_pos = crab_start_x;
-                    for ch in line.chars() {
+                    for (x_pos, ch) in (crab_start_x..).zip(line.chars()) {
                         if x_pos < inner_area.x + inner_area.width {
                             if let Some(cell) = f.buffer_mut().cell_mut(Position::new(x_pos, y)) {
                                 cell.set_char(ch);
@@ -176,14 +173,13 @@ impl App {
                                 cell.set_bg(self.ui.theme.bg_color);
                             }
                         }
-                        x_pos += 1;
                     }
                 }
             }
         }
 
         // Quick Actions section
-        let padding = " ".repeat(((area.width as usize / 2).saturating_sub(25)).max(0));
+        let padding = " ".repeat((area.width as usize / 2).saturating_sub(25));
         let commands_text = vec![
             Line::from(vec![
                 Span::raw(&padding),

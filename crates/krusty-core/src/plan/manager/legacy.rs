@@ -48,7 +48,7 @@ impl PlanManager {
             }
         }
 
-        plans.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        plans.sort_by_key(|plan| std::cmp::Reverse(plan.created_at));
         Ok(plans)
     }
 

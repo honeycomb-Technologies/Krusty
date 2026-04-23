@@ -1023,11 +1023,10 @@ impl StreamBlock for BashBlock {
                             let max_scroll = total.saturating_sub(visible);
                             let track_height = visible;
                             let click_y = (internal_y - 1) as usize;
-                            let new_offset = if track_height > 0 {
-                                (click_y * max_scroll) / track_height
-                            } else {
-                                0
-                            };
+                            let new_offset = click_y
+                                .saturating_mul(max_scroll)
+                                .checked_div(track_height)
+                                .unwrap_or(0);
                             self.scroll_offset = new_offset.min(max_scroll) as u16;
                             return EventResult::Consumed;
                         }

@@ -324,7 +324,7 @@ async fn apply_update(path: &str, chunks: &[Chunk], ctx: &ToolContext) -> Result
     }
 
     // Apply replacements in reverse order to preserve indices
-    replacements.sort_by(|a, b| b.0.cmp(&a.0));
+    replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.0));
 
     for (start, end, new_lines) in replacements {
         let end = end.min(lines.len());

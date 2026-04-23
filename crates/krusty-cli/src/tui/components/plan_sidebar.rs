@@ -335,15 +335,13 @@ pub fn render_plan_sidebar(
     // Render visible lines from cache using slice (with horizontal padding)
     let start = state.scroll_offset;
     let end = (start + visible_height).min(state.cached_lines.len());
-    let mut y = inner.y;
     let content_x = inner.x + PAD_X;
     // Use explicit area boundary to prevent any possibility of overflow
     // The right boundary is inner.x + content_area_width (excludes scrollbar column)
     let area_max_x = inner.x + content_area_width;
 
-    for line in &state.cached_lines[start..end] {
+    for (y, line) in (inner.y..).zip(state.cached_lines[start..end].iter()) {
         render_line(buf, content_x, y, area_max_x, line);
-        y += 1;
     }
 
     // Render scrollbar if needed

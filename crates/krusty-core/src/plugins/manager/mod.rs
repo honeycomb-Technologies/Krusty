@@ -129,7 +129,7 @@ impl PluginManager {
             }
         }
 
-        installed.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        installed.sort_by_key(|plugin| plugin.name.to_lowercase());
         Ok(installed)
     }
 }

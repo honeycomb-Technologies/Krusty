@@ -108,7 +108,7 @@ To search file contents (not names), use Grep instead. To see directory structur
             })
             .collect();
 
-        files.sort_by(|a, b| b.1.cmp(&a.1));
+        files.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
         let matches: Vec<String> = files
             .iter()

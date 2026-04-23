@@ -499,7 +499,7 @@ impl FileSearchPopup {
             }
         }
 
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        scored.sort_by_key(|entry| std::cmp::Reverse(entry.1));
         self.filtered = scored.into_iter().take(50).collect();
     }
 

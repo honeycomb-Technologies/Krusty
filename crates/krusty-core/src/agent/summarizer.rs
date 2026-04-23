@@ -223,15 +223,13 @@ pub fn build_summarization_prompt(
                         role_str, status, preview
                     ));
                 }
-                Content::Thinking { thinking, .. } => {
+                Content::Thinking { thinking, .. } if thinking.len() > 500 => {
                     // Brief thinking preview
-                    if thinking.len() > 500 {
-                        prompt.push_str(&format!(
-                            "{}: [Thinking: {}...]\n\n",
-                            role_str,
-                            truncate_str(thinking, 500)
-                        ));
-                    }
+                    prompt.push_str(&format!(
+                        "{}: [Thinking: {}...]\n\n",
+                        role_str,
+                        truncate_str(thinking, 500)
+                    ));
                 }
                 _ => {}
             }

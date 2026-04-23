@@ -361,19 +361,17 @@ impl AuthPopup {
                     scroll_offset: 0,
                 };
             }
-            AuthState::ApiKeyInput { provider, .. } => {
-                // If provider supports OAuth, go back to method selection
-                if provider.supports_oauth() {
-                    self.state = AuthState::AuthMethodSelection {
-                        provider: *provider,
-                        selected_index: 0,
-                    };
-                } else {
-                    self.state = AuthState::ProviderSelection {
-                        selected_index: 0,
-                        scroll_offset: 0,
-                    };
-                }
+            AuthState::ApiKeyInput { provider, .. } if provider.supports_oauth() => {
+                self.state = AuthState::AuthMethodSelection {
+                    provider: *provider,
+                    selected_index: 0,
+                };
+            }
+            AuthState::ApiKeyInput { .. } => {
+                self.state = AuthState::ProviderSelection {
+                    selected_index: 0,
+                    scroll_offset: 0,
+                };
             }
             AuthState::OAuthBrowserWaiting { provider, .. }
             | AuthState::OAuthDeviceCode { provider, .. }

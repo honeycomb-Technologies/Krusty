@@ -260,9 +260,10 @@ mod tests {
             .await
             .unwrap_or_else(|_| panic!("access request should succeed"));
 
+        assert!(response.remote_access_enabled);
         assert!(response.remote_access_token_available);
         assert!(response.revealed_remote_access_token.is_none());
-        assert!(response.remote_launch_url.is_some());
+        assert_eq!(response.remote_launch_url, response.tailscale.url);
     }
 
     #[tokio::test]

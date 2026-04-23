@@ -31,13 +31,11 @@ pub(super) fn build_codex_user_content(content: &[Content]) -> Vec<Value> {
 
     for block in content {
         match block {
-            Content::Text { text } => {
-                if !text.is_empty() {
-                    items.push(serde_json::json!({
-                        "type": "input_text",
-                        "text": text
-                    }));
-                }
+            Content::Text { text } if !text.is_empty() => {
+                items.push(serde_json::json!({
+                    "type": "input_text",
+                    "text": text
+                }));
             }
             Content::Image { image, detail } => {
                 if let Some(image_url) = codex_image_url(image) {
@@ -51,13 +49,11 @@ pub(super) fn build_codex_user_content(content: &[Content]) -> Vec<Value> {
                     items.push(item);
                 }
             }
-            Content::Thinking { thinking, .. } => {
-                if !thinking.is_empty() {
-                    items.push(serde_json::json!({
-                        "type": "input_text",
-                        "text": format!("[Thinking]\n{}\n[/Thinking]", thinking)
-                    }));
-                }
+            Content::Thinking { thinking, .. } if !thinking.is_empty() => {
+                items.push(serde_json::json!({
+                    "type": "input_text",
+                    "text": format!("[Thinking]\n{}\n[/Thinking]", thinking)
+                }));
             }
             _ => {}
         }

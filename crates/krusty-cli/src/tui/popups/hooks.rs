@@ -119,18 +119,14 @@ impl HooksPopup {
 
     pub fn prev(&mut self) {
         match &self.stage {
-            HooksStage::List => {
-                if self.selected_index > 0 {
-                    self.selected_index -= 1;
-                    self.ensure_visible();
-                }
+            HooksStage::List if self.selected_index > 0 => {
+                self.selected_index -= 1;
+                self.ensure_visible();
             }
-            HooksStage::SelectType { selected_index } => {
-                if *selected_index > 0 {
-                    self.stage = HooksStage::SelectType {
-                        selected_index: selected_index - 1,
-                    };
-                }
+            HooksStage::SelectType { selected_index } if *selected_index > 0 => {
+                self.stage = HooksStage::SelectType {
+                    selected_index: selected_index - 1,
+                };
             }
             _ => {}
         }

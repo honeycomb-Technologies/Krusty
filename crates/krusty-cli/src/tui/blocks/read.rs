@@ -697,11 +697,10 @@ impl StreamBlock for ReadBlock {
                                 let visible = MAX_VISIBLE_LINES as usize;
                                 let max_scroll = total.saturating_sub(visible);
                                 let click_y = (internal_y - 1) as usize;
-                                let new_offset = if visible > 0 {
-                                    (click_y * max_scroll) / visible
-                                } else {
-                                    0
-                                };
+                                let new_offset = click_y
+                                    .saturating_mul(max_scroll)
+                                    .checked_div(visible)
+                                    .unwrap_or(0);
                                 self.scroll_offset = new_offset.min(max_scroll) as u16;
                                 return EventResult::Consumed;
                             }

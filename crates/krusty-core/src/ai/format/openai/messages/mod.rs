@@ -119,15 +119,13 @@ impl OpenAIFormat {
                                 }
                             }));
                         }
-                        Content::Thinking { thinking, .. } => {
-                            if !thinking.is_empty() {
-                                if !text_content.is_empty() {
-                                    text_content.push_str("\n\n");
-                                }
-                                text_content.push_str("[Thinking]\n");
-                                text_content.push_str(thinking);
-                                text_content.push_str("\n[/Thinking]\n\n");
+                        Content::Thinking { thinking, .. } if !thinking.is_empty() => {
+                            if !text_content.is_empty() {
+                                text_content.push_str("\n\n");
                             }
+                            text_content.push_str("[Thinking]\n");
+                            text_content.push_str(thinking);
+                            text_content.push_str("\n[/Thinking]\n\n");
                         }
                         _ => {}
                     }
@@ -164,21 +162,17 @@ impl OpenAIFormat {
 
             for content in &msg.content {
                 match content {
-                    Content::Text { text } => {
-                        if !text.is_empty() {
-                            text_parts.push(text.clone());
-                            if role == "user" {
-                                user_parts.push(parts::user_text_part(self, text));
-                            }
+                    Content::Text { text } if !text.is_empty() => {
+                        text_parts.push(text.clone());
+                        if role == "user" {
+                            user_parts.push(parts::user_text_part(self, text));
                         }
                     }
-                    Content::Thinking { thinking, .. } => {
-                        if !thinking.is_empty() {
-                            let formatted = format!("[Thinking]\n{}\n[/Thinking]", thinking);
-                            text_parts.push(formatted.clone());
-                            if role == "user" {
-                                user_parts.push(parts::user_text_part(self, &formatted));
-                            }
+                    Content::Thinking { thinking, .. } if !thinking.is_empty() => {
+                        let formatted = format!("[Thinking]\n{}\n[/Thinking]", thinking);
+                        text_parts.push(formatted.clone());
+                        if role == "user" {
+                            user_parts.push(parts::user_text_part(self, &formatted));
                         }
                     }
                     Content::Image { image, detail } if role == "user" => {

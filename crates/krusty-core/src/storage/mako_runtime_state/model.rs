@@ -45,10 +45,11 @@ impl std::fmt::Display for MakoRuntimeStateStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MakoRunPriority {
     Low,
+    #[default]
     Normal,
     High,
 }
@@ -69,12 +70,6 @@ impl MakoRunPriority {
             "high" => Some(Self::High),
             _ => None,
         }
-    }
-}
-
-impl Default for MakoRunPriority {
-    fn default() -> Self {
-        Self::Normal
     }
 }
 

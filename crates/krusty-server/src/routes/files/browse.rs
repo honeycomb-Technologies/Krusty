@@ -93,6 +93,6 @@ async fn list_visible_directories(
         });
     }
 
-    directories.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    directories.sort_by_key(|directory| directory.name.to_lowercase());
     Ok(directories)
 }
