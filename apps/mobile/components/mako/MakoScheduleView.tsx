@@ -5,6 +5,7 @@ import {
   RefreshControl,
   ScrollView,
   StyleSheet,
+  type DimensionValue,
   Text,
   TextInput,
   View,
@@ -901,8 +902,8 @@ export function MakoScheduleView({
                         ))}
                       </View>
                       {lane.map((bar) => {
-                        const left = `${(bar.startIndex / 7) * 100}%`;
-                        const width = `${(bar.span / 7) * 100}%`;
+                        const left: DimensionValue = `${(bar.startIndex / 7) * 100}%`;
+                        const width: DimensionValue = `${(bar.span / 7) * 100}%`;
                         return (
                           <Pressable
                             key={bar.id}

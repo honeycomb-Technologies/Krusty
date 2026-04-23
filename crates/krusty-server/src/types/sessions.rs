@@ -1,0 +1,306 @@
+use krusty_core::storage::{
+    DelegatedRunRecord, DelegatedRunScope, PartialAssistantState, RuntimeTraceEvent,
+    RuntimeTraceSummary, SessionInfo, SessionRecoveryState, SessionType, WorkMode, WorkspaceMode,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use super::{DelegatedProgressStatus, DelegatedRunStage, DelegatedToolKind};
+
+// ============================================================================
+// Session Types
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct CreateSessionRequest {
+    pub title: Option<String>,
+    pub model: Option<String>,
+    pub project_dir: Option<String>,
+    pub working_dir: Option<String>,
+    pub workspace_mode: Option<WorkspaceMode>,
+    pub target_branch: Option<String>,
+    pub session_type: Option<SessionType>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateSessionRequest {
+    pub title: Option<String>,
+    pub project_dir: Option<String>,
+    pub working_dir: Option<String>,
+    pub workspace_mode: Option<WorkspaceMode>,
+    pub mode: Option<WorkMode>,
+    pub model: Option<String>,
+    pub target_branch: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct PinchRequest {
+    /// Optional hints about what to preserve
+    pub preservation_hints: Option<String>,
+    /// Optional direction for the new session
+    pub direction: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct PinchResponse {
+    /// The new child session
+    pub session: SessionResponse,
+    /// Summary of what was preserved
+    pub summary: String,
+    /// Key decisions preserved
+    pub key_decisions: Vec<String>,
+    /// Pending tasks carried forward
+    pub pending_tasks: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct SessionResponse {
+    pub id: String,
+    pub title: String,
+    pub updated_at: String,
+    pub token_count: Option<usize>,
+    pub parent_session_id: Option<String>,
+    pub working_dir: Option<String>,
+    pub project_dir: Option<String>,
+    pub workspace_mode: WorkspaceMode,
+    pub session_type: SessionType,
+    pub mode: WorkMode,
+    pub model: Option<String>,
+    pub target_branch: Option<String>,
+}
+
+impl From<SessionInfo> for SessionResponse {
+    fn from(s: SessionInfo) -> Self {
+        Self {
+            id: s.id,
+            title: s.title,
+            updated_at: s.updated_at.to_rfc3339(),
+            token_count: s.token_count,
+            parent_session_id: s.parent_session_id,
+            working_dir: s.working_dir,
+            project_dir: s.project_dir,
+            workspace_mode: s.workspace_mode,
+            session_type: s.session_type,
+            mode: s.work_mode,
+            model: s.model,
+            target_branch: s.target_branch,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct SessionWithMessagesResponse {
+    pub session: SessionResponse,
+    pub messages: Vec<MessageResponse>,
+}
+
+/// Agent execution state for a session
+#[derive(Serialize)]
+pub struct SessionStateResponse {
+    /// Session ID
+    pub id: String,
+    /// Agent state: "idle", "streaming", "tool_executing", "awaiting_input", "error"
+    pub agent_state: String,
+    /// When the agent started (if not idle)
+    pub started_at: Option<String>,
+    /// Last event timestamp (for activity tracking)
+    pub last_event_at: Option<String>,
+    /// Current persisted work mode
+    pub mode: WorkMode,
+    /// Interrupted-turn recovery state, if any.
+    pub recovery: Option<SessionRecoveryState>,
+    /// Authoritative in-flight partial assistant state for active sessions.
+    pub live_partial_assistant: Option<PartialAssistantState>,
+    /// Active delegated tool snapshots for this session, keyed by top-level tool call.
+    pub delegated_tools: Vec<DelegatedToolStateResponse>,
+    /// Recent persisted delegated runs for this session.
+    pub recent_delegated_runs: Vec<DelegatedRunResponse>,
+    /// Latest persisted runtime trace sequence observed for this session.
+    pub last_event_sequence: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DelegatedAgentStateResponse {
+    pub task_id: String,
+    pub agent_name: String,
+    pub status: DelegatedProgressStatus,
+    pub tool_count: usize,
+    pub tokens: usize,
+    pub current_action: Option<String>,
+    pub completion_summary: Option<String>,
+    pub lines_added: usize,
+    pub lines_removed: usize,
+    pub completed_plan_task: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DelegatedToolStateResponse {
+    pub delegated_run_id: String,
+    pub tool_call_id: String,
+    pub kind: DelegatedToolKind,
+    pub stage: DelegatedRunStage,
+    pub parent_session_id: Option<String>,
+    pub agents: Vec<DelegatedAgentStateResponse>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DelegatedRunScopeResponse {
+    pub label: String,
+    pub path: String,
+    pub kind: String,
+}
+
+impl From<DelegatedRunScope> for DelegatedRunScopeResponse {
+    fn from(value: DelegatedRunScope) -> Self {
+        Self {
+            label: value.label,
+            path: value.path,
+            kind: value.kind,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DelegatedRunResponse {
+    pub delegated_run_id: String,
+    pub parent_tool_call_id: Option<String>,
+    pub kind: DelegatedToolKind,
+    pub stage: DelegatedRunStage,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub resumable: bool,
+    pub resumed_from_run_id: Option<String>,
+    pub target_scope: Vec<DelegatedRunScopeResponse>,
+    pub human_review: Option<String>,
+    pub artifact: Option<Value>,
+    pub updated_at: String,
+}
+
+impl From<DelegatedRunRecord> for DelegatedRunResponse {
+    fn from(value: DelegatedRunRecord) -> Self {
+        Self {
+            delegated_run_id: value.delegated_run_id,
+            parent_tool_call_id: value.parent_tool_call_id,
+            kind: match value.role {
+                krusty_core::storage::DelegatedRunRole::Explore => DelegatedToolKind::Explore,
+                krusty_core::storage::DelegatedRunRole::Planner => DelegatedToolKind::Plan,
+                krusty_core::storage::DelegatedRunRole::Verifier => DelegatedToolKind::Verify,
+                krusty_core::storage::DelegatedRunRole::Build => DelegatedToolKind::Build,
+            },
+            stage: match value.stage {
+                krusty_core::agent::DelegatedRunStage::Created => DelegatedRunStage::Created,
+                krusty_core::agent::DelegatedRunStage::Running => DelegatedRunStage::Running,
+                krusty_core::agent::DelegatedRunStage::Synthesizing => {
+                    DelegatedRunStage::Synthesizing
+                }
+                krusty_core::agent::DelegatedRunStage::Complete => DelegatedRunStage::Complete,
+                krusty_core::agent::DelegatedRunStage::Degraded => DelegatedRunStage::Degraded,
+                krusty_core::agent::DelegatedRunStage::Failed => DelegatedRunStage::Failed,
+                krusty_core::agent::DelegatedRunStage::Cancelled => DelegatedRunStage::Cancelled,
+            },
+            provider: value.provider,
+            model: value.model,
+            resumable: value.resumable,
+            resumed_from_run_id: value.resumed_from_run_id,
+            target_scope: value.target_scope.into_iter().map(Into::into).collect(),
+            human_review: value.human_review,
+            artifact: value.artifact,
+            updated_at: value.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct SessionTraceResponse {
+    pub id: String,
+    pub summary: RuntimeTraceSummary,
+    pub events: Vec<RuntimeTraceEvent>,
+    pub latest_sequence: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct SessionPresenceHeartbeatRequest {
+    pub client_id: String,
+    pub surface: String,
+    pub capability: crate::presence::PresenceCapability,
+    pub last_event_sequence: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct SessionPresenceClientResponse {
+    pub client_id: String,
+    pub surface: String,
+    pub capability: crate::presence::PresenceCapability,
+    pub user_id: Option<String>,
+    pub last_seen_at: String,
+    pub last_event_sequence: Option<i64>,
+    pub stale: bool,
+}
+
+#[derive(Serialize)]
+pub struct SessionPresenceResponse {
+    pub session_id: String,
+    pub active_viewers: usize,
+    pub active_controllers: usize,
+    pub stale_clients: usize,
+    pub clients: Vec<SessionPresenceClientResponse>,
+}
+
+#[derive(Serialize)]
+pub struct ServerAccessResponse {
+    pub local_url: String,
+    pub remote_access_enabled: bool,
+    pub remote_access_token: String,
+    pub remote_launch_url: Option<String>,
+    pub tailscale: TailscaleAccessResponse,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateServerAccessRequest {
+    pub enabled: Option<bool>,
+    pub rotate_token: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct TailscaleAccessResponse {
+    pub status: String,
+    pub url: Option<String>,
+    pub detail: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ActiveSessionStatusResponse {
+    pub id: String,
+    pub title: String,
+    pub agent_state: String,
+    pub started_at: Option<String>,
+    pub last_event_at: Option<String>,
+    pub working_dir: Option<String>,
+    pub project_dir: Option<String>,
+    pub workspace_mode: WorkspaceMode,
+    pub active_viewers: usize,
+    pub active_controllers: usize,
+    pub stale_clients: usize,
+}
+
+#[derive(Serialize)]
+pub struct ServerStatusResponse {
+    pub active_agent_streams: usize,
+    pub active_sessions: Vec<ActiveSessionStatusResponse>,
+    pub memory: ServerMemoryStatusResponse,
+    pub tailscale: TailscaleAccessResponse,
+}
+
+#[derive(Serialize)]
+pub struct ServerMemoryStatusResponse {
+    pub rss_bytes: Option<u64>,
+    pub virtual_bytes: Option<u64>,
+    pub peak_rss_bytes: Option<u64>,
+    pub peak_virtual_bytes: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub struct MessageResponse {
+    pub role: String,
+    pub content: serde_json::Value,
+}

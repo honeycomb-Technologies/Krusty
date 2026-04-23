@@ -23,19 +23,23 @@
 //! - `SubAgentPool` - Concurrent execution of lightweight agents
 //! - `SubAgentTask` - Task configuration for sub-agents
 //!
+//! ## Autonomy (Mako)
+//! - `TickEngine` - Autonomous wake/sleep driver for Mako sessions
+//! - `coordinator_prompt` - Mako coordinator system prompt surface
+//! - `team` - Background teammate orchestration
+//! - `AutoClassifierHook` - Autonomous tool-call guardrail hook
+//!
 //! ## Builder Swarm (Octopod)
-//! - `SharedBuildContext` - Coordination for builder agents
+//! - `subagent::build_context` - Shared coordination for builder agents
 //! - Type registry, file locks, conventions
 
 pub mod agent_types;
-pub mod auto_classifier;
-pub mod build_context;
+pub mod autonomy;
 pub mod cancellation;
 pub mod compaction;
 pub mod constants;
 pub mod context;
 pub mod context_ledger;
-pub mod coordinator_prompt;
 pub mod event_bus;
 pub mod events;
 pub mod executor;
@@ -46,20 +50,20 @@ pub mod loop_events;
 mod observability;
 pub mod orchestrator;
 pub mod pinch_context;
+pub mod pinch_session;
 pub mod plan_handler;
 pub mod state;
 pub mod stream;
 pub mod subagent;
 pub mod summarizer;
-pub mod team;
-pub mod tick_engine;
 mod tool_control;
 pub mod user_hooks;
 
 use serde::{Deserialize, Serialize};
 
-pub use auto_classifier::AutoClassifierHook;
-pub use build_context::SharedBuildContext;
+pub use autonomy::auto_classifier;
+pub use autonomy::auto_classifier::AutoClassifierHook;
+pub use autonomy::{coordinator_prompt, team, tick_engine};
 pub use cancellation::AgentCancellation;
 pub(crate) use compaction::estimate_tokens as estimate_conversation_tokens;
 pub use context::{
@@ -71,7 +75,12 @@ pub use hooks::{LoggingHook, PlanModeHook, SafetyHook};
 pub use loop_events::{LoopEvent, LoopInput, PlanTaskInfo};
 pub use orchestrator::{AgenticOrchestrator, OrchestratorConfig, OrchestratorServices};
 pub use pinch_context::{PinchContext, PinchContextInput};
+pub use pinch_session::{
+    create_pinched_session, CreatePinchedSessionRequest, CreatePinchedSessionResult,
+};
 pub use state::{AgentConfig, AgentState};
+pub use subagent::build_context;
+pub use subagent::build_context::SharedBuildContext;
 pub use summarizer::{generate_summary, SummarizationResult};
 pub use user_hooks::{
     UserHook, UserHookExecutor, UserHookManager, UserHookResult, UserHookType, UserPostToolHook,

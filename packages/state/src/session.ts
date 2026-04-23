@@ -279,7 +279,7 @@ export interface SessionStoreState {
   setTitle: (title: string) => void;
   updateTitle: (sessionId: string, title: string) => Promise<void>;
   setMode: (mode: SessionMode) => void;
-  setModel: (model: string) => void;
+  setModel: (model: string | null) => void;
   setThinkingLevel: (level: ThinkingLevel) => void;
   toggleThinking: () => void;
   togglePermissionMode: () => void;
@@ -1647,6 +1647,14 @@ export function createSessionStore(
     }
   }
 
+  async function persistCurrentModel(model: string | null) {
+    try {
+      await client.setCurrentModel(model);
+    } catch {
+      // Failed to persist
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Apply session snapshot from server state
   // -------------------------------------------------------------------------
@@ -1860,12 +1868,14 @@ export function createSessionStore(
         }
 
         const mode = serverState?.mode ?? data.session.mode ?? "build";
+        const previousModel = get().model;
+        const sessionModel = data.session.model?.trim() || null;
         set((s) => ({
           ...s,
           sessionId: data.session.id,
           title: data.session.title || "Untitled",
           mode,
-          model: data.session.model ?? s.model,
+          model: sessionModel ?? s.model,
           tokenCount: data.session.token_count ?? 0,
           messages: applyLivePartialAssistant(
             applyRecoveryParity(
@@ -1893,6 +1903,9 @@ export function createSessionStore(
 
         applySessionSnapshot(sessionId, serverState, isRefresh, set, get);
         get().startPresenceHeartbeat(sessionId);
+        if (sessionModel && sessionModel !== previousModel) {
+          void persistCurrentModel(sessionModel);
+        }
       } catch (err) {
         set({
           isLoading: false,
@@ -1961,9 +1974,16 @@ export function createSessionStore(
 
     // -- setModel -----------------------------------------------------------
 
-    setModel(model: string) {
+    setModel(model: string | null) {
+      if (get().model === model) {
+        return;
+      }
+
       set({ model });
-      void persistSessionModel(get, model);
+      void persistCurrentModel(model);
+      if (model) {
+        void persistSessionModel(get, model);
+      }
     },
 
     // -- setThinkingLevel ---------------------------------------------------

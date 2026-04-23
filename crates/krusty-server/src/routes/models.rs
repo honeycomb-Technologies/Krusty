@@ -1,61 +1,56 @@
 //! Model listing endpoint
 
-use axum::{extract::State, routing::get, Json, Router};
+use axum::{
+    extract::State,
+    routing::{get, put},
+    Json, Router,
+};
+use serde::Deserialize;
 
 use krusty_core::ai::providers::ProviderId;
-use krusty_core::constants;
 
+use crate::ai_bootstrap::{
+    clear_current_model_preference, persist_current_model_selection, resolve_preferred_model,
+};
+use crate::auth::CurrentUser;
 use crate::error::AppError;
-use crate::types::{ModelResponse, ModelsListResponse};
+use crate::types::{ModelResponse, ModelsListResponse, SimpleOkResponse};
 use crate::AppState;
 
 /// Build the models router
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_models))
+        .route("/current", put(set_current_model))
         .route("/:id", get(get_model))
 }
 
-fn resolve_default_model(
-    models: &[ModelResponse],
-    active_model: Option<&str>,
-    providers_with_auth: &[ProviderId],
-) -> String {
-    if let Some(model) = active_model {
-        return model.to_string();
-    }
+#[derive(Debug, Deserialize)]
+struct CurrentModelRequest {
+    model: Option<String>,
+}
 
-    if let Some(configured_model) = models.iter().find(|model| {
-        ProviderId::all()
-            .iter()
-            .find(|provider| provider.to_string() == model.provider)
-            .map(|provider| providers_with_auth.contains(provider))
-            .unwrap_or(false)
-    }) {
-        return configured_model.id.clone();
-    }
-
-    if let Some(first) = models.first() {
-        return first.id.clone();
-    }
-
-    constants::ai::DEFAULT_MODEL.to_string()
+fn resolve_default_model(active_model: Option<&str>) -> Option<String> {
+    active_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 /// List all available models from configured providers
-async fn list_models(State(state): State<AppState>) -> Result<Json<ModelsListResponse>, AppError> {
+async fn list_models(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+) -> Result<Json<ModelsListResponse>, AppError> {
     let configured_providers: Vec<ProviderId> = ProviderId::all().to_vec();
 
-    // Get organized models from registry
     let (recent_models, models_by_provider) = state
         .model_registry
         .get_organized_models(&configured_providers)
         .await;
 
-    // Flatten into a single list, preserving provider grouping
     let mut models: Vec<ModelResponse> = Vec::new();
 
-    // Add recent models first (if any)
     for m in recent_models {
         models.push(ModelResponse {
             id: m.id.clone(),
@@ -69,11 +64,9 @@ async fn list_models(State(state): State<AppState>) -> Result<Json<ModelsListRes
         });
     }
 
-    // Add models by provider in order
     for provider_id in ProviderId::all() {
         if let Some(provider_models) = models_by_provider.get(provider_id) {
             for m in provider_models {
-                // Skip if already added in recent
                 if models.iter().any(|existing| existing.id == m.id) {
                     continue;
                 }
@@ -91,24 +84,52 @@ async fn list_models(State(state): State<AppState>) -> Result<Json<ModelsListRes
         }
     }
 
-    let providers_with_auth = {
-        let store = state.credential_store.read().await;
-        store.providers_with_auth()
-    };
-
+    let user_id = user
+        .as_ref()
+        .and_then(|current_user| current_user.0.user_id.as_deref());
     let default_model = resolve_default_model(
-        &models,
-        state
-            .ai_client
-            .as_ref()
-            .map(|client| client.config().model.as_str()),
-        &providers_with_auth,
+        resolve_preferred_model(state.db_path.as_ref().as_path(), user_id).as_deref(),
     );
 
     Ok(Json(ModelsListResponse {
         models,
         default_model,
     }))
+}
+
+async fn set_current_model(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Json(req): Json<CurrentModelRequest>,
+) -> Result<Json<SimpleOkResponse>, AppError> {
+    let user_id = user
+        .as_ref()
+        .and_then(|current_user| current_user.0.user_id.as_deref());
+    let next_model = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+
+    if let Some(model_id) = next_model {
+        if state.model_registry.get_model(model_id).await.is_none() {
+            return Err(AppError::BadRequest(format!(
+                "Model '{}' is not available",
+                model_id
+            )));
+        }
+        persist_current_model_selection(
+            &state.model_registry,
+            state.db_path.as_ref().as_path(),
+            user_id,
+            model_id,
+        )
+        .await?;
+    } else {
+        clear_current_model_preference(state.db_path.as_ref().as_path(), user_id)?;
+    }
+
+    Ok(Json(SimpleOkResponse { ok: true }))
 }
 
 /// Get a specific model by ID
@@ -135,42 +156,15 @@ async fn get_model(
 #[cfg(test)]
 mod tests {
     use super::resolve_default_model;
-    use crate::types::ModelResponse;
-    use krusty_core::ai::providers::ProviderId;
-
-    fn model(id: &str, provider: &str) -> ModelResponse {
-        ModelResponse {
-            id: id.to_string(),
-            display_name: id.to_string(),
-            provider: provider.to_string(),
-            context_window: 1,
-            max_output: 1,
-            supports_thinking: false,
-            supports_tools: true,
-            supports_vision: false,
-        }
-    }
 
     #[test]
     fn resolve_default_model_prefers_active_model() {
-        let models = vec![
-            model("MiniMax-M2.5", "MiniMax"),
-            model("claude-opus-4.6", "Anthropic"),
-        ];
-        let default_model =
-            resolve_default_model(&models, Some("claude-opus-4.6"), &[ProviderId::Anthropic]);
-
-        assert_eq!(default_model, "claude-opus-4.6");
+        let default_model = resolve_default_model(Some("claude-opus-4.6"));
+        assert_eq!(default_model.as_deref(), Some("claude-opus-4.6"));
     }
 
     #[test]
-    fn resolve_default_model_prefers_configured_provider_when_no_active_model() {
-        let models = vec![
-            model("MiniMax-M2.5", "MiniMax"),
-            model("claude-opus-4.6", "Anthropic"),
-        ];
-        let default_model = resolve_default_model(&models, None, &[ProviderId::Anthropic]);
-
-        assert_eq!(default_model, "claude-opus-4.6");
+    fn resolve_default_model_returns_none_when_no_model_is_selected() {
+        assert_eq!(resolve_default_model(None), None);
     }
 }

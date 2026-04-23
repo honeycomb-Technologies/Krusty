@@ -2,10 +2,13 @@
 
 use axum::{
     extract::State,
+    http::Uri,
     routing::{delete, get, post},
     Json, Router,
 };
+use base64ct::{Base64UrlUnpadded, Encoding};
 use serde::{Deserialize, Serialize};
+use web_push_native::p256::PublicKey;
 
 use krusty_core::storage::{Database, PushDeliveryAttemptStore, PushSubscriptionStore};
 
@@ -150,15 +153,80 @@ struct SubscribeResponse {
     id: String,
 }
 
+fn normalize_endpoint(endpoint: &str) -> Result<String, AppError> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return Err(AppError::BadRequest(
+            "Push subscription endpoint is required".to_string(),
+        ));
+    }
+
+    let uri: Uri = endpoint.parse().map_err(|_| {
+        AppError::BadRequest("Push subscription endpoint must be a valid URL".to_string())
+    })?;
+
+    if uri.scheme_str() != Some("https") || uri.host().is_none() {
+        return Err(AppError::BadRequest(
+            "Push subscription endpoint must be an https URL".to_string(),
+        ));
+    }
+
+    Ok(endpoint.to_string())
+}
+
+fn normalize_auth_secret(auth: &str) -> Result<String, AppError> {
+    let auth = auth.trim();
+    if auth.is_empty() {
+        return Err(AppError::BadRequest(
+            "Push auth secret is required".to_string(),
+        ));
+    }
+
+    let decoded = Base64UrlUnpadded::decode_vec(auth).map_err(|_| {
+        AppError::BadRequest("Push auth secret must be base64url encoded".to_string())
+    })?;
+
+    if decoded.len() != 16 {
+        return Err(AppError::BadRequest(
+            "Push auth secret must decode to 16 bytes".to_string(),
+        ));
+    }
+
+    Ok(auth.to_string())
+}
+
+fn normalize_p256dh_key(p256dh: &str) -> Result<String, AppError> {
+    let p256dh = p256dh.trim();
+    if p256dh.is_empty() {
+        return Err(AppError::BadRequest(
+            "Push p256dh key is required".to_string(),
+        ));
+    }
+
+    let decoded = Base64UrlUnpadded::decode_vec(p256dh).map_err(|_| {
+        AppError::BadRequest("Push p256dh key must be base64url encoded".to_string())
+    })?;
+
+    PublicKey::from_sec1_bytes(&decoded).map_err(|_| {
+        AppError::BadRequest("Push p256dh key must be a valid P-256 public key".to_string())
+    })?;
+
+    Ok(p256dh.to_string())
+}
+
 async fn subscribe(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
     Json(req): Json<SubscribeRequest>,
 ) -> Result<Json<SubscribeResponse>, AppError> {
     let user_id = user.and_then(|u| u.0.user_id);
+    let endpoint = normalize_endpoint(&req.endpoint)?;
+    let p256dh = normalize_p256dh_key(&req.p256dh)?;
+    let auth = normalize_auth_secret(&req.auth)?;
+
     let db = Database::new(&state.db_path)?;
     let store = PushSubscriptionStore::new(&db);
-    let id = store.upsert(user_id.as_deref(), &req.endpoint, &req.p256dh, &req.auth)?;
+    let id = store.upsert(user_id.as_deref(), &endpoint, &p256dh, &auth)?;
     Ok(Json(SubscribeResponse { id }))
 }
 
@@ -169,10 +237,49 @@ struct UnsubscribeRequest {
 
 async fn unsubscribe(
     State(state): State<AppState>,
+    user: Option<CurrentUser>,
     Json(req): Json<UnsubscribeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let user_id = user.and_then(|u| u.0.user_id);
+    let endpoint = normalize_endpoint(&req.endpoint)?;
+
     let db = Database::new(&state.db_path)?;
     let store = PushSubscriptionStore::new(&db);
-    let removed = store.remove_by_endpoint(&req.endpoint)?;
+    let removed = store.remove_by_endpoint_for_user(user_id.as_deref(), &endpoint)?;
     Ok(Json(serde_json::json!({ "removed": removed })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_auth_secret, normalize_endpoint, normalize_p256dh_key};
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    use web_push_native::jwt_simple::algorithms::{ECDSAP256PublicKeyLike, ES256KeyPair};
+
+    fn valid_p256dh_key() -> String {
+        let keypair = ES256KeyPair::generate();
+        let public_key_bytes = keypair.public_key().public_key().to_bytes_uncompressed();
+        Base64UrlUnpadded::encode_string(&public_key_bytes)
+    }
+
+    #[test]
+    fn subscribe_validation_rejects_non_https_endpoints() {
+        let error = normalize_endpoint("http://push.example.test/subscription")
+            .expect_err("http endpoint should be rejected");
+        assert!(matches!(error, super::AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn subscribe_validation_rejects_invalid_auth_secret() {
+        let error = normalize_auth_secret("not-base64")
+            .expect_err("invalid auth secret should be rejected");
+        assert!(matches!(error, super::AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn subscribe_validation_accepts_valid_push_keys() {
+        let auth = Base64UrlUnpadded::encode_string(b"abcdefghijklmnop");
+        assert!(normalize_endpoint("https://push.example.test/subscription").is_ok());
+        assert!(normalize_auth_secret(&auth).is_ok());
+        assert!(normalize_p256dh_key(&valid_p256dh_key()).is_ok());
+    }
 }

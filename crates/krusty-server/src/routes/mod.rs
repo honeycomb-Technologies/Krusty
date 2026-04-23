@@ -49,5 +49,4 @@ pub fn api_router() -> Router<AppState> {
         .nest("/server", server::router())
         .nest("/skills", skills::router())
         .nest("/auth/oauth", oauth::router())
-        .merge(Router::new())
 }

@@ -273,14 +273,14 @@ impl PushService {
         payload: PushPayload,
         event_type: PushEventType,
     ) -> PushNotifyStats {
+        let db = match Database::new(&self.db_path) {
+            Ok(db) => db,
+            Err(e) => {
+                tracing::error!("Failed to open DB for push: {}", e);
+                return PushNotifyStats::default();
+            }
+        };
         let subscriptions = {
-            let db = match Database::new(&self.db_path) {
-                Ok(db) => db,
-                Err(e) => {
-                    tracing::error!("Failed to open DB for push: {}", e);
-                    return PushNotifyStats::default();
-                }
-            };
             let store = PushSubscriptionStore::new(&db);
             match user_id {
                 Some(uid) => store.get_for_user(uid).unwrap_or_default(),
@@ -316,72 +316,7 @@ impl PushService {
                 DeliveryOutcome::Failure { .. } => stats.failed += 1,
             }
 
-            let db = match Database::new(&self.db_path) {
-                Ok(db) => db,
-                Err(error) => {
-                    tracing::error!(
-                        endpoint = %sub.endpoint,
-                        error = %error,
-                        "Failed to open DB while recording push outcome"
-                    );
-                    continue;
-                }
-            };
-            let store = PushSubscriptionStore::new(&db);
-            let attempt_store = PushDeliveryAttemptStore::new(&db);
-
-            match outcome {
-                DeliveryOutcome::Success { status, latency_ms } => {
-                    let _ = store.mark_success(&sub.endpoint);
-                    let _ = attempt_store.record_attempt(PushDeliveryAttemptInput {
-                        user_id: sub.user_id.as_deref(),
-                        session_id: payload.session_id.as_deref(),
-                        endpoint: &sub.endpoint,
-                        event_type: event_type.as_str(),
-                        outcome: "success",
-                        http_status: Some(status),
-                        error_message: None,
-                        latency_ms: Some(latency_ms),
-                    });
-                    tracing::debug!(endpoint = %sub.endpoint, status, "Push sent");
-                }
-                DeliveryOutcome::Stale { status, latency_ms } => {
-                    tracing::info!(
-                        endpoint = %sub.endpoint,
-                        status,
-                        "Push subscription stale, removing"
-                    );
-                    let _ = store.remove_by_endpoint(&sub.endpoint);
-                    let _ = attempt_store.record_attempt(PushDeliveryAttemptInput {
-                        user_id: sub.user_id.as_deref(),
-                        session_id: payload.session_id.as_deref(),
-                        endpoint: &sub.endpoint,
-                        event_type: event_type.as_str(),
-                        outcome: "stale",
-                        http_status: Some(status),
-                        error_message: Some("subscription stale or rejected"),
-                        latency_ms: Some(latency_ms),
-                    });
-                }
-                DeliveryOutcome::Failure {
-                    status,
-                    reason,
-                    latency_ms,
-                } => {
-                    let _ = store.mark_failure(&sub.endpoint, &reason);
-                    let _ = attempt_store.record_attempt(PushDeliveryAttemptInput {
-                        user_id: sub.user_id.as_deref(),
-                        session_id: payload.session_id.as_deref(),
-                        endpoint: &sub.endpoint,
-                        event_type: event_type.as_str(),
-                        outcome: "failure",
-                        http_status: status,
-                        error_message: Some(&reason),
-                        latency_ms,
-                    });
-                    tracing::warn!(endpoint = %sub.endpoint, status, "Push failed: {}", reason);
-                }
-            }
+            record_delivery_outcome(&db, &sub, &payload, event_type, outcome);
         }
 
         tracing::info!(
@@ -395,6 +330,70 @@ impl PushService {
         );
 
         stats
+    }
+}
+
+fn record_delivery_outcome(
+    db: &Database,
+    sub: &PushSubscription,
+    payload: &PushPayload,
+    event_type: PushEventType,
+    outcome: DeliveryOutcome,
+) {
+    let store = PushSubscriptionStore::new(db);
+    let attempt_store = PushDeliveryAttemptStore::new(db);
+
+    match outcome {
+        DeliveryOutcome::Success { status, latency_ms } => {
+            let _ = store.mark_success(&sub.endpoint);
+            let _ = attempt_store.record_attempt(PushDeliveryAttemptInput {
+                user_id: sub.user_id.as_deref(),
+                session_id: payload.session_id.as_deref(),
+                endpoint: &sub.endpoint,
+                event_type: event_type.as_str(),
+                outcome: "success",
+                http_status: Some(status),
+                error_message: None,
+                latency_ms: Some(latency_ms),
+            });
+            tracing::debug!(endpoint = %sub.endpoint, status, "Push sent");
+        }
+        DeliveryOutcome::Stale { status, latency_ms } => {
+            tracing::info!(
+                endpoint = %sub.endpoint,
+                status,
+                "Push subscription stale, removing"
+            );
+            let _ = store.remove_by_endpoint(&sub.endpoint);
+            let _ = attempt_store.record_attempt(PushDeliveryAttemptInput {
+                user_id: sub.user_id.as_deref(),
+                session_id: payload.session_id.as_deref(),
+                endpoint: &sub.endpoint,
+                event_type: event_type.as_str(),
+                outcome: "stale",
+                http_status: Some(status),
+                error_message: Some("subscription stale or rejected"),
+                latency_ms: Some(latency_ms),
+            });
+        }
+        DeliveryOutcome::Failure {
+            status,
+            reason,
+            latency_ms,
+        } => {
+            let _ = store.mark_failure(&sub.endpoint, &reason);
+            let _ = attempt_store.record_attempt(PushDeliveryAttemptInput {
+                user_id: sub.user_id.as_deref(),
+                session_id: payload.session_id.as_deref(),
+                endpoint: &sub.endpoint,
+                event_type: event_type.as_str(),
+                outcome: "failure",
+                http_status: status,
+                error_message: Some(&reason),
+                latency_ms,
+            });
+            tracing::warn!(endpoint = %sub.endpoint, status, "Push failed: {}", reason);
+        }
     }
 }
 

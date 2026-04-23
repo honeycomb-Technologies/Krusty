@@ -1,27 +1,8 @@
-//! Tool implementations
+//! Tool implementations.
 //!
-//! Core tools:
-//! - read: Read files
-//! - write: Create/overwrite files
-//! - edit: Edit specific lines with fuzzy matching
-//! - multiedit: Multiple edits to one file
-//! - bash: Execute shell commands
-//! - grep: Search with ripgrep
-//! - glob: Find files by pattern
-//! - list: List directory contents
-//! - apply_patch: Multi-file patch application
-//! - processes: Manage background processes
-//! - agent: Unified sub-agent dispatch (explore, plan, verify, build)
-//! - skill: Invoke skills for specialized instructions
-//! - ask_user: Interactive user prompts (handled by UI)
-//! - task_complete: Mark plan tasks as complete with result (handled by UI)
-//! - task_start: Mark task as in-progress (handled by UI)
-//! - add_subtask: Create subtasks for task breakdown (handled by UI)
-//! - set_dependency: Create task dependencies (handled by UI)
-//! - set_work_mode: Switch between build and plan modes (handled by UI/server)
-//! - enter_plan_mode: Switch to plan mode (handled by UI)
-//! - send_user_message: Send prominent messages to user (Mako autonomous mode)
-//! - sleep: Idle signal for autonomous runtime scheduling
+//! This module is the catalog/facade for concrete tool types. Registration
+//! policy for CLI/ACP/Mako surfaces lives in `registration.rs` so the catalog
+//! does not also own runtime exposure decisions.
 
 pub mod add_subtask;
 pub mod agent;
@@ -39,7 +20,6 @@ pub mod plan_mode;
 pub mod processes;
 pub mod read;
 pub mod report;
-pub mod send_message;
 pub mod send_user_message;
 pub mod set_dependency;
 pub mod set_work_mode;
@@ -48,13 +28,15 @@ pub mod skill;
 pub mod sleep;
 pub mod task_complete;
 pub mod task_start;
-pub mod teammate;
 pub mod write;
+
+mod registration;
 
 pub use add_subtask::AddSubtaskTool;
 pub use agent::AgentTool;
 pub use apply_patch::ApplyPatchTool;
 pub use ask_user::AskUserQuestionTool;
+pub use autonomous_task::AutonomousTaskTool;
 pub use bash::BashTool;
 pub use edit::EditTool;
 pub use glob::GlobTool;
@@ -65,7 +47,10 @@ pub use multiedit::MultiEditTool;
 pub use plan_mode::EnterPlanModeTool;
 pub use processes::ProcessesTool;
 pub use read::ReadTool;
-pub use send_message::SendMessageTool;
+pub use registration::{
+    register_acp_tools, register_agent_tool, register_all_tools, register_mako_tools,
+};
+pub use report::ReportTool;
 pub use send_user_message::SendUserMessageTool;
 pub use set_dependency::SetDependencyTool;
 pub use set_work_mode::SetWorkModeTool;
@@ -75,87 +60,3 @@ pub use sleep::SleepTool;
 pub use task_complete::TaskCompleteTool;
 pub use task_start::TaskStartTool;
 pub use write::WriteTool;
-
-pub use autonomous_task::{CreateTaskTool, ListTasksTool, UpdateTaskTool};
-pub use report::{CreateReportTool, ListReportsTool, ReadReportTool};
-// teammate tool retired — teammates managed through `agent` tool with `name` param
-
-use std::sync::Arc;
-
-use crate::agent::AgentCancellation;
-use crate::ai::client::AiClient;
-use crate::tools::registry::ToolRegistry;
-
-/// Register all built-in tools (except agent which needs client)
-pub async fn register_all_tools(registry: &ToolRegistry) {
-    registry.register(Arc::new(ReadTool)).await;
-    registry.register(Arc::new(WriteTool)).await;
-    registry.register(Arc::new(EditTool)).await;
-    registry.register(Arc::new(MultiEditTool)).await;
-    registry.register(Arc::new(BashTool)).await;
-    registry.register(Arc::new(GrepTool)).await;
-    registry.register(Arc::new(GlobTool)).await;
-    registry.register(Arc::new(ListTool)).await;
-    registry.register(Arc::new(ApplyPatchTool)).await;
-    registry.register(Arc::new(ProcessesTool)).await;
-    registry.register(Arc::new(SkillTool)).await;
-    registry.register(Arc::new(MemoryTool)).await;
-    registry.register(Arc::new(AskUserQuestionTool)).await;
-    registry.register(Arc::new(TaskCompleteTool)).await;
-    registry.register(Arc::new(TaskStartTool)).await;
-    registry.register(Arc::new(AddSubtaskTool)).await;
-    registry.register(Arc::new(SetDependencyTool)).await;
-    registry.register(Arc::new(SetWorkspaceContextTool)).await;
-    registry.register(Arc::new(SetWorkModeTool)).await;
-    registry.register(Arc::new(EnterPlanModeTool)).await;
-    registry.register(Arc::new(SendUserMessageTool)).await;
-    registry.register(Arc::new(SleepTool)).await;
-}
-
-/// Register tools for ACP (excludes TUI-only tools)
-///
-/// Excludes:
-/// - AskUserQuestionTool (requires TUI interaction)
-/// - TaskCompleteTool (requires TUI plan mode)
-/// - EnterPlanModeTool (requires TUI plan mode)
-/// - SkillTool (requires skills manager setup)
-pub async fn register_acp_tools(registry: &ToolRegistry) {
-    registry.register(Arc::new(ReadTool)).await;
-    registry.register(Arc::new(WriteTool)).await;
-    registry.register(Arc::new(EditTool)).await;
-    registry.register(Arc::new(MultiEditTool)).await;
-    registry.register(Arc::new(BashTool)).await;
-    registry.register(Arc::new(GrepTool)).await;
-    registry.register(Arc::new(GlobTool)).await;
-    registry.register(Arc::new(ListTool)).await;
-    registry.register(Arc::new(ApplyPatchTool)).await;
-    registry.register(Arc::new(ProcessesTool)).await;
-}
-
-/// Register the unified agent tool (explore, plan, verify, build)
-///
-/// Call this after authentication when the AI client is available.
-pub async fn register_agent_tool(
-    registry: &ToolRegistry,
-    client: Arc<AiClient>,
-    cancellation: AgentCancellation,
-) {
-    registry
-        .register(Arc::new(AgentTool::new(client, cancellation)))
-        .await;
-}
-
-/// Register Mako-specific tools (autonomous tasks and reports).
-///
-/// These are additive — call after `register_all_tools` so Mako sessions
-/// get both the standard Code tools and the Mako extensions. Mako delegates
-/// through the `agent` tool; the legacy mailbox `send_message` path is not
-/// part of the autonomous contract.
-pub async fn register_mako_tools(registry: &ToolRegistry) {
-    registry.register(Arc::new(CreateTaskTool)).await;
-    registry.register(Arc::new(UpdateTaskTool)).await;
-    registry.register(Arc::new(ListTasksTool)).await;
-    registry.register(Arc::new(CreateReportTool)).await;
-    registry.register(Arc::new(ListReportsTool)).await;
-    registry.register(Arc::new(ReadReportTool)).await;
-}

@@ -200,6 +200,13 @@ export class KrustyClient {
     return this.request('/models');
   }
 
+  async setCurrentModel(model: string | null): Promise<SimpleOkResponse> {
+    return this.request('/models/current', {
+      method: 'PUT',
+      body: JSON.stringify({ model }),
+    });
+  }
+
   // Git
   async getGitStatus(path?: string): Promise<GitStatusResponse> {
     const q = path ? `?path=${encodeURIComponent(path)}` : '';
@@ -394,7 +401,7 @@ export class KrustyClient {
 
   // Directories
   async getDirectories(): Promise<string[]> {
-    return this.request('/directories');
+    return this.request('/sessions/directories');
   }
 
   async browseDirectories(path?: string): Promise<{
@@ -770,6 +777,10 @@ export class KrustyClient {
         break;
       case 'usage':
         callbacks.onUsage(event.prompt_tokens, event.completion_tokens);
+        break;
+      case 'session_pinched':
+      case 'context_compacted':
+        callbacks.onSessionPinched?.(event);
         break;
       case 'title_update':
         callbacks.onTitleUpdate(event.title);

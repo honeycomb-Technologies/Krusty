@@ -386,19 +386,18 @@ impl App {
                 self.runtime.context_tokens_used = prompt_tokens + completion_tokens;
                 self.save_session_token_count();
             }
-            LoopEvent::ContextCompacted {
+            LoopEvent::SessionPinched {
                 reason,
+                source_session_id: _,
+                new_session_id,
                 estimated_tokens_before,
-                estimated_tokens_after,
-                replaced_messages,
             } => {
-                self.runtime.context_tokens_used = estimated_tokens_after;
-                self.save_session_token_count();
+                self.runtime.pending_pinched_session_id = Some(new_session_id.clone());
                 self.runtime.chat.messages.push((
                     "system".to_string(),
                     format!(
-                        "Live compaction ({}) reduced context from ~{} to ~{} tokens by rewriting {} message(s).",
-                        reason, estimated_tokens_before, estimated_tokens_after, replaced_messages
+                        "Pinch ({}) moved this run into session {} at ~{} tokens so work can continue with fresh context.",
+                        reason, new_session_id, estimated_tokens_before
                     ),
                 ));
             }
@@ -411,20 +410,32 @@ impl App {
             } => {
                 tracing::info!("Orchestrator finished for session {}", session_id);
                 let stream_telemetry = self.runtime.chat.stream_drain.telemetry();
-                self.reload_conversation_from_db();
+                let next_pinched_session = if stop_reason == LoopStopReason::Pinched {
+                    self.runtime.pending_pinched_session_id.take()
+                } else {
+                    None
+                };
+                if next_pinched_session.is_none() {
+                    self.reload_conversation_from_db();
+                }
                 self.stop_streaming();
                 self.stop_tool_execution();
                 self.runtime.channels.loop_events = None;
                 self.runtime.channels.loop_input = None;
                 self.runtime.pending_ask_user_calls.clear();
-                self.push_stream_recovery_banner(stop_reason.clone(), stream_telemetry);
-                match stop_reason {
-                    LoopStopReason::ContextCompactionFailed => {
-                        self.schedule_auto_pinch(
-                            "Live compaction could not keep this thread healthy.",
-                        );
+                self.push_stream_recovery_banner(stop_reason, stream_telemetry);
+                if let Some(new_session_id) = next_pinched_session {
+                    if let Err(error) = self.load_session(&new_session_id) {
+                        self.runtime.chat.messages.push((
+                            "system".to_string(),
+                            format!(
+                                "Pinch created session {}, but the TUI could not load it automatically: {}",
+                                new_session_id, error
+                            ),
+                        ));
+                    } else {
+                        self.send_to_ai();
                     }
-                    _ => self.check_auto_pinch(),
                 }
             }
             LoopEvent::Error { error } => {

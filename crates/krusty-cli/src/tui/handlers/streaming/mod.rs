@@ -46,6 +46,15 @@ impl App {
             self.ui.view = View::Chat;
         }
 
+        if !self.has_selected_model() {
+            self.ui.input.insert_text(&text);
+            self.runtime.chat.messages.push((
+                "system".to_string(),
+                "No model selected. Use /model to choose one.".to_string(),
+            ));
+            return;
+        }
+
         if !self.is_authenticated() {
             self.ui.input.insert_text(&text);
             self.runtime.chat.messages.push((
@@ -226,10 +235,15 @@ impl App {
         let client = match self.create_ai_client() {
             Some(c) => c,
             None => {
-                self.runtime.chat.messages.push((
-                    "system".to_string(),
-                    "No authentication available".to_string(),
-                ));
+                let message = if self.has_selected_model() {
+                    "No authentication available"
+                } else {
+                    "No model selected. Use /model to choose one."
+                };
+                self.runtime
+                    .chat
+                    .messages
+                    .push(("system".to_string(), message.to_string()));
                 return;
             }
         };

@@ -446,27 +446,19 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       return existingModel;
     }
 
-    const saved = await SecureStore.getItemAsync(SELECTED_MODEL_KEY);
-    const firstUsableModel =
-      catalog.find((candidate) =>
-        allowedProviders.length === 0
-          ? true
-          : allowedProviders.includes(normalizeProviderId(candidate.provider)),
-      )?.id ?? null;
-    const selectedModel = isModelUsable(saved, catalog, allowedProviders)
-      ? saved
-      : isModelUsable(fallbackDefault, catalog, allowedProviders)
-        ? fallbackDefault
-        : firstUsableModel;
+    const selectedModel = isModelUsable(fallbackDefault, catalog, allowedProviders)
+      ? fallbackDefault
+      : null;
 
     if (selectedModel) {
       sessionStore.getState().setModel(selectedModel);
-      if (saved !== selectedModel) {
-        await SecureStore.setItemAsync(SELECTED_MODEL_KEY, selectedModel);
-      }
+      await SecureStore.setItemAsync(SELECTED_MODEL_KEY, selectedModel);
+      return selectedModel;
     }
 
-    return selectedModel;
+    sessionStore.getState().setModel(null);
+    await SecureStore.deleteItemAsync(SELECTED_MODEL_KEY).catch(() => {});
+    return null;
   }, [configuredProviders, defaultModelId, loadModelCatalog, models, sessionStore]);
 
   useEffect(() => {

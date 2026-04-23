@@ -122,20 +122,29 @@ export interface TextContent {
   text: string;
 }
 
+export type ImageSource = Base64ImageSource | UrlImageSource;
+
+export interface Base64ImageSource {
+  type: 'base64';
+  media_type: string;
+  data: string;
+}
+
+export interface UrlImageSource {
+  type: 'url';
+  url: string;
+}
+
 export interface ImageContent {
   type: 'image';
-  source: {
-    type: 'base64';
-    media_type: string;
-    data: string;
-  };
+  source: ImageSource;
 }
 
 // ============================================================================
 // Delegation Types
 // ============================================================================
 
-export type DelegatedToolKind = 'explore' | 'build';
+export type DelegatedToolKind = 'explore' | 'plan' | 'verify' | 'build';
 export type DelegatedProgressStatus = 'running' | 'complete' | 'failed';
 export type DelegatedRunStage =
   | 'created' | 'running' | 'synthesizing' | 'complete'
@@ -594,6 +603,24 @@ export interface PlanItem {
   completed: boolean;
 }
 
+export interface SessionPinchedEvent {
+  type: 'session_pinched';
+  reason: string;
+  source_session_id: string;
+  new_session_id: string;
+  estimated_tokens_before: number;
+}
+
+export interface ContextCompactedEvent {
+  type: 'context_compacted';
+  reason: string;
+  estimated_tokens_before: number;
+  estimated_tokens_after: number;
+  replaced_messages: number;
+}
+
+export type SessionContinuationEvent = SessionPinchedEvent | ContextCompactedEvent;
+
 export type StreamEvent =
   | { type: 'text_delta'; delta: string }
   | { type: 'text_delta_with_citations'; delta: string; citations: unknown[] }
@@ -614,7 +641,8 @@ export type StreamEvent =
   | { type: 'mode_change'; mode: string; reason?: string }
   | { type: 'plan_complete'; tool_call_id: string; title: string; task_count: number }
   | { type: 'usage'; prompt_tokens: number; completion_tokens: number }
-  | { type: 'context_compacted'; reason: string; estimated_tokens_before: number; estimated_tokens_after: number; replaced_messages: number }
+  | SessionPinchedEvent
+  | ContextCompactedEvent
   | { type: 'lagged'; skipped: number }
   | { type: 'title_update'; title: string }
   | { type: 'tool_approval_required'; id: string; name: string; arguments: Record<string, unknown> }
@@ -649,6 +677,7 @@ export interface StreamCallbacks {
   onModeChange: (mode: string, reason?: string) => void;
   onPlanComplete: (toolCallId: string, title: string, taskCount: number) => void;
   onUsage: (promptTokens: number, completionTokens: number) => void;
+  onSessionPinched?: (event: SessionContinuationEvent) => void;
   onTitleUpdate: (title: string) => void;
   onFinish: (sessionId: string) => void;
   onError: (error: string) => void;
@@ -801,7 +830,7 @@ export interface ModelInfo {
 
 export interface ModelsResponse {
   models: ModelInfo[];
-  default_model: string;
+  default_model: string | null;
 }
 
 // ============================================================================

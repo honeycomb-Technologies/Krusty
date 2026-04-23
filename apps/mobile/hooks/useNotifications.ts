@@ -171,9 +171,10 @@ export function useNotifications(options?: UseNotificationsOptions) {
         } else if (actionId === "VIEW" && data.sessionId) {
           options?.onNavigate?.("/(tabs)", { sessionId: data.sessionId });
         } else if (actionId === "OPEN_MAKO") {
-          const params = data.sessionId
-            ? { focus: "mako", sessionId: data.sessionId }
-            : { focus: "mako" };
+          const params: Record<string, string> = { focus: "mako" };
+          if (data.sessionId) {
+            params.sessionId = data.sessionId;
+          }
           options?.onNavigate?.("/(tabs)", params);
         } else if (
           actionId === Notifications?.DEFAULT_ACTION_IDENTIFIER &&

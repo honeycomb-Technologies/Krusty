@@ -6,8 +6,6 @@
 use crate::ai::types::{Content, ModelMessage, Role};
 use serde::{Deserialize, Serialize};
 
-use super::compaction::CompactionReason;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NonResumableReason {
     MissingUserObjective,
@@ -42,22 +40,6 @@ pub(crate) struct ContinuationContract {
     pub(crate) decision: ContinuationContractDecision,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CompactionLedgerSnapshot {
-    pub(crate) reason: CompactionReason,
-    pub(crate) estimated_tokens_before: usize,
-    pub(crate) estimated_tokens_after: usize,
-    pub(crate) replaced_messages: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct CompactionLedgerSnapshotRecord {
-    pub(crate) reason: String,
-    pub(crate) estimated_tokens_before: usize,
-    pub(crate) estimated_tokens_after: usize,
-    pub(crate) replaced_messages: usize,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ContextLedgerRecord {
     pub(crate) schema_version: u8,
@@ -67,7 +49,6 @@ pub(crate) struct ContextLedgerRecord {
     pub(crate) pinned_messages: usize,
     pub(crate) replayed_messages: usize,
     pub(crate) latest_user_objective: Option<String>,
-    pub(crate) last_compaction: Option<CompactionLedgerSnapshotRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -78,7 +59,6 @@ pub(crate) struct ContextLedger {
     pub(crate) pinned_messages: usize,
     pub(crate) replayed_messages: usize,
     pub(crate) latest_user_objective: Option<String>,
-    pub(crate) last_compaction: Option<CompactionLedgerSnapshot>,
 }
 
 impl ContextLedger {
@@ -90,21 +70,6 @@ impl ContextLedger {
 
     pub(crate) fn update_from_conversation(&mut self, conversation: &[ModelMessage]) {
         self.recompute(conversation);
-    }
-
-    pub(crate) fn record_compaction(
-        &mut self,
-        reason: CompactionReason,
-        estimated_tokens_before: usize,
-        estimated_tokens_after: usize,
-        replaced_messages: usize,
-    ) {
-        self.last_compaction = Some(CompactionLedgerSnapshot {
-            reason,
-            estimated_tokens_before,
-            estimated_tokens_after,
-            replaced_messages,
-        });
     }
 
     pub(crate) fn continuation_decision(&self) -> ContinuationDecision {
@@ -133,14 +98,6 @@ impl ContextLedger {
             pinned_messages: self.pinned_messages,
             replayed_messages: self.replayed_messages,
             latest_user_objective: self.latest_user_objective.clone(),
-            last_compaction: self
-                .last_compaction
-                .map(|snapshot| CompactionLedgerSnapshotRecord {
-                    reason: snapshot.reason.as_str().to_string(),
-                    estimated_tokens_before: snapshot.estimated_tokens_before,
-                    estimated_tokens_after: snapshot.estimated_tokens_after,
-                    replaced_messages: snapshot.replaced_messages,
-                }),
         }
     }
 
@@ -312,8 +269,7 @@ mod tests {
     #[test]
     fn ledger_serializes_persistence_contract() {
         let conversation = vec![text_message(Role::User, "stabilize streaming resumes")];
-        let mut ledger = ContextLedger::from_conversation(&conversation);
-        ledger.record_compaction(CompactionReason::ContextPressure, 5000, 1800, 6);
+        let ledger = ContextLedger::from_conversation(&conversation);
 
         let record = ledger.persistence_record();
         assert_eq!(record.schema_version, 1);
@@ -321,14 +277,6 @@ mod tests {
             record.latest_user_objective.as_deref(),
             Some("stabilize streaming resumes")
         );
-        assert_eq!(
-            record
-                .last_compaction
-                .as_ref()
-                .map(|snapshot| snapshot.reason.as_str()),
-            Some("context_pressure")
-        );
-
         let contract = ledger.continuation_contract();
         assert_eq!(contract.schema_version, 1);
         match contract.decision {

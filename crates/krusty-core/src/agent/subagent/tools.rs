@@ -7,10 +7,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::agent::build_context::{BuilderInterface, SharedBuildContext};
 use crate::ai::types::AiTool;
 use crate::tools::implementations::{BashTool, EditTool, GlobTool, GrepTool, ReadTool, WriteTool};
 use crate::tools::registry::{Tool, ToolContext, ToolResult};
+
+use super::build_context::{BuilderInterface, SharedBuildContext};
 
 /// RAII guard for builder file locks
 ///
