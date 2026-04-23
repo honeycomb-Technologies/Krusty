@@ -1,6 +1,5 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import * as Haptics from "../../platform/haptics";
-import { GlassCard } from "../ui/GlassCard";
 import { useThemeContext } from "../../hooks/useTheme";
 import type { MakoPendingApproval } from "@krusty/api";
 import { formatPriorityLabel } from "./priority";
@@ -51,7 +50,15 @@ export function MakoApprovalList({
         const actionsDisabled = activeToolCallId !== null;
 
         return (
-          <GlassCard key={approval.tool_call_id} style={styles.card}>
+          <View
+            key={approval.tool_call_id}
+            style={[
+              styles.block,
+              {
+                borderColor: t.border,
+              },
+            ]}
+          >
             <View style={styles.header}>
               <View style={styles.copy}>
                 <Text
@@ -85,7 +92,7 @@ export function MakoApprovalList({
                 styles.preview,
                 {
                   borderColor: `${t.border}66`,
-                  backgroundColor: `${t.card}66`,
+                  backgroundColor: "transparent",
                 },
               ]}
             >
@@ -105,15 +112,13 @@ export function MakoApprovalList({
                   onSelectRun(approval.session_id);
                 }}
                 style={[
-                  styles.secondaryButton,
+                  styles.secondaryAction,
                   {
-                    borderColor: `${t.border}88`,
-                    backgroundColor: `${t.card}88`,
                     opacity: actionsDisabled ? 0.6 : 1,
                   },
                 ]}
               >
-                <Text style={[styles.secondaryLabel, { color: t.foreground }]}>
+                <Text style={[styles.secondaryLabel, { color: t.mutedForeground }]}>
                   Open run
                 </Text>
               </Pressable>
@@ -125,14 +130,13 @@ export function MakoApprovalList({
                   onApproveTool(approval.session_id, approval.tool_call_id);
                 }}
                 style={[
-                  styles.primaryButton,
+                  styles.primaryAction,
                   {
-                    backgroundColor: t.success,
                     opacity: actionsDisabled ? 0.6 : 1,
                   },
                 ]}
               >
-                <Text style={styles.primaryLabel}>
+                <Text style={[styles.primaryLabel, { color: t.success }]}>
                   {isSubmitting ? "Approving..." : "Approve"}
                 </Text>
               </Pressable>
@@ -144,20 +148,18 @@ export function MakoApprovalList({
                   onDenyTool(approval.session_id, approval.tool_call_id);
                 }}
                 style={[
-                  styles.secondaryButton,
+                  styles.secondaryAction,
                   {
-                    borderColor: `${t.border}88`,
-                    backgroundColor: `${t.card}88`,
                     opacity: actionsDisabled ? 0.6 : 1,
                   },
                 ]}
               >
-                <Text style={[styles.secondaryLabel, { color: t.foreground }]}>
+                <Text style={[styles.secondaryLabel, { color: t.error }]}>
                   {isSubmitting ? "Working..." : "Deny"}
                 </Text>
               </Pressable>
             </View>
-          </GlassCard>
+          </View>
         );
       })}
     </View>
@@ -166,10 +168,11 @@ export function MakoApprovalList({
 
 const styles = StyleSheet.create({
   list: {
-    gap: 10,
+    gap: 0,
   },
-  card: {
-    marginBottom: 0,
+  block: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingVertical: 12,
   },
   header: {
     flexDirection: "row",
@@ -181,28 +184,26 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   title: {
-    fontSize: 16,
-    fontWeight: "700",
+    fontSize: 14,
+    fontWeight: "600",
   },
   meta: {
-    marginTop: 4,
+    marginTop: 3,
     fontSize: 12,
-    fontWeight: "500",
+    fontWeight: "400",
   },
   toolName: {
-    fontSize: 12,
-    fontWeight: "700",
-    textTransform: "uppercase",
-    letterSpacing: 0.3,
+    fontSize: 11,
+    fontWeight: "600",
   },
   summary: {
-    marginTop: 12,
+    marginTop: 8,
     fontSize: 13,
     lineHeight: 18,
   },
   preview: {
-    marginTop: 12,
-    borderRadius: 10,
+    marginTop: 10,
+    borderRadius: 8,
     borderWidth: StyleSheet.hairlineWidth,
     padding: 10,
   },
@@ -212,32 +213,24 @@ const styles = StyleSheet.create({
     lineHeight: 17,
   },
   actions: {
-    marginTop: 12,
+    marginTop: 8,
     flexDirection: "row",
-    gap: 10,
+    gap: 14,
   },
-  primaryButton: {
-    flex: 1,
-    minHeight: 42,
-    borderRadius: 10,
-    alignItems: "center",
+  primaryAction: {
+    minHeight: 24,
     justifyContent: "center",
   },
   primaryLabel: {
-    color: "#fff",
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: "600",
   },
-  secondaryButton: {
-    flex: 1,
-    minHeight: 42,
-    borderRadius: 10,
-    borderWidth: 1,
-    alignItems: "center",
+  secondaryAction: {
+    minHeight: 24,
     justifyContent: "center",
   },
   secondaryLabel: {
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: "600",
   },
   empty: {

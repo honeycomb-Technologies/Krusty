@@ -1,0 +1,682 @@
+use std::collections::HashSet;
+use std::time::Instant;
+
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
+
+use crate::agent::constants::subagent;
+use crate::agent::history_policy::build_history_tool_result;
+use crate::ai::client::AiClient;
+use crate::ai::types::{Content, ModelMessage, Role};
+
+use super::super::types::{
+    parse_explore_report, AgentProgress, AgentProgressStatus, SubAgentResult, SubAgentTask,
+};
+use super::api::{call_subagent_api, parse_response};
+use super::config::AgentConfig;
+use super::explorer::{
+    collect_paths_from_tool_result, completion_summary_preview, normalize_explorer_result,
+    relative_or_display, synthesized_explorer_output, text_claims_tool_empty,
+    timeout_partial_output, tool_result_has_positive_evidence,
+};
+use super::governance::{build_subagent_tool_context, delegated_is_explore, delegated_turn_budget};
+
+const MAX_DELEGATED_POLICY_VIOLATIONS: usize = 3;
+const EXPLORER_STALE_SEQUENCE_THRESHOLD: usize = 3;
+const EXPLORER_SYNTHESIS_FILE_THRESHOLD: usize = 8;
+
+/// Unified agentic loop that replaces separate explorer/builder implementations.
+pub(crate) async fn execute_agent_loop<C: AgentConfig>(
+    client: &AiClient,
+    task: &SubAgentTask,
+    model: &str,
+    cancellation: CancellationToken,
+    config: &C,
+    progress_tx: Option<mpsc::UnboundedSender<AgentProgress>>,
+) -> SubAgentResult {
+    let start = Instant::now();
+    let task_id = task.id.clone();
+    let task_name = task.name.clone();
+    let plan_task_id = task.plan_task_id.clone();
+
+    let ai_tools = config.get_ai_tools();
+    let ctx = build_subagent_tool_context(task, config.timeout_secs());
+
+    let mut messages: Vec<ModelMessage> = vec![ModelMessage {
+        role: Role::User,
+        content: vec![Content::Text {
+            text: task.prompt.clone(),
+        }],
+    }];
+
+    let mut files_examined: Vec<String> = vec![];
+    let mut turns = 0;
+    let mut total_tool_calls = 0;
+    let mut estimated_tokens: usize = 0;
+    let mut final_output = String::new();
+    let mut last_action = "starting...".to_string();
+    let mut policy_violations: Vec<String> = Vec::new();
+    let mut unique_files_examined: HashSet<String> = HashSet::new();
+    let mut stale_readonly_cycles = 0usize;
+    let mut forced_summary_requested = false;
+    let mut last_cycle_positive_evidence = false;
+    let mut tool_truth_corrections = 0usize;
+    let mut forced_read_before_completion = false;
+    let mut structured_report_repair_requested = false;
+
+    let send_progress = |status: AgentProgressStatus,
+                         action: &str,
+                         tool_count: usize,
+                         tokens: usize,
+                         completion_summary: Option<String>,
+                         config: &C| {
+        if let Some(ref tx) = progress_tx {
+            let is_complete = status == AgentProgressStatus::Complete;
+            let mut progress = AgentProgress {
+                delegated_run_id: task.delegated_run_id.clone(),
+                task_id: task_id.clone(),
+                name: task_name.clone(),
+                status,
+                tool_count,
+                tokens,
+                current_action: Some(action.to_string()),
+                completion_summary,
+                completed_plan_task: if is_complete {
+                    plan_task_id.clone()
+                } else {
+                    None
+                },
+                ..Default::default()
+            };
+            config.update_progress(&mut progress);
+            let _ = tx.send(progress);
+        }
+    };
+
+    send_progress(
+        AgentProgressStatus::Running,
+        &last_action,
+        0,
+        0,
+        None,
+        config,
+    );
+
+    loop {
+        if cancellation.is_cancelled() {
+            info!(task_id = %task_id, "Agent cancelled");
+            send_progress(
+                AgentProgressStatus::Failed,
+                "cancelled",
+                total_tool_calls,
+                estimated_tokens,
+                None,
+                config,
+            );
+            config.cleanup();
+            return SubAgentResult {
+                task_id,
+                agent_name: task_name.clone(),
+                delegated_run_id: task.delegated_run_id.clone(),
+                success: false,
+                output: String::new(),
+                files_examined,
+                duration_ms: start.elapsed().as_millis() as u64,
+                turns_used: turns,
+                error: Some("Cancelled".to_string()),
+                policy_violations,
+            };
+        }
+
+        turns += 1;
+
+        let max_turns_budget = delegated_turn_budget(task);
+        if let Some(max_turns) = max_turns_budget {
+            if turns > max_turns {
+                warn!(
+                    task_id = %task_id,
+                    turns = turns,
+                    max_turns = max_turns,
+                    "Sub-agent exceeded max turns"
+                );
+                send_progress(
+                    AgentProgressStatus::Failed,
+                    "max turns reached",
+                    total_tool_calls,
+                    estimated_tokens,
+                    None,
+                    config,
+                );
+                config.cleanup();
+                return SubAgentResult {
+                    task_id,
+                    agent_name: task_name.clone(),
+                    delegated_run_id: task.delegated_run_id.clone(),
+                    success: false,
+                    output: final_output,
+                    files_examined,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    turns_used: turns,
+                    error: Some(format!(
+                        "Sub-agent exceeded configured turn budget ({})",
+                        max_turns
+                    )),
+                    policy_violations,
+                };
+            }
+        }
+
+        let system_prompt = config.system_prompt(turns);
+
+        let thinking_action = if total_tool_calls > 0 {
+            format!("{}...", last_action)
+        } else {
+            "thinking...".to_string()
+        };
+        send_progress(
+            AgentProgressStatus::Running,
+            &thinking_action,
+            total_tool_calls,
+            estimated_tokens,
+            None,
+            config,
+        );
+
+        let api_future = call_subagent_api(
+            client,
+            model,
+            &system_prompt,
+            &messages,
+            &ai_tools,
+            config.max_tokens(),
+            task.thinking_enabled,
+        );
+
+        let response = match tokio::time::timeout(config.api_call_timeout(), api_future).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                send_progress(
+                    AgentProgressStatus::Failed,
+                    "error",
+                    total_tool_calls,
+                    estimated_tokens,
+                    None,
+                    config,
+                );
+                config.cleanup();
+                return SubAgentResult {
+                    task_id,
+                    agent_name: task_name.clone(),
+                    delegated_run_id: task.delegated_run_id.clone(),
+                    success: false,
+                    output: String::new(),
+                    files_examined,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    turns_used: turns,
+                    error: Some(e.to_string()),
+                    policy_violations,
+                };
+            }
+            Err(_) => {
+                warn!(
+                    task_id = %task_id,
+                    turn = turns,
+                    timeout_secs = config.api_call_timeout().as_secs(),
+                    files_examined = files_examined.len(),
+                    "Sub-agent API call timed out"
+                );
+                let output = timeout_partial_output(&final_output, &files_examined);
+                let has_evidence = !files_examined.is_empty();
+                send_progress(
+                    if has_evidence {
+                        AgentProgressStatus::Complete
+                    } else {
+                        AgentProgressStatus::Failed
+                    },
+                    if has_evidence {
+                        "timeout (partial)"
+                    } else {
+                        "timeout"
+                    },
+                    total_tool_calls,
+                    estimated_tokens,
+                    completion_summary_preview(&output),
+                    config,
+                );
+                config.cleanup();
+                return SubAgentResult {
+                    task_id,
+                    agent_name: task_name.clone(),
+                    delegated_run_id: task.delegated_run_id.clone(),
+                    success: has_evidence,
+                    output,
+                    files_examined,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    turns_used: turns,
+                    error: if has_evidence {
+                        None
+                    } else {
+                        Some(format!(
+                            "API call timed out after {}s on turn {}",
+                            config.api_call_timeout().as_secs(),
+                            turns
+                        ))
+                    },
+                    policy_violations,
+                };
+            }
+        };
+
+        if let Some(usage) = response.get("usage") {
+            if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+                estimated_tokens += input as usize;
+            }
+            if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+                estimated_tokens += output as usize;
+            }
+        }
+
+        let (text_parts, tool_calls, stop_reason) = parse_response(&response);
+
+        if !text_parts.is_empty() {
+            final_output = text_parts.join("\n");
+        }
+
+        if config.use_explorer_heuristics()
+            && delegated_is_explore(task)
+            && last_cycle_positive_evidence
+            && text_claims_tool_empty(&final_output)
+        {
+            if tool_truth_corrections >= 1 {
+                send_progress(
+                    AgentProgressStatus::Failed,
+                    "misread tool output",
+                    total_tool_calls,
+                    estimated_tokens,
+                    completion_summary_preview(&final_output),
+                    config,
+                );
+                config.cleanup();
+                return SubAgentResult {
+                    task_id,
+                    agent_name: task_name.clone(),
+                    delegated_run_id: task.delegated_run_id.clone(),
+                    success: false,
+                    output: final_output,
+                    files_examined,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    turns_used: turns,
+                    error: Some(
+                        "Misread successful tool output after correction; delegated exploration is no longer trustworthy"
+                            .to_string(),
+                    ),
+                    policy_violations,
+                };
+            }
+
+            tool_truth_corrections += 1;
+            messages.push(ModelMessage {
+                role: Role::User,
+                content: vec![Content::Text {
+                    text: "Correction: the previous tool calls returned real data. You must treat successful tool output as ground truth and use it directly. Do not claim the results were empty or that nothing worked. Summarize the evidence from the returned paths/content instead of rechecking blindly.".to_string(),
+                }],
+            });
+            send_progress(
+                AgentProgressStatus::Running,
+                "correcting tool interpretation",
+                total_tool_calls,
+                estimated_tokens,
+                completion_summary_preview(&final_output),
+                config,
+            );
+            continue;
+        }
+
+        if tool_calls.is_empty() || stop_reason == "end_turn" {
+            if config.use_explorer_heuristics() && delegated_is_explore(task) {
+                let missing_report = parse_explore_report(&final_output).is_none();
+
+                if files_examined.is_empty() && !forced_read_before_completion {
+                    forced_read_before_completion = true;
+                    messages.push(ModelMessage {
+                        role: Role::User,
+                        content: vec![Content::Text {
+                            text: "You have not gathered any real path evidence yet. Before you finish, use the current working directory to inspect the most relevant files or directories, then produce the required <explore_report> with those paths in `paths_examined` and any concrete reads in `files_examined`. Do not stop yet.".to_string(),
+                        }],
+                    });
+                    send_progress(
+                        AgentProgressStatus::Running,
+                        "requiring path evidence",
+                        total_tool_calls,
+                        estimated_tokens,
+                        completion_summary_preview(&final_output),
+                        config,
+                    );
+                    continue;
+                }
+
+                if missing_report && !structured_report_repair_requested {
+                    structured_report_repair_requested = true;
+                    messages.push(ModelMessage {
+                        role: Role::User,
+                        content: vec![Content::Text {
+                            text: "Your previous response did not include the required <explore_report> JSON block. Using only the evidence you already gathered, reply now with exactly one valid <explore_report> block and no extra prose. Include all supporting paths in `paths_examined` and any concrete reads in `files_examined`. Do not call more tools unless a single critical read is required.".to_string(),
+                        }],
+                    });
+                    send_progress(
+                        AgentProgressStatus::Running,
+                        "repairing structured report",
+                        total_tool_calls,
+                        estimated_tokens,
+                        completion_summary_preview(&final_output),
+                        config,
+                    );
+                    continue;
+                }
+            }
+
+            let raw_result = SubAgentResult {
+                task_id: task_id.clone(),
+                agent_name: task_name.clone(),
+                delegated_run_id: task.delegated_run_id.clone(),
+                success: true,
+                output: final_output,
+                files_examined,
+                duration_ms: start.elapsed().as_millis() as u64,
+                turns_used: turns,
+                error: None,
+                policy_violations,
+            };
+            let result = if config.use_explorer_heuristics() {
+                normalize_explorer_result(raw_result, task)
+            } else {
+                raw_result
+            };
+            info!(
+                task_id = %result.task_id,
+                turns = turns,
+                output_len = result.output.len(),
+                success = result.success,
+                "Agent completed"
+            );
+            send_progress(
+                if result.success {
+                    AgentProgressStatus::Complete
+                } else {
+                    AgentProgressStatus::Failed
+                },
+                if result.success {
+                    "complete"
+                } else {
+                    "degraded completion"
+                },
+                total_tool_calls,
+                estimated_tokens,
+                completion_summary_preview(&result.output),
+                config,
+            );
+            config.cleanup();
+            return result;
+        }
+
+        let is_explore_delegation = delegated_is_explore(task);
+        let all_read_only_tools = is_explore_delegation
+            && tool_calls
+                .iter()
+                .all(|call| matches!(call.name.as_str(), "read" | "glob" | "grep" | "list"));
+
+        if config.use_explorer_heuristics()
+            && is_explore_delegation
+            && forced_summary_requested
+            && all_read_only_tools
+        {
+            let synthesized =
+                synthesized_explorer_output(&task.name, &final_output, &files_examined);
+            let result = normalize_explorer_result(
+                SubAgentResult {
+                    task_id: task_id.clone(),
+                    agent_name: task_name.clone(),
+                    delegated_run_id: task.delegated_run_id.clone(),
+                    success: true,
+                    output: synthesized,
+                    files_examined,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    turns_used: turns,
+                    error: None,
+                    policy_violations,
+                },
+                task,
+            );
+            send_progress(
+                if result.success {
+                    AgentProgressStatus::Complete
+                } else {
+                    AgentProgressStatus::Failed
+                },
+                if result.success {
+                    "forced summary"
+                } else {
+                    "forced summary degraded"
+                },
+                total_tool_calls,
+                estimated_tokens,
+                completion_summary_preview(&result.output),
+                config,
+            );
+            config.cleanup();
+            return result;
+        }
+
+        let mut assistant_content: Vec<Content> = text_parts
+            .iter()
+            .map(|t| Content::Text { text: t.clone() })
+            .collect();
+
+        let mut cycle_new_files = 0usize;
+
+        for tc in &tool_calls {
+            assistant_content.push(Content::ToolUse {
+                id: tc.id.clone(),
+                name: tc.name.clone(),
+                input: tc.input.clone(),
+            });
+        }
+
+        messages.push(ModelMessage {
+            role: Role::Assistant,
+            content: assistant_content,
+        });
+
+        let mut tool_results: Vec<Content> = vec![];
+        let mut cycle_positive_evidence = false;
+
+        for tc in &tool_calls {
+            total_tool_calls += 1;
+            if let Some(policy) = task.delegation_policy.as_ref() {
+                if let Err(reason) = policy.authorize_tool(&tc.name, ctx.plan_mode) {
+                    let violation = format!("{}: {}", tc.name, reason);
+                    policy_violations.push(violation.clone());
+                    tool_results.push(Content::ToolResult {
+                        tool_use_id: tc.id.clone(),
+                        output: build_history_tool_result(
+                            &tc.name,
+                            &crate::tools::registry::ToolResult::error_with_details(
+                                "delegated_policy_block",
+                                reason,
+                                None,
+                                Some(policy.audit_json()),
+                            )
+                            .output,
+                            true,
+                        ),
+                        is_error: Some(true),
+                    });
+
+                    if policy_violations.len() >= MAX_DELEGATED_POLICY_VIOLATIONS {
+                        send_progress(
+                            AgentProgressStatus::Failed,
+                            "delegated policy blocked repeated tool calls",
+                            total_tool_calls,
+                            estimated_tokens,
+                            None,
+                            config,
+                        );
+                        config.cleanup();
+                        return SubAgentResult {
+                            task_id,
+                            agent_name: task_name.clone(),
+                            delegated_run_id: task.delegated_run_id.clone(),
+                            success: false,
+                            output: final_output,
+                            files_examined,
+                            duration_ms: start.elapsed().as_millis() as u64,
+                            turns_used: turns,
+                            error: Some(
+                                "Delegated policy containment triggered after repeated blocked tool attempts"
+                                    .to_string(),
+                            ),
+                            policy_violations,
+                        };
+                    }
+                    continue;
+                }
+            }
+
+            last_action = config.format_action(&tc.name, &tc.input);
+            send_progress(
+                AgentProgressStatus::Running,
+                &last_action,
+                total_tool_calls,
+                estimated_tokens,
+                None,
+                config,
+            );
+
+            let result = config.execute_tool(&tc.name, tc.input.clone(), &ctx).await;
+
+            let (output, is_error) = match result {
+                Some(r) => (r.output, r.is_error),
+                None => (format!("Unknown tool: {}", tc.name), true),
+            };
+
+            if tool_result_has_positive_evidence(&tc.name, &output, is_error) {
+                cycle_positive_evidence = true;
+            }
+
+            if config.is_read_tool(&tc.name) {
+                if let Some(path) = tc.input.get("file_path").and_then(|value| value.as_str()) {
+                    let normalized = relative_or_display(path, &task.working_dir);
+                    if unique_files_examined.insert(normalized.clone()) {
+                        cycle_new_files += 1;
+                        files_examined.push(normalized);
+                    }
+                }
+            }
+
+            for path in collect_paths_from_tool_result(&tc.name, &output, &task.working_dir) {
+                if unique_files_examined.insert(path.clone()) {
+                    cycle_new_files += 1;
+                    files_examined.push(path);
+                }
+            }
+
+            tool_results.push(Content::ToolResult {
+                tool_use_id: tc.id.clone(),
+                output: build_history_tool_result(&tc.name, &output, is_error),
+                is_error: Some(is_error),
+            });
+        }
+
+        messages.push(ModelMessage {
+            role: Role::User,
+            content: tool_results,
+        });
+        last_cycle_positive_evidence = cycle_positive_evidence;
+
+        if config.use_explorer_heuristics() && is_explore_delegation && all_read_only_tools {
+            let produced_new_files = cycle_new_files > 0;
+            let has_sufficient_evidence = !final_output.trim().is_empty()
+                && unique_files_examined.len() >= EXPLORER_SYNTHESIS_FILE_THRESHOLD;
+
+            if has_sufficient_evidence || !produced_new_files {
+                stale_readonly_cycles += 1;
+            } else {
+                stale_readonly_cycles = 0;
+            }
+
+            if stale_readonly_cycles >= EXPLORER_STALE_SEQUENCE_THRESHOLD {
+                if !forced_summary_requested {
+                    forced_summary_requested = true;
+                    stale_readonly_cycles = 0;
+                    messages.push(ModelMessage {
+                        role: Role::User,
+                        content: vec![Content::Text {
+                            text: "You now have enough evidence to answer the investigation. Stop exploring. Do not call more tools unless a critical gap prevents answering. Provide a concise summary covering architecture, key modules, design patterns, main concerns, and the most important files examined.".to_string(),
+                        }],
+                    });
+                    send_progress(
+                        AgentProgressStatus::Running,
+                        "synthesizing findings",
+                        total_tool_calls,
+                        estimated_tokens,
+                        completion_summary_preview(&final_output),
+                        config,
+                    );
+                    continue;
+                }
+
+                let synthesized =
+                    synthesized_explorer_output(&task.name, &final_output, &files_examined);
+                let result = normalize_explorer_result(
+                    SubAgentResult {
+                        task_id: task_id.clone(),
+                        agent_name: task_name.clone(),
+                        delegated_run_id: task.delegated_run_id.clone(),
+                        success: true,
+                        output: synthesized,
+                        files_examined,
+                        duration_ms: start.elapsed().as_millis() as u64,
+                        turns_used: turns,
+                        error: None,
+                        policy_violations,
+                    },
+                    task,
+                );
+                send_progress(
+                    if result.success {
+                        AgentProgressStatus::Complete
+                    } else {
+                        AgentProgressStatus::Failed
+                    },
+                    if result.success {
+                        "converged"
+                    } else {
+                        "converged degraded"
+                    },
+                    total_tool_calls,
+                    estimated_tokens,
+                    completion_summary_preview(&result.output),
+                    config,
+                );
+                config.cleanup();
+                return result;
+            }
+        } else {
+            stale_readonly_cycles = 0;
+        }
+
+        if messages.len() > subagent::MAX_MESSAGES {
+            let to_remove = messages.len() - subagent::MAX_MESSAGES;
+            for _ in 0..to_remove {
+                messages.remove(1);
+            }
+            tracing::debug!(
+                task_id = %task_id,
+                removed = to_remove,
+                remaining = messages.len(),
+                "Pruned messages to stay within limit"
+            );
+        }
+    }
+}

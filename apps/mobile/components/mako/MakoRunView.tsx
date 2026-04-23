@@ -12,7 +12,7 @@ import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";
 import { ChatBar } from "../chat/ChatBar";
 import { ChatTranscript } from "../chat/ChatTranscript";
-import { GlassCard } from "../ui/GlassCard";
+import { MakoCrewPicker } from "./MakoCrewPicker";
 import { MakoPriorityPicker } from "./MakoPriorityPicker";
 import { MakoSchedulePicker } from "./MakoSchedulePicker";
 import { MakoWakeTimeline } from "./MakoWakeTimeline";
@@ -25,29 +25,134 @@ import {
 } from "./schedule";
 import { MakoStatusBadge } from "./MakoStatusBadge";
 import { MakoTopBar } from "./MakoTopBar";
-import { MakoTopNav } from "./MakoTopNav";
 import {
   describeRun,
   formatProjectLabel,
   formatRelativeTime,
   formatTimestamp,
-  getRunPriority,
   getRunDisplayStatus,
+  getRunPriority,
   getRuntimeLabel,
 } from "./utils";
 import type { MakoChatContext, MakoCurrentRunSummary } from "./types";
+import type { ChatMessage, MakoCrewRuntimeMember } from "@krusty/api";
 
 interface MakoRunViewProps {
   runId: string;
   summary: MakoCurrentRunSummary | null;
+  crewMembers: MakoCrewRuntimeMember[];
   chat: MakoChatContext;
   onBack: () => void;
   onDeleteRun: (id: string) => void;
 }
 
+function SummaryCell({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+}) {
+  const { theme } = useThemeContext();
+  const t = theme.colors;
+
+  return (
+    <View style={styles.summaryCell}>
+      <Text style={[styles.summaryLabel, { color: t.mutedForeground }]}>{label}</Text>
+      <Text style={[styles.summaryValue, { color: t.foreground }]} numberOfLines={1}>
+        {value}
+      </Text>
+      {hint ? (
+        <Text style={[styles.summaryHint, { color: t.mutedForeground }]} numberOfLines={1}>
+          {hint}
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
+function SectionTitle({ title }: { title: string }) {
+  const { theme } = useThemeContext();
+  return <Text style={[styles.sectionTitle, { color: theme.colors.foreground }]}>{title}</Text>;
+}
+
+function FlatAction({
+  label,
+  color,
+  disabled = false,
+  onPress,
+}: {
+  label: string;
+  color: string;
+  disabled?: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      disabled={disabled}
+      onPress={() => {
+        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        onPress();
+      }}
+      style={styles.actionLink}
+    >
+      <Text style={[styles.actionLinkText, { color: disabled ? `${color}88` : color }]}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+function TaskRow({
+  title,
+  detail,
+  status,
+  timestamp,
+}: {
+  title: string;
+  detail: string;
+  status: string;
+  timestamp?: string | null;
+}) {
+  const { theme } = useThemeContext();
+  const t = theme.colors;
+
+  return (
+    <View style={[styles.listRow, { borderColor: t.border }]}>
+      <View style={styles.listCopy}>
+        <Text style={[styles.listTitle, { color: t.foreground }]} numberOfLines={1}>
+          {title}
+        </Text>
+        <Text style={[styles.listDetail, { color: t.mutedForeground }]} numberOfLines={2}>
+          {detail}
+        </Text>
+      </View>
+      <View style={styles.listAside}>
+        <MakoStatusBadge status={status} />
+        {timestamp ? (
+          <Text style={[styles.listMeta, { color: t.mutedForeground }]}>
+            {formatTimestamp(timestamp)}
+          </Text>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
+function messagePreview(message: ChatMessage): string {
+  const content = message.content.trim();
+  if (!content) {
+    return message.role === "assistant" ? "Working..." : "No content";
+  }
+  return content.replace(/\s+/g, " ");
+}
+
 export function MakoRunView({
   runId,
   summary,
+  crewMembers,
   chat,
   onBack,
   onDeleteRun,
@@ -55,48 +160,57 @@ export function MakoRunView({
   const { client } = useConnection();
   const { theme } = useThemeContext();
   const t = theme.colors;
-  const [runSection, setRunSection] = useState<
-    "overview" | "wake" | "tasks" | "chat" | "artifacts"
-  >("overview");
+  const [chatOpen, setChatOpen] = useState(false);
   const [schedulePreset, setSchedulePreset] = useState<MakoSchedulePreset>("30m");
   const [customSchedule, setCustomSchedule] = useState("");
   const [priority, setPriority] = useState(getRunPriority(summary ?? { runtime: null }));
+  const [crewSlug, setCrewSlug] = useState(summary?.runtime?.crew_slug ?? null);
   const [isScheduling, setIsScheduling] = useState(false);
   const [isSavingPriority, setIsSavingPriority] = useState(false);
+  const [isSavingCrew, setIsSavingCrew] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [composerReserveHeight, setComposerReserveHeight] = useState(150);
   const { status, wake, isLoading, refresh } = useMakoRun(runId, true);
 
-  const displayStatus = getRunDisplayStatus(summary ?? {
-    runtime: status?.runtime ?? null,
-    agent_state: status?.agent_state ?? "idle",
-  });
+  const displayStatus = getRunDisplayStatus(
+    summary ?? {
+      runtime: status?.runtime ?? null,
+      agent_state: status?.agent_state ?? "idle",
+    },
+  );
 
   const taskStats = useMemo(() => {
     const tasks = status?.tasks ?? [];
     return {
-      total: tasks.length,
       inProgress: tasks.filter((task) => task.status === "in_progress").length,
       pending: tasks.filter((task) => task.status === "pending").length,
       completed: tasks.filter((task) => task.status === "completed").length,
       failed: tasks.filter((task) => task.status === "failed").length,
     };
   }, [status?.tasks]);
+
   const cadence = status?.cadence ?? summary?.cadence ?? {
     tick_interval_secs: 30,
     max_ticks: 1000,
   };
   const runtimeStatus = status?.runtime?.status ?? null;
   const runtimePriority = status?.runtime?.priority ?? summary?.runtime?.priority ?? "normal";
+  const runtimeCrewSlug = status?.runtime?.crew_slug ?? summary?.runtime?.crew_slug ?? null;
   const nextWakeAt = status?.runtime?.next_wake_at ?? summary?.runtime?.next_wake_at;
   const schedule = resolveScheduleSelection(schedulePreset, customSchedule);
   const resumeLabel = runtimeStatus === "sleeping" ? "Wake now" : "Resume";
   const showPause = runtimeStatus !== "sleeping" && runtimeStatus !== "paused";
   const showResume = runtimeStatus !== "running";
+  const recentMessages = chat.messages.slice(-3);
+  const artifactTasks = (status?.tasks ?? []).filter((task) => task.result);
 
   useEffect(() => {
     setPriority(runtimePriority);
   }, [runtimePriority]);
+
+  useEffect(() => {
+    setCrewSlug(runtimeCrewSlug);
+  }, [runtimeCrewSlug]);
 
   useEffect(() => {
     setCustomSchedule(formatScheduleInputValue(nextWakeAt));
@@ -142,8 +256,7 @@ export function MakoRunView({
       setActionError(schedule.error);
       return;
     }
-    const startAt = schedule.startAt;
-    if (!startAt) {
+    if (!schedule.startAt) {
       setActionError("Choose a future wake time before rescheduling.");
       return;
     }
@@ -151,7 +264,7 @@ export function MakoRunView({
     setIsScheduling(true);
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     try {
-      await client.scheduleMakoSession(runId, startAt);
+      await client.scheduleMakoSession(runId, schedule.startAt);
       await refresh();
     } catch (error) {
       setActionError(
@@ -182,6 +295,91 @@ export function MakoRunView({
     }
   };
 
+  const handleCrewChange = async (nextCrewSlug: string | null) => {
+    if (!client) {
+      return;
+    }
+    setCrewSlug(nextCrewSlug);
+    setActionError(null);
+    setIsSavingCrew(true);
+    try {
+      await client.setMakoSessionCrew(runId, nextCrewSlug);
+      await refresh();
+    } catch (error) {
+      setCrewSlug(runtimeCrewSlug);
+      setActionError(
+        error instanceof Error ? error.message : "Failed to update crew.",
+      );
+    } finally {
+      setIsSavingCrew(false);
+    }
+  };
+
+  if (chatOpen) {
+    return (
+      <View style={styles.container}>
+        <MakoTopBar
+          title={summary?.title || status?.title || "Run"}
+          subtitle="Run chat"
+          status={displayStatus}
+          onBack={() => {
+            setChatOpen(false);
+          }}
+        />
+
+        <View style={styles.chatWrap}>
+          <ChatTranscript
+            messages={chat.messages}
+            sessionId={chat.sessionId}
+            isStreaming={chat.isStreaming}
+            isThinking={chat.isThinking}
+            activeToolCallId={chat.activeToolCallId}
+            onApproveTool={chat.onApproveTool}
+            onDenyTool={chat.onDenyTool}
+            onSubmitToolResult={chat.onSubmitToolResult}
+            onPlanConfirm={chat.onPlanConfirm}
+            emptyState={
+              <View style={styles.emptyChat}>
+                <Text style={[styles.emptyTitle, { color: t.foreground }]}>
+                  No chat yet
+                </Text>
+                <Text style={[styles.emptyBody, { color: t.mutedForeground }]}>
+                  Talk directly to this run without leaving the watch.
+                </Text>
+              </View>
+            }
+            bottomPadding={composerReserveHeight}
+            showPlanTracker={false}
+          />
+
+          <ChatBar
+            onSend={chat.onSend}
+            onStop={chat.onStop}
+            onHeightChange={setComposerReserveHeight}
+            isStreaming={chat.isStreaming}
+            disabled={!chat.sessionId}
+            thinkingLevel={chat.thinkingLevel}
+            onThinkingChange={chat.onThinkingChange}
+            permissionMode={chat.permissionMode}
+            onPermissionModeToggle={chat.onPermissionModeToggle}
+            fastModeEnabled={chat.fastModeEnabled}
+            fastModeSupported={chat.fastModeSupported}
+            onFastModeToggle={chat.onFastModeToggle}
+            mode={chat.mode}
+            onModeToggle={chat.onModeToggle}
+            onModelSelect={chat.onModelSelect}
+            model={chat.model ?? null}
+            models={chat.models}
+            sessionType="mako"
+            researchEnabled={chat.researchEnabled}
+            onResearchToggle={chat.onResearchToggle}
+            tokenCount={chat.tokenCount}
+          />
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
       <MakoTopBar
@@ -191,332 +389,260 @@ export function MakoRunView({
         onBack={onBack}
       />
 
-      <MakoTopNav
-        items={[
-          { id: "overview", label: "Overview" },
-          { id: "wake", label: "Wake" },
-          { id: "tasks", label: "Tasks" },
-          { id: "chat", label: "Chat" },
-          { id: "artifacts", label: "Artifacts" },
-        ]}
-        active={runSection}
-        onSelect={setRunSection}
-      />
-
       {isLoading && !status ? (
         <View style={styles.loading}>
           <ActivityIndicator color={t.userMessage} />
         </View>
-      ) : null}
+      ) : (
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={styles.content}
+          showsVerticalScrollIndicator={false}
+        >
+          <View
+            style={[
+              styles.summaryStrip,
+              {
+                borderTopColor: t.border,
+                borderBottomColor: t.border,
+              },
+            ]}
+          >
+            <SummaryCell
+              label="State"
+              value={getRuntimeLabel(displayStatus)}
+              hint={formatPriorityLabel(runtimePriority)}
+            />
+            <SummaryCell
+              label="Updated"
+              value={formatRelativeTime(summary?.updated_at ?? status?.runtime?.updated_at)}
+              hint={nextWakeAt ? `wake ${formatTimestamp(nextWakeAt)}` : "no wake set"}
+            />
+            <SummaryCell
+              label="Tasks"
+              value={String(taskStats.pending + taskStats.inProgress)}
+              hint={`${taskStats.completed} done`}
+            />
+            <SummaryCell
+              label="Crew"
+              value={runtimeCrewSlug ?? "Mako"}
+              hint={`${cadence.tick_interval_secs}s cadence`}
+            />
+          </View>
 
-      {!isLoading || status ? (
-        <>
-          {runSection === "overview" ? (
-            <ScrollView
-              style={styles.scroll}
-              contentContainerStyle={styles.content}
-              showsVerticalScrollIndicator={false}
-            >
-              <View style={styles.metricsRow}>
-                <OverviewCard label="State" value={getRuntimeLabel(displayStatus)} />
-                <OverviewCard
-                  label="Updated"
-                  value={formatRelativeTime(summary?.updated_at ?? status?.runtime?.updated_at)}
-                />
-              </View>
-
-              <View style={styles.metricsRow}>
-                <OverviewCard label="Open tasks" value={String(taskStats.pending + taskStats.inProgress)} />
-                <OverviewCard label="Completed" value={String(taskStats.completed)} />
-              </View>
-
-              <View style={styles.metricsRow}>
-                <OverviewCard label="Tick interval" value={`${cadence.tick_interval_secs}s`} />
-                <OverviewCard label="Tick budget" value={String(cadence.max_ticks)} />
-              </View>
-
-              <GlassCard style={styles.card}>
-                <Text style={[styles.cardTitle, { color: t.foreground }]}>
-                  Run state
+          <View style={styles.section}>
+            <SectionTitle title="Overview" />
+            <View style={[styles.sectionBody, { borderTopColor: t.border }]}>
+              <View style={styles.copyBlock}>
+                <Text style={[styles.bodyText, { color: t.mutedForeground }]}>
+                  {summary
+                    ? describeRun(summary)
+                    : "Runtime summary will populate as the run moves."}
                 </Text>
-                <Text style={[styles.cardBody, { color: t.mutedForeground }]}>
-                  {summary ? describeRun(summary) : "Runtime summary will populate as the run moves."}
-                </Text>
-                <View style={styles.rowMeta}>
+                <View style={styles.metaRow}>
                   <MakoStatusBadge status={displayStatus} />
                   <Text style={[styles.metaText, { color: t.mutedForeground }]}>
                     {formatTimestamp(status?.runtime?.updated_at)}
                   </Text>
                 </View>
-              </GlassCard>
-
-              <GlassCard style={styles.card}>
-                <Text style={[styles.cardTitle, { color: t.foreground }]}>
-                  Run priority
-                </Text>
-                <Text style={[styles.cardBody, { color: t.mutedForeground }]}>
-                  {formatPriorityLabel(runtimePriority)}
-                </Text>
-                <View style={styles.scheduleWrap}>
-                  <MakoPriorityPicker
-                    value={priority}
-                    onChange={(nextPriority) => {
-                      void handlePriorityChange(nextPriority);
-                    }}
-                  />
-                </View>
-                {isSavingPriority ? (
-                  <Text style={[styles.metaText, { color: t.mutedForeground }]}>
-                    Saving priority...
-                  </Text>
-                ) : null}
-              </GlassCard>
-
-              <GlassCard style={styles.card}>
-                <Text style={[styles.cardTitle, { color: t.foreground }]}>
-                  Course timing
-                </Text>
-                <Text style={[styles.cardBody, { color: t.mutedForeground }]}>
-                  {nextWakeAt
-                    ? `Next wake is ${formatTimestamp(nextWakeAt)}.`
-                    : "No future wake is set right now."}
-                </Text>
-                <View style={styles.scheduleWrap}>
-                  <MakoSchedulePicker
-                    value={schedulePreset}
-                    onChange={setSchedulePreset}
-                    includeImmediate={false}
-                    subject="run"
-                    customValue={customSchedule}
-                    onCustomValueChange={setCustomSchedule}
-                    customError={schedulePreset === "custom" ? schedule.error : null}
-                  />
-                </View>
-                <View style={styles.actionRow}>
-                  <ActionButton
-                    label={isScheduling ? "Scheduling..." : "Reschedule"}
-                    tone="primary"
-                    disabled={
-                      isScheduling ||
-                      (schedulePreset === "custom" && schedule.error !== null)
-                    }
-                    onPress={() => {
-                      void handleSchedule();
-                    }}
-                  />
-                </View>
-              </GlassCard>
-
+              </View>
               <View style={styles.actionRow}>
+                <FlatAction
+                  label="Open chat"
+                  color={t.userMessage}
+                  onPress={() => {
+                    setChatOpen(true);
+                  }}
+                />
                 {showPause ? (
-                  <ActionButton
-                    label="Pause"
-                    tone="neutral"
-                    onPress={() => {
-                      void handlePause();
-                    }}
-                  />
+                  <FlatAction label="Pause" color={t.mutedForeground} onPress={handlePause} />
                 ) : null}
                 {showResume ? (
-                  <ActionButton
-                    label={resumeLabel}
-                    tone="primary"
-                    onPress={() => {
-                      void handleResume();
-                    }}
-                  />
+                  <FlatAction label={resumeLabel} color={t.userMessage} onPress={handleResume} />
                 ) : null}
-                <ActionButton
+                <FlatAction
                   label="Cancel"
-                  tone="danger"
-                  onPress={() => onDeleteRun(runId)}
+                  color={t.error}
+                  onPress={() => {
+                    onDeleteRun(runId);
+                  }}
                 />
               </View>
-
               {actionError ? (
                 <Text style={[styles.errorText, { color: t.error }]}>
                   {actionError}
                 </Text>
               ) : null}
-            </ScrollView>
-          ) : null}
+            </View>
+          </View>
 
-          {runSection === "wake" ? (
-            <ScrollView
-              style={styles.scroll}
-              contentContainerStyle={styles.content}
-              showsVerticalScrollIndicator={false}
-            >
+          <View style={styles.section}>
+            <SectionTitle title="Priority" />
+            <View style={[styles.sectionBody, { borderTopColor: t.border }]}>
+              <Text style={[styles.bodyText, { color: t.mutedForeground }]}>
+                {formatPriorityLabel(runtimePriority)}
+              </Text>
+              <View style={styles.controlBlock}>
+                <MakoPriorityPicker
+                  value={priority}
+                  onChange={(nextPriority) => {
+                    void handlePriorityChange(nextPriority);
+                  }}
+                />
+              </View>
+              {isSavingPriority ? (
+                <Text style={[styles.metaText, { color: t.mutedForeground }]}>
+                  Saving priority...
+                </Text>
+              ) : null}
+            </View>
+          </View>
+
+          <View style={styles.section}>
+            <SectionTitle title="Crew" />
+            <View style={[styles.sectionBody, { borderTopColor: t.border }]}>
+              <Text style={[styles.bodyText, { color: t.mutedForeground }]}>
+                Assign this run to Mako or a specific crew member. The selected crew identity shapes the run&apos;s working presence and context layers.
+              </Text>
+              <View style={styles.controlBlock}>
+                <MakoCrewPicker
+                  members={crewMembers}
+                  selectedSlug={crewSlug}
+                  isSaving={isSavingCrew}
+                  onSelect={(nextCrewSlug) => {
+                    void handleCrewChange(nextCrewSlug);
+                  }}
+                />
+              </View>
+              {isSavingCrew ? (
+                <Text style={[styles.metaText, { color: t.mutedForeground }]}>
+                  Saving crew...
+                </Text>
+              ) : null}
+            </View>
+          </View>
+
+          <View style={styles.section}>
+            <SectionTitle title="Schedule" />
+            <View style={[styles.sectionBody, { borderTopColor: t.border }]}>
+              <Text style={[styles.bodyText, { color: t.mutedForeground }]}>
+                {nextWakeAt
+                  ? `Next wake is ${formatTimestamp(nextWakeAt)}.`
+                  : "No future wake is set right now."}
+              </Text>
+              <View style={styles.controlBlock}>
+                <MakoSchedulePicker
+                  value={schedulePreset}
+                  onChange={setSchedulePreset}
+                  includeImmediate={false}
+                  subject="run"
+                  customValue={customSchedule}
+                  onCustomValueChange={setCustomSchedule}
+                  customError={schedulePreset === "custom" ? schedule.error : null}
+                />
+              </View>
+              <View style={styles.actionRow}>
+                <FlatAction
+                  label={isScheduling ? "Scheduling..." : "Reschedule"}
+                  color={t.userMessage}
+                  disabled={
+                    isScheduling ||
+                    (schedulePreset === "custom" && schedule.error !== null)
+                  }
+                  onPress={() => {
+                    void handleSchedule();
+                  }}
+                />
+              </View>
+            </View>
+          </View>
+
+          <View style={styles.section}>
+            <SectionTitle title="Wake" />
+            <View style={[styles.sectionBody, { borderTopColor: t.border }]}>
               <MakoWakeTimeline wake={wake} />
-            </ScrollView>
-          ) : null}
+            </View>
+          </View>
 
-          {runSection === "tasks" ? (
-            <ScrollView
-              style={styles.scroll}
-              contentContainerStyle={styles.content}
-              showsVerticalScrollIndicator={false}
-            >
-              {(status?.tasks ?? []).map((task) => (
-                <GlassCard key={task.id} style={styles.card}>
-                  <View style={styles.rowMeta}>
-                    <Text style={[styles.cardTitle, { color: t.foreground, flex: 1 }]}>
-                      {task.subject}
-                    </Text>
-                    <MakoStatusBadge status={task.status} />
-                  </View>
-                  <Text style={[styles.cardBody, { color: t.mutedForeground }]}>
-                    {task.description || task.result || "No details yet."}
-                  </Text>
-                  <Text style={[styles.metaText, { color: t.mutedForeground }]}>
-                    {formatTimestamp(task.updated_at)}
-                  </Text>
-                </GlassCard>
-              ))}
-            </ScrollView>
-          ) : null}
+          <View style={styles.section}>
+            <SectionTitle title="Tasks" />
+            <View style={[styles.sectionBody, { borderTopColor: t.border }]}>
+              {(status?.tasks ?? []).length === 0 ? (
+                <Text style={[styles.emptyBody, { color: t.mutedForeground }]}>
+                  No tasks yet.
+                </Text>
+              ) : (
+                (status?.tasks ?? []).map((task) => (
+                  <TaskRow
+                    key={task.id}
+                    title={task.subject}
+                    detail={task.description || task.result || "No details yet."}
+                    status={task.status}
+                    timestamp={task.updated_at}
+                  />
+                ))
+              )}
+            </View>
+          </View>
 
-          {runSection === "chat" ? (
-            <View style={styles.chatWrap}>
-              <ChatTranscript
-                messages={chat.messages}
-                sessionId={chat.sessionId}
-                isStreaming={chat.isStreaming}
-                isThinking={chat.isThinking}
-                activeToolCallId={chat.activeToolCallId}
-                onApproveTool={chat.onApproveTool}
-                onDenyTool={chat.onDenyTool}
-                onSubmitToolResult={chat.onSubmitToolResult}
-                onPlanConfirm={chat.onPlanConfirm}
-                emptyState={
-                  <View style={styles.emptyChat}>
-                    <Text style={[styles.emptyTitle, { color: t.foreground }]}>
-                      No chat yet
-                    </Text>
-                    <Text style={[styles.cardBody, { color: t.mutedForeground }]}>
-                      Talk directly to this run without leaving the watch.
-                    </Text>
-                  </View>
-                }
-                bottomPadding={composerReserveHeight}
-                showPlanTracker={false}
-              />
-
-              <ChatBar
-                onSend={chat.onSend}
-                onStop={chat.onStop}
-                onHeightChange={setComposerReserveHeight}
-                isStreaming={chat.isStreaming}
-                disabled={!chat.sessionId}
-                thinkingLevel={chat.thinkingLevel}
-                onThinkingChange={chat.onThinkingChange}
-                permissionMode={chat.permissionMode}
-                onPermissionModeToggle={chat.onPermissionModeToggle}
-                fastModeEnabled={chat.fastModeEnabled}
-                fastModeSupported={chat.fastModeSupported}
-                onFastModeToggle={chat.onFastModeToggle}
-                mode={chat.mode}
-                onModeToggle={chat.onModeToggle}
-                onModelSelect={chat.onModelSelect}
-                model={chat.model ?? null}
-                models={chat.models}
-                sessionType="mako"
-                researchEnabled={chat.researchEnabled}
-                onResearchToggle={chat.onResearchToggle}
-                tokenCount={chat.tokenCount}
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <SectionTitle title="Recent thread" />
+              <FlatAction
+                label="Open chat"
+                color={t.userMessage}
+                onPress={() => {
+                  setChatOpen(true);
+                }}
               />
             </View>
-          ) : null}
-
-          {runSection === "artifacts" ? (
-            <ScrollView
-              style={styles.scroll}
-              contentContainerStyle={styles.content}
-              showsVerticalScrollIndicator={false}
-            >
-              <GlassCard style={styles.card}>
-                <Text style={[styles.cardTitle, { color: t.foreground }]}>
-                  Project
+            <View style={[styles.sectionBody, { borderTopColor: t.border }]}>
+              {recentMessages.length === 0 ? (
+                <Text style={[styles.emptyBody, { color: t.mutedForeground }]}>
+                  No chat yet.
                 </Text>
-                <Text style={[styles.cardBody, { color: t.mutedForeground }]}>
-                  {formatProjectLabel(summary?.project_dir)}
-                </Text>
-              </GlassCard>
+              ) : (
+                recentMessages.map((message) => (
+                  <View key={message.id} style={[styles.listRow, { borderColor: t.border }]}>
+                    <View style={styles.listCopy}>
+                      <Text style={[styles.listMeta, { color: t.mutedForeground }]}>
+                        {message.role === "assistant" ? "Mako" : "You"}
+                      </Text>
+                      <Text
+                        style={[styles.listDetail, { color: t.foreground }]}
+                        numberOfLines={2}
+                      >
+                        {messagePreview(message)}
+                      </Text>
+                    </View>
+                  </View>
+                ))
+              )}
+            </View>
+          </View>
 
-              {(status?.tasks ?? [])
-                .filter((task) => task.result)
-                .map((task) => (
-                  <GlassCard key={`artifact-${task.id}`} style={styles.card}>
-                    <Text style={[styles.cardTitle, { color: t.foreground }]}>
-                      {task.subject}
-                    </Text>
-                    <Text style={[styles.cardBody, { color: t.mutedForeground }]}>
-                      {task.result}
-                    </Text>
-                  </GlassCard>
-                ))}
-            </ScrollView>
-          ) : null}
-        </>
-      ) : null}
+          <View style={styles.section}>
+            <SectionTitle title="Artifacts" />
+            <View style={[styles.sectionBody, { borderTopColor: t.border }]}>
+              <TaskRow
+                title="Project"
+                detail={formatProjectLabel(summary?.project_dir)}
+                status="idle"
+              />
+              {artifactTasks.map((task) => (
+                <TaskRow
+                  key={`artifact-${task.id}`}
+                  title={task.subject}
+                  detail={task.result || "No result yet."}
+                  status={task.status}
+                  timestamp={task.updated_at}
+                />
+              ))}
+            </View>
+          </View>
+        </ScrollView>
+      )}
     </View>
-  );
-}
-
-function OverviewCard({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}) {
-  const { theme } = useThemeContext();
-  const t = theme.colors;
-  return (
-    <GlassCard style={styles.metricCard}>
-      <Text style={[styles.metricLabel, { color: t.mutedForeground }]}>{label}</Text>
-      <Text style={[styles.metricValue, { color: t.foreground }]}>{value}</Text>
-    </GlassCard>
-  );
-}
-
-function ActionButton({
-  label,
-  tone,
-  disabled = false,
-  onPress,
-}: {
-  label: string;
-  tone: "primary" | "neutral" | "danger";
-  disabled?: boolean;
-  onPress: () => void;
-}) {
-  const { theme } = useThemeContext();
-  const t = theme.colors;
-  const palette =
-    tone === "primary"
-      ? { backgroundColor: t.userMessage, color: "#ffffff" }
-      : tone === "danger"
-        ? { backgroundColor: `${t.error}18`, color: t.error }
-        : { backgroundColor: t.glass.backgroundElevated, color: t.foreground };
-
-  return (
-    <Pressable
-      disabled={disabled}
-      onPress={() => {
-        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        onPress();
-      }}
-      style={[
-        styles.actionButton,
-        {
-          backgroundColor: palette.backgroundColor,
-          opacity: disabled ? 0.6 : 1,
-        },
-      ]}
-    >
-      <Text style={[styles.actionLabel, { color: palette.color }]}>{label}</Text>
-    </Pressable>
   );
 }
 
@@ -528,77 +654,122 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   content: {
-    paddingHorizontal: 16,
     paddingBottom: 28,
-    gap: 12,
+    gap: 16,
   },
   loading: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
   },
-  metricsRow: {
+  summaryStrip: {
     flexDirection: "row",
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 16,
+  },
+  summaryCell: {
+    flex: 1,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+  },
+  summaryLabel: {
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  summaryValue: {
+    marginTop: 4,
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  summaryHint: {
+    marginTop: 2,
+    fontSize: 11,
+    lineHeight: 14,
+  },
+  section: {
+    paddingHorizontal: 16,
+  },
+  sectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     gap: 12,
   },
-  metricCard: {
-    flex: 1,
-    marginBottom: 0,
-  },
-  metricLabel: {
-    fontSize: 12,
+  sectionTitle: {
+    fontSize: 15,
     fontWeight: "600",
-    textTransform: "uppercase",
-    letterSpacing: 0.3,
   },
-  metricValue: {
+  sectionBody: {
     marginTop: 10,
-    fontSize: 22,
-    fontWeight: "700",
-    letterSpacing: -0.5,
+    borderTopWidth: StyleSheet.hairlineWidth,
   },
-  card: {
-    marginBottom: 0,
+  copyBlock: {
+    paddingVertical: 12,
+    gap: 8,
   },
-  cardTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-  },
-  cardBody: {
-    marginTop: 10,
+  bodyText: {
     fontSize: 13,
     lineHeight: 18,
   },
-  rowMeta: {
+  metaRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
-    marginTop: 14,
-  },
-  scheduleWrap: {
-    marginTop: 14,
+    gap: 10,
   },
   metaText: {
     fontSize: 12,
-    fontWeight: "500",
+    lineHeight: 16,
+  },
+  controlBlock: {
+    paddingTop: 12,
   },
   actionRow: {
     flexDirection: "row",
-    gap: 10,
+    flexWrap: "wrap",
+    gap: 14,
+    paddingTop: 10,
+  },
+  actionLink: {
+    minHeight: 24,
+    justifyContent: "center",
+  },
+  actionLinkText: {
+    fontSize: 12,
+    fontWeight: "600",
   },
   errorText: {
+    paddingTop: 10,
     fontSize: 13,
     lineHeight: 18,
   },
-  actionButton: {
-    flex: 1,
-    borderRadius: 16,
+  listRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 12,
     paddingVertical: 12,
-    alignItems: "center",
+    borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  actionLabel: {
+  listCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  listTitle: {
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  listDetail: {
+    marginTop: 4,
     fontSize: 13,
-    fontWeight: "700",
+    lineHeight: 18,
+  },
+  listAside: {
+    alignItems: "flex-end",
+    gap: 6,
+  },
+  listMeta: {
+    fontSize: 11,
+    lineHeight: 15,
   },
   chatWrap: {
     flex: 1,
@@ -611,7 +782,12 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   emptyTitle: {
-    fontSize: 20,
-    fontWeight: "700",
+    fontSize: 18,
+    fontWeight: "600",
+  },
+  emptyBody: {
+    paddingVertical: 12,
+    fontSize: 13,
+    lineHeight: 18,
   },
 });

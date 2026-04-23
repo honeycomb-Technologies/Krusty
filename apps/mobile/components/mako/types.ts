@@ -1,7 +1,12 @@
 import type {
   ChatMessage,
+  MakoChannelsResponse,
+  MakoCrewDocumentKind,
+  MakoCrewResponse,
   MakoCurrentRunSummary,
   MakoCurrentResponse,
+  MakoHomeDocumentKind,
+  MakoHomeResponse,
   MakoRunPriority,
   MakoRunWakeEvent,
   MakoSessionStatus,
@@ -11,10 +16,28 @@ import type {
 } from "@krusty/api";
 import type { Attachment as ChatBarAttachment } from "../chat/ChatBar";
 
-export type MakoTopLevelView = "current" | "chat" | "runs" | "reports" | "status";
+export type MakoTopLevelView =
+  | "mako"
+  | "attention"
+  | "schedule"
+  | "logbook"
+  | "runs"
+  | "details"
+  | "crew"
+  | "channels";
 export type MakoRunSection = "overview" | "wake" | "tasks" | "chat" | "artifacts";
-export type MakoKnowledgeView = "reports" | "memory";
+export type MakoKnowledgeView = "recent" | "memory";
 export type MakoKnowledgeScope = "workspace" | "all";
+export type MakoAttentionItemKind =
+  | "approval_required"
+  | "input_required"
+  | "run_completed"
+  | "run_failed"
+  | "run_stalled"
+  | "scheduled_run_started"
+  | "scheduled_run_completed"
+  | "delegated_task_completed";
+export type MakoAttentionSection = "needs_action" | "updates";
 export type { MakoCurrentRunSummary };
 
 export interface MakoChatContext {
@@ -67,9 +90,39 @@ export interface MakoCurrentState {
     model?: string | null;
     startAt?: string | null;
     priority?: MakoRunPriority | null;
+    crewSlug?: string | null;
   }) => Promise<string | null>;
   recoverDaemon: () => Promise<number>;
   isDispatching: boolean;
+}
+
+export interface MakoHomeState {
+  home: MakoHomeResponse | null;
+  crew: MakoCrewResponse | null;
+  isLoading: boolean;
+  isRefreshing: boolean;
+  isBootstrapping: boolean;
+  isSaving: boolean;
+  error: string | null;
+  refresh: () => Promise<void>;
+  bootstrap: () => Promise<void>;
+  updateHomeDocument: (
+    kind: MakoHomeDocumentKind,
+    content: string,
+  ) => Promise<void>;
+  updateCrewDocument: (
+    slug: string,
+    kind: MakoCrewDocumentKind,
+    content: string,
+  ) => Promise<void>;
+}
+
+export interface MakoChannelsState {
+  channels: MakoChannelsResponse | null;
+  isLoading: boolean;
+  isRefreshing: boolean;
+  error: string | null;
+  refresh: () => Promise<void>;
 }
 
 export interface MakoRunState {
@@ -83,4 +136,22 @@ export interface MakoRunState {
 export interface MakoSelectedRun {
   runId: string;
   summary: MakoCurrentRunSummary | null;
+}
+
+export interface MakoAttentionItem {
+  id: string;
+  kind: MakoAttentionItemKind;
+  section: MakoAttentionSection;
+  title: string;
+  summary: string;
+  detail: string;
+  createdAt: string;
+  read: boolean;
+  active: boolean;
+  runId?: string | null;
+  projectDir?: string | null;
+  toolCallId?: string | null;
+  sessionId?: string | null;
+  threadSessionId?: string | null;
+  threadMessageId?: string | null;
 }

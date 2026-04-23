@@ -6,11 +6,15 @@
 
 use anyhow::{Context, Result};
 use std::io::{self, Write};
+use std::net::{Ipv4Addr, TcpListener as StdTcpListener};
 
 use krusty_core::ai::providers::ProviderId;
 use krusty_core::server_instance;
 use krusty_core::storage::credentials::CredentialStore;
 use krusty_core::tailscale::{self, TailscaleServeSetup};
+
+const DEFAULT_SERVER_PORT: u16 = 3000;
+const DEFAULT_PORT_SEARCH_SPAN: u16 = 100;
 
 /// Run the serve command.
 pub async fn run(port: u16) -> Result<()> {
@@ -30,6 +34,15 @@ pub async fn run(port: u16) -> Result<()> {
     let store = CredentialStore::load().unwrap_or_default();
     if store.providers_with_auth().is_empty() {
         run_setup_wizard()?;
+    }
+
+    let (port, listener) = reserve_server_listener(port)?;
+
+    if port != DEFAULT_SERVER_PORT {
+        println!(
+            "  Port {} is already in use. Using {} instead.",
+            DEFAULT_SERVER_PORT, port
+        );
     }
 
     // Write PID file
@@ -61,7 +74,7 @@ pub async fn run(port: u16) -> Result<()> {
     };
 
     // Start server with graceful shutdown
-    let server = krusty_server::start_server(config);
+    let server = krusty_server::start_server_with_listener(config, listener);
 
     tokio::select! {
         result = server => {
@@ -75,6 +88,67 @@ pub async fn run(port: u16) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn reserve_server_listener(port: u16) -> Result<(u16, tokio::net::TcpListener)> {
+    if port == DEFAULT_SERVER_PORT {
+        return reserve_listener_with_fallback(port, DEFAULT_PORT_SEARCH_SPAN);
+    }
+
+    let listener =
+        bind_listener(port).with_context(|| format!("Failed to bind server port {}.", port))?;
+    Ok((port, listener))
+}
+
+fn reserve_listener_with_fallback(
+    start_port: u16,
+    search_span: u16,
+) -> Result<(u16, tokio::net::TcpListener)> {
+    let mut reserved_listener = None;
+    let selected_port =
+        find_available_port(start_port, search_span, |candidate| {
+            match bind_listener(candidate) {
+                Ok(listener) => {
+                    reserved_listener = Some(listener);
+                    Ok(true)
+                }
+                Err(err) if err.kind() == io::ErrorKind::AddrInUse => Ok(false),
+                Err(err) => Err(err)
+                    .with_context(|| format!("Failed while probing server port {}.", candidate)),
+            }
+        })?;
+
+    let listener = reserved_listener.expect("selected port must have a reserved listener");
+    Ok((selected_port, listener))
+}
+
+fn bind_listener(port: u16) -> io::Result<tokio::net::TcpListener> {
+    let listener = StdTcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?;
+    listener.set_nonblocking(true)?;
+    tokio::net::TcpListener::from_std(listener)
+}
+
+fn find_available_port<F>(start_port: u16, search_span: u16, mut probe: F) -> Result<u16>
+where
+    F: FnMut(u16) -> Result<bool>,
+{
+    let end_port = start_port.saturating_add(search_span);
+
+    for offset in 0..=search_span {
+        let Some(candidate) = start_port.checked_add(offset) else {
+            break;
+        };
+
+        if probe(candidate)? {
+            return Ok(candidate);
+        }
+    }
+
+    anyhow::bail!(
+        "No available server port found in the {}-{} range.",
+        start_port,
+        end_port
+    );
 }
 
 fn print_tailscale_status(setup: TailscaleServeSetup) {
@@ -165,4 +239,25 @@ fn run_setup_wizard() -> Result<()> {
     println!();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_available_port;
+
+    #[test]
+    fn falls_forward_when_preferred_port_is_busy() {
+        let selected =
+            find_available_port(3000, 5, |port| Ok(port == 3002)).expect("find fallback port");
+
+        assert_eq!(selected, 3002);
+    }
+
+    #[test]
+    fn explicit_non_default_port_does_not_fallback() {
+        let err = find_available_port(4242, 0, |_| Ok(false))
+            .expect_err("non-default explicit port should fail when occupied");
+
+        assert!(err.to_string().contains("4242-4242"));
+    }
 }

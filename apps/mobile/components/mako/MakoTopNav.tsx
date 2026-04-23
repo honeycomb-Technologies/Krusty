@@ -21,7 +21,12 @@ export function MakoTopNav<T extends string>({
       horizontal
       showsHorizontalScrollIndicator={false}
       style={styles.scroll}
-      contentContainerStyle={styles.content}
+      contentContainerStyle={[
+        styles.content,
+        {
+          borderColor: t.glass.border,
+        },
+      ]}
     >
       {items.map((item) => {
         const isActive = item.id === active;
@@ -35,12 +40,12 @@ export function MakoTopNav<T extends string>({
               }
             }}
             style={[
-              styles.pill,
+              styles.segment,
               {
                 backgroundColor: isActive
                   ? t.glass.backgroundElevated
-                  : t.glass.background,
-                borderColor: isActive ? t.glass.borderLight : t.glass.border,
+                  : "transparent",
+                borderColor: t.glass.border,
               },
             ]}
           >
@@ -66,21 +71,23 @@ const styles = StyleSheet.create({
   },
   content: {
     alignItems: "center",
-    gap: 8,
+    gap: 0,
     paddingHorizontal: 16,
     paddingBottom: 8,
-  },
-  pill: {
-    alignSelf: "flex-start",
-    borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
-    minHeight: 42,
+    borderRadius: 10,
+    overflow: "hidden",
+  },
+  segment: {
+    alignSelf: "flex-start",
+    borderRightWidth: StyleSheet.hairlineWidth,
+    minHeight: 40,
     justifyContent: "center",
     paddingHorizontal: 14,
-    paddingVertical: 9,
+    paddingVertical: 8,
   },
   label: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: "600",
   },
 });

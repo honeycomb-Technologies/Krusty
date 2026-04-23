@@ -35,9 +35,10 @@ impl App {
         let fallback_title = SessionManager::generate_title_from_content(first_message);
         let working_dir_str = self.runtime.working_dir.to_string_lossy().into_owned();
 
+        let selected_model = self.runtime.current_model.trim();
         match sm.create_session(
             &fallback_title,
-            Some(&self.runtime.current_model),
+            (!selected_model.is_empty()).then_some(selected_model),
             Some(&working_dir_str),
         ) {
             Ok(id) => {
@@ -202,6 +203,17 @@ impl App {
         // Set session info
         self.runtime.session_title = session_info.as_ref().map(|i| i.title.clone());
         let stored_token_count = session_info.as_ref().and_then(|i| i.token_count);
+        if let Some(model) = session_info
+            .as_ref()
+            .and_then(|info| info.model.as_deref())
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        {
+            self.runtime.current_model = model.to_string();
+            self.persist_current_model_selection();
+            self.sync_active_provider_to_current_model();
+            let _ = futures::executor::block_on(self.try_load_auth());
+        }
 
         // Clear current state
         self.runtime.chat.messages.clear();
@@ -213,6 +225,7 @@ impl App {
         self.runtime.pending_clipboard_images.clear();
         self.runtime.attached_files.clear();
         self.runtime.current_session_id = Some(session_id.to_string());
+        self.runtime.pending_pinched_session_id = None;
         self.runtime.agent_state.reset();
 
         // Load plan for this session (strict 1:1 linkage, no working_dir fallback)

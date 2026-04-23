@@ -61,6 +61,14 @@ The four ways users interact with Krusty.
 | [ACP Editor Integration](interfaces/acp-editor-integration.md) | How editors (Zed, Neovim, JetBrains) connect via the Agent Client Protocol |
 | [Mako Autonomous Mode](interfaces/mako-autonomous-mode.md) | Background autonomous agent: tick engine, swarm execution, CLI controls |
 
+## Mako Specs
+
+Extra product and implementation notes for the Mako surface.
+
+| Document | Description |
+|----------|-------------|
+| [Mako Specs Index](mako/README.md) | Product model, IA, screen maps, roadmap, and implementation notes for the Mako UI/runtime surface |
+
 ## Frontends
 
 Client applications that connect to the Krusty server.
@@ -87,4 +95,3 @@ Building, testing, deploying, and packaging.
 | Document | Description |
 |----------|-------------|
 | [Build, CI/CD & Packaging](operations/build-and-deploy.md) | Cargo workspace, GitHub Actions, AUR/Homebrew packaging, Expo/Tauri builds |
-

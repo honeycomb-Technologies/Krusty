@@ -148,6 +148,7 @@ export function AccordionControls({
   const [flashFast, setFlashFast] = useState<string | null>(null);
   const [flashPermission, setFlashPermission] = useState<string | null>(null);
   const isChat = sessionType === 'chat';
+  const isMako = sessionType === 'mako';
 
   const handleThinking = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -228,7 +229,7 @@ export function AccordionControls({
             <AccordionPill index={3} isOpen={isOpen} onPress={handleResearch} flashLabel={flashMode}>
               <FlaskConical size={24} color={researchEnabled ? t.thinking : t.mutedForeground} strokeWidth={1.6} />
             </AccordionPill>
-          ) : (
+          ) : !isMako ? (
             <AccordionPill index={3} isOpen={isOpen} onPress={handleMode} flashLabel={flashMode}>
               {mode === 'build' ? (
                 <Hammer size={24} color={t.mutedForeground} strokeWidth={1.6} />
@@ -236,7 +237,7 @@ export function AccordionControls({
                 <Compass size={24} color={t.mutedForeground} strokeWidth={1.6} />
               )}
             </AccordionPill>
-          )}
+          ) : null}
 
           <AccordionPill index={2} isOpen={isOpen} onPress={handlePermissionMode} flashLabel={flashPermission}>
             {permissionMode === 'supervised' ? (

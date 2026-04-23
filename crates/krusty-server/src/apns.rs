@@ -18,6 +18,7 @@ use krusty_core::storage::{ApnsDevice, ApnsDeviceStore, Database};
 
 const APNS_PRODUCTION_URL: &str = "https://api.push.apple.com";
 const APNS_SANDBOX_URL: &str = "https://api.sandbox.push.apple.com";
+pub(crate) const DEFAULT_APNS_BUNDLE_ID: &str = "io.krusty.mobile";
 
 /// JWT tokens are valid for up to 60 minutes. We refresh at 50 min.
 const JWT_REFRESH_INTERVAL: Duration = Duration::from_secs(50 * 60);
@@ -138,8 +139,8 @@ impl ApnsService {
         let key_path = std::env::var("KRUSTY_APNS_KEY_PATH").ok()?;
         let key_id = std::env::var("KRUSTY_APNS_KEY_ID").ok()?;
         let team_id = std::env::var("KRUSTY_APNS_TEAM_ID").ok()?;
-        let bundle_id =
-            std::env::var("KRUSTY_APNS_BUNDLE_ID").unwrap_or_else(|_| "io.krusty.mobile".into());
+        let bundle_id = std::env::var("KRUSTY_APNS_BUNDLE_ID")
+            .unwrap_or_else(|_| DEFAULT_APNS_BUNDLE_ID.into());
         let sandbox = std::env::var("KRUSTY_APNS_SANDBOX")
             .map(|v| v == "1" || v == "true")
             .unwrap_or(false);
@@ -222,20 +223,15 @@ impl ApnsService {
         // Build the APNs JSON payload
         let apns_payload = build_apns_json(payload, &self.config.bundle_id, event_type);
 
-        let topic = match event_type {
-            // Live Activity updates use a different topic
-            ApnsEventType::ToolApproval | ApnsEventType::Completion => {
-                format!("{}.push-type.liveactivity", self.config.bundle_id)
-            }
-            _ => self.config.bundle_id.clone(),
-        };
+        let topic = apns_topic(&self.config.bundle_id, event_type);
+        let push_type = apns_push_type(event_type);
 
         let resp = self
             .client
             .post(&url)
             .header("authorization", format!("bearer {token}"))
             .header("apns-topic", &topic)
-            .header("apns-push-type", "alert")
+            .header("apns-push-type", push_type)
             .header("apns-priority", "10")
             .header("apns-expiration", "0")
             .json(&apns_payload)
@@ -352,6 +348,22 @@ impl ApnsService {
     }
 }
 
+fn apns_topic(bundle_id: &str, event_type: ApnsEventType) -> String {
+    match event_type {
+        ApnsEventType::ToolApproval | ApnsEventType::Completion => {
+            format!("{}.push-type.liveactivity", bundle_id)
+        }
+        _ => bundle_id.to_string(),
+    }
+}
+
+fn apns_push_type(event_type: ApnsEventType) -> &'static str {
+    match event_type {
+        ApnsEventType::ToolApproval | ApnsEventType::Completion => "liveactivity",
+        _ => "alert",
+    }
+}
+
 /// Build the APNs JSON payload from our internal payload struct.
 fn build_apns_json(
     payload: &ApnsPayload,
@@ -382,4 +394,32 @@ fn build_apns_json(
     }
 
     root
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apns_push_type, apns_topic, ApnsEventType, DEFAULT_APNS_BUNDLE_ID};
+
+    #[test]
+    fn live_activity_events_use_liveactivity_contract() {
+        assert_eq!(
+            apns_topic(DEFAULT_APNS_BUNDLE_ID, ApnsEventType::ToolApproval),
+            format!("{}.push-type.liveactivity", DEFAULT_APNS_BUNDLE_ID)
+        );
+        assert_eq!(apns_push_type(ApnsEventType::ToolApproval), "liveactivity");
+        assert_eq!(
+            apns_topic(DEFAULT_APNS_BUNDLE_ID, ApnsEventType::Completion),
+            format!("{}.push-type.liveactivity", DEFAULT_APNS_BUNDLE_ID)
+        );
+        assert_eq!(apns_push_type(ApnsEventType::Completion), "liveactivity");
+    }
+
+    #[test]
+    fn standard_events_use_alert_contract() {
+        assert_eq!(
+            apns_topic(DEFAULT_APNS_BUNDLE_ID, ApnsEventType::AwaitingInput),
+            DEFAULT_APNS_BUNDLE_ID
+        );
+        assert_eq!(apns_push_type(ApnsEventType::AwaitingInput), "alert");
+    }
 }

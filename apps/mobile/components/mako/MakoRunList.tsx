@@ -1,6 +1,5 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import * as Haptics from "../../platform/haptics";
-import { GlassCard } from "../ui/GlassCard";
 import { useThemeContext } from "../../hooks/useTheme";
 import type { MakoCurrentRunSummary } from "@krusty/api";
 import {
@@ -49,7 +48,15 @@ export function MakoRunList({
         const showResume = Boolean(onResumeRun) && canResumeRun(run);
 
         return (
-          <GlassCard key={run.session_id} style={styles.card}>
+          <View
+            key={run.session_id}
+            style={[
+              styles.rowBlock,
+              {
+                borderColor: t.border,
+              },
+            ]}
+          >
             <Pressable
               onPress={() => {
                 void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -92,16 +99,14 @@ export function MakoRunList({
                       onPauseRun?.(run.session_id);
                     }}
                     style={[
-                      styles.secondaryButton,
+                      styles.secondaryAction,
                       {
-                        borderColor: `${t.border}88`,
-                        backgroundColor: `${t.card}88`,
                         opacity: isActionBusy ? 0.6 : 1,
                       },
                     ]}
                   >
                     <Text
-                      style={[styles.secondaryLabel, { color: t.foreground }]}
+                      style={[styles.secondaryLabel, { color: t.mutedForeground }]}
                     >
                       Pause
                     </Text>
@@ -116,21 +121,20 @@ export function MakoRunList({
                       onResumeRun?.(run.session_id);
                     }}
                     style={[
-                      styles.primaryButton,
+                      styles.primaryAction,
                       {
-                        backgroundColor: t.userMessage,
                         opacity: isActionBusy ? 0.6 : 1,
                       },
                     ]}
                   >
-                    <Text style={styles.primaryLabel}>
+                    <Text style={[styles.primaryLabel, { color: t.userMessage }]}>
                       {isActionBusy ? "Working..." : getRunResumeLabel(run)}
                     </Text>
                   </Pressable>
                 ) : null}
               </View>
             ) : null}
-          </GlassCard>
+          </View>
         );
       })}
     </View>
@@ -139,10 +143,11 @@ export function MakoRunList({
 
 const styles = StyleSheet.create({
   list: {
-    gap: 10,
+    gap: 0,
   },
-  card: {
-    marginBottom: 0,
+  rowBlock: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingVertical: 12,
   },
   row: {
     flexDirection: "row",
@@ -154,47 +159,39 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   title: {
-    fontSize: 16,
-    fontWeight: "700",
+    fontSize: 14,
+    fontWeight: "600",
   },
   meta: {
-    marginTop: 4,
+    marginTop: 3,
     fontSize: 12,
-    fontWeight: "500",
+    fontWeight: "400",
   },
   summary: {
-    marginTop: 12,
+    marginTop: 8,
     fontSize: 13,
     lineHeight: 18,
   },
   actions: {
-    marginTop: 12,
+    marginTop: 8,
     flexDirection: "row",
-    gap: 10,
+    gap: 14,
   },
-  primaryButton: {
-    flex: 1,
-    minHeight: 40,
-    borderRadius: 10,
-    alignItems: "center",
+  primaryAction: {
+    minHeight: 24,
     justifyContent: "center",
   },
   primaryLabel: {
-    color: "#ffffff",
-    fontSize: 13,
-    fontWeight: "700",
+    fontSize: 12,
+    fontWeight: "600",
   },
-  secondaryButton: {
-    flex: 1,
-    minHeight: 40,
-    borderRadius: 10,
-    borderWidth: 1,
-    alignItems: "center",
+  secondaryAction: {
+    minHeight: 24,
     justifyContent: "center",
   },
   secondaryLabel: {
-    fontSize: 13,
-    fontWeight: "700",
+    fontSize: 12,
+    fontWeight: "600",
   },
   empty: {
     fontSize: 14,

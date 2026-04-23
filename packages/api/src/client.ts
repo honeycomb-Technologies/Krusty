@@ -32,8 +32,15 @@ import type {
   MemoryType,
   MemorySnapshotResponse,
   PromoteReportToMemoryResponse,
+  MakoAttentionResponse,
   MakoDispatchResponse,
+  MakoBootstrapResponse,
+  MakoCrewDocumentKind,
+  MakoCrewResponse,
+  MakoChannelsResponse,
   MakoCurrentResponse,
+  MakoHomeDocumentKind,
+  MakoHomeResponse,
   MakoRecoverDaemonResponse,
   MakoRunPriority,
   MakoSessionSummary,
@@ -43,7 +50,7 @@ import type {
   SimpleOkResponse,
 } from './types';
 
-const STREAM_ACTIVITY_TIMEOUT = 30_000;
+const STREAM_ACTIVITY_TIMEOUT = 120_000;
 
 export interface KrustyClientConfig {
   baseUrl: string;
@@ -191,6 +198,13 @@ export class KrustyClient {
   // Models
   async getModels(): Promise<ModelsResponse> {
     return this.request('/models');
+  }
+
+  async setCurrentModel(model: string | null): Promise<SimpleOkResponse> {
+    return this.request('/models/current', {
+      method: 'PUT',
+      body: JSON.stringify({ model }),
+    });
   }
 
   // Git
@@ -387,7 +401,7 @@ export class KrustyClient {
 
   // Directories
   async getDirectories(): Promise<string[]> {
-    return this.request('/directories');
+    return this.request('/sessions/directories');
   }
 
   async browseDirectories(path?: string): Promise<{
@@ -452,7 +466,7 @@ export class KrustyClient {
   }
 
   // Mako
-  async dispatchMako(task: string, options?: { projectDir?: string; model?: string; startAt?: string; priority?: MakoRunPriority }): Promise<MakoDispatchResponse> {
+  async dispatchMako(task: string, options?: { projectDir?: string; model?: string; startAt?: string; priority?: MakoRunPriority; crewSlug?: string | null }): Promise<MakoDispatchResponse> {
     return this.request('/mako/dispatch', {
       method: 'POST',
       body: JSON.stringify({
@@ -461,12 +475,80 @@ export class KrustyClient {
         model: options?.model ?? undefined,
         start_at: options?.startAt ?? undefined,
         priority: options?.priority ?? undefined,
+        crew_slug: options?.crewSlug ?? undefined,
       }),
     });
   }
 
   async getMakoCurrent(): Promise<MakoCurrentResponse> {
     return this.request('/mako/current');
+  }
+
+  async getMakoAttention(options?: {
+    threadSessionId?: string | null;
+  }): Promise<MakoAttentionResponse> {
+    const params: string[] = [];
+    if (options?.threadSessionId) {
+      params.push(
+        `thread_session_id=${encodeURIComponent(options.threadSessionId)}`,
+      );
+    }
+    const q = params.length > 0 ? `?${params.join('&')}` : '';
+    return this.request(`/mako/attention${q}`);
+  }
+
+  async setMakoAttentionRead(itemId: string, read: boolean): Promise<SimpleOkResponse> {
+    return this.request(`/mako/attention/${encodeURIComponent(itemId)}/read`, {
+      method: 'POST',
+      body: JSON.stringify({ read }),
+    });
+  }
+
+  async setMakoAttentionCleared(itemId: string, cleared: boolean): Promise<SimpleOkResponse> {
+    return this.request(`/mako/attention/${encodeURIComponent(itemId)}/clear`, {
+      method: 'POST',
+      body: JSON.stringify({ cleared }),
+    });
+  }
+
+  async getMakoHome(): Promise<MakoHomeResponse> {
+    return this.request('/mako/home');
+  }
+
+  async bootstrapMakoHome(): Promise<MakoBootstrapResponse> {
+    return this.request('/mako/home/bootstrap', { method: 'POST' });
+  }
+
+  async updateMakoHomeDocument(
+    kind: MakoHomeDocumentKind,
+    content: string,
+  ): Promise<MakoHomeResponse> {
+    return this.request(`/mako/home/${encodeURIComponent(kind)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    });
+  }
+
+  async updateMakoCrewDocument(
+    slug: string,
+    kind: MakoCrewDocumentKind,
+    content: string,
+  ): Promise<MakoHomeResponse> {
+    return this.request(
+      `/mako/home/crew/${encodeURIComponent(slug)}/${encodeURIComponent(kind)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ content }),
+      },
+    );
+  }
+
+  async getMakoCrew(): Promise<MakoCrewResponse> {
+    return this.request('/mako/crew');
+  }
+
+  async getMakoChannels(): Promise<MakoChannelsResponse> {
+    return this.request('/mako/channels');
   }
 
   async recoverMakoDaemon(): Promise<MakoRecoverDaemonResponse> {
@@ -499,6 +581,13 @@ export class KrustyClient {
     return this.request(`/mako/sessions/${id}/priority`, {
       method: 'POST',
       body: JSON.stringify({ priority }),
+    });
+  }
+
+  async setMakoSessionCrew(id: string, crewSlug?: string | null): Promise<SimpleOkResponse> {
+    return this.request(`/mako/sessions/${id}/crew`, {
+      method: 'POST',
+      body: JSON.stringify({ crew_slug: crewSlug ?? null }),
     });
   }
 
@@ -583,7 +672,9 @@ export class KrustyClient {
 
     const activityCheck = setInterval(() => {
       if (Date.now() - lastActivity > STREAM_ACTIVITY_TIMEOUT) {
-        callbacks.onError('Stream timeout — no activity for 30s');
+        callbacks.onError(
+          `Stream timeout — no activity for ${Math.round(STREAM_ACTIVITY_TIMEOUT / 1000)}s`,
+        );
         reader.cancel();
         clearInterval(activityCheck);
       }
@@ -686,6 +777,10 @@ export class KrustyClient {
         break;
       case 'usage':
         callbacks.onUsage(event.prompt_tokens, event.completion_tokens);
+        break;
+      case 'session_pinched':
+      case 'context_compacted':
+        callbacks.onSessionPinched?.(event);
         break;
       case 'title_update':
         callbacks.onTitleUpdate(event.title);

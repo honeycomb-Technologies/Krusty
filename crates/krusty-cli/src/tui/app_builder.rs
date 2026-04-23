@@ -87,7 +87,7 @@ pub async fn init_services(
         tracing::warn!("Failed to load credential store: {}", e);
         CredentialStore::default()
     });
-    let active_provider = crate::storage::credentials::ActiveProviderStore::load();
+    let saved_active_provider = crate::storage::credentials::ActiveProviderStore::load();
 
     // Model registry
     let model_registry = init_model_registry(&preferences);
@@ -96,14 +96,15 @@ pub async fn init_services(
     let current_model = preferences
         .as_ref()
         .and_then(|p| p.get_current_model())
+        .map(|model| model.trim().to_string())
         .filter(|model| !model.is_empty())
-        .or_else(|| {
-            builtin_providers()
-                .iter()
-                .find(|provider| provider.id == active_provider)
-                .map(|provider| provider.default_model().to_string())
-        })
         .unwrap_or_default();
+    let active_provider = resolve_initial_provider(
+        saved_active_provider,
+        &current_model,
+        &credential_store,
+        &model_registry,
+    );
 
     // Skills manager
     let global_skills_dir = paths::config_dir().join("skills");
@@ -198,6 +199,18 @@ fn init_preferences(db_path: &Path) -> (Option<Preferences>, String) {
             (None, "krusty".to_string())
         }
     }
+}
+
+fn resolve_initial_provider(
+    saved_active_provider: Option<ProviderId>,
+    current_model: &str,
+    credential_store: &CredentialStore,
+    model_registry: &SharedModelRegistry,
+) -> ProviderId {
+    crate::tui::auth::infer_provider_for_model(model_registry, current_model)
+        .or(saved_active_provider)
+        .or_else(|| credential_store.providers_with_auth().into_iter().next())
+        .unwrap_or(ProviderId::MiniMax)
 }
 
 /// Initialize session manager

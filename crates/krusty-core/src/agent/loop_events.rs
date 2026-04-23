@@ -23,7 +23,8 @@ pub enum LoopStopReason {
     LoopGuardTriggered,
     StreamIdleTimeout,
     UserAbort,
-    ContextCompactionFailed,
+    Pinched,
+    PinchFailed,
 }
 
 /// Events emitted by the agentic orchestrator.
@@ -151,12 +152,12 @@ pub enum LoopEvent {
         completion_tokens: usize,
     },
 
-    /// Conversation history was compacted in place to preserve live context.
-    ContextCompacted {
+    /// Active work was handed off into a linked continuation session.
+    SessionPinched {
         reason: String,
+        source_session_id: String,
+        new_session_id: String,
         estimated_tokens_before: usize,
-        estimated_tokens_after: usize,
-        replaced_messages: usize,
     },
 
     /// Session title generated.

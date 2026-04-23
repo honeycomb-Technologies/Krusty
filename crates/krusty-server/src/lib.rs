@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use axum::{
     body::Body,
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, State},
     http::{header, Method, Response, StatusCode, Uri},
     middleware,
     response::IntoResponse,
@@ -31,10 +31,8 @@ use krusty_core::agent::{
     AgentCancellation, LoggingHook, PlanModeHook, SafetyHook, UserHookManager, UserPostToolHook,
     UserPreToolHook,
 };
-use krusty_core::ai::client::{AiClient, AiClientConfig};
-use krusty_core::ai::models::{create_model_registry, ModelMetadata, SharedModelRegistry};
-use krusty_core::ai::providers::{builtin_providers, get_provider, ProviderId};
-use krusty_core::constants;
+use krusty_core::ai::client::AiClient;
+use krusty_core::ai::models::{create_model_registry, SharedModelRegistry};
 use krusty_core::mcp::McpManager;
 use krusty_core::paths;
 use krusty_core::process::ProcessRegistry;
@@ -46,7 +44,10 @@ use krusty_core::tools::implementations::{
 };
 use krusty_core::tools::registry::ToolRegistry;
 
+use self::ai_bootstrap::{create_ai_client, create_ai_client_for_model, initialize_models};
+
 type SessionGuard = Arc<Mutex<()>>;
+mod ai_bootstrap;
 type SessionLockMap = HashMap<String, (SessionGuard, Instant)>;
 type SessionInputMap =
     HashMap<String, tokio::sync::mpsc::UnboundedSender<krusty_core::agent::LoopInput>>;
@@ -75,6 +76,60 @@ pub mod ws;
 #[prefix = ""]
 #[allow_missing = true]
 struct WebAssets;
+
+pub(crate) const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 100 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+struct ServerHttpPolicy {
+    allow_any_origin: bool,
+    max_request_body_bytes: usize,
+    immutable_asset_max_age_secs: u64,
+    mutable_asset_max_age_secs: u64,
+}
+
+impl Default for ServerHttpPolicy {
+    fn default() -> Self {
+        Self {
+            allow_any_origin: true,
+            max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
+            immutable_asset_max_age_secs: 31_536_000,
+            mutable_asset_max_age_secs: 3_600,
+        }
+    }
+}
+
+impl ServerHttpPolicy {
+    fn cors_layer(self) -> CorsLayer {
+        let cors = CorsLayer::new()
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PATCH,
+                Method::PUT,
+                Method::DELETE,
+            ])
+            .allow_headers(Any);
+
+        if self.allow_any_origin {
+            cors.allow_origin(Any)
+        } else {
+            cors
+        }
+    }
+
+    fn cache_control(self, path: &str) -> String {
+        if path.contains("/_app/immutable/") || path.starts_with("_expo/static/") {
+            format!(
+                "public, max-age={}, immutable",
+                self.immutable_asset_max_age_secs
+            )
+        } else if path.ends_with(".html") {
+            "no-cache".to_string()
+        } else {
+            format!("public, max-age={}", self.mutable_asset_max_age_secs)
+        }
+    }
+}
 
 /// Configuration for starting the server.
 pub struct ServerConfig {
@@ -137,196 +192,52 @@ pub struct AppState {
 impl AppState {
     /// Resolve a fresh AI client using the current credential store and requested model.
     pub async fn resolve_ai_client(&self, requested_model: Option<&str>) -> Option<Arc<AiClient>> {
+        self.resolve_ai_client_for_user(requested_model, None).await
+    }
+
+    pub async fn resolve_ai_client_for_user(
+        &self,
+        requested_model: Option<&str>,
+        user_id: Option<&str>,
+    ) -> Option<Arc<AiClient>> {
         let credentials = self.credential_store.read().await.clone();
-        create_ai_client_for_model(&credentials, &self.model_registry, requested_model)
-            .await
-            .map(Arc::new)
-    }
-}
-
-/// Build an AI client from configured credentials and env overrides.
-pub fn create_ai_client(credentials: &CredentialStore) -> Option<AiClient> {
-    let provider = std::env::var("KRUSTY_PROVIDER")
-        .ok()
-        .as_deref()
-        .and_then(utils::providers::parse_provider)
-        .unwrap_or(ProviderId::MiniMax);
-
-    let provider_cfg = get_provider(provider)?;
-    let model =
-        std::env::var("KRUSTY_MODEL").unwrap_or_else(|_| provider_cfg.default_model().to_string());
-
-    create_ai_client_for_provider(credentials, provider, model)
-}
-
-pub async fn create_ai_client_for_model(
-    credentials: &CredentialStore,
-    model_registry: &SharedModelRegistry,
-    requested_model: Option<&str>,
-) -> Option<AiClient> {
-    let requested_model = requested_model
-        .map(str::trim)
-        .filter(|model| !model.is_empty());
-
-    let provider = std::env::var("KRUSTY_PROVIDER")
-        .ok()
-        .as_deref()
-        .and_then(utils::providers::parse_provider)
-        .unwrap_or(ProviderId::MiniMax);
-
-    let provider = if let Some(model) = requested_model {
-        model_registry
-            .get_model(model)
-            .await
-            .map(|metadata| metadata.provider)
-            .unwrap_or(provider)
-    } else {
-        provider
-    };
-
-    let provider_cfg = get_provider(provider)?;
-    let model = requested_model.map(ToOwned::to_owned).unwrap_or_else(|| {
-        std::env::var("KRUSTY_MODEL").unwrap_or_else(|_| provider_cfg.default_model().to_string())
-    });
-
-    create_ai_client_for_provider(credentials, provider, model)
-}
-
-fn create_ai_client_for_provider(
-    credentials: &CredentialStore,
-    provider: ProviderId,
-    model: String,
-) -> Option<AiClient> {
-    let auth = credentials.get_auth(&provider).or_else(|| {
-        let env_key = match provider {
-            ProviderId::MiniMax => "MINIMAX_API_KEY",
-            ProviderId::OpenRouter => "OPENROUTER_API_KEY",
-            ProviderId::ZAi => "Z_AI_API_KEY",
-            ProviderId::Anthropic => "ANTHROPIC_API_KEY",
-            ProviderId::OpenAI => "OPENAI_API_KEY",
-        };
-        std::env::var(env_key).ok()
-    });
-
-    let provider_cfg = get_provider(provider)?;
-
-    let (config, api_key) = match provider {
-        ProviderId::OpenAI => {
-            let config = AiClientConfig::for_openai_with_auth_detection(&model, credentials);
-            let resolved = krusty_core::auth::resolve_openai_auth(credentials, &model);
-
-            let auth = resolved
-                .credential
-                .or_else(|| std::env::var("OPENAI_API_KEY").ok());
-            let api_key = match auth {
-                Some(key) => key,
-                None => {
-                    tracing::warn!(
-                        "No OpenAI credentials found for resolved auth mode ({:?}); chat API unavailable",
-                        resolved.auth_type
-                    );
-                    return None;
-                }
-            };
-            (config, api_key)
-        }
-        ProviderId::Anthropic => {
-            let config = AiClientConfig::for_anthropic_with_auth_detection(&model, credentials);
-            let api_key = match auth {
-                Some(key) => key,
-                None => {
-                    tracing::warn!(
-                        "No credentials found for provider {}; chat API will be unavailable until credentials are configured",
-                        provider
-                    );
-                    return None;
-                }
-            };
-            (config, api_key)
-        }
-        _ => {
-            let api_key = match auth {
-                Some(key) => key,
-                None => {
-                    tracing::warn!(
-                        "No credentials found for provider {}; chat API will be unavailable until credentials are configured",
-                        provider
-                    );
-                    return None;
-                }
-            };
-            (
-                AiClientConfig {
-                    model,
-                    max_tokens: constants::ai::MAX_OUTPUT_TOKENS,
-                    base_url: Some(provider_cfg.base_url.clone()),
-                    auth_header: provider_cfg.auth_header,
-                    provider_id: provider,
-                    api_format: Default::default(),
-                    custom_headers: provider_cfg.custom_headers.clone(),
-                },
-                api_key,
-            )
-        }
-    };
-
-    Some(AiClient::new(config, api_key))
-}
-
-/// Initialize models in the shared registry.
-async fn initialize_models(registry: &SharedModelRegistry, credentials: &CredentialStore) {
-    for provider in builtin_providers() {
-        let models: Vec<ModelMetadata> = provider
-            .models
-            .iter()
-            .map(|m| {
-                let mut model = ModelMetadata::new(&m.id, &m.display_name, provider.id)
-                    .with_context(m.context_window, m.max_output);
-
-                if let Some(reasoning) = m.reasoning {
-                    model = model.with_thinking(reasoning);
-                }
-
-                model.supports_tools = provider.supports_tools;
-                model
-            })
-            .collect();
-
-        registry.set_models(provider.id, models).await;
+        let client = create_ai_client_for_model(
+            &credentials,
+            &self.model_registry,
+            self.db_path.as_ref().as_path(),
+            requested_model,
+            user_id,
+        )
+        .await
+        .map(Arc::new)?;
+        self.ensure_agent_tool_registered(client.clone()).await;
+        Some(client)
     }
 
-    if let Some(api_key) = credentials.get(&ProviderId::OpenRouter) {
-        match krusty_core::ai::openrouter::fetch_models(api_key).await {
-            Ok(models) => {
-                tracing::info!("Fetched {} OpenRouter models", models.len());
-                registry.set_models(ProviderId::OpenRouter, models).await;
-            }
-            Err(e) => tracing::warn!("Failed to fetch OpenRouter models: {}", e),
+    async fn ensure_agent_tool_registered(&self, client: Arc<AiClient>) {
+        if self.tool_registry.get("agent").await.is_some() {
+            return;
         }
-    }
 
-    let openai_credential =
-        krusty_core::auth::resolve_openai_auth(credentials, "gpt-5.3-codex").credential;
-    if let Some(api_key) = openai_credential {
-        match krusty_core::ai::openai::fetch_models(&api_key).await {
-            Ok(models) => {
-                tracing::info!("Fetched {} OpenAI models", models.len());
-                registry.set_models(ProviderId::OpenAI, models).await;
-            }
-            Err(e) => tracing::warn!("Failed to fetch OpenAI models: {}", e),
-        }
+        register_agent_tool(&self.tool_registry, client, self.cancellation.clone()).await;
+        tracing::info!("Registered unified agent sub-agent tool");
     }
 }
 
 /// Build the Axum router with all routes and embedded web assets.
 pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppState)> {
+    let http_policy = ServerHttpPolicy::default();
     let db_path = paths::config_dir().join("krusty.db");
     let _db = Database::new(&db_path)?;
     reconcile_transient_agent_states(&db_path)?;
 
     let credential_store_inner = CredentialStore::load().unwrap_or_default();
     let credential_store = Arc::new(RwLock::new(credential_store_inner.clone()));
-    let ai_client = create_ai_client(&credential_store_inner).map(Arc::new);
+    let model_registry = create_model_registry();
+    initialize_models(&model_registry, &credential_store_inner).await;
+    let ai_client = create_ai_client(&credential_store_inner, &model_registry, &db_path)
+        .await
+        .map(Arc::new);
 
     let process_registry = Arc::new(ProcessRegistry::new());
     let cancellation = AgentCancellation::new();
@@ -346,7 +257,7 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
     tool_registry_inner.add_pre_hook(Arc::new(PlanModeHook::new()));
     // Auto-classifier for Mako autonomous sessions (no-op when permission_mode != Autonomous)
     if let Some(ref client) = ai_client {
-        use krusty_core::agent::auto_classifier::AutoClassifierHook;
+        use krusty_core::agent::autonomy::auto_classifier::AutoClassifierHook;
         tool_registry_inner.add_pre_hook(Arc::new(AutoClassifierHook::new(client.clone())));
     }
     tool_registry_inner.add_post_hook(Arc::new(LoggingHook::new()));
@@ -361,9 +272,6 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
         register_agent_tool(&tool_registry, client.clone(), cancellation.clone()).await;
         tracing::info!("Registered unified agent sub-agent tool");
     }
-
-    let model_registry = create_model_registry();
-    initialize_models(&model_registry, &credential_store_inner).await;
 
     // MCP server connections + tool registration
     let mcp_manager = Arc::new(McpManager::new(config.working_dir.clone()));
@@ -430,16 +338,7 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
         .restore_persisted_sessions(state.clone())
         .await?;
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PATCH,
-            Method::PUT,
-            Method::DELETE,
-        ])
-        .allow_headers(Any);
+    let cors = http_policy.cors_layer();
 
     let protected_routes = Router::new()
         .route("/ws/terminal", get(ws::terminal::handler))
@@ -457,7 +356,7 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         // Allow large request bodies for image uploads (up to 100MB)
-        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(http_policy.max_request_body_bytes))
         .with_state(state.clone());
 
     Ok((app, state))
@@ -530,15 +429,24 @@ fn parse_proc_status_kib_line(line: &str) -> Option<u64> {
 /// Start the Krusty server and block until shutdown.
 pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     let addr: SocketAddr = format!("0.0.0.0:{}", config.port).parse()?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    start_server_with_listener(config, listener).await
+}
+
+/// Start the Krusty server from a pre-bound listener.
+pub async fn start_server_with_listener(
+    config: ServerConfig,
+    listener: tokio::net::TcpListener,
+) -> anyhow::Result<()> {
+    let local_addr = listener.local_addr()?;
     let (app, _state) = build_router(&config).await?;
 
     tracing::info!(
-        bind_address = %addr,
-        local_url = %format!("http://localhost:{}", config.port),
+        bind_address = %local_addr,
+        local_url = %format!("http://localhost:{}", local_addr.port()),
         "Krusty server listening"
     );
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -550,6 +458,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
 
 /// Serve embedded web assets with SPA fallback.
 async fn serve_web_app(uri: Uri) -> impl IntoResponse {
+    let http_policy = ServerHttpPolicy::default();
     let path = uri.path().trim_start_matches('/');
 
     // Try exact file match first
@@ -558,7 +467,7 @@ async fn serve_web_app(uri: Uri) -> impl IntoResponse {
         return Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, mime.as_ref())
-            .header(header::CACHE_CONTROL, cache_control(path))
+            .header(header::CACHE_CONTROL, cache_control(path, http_policy))
             .body(Body::from(file.data.to_vec()))
             .expect("static response builder");
     }
@@ -582,22 +491,23 @@ async fn serve_web_app(uri: Uri) -> impl IntoResponse {
 }
 
 /// Cache-control header value based on file type.
-fn cache_control(path: &str) -> &'static str {
-    if path.contains("/_app/immutable/") || path.starts_with("_expo/static/") {
-        // Bundled immutable assets — hash in filename, cache forever
-        "public, max-age=31536000, immutable"
-    } else if path.ends_with(".html") {
-        "no-cache"
-    } else {
-        "public, max-age=3600"
-    }
+fn cache_control(path: &str, http_policy: ServerHttpPolicy) -> String {
+    // Bundled immutable assets use content-hashed filenames, so cache policy lives
+    // in the shared HTTP policy rather than as route-local string literals.
+    http_policy.cache_control(path)
 }
 
-async fn health() -> Json<HealthResponse> {
+async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    let chat_available = state.ai_client.is_some();
+    let tools_available = !state.tool_registry.get_ai_tools().await.is_empty();
+
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        features: HashMap::from([("chat".to_string(), true), ("tools".to_string(), true)]),
+        features: HashMap::from([
+            ("chat".to_string(), chat_available),
+            ("tools".to_string(), tools_available),
+        ]),
     })
 }
 

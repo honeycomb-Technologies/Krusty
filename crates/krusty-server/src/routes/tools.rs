@@ -55,6 +55,9 @@ async fn execute_tool(
     Json(req): Json<ToolExecuteRequest>,
 ) -> Result<Json<ToolExecuteResponse>, AppError> {
     let working_dir = resolve_tool_working_dir(&state, user.as_ref(), req.working_dir.as_deref())?;
+    let user_id = user
+        .as_ref()
+        .and_then(|current_user| current_user.0.user_id.as_deref());
 
     // Create tool context
     let ctx = ToolContext {
@@ -68,7 +71,7 @@ async fn execute_tool(
     .with_mcp_manager(state.mcp_manager.clone())
     .with_skills_manager(state.skills_manager.clone());
 
-    let ctx = if let Some(client) = state.resolve_ai_client(None).await {
+    let ctx = if let Some(client) = state.resolve_ai_client_for_user(None, user_id).await {
         ctx.with_ai_client(client)
     } else {
         ctx

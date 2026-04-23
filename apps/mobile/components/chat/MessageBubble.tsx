@@ -8,6 +8,8 @@ import { ToolApprovalWidget } from "./ToolApprovalWidget";
 import { AskUserQuestionWidget } from "./AskUserQuestionWidget";
 import { PlanConfirmWidget } from "./PlanConfirmWidget";
 import type { ChatMessage } from "@krusty/api";
+import * as Clipboard from "../../platform/clipboard";
+import * as Haptics from "../../platform/haptics";
 
 const INTERNAL_TOOL_NAMES = new Set([
   "enter_plan_mode",
@@ -50,6 +52,7 @@ export function MessageBubble({
   const { theme } = useThemeContext();
   const t = theme.colors;
   const isUser = message.role === "user";
+  const [copied, setCopied] = useState(false);
 
   const toolCalls = message.toolCalls ?? [];
   const delegatedTools = toolCalls.filter(
@@ -80,6 +83,18 @@ export function MessageBubble({
     questionTools.length === 0 &&
     planConfirmTools.length === 0;
 
+  const handleCopy = () => {
+    const value = message.content.trim();
+    if (!value) {
+      return;
+    }
+
+    Clipboard.setStringAsync(value);
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
+
   return (
     <View style={[styles.container, isUser && styles.containerUser]}>
       {isUser && message.content.length > 0 && (
@@ -94,7 +109,9 @@ export function MessageBubble({
               </Text>
             </View>
           )}
-          <View
+          <Pressable
+            onLongPress={handleCopy}
+            delayLongPress={250}
             style={[
               styles.userBubble,
               {
@@ -105,7 +122,12 @@ export function MessageBubble({
             ]}
           >
             <MarkdownContent content={message.content} isUser />
-          </View>
+          </Pressable>
+          {copied ? (
+            <Text style={[styles.copyStatus, { color: t.mutedForeground }]}>
+              Copied
+            </Text>
+          ) : null}
         </View>
       )}
 
@@ -160,14 +182,18 @@ export function MessageBubble({
           )}
 
           {message.content.length > 0 && (
-            <View style={styles.assistantText}>
+            <Pressable
+              onLongPress={handleCopy}
+              delayLongPress={250}
+              style={styles.assistantText}
+            >
               <MarkdownContent content={message.content} />
               {isLast && isStreaming && (
                 <View
                   style={[styles.cursor, { backgroundColor: t.userMessage }]}
                 />
               )}
-            </View>
+            </Pressable>
           )}
 
           {showStreamingPlaceholder && (
@@ -208,6 +234,12 @@ export function MessageBubble({
               ))}
             </View>
           )}
+
+          {copied ? (
+            <Text style={[styles.copyStatus, { color: t.mutedForeground }]}>
+              Copied
+            </Text>
+          ) : null}
         </View>
       )}
     </View>
@@ -291,6 +323,12 @@ const styles = StyleSheet.create({
   assistantText: {
     paddingLeft: 2,
     paddingVertical: 2,
+  },
+  copyStatus: {
+    fontSize: 12,
+    fontWeight: "500",
+    marginTop: -2,
+    marginLeft: 2,
   },
   placeholderText: {
     fontSize: 14,

@@ -18,6 +18,12 @@
 //!  └─────────────┘        LoopInput          └─────────────┘
 //! ```
 
+mod message_builder;
+mod persistence;
+mod plan_flow;
+mod recovery;
+mod title;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,27 +32,35 @@ use tokio::sync::{mpsc, RwLock};
 
 use crate::ai::client::{AiClient, CallOptions};
 use crate::ai::models::resolve_context_window;
-use crate::ai::title::generate_title as ai_generate_title;
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::constants;
-use crate::plan::PlanManager;
 use crate::process::ProcessRegistry;
 use crate::skills::SkillsManager;
 use crate::storage::{
-    Database, PartialAssistantState, ProjectSettings, RecoveryDecision, RecoveryNonResumableReason,
-    RecoveryStatus, RecoveryToolCall, SessionManager, SessionRecoveryState, SessionType, WorkMode,
+    PartialAssistantState, ProjectSettings, RecoveryStatus, SessionManager, SessionType, WorkMode,
 };
 use crate::tools::registry::{PermissionMode, ToolRegistry};
 
-use super::compaction::{CompactionManager, CompactionReason};
+use super::compaction::CompactionManager;
 use super::context;
 use super::context_ledger::{ContextLedger, ContinuationDecision};
 use super::executor;
 use super::failure;
-use super::loop_events::{LoopEvent, LoopInput, LoopStopReason, PlanTaskInfo};
-use super::plan_handler;
-use super::stream::{self, ThinkingBlock};
+use super::loop_events::{LoopEvent, LoopInput, LoopStopReason};
+use super::stream;
 use super::DelegatedProgressEvent;
+use super::{create_pinched_session, CreatePinchedSessionRequest};
+
+use self::message_builder::{build_assistant_message, finalize_explore_only_turn};
+use self::persistence::{
+    clear_recovery_state, persist_context_state, persist_recovery_state, save_message,
+    set_agent_state, update_token_count,
+};
+use self::plan_flow::handle_plan_detection;
+use self::recovery::{
+    build_partial_assistant_state, build_recovery_state, continuation_recovery_message,
+};
+use self::title::maybe_generate_title;
 
 const EXPLORATION_BUDGET_SOFT: usize = 15;
 const EXPLORATION_BUDGET_HARD: usize = 30;
@@ -56,6 +70,7 @@ pub struct OrchestratorConfig {
     pub session_id: String,
     pub working_dir: PathBuf,
     pub project_dir: Option<PathBuf>,
+    pub mako_crew_slug: Option<String>,
     pub session_type: SessionType,
     pub permission_mode: PermissionMode,
     pub max_iterations: Option<usize>,
@@ -75,6 +90,7 @@ impl Default for OrchestratorConfig {
             session_id: String::new(),
             working_dir: PathBuf::new(),
             project_dir: None,
+            mako_crew_slug: None,
             session_type: SessionType::Code,
             permission_mode: PermissionMode::default(),
             max_iterations: None,
@@ -117,6 +133,7 @@ fn inject_runtime_context(
     session_id: &str,
     working_dir: &Path,
     project_dir: Option<&Path>,
+    mako_crew_slug: Option<&str>,
     work_mode: WorkMode,
     skills_manager: &RwLock<SkillsManager>,
     model: Option<&str>,
@@ -132,6 +149,7 @@ fn inject_runtime_context(
         skills_manager,
         model,
         Some(session_type_name(session_type)),
+        mako_crew_slug,
     )
 }
 
@@ -199,6 +217,7 @@ impl AgenticOrchestrator {
             session_id,
             working_dir,
             project_dir,
+            mako_crew_slug,
             session_type,
             permission_mode,
             max_iterations,
@@ -291,12 +310,13 @@ impl AgenticOrchestrator {
             iteration += 1;
 
             // Build context-injected conversation
-            let mut conversation_with_context = inject_runtime_context(
+            let conversation_with_context = inject_runtime_context(
                 &conversation,
                 &db_path,
                 &session_id,
                 &working_dir,
                 project_dir.as_deref(),
+                mako_crew_slug.as_deref(),
                 work_mode,
                 &skills_manager,
                 Some(ai_client.config().model.as_str()),
@@ -306,91 +326,95 @@ impl AgenticOrchestrator {
                 super::estimate_conversation_tokens(&conversation_with_context);
 
             if compaction_manager.should_compact(estimated_tokens_before) {
-                let Some(outcome) = compaction_manager
-                    .compact_conversation(&conversation, CompactionReason::ContextPressure)
-                else {
-                    let continuation = context_ledger.continuation_decision();
-                    persist_context_state(&db_path, &session_id, &context_ledger);
-                    let continuation_hint = match continuation {
-                        ContinuationDecision::Resumable {
-                            latest_user_objective,
-                        } => format!(
-                            " continuation candidate preserved objective: {}",
-                            latest_user_objective
-                        ),
-                        ContinuationDecision::NonResumable { reason } => {
-                            format!(" continuation is non-resumable: {:?}", reason)
-                        }
-                    };
-                    let _ = event_tx.send(LoopEvent::Error {
-                        error: format!(
-                            "Live context compaction could not reduce the active conversation;{}",
-                            continuation_hint
-                        ),
-                    });
-                    if last_token_count > 0 {
-                        update_token_count(&db_path, &session_id, last_token_count);
+                let session_info = match crate::storage::Database::new(&db_path) {
+                    Ok(db) => SessionManager::new(db)
+                        .get_session(&session_id)
+                        .ok()
+                        .flatten(),
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %error,
+                            "Failed to open database while preparing automatic pinch"
+                        );
+                        None
                     }
-                    clear_recovery_state(&db_path, &session_id);
-                    set_agent_state(&db_path, &session_id, "error");
-                    let _ = event_tx.send(LoopEvent::Finished {
-                        session_id: session_id.clone(),
-                        stop_reason: LoopStopReason::ContextCompactionFailed,
-                    });
-                    return;
+                };
+                let source_session_title = session_info
+                    .as_ref()
+                    .map(|session| session.title.as_str())
+                    .unwrap_or("Session");
+                let target_branch = session_info
+                    .as_ref()
+                    .and_then(|session| session.target_branch.as_deref());
+                let model_for_child = session_info
+                    .as_ref()
+                    .and_then(|session| session.model.as_deref())
+                    .unwrap_or(ai_client.config().model.as_str());
+
+                let pinch_result = match create_pinched_session(CreatePinchedSessionRequest {
+                    db_path: &db_path,
+                    ai_client: Some(ai_client.as_ref()),
+                    session_id: &session_id,
+                    source_session_title,
+                    conversation: &conversation,
+                    working_dir: &working_dir,
+                    model: Some(model_for_child),
+                    target_branch,
+                    preservation_hints: None,
+                    direction: None,
+                    initial_user_message: Some("Continue working on the current task.".to_string()),
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let continuation = context_ledger.continuation_decision();
+                        persist_context_state(&db_path, &session_id, &context_ledger);
+                        let continuation_hint = match continuation {
+                            ContinuationDecision::Resumable {
+                                latest_user_objective,
+                            } => format!(
+                                " continuation candidate preserved objective: {}",
+                                latest_user_objective
+                            ),
+                            ContinuationDecision::NonResumable { reason } => {
+                                format!(" continuation is non-resumable: {:?}", reason)
+                            }
+                        };
+                        let _ = event_tx.send(LoopEvent::Error {
+                            error: format!(
+                                "Automatic pinch could not create a continuation session;{} ({})",
+                                continuation_hint, error
+                            ),
+                        });
+                        if last_token_count > 0 {
+                            update_token_count(&db_path, &session_id, last_token_count);
+                        }
+                        clear_recovery_state(&db_path, &session_id);
+                        set_agent_state(&db_path, &session_id, "error");
+                        let _ = event_tx.send(LoopEvent::Finished {
+                            session_id: session_id.clone(),
+                            stop_reason: LoopStopReason::PinchFailed,
+                        });
+                        return;
+                    }
                 };
 
-                conversation = outcome.conversation;
-                context_ledger.update_from_conversation(&conversation);
-                context_ledger.record_compaction(
-                    CompactionReason::ContextPressure,
-                    estimated_tokens_before,
-                    super::estimate_conversation_tokens(&conversation),
-                    outcome.replaced_messages,
-                );
                 persist_context_state(&db_path, &session_id, &context_ledger);
-                persist_conversation(&db_path, &session_id, &conversation);
-
-                conversation_with_context = inject_runtime_context(
-                    &conversation,
-                    &db_path,
-                    &session_id,
-                    &working_dir,
-                    project_dir.as_deref(),
-                    work_mode,
-                    &skills_manager,
-                    Some(ai_client.config().model.as_str()),
-                    session_type,
-                );
-                let estimated_tokens_after =
-                    super::estimate_conversation_tokens(&conversation_with_context);
-                last_token_count = estimated_tokens_after;
-                update_token_count(&db_path, &session_id, estimated_tokens_after);
-
-                let _ = event_tx.send(LoopEvent::ContextCompacted {
-                    reason: CompactionReason::ContextPressure.as_str().to_string(),
+                clear_recovery_state(&db_path, &session_id);
+                set_agent_state(&db_path, &session_id, "idle");
+                let _ = event_tx.send(LoopEvent::SessionPinched {
+                    reason: "context_pressure".to_string(),
+                    source_session_id: session_id.clone(),
+                    new_session_id: pinch_result.new_session_id,
                     estimated_tokens_before,
-                    estimated_tokens_after,
-                    replaced_messages: outcome.replaced_messages,
                 });
-
-                if estimated_tokens_after >= estimated_tokens_before
-                    || compaction_manager.is_hard_failure(estimated_tokens_after)
-                {
-                    let _ = event_tx.send(LoopEvent::Error {
-                        error: format!(
-                            "Live context compaction reduced history from ~{} to ~{} tokens, which is still above the safe limit for this thread",
-                            estimated_tokens_before, estimated_tokens_after
-                        ),
-                    });
-                    clear_recovery_state(&db_path, &session_id);
-                    set_agent_state(&db_path, &session_id, "error");
-                    let _ = event_tx.send(LoopEvent::Finished {
-                        session_id: session_id.clone(),
-                        stop_reason: LoopStopReason::ContextCompactionFailed,
-                    });
-                    return;
-                }
+                let _ = event_tx.send(LoopEvent::Finished {
+                    session_id: session_id.clone(),
+                    stop_reason: LoopStopReason::Pinched,
+                });
+                return;
             }
 
             // Stream AI response
@@ -808,464 +832,12 @@ impl AgenticOrchestrator {
     }
 }
 
-// ── Plan detection ─────────────────────────────────────────────────────
-
-fn handle_plan_detection(
-    text: &str,
-    session_id: &str,
-    working_dir: &Path,
-    db_path: &std::path::Path,
-    event_tx: &mpsc::UnboundedSender<LoopEvent>,
-) -> bool {
-    let Some(mut plan) = plan_handler::try_detect_plan(text) else {
-        return false;
-    };
-    plan.plan_file.session_id = Some(session_id.to_string());
-    plan.plan_file.working_dir = Some(working_dir.to_string_lossy().to_string());
-
-    match PlanManager::new(db_path.to_path_buf()) {
-        Ok(plan_manager) => {
-            if let Err(e) = plan_manager.save_plan_for_session(session_id, &plan.plan_file) {
-                tracing::warn!(
-                    session_id = %session_id,
-                    "Failed to save detected plan: {}", e
-                );
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                session_id = %session_id,
-                "Failed to initialize plan manager for detected plan: {}", e
-            );
-        }
-    }
-
-    let tasks: Vec<PlanTaskInfo> = plan
-        .tasks
-        .iter()
-        .map(|t| PlanTaskInfo {
-            description: t.description.clone(),
-            completed: t.completed,
-        })
-        .collect();
-
-    let _ = event_tx.send(LoopEvent::PlanUpdate {
-        tasks: tasks.clone(),
-    });
-
-    let tool_call_id = format!("plan-confirm-{}", uuid::Uuid::new_v4());
-    let _ = event_tx.send(LoopEvent::PlanComplete {
-        tool_call_id: tool_call_id.clone(),
-        title: plan.title,
-        task_count: tasks.len(),
-    });
-
-    let _ = event_tx.send(LoopEvent::AwaitingInput {
-        tool_call_id,
-        tool_name: "PlanConfirm".to_string(),
-    });
-
-    true
-}
-
-// ── DB helpers ─────────────────────────────────────────────────────────
-
-fn build_assistant_message(
-    text: &str,
-    thinking_blocks: &[ThinkingBlock],
-    tool_calls: &[crate::ai::types::AiToolCall],
-) -> ModelMessage {
-    let mut content = Vec::with_capacity(
-        thinking_blocks.len() + tool_calls.len() + usize::from(!text.is_empty()),
-    );
-
-    for block in thinking_blocks {
-        content.push(Content::Thinking {
-            thinking: block.thinking.clone(),
-            signature: block.signature.clone(),
-        });
-    }
-
-    if !text.is_empty() {
-        content.push(Content::Text {
-            text: text.to_string(),
-        });
-    }
-
-    for call in tool_calls {
-        content.push(Content::ToolUse {
-            id: call.id.clone(),
-            name: call.name.clone(),
-            input: call.arguments.clone(),
-        });
-    }
-
-    ModelMessage {
-        role: Role::Assistant,
-        content,
-    }
-}
-
-fn finalize_explore_only_turn(
-    tool_calls: &[crate::ai::types::AiToolCall],
-    tool_results: &[Content],
-) -> Option<String> {
-    if tool_calls.len() != 1 || tool_calls.first()?.name != "explore" {
-        return None;
-    }
-
-    let Content::ToolResult {
-        tool_use_id,
-        output,
-        is_error,
-    } = tool_results.first()?
-    else {
-        return None;
-    };
-
-    if tool_use_id != &tool_calls.first()?.id || is_error.unwrap_or(false) {
-        return None;
-    }
-
-    let parsed = match output {
-        serde_json::Value::String(text) => serde_json::from_str::<serde_json::Value>(text).ok()?,
-        other => other.clone(),
-    };
-    let payload = parsed.get("result").unwrap_or(&parsed);
-    let outcome = payload
-        .get("outcome")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let usable_agents = payload
-        .get("usable_agents")
-        .or_else(|| payload.get("successful_agents"))
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0);
-    if !matches!(outcome, "success" | "partial") || usable_agents == 0 {
-        return None;
-    }
-
-    let message = payload
-        .get("message")
-        .and_then(|value| value.as_str())
-        .unwrap_or("Explore completed.");
-    if let Some(human_review) = payload
-        .get("human_review")
-        .and_then(|value| value.as_str())
-        .filter(|review| !review.trim().is_empty())
-    {
-        return Some(human_review.to_string());
-    }
-    payload
-        .get("investigation_summary")
-        .and_then(|value| value.as_str())
-        .filter(|summary| !summary.trim().is_empty())
-        .map(ToString::to_string)
-        .or_else(|| {
-            Some(message)
-                .filter(|message| !message.trim().is_empty())
-                .map(ToString::to_string)
-        })
-}
-
-fn maybe_generate_title(
-    conversation: &[ModelMessage],
-    ai_client: &Arc<AiClient>,
-    event_tx: &mpsc::UnboundedSender<LoopEvent>,
-    session_id: &str,
-    db_path: &Path,
-) {
-    let first_user_msg = conversation
-        .iter()
-        .find(|m| m.role == Role::User)
-        .and_then(|m| {
-            m.content.iter().find_map(|c| {
-                if let Content::Text { text } = c {
-                    Some(text.clone())
-                } else {
-                    None
-                }
-            })
-        })
-        .unwrap_or_default();
-
-    if first_user_msg.is_empty() {
-        return;
-    }
-
-    let title_client = ai_client.clone();
-    let title_tx = event_tx.clone();
-    let title_session_id = session_id.to_string();
-    let title_db_path = db_path.to_path_buf();
-    tokio::spawn(async move {
-        let title = ai_generate_title(&title_client, &first_user_msg).await;
-        if !title.is_empty() {
-            save_title(&title_db_path, &title_session_id, &title);
-            let _ = title_tx.send(LoopEvent::TitleGenerated { title });
-        }
-    });
-}
-
-fn save_message(db_path: &Path, session_id: &str, message: &ModelMessage) {
-    let role = match message.role {
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        _ => return,
-    };
-
-    match serde_json::to_string(&message.content) {
-        Ok(json) => {
-            let Some(session_manager) = open_session_manager(db_path, "saving message") else {
-                return;
-            };
-            if let Err(e) = session_manager.save_message(session_id, role, &json) {
-                tracing::error!("Failed to save message: {}", e);
-            }
-        }
-        Err(e) => tracing::error!("Failed to serialize message: {}", e),
-    }
-}
-
-fn persist_conversation(db_path: &Path, session_id: &str, conversation: &[ModelMessage]) {
-    let persisted = conversation
-        .iter()
-        .filter_map(|message| {
-            let role = match message.role {
-                Role::System => "system",
-                Role::User => "user",
-                Role::Assistant => "assistant",
-                Role::Tool => return None,
-            };
-
-            serde_json::to_string(&message.content)
-                .ok()
-                .map(|content| (role.to_string(), content))
-        })
-        .collect::<Vec<_>>();
-
-    let Some(session_manager) = open_session_manager(db_path, "persisting compacted conversation")
-    else {
-        return;
-    };
-    if let Err(e) = session_manager.replace_session_messages(session_id, &persisted) {
-        tracing::error!("Failed to persist compacted conversation: {}", e);
-    }
-}
-
-fn persist_context_state(db_path: &Path, session_id: &str, ledger: &ContextLedger) {
-    let ledger_json = match serde_json::to_string(&ledger.persistence_record()) {
-        Ok(json) => json,
-        Err(e) => {
-            tracing::warn!(
-                session_id = %session_id,
-                "Failed to serialize context ledger snapshot: {}", e
-            );
-            return;
-        }
-    };
-
-    let continuation_json = match serde_json::to_string(&ledger.continuation_contract()) {
-        Ok(json) => json,
-        Err(e) => {
-            tracing::warn!(
-                session_id = %session_id,
-                "Failed to serialize continuation contract: {}", e
-            );
-            return;
-        }
-    };
-
-    let Some(session_manager) =
-        open_session_manager(db_path, "persisting context continuation state")
-    else {
-        return;
-    };
-    if let Err(e) = session_manager.update_context_continuation_state(
-        session_id,
-        &ledger_json,
-        &continuation_json,
-    ) {
-        tracing::warn!(
-            session_id = %session_id,
-            "Failed to persist context continuation state: {}", e
-        );
-    }
-}
-
-fn persist_recovery_state(db_path: &Path, session_id: &str, recovery: &SessionRecoveryState) {
-    update_recovery_state(db_path, session_id, Some(recovery));
-}
-
-fn clear_recovery_state(db_path: &Path, session_id: &str) {
-    update_recovery_state(db_path, session_id, None);
-}
-
-fn save_title(db_path: &Path, session_id: &str, title: &str) {
-    let Some(session_manager) = open_session_manager(db_path, "saving title") else {
-        return;
-    };
-    if let Err(e) = session_manager.update_session_title(session_id, title) {
-        tracing::warn!(
-            session_id = %session_id,
-            "Failed to save title: {}", e
-        );
-    }
-}
-
-fn set_agent_state(db_path: &Path, session_id: &str, state: &str) {
-    let Some(session_manager) = open_session_manager(db_path, "setting agent state") else {
-        return;
-    };
-    if let Err(e) = session_manager.set_agent_state(session_id, state) {
-        tracing::warn!(
-            session_id = %session_id,
-            "Failed to set agent state '{state}': {}", e
-        );
-    }
-}
-
-fn update_token_count(db_path: &Path, session_id: &str, token_count: usize) {
-    let Some(session_manager) = open_session_manager(db_path, "updating token count") else {
-        return;
-    };
-    if let Err(e) = session_manager.update_token_count(session_id, token_count) {
-        tracing::warn!(
-            session_id = %session_id,
-            "Failed to update token count: {}", e
-        );
-    }
-}
-
-fn update_recovery_state(
-    db_path: &Path,
-    session_id: &str,
-    recovery: Option<&SessionRecoveryState>,
-) {
-    let action = if recovery.is_some() {
-        "persisting recovery state"
-    } else {
-        "clearing recovery state"
-    };
-    let Some(session_manager) = open_session_manager(db_path, action) else {
-        return;
-    };
-
-    let result = match recovery {
-        Some(recovery) => session_manager.update_recovery_state(session_id, recovery),
-        None => session_manager.clear_recovery_state(session_id),
-    };
-    if let Err(e) = result {
-        let verb = if recovery.is_some() {
-            "persist"
-        } else {
-            "clear"
-        };
-        tracing::warn!(
-            session_id = %session_id,
-            "Failed to {verb} recovery state: {}", e
-        );
-    }
-}
-
-fn open_session_manager(db_path: &Path, action: &str) -> Option<SessionManager> {
-    match Database::new(db_path) {
-        Ok(db) => Some(SessionManager::new(db)),
-        Err(e) => {
-            tracing::error!("Failed to open database while {}: {}", action, e);
-            None
-        }
-    }
-}
-
-fn continuation_recovery_message(ledger: &ContextLedger) -> String {
-    match ledger.continuation_decision() {
-        ContinuationDecision::Resumable {
-            latest_user_objective,
-        } => format!(
-            "Continuation contract: resumable. Preserved objective: {}",
-            latest_user_objective
-        ),
-        ContinuationDecision::NonResumable { reason } => format!(
-            "Continuation contract: non-resumable ({:?}). Start a fresh turn with explicit user intent.",
-            reason
-        ),
-    }
-}
-
-fn build_partial_assistant_state(checkpoint: &stream::StreamCheckpoint) -> PartialAssistantState {
-    PartialAssistantState {
-        text: checkpoint.text.clone(),
-        thinking: checkpoint.thinking.clone(),
-        tool_calls: checkpoint
-            .tool_calls
-            .iter()
-            .map(|tool| RecoveryToolCall {
-                id: tool.id.clone(),
-                name: tool.name.clone(),
-            })
-            .collect(),
-    }
-}
-
-fn build_recovery_state(
-    ledger: &ContextLedger,
-    status: RecoveryStatus,
-    stop_reason: Option<LoopStopReason>,
-    last_error: Option<String>,
-    partial_assistant: PartialAssistantState,
-) -> SessionRecoveryState {
-    SessionRecoveryState::new(
-        status.clone(),
-        stop_reason,
-        last_error,
-        partial_assistant.clone(),
-        recovery_decision(ledger, &status, &partial_assistant),
-    )
-}
-
-fn recovery_decision(
-    ledger: &ContextLedger,
-    status: &RecoveryStatus,
-    partial_assistant: &PartialAssistantState,
-) -> RecoveryDecision {
-    let override_reason = match status {
-        RecoveryStatus::ToolExecuting => Some(RecoveryNonResumableReason::ToolExecutionInProgress),
-        RecoveryStatus::Streaming | RecoveryStatus::Interrupted
-            if !partial_assistant.tool_calls.is_empty() =>
-        {
-            Some(RecoveryNonResumableReason::PendingToolCall)
-        }
-        _ => None,
-    };
-
-    if let Some(reason) = override_reason {
-        return RecoveryDecision::NonResumable { reason };
-    }
-
-    match ledger.continuation_decision() {
-        ContinuationDecision::Resumable {
-            latest_user_objective,
-        } => RecoveryDecision::Resumable {
-            latest_user_objective,
-        },
-        ContinuationDecision::NonResumable { reason } => RecoveryDecision::NonResumable {
-            reason: match reason {
-                super::context_ledger::NonResumableReason::MissingUserObjective => {
-                    RecoveryNonResumableReason::MissingUserObjective
-                }
-                super::context_ledger::NonResumableReason::EmptyConversation => {
-                    RecoveryNonResumableReason::EmptyConversation
-                }
-            },
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
 
-    use super::{finalize_explore_only_turn, inject_runtime_context};
+    use super::inject_runtime_context;
+    use super::message_builder::finalize_explore_only_turn;
     use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
     use crate::skills::SkillsManager;
     use crate::storage::{SessionType, WorkMode};
@@ -1350,6 +922,7 @@ mod tests {
             "session-id",
             repo,
             Some(repo),
+            None,
             WorkMode::Build,
             &skills,
             None,
@@ -1361,6 +934,7 @@ mod tests {
             "session-id",
             repo,
             Some(repo),
+            None,
             WorkMode::Build,
             &skills,
             None,
@@ -1371,13 +945,13 @@ mod tests {
             matches!(
                 &message.content[0],
                 Content::Text { text }
-                    if text.contains("[MAKO IDENTITY - MAKO.md]") && text.contains("Always Swimming.")
+                    if text.contains("[MAKO PROJECT OVERLAY - MAKO.md]") && text.contains("Always Swimming.")
             )
         }));
         assert!(!code_injected.iter().any(|message| {
             matches!(
                 &message.content[0],
-                Content::Text { text } if text.contains("[MAKO IDENTITY - MAKO.md]")
+                Content::Text { text } if text.contains("[MAKO PROJECT OVERLAY - MAKO.md]")
             )
         }));
     }

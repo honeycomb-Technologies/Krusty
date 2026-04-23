@@ -24,6 +24,8 @@ import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
 import { SegmentControl } from '../ui/SegmentControl';
 import type { SessionResponse } from '@krusty/api';
+import { MAKO_DRAWER_ITEMS } from './makoDrawerItems';
+import type { MakoTopLevelView } from '../mako/types';
 
 const DRAWER_WIDTH = Dimensions.get('window').width * 0.82;
 const SPRING = { damping: 22, stiffness: 300, mass: 0.8 };
@@ -41,6 +43,8 @@ interface SessionDrawerProps {
   onOpenSettings?: () => void;
   activeTab: number;
   onTabChange: (index: number) => void;
+  activeMakoView?: MakoTopLevelView;
+  onSelectMakoView?: (view: MakoTopLevelView) => void;
 }
 
 interface DirEntry { name: string; path: string }
@@ -62,18 +66,10 @@ function formatTime(dateStr: string): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
-function typeLabel(type: SessionResponse['session_type']): string {
-  switch (type) {
-    case 'chat': return 'Chat';
-    case 'mako': return 'Mako';
-    default: return 'Code';
-  }
-}
-
 export function SessionDrawer({
   isOpen, onClose, sessions, activeSessionId,
   onSelectSession, onNewSession, onNewSessionWithDir, onDeleteSession,
-  onOpenSettings, activeTab, onTabChange,
+  onOpenSettings, activeTab, onTabChange, activeMakoView, onSelectMakoView,
 }: SessionDrawerProps) {
   const { theme } = useThemeContext();
   const { client, status } = useConnection();
@@ -90,9 +86,9 @@ export function SessionDrawer({
   const dirCache = useRef<Map<string, DirCache>>(new Map());
   const [pickerReady, setPickerReady] = useState(false); // data loaded at least once
 
-  // Pre-fetch home directory when drawer opens on Code/Mako tab
+  // Pre-fetch home directory when drawer opens on Code tab
   useEffect(() => {
-    if (isOpen && client && activeTab !== 0 && !pickerReady) {
+    if (isOpen && client && activeTab === 1 && !pickerReady) {
       client.browseDirectories().then(result => {
         const entry: DirCache = { current: result.current, parent: result.parent, directories: result.directories };
         dirCache.current.set('', entry);
@@ -187,8 +183,6 @@ export function SessionDrawer({
     });
 
   const t = theme.colors;
-  const g = theme.colors.glass;
-
   const chatSessions = useMemo(() =>
     sessions.filter(s => s.session_type === 'chat')
       .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()),
@@ -215,7 +209,6 @@ export function SessionDrawer({
   };
 
   const codeDirGroups = useMemo(() => groupSessionsByDirectory('code'), [sessions]);
-  const makoDirGroups = useMemo(() => groupSessionsByDirectory('mako'), [sessions]);
 
   const toggleDir = (dir: string) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -272,6 +265,42 @@ export function SessionDrawer({
           );
         });
 
+  const renderMakoList = () => (
+    <View>
+      {MAKO_DRAWER_ITEMS.map((item) => {
+        const isActive = activeMakoView === item.id;
+        return (
+          <Pressable
+            key={item.id}
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              onSelectMakoView?.(item.id);
+            }}
+            style={[
+              styles.makoItem,
+              isActive && { backgroundColor: t.userMessage + '12' },
+            ]}
+          >
+            <View style={styles.makoCopy}>
+              <Text
+                style={[
+                  styles.makoTitle,
+                  { color: isActive ? t.userMessage : t.foreground },
+                ]}
+              >
+                {item.label}
+              </Text>
+              <Text style={[styles.makoDetail, { color: t.mutedForeground }]}>
+                {item.detail}
+              </Text>
+            </View>
+            <ChevronRight size={16} color={t.mutedForeground} />
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+
   return (
     <>
       <Animated.View style={[styles.backdrop, backdropStyle]}>
@@ -301,11 +330,11 @@ export function SessionDrawer({
                   : chatSessions.map(renderSessionItem)
               )}
               {activeTab === 1 && renderDirAccordion(codeDirGroups, t.thinking)}
-              {activeTab === 2 && renderDirAccordion(makoDirGroups, t.userMessage)}
+              {activeTab === 2 && renderMakoList()}
             </ScrollView>
 
             {/* Animated picker — slides up from behind bottom bar */}
-            {pickerVisible && (
+            {activeTab === 1 && pickerVisible && (
               <Animated.View style={[styles.pickerContainer, { height: PICKER_HEIGHT, borderTopColor: t.border, backgroundColor: t.background }, pickerAnimStyle]}>
                 <View style={styles.pickerHeader}>
                   <View>
@@ -376,15 +405,18 @@ export function SessionDrawer({
                     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
                     if (activeTab === 0) {
                       onNewSession();
-                    } else {
+                    } else if (activeTab === 1) {
                       showPicker();
+                    } else {
+                      onSelectMakoView?.('mako');
+                      onClose();
                     }
                   }}
                   style={styles.iconBtn}
                 >
-                  {activeTab === 0
-                    ? <SquarePlus size={22} color={t.mutedForeground} strokeWidth={1.8} />
-                    : <FolderPlus size={22} color={t.mutedForeground} strokeWidth={1.8} />}
+                  {activeTab === 1
+                    ? <FolderPlus size={22} color={t.mutedForeground} strokeWidth={1.8} />
+                    : <SquarePlus size={22} color={t.mutedForeground} strokeWidth={1.8} />}
               </Pressable>
               </View>
             </View>
@@ -479,6 +511,27 @@ const styles = StyleSheet.create({
   },
   sessionTime: { fontSize: 12 },
   sessionModel: { fontSize: 12 },
+  makoItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderRadius: 10,
+    marginBottom: 2,
+  },
+  makoCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  makoTitle: {
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  makoDetail: {
+    marginTop: 3,
+    fontSize: 12,
+  },
 
   // Animated picker overlay — slides up from bottom
   pickerContainer: {

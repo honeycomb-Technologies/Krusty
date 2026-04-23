@@ -108,7 +108,7 @@ impl Default for WorkspaceContextBuilder {
 /// - Project type (based on config files)
 /// - Directory structure (top-level)
 /// - Key files present
-fn build_workspace_context(cwd: &Path) -> String {
+pub(crate) fn build_workspace_context(cwd: &Path) -> String {
     use std::fs;
 
     let mut context = String::new();

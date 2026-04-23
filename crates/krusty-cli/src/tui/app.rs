@@ -304,6 +304,8 @@ pub struct AppRuntime {
     pub working_dir: PathBuf,
     /// Current session ID
     pub current_session_id: Option<String>,
+    /// Child session created by an automatic pinch handoff.
+    pub pending_pinched_session_id: Option<String>,
     /// Session title
     pub session_title: Option<String>,
     /// Title editing state
@@ -377,6 +379,7 @@ impl AppRuntime {
             last_plugin_catalog_poll: Instant::now() - Duration::from_secs(60),
             working_dir,
             current_session_id: None,
+            pending_pinched_session_id: None,
             session_title: None,
             title_editor: TitleEditor::new(),
             channels: AsyncChannels::new(),
@@ -582,40 +585,6 @@ impl App {
     /// - Session resume: use canonical lifecycle resolution
     pub fn set_plan(&mut self, plan: PlanFile) {
         self.runtime.active_plan = Some(plan);
-    }
-
-    /// Critical context threshold where pinch may still be needed as a fallback.
-    const AUTO_PINCH_THRESHOLD: f32 = 0.98;
-
-    /// Schedule a pinch fallback for a degraded thread.
-    pub fn schedule_auto_pinch(&mut self, reason: impl Into<String>) {
-        if self.runtime.pending_auto_pinch || self.runtime.current_session_id.is_none() {
-            return;
-        }
-
-        self.runtime.pending_auto_pinch = true;
-        self.runtime.pending_auto_pinch_reason = Some(reason.into());
-    }
-
-    /// Check if context usage is still critically high after local compaction.
-    pub fn check_auto_pinch(&mut self) {
-        if self.runtime.current_session_id.is_none() {
-            return;
-        }
-
-        let max_tokens = self.max_context_tokens();
-        if max_tokens == 0 {
-            return;
-        }
-
-        let usage_ratio = self.runtime.context_tokens_used as f32 / max_tokens as f32;
-
-        if usage_ratio >= Self::AUTO_PINCH_THRESHOLD {
-            self.schedule_auto_pinch(format!(
-                "Live compaction kept the session running, but the thread is still at {:.0}% of the available context budget.",
-                usage_ratio * 100.0
-            ));
-        }
     }
 
     /// Trigger auto-pinch if pending and conditions are right

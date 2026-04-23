@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use krusty_core::storage::{ApnsDeviceStore, Database};
 
-use crate::apns::{ApnsEventType, ApnsPayload};
+use crate::apns::{ApnsEventType, ApnsPayload, DEFAULT_APNS_BUNDLE_ID};
 use crate::auth::CurrentUser;
 use crate::error::AppError;
 use crate::AppState;
@@ -41,7 +41,7 @@ async fn register_device(
     let user_id = user.and_then(|u| u.0.user_id);
     let db = Database::new(&state.db_path)?;
     let store = ApnsDeviceStore::new(&db);
-    let bundle_id = req.bundle_id.as_deref().unwrap_or("io.krusty.mobile");
+    let bundle_id = req.bundle_id.as_deref().unwrap_or(DEFAULT_APNS_BUNDLE_ID);
     let id = store.upsert(user_id.as_deref(), &req.device_token, bundle_id)?;
     Ok(Json(RegisterResponse { id }))
 }

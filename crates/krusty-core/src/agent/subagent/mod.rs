@@ -9,10 +9,12 @@
 //! when creating SubAgentPool to use the same model as the main agent.
 //!
 //! ## Module Structure
+//! - `build_context`: Shared builder coordination context
 //! - `types`: Core data types (progress, models, tasks, results)
 //! - `tools`: Tool implementations for explorers and builders
 //! - `execution`: Agent loop and API communication
 
+pub mod build_context;
 mod execution;
 mod tools;
 mod types;
@@ -30,9 +32,10 @@ const SEMAPHORE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Same for all providers - users can override with with_stagger_delay() if needed
 const DEFAULT_STAGGER_MS: u64 = 100;
 
-use crate::agent::build_context::SharedBuildContext;
 use crate::agent::AgentCancellation;
 use crate::ai::client::AiClient;
+
+use self::build_context::SharedBuildContext;
 
 // Re-export public types
 pub use tools::BuilderTools;

@@ -25,6 +25,12 @@ const PRESENCE_HEARTBEAT_INTERVAL = 10_000;
 const MAX_QUEUED_MESSAGES = 50;
 const MAX_MESSAGE_CONTENT_LENGTH = 500_000;
 const PRESENCE_CLIENT_STORAGE_KEY = "krusty:presence-client-id";
+const SUPPORTED_IMAGE_MIME_TYPES = [
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+] as const;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -273,7 +279,7 @@ export interface SessionStoreState {
   setTitle: (title: string) => void;
   updateTitle: (sessionId: string, title: string) => Promise<void>;
   setMode: (mode: SessionMode) => void;
-  setModel: (model: string) => void;
+  setModel: (model: string | null) => void;
   setThinkingLevel: (level: ThinkingLevel) => void;
   toggleThinking: () => void;
   togglePermissionMode: () => void;
@@ -1156,11 +1162,15 @@ function buildContentBlocks(
 
   for (const att of attachments) {
     if (att.type === "image" && att.base64) {
+      const mediaType = normalizeSupportedImageMimeType(att.mimeType);
+      if (!mediaType) {
+        throw new Error(unsupportedImageMimeTypeMessage(att.mimeType));
+      }
       blocks.push({
         type: "image",
         source: {
           type: "base64",
-          media_type: att.mimeType || "image/png",
+          media_type: mediaType,
           data: att.base64,
         },
       });
@@ -1194,6 +1204,46 @@ ${att.text}`);
   });
 
   return blocks;
+}
+
+function normalizeSupportedImageMimeType(
+  mimeType: string | null | undefined,
+): string | null {
+  const normalized = (mimeType || "image/png").trim().toLowerCase();
+  switch (normalized) {
+    case "image/jpeg":
+    case "image/jpg":
+    case "image/pjpeg":
+      return "image/jpeg";
+    case "image/png":
+      return "image/png";
+    case "image/gif":
+      return "image/gif";
+    case "image/webp":
+      return "image/webp";
+    default:
+      return null;
+  }
+}
+
+function unsupportedImageMimeTypeMessage(mimeType: string): string {
+  const normalized = mimeType.trim().toLowerCase();
+  const hint =
+    normalized === "image/heic" || normalized === "image/heif"
+      ? " Convert HEIC/HEIF images to JPEG or PNG before uploading."
+      : "";
+  return `Image format '${mimeType.trim()}' is not supported. Supported formats: ${SUPPORTED_IMAGE_MIME_TYPES.join(", ")}.${hint}`;
+}
+
+function getUnsupportedImageAttachment(
+  attachments: Attachment[],
+): Attachment | undefined {
+  return attachments.find(
+    (att) =>
+      att.type === "image"
+      && Boolean(att.base64)
+      && !normalizeSupportedImageMimeType(att.mimeType),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1597,6 +1647,14 @@ export function createSessionStore(
     }
   }
 
+  async function persistCurrentModel(model: string | null) {
+    try {
+      await client.setCurrentModel(model);
+    } catch {
+      // Failed to persist
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Apply session snapshot from server state
   // -------------------------------------------------------------------------
@@ -1675,6 +1733,14 @@ export function createSessionStore(
           : attachments.length > 0
             ? "Please review the attached content."
             : content;
+
+      const unsupportedImage = getUnsupportedImageAttachment(attachments);
+      if (unsupportedImage) {
+        set({
+          error: unsupportedImageMimeTypeMessage(unsupportedImage.mimeType),
+        });
+        return;
+      }
 
       const attachmentLabel =
         attachments.length > 0
@@ -1802,12 +1868,14 @@ export function createSessionStore(
         }
 
         const mode = serverState?.mode ?? data.session.mode ?? "build";
+        const previousModel = get().model;
+        const sessionModel = data.session.model?.trim() || null;
         set((s) => ({
           ...s,
           sessionId: data.session.id,
           title: data.session.title || "Untitled",
           mode,
-          model: data.session.model ?? s.model,
+          model: sessionModel ?? s.model,
           tokenCount: data.session.token_count ?? 0,
           messages: applyLivePartialAssistant(
             applyRecoveryParity(
@@ -1835,6 +1903,9 @@ export function createSessionStore(
 
         applySessionSnapshot(sessionId, serverState, isRefresh, set, get);
         get().startPresenceHeartbeat(sessionId);
+        if (sessionModel && sessionModel !== previousModel) {
+          void persistCurrentModel(sessionModel);
+        }
       } catch (err) {
         set({
           isLoading: false,
@@ -1903,9 +1974,16 @@ export function createSessionStore(
 
     // -- setModel -----------------------------------------------------------
 
-    setModel(model: string) {
+    setModel(model: string | null) {
+      if (get().model === model) {
+        return;
+      }
+
       set({ model });
-      void persistSessionModel(get, model);
+      void persistCurrentModel(model);
+      if (model) {
+        void persistSessionModel(get, model);
+      }
     },
 
     // -- setThinkingLevel ---------------------------------------------------

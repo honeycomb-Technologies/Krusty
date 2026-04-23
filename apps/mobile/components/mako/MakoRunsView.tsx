@@ -111,7 +111,7 @@ export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
       }
     >
       <Text style={[styles.description, { color: t.mutedForeground }]}>
-        Runs keep the open queue visible first, then break the waterline into active, waiting, sleeping, queued, and completed groups.
+        Runs are the work ledger. Open a run to see what Mako is doing now, waiting on, or has already finished.
       </Text>
 
       {actionError ? (
@@ -120,38 +120,38 @@ export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
 
       <View style={styles.grid}>
         <MakoInsightCard
-          label="Open queue"
+          label="Open runs"
           value={String(queueHead.length)}
-          detail={`${groups.active.length} active • ${attentionRuns.length} need attention`}
+          detail={`${groups.active.length} running • ${attentionRuns.length} need attention`}
           style={styles.metricCard}
         />
         <MakoInsightCard
-          label="Queued later"
+          label="Upcoming wakes"
           value={String(queuedLaterCount)}
-          detail={nextWakeAt ? `Next wake ${formatTimestamp(nextWakeAt)}` : "No wake is queued yet."}
+          detail={nextWakeAt ? `Next wake ${formatTimestamp(nextWakeAt)}` : "No wake is scheduled."}
           style={styles.metricCard}
           tone="accent"
         />
         <MakoInsightCard
-          label="High priority"
+          label="Priority"
           value={String(highPriorityCount)}
-          detail="High-priority work floats to the top of the queue."
+          detail="High-priority work rises to the top of the queue."
           style={styles.metricCard}
           tone={highPriorityCount > 0 ? "warning" : "default"}
         />
         <MakoInsightCard
-          label="Completed"
+          label="Finished"
           value={String(groups.completed.length)}
-          detail="Finished runs stay visible here for quick follow-up."
+          detail="Finished runs stay here for follow-up."
           style={styles.metricCard}
           tone="success"
         />
       </View>
 
-      <Section title="Queue head">
+      <Section title="Next up">
         <MakoRunList
           runs={queueHead.slice(0, 6)}
-          emptyLabel="No open runs are in the queue."
+          emptyLabel="Nothing is waiting in the queue."
           onSelectRun={onSelectRun}
           activeActionRunId={activeActionRunId}
           onPauseRun={(runId) => {
@@ -163,10 +163,10 @@ export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
         />
       </Section>
 
-      <Section title="Active">
+      <Section title="Running">
         <MakoRunList
           runs={groups.active}
-          emptyLabel="No active runs."
+          emptyLabel="No runs are active."
           onSelectRun={onSelectRun}
           activeActionRunId={activeActionRunId}
           onPauseRun={(runId) => {
@@ -178,7 +178,7 @@ export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
         />
       </Section>
 
-      <Section title="Waiting">
+      <Section title="Waiting on you">
         <MakoRunList
           runs={groups.waiting}
           emptyLabel="No runs are waiting on you."
@@ -196,7 +196,7 @@ export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
       <Section title="Sleeping">
         <MakoRunList
           runs={groups.sleeping}
-          emptyLabel="No sleeping runs."
+          emptyLabel="No runs are sleeping."
           onSelectRun={onSelectRun}
           activeActionRunId={activeActionRunId}
           onPauseRun={(runId) => {
@@ -208,10 +208,10 @@ export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
         />
       </Section>
 
-      <Section title="Queued">
+      <Section title="Queued later">
         <MakoRunList
           runs={groups.queued}
-          emptyLabel="No queued runs."
+          emptyLabel="No runs are queued for later."
           onSelectRun={onSelectRun}
           activeActionRunId={activeActionRunId}
           onPauseRun={(runId) => {
@@ -226,7 +226,7 @@ export function MakoRunsView({ state, onSelectRun }: MakoRunsViewProps) {
       <Section title="Completed">
         <MakoRunList
           runs={groups.completed}
-          emptyLabel="No completed runs yet."
+          emptyLabel="No finished runs yet."
           onSelectRun={onSelectRun}
         />
       </Section>

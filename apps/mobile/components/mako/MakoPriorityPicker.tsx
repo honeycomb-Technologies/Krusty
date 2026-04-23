@@ -65,8 +65,6 @@ const styles = StyleSheet.create({
   label: {
     fontSize: 12,
     fontWeight: "600",
-    textTransform: "uppercase",
-    letterSpacing: 0.3,
   },
   options: {
     flexDirection: "row",
@@ -74,7 +72,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   chip: {
-    borderRadius: 999,
+    borderRadius: 8,
     borderWidth: StyleSheet.hairlineWidth,
     paddingHorizontal: 12,
     paddingVertical: 8,

@@ -5,7 +5,7 @@
 use crate::ai::client::AiClientConfig;
 use crate::ai::format_detection::detect_api_format;
 use crate::ai::models::SharedModelRegistry;
-use crate::ai::providers::{get_provider, translate_model_or_default, ProviderId};
+use crate::ai::providers::{get_provider, translate_model_id, ProviderId};
 use crate::storage::CredentialStore;
 
 /// Create AiClientConfig for a provider/model combination
@@ -63,44 +63,43 @@ pub fn create_client_config(
     }
 }
 
-/// Translate model ID when switching providers and validate it exists
+pub fn infer_provider_for_model(
+    model_registry: &SharedModelRegistry,
+    model: &str,
+) -> Option<ProviderId> {
+    let model = model.trim();
+    if model.is_empty() {
+        return None;
+    }
+
+    if let Some(metadata) = model_registry.try_get_model(model) {
+        return Some(metadata.provider);
+    }
+
+    ProviderId::all().iter().find_map(|provider| {
+        get_provider(*provider)
+            .filter(|config| config.has_model(model))
+            .map(|config| config.id)
+    })
+}
+
+/// Translate a selected model to an equivalent for another provider.
 ///
-/// Returns (translated_model, changed) where changed indicates if translation occurred
+/// Returns `None` when no model is selected or when there is no equivalent model
+/// for the target provider.
 pub fn translate_model_for_provider(
     current_model: &str,
     from_provider: ProviderId,
     to_provider: ProviderId,
-) -> (String, bool) {
-    let translated = translate_model_or_default(current_model, from_provider, to_provider);
-    let changed = translated != current_model;
-
-    if changed {
-        tracing::info!(
-            "Translated model '{}' -> '{}' for {}",
-            current_model,
-            translated,
-            to_provider
-        );
+) -> Option<String> {
+    let current_model = current_model.trim();
+    if current_model.is_empty() {
+        return None;
     }
 
-    (translated, changed)
-}
-
-/// Validate model exists for provider, returning default if not
-///
-/// Returns (validated_model, was_fallback)
-pub fn validate_model_for_provider(model: &str, provider: ProviderId) -> (String, bool) {
-    if let Some(provider_config) = get_provider(provider) {
-        if !provider_config.has_model(model) {
-            let default = provider_config.default_model().to_string();
-            tracing::info!(
-                "Model '{}' not available for {}, using default '{}'",
-                model,
-                provider,
-                default
-            );
-            return (default, true);
-        }
+    if from_provider == to_provider {
+        return Some(current_model.to_string());
     }
-    (model.to_string(), false)
+
+    translate_model_id(current_model, from_provider, to_provider)
 }

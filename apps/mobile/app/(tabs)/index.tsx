@@ -56,6 +56,7 @@ import type {
   SessionResponse,
   SessionType,
 } from "@krusty/api";
+import type { MakoTopLevelView } from "../../components/mako/types";
 import type {
   Attachment as SessionAttachment,
   PermissionMode,
@@ -282,6 +283,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const [activeToolCallId, setActiveToolCallId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState(1);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [makoTopLevel, setMakoTopLevel] = useState<MakoTopLevelView>("mako");
   const [toolboxOpen, setToolboxOpen] = useState(false);
   const [toolboxTab, setToolboxTab] = useState(2);
   const splitProgress = useSharedValue(0);
@@ -444,27 +446,19 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       return existingModel;
     }
 
-    const saved = await SecureStore.getItemAsync(SELECTED_MODEL_KEY);
-    const firstUsableModel =
-      catalog.find((candidate) =>
-        allowedProviders.length === 0
-          ? true
-          : allowedProviders.includes(normalizeProviderId(candidate.provider)),
-      )?.id ?? null;
-    const selectedModel = isModelUsable(saved, catalog, allowedProviders)
-      ? saved
-      : isModelUsable(fallbackDefault, catalog, allowedProviders)
-        ? fallbackDefault
-        : firstUsableModel;
+    const selectedModel = isModelUsable(fallbackDefault, catalog, allowedProviders)
+      ? fallbackDefault
+      : null;
 
     if (selectedModel) {
       sessionStore.getState().setModel(selectedModel);
-      if (saved !== selectedModel) {
-        await SecureStore.setItemAsync(SELECTED_MODEL_KEY, selectedModel);
-      }
+      await SecureStore.setItemAsync(SELECTED_MODEL_KEY, selectedModel);
+      return selectedModel;
     }
 
-    return selectedModel;
+    sessionStore.getState().setModel(null);
+    await SecureStore.deleteItemAsync(SELECTED_MODEL_KEY).catch(() => {});
+    return null;
   }, [configuredProviders, defaultModelId, loadModelCatalog, models, sessionStore]);
 
   useEffect(() => {
@@ -742,6 +736,55 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     [sessionStore, stopCurrentStream],
   );
 
+  const openProjectInCode = useCallback(
+    async (projectDir: string) => {
+      if (!client) {
+        return;
+      }
+
+      stopCurrentStream();
+      setDrawerOpen(false);
+      setActiveTab(1);
+
+      const existing = sessions.find(
+        (session) =>
+          session.session_type === "code" &&
+          (session.project_dir === projectDir || session.working_dir === projectDir),
+      );
+
+      if (existing) {
+        await sessionStore.getState().loadSession(existing.id);
+        return;
+      }
+
+      try {
+        await ensureModelReady();
+        const session = await client.createSession(
+          undefined,
+          projectDir,
+          undefined,
+          "selected",
+          "code",
+        );
+        await bootstrapSession(session);
+        setActiveToolCallId(null);
+        void Haptics.notificationAsync(
+          Haptics.NotificationFeedbackType.Success,
+        );
+      } catch {
+        return;
+      }
+    },
+    [
+      bootstrapSession,
+      client,
+      ensureModelReady,
+      sessionStore,
+      sessions,
+      stopCurrentStream,
+    ],
+  );
+
   const handleNewSession = useCallback(async () => {
     await createSessionForCurrentTab();
   }, [createSessionForCurrentTab]);
@@ -906,6 +949,15 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       }
     },
     [sessionStore, sessions, stopCurrentStream],
+  );
+
+  const handleSelectMakoView = useCallback(
+    (view: MakoTopLevelView) => {
+      handleTabChange(2);
+      setMakoTopLevel(view);
+      setDrawerOpen(false);
+    },
+    [handleTabChange],
   );
 
   const handleRenameSession = useCallback(() => {
@@ -1094,12 +1146,15 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       <MakoScreen
         workspaceDirectory={workspaceDirectory}
         activeRunId={sessionId}
+        requestedTopLevel={makoTopLevel}
         onOpenRunById={loadSessionById}
+        onOpenProject={openProjectInCode}
         onDeleteRun={handleDeleteSession}
         onOpenMenu={() => {
           void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
           setDrawerOpen(true);
         }}
+        onTopLevelChange={setMakoTopLevel}
         chat={{
           sessionId,
           title: sessionTitle,
@@ -1153,6 +1208,8 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       onOpenSettings={() => router.push("/(tabs)/settings")}
       activeTab={activeTab}
       onTabChange={handleTabChange}
+      activeMakoView={makoTopLevel}
+      onSelectMakoView={handleSelectMakoView}
     >
       {activeTab === 2 ? makoContent : chatContent}
 
@@ -1172,6 +1229,8 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           }}
           activeTab={activeTab}
           onTabChange={handleTabChange}
+          activeMakoView={makoTopLevel}
+          onSelectMakoView={handleSelectMakoView}
         />
       )}
     </DesktopShell>

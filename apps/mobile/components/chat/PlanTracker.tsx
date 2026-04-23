@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useRef } from "react";
 import { View, Text, Pressable, StyleSheet } from "react-native";
 import { CheckCircle2, Circle, ListChecks } from "lucide-react-native";
 import * as Haptics from "../../platform/haptics";
@@ -6,23 +7,51 @@ import { useThemeContext } from "../../hooks/useTheme";
 import { usePlanStore } from "../../hooks/useStores";
 import { useBreakpoint } from "../../hooks/useBreakpoint";
 
-export function PlanTracker() {
+interface PlanTrackerProps {
+  onHeightChange?: (height: number) => void;
+}
+
+export function PlanTracker({ onHeightChange }: PlanTrackerProps) {
   const { theme } = useThemeContext();
   const { isDesktop } = useBreakpoint();
   const t = theme.colors;
   const isDark = theme.scheme === "dark";
+  const lastReportedHeightRef = useRef(0);
 
   const planItems = usePlanStore((s) => s.items);
   const items = planItems ?? [];
   const isVisible = usePlanStore((s) => s.isVisible);
+  const trackerVisible = Boolean(isVisible) && items.length > 0;
 
-  if (!isVisible || items.length === 0) return null;
+  useEffect(() => {
+    if (trackerVisible || lastReportedHeightRef.current === 0) {
+      return;
+    }
+
+    lastReportedHeightRef.current = 0;
+    onHeightChange?.(0);
+  }, [onHeightChange, trackerVisible]);
+
+  const handleLayout = useCallback(({ nativeEvent }: any) => {
+    const nextHeight = Math.ceil(nativeEvent.layout.height);
+    if (lastReportedHeightRef.current === nextHeight) {
+      return;
+    }
+
+    lastReportedHeightRef.current = nextHeight;
+    onHeightChange?.(nextHeight);
+  }, [onHeightChange]);
+
+  if (!trackerVisible) return null;
 
   const completed = items.filter((i) => i.completed).length;
   const total = items.length;
 
   return (
-    <View style={[styles.container, isDesktop ? styles.containerDesktop : styles.containerMobile]}>
+    <View
+      style={[styles.container, isDesktop ? styles.containerDesktop : styles.containerMobile]}
+      onLayout={handleLayout}
+    >
       <BlurView
         intensity={30}
         tint={isDark ? "systemMaterialDark" : "systemMaterialLight"}
