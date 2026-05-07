@@ -92,6 +92,7 @@ pub fn translate_model_or_default(model_id: &str, from: ProviderId, to: Provider
 /// Toggle between standard and fast model variants when a known pair exists.
 pub fn toggle_fast_model(model_id: &str) -> Option<String> {
     const FAST_MODEL_PAIRS: &[(&str, &str)] = &[
+        ("gpt-5.5", "gpt-5.5-mini"),
         ("gpt-5.4", "gpt-5.4-mini"),
         ("claude-opus-4-6", "claude-haiku-4-5-20251001"),
         ("claude-opus-4.6", "claude-haiku-4.5"),
@@ -151,6 +152,14 @@ mod tests {
 
     #[test]
     fn test_toggle_fast_model() {
+        assert_eq!(
+            toggle_fast_model("gpt-5.5").as_deref(),
+            Some("gpt-5.5-mini")
+        );
+        assert_eq!(
+            toggle_fast_model("gpt-5.5-mini").as_deref(),
+            Some("gpt-5.5")
+        );
         assert_eq!(
             toggle_fast_model("gpt-5.4").as_deref(),
             Some("gpt-5.4-mini")

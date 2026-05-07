@@ -3,11 +3,12 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-use super::super::config::CallOptions;
+use super::super::config::{CallOptions, CodexReasoningEffort};
 use super::super::core::AiClient;
 use super::shared::{ensure_success_stream_response, log_system_prompt_layers, start_sse_stream};
 use crate::ai::format::openai::OpenAIFormat;
 use crate::ai::format::FormatHandler;
+use crate::ai::models::ApiFormat;
 use crate::ai::parsers::OpenAIParser;
 use crate::ai::streaming::StreamPart;
 use crate::ai::transform::apply_request_body_transform;
@@ -96,6 +97,19 @@ impl AiClient {
             if let Some(temp) = options.temperature {
                 body["temperature"] = serde_json::json!(temp);
             }
+        }
+
+        if options.thinking.is_some()
+            && matches!(self.config().api_format, ApiFormat::OpenAIResponses)
+        {
+            let effort = options
+                .codex_reasoning_effort
+                .unwrap_or(CodexReasoningEffort::High)
+                .normalized_for_model(&self.config().model)
+                .as_str();
+            body["reasoning"] = serde_json::json!({
+                "effort": effort
+            });
         }
 
         // Add tools — sorted deterministically for stable prefix ordering.

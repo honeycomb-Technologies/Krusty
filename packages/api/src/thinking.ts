@@ -1,22 +1,21 @@
 import type { ThinkingLevel } from './types';
 
-export function cycleThinkingLevel(current: ThinkingLevel, model: string | null): ThinkingLevel {
+function supportsExtendedThinkingCycle(model: string | null): boolean {
   const modelLower = (model ?? '').toLowerCase();
-  const isCodex = modelLower.includes('codex');
-  const isOpus =
-    modelLower.includes('opus-4-6')
+  return (
+    modelLower.includes('codex')
+    || modelLower.startsWith('gpt-5.4')
+    || modelLower.startsWith('openai/gpt-5.4')
+    || modelLower.startsWith('gpt-5.5')
+    || modelLower.startsWith('openai/gpt-5.5')
+    || modelLower.includes('opus-4-6')
     || modelLower.includes('opus-4.6')
-    || modelLower.includes('opus 4.6');
+    || modelLower.includes('opus 4.6')
+  );
+}
 
-  if (isCodex) {
-    // Full cycle for Codex models
-    const cycle: ThinkingLevel[] = ['off', 'low', 'medium', 'high', 'xhigh'];
-    const idx = cycle.indexOf(current);
-    return cycle[(idx + 1) % cycle.length];
-  }
-
-  if (isOpus) {
-    // Full cycle for Opus 4.6 adaptive effort, including Max
+export function cycleThinkingLevel(current: ThinkingLevel, model: string | null): ThinkingLevel {
+  if (supportsExtendedThinkingCycle(model)) {
     const cycle: ThinkingLevel[] = ['off', 'low', 'medium', 'high', 'xhigh'];
     const idx = cycle.indexOf(current);
     return cycle[(idx + 1) % cycle.length];

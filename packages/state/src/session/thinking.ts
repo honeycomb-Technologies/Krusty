@@ -6,6 +6,7 @@ interface FastModelPair {
 }
 
 const FAST_MODEL_PAIRS: FastModelPair[] = [
+  { standard: 'gpt-5.5', fast: 'gpt-5.5-mini' },
   { standard: 'gpt-5.4', fast: 'gpt-5.4-mini' },
   { standard: 'claude-opus-4-6', fast: 'claude-haiku-4-5-20251001' },
   { standard: 'claude-opus-4.6', fast: 'claude-haiku-4.5' },
@@ -21,13 +22,17 @@ export function cycleThinkingLevel(
   model: string | null,
 ): ThinkingLevel {
   const modelLower = (model ?? '').toLowerCase();
-  const isCodex = modelLower.includes('codex');
-  const isOpus =
-    modelLower.includes('opus-4-6')
+  const supportsExtendedCycle =
+    modelLower.includes('codex')
+    || modelLower.startsWith('gpt-5.4')
+    || modelLower.startsWith('openai/gpt-5.4')
+    || modelLower.startsWith('gpt-5.5')
+    || modelLower.startsWith('openai/gpt-5.5')
+    || modelLower.includes('opus-4-6')
     || modelLower.includes('opus-4.6')
     || modelLower.includes('opus 4.6');
 
-  if (isCodex || isOpus) {
+  if (supportsExtendedCycle) {
     switch (current) {
       case 'off':
         return 'low';

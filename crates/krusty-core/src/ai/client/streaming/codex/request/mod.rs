@@ -128,6 +128,7 @@ impl AiClient {
         let reasoning_effort = options
             .codex_reasoning_effort
             .unwrap_or(CodexReasoningEffort::Medium)
+            .normalized_for_model(&self.config().model)
             .as_str();
 
         let mut body = serde_json::json!({

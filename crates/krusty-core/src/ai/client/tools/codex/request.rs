@@ -161,6 +161,7 @@ impl AiClient {
                 "effort": options
                     .codex_reasoning_effort
                     .unwrap_or(CodexReasoningEffort::High)
+                    .normalized_for_model(model)
                     .as_str(),
                 "summary": "auto"
             });

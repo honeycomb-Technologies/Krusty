@@ -6,7 +6,152 @@ use tracing::{error, info};
 use super::super::config::{CallOptions, CodexReasoningEffort};
 use super::super::core::AiClient;
 use crate::ai::format::response::{extract_text_from_content, normalize_openai_response};
+use crate::ai::models::ApiFormat;
 use crate::ai::transform::apply_request_body_transform;
+
+fn build_openai_tool_request_body(
+    model: &str,
+    api_format: ApiFormat,
+    max_tokens: usize,
+    system_prompt: Option<&str>,
+    messages: Vec<Value>,
+    tools: Vec<Value>,
+    reasoning_effort: Option<&str>,
+) -> Value {
+    let responses_format = matches!(api_format, ApiFormat::OpenAIResponses);
+    let messages_key = if responses_format {
+        "input"
+    } else {
+        "messages"
+    };
+    let max_tokens_key = if responses_format {
+        "max_output_tokens"
+    } else {
+        "max_tokens"
+    };
+
+    let mut request_messages = Vec::new();
+    if let Some(prompt) = system_prompt.filter(|prompt| !prompt.is_empty()) {
+        request_messages.push(serde_json::json!({
+            "role": "system",
+            "content": prompt
+        }));
+    }
+    for message in messages {
+        request_messages.extend(convert_openai_tool_message_for_request(message, api_format));
+    }
+
+    let mut body = serde_json::json!({
+        "model": model,
+    });
+    body[max_tokens_key] = serde_json::json!(max_tokens);
+    body[messages_key] = serde_json::json!(request_messages);
+
+    let openai_tools: Vec<Value> = tools
+        .iter()
+        .map(|tool| openai_tool_definition(tool, api_format))
+        .collect();
+    if !openai_tools.is_empty() {
+        body["tools"] = serde_json::json!(openai_tools);
+    }
+
+    if let Some(effort) = reasoning_effort {
+        if responses_format {
+            body["reasoning"] = serde_json::json!({ "effort": effort });
+        } else {
+            body["reasoning_effort"] = serde_json::json!(effort);
+        }
+    }
+
+    body
+}
+
+fn openai_tool_definition(tool: &Value, api_format: ApiFormat) -> Value {
+    let name = tool
+        .get("name")
+        .and_then(|name| name.as_str())
+        .unwrap_or("");
+    let description = tool
+        .get("description")
+        .and_then(|description| description.as_str())
+        .unwrap_or("");
+    let parameters = tool.get("input_schema").cloned().unwrap_or(Value::Null);
+
+    if matches!(api_format, ApiFormat::OpenAIResponses) {
+        serde_json::json!({
+            "type": "function",
+            "name": name,
+            "description": description,
+            "parameters": parameters
+        })
+    } else {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": parameters
+            }
+        })
+    }
+}
+
+fn convert_openai_tool_message_for_request(message: Value, api_format: ApiFormat) -> Vec<Value> {
+    if !matches!(api_format, ApiFormat::OpenAIResponses) {
+        return vec![message];
+    }
+
+    let role = message.get("role").and_then(|role| role.as_str());
+    if role == Some("tool") {
+        return vec![serde_json::json!({
+            "type": "function_call_output",
+            "call_id": message
+                .get("tool_call_id")
+                .and_then(|call_id| call_id.as_str())
+                .unwrap_or(""),
+            "output": message
+                .get("content")
+                .and_then(|content| content.as_str())
+                .unwrap_or("")
+        })];
+    }
+
+    if role == Some("assistant") {
+        if let Some(tool_calls) = message.get("tool_calls").and_then(|calls| calls.as_array()) {
+            let mut converted = Vec::new();
+            if let Some(text) = message.get("content").and_then(|content| content.as_str()) {
+                if !text.is_empty() {
+                    converted.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": text
+                    }));
+                }
+            }
+            for tool_call in tool_calls {
+                if let Some(function) = tool_call.get("function") {
+                    converted.push(serde_json::json!({
+                        "type": "function_call",
+                        "call_id": tool_call
+                            .get("id")
+                            .and_then(|id| id.as_str())
+                            .unwrap_or(""),
+                        "name": function
+                            .get("name")
+                            .and_then(|name| name.as_str())
+                            .unwrap_or(""),
+                        "arguments": function
+                            .get("arguments")
+                            .and_then(|arguments| arguments.as_str())
+                            .unwrap_or("{}")
+                    }));
+                }
+            }
+            return converted;
+        }
+    }
+
+    vec![message]
+}
 
 impl AiClient {
     pub(super) async fn call_with_tools_openai(
@@ -141,39 +286,28 @@ impl AiClient {
             }
         }
 
-        // Convert tools from Anthropic to OpenAI format
-        let openai_tools: Vec<Value> = tools
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.get("name").and_then(|n| n.as_str()).unwrap_or(""),
-                        "description": t.get("description").and_then(|d| d.as_str()).unwrap_or(""),
-                        "parameters": t.get("input_schema").cloned().unwrap_or(Value::Null)
-                    }
-                })
-            })
-            .collect();
+        let effort = if thinking_enabled {
+            Some(
+                options
+                    .codex_reasoning_effort
+                    .unwrap_or(CodexReasoningEffort::High)
+                    .normalized_for_model(model)
+                    .as_str()
+                    .to_string(),
+            )
+        } else {
+            None
+        };
 
-        // Build request body
-        let mut body = serde_json::json!({
-            "model": model,
-            "max_tokens": max_tokens,
-            "messages": openai_messages,
-        });
-
-        if !openai_tools.is_empty() {
-            body["tools"] = serde_json::json!(openai_tools);
-        }
-
-        // Add reasoning effort when thinking is enabled (high = maximum for OpenAI API)
-        if thinking_enabled {
-            body["reasoning_effort"] = serde_json::json!(options
-                .codex_reasoning_effort
-                .unwrap_or(CodexReasoningEffort::High)
-                .as_str());
-        }
+        let body = build_openai_tool_request_body(
+            model,
+            self.config().api_format,
+            max_tokens,
+            None,
+            openai_messages,
+            tools,
+            effort.as_deref(),
+        );
 
         let body =
             apply_request_body_transform(body, self.provider_id(), self.config().api_format, model);
@@ -200,5 +334,37 @@ impl AiClient {
             "Sub-agent OpenAI API call complete"
         );
         Ok(anthropic_response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::build_openai_tool_request_body;
+    use crate::ai::models::ApiFormat;
+
+    #[test]
+    fn responses_tool_request_uses_responses_shape() {
+        let body = build_openai_tool_request_body(
+            "gpt-5.5",
+            ApiFormat::OpenAIResponses,
+            4096,
+            Some("System"),
+            vec![json!({"role": "user", "content": [{"type": "text", "text": "Use a tool"}]})],
+            vec![
+                json!({"name": "read", "description": "Read a file", "input_schema": {"type": "object"}}),
+            ],
+            Some("xhigh"),
+        );
+
+        assert!(body.get("messages").is_none());
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["input"][0]["role"], "system");
+        assert_eq!(body["max_output_tokens"], 4096);
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["name"], "read");
+        assert!(body["tools"][0].get("function").is_none());
     }
 }

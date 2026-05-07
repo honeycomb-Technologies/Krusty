@@ -1,4 +1,5 @@
 use super::*;
+use krusty_core::ai::client::supports_openai_xhigh_reasoning;
 
 impl App {
     /// Get max context window size for current model
@@ -31,14 +32,10 @@ impl App {
         )
     }
 
-    /// Whether Tab should cycle Codex thinking levels.
-    pub fn is_codex_thinking_mode(&self) -> bool {
+    /// Whether Tab should cycle OpenAI xhigh-capable thinking levels.
+    pub fn is_openai_xhigh_thinking_mode(&self) -> bool {
         self.runtime.active_provider == ProviderId::OpenAI
-            && self
-                .runtime
-                .current_model
-                .to_ascii_lowercase()
-                .contains("codex")
+            && supports_openai_xhigh_reasoning(&self.runtime.current_model)
     }
 
     /// Whether Tab should cycle Anthropic Opus 4.6 thinking levels.
@@ -50,12 +47,12 @@ impl App {
 
     /// Whether this model supports multi-level thinking cycling.
     pub fn has_multi_level_thinking(&self) -> bool {
-        self.is_codex_thinking_mode() || self.is_anthropic_opus_thinking_mode()
+        self.is_openai_xhigh_thinking_mode() || self.is_anthropic_opus_thinking_mode()
     }
 
     /// Handle Tab thinking toggle/cycle.
     pub fn cycle_thinking_level(&mut self) {
-        self.runtime.thinking_level = if self.is_codex_thinking_mode() {
+        self.runtime.thinking_level = if self.is_openai_xhigh_thinking_mode() {
             self.runtime.thinking_level.cycle_codex()
         } else if self.is_anthropic_opus_thinking_mode() {
             self.runtime.thinking_level.cycle_anthropic()

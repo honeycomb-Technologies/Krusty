@@ -175,7 +175,7 @@ impl ProviderConfig {
         } else {
             match self.id {
                 ProviderId::OpenRouter => "openai/gpt-5-codex",
-                ProviderId::OpenAI => "gpt-5.3-codex",
+                ProviderId::OpenAI => "gpt-5.5",
                 _ => "MiniMax-M2.5",
             }
         }

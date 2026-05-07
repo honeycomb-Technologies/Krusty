@@ -269,7 +269,7 @@ impl App {
         let tools = self.services.cached_ai_tools.clone();
         let can_use_thinking = self.runtime.thinking_level.is_enabled();
         let thinking = can_use_thinking.then(ThinkingConfig::default);
-        let codex_reasoning_effort = if self.is_codex_thinking_mode() {
+        let codex_reasoning_effort = if self.is_openai_xhigh_thinking_mode() {
             match self.runtime.thinking_level {
                 ThinkingLevel::Off => None,
                 ThinkingLevel::Low => Some(CodexReasoningEffort::Low),

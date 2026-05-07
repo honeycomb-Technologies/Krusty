@@ -8,4 +8,4 @@ mod effort;
 
 pub use ai_client::AiClientConfig;
 pub use call_options::CallOptions;
-pub use effort::{AnthropicAdaptiveEffort, CodexReasoningEffort};
+pub use effort::{supports_openai_xhigh_reasoning, AnthropicAdaptiveEffort, CodexReasoningEffort};

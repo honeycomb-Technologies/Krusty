@@ -3,7 +3,13 @@ use crate::ai::providers::{ProviderConfig, ProviderId, ReasoningFormat};
 
 use super::types::OpenAiModel;
 
-const ALLOWED_OPENAI_MODELS: &[&str] = &["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"];
+const ALLOWED_OPENAI_MODELS: &[&str] = &[
+    "gpt-5.5",
+    "gpt-5.5-mini",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex",
+];
 
 pub(super) fn is_useful_model(id: &str) -> bool {
     let id = id.to_ascii_lowercase();
@@ -94,6 +100,8 @@ mod tests {
 
     #[test]
     fn keeps_curated_openai_models_only() {
+        assert!(is_useful_model("gpt-5.5"));
+        assert!(is_useful_model("gpt-5.5-mini"));
         assert!(is_useful_model("gpt-5.3-codex"));
         assert!(is_useful_model("gpt-5.4"));
         assert!(is_useful_model("gpt-5.4-mini"));
@@ -105,6 +113,7 @@ mod tests {
     #[test]
     fn builds_readable_display_name() {
         assert_eq!(display_name("gpt-5.3-codex"), "GPT 5.3 Codex");
+        assert_eq!(display_name("gpt-5.5-mini"), "GPT 5.5 Mini");
         assert_eq!(display_name("gpt-5.4-mini"), "GPT 5.4 Mini");
     }
 
