@@ -56,7 +56,7 @@ The package defines a `KrustyStorage` interface with three methods: `get`, `set`
 
 The session store (`createSessionStore`) is the largest store in the package. It manages the active chat session's full lifecycle: loading messages from the server, sending new messages, handling streaming responses via SSE, tracking tool call state (pending, running, success, error, awaiting approval), managing thinking content, handling message queuing during active streams, and polling for session state changes. It also manages presence heartbeats so the server knows which clients are watching a session, and it coordinates with the plan store to display task progress during plan mode.
 
-The store tracks mode (build or plan), permission mode (supervised or autonomous), thinking level, model selection, token counts, and error state. It also includes fast-mode toggling logic that swaps between paired models (for example, `claude-opus-4.6` and `claude-haiku-4.5`) for quick iteration versus deep reasoning.
+The store tracks mode (build or plan), permission mode (supervised or autonomous), thinking level, model selection, token counts, and error state. It also includes fast-mode toggling logic that preserves the selected model and requests the provider's faster service tier when that provider supports one.
 
 ### Sessions Store
 

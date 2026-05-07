@@ -34,6 +34,8 @@ pub struct CallOptions {
     pub codex_parallel_tool_calls: bool,
     /// Anthropic Opus 4.6 adaptive thinking effort
     pub anthropic_adaptive_effort: Option<AnthropicAdaptiveEffort>,
+    /// Request provider priority/fast service tier without changing the selected model.
+    pub fast_mode: bool,
 }
 
 impl Default for CallOptions {
@@ -53,6 +55,7 @@ impl Default for CallOptions {
             codex_reasoning_effort: None,
             codex_parallel_tool_calls: false,
             anthropic_adaptive_effort: None,
+            fast_mode: false,
         }
     }
 }
@@ -111,6 +114,19 @@ impl CallOptions {
         }
 
         options
+    }
+
+    /// Map Krusty's provider-independent fast-mode toggle to provider wire values.
+    ///
+    /// This intentionally does not mutate the model ID: `gpt-5.5` and
+    /// `gpt-5.5-mini` can both run in standard or fast service tiers.
+    pub fn service_tier_for_provider(&self, provider: ProviderId) -> Option<&'static str> {
+        match (provider, self.fast_mode) {
+            (ProviderId::OpenAI | ProviderId::OpenRouter, true) => Some("priority"),
+            (ProviderId::Anthropic, true) => Some("auto"),
+            (ProviderId::Anthropic, false) => Some("standard_only"),
+            _ => None,
+        }
     }
 }
 
@@ -171,5 +187,43 @@ mod tests {
 
         assert_eq!(canonical.reasoning_format, Some(ReasoningFormat::Anthropic));
         assert!(canonical.thinking.is_some());
+    }
+
+    #[test]
+    fn fast_mode_maps_to_provider_service_tiers_without_changing_models() {
+        let options = CallOptions {
+            fast_mode: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            options.service_tier_for_provider(ProviderId::OpenAI),
+            Some("priority")
+        );
+        assert_eq!(
+            options.service_tier_for_provider(ProviderId::Anthropic),
+            Some("auto")
+        );
+        assert_eq!(
+            options.service_tier_for_provider(ProviderId::OpenRouter),
+            Some("priority")
+        );
+        assert_eq!(options.service_tier_for_provider(ProviderId::MiniMax), None);
+        assert_eq!(options.service_tier_for_provider(ProviderId::ZAi), None);
+    }
+
+    #[test]
+    fn standard_mode_does_not_request_priority_tiers() {
+        let options = CallOptions::default();
+
+        assert_eq!(options.service_tier_for_provider(ProviderId::OpenAI), None);
+        assert_eq!(
+            options.service_tier_for_provider(ProviderId::Anthropic),
+            Some("standard_only")
+        );
+        assert_eq!(
+            options.service_tier_for_provider(ProviderId::OpenRouter),
+            None
+        );
     }
 }

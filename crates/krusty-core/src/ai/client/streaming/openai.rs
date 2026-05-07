@@ -112,6 +112,10 @@ impl AiClient {
             });
         }
 
+        if let Some(service_tier) = options.service_tier_for_provider(self.provider_id()) {
+            body["service_tier"] = serde_json::json!(service_tier);
+        }
+
         // Add tools — sorted deterministically for stable prefix ordering.
         // OpenAI uses automatic prefix caching; consistent tool order maximizes hits.
         if let Some(tools) = &options.tools {

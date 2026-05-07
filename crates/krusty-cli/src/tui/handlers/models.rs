@@ -2,8 +2,8 @@
 //!
 //! Async model fetching from dynamic providers such as OpenRouter and OpenAI.
 
-use crate::ai::format_detection::detect_api_format;
-use crate::ai::models::{resolve_model_metadata, ModelMetadata};
+use crate::ai::client::CallOptions;
+use crate::ai::models::ModelMetadata;
 use crate::ai::providers::ProviderId;
 use crate::tui::app::App;
 use crate::tui::utils::DynamicModelUpdate;
@@ -53,19 +53,19 @@ impl App {
         }
     }
 
-    pub fn toggle_fast_model(&mut self) -> Option<String> {
-        let next_model = crate::ai::providers::toggle_fast_model(&self.runtime.current_model)?;
-        let api_format = detect_api_format(self.runtime.active_provider, &next_model);
-        let metadata = self
-            .services
-            .model_registry
-            .try_get_model(&next_model)
-            .unwrap_or_else(|| {
-                resolve_model_metadata(self.runtime.active_provider, &next_model, api_format)
-            });
+    pub fn toggle_fast_mode(&mut self) -> Option<bool> {
+        let supports_fast_mode = CallOptions {
+            fast_mode: true,
+            ..Default::default()
+        }
+        .service_tier_for_provider(self.runtime.active_provider)
+        .is_some();
+        if !supports_fast_mode {
+            return None;
+        }
 
-        self.apply_model_selection(metadata, false);
-        Some(next_model)
+        self.runtime.fast_mode = !self.runtime.fast_mode;
+        Some(self.runtime.fast_mode)
     }
 
     /// Start async fetch of models for a dynamic provider.

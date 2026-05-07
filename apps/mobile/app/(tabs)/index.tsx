@@ -54,11 +54,7 @@ import type {
   PermissionMode,
   ThinkingLevel,
 } from "@krusty/state";
-import {
-  isFastModeModel,
-  supportsFastMode,
-  toggleFastModeModel,
-} from "@krusty/state";
+import { supportsFastMode } from "@krusty/state";
 
 import { ChatBootScreen } from "./chat-screen/BootScreen";
 import {
@@ -131,14 +127,14 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     useSessionStore((state) => state.thinkingLevel) ?? "medium";
   const permissionMode =
     useSessionStore((state) => state.permissionMode) ?? "supervised";
+  const fastModeStoreEnabled =
+    useSessionStore((state) => state.fastModeEnabled) ?? false;
   const mode = useSessionStore((state) => state.mode) ?? "build";
   const tokenCount = useSessionStore((state) => state.tokenCount) ?? 0;
   const error = useSessionStore((state) => state.error) ?? null;
   const isLoading = useSessionStore((state) => state.isLoading) ?? false;
   const workspaceDirectory =
     useWorkspaceStore((state) => state.directory) ?? null;
-  const fastModeSupported = supportsFastMode(model);
-  const fastModeEnabled = isFastModeModel(model);
 
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [defaultModelId, setDefaultModelId] = useState<string | null>(null);
@@ -154,6 +150,22 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const [researchEnabled, setResearchEnabled] = useState(false);
   const [composerReserveHeight, setComposerReserveHeight] =
     useState(CHAT_BAR_ZONE);
+  const selectedModelInfo = useMemo(
+    () => models.find((candidate) => candidate.id === model) ?? null,
+    [model, models],
+  );
+  const fastModeSupported = supportsFastMode(
+    model,
+    selectedModelInfo?.provider ?? null,
+  );
+  const fastModeEnabled = fastModeSupported && fastModeStoreEnabled;
+
+  useEffect(() => {
+    if (!model || !selectedModelInfo) {
+      return;
+    }
+    sessionStore.getState().setModel(model, selectedModelInfo.provider);
+  }, [model, selectedModelInfo, sessionStore]);
 
   const previousStreamingRef = useRef(false);
   const currentStreamSessionIdRef = useRef<string | null>(null);
@@ -305,7 +317,11 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       allowedProviders = result.configuredProviders;
     }
 
+    const existingModelInfo = catalog.find(
+      (candidate) => candidate.id === existingModel,
+    );
     if (isModelUsable(existingModel, catalog, allowedProviders)) {
+      sessionStore.getState().setModel(existingModel, existingModelInfo?.provider ?? null);
       return existingModel;
     }
 
@@ -314,7 +330,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       : null;
 
     if (selectedModel) {
-      sessionStore.getState().setModel(selectedModel);
+      const selectedModelInfo = catalog.find(
+        (candidate) => candidate.id === selectedModel,
+      );
+      sessionStore.getState().setModel(selectedModel, selectedModelInfo?.provider ?? null);
       await SecureStore.setItemAsync(SELECTED_MODEL_KEY, selectedModel);
       return selectedModel;
     }
@@ -514,6 +533,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     sessionsStore,
     workspace,
     sessions,
+    models,
     suppressCompletionRef,
   });
 

@@ -108,10 +108,12 @@ export interface SessionStoreState {
   thinkingContent: string;
   thinkingEnabled: boolean;
   thinkingLevel: ThinkingLevel;
+  fastModeEnabled: boolean;
   tokenCount: number;
   lastEventSequence: number | null;
   error: string | null;
   model: string | null;
+  modelProvider: string | null;
 
   sendMessage: (
     content: string,
@@ -124,9 +126,11 @@ export interface SessionStoreState {
   setTitle: (title: string) => void;
   updateTitle: (sessionId: string, title: string) => Promise<void>;
   setMode: (mode: SessionMode) => void;
-  setModel: (model: string | null) => void;
+  setModel: (model: string | null, provider?: string | null) => void;
   setThinkingLevel: (level: ThinkingLevel) => void;
   toggleThinking: () => void;
+  setFastModeEnabled: (enabled: boolean) => void;
+  toggleFastMode: () => void;
   togglePermissionMode: () => void;
   submitToolResult: (toolCallId: string, result: string) => Promise<void>;
   submitToolApproval: (toolCallId: string, approved: boolean) => Promise<void>;

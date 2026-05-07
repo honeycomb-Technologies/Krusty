@@ -1,9 +1,8 @@
 import { useCallback } from "react";
 import { Alert } from "react-native";
 
-import type { SessionResponse } from "@krusty/api";
+import type { ModelInfo, SessionResponse } from "@krusty/api";
 import type { Attachment as SessionAttachment } from "@krusty/state";
-import { toggleFastModeModel } from "@krusty/state";
 import type { useConnection } from "../../../hooks/useConnection";
 import type { useStores } from "../../../hooks/useStores";
 import * as Haptics from "../../../platform/haptics";
@@ -36,6 +35,7 @@ interface UseSessionActionsArgs {
   sessionsStore: SessionsStoreApi;
   workspace: WorkspaceStoreApi;
   sessions: SessionResponse[];
+  models: ModelInfo[];
   suppressCompletionRef: { current: boolean };
 }
 
@@ -52,6 +52,7 @@ export function useSessionActions({
   sessionsStore,
   workspace,
   sessions,
+  models,
   suppressCompletionRef,
 }: UseSessionActionsArgs) {
   const stopCurrentStream = useCallback(
@@ -79,7 +80,8 @@ export function useSessionActions({
         .initFromSession(session.id, directory, workspaceMode);
 
       if (currentModel) {
-        sessionStore.getState().setModel(currentModel);
+        const modelInfo = models.find((candidate) => candidate.id === currentModel);
+        sessionStore.getState().setModel(currentModel, modelInfo?.provider ?? null);
       }
       if (sessionStore.getState().thinkingLevel !== currentThinkingLevel) {
         sessionStore.getState().setThinkingLevel(currentThinkingLevel);
@@ -87,7 +89,7 @@ export function useSessionActions({
 
       await sessionsStore.getState().loadSessions();
     },
-    [sessionStore, sessionsStore, workspace],
+    [models, sessionStore, sessionsStore, workspace],
   );
 
   const createSessionForCurrentTab = useCallback(
@@ -343,22 +345,21 @@ export function useSessionActions({
 
   const handleModelSelect = useCallback(
     (modelId: string) => {
-      sessionStore.getState().setModel(modelId);
+      const modelInfo = models.find((candidate) => candidate.id === modelId);
+      sessionStore.getState().setModel(modelId, modelInfo?.provider ?? null);
       void SecureStore.setItemAsync(SELECTED_MODEL_KEY, modelId);
     },
-    [sessionStore],
+    [models, sessionStore],
   );
 
   const handleFastModeToggle = useCallback(() => {
     const currentModel = sessionStore.getState().model;
-    const nextModel = toggleFastModeModel(currentModel);
-    if (!nextModel || nextModel === currentModel) {
-      return;
+    if (currentModel) {
+      const modelInfo = models.find((candidate) => candidate.id === currentModel);
+      sessionStore.getState().setModel(currentModel, modelInfo?.provider ?? null);
     }
-
-    sessionStore.getState().setModel(nextModel);
-    void SecureStore.setItemAsync(SELECTED_MODEL_KEY, nextModel);
-  }, [sessionStore]);
+    sessionStore.getState().toggleFastMode();
+  }, [models, sessionStore]);
 
   const handleTabChange = useCallback(
     (index: number) => {

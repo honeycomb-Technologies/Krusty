@@ -103,6 +103,9 @@ pub struct ChatRequest {
     /// Permission mode for tool execution
     #[serde(default)]
     pub permission_mode: PermissionMode,
+    /// Request provider fast/priority service tier without changing the selected model
+    #[serde(default)]
+    pub fast_mode: bool,
     /// Enable research tools (agent, reports) in Chat sessions
     #[serde(default)]
     pub research_enabled: Option<bool>,
@@ -143,6 +146,30 @@ mod tests {
         }))
         .expect("request should deserialize");
         assert_eq!(req.thinking_enabled, ThinkingLevel::Off);
+    }
+
+    #[test]
+    fn chat_request_accepts_fast_mode_flag() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "message": "hello",
+            "fast_mode": true
+        }))
+        .expect("request should deserialize");
+
+        assert!(req.fast_mode);
+    }
+
+    #[test]
+    fn tool_result_request_accepts_fast_mode_flag() {
+        let req: super::ToolResultRequest = serde_json::from_value(json!({
+            "session_id": "session-1",
+            "tool_call_id": "tool-1",
+            "result": "ok",
+            "fast_mode": true
+        }))
+        .expect("request should deserialize");
+
+        assert!(req.fast_mode);
     }
 
     #[test]
@@ -293,6 +320,9 @@ pub struct ToolResultRequest {
     pub tool_call_id: String,
     /// Tool result content (JSON string)
     pub result: String,
+    /// Request provider fast/priority service tier while resuming after a tool result
+    #[serde(default)]
+    pub fast_mode: bool,
 }
 
 #[derive(Deserialize)]

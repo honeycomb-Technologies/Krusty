@@ -184,7 +184,7 @@ export function AccordionControls({
     if (!fastModeSupported) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     onFastModeToggle?.();
-    setFlashFast(fastModeEnabled ? 'Full' : 'Fast');
+    setFlashFast(fastModeEnabled ? 'Standard' : 'Fast');
     setTimeout(() => setFlashFast(null), 1200);
   };
 

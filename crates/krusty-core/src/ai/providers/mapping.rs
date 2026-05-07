@@ -89,28 +89,6 @@ pub fn translate_model_or_default(model_id: &str, from: ProviderId, to: Provider
     })
 }
 
-/// Toggle between standard and fast model variants when a known pair exists.
-pub fn toggle_fast_model(model_id: &str) -> Option<String> {
-    const FAST_MODEL_PAIRS: &[(&str, &str)] = &[
-        ("gpt-5.5", "gpt-5.5-mini"),
-        ("gpt-5.4", "gpt-5.4-mini"),
-        ("claude-opus-4-6", "claude-haiku-4-5-20251001"),
-        ("claude-opus-4.6", "claude-haiku-4.5"),
-        ("anthropic/claude-opus-4.6", "anthropic/claude-haiku-4.5"),
-    ];
-
-    for (standard, fast) in FAST_MODEL_PAIRS {
-        if model_id == *standard {
-            return Some((*fast).to_string());
-        }
-        if model_id == *fast {
-            return Some((*standard).to_string());
-        }
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,34 +126,5 @@ mod tests {
     fn test_translate_model_or_default() {
         let result = translate_model_or_default("GLM-5", ProviderId::ZAi, ProviderId::MiniMax);
         assert_eq!(result, "MiniMax-M2.5");
-    }
-
-    #[test]
-    fn test_toggle_fast_model() {
-        assert_eq!(
-            toggle_fast_model("gpt-5.5").as_deref(),
-            Some("gpt-5.5-mini")
-        );
-        assert_eq!(
-            toggle_fast_model("gpt-5.5-mini").as_deref(),
-            Some("gpt-5.5")
-        );
-        assert_eq!(
-            toggle_fast_model("gpt-5.4").as_deref(),
-            Some("gpt-5.4-mini")
-        );
-        assert_eq!(
-            toggle_fast_model("gpt-5.4-mini").as_deref(),
-            Some("gpt-5.4")
-        );
-        assert_eq!(
-            toggle_fast_model("claude-opus-4-6").as_deref(),
-            Some("claude-haiku-4-5-20251001")
-        );
-        assert_eq!(
-            toggle_fast_model("anthropic/claude-opus-4.6").as_deref(),
-            Some("anthropic/claude-haiku-4.5")
-        );
-        assert!(toggle_fast_model("gpt-5.3-codex").is_none());
     }
 }

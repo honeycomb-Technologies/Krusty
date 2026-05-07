@@ -308,6 +308,7 @@ impl App {
             codex_reasoning_effort,
             codex_parallel_tool_calls: true,
             anthropic_adaptive_effort,
+            fast_mode: self.runtime.fast_mode,
             ..Default::default()
         };
 

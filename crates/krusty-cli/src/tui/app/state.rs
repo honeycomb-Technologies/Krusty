@@ -163,6 +163,8 @@ pub struct AppRuntime {
     pub cancellation: AgentCancellation,
     /// Extended thinking level (Tab cycles levels for Codex models)
     pub thinking_level: ThinkingLevel,
+    /// Request provider fast/priority service tier without changing the selected model
+    pub fast_mode: bool,
     /// Clipboard images pending resolution
     pub pending_clipboard_images: std::collections::HashMap<String, (usize, usize, Vec<u8>)>,
     /// Block manager (owns all block types)
@@ -226,6 +228,7 @@ impl AppRuntime {
             agent_config: AgentConfig::default(),
             cancellation: AgentCancellation::new(),
             thinking_level: ThinkingLevel::Off,
+            fast_mode: false,
             pending_clipboard_images: std::collections::HashMap::new(),
             blocks: BlockManager::new(),
             tool_results: ToolResultCache::new(),

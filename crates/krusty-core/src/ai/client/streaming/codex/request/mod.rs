@@ -150,6 +150,10 @@ impl AiClient {
             body["prompt_cache_key"] = serde_json::json!(cache_key);
         }
 
+        if let Some(service_tier) = options.service_tier_for_provider(self.provider_id()) {
+            body["service_tier"] = serde_json::json!(service_tier);
+        }
+
         if thinking_enabled {
             body["reasoning"] = serde_json::json!({
                 "effort": reasoning_effort,
@@ -184,5 +188,49 @@ impl AiClient {
             self.config().api_format,
             &self.config().model,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ai::client::{AiClient, AiClientConfig, CallOptions};
+    use crate::ai::format::openai::OpenAIFormat;
+    use crate::ai::models::ApiFormat;
+    use crate::ai::providers::ProviderId;
+    use crate::ai::types::{Content, ModelMessage, Role};
+
+    fn openai_responses_client() -> AiClient {
+        AiClient::new(
+            AiClientConfig {
+                model: "gpt-5.5".to_string(),
+                provider_id: ProviderId::OpenAI,
+                api_format: ApiFormat::OpenAIResponses,
+                base_url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
+                ..Default::default()
+            },
+            "test-key".to_string(),
+        )
+    }
+
+    #[test]
+    fn chatgpt_codex_streaming_body_carries_fast_mode_service_tier() {
+        let client = openai_responses_client();
+        let format_handler = OpenAIFormat::new(ApiFormat::OpenAIResponses);
+        let options = CallOptions {
+            fast_mode: true,
+            ..Default::default()
+        };
+        let messages = vec![ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "hello".to_string(),
+            }],
+        }];
+
+        let body =
+            client.build_chatgpt_codex_body(&messages, "system", 4096, &options, &format_handler);
+
+        assert_eq!(body["model"], "gpt-5.5");
+        assert_eq!(body["service_tier"], "priority");
     }
 }

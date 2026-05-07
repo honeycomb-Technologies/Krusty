@@ -252,7 +252,7 @@ pub fn get_all_commands() -> Vec<CommandSuggestion> {
         CommandSuggestion {
             primary: "/fast",
             aliases: vec![],
-            description: "Toggle fast/full model variant",
+            description: "Toggle fast service tier",
         },
         CommandSuggestion {
             primary: "/auth",

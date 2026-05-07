@@ -111,6 +111,7 @@ export interface ChatRequest {
   research_enabled?: boolean;
   model?: string;
   thinking_enabled?: boolean | string;
+  fast_mode?: boolean;
   permission_mode?: PermissionMode;
   mode?: SessionMode;
 }

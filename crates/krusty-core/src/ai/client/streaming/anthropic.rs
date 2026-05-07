@@ -192,6 +192,9 @@ impl AiClient {
 
         // Add provider-specific parameters
         self.add_provider_params(&mut body, reasoning_enabled);
+        if let Some(service_tier) = options.service_tier_for_provider(self.provider_id()) {
+            body["service_tier"] = serde_json::json!(service_tier);
+        }
         let body = apply_request_body_transform(
             body,
             self.provider_id(),
