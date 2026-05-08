@@ -9,19 +9,26 @@ use krusty_core::ai::client::{AiClient, CallOptions};
 use krusty_core::ai::providers::ProviderId;
 use krusty_core::ai::types::ModelMessage;
 use krusty_core::plan::PlanManager;
-use krusty_core::storage::{Database, MakoRuntimeStateStore, SessionType, WorkMode};
+use krusty_core::storage::{
+    Database, MakoRuntimeStateStore, SessionInfo, SessionType, WorkMode, WorkspaceMode,
+};
 use krusty_core::SessionManager;
 
-use super::super::session_access::{current_user_id, load_owned_session, request_workspace_scope};
+use super::super::session_access::{
+    current_user_id, ensure_owned_session, load_owned_session, request_workspace_scope,
+};
 use super::tools::{apply_thinking_config, chat_system_prompt, filter_tools_for_session_type};
 use super::{SESSION_LOCK_MAX_AGE, SESSION_LOCK_MAX_ENTRIES};
-use crate::ai_bootstrap::resolve_preferred_model;
+use crate::ai_bootstrap::{persist_current_model_selection, resolve_preferred_model};
 use crate::auth::CurrentUser;
 use crate::error::AppError;
-use crate::types::ThinkingLevel;
+use crate::types::{ChatRequest, ThinkingLevel};
 use crate::utils::messages::parse_stored_model_messages;
 use crate::utils::text::trimmed_nonempty;
-use crate::utils::workspace::{resolve_optional_workspace_path, resolve_session_working_dir};
+use crate::utils::workspace::{
+    normalize_resolved_requested_workspace, resolve_optional_workspace_path,
+    resolve_session_working_dir, WorkspaceNormalizationPolicy,
+};
 use crate::AppState;
 
 pub(super) struct ChatSessionContext {
@@ -71,6 +78,216 @@ impl<'a> RequestedModel<'a> {
             Self::Set(model) => Some(Some(model)),
         }
     }
+}
+
+pub(super) struct PreparedChatRouteSession {
+    pub(super) session_id: String,
+    pub(super) is_first_message: bool,
+    pub(super) pending_model_update: Option<Option<String>>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ChatContinuationContract {
+    pub(super) session_id: String,
+    pub(super) is_first_message: bool,
+    pub(super) working_dir: PathBuf,
+    pub(super) project_dir: Option<PathBuf>,
+    pub(super) workspace_mode: WorkspaceMode,
+    pub(super) session_type: SessionType,
+    pub(super) work_mode: WorkMode,
+    pub(super) model: Option<String>,
+    pub(super) target_branch: Option<String>,
+    pub(super) fast_mode: bool,
+    pub(super) user_id: Option<String>,
+}
+
+pub(super) async fn prepare_chat_route_session(
+    state: &AppState,
+    user: Option<&CurrentUser>,
+    req: &ChatRequest,
+    requested_model: RequestedModel<'_>,
+    requested_session_type: SessionType,
+    requires_vision: bool,
+) -> Result<PreparedChatRouteSession, AppError> {
+    let user_id = current_user_id(user).map(ToOwned::to_owned);
+    let workspace_scope = request_workspace_scope(state, user);
+
+    match req.session_id.as_deref() {
+        Some(id) => {
+            let db = Database::new(&state.db_path)?;
+            let sm = SessionManager::new(db);
+            ensure_owned_session(&sm, id, user)?;
+            let messages = sm.load_session_messages(id)?;
+            Ok(PreparedChatRouteSession {
+                session_id: id.to_string(),
+                is_first_message: messages.is_empty(),
+                pending_model_update: requested_model
+                    .persisted()
+                    .map(|model| model.map(ToOwned::to_owned)),
+            })
+        }
+        None => {
+            let db = Database::new(&state.db_path)?;
+            let sm = SessionManager::new(db);
+            let title = SessionManager::generate_title_from_content(&req.message);
+            let default_mode_without_paths = if requested_session_type == SessionType::Chat {
+                WorkspaceMode::Neutral
+            } else {
+                WorkspaceMode::Selected
+            };
+            let default_workspace = workspace_scope.base_dir.to_string_lossy().to_string();
+            let workspace = normalize_resolved_requested_workspace(
+                req.working_dir.as_deref(),
+                req.project_dir.as_deref(),
+                req.workspace_mode,
+                WorkspaceNormalizationPolicy {
+                    default_mode_without_paths,
+                    selected_fallback_dir: Some(default_workspace.as_str()),
+                },
+                &workspace_scope.base_dir,
+                &workspace_scope.allowed_root,
+            )?;
+            let preferred_model =
+                resolve_preferred_model(state.db_path.as_ref().as_path(), user_id.as_deref());
+            let initial_model = select_model_for_chat_request(
+                state,
+                requested_model,
+                preferred_model
+                    .as_deref()
+                    .filter(|_| matches!(requested_model, RequestedModel::Unspecified)),
+                requires_vision,
+            )
+            .await?;
+            if initial_model.is_none() && preferred_model.is_none() {
+                return Err(AppError::BadRequest(
+                    "No model selected. Choose a model and try again.".to_string(),
+                ));
+            }
+            let session_id = sm.create_session_for_user_with_config(
+                &title,
+                initial_model.as_deref(),
+                workspace.working_dir.as_deref(),
+                workspace.project_dir.as_deref(),
+                workspace.workspace_mode,
+                user_id.as_deref(),
+                None,
+                requested_session_type,
+            )?;
+            let should_persist_current_model = match requested_model {
+                RequestedModel::Set(_) => true,
+                RequestedModel::Unspecified => {
+                    preferred_model.as_deref() == initial_model.as_deref()
+                }
+                RequestedModel::Clear => false,
+            };
+            if should_persist_current_model {
+                if let Some(model) = initial_model.as_deref() {
+                    persist_current_model_selection(
+                        &state.model_registry,
+                        state.db_path.as_ref().as_path(),
+                        user_id.as_deref(),
+                        model,
+                    )
+                    .await?;
+                }
+            }
+
+            Ok(PreparedChatRouteSession {
+                session_id,
+                is_first_message: true,
+                pending_model_update: None,
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn build_chat_continuation_contract(
+    session: &SessionInfo,
+    working_dir: PathBuf,
+    project_dir: Option<PathBuf>,
+    work_mode: WorkMode,
+    fast_mode: bool,
+    is_first_message: bool,
+) -> ChatContinuationContract {
+    ChatContinuationContract {
+        session_id: session.id.clone(),
+        is_first_message,
+        working_dir,
+        project_dir,
+        workspace_mode: session.workspace_mode,
+        session_type: session.session_type,
+        work_mode,
+        model: session.model.clone(),
+        target_branch: session.target_branch.clone(),
+        fast_mode,
+        user_id: session.user_id.clone(),
+    }
+}
+
+#[cfg(test)]
+pub(super) async fn load_chat_continuation_contract(
+    state: &AppState,
+    user: Option<&CurrentUser>,
+    prepared: &PreparedChatRouteSession,
+    fast_mode: bool,
+) -> Result<ChatContinuationContract, AppError> {
+    let workspace_scope = request_workspace_scope(state, user);
+    let db = Database::new(&state.db_path)?;
+    let session_manager = SessionManager::new(db);
+    let session = load_owned_session(&session_manager, &prepared.session_id, user)?;
+    let working_dir = resolve_session_working_dir(
+        session.working_dir.as_deref(),
+        &workspace_scope.base_dir,
+        &workspace_scope.allowed_root,
+    )?;
+    let project_dir = resolve_optional_workspace_path(
+        session.project_dir.as_deref(),
+        &workspace_scope.base_dir,
+        &workspace_scope.allowed_root,
+    )?
+    .map(PathBuf::from);
+    let work_mode = effective_session_work_mode(state, &session);
+
+    Ok(build_chat_continuation_contract(
+        &session,
+        working_dir,
+        project_dir,
+        work_mode,
+        fast_mode,
+        prepared.is_first_message,
+    ))
+}
+
+#[cfg(test)]
+pub(super) async fn prepare_chat_contract_for_test(
+    state: &AppState,
+    user: Option<CurrentUser>,
+    req: ChatRequest,
+) -> Result<ChatContinuationContract, AppError> {
+    let requested_model = RequestedModel::from_request(req.model.as_deref());
+    let requested_session_type = req.session_type.unwrap_or(SessionType::Code);
+    let requires_vision = false;
+    let prepared = prepare_chat_route_session(
+        state,
+        user.as_ref(),
+        &req,
+        requested_model,
+        requested_session_type,
+        requires_vision,
+    )
+    .await?;
+
+    load_chat_continuation_contract(state, user.as_ref(), &prepared, req.fast_mode).await
+}
+
+fn effective_session_work_mode(state: &AppState, session: &SessionInfo) -> WorkMode {
+    PlanManager::new((*state.db_path).clone())
+        .ok()
+        .and_then(|pm| pm.get_lifecycle_state(&session.id, session.work_mode).ok())
+        .map(|state| state.effective_work_mode)
+        .unwrap_or(session.work_mode)
 }
 
 async fn model_supports_vision(state: &AppState, model_id: &str) -> bool {
@@ -262,11 +479,7 @@ pub(super) async fn setup_chat_session(
         apply_thinking_config(&ai_client, thinking_level, &mut options);
     }
 
-    let effective_work_mode = PlanManager::new((*state.db_path).clone())
-        .ok()
-        .and_then(|pm| pm.get_lifecycle_state(session_id, session.work_mode).ok())
-        .map(|state| state.effective_work_mode)
-        .unwrap_or(session.work_mode);
+    let effective_work_mode = effective_session_work_mode(state, &session);
     let mako_runtime = if session.session_type == SessionType::Mako {
         MakoRuntimeStateStore::new(Database::new(&state.db_path)?).get_state(session_id)?
     } else {

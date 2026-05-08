@@ -7,6 +7,7 @@ use axum::Json;
 use chrono::Utc;
 use tokio::sync::{Mutex, RwLock};
 
+use krusty_core::agent::loop_events::{LoopEvent, LoopStopReason};
 use krusty_core::agent::{AgentCancellation, UserHookManager};
 use krusty_core::ai::models::create_model_registry;
 use krusty_core::mcp::McpManager;
@@ -14,7 +15,10 @@ use krusty_core::plan::{PlanFile, PlanManager};
 use krusty_core::process::ProcessRegistry;
 use krusty_core::skills::SkillsManager;
 use krusty_core::storage::credentials::CredentialStore;
-use krusty_core::storage::{Database, SessionType, WorkspaceMode};
+use krusty_core::storage::{
+    Database, PartialAssistantState, RecoveryDecision, RecoveryStatus, RecoveryToolCall,
+    RuntimeTraceEvent, RuntimeTraceStore, SessionRecoveryState, SessionType, WorkspaceMode,
+};
 use krusty_core::tools::registry::ToolRegistry;
 
 use super::crud::{GetSessionQuery, ListSessionsQuery};
@@ -83,6 +87,65 @@ fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
         user_id: Some(user_id.to_string()),
         home_dir: Some(home_dir.to_path_buf()),
     })
+}
+
+#[tokio::test]
+async fn session_create_persists_full_continuation_contract() {
+    let (state, temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let user_root = temp_dir.join("alice-home");
+    let project_parent = user_root.join("projects");
+    std::fs::create_dir_all(&project_parent).expect("project parent should exist");
+    let project_dir = project_parent.join("continuation-contract");
+
+    let (_, Json(created)) = create_session(
+        State(state.clone()),
+        Some(current_user("alice", &user_root)),
+        Json(CreateSessionRequest {
+            title: Some("Continuation Contract".to_string()),
+            model: Some("openai/gpt-5.5".to_string()),
+            project_dir: Some(project_dir.to_string_lossy().to_string()),
+            working_dir: None,
+            workspace_mode: Some(WorkspaceMode::Created),
+            target_branch: Some("feature/continue".to_string()),
+            session_type: Some(SessionType::Code),
+        }),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("session creation should succeed"));
+
+    let expected_project = project_dir.to_string_lossy().to_string();
+    assert_eq!(created.session_type, SessionType::Code);
+    assert_eq!(created.workspace_mode, WorkspaceMode::Created);
+    assert_eq!(
+        created.working_dir.as_deref(),
+        Some(expected_project.as_str())
+    );
+    assert_eq!(
+        created.project_dir.as_deref(),
+        Some(expected_project.as_str())
+    );
+    assert_eq!(created.target_branch.as_deref(), Some("feature/continue"));
+    assert_eq!(created.model.as_deref(), Some("openai/gpt-5.5"));
+
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let persisted = session_manager
+        .get_session(&created.id)
+        .expect("session lookup should succeed")
+        .expect("session should exist");
+    assert_eq!(persisted.session_type, SessionType::Code);
+    assert_eq!(persisted.workspace_mode, WorkspaceMode::Created);
+    assert_eq!(
+        persisted.working_dir.as_deref(),
+        Some(expected_project.as_str())
+    );
+    assert_eq!(
+        persisted.project_dir.as_deref(),
+        Some(expected_project.as_str())
+    );
+    assert_eq!(persisted.target_branch.as_deref(), Some("feature/continue"));
+    assert_eq!(persisted.model.as_deref(), Some("openai/gpt-5.5"));
 }
 
 #[tokio::test]
@@ -354,6 +417,82 @@ async fn presence_heartbeat_tracks_active_controller_for_owned_session() {
     assert_eq!(response.clients.len(), 1);
     assert_eq!(response.clients[0].client_id, "client-1");
     assert_eq!(response.clients[0].last_event_sequence, Some(12));
+}
+
+#[tokio::test]
+async fn session_state_exposes_recovery_live_partial_and_trace_sequence() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user_with_config(
+            "Recoverable Session",
+            Some("openai/gpt-5.5"),
+            None,
+            None,
+            WorkspaceMode::Neutral,
+            Some("alice"),
+            None,
+            SessionType::Code,
+        )
+        .expect("session creation should succeed");
+    session_manager
+        .set_agent_state(&session_id, "streaming")
+        .expect("agent state should update");
+
+    let recovery = SessionRecoveryState::new(
+        RecoveryStatus::Streaming,
+        Some(LoopStopReason::StreamIdleTimeout),
+        None,
+        PartialAssistantState {
+            text: "partial answer".to_string(),
+            thinking: "working notes".to_string(),
+            tool_calls: vec![RecoveryToolCall {
+                id: "tool-1".to_string(),
+                name: "edit".to_string(),
+            }],
+        },
+        RecoveryDecision::Resumable {
+            latest_user_objective: "finish the contract harness".to_string(),
+        },
+    );
+    session_manager
+        .update_recovery_state(&session_id, &recovery)
+        .expect("recovery state should persist");
+
+    let trace_event = RuntimeTraceEvent::from_loop_event(
+        "run-1",
+        42,
+        1,
+        &LoopEvent::TextDelta {
+            delta: "partial answer".to_string(),
+        },
+    );
+    RuntimeTraceStore::new(session_manager.db())
+        .append_event(&session_id, &trace_event)
+        .expect("runtime trace should persist");
+
+    let Json(response) = get_session_state(
+        State(state),
+        Some(current_user("alice", std::path::Path::new("/tmp"))),
+        Path(session_id.clone()),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("session state should load"));
+
+    assert_eq!(response.id, session_id);
+    assert_eq!(response.agent_state, "streaming");
+    assert_eq!(response.recovery.as_ref(), Some(&recovery));
+    assert_eq!(
+        response
+            .live_partial_assistant
+            .as_ref()
+            .map(|partial| partial.text.as_str()),
+        Some("partial answer")
+    );
+    assert_eq!(response.last_event_sequence, Some(42));
 }
 
 #[tokio::test]
