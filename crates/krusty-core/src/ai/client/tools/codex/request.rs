@@ -161,10 +161,15 @@ impl AiClient {
                 "effort": options
                     .codex_reasoning_effort
                     .unwrap_or(CodexReasoningEffort::High)
+                    .normalized_for_model(model)
                     .as_str(),
                 "summary": "auto"
             });
             body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
+        }
+
+        if let Some(service_tier) = options.service_tier_for_provider(self.provider_id()) {
+            body["service_tier"] = serde_json::json!(service_tier);
         }
 
         if codex_tools.is_empty() {
@@ -175,6 +180,54 @@ impl AiClient {
         }
 
         body
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ai::client::{AiClient, AiClientConfig, CallOptions};
+    use crate::ai::models::ApiFormat;
+    use crate::ai::providers::ProviderId;
+
+    fn openai_responses_client() -> AiClient {
+        AiClient::new(
+            AiClientConfig {
+                model: "gpt-5.5".to_string(),
+                provider_id: ProviderId::OpenAI,
+                api_format: ApiFormat::OpenAIResponses,
+                base_url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
+                ..Default::default()
+            },
+            "test-key".to_string(),
+        )
+    }
+
+    #[test]
+    fn chatgpt_codex_tool_body_carries_fast_mode_service_tier() {
+        let client = openai_responses_client();
+        let options = CallOptions {
+            fast_mode: true,
+            system_prompt: Some("system".to_string()),
+            ..Default::default()
+        };
+
+        let body = client.build_codex_tool_call_body(
+            "gpt-5.5",
+            &options,
+            vec![serde_json::json!({
+                "role": "user",
+                "content": [{"type": "text", "text": "Use a tool"}]
+            })],
+            vec![serde_json::json!({
+                "name": "read",
+                "description": "Read a file",
+                "input_schema": {"type": "object"}
+            })],
+            false,
+        );
+
+        assert_eq!(body["model"], "gpt-5.5");
+        assert_eq!(body["service_tier"], "priority");
     }
 }
 

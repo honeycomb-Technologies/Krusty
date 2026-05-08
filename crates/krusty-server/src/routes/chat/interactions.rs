@@ -36,6 +36,7 @@ pub(super) async fn tool_result(
         &req.session_id,
         RequestedModel::Unspecified,
         ThinkingLevel::Off,
+        req.fast_mode,
         false,
         false,
     )

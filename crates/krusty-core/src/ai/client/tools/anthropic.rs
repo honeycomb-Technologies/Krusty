@@ -73,6 +73,10 @@ impl AiClient {
             }
         }
 
+        if let Some(service_tier) = options.service_tier_for_provider(self.provider_id()) {
+            body["service_tier"] = serde_json::json!(service_tier);
+        }
+
         let body =
             apply_request_body_transform(body, self.provider_id(), self.config().api_format, model);
         let request = self.build_request(&self.config().api_url());

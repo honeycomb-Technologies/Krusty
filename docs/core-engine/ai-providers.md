@@ -121,7 +121,7 @@ More nuanced detection happens in `AiClientConfig::for_openai_with_auth_detectio
 
 The provider registry includes a model translation system. `ModelFamily` defines canonical model families (Claude Opus 4.6, Claude Sonnet 4, etc.) and `MODEL_MAPPINGS` maps them to provider-specific IDs. `translate_model_id()` converts between providers -- for example, `claude-opus-4-6` on Anthropic becomes `anthropic/claude-opus-4.6` on OpenRouter. `translate_model_or_default()` falls back to the target provider's default model when no mapping exists.
 
-`toggle_fast_model()` provides a quick toggle between standard and fast variants: Claude Opus 4.6 pairs with Haiku 4.5, GPT-5.4 pairs with GPT-5.4 Mini. This powers the fast mode toggle in the TUI.
+Krusty keeps model identity separate from request speed. Mini/Haiku models are explicit model selections, while the TUI/mobile fast toggle requests a provider service tier through `CallOptions::service_tier_for_provider()` without mutating the selected model ID.
 
 ## Dynamic Model Discovery
 

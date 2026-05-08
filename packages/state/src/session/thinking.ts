@@ -1,17 +1,5 @@
 import type { ThinkingLevel } from './types';
 
-interface FastModelPair {
-  standard: string;
-  fast: string;
-}
-
-const FAST_MODEL_PAIRS: FastModelPair[] = [
-  { standard: 'gpt-5.4', fast: 'gpt-5.4-mini' },
-  { standard: 'claude-opus-4-6', fast: 'claude-haiku-4-5-20251001' },
-  { standard: 'claude-opus-4.6', fast: 'claude-haiku-4.5' },
-  { standard: 'anthropic/claude-opus-4.6', fast: 'anthropic/claude-haiku-4.5' },
-];
-
 export function isThinkingEnabled(level: ThinkingLevel): boolean {
   return level !== 'off';
 }
@@ -21,13 +9,17 @@ export function cycleThinkingLevel(
   model: string | null,
 ): ThinkingLevel {
   const modelLower = (model ?? '').toLowerCase();
-  const isCodex = modelLower.includes('codex');
-  const isOpus =
-    modelLower.includes('opus-4-6')
+  const supportsExtendedCycle =
+    modelLower.includes('codex')
+    || modelLower.startsWith('gpt-5.4')
+    || modelLower.startsWith('openai/gpt-5.4')
+    || modelLower.startsWith('gpt-5.5')
+    || modelLower.startsWith('openai/gpt-5.5')
+    || modelLower.includes('opus-4-6')
     || modelLower.includes('opus-4.6')
     || modelLower.includes('opus 4.6');
 
-  if (isCodex || isOpus) {
+  if (supportsExtendedCycle) {
     switch (current) {
       case 'off':
         return 'low';
@@ -67,24 +59,26 @@ export function thinkingLevelLabel(level: ThinkingLevel): string {
   return level;
 }
 
-function findFastModelPair(model: string | null): FastModelPair | undefined {
-  if (!model) return undefined;
-  return FAST_MODEL_PAIRS.find(
-    (pair) => pair.standard === model || pair.fast === model,
+export function supportsFastMode(
+  model: string | null,
+  provider?: string | null,
+): boolean {
+  const providerLower = (provider ?? '').trim().toLowerCase();
+  if (providerLower) {
+    return (
+      providerLower === 'openai'
+      || providerLower === 'anthropic'
+      || providerLower === 'openrouter'
+    );
+  }
+
+  const modelLower = (model ?? '').trim().toLowerCase();
+  if (!modelLower) return false;
+
+  return (
+    modelLower.startsWith('gpt-')
+    || modelLower.startsWith('claude-')
+    || modelLower.startsWith('openai/')
+    || modelLower.startsWith('anthropic/')
   );
-}
-
-export function supportsFastMode(model: string | null): boolean {
-  return findFastModelPair(model) !== undefined;
-}
-
-export function isFastModeModel(model: string | null): boolean {
-  const pair = findFastModelPair(model);
-  return pair !== undefined && pair.fast === model;
-}
-
-export function toggleFastModeModel(model: string | null): string | null {
-  const pair = findFastModelPair(model);
-  if (!pair || !model) return model;
-  return pair.fast === model ? pair.standard : pair.fast;
 }

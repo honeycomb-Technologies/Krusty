@@ -368,10 +368,10 @@ export class KrustyClient {
     });
   }
 
-  async submitToolResult(sessionId: string, toolCallId: string, result: string): Promise<void> {
+  async submitToolResult(sessionId: string, toolCallId: string, result: string, fastMode = false): Promise<void> {
     await this.request('/chat/tool-result', {
       method: 'POST',
-      body: JSON.stringify({ session_id: sessionId, tool_call_id: toolCallId, result }),
+      body: JSON.stringify({ session_id: sessionId, tool_call_id: toolCallId, result, fast_mode: fastMode }),
     });
   }
 
@@ -624,7 +624,7 @@ export class KrustyClient {
   }
 
   async streamToolResult(
-    request: { session_id: string; tool_call_id: string; result: string },
+    request: { session_id: string; tool_call_id: string; result: string; fast_mode?: boolean },
     callbacks: StreamCallbacks,
     signal?: AbortSignal,
   ): Promise<void> {

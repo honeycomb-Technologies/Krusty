@@ -231,7 +231,7 @@ impl AgentTool {
         use crate::ai::providers::ProviderId;
         match client.provider_id() {
             ProviderId::Anthropic => "claude-haiku-4-5-20251001".to_string(),
-            ProviderId::OpenAI => "gpt-5.4-mini".to_string(),
+            ProviderId::OpenAI => "gpt-5.5-mini".to_string(),
             _ => self.resolve_model(ctx, client),
         }
     }

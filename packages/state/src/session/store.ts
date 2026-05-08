@@ -48,6 +48,7 @@ import type {
 import {
   cycleThinkingLevel,
   isThinkingEnabled,
+  supportsFastMode,
   thinkingLevelToApiValue,
 } from './thinking';
 
@@ -119,6 +120,8 @@ export function createSessionStore(
     | "setModel"
     | "setThinkingLevel"
     | "toggleThinking"
+    | "setFastModeEnabled"
+    | "toggleFastMode"
     | "togglePermissionMode"
     | "submitToolResult"
     | "submitToolApproval"
@@ -141,10 +144,12 @@ export function createSessionStore(
     thinkingContent: "",
     thinkingEnabled: true,
     thinkingLevel: "medium",
+    fastModeEnabled: false,
     tokenCount: 0,
     lastEventSequence: null,
     error: null,
     model: null,
+    modelProvider: null,
   };
 
 
@@ -268,6 +273,7 @@ export function createSessionStore(
             workspace_mode: state.sessionId ? undefined : ws.mode,
             research_enabled: researchEnabled || undefined,
             model: state.model ?? undefined,
+            fast_mode: state.fastModeEnabled || undefined,
             thinking_enabled: thinkingLevelToApiValue(state.thinkingLevel),
             permission_mode: state.permissionMode,
             mode: state.mode,
@@ -314,24 +320,37 @@ export function createSessionStore(
         const mode = serverState?.mode ?? data.session.mode ?? "build";
         const previousModel = get().model;
         const sessionModel = data.session.model?.trim() || null;
-        set((s) => ({
-          ...s,
-          sessionId: data.session.id,
-          title: data.session.title || "Untitled",
-          mode,
-          model: sessionModel ?? s.model,
-          tokenCount: data.session.token_count ?? 0,
-          messages: applyLivePartialAssistant(
-            applyRecoveryParity(
-              processedMessages,
-              serverState?.recovery,
+        set((s) => {
+          const nextModelProvider = sessionModel
+            ? sessionModel === s.model
+              ? s.modelProvider
+              : null
+            : s.modelProvider;
+          return {
+            ...s,
+            sessionId: data.session.id,
+            title: data.session.title || "Untitled",
+            mode,
+            model: sessionModel ?? s.model,
+            modelProvider: nextModelProvider,
+            fastModeEnabled: sessionModel
+              ? nextModelProvider
+                ? s.fastModeEnabled && supportsFastMode(sessionModel, nextModelProvider)
+                : s.fastModeEnabled
+              : s.fastModeEnabled,
+            tokenCount: data.session.token_count ?? 0,
+            messages: applyLivePartialAssistant(
+              applyRecoveryParity(
+                processedMessages,
+                serverState?.recovery,
+                serverState?.agent_state ?? "idle",
+              ),
+              serverState?.live_partial_assistant,
               serverState?.agent_state ?? "idle",
             ),
-            serverState?.live_partial_assistant,
-            serverState?.agent_state ?? "idle",
-          ),
-          isLoading: false,
-        }));
+            isLoading: false,
+          };
+        });
         planStore.getState().setVisible(mode === "plan");
 
         workspace
@@ -367,8 +386,10 @@ export function createSessionStore(
         ...initialState,
         permissionMode: current.permissionMode,
         model: current.model,
+        modelProvider: current.modelProvider,
         thinkingLevel: current.thinkingLevel,
         thinkingEnabled: current.thinkingEnabled,
+        fastModeEnabled: current.fastModeEnabled,
       });
       workspace.getState().clear();
     },
@@ -382,8 +403,10 @@ export function createSessionStore(
         ...initialState,
         permissionMode: current.permissionMode,
         model: current.model,
+        modelProvider: current.modelProvider,
         thinkingLevel: current.thinkingLevel,
         thinkingEnabled: current.thinkingEnabled,
+        fastModeEnabled: current.fastModeEnabled,
         sessionId,
         title,
       });
@@ -418,12 +441,20 @@ export function createSessionStore(
 
     // -- setModel -----------------------------------------------------------
 
-    setModel(model: string | null) {
-      if (get().model === model) {
+    setModel(model: string | null, provider?: string | null) {
+      const current = get();
+      const nextProvider = provider ?? (model === current.model ? current.modelProvider : null);
+      if (current.model === model && current.modelProvider === nextProvider) {
         return;
       }
 
-      set({ model });
+      set((s) => ({
+        model,
+        modelProvider: nextProvider,
+        fastModeEnabled: model
+          ? s.fastModeEnabled && supportsFastMode(model, nextProvider)
+          : false,
+      }));
       void persistCurrentSelectedModel(model);
       void persistModel(get, model);
     },
@@ -446,6 +477,25 @@ export function createSessionStore(
           thinkingEnabled: isThinkingEnabled(newLevel),
           thinkingLevel: newLevel,
         };
+      });
+    },
+
+    // -- setFastModeEnabled -------------------------------------------------
+
+    setFastModeEnabled(enabled: boolean) {
+      set((s) => ({
+        fastModeEnabled: enabled && supportsFastMode(s.model, s.modelProvider),
+      }));
+    },
+
+    // -- toggleFastMode -----------------------------------------------------
+
+    toggleFastMode() {
+      set((s) => {
+        if (!supportsFastMode(s.model, s.modelProvider)) {
+          return { fastModeEnabled: false };
+        }
+        return { fastModeEnabled: !s.fastModeEnabled };
       });
     },
 
@@ -509,6 +559,7 @@ export function createSessionStore(
             session_id: state.sessionId,
             tool_call_id: toolCallId,
             result,
+            fast_mode: state.fastModeEnabled,
           },
           createStreamCallbacks(ref, set, get, {
             planStore,

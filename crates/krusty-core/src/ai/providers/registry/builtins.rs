@@ -157,10 +157,14 @@ fn openai_provider() -> ProviderConfig {
     ProviderConfig {
         id: ProviderId::OpenAI,
         name: "OpenAI".to_string(),
-        description: "GPT-5.4 + Mini + Codex (OAuth or API key)".to_string(),
+        description: "GPT-5.5 + Mini + Codex (OAuth or API key)".to_string(),
         base_url: "https://api.openai.com/v1/chat/completions".to_string(),
         auth_header: AuthHeader::Bearer,
         models: vec![
+            ModelInfo::new("gpt-5.5", "GPT-5.5", 400_000, 128_000)
+                .with_reasoning(ReasoningFormat::OpenAI),
+            ModelInfo::new("gpt-5.5-mini", "GPT-5.5 Mini", 400_000, 128_000)
+                .with_reasoning(ReasoningFormat::OpenAI),
             ModelInfo::new("gpt-5.3-codex", "GPT-5.3 Codex", 400_000, 128_000)
                 .with_reasoning(ReasoningFormat::OpenAI),
             ModelInfo::new("gpt-5.4", "GPT-5.4", 400_000, 128_000)

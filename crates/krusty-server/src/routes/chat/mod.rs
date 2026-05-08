@@ -149,6 +149,7 @@ async fn chat(
         &session_id,
         requested_model,
         req.thinking_enabled,
+        req.fast_mode,
         req.research_enabled.unwrap_or(false),
         requires_vision,
     )

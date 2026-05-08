@@ -21,11 +21,15 @@ impl App {
             "/home" => self.open_home_view(),
             "/load" => self.open_session_list_popup(),
             "/model" => self.open_model_popup(),
-            "/fast" => match self.toggle_fast_model() {
-                Some(model_id) => {
+            "/fast" => match self.toggle_fast_mode() {
+                Some(enabled) => {
                     self.runtime.chat.messages.push((
                         "system".to_string(),
-                        format!("Fast mode toggled: {}", model_id),
+                        format!(
+                            "Fast mode {} for {}.",
+                            if enabled { "enabled" } else { "disabled" },
+                            self.runtime.current_model
+                        ),
                     ));
                 }
                 None => {

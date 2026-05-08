@@ -1,5 +1,6 @@
 use krusty_core::ai::client::{
-    AiClient, AnthropicAdaptiveEffort, CallOptions, CodexReasoningEffort,
+    supports_openai_xhigh_reasoning, AiClient, AnthropicAdaptiveEffort, CallOptions,
+    CodexReasoningEffort,
 };
 use krusty_core::ai::model_profile::{ModelProfile, PromptFamily};
 use krusty_core::ai::models::ApiFormat;
@@ -100,14 +101,23 @@ pub(super) fn apply_thinking_config(
     let cfg = ai_client.config();
     options.thinking = Some(ThinkingConfig::default());
 
-    if supports_codex_reasoning(cfg.provider_id, cfg.api_format, &cfg.model) {
-        options.codex_reasoning_effort = Some(match thinking_level {
-            ThinkingLevel::Off => return,
-            ThinkingLevel::Low => CodexReasoningEffort::Low,
-            ThinkingLevel::Medium => CodexReasoningEffort::Medium,
-            ThinkingLevel::High => CodexReasoningEffort::High,
-            ThinkingLevel::XHigh => CodexReasoningEffort::XHigh,
-        });
+    if supports_openai_reasoning_effort(cfg.provider_id, cfg.api_format, &cfg.model) {
+        options.codex_reasoning_effort = Some(
+            match thinking_level {
+                ThinkingLevel::Off => return,
+                ThinkingLevel::Low => CodexReasoningEffort::Low,
+                ThinkingLevel::Medium => CodexReasoningEffort::Medium,
+                ThinkingLevel::High => CodexReasoningEffort::High,
+                ThinkingLevel::XHigh => {
+                    if supports_openai_xhigh_reasoning(&cfg.model) {
+                        CodexReasoningEffort::XHigh
+                    } else {
+                        CodexReasoningEffort::High
+                    }
+                }
+            }
+            .normalized_for_model(&cfg.model),
+        );
     } else if supports_anthropic_adaptive_effort(cfg.provider_id, &cfg.model) {
         options.anthropic_adaptive_effort = Some(match thinking_level {
             ThinkingLevel::Off => return,
@@ -119,13 +129,15 @@ pub(super) fn apply_thinking_config(
     }
 }
 
-fn supports_codex_reasoning(
+fn supports_openai_reasoning_effort(
     provider_id: ProviderId,
     api_format: ApiFormat,
     model_id: &str,
 ) -> bool {
-    ModelProfile::resolve(provider_id, api_format, model_id).prompt_family
-        == PromptFamily::OpenAiCodex
+    matches!(
+        ModelProfile::resolve(provider_id, api_format, model_id).prompt_family,
+        PromptFamily::OpenAiCodex | PromptFamily::OpenAiReasoning
+    )
 }
 
 fn supports_anthropic_adaptive_effort(provider_id: ProviderId, model_id: &str) -> bool {
@@ -249,17 +261,34 @@ mod tests {
     }
 
     #[test]
-    fn codex_reasoning_support_uses_shared_model_profile_resolution() {
-        assert!(supports_codex_reasoning(
+    fn openai_reasoning_support_uses_shared_model_profile_resolution() {
+        assert!(supports_openai_reasoning_effort(
             ProviderId::OpenAI,
             ApiFormat::OpenAIResponses,
             "gpt-5.3-codex"
         ));
-        assert!(!supports_codex_reasoning(
+        assert!(supports_openai_reasoning_effort(
             ProviderId::OpenAI,
             ApiFormat::OpenAIResponses,
             "gpt-5.4"
         ));
+        assert!(supports_openai_reasoning_effort(
+            ProviderId::OpenAI,
+            ApiFormat::OpenAIResponses,
+            "gpt-5.5"
+        ));
+        assert!(!supports_openai_reasoning_effort(
+            ProviderId::Anthropic,
+            ApiFormat::Anthropic,
+            "claude-opus-4.6"
+        ));
+    }
+
+    #[test]
+    fn xhigh_reasoning_support_tracks_openai_model_family() {
+        assert!(supports_openai_xhigh_reasoning("gpt-5.4"));
+        assert!(supports_openai_xhigh_reasoning("gpt-5.5"));
+        assert!(!supports_openai_xhigh_reasoning("gpt-5.2"));
     }
 
     #[test]

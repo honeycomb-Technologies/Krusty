@@ -14,7 +14,6 @@ pub use self::config::{
     OPENAI_CHAT_API, OPENAI_RESPONSES_API,
 };
 pub use self::mapping::{
-    get_model_family, toggle_fast_model, translate_model_id, translate_model_or_default,
-    ModelFamily,
+    get_model_family, translate_model_id, translate_model_or_default, ModelFamily,
 };
 pub use self::registry::{builtin_providers, get_provider};

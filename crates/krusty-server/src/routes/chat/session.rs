@@ -163,6 +163,7 @@ pub(super) async fn setup_chat_session(
     session_id: &str,
     requested_model: RequestedModel<'_>,
     thinking_level: ThinkingLevel,
+    fast_mode: bool,
     research_enabled: bool,
     requires_vision: bool,
 ) -> Result<ChatSessionContext, AppError> {
@@ -249,6 +250,7 @@ pub(super) async fn setup_chat_session(
         },
         session_id: Some(session_id.to_string()),
         codex_parallel_tool_calls: true,
+        fast_mode,
         system_prompt: match session.session_type {
             SessionType::Chat => Some(chat_system_prompt(research_enabled)),
             SessionType::Mako => system_prompt_for_session(SessionType::Mako),

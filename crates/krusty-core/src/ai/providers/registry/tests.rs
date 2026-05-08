@@ -46,8 +46,17 @@ fn test_openai_config_uses_curated_models() {
         .map(|model| model.id.as_str())
         .collect();
 
-    assert_eq!(provider.default_model(), "gpt-5.3-codex");
-    assert_eq!(ids, vec!["gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini"]);
+    assert_eq!(provider.default_model(), "gpt-5.5");
+    assert_eq!(
+        ids,
+        vec![
+            "gpt-5.5",
+            "gpt-5.5-mini",
+            "gpt-5.3-codex",
+            "gpt-5.4",
+            "gpt-5.4-mini"
+        ]
+    );
     assert!(provider
         .models
         .iter()

@@ -122,7 +122,7 @@ The command system maps input prefixed with `/` to application actions. Commands
 | `/home` | Return to start menu, clear session |
 | `/load` | Open session list popup |
 | `/model` | Open model selector |
-| `/fast` | Toggle fast/full model variant |
+| `/fast` | Toggle fast service tier |
 | `/auth` | Manage API providers |
 | `/init` | Analyze codebase and generate KRAB.md |
 | `/theme` | Open theme picker |
