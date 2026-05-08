@@ -2,7 +2,7 @@ name: Mobile → TestFlight
 
 on:
   push:
-    branches: [dev]
+    branches: [main]
     paths:
       - 'apps/mobile/**'
       - 'packages/**'
@@ -17,6 +17,7 @@ jobs:
   build-and-submit:
     name: Build iOS & Submit to TestFlight
     runs-on: ubuntu-latest
+    environment: testflight
     defaults:
       run:
         working-directory: apps/mobile
