@@ -229,6 +229,19 @@ impl AppState {
     }
 }
 
+fn register_autonomous_classifier_hook(
+    tool_registry_inner: &mut ToolRegistry,
+    ai_client: Option<Arc<AiClient>>,
+) {
+    use krusty_core::agent::autonomy::auto_classifier::AutoClassifierHook;
+
+    let hook = match ai_client {
+        Some(client) => AutoClassifierHook::new(client),
+        None => AutoClassifierHook::without_bootstrap_client(),
+    };
+    tool_registry_inner.add_pre_hook(Arc::new(hook));
+}
+
 /// Build the Axum router with all routes and embedded web assets.
 pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppState)> {
     let http_policy = ServerHttpPolicy::default();
@@ -260,11 +273,10 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
     let mut tool_registry_inner = ToolRegistry::new();
     tool_registry_inner.add_pre_hook(Arc::new(SafetyHook::new()));
     tool_registry_inner.add_pre_hook(Arc::new(PlanModeHook::new()));
-    // Auto-classifier for Mako autonomous sessions (no-op when permission_mode != Autonomous)
-    if let Some(ref client) = ai_client {
-        use krusty_core::agent::autonomy::auto_classifier::AutoClassifierHook;
-        tool_registry_inner.add_pre_hook(Arc::new(AutoClassifierHook::new(client.clone())));
-    }
+    // Auto-classifier for Mako autonomous sessions (no-op when permission_mode != Autonomous).
+    // Register even when no bootstrap client exists so later per-user Mako clients
+    // are classified via ToolContext instead of bypassing the hook chain.
+    register_autonomous_classifier_hook(&mut tool_registry_inner, ai_client.clone());
     tool_registry_inner.add_post_hook(Arc::new(LoggingHook::new()));
     tool_registry_inner.add_pre_hook(Arc::new(UserPreToolHook::new(hook_manager.clone())));
     tool_registry_inner.add_post_hook(Arc::new(UserPostToolHook::new(hook_manager.clone())));
@@ -521,4 +533,66 @@ struct HealthResponse {
     status: String,
     version: String,
     features: HashMap<String, bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::async_trait;
+    use serde_json::{json, Value};
+
+    use krusty_core::tools::registry::{
+        PermissionMode, Tool, ToolContext, ToolRegistry, ToolResult,
+    };
+
+    use super::*;
+
+    struct TestWriteTool;
+
+    #[async_trait]
+    impl Tool for TestWriteTool {
+        fn name(&self) -> &str {
+            "write"
+        }
+
+        fn description(&self) -> &str {
+            "test write tool"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        async fn execute(&self, _params: Value, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::success_data(json!({"executed": true}))
+        }
+    }
+
+    #[tokio::test]
+    async fn no_bootstrap_tool_registry_registers_fail_closed_autonomous_classifier() {
+        let mut registry = ToolRegistry::new();
+        register_autonomous_classifier_hook(&mut registry, None);
+        let registry = Arc::new(registry);
+        registry.register(Arc::new(TestWriteTool)).await;
+        let ctx = ToolContext {
+            permission_mode: PermissionMode::Autonomous,
+            ..Default::default()
+        };
+
+        let result = registry
+            .execute(
+                "write",
+                json!({"path": "src/lib.rs", "content": "unsafe autonomous write"}),
+                &ctx,
+            )
+            .await
+            .expect("test write tool should be registered");
+
+        assert!(result.is_error, "unsafe autonomous write must fail closed");
+        assert!(
+            result.output.contains("Auto-classifier unavailable")
+                && result.output.contains("fail closed"),
+            "unexpected result output: {}",
+            result.output
+        );
+    }
 }

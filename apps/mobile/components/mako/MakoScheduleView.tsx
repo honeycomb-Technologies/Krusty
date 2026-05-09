@@ -24,7 +24,7 @@ import { formatProjectLabel, getRunNextWakeAt } from "./utils";
 interface MakoScheduleViewProps {
   state: MakoCurrentState;
   onSelectRun: (runId: string) => void;
-  onOpenProject?: (projectDir: string) => Promise<void> | void;
+  onOpenProject?: (projectDir: string, targetBranch?: string | null) => Promise<void> | void;
 }
 
 type ScheduleMode = "month_day" | "week" | "month";
@@ -137,8 +137,9 @@ function buildCalendarDays(baseMonth: Date): Date[] {
 function scheduleSeriesKey(run: MakoCurrentRunSummary, wakeAt: string): string {
   const title = (run.title || "Untitled run").trim().toLowerCase();
   const project = run.project_dir?.trim().toLowerCase() ?? "";
+  const branch = run.target_branch?.trim().toLowerCase() ?? "";
   const crew = run.runtime?.crew_slug?.trim().toLowerCase() ?? "";
-  return [title, project, crew, timeValue(wakeAt)].join("|");
+  return [title, project, branch, crew, timeValue(wakeAt)].join("|");
 }
 
 function buildScheduledItems(runs: MakoCurrentRunSummary[]): ScheduledRunItem[] {
@@ -152,6 +153,9 @@ function buildScheduledItems(runs: MakoCurrentRunSummary[]): ScheduledRunItem[] 
       const detailParts: string[] = [];
       if (run.project_dir) {
         detailParts.push(formatProjectLabel(run.project_dir));
+      }
+      if (run.target_branch) {
+        detailParts.push(`branch ${run.target_branch}`);
       }
       if (run.runtime?.crew_slug) {
         detailParts.push(`${run.runtime.crew_slug} crew`);
@@ -1029,11 +1033,12 @@ export function MakoScheduleView({
         }}
         onOpenProject={() => {
           const projectDir = detailTarget?.item.run.project_dir;
+          const targetBranch = detailTarget?.item.run.target_branch ?? null;
           if (!projectDir || !onOpenProject) {
             return;
           }
           setDetailTarget(null);
-          void onOpenProject(projectDir);
+          void onOpenProject(projectDir, targetBranch);
         }}
         isSaving={isSavingDetail}
         error={detailError}

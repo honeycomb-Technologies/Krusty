@@ -8,7 +8,7 @@ static NETWORK_PIPE_TO_SHELL_PATTERN: Lazy<Regex> =
 static DANGEROUS_REDIRECT_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)>\s*/dev/(sd|nvme|vd|xvd|disk)").unwrap());
 
-pub(super) fn safety_violation(command: &str) -> Option<String> {
+pub(crate) fn safety_violation(command: &str) -> Option<String> {
     if FORK_BOMB_PATTERN.is_match(command) {
         return Some("fork bomb".to_string());
     }

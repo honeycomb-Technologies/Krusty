@@ -24,6 +24,7 @@ pub(in super::super) fn load_run_trace_diagnostics(
     session_id: &str,
     session_title: &str,
     project_dir: Option<&str>,
+    target_branch: Option<&str>,
     priority: MakoRunPriority,
 ) -> Result<RunTraceDiagnostics, AppError> {
     let events = trace_store.list_events(session_id, Some(200))?;
@@ -35,6 +36,7 @@ pub(in super::super) fn load_run_trace_diagnostics(
         session_id,
         session_title,
         project_dir,
+        target_branch,
         priority,
     );
 
@@ -68,6 +70,7 @@ fn load_pending_approvals_from_events(
     session_id: &str,
     session_title: &str,
     project_dir: Option<&str>,
+    target_branch: Option<&str>,
     priority: MakoRunPriority,
 ) -> Vec<MakoPendingApprovalSummary> {
     let mut pending = BTreeMap::new();
@@ -93,6 +96,7 @@ fn load_pending_approvals_from_events(
                         session_id: session_id.to_string(),
                         session_title: session_title.to_string(),
                         project_dir: project_dir.map(str::to_string),
+                        target_branch: target_branch.map(str::to_string),
                         tool_call_id: tool_call_id.to_string(),
                         tool_name: tool_name.to_string(),
                         arguments,

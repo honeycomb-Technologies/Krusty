@@ -46,6 +46,18 @@ The Linux jobs install `libudev-dev` because the CLI uses `gilrs` for gamepad su
 
 All Rust jobs use `dtolnay/rust-toolchain@master` pinned to the stable channel. A PR cannot merge until every job is green.
 
+### Default-branch and governance preflight
+
+Before routing autonomous continuation, opening broad implementation work, or validating release/TestFlight governance, run the read-only default-branch preflight from the repository root:
+
+```bash
+scripts/check-default-branch-preflight.sh
+```
+
+The preflight compares the GitHub default branch reported by `gh repo view`, the authoritative remote HEAD from `git ls-remote --symref origin HEAD`, and the local tracking symref at `refs/remotes/origin/HEAD`. Krusty's expected default branch is `main`; if local `origin/HEAD` still points at a stale branch such as `origin/dev`, fix the local ref before using it to choose a base branch. The check is ruleset-aware: a classic branch-protection 404 is acceptable only when an active branch ruleset applies to `refs/heads/main`.
+
+The preflight is safe for validation: it reads repository metadata, remote refs, classic branch protection, and repository rulesets only. It does not push, delete branches, trigger workflows, edit settings, create releases, or read secret values.
+
 ## Release automation
 
 Releases are triggered by pushing a Git tag that matches `v*` (for example, `v0.6.0`). The release workflow (`.github/workflows/release.yml`) has three stages:
@@ -65,6 +77,8 @@ Each job first builds the Expo web frontend from `apps/mobile` (so it can be emb
 **2. Desktop Linux bundles.** A separate job builds the Tauri desktop shell on Ubuntu, producing `.deb` and `.rpm` packages from `apps/desktop/shell`.
 
 **3. Create release.** Once both build stages complete, all artifacts are downloaded and a GitHub Release is created with auto-generated release notes. The release includes the CLI binaries for all five platforms plus the desktop Linux packages.
+
+**Governance TODO:** the tag-triggered release path should gain an explicit release/tag environment gate (or equivalent protected tag ruleset) before autonomous agents can request or prepare releases at scale. This card documents the gap only; do not validate releases by pushing `v*` tags or by manually dispatching a release workflow.
 
 ## Distribution channels
 
@@ -124,7 +138,11 @@ The mobile app lives in `apps/mobile` and is built with Expo and EAS (Expo Appli
 
 ### TestFlight deployment
 
-The `mobile-testflight.yml` workflow automates iOS builds and TestFlight submission. It triggers on pushes to `dev` when files change under `apps/mobile/`, `packages/`, or the workflow file itself. It can also be triggered manually via `workflow_dispatch`.
+The `mobile-testflight.yml` workflow automates iOS builds and TestFlight submission. It triggers on pushes to `main` when files change under `apps/mobile/**`, `packages/**`, or `.github/workflows/mobile-testflight.yml`. The workflow can also be triggered manually via `workflow_dispatch`; choose `main` in the GitHub UI/CLI because Krusty's default branch and release governance are anchored on `main`, not on the legacy `dev` branch.
+
+Push path filters are intentionally narrow so Rust-only, docs-only, and desktop-only changes do not start a TestFlight build. Manual `workflow_dispatch` runs do not get the same path-filter protection, so use manual dispatch only for an intentional TestFlight validation on `main`, after reviewing the diff and approvals.
+
+The job targets the GitHub Actions `testflight` environment (`environment: testflight`). Keep that environment configured with human approval/reviewer protection so EAS build and App Store Connect secrets are not exposed and the build is not submitted until the approval gate is satisfied.
 
 The workflow uses concurrency control (`group: mobile-ios-build, cancel-in-progress: true`) so that a new push cancels any in-flight build rather than queueing up stale builds. The steps are:
 
@@ -135,6 +153,8 @@ The workflow uses concurrency control (`group: mobile-ios-build, cancel-in-progr
 5. Submit the resulting build to TestFlight with `eas submit`
 
 The App Store Connect app ID (`6761496828`) is configured in `eas.json`. Apple credentials are stored as GitHub secrets.
+
+For safe no-TestFlight validation of docs/tooling changes, inspect the workflow definition and repository metadata only (for example, `gh workflow view mobile-testflight.yml --repo honeycomb-Technologies/Krusty`, `scripts/check-default-branch-preflight.sh`, and `git diff --check`). Do not validate this path by pushing mobile changes to `main`, running `gh workflow run mobile-testflight.yml`, or submitting a build unless Jacob/Bob explicitly approves a TestFlight release attempt.
 
 ## Desktop builds
 

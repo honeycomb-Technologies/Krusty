@@ -141,7 +141,7 @@ export class KrustyClient {
   async createSession(
     title?: string,
     projectDir?: string,
-    targetBranch?: string,
+    targetBranch?: string | null,
     workspaceMode?: WorkspaceMode,
     sessionType?: SessionType,
   ): Promise<SessionResponse> {
@@ -157,7 +157,16 @@ export class KrustyClient {
     });
   }
 
-  async updateSession(id: string, data: Partial<{ title: string; mode: string; model: string | null }>): Promise<SessionResponse> {
+  async updateSession(
+    id: string,
+    data: Partial<{
+      title: string;
+      mode: string;
+      model: string | null;
+      target_branch: string | null;
+      targetBranch: string | null;
+    }>,
+  ): Promise<SessionResponse> {
     return this.request(`/sessions/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(data),

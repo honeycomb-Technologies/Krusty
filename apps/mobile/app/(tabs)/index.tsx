@@ -135,6 +135,8 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const isLoading = useSessionStore((state) => state.isLoading) ?? false;
   const workspaceDirectory =
     useWorkspaceStore((state) => state.directory) ?? null;
+  const workspaceSessionId =
+    useWorkspaceStore((state) => state.sessionId) ?? null;
 
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [defaultModelId, setDefaultModelId] = useState<string | null>(null);
@@ -173,6 +175,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const liveActivityOpenRef = useRef(false);
   const notifiedApprovalIdsRef = useRef<Set<string>>(new Set());
   const suppressCompletionRef = useRef(false);
+  const attemptedWorkspaceSessionHydrationRef = useRef<string | null>(null);
 
   const lastAssistantMessage = useMemo(
     () => getLastAssistantMessage(messages),
@@ -353,6 +356,23 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   }, [client, ensureModelReady, isConnected, sessionsStore]);
 
   useEffect(() => {
+    if (!client || !isConnected || sessionId || !workspaceSessionId) {
+      return;
+    }
+    if (attemptedWorkspaceSessionHydrationRef.current === workspaceSessionId) {
+      return;
+    }
+
+    attemptedWorkspaceSessionHydrationRef.current = workspaceSessionId;
+    void sessionStore
+      .getState()
+      .loadSession(workspaceSessionId, true)
+      .catch(() => {
+        void sessionsStore.getState().loadSessions();
+      });
+  }, [client, isConnected, sessionId, sessionStore, sessionsStore, workspaceSessionId]);
+
+  useEffect(() => {
     if (!client || !isConnected) {
       return;
     }
@@ -372,14 +392,15 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         return;
       }
 
-      const currentSessionId = sessionStore.getState().sessionId;
+      const currentSessionId =
+        sessionStore.getState().sessionId ?? workspace.getState().sessionId;
       if (currentSessionId) {
         void sessionStore.getState().loadSession(currentSessionId, true);
       }
     });
 
     return () => subscription.remove();
-  }, [sessionStore]);
+  }, [sessionStore, workspace]);
 
   useEffect(() => {
     if (!sessionId) {

@@ -150,6 +150,7 @@ export interface MakoAttentionItem {
   active: boolean;
   runId?: string | null;
   projectDir?: string | null;
+  targetBranch?: string | null;
   toolCallId?: string | null;
   sessionId?: string | null;
   threadSessionId?: string | null;

@@ -1,8 +1,9 @@
 use krusty_core::storage::{
-    DelegatedRunRecord, DelegatedRunScope, PartialAssistantState, RuntimeTraceEvent,
-    RuntimeTraceSummary, SessionInfo, SessionRecoveryState, SessionType, WorkMode, WorkspaceMode,
+    DelegatedRunRecord, DelegatedRunScope, PartialAssistantState, PendingInteractionSnapshot,
+    RuntimeTraceEvent, RuntimeTraceSummary, SessionInfo, SessionRecoveryState, SessionType,
+    WorkMode, WorkspaceMode,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use super::{DelegatedProgressStatus, DelegatedRunStage, DelegatedToolKind};
@@ -30,7 +31,53 @@ pub struct UpdateSessionRequest {
     pub workspace_mode: Option<WorkspaceMode>,
     pub mode: Option<WorkMode>,
     pub model: Option<String>,
-    pub target_branch: Option<String>,
+    #[serde(
+        default,
+        alias = "targetBranch",
+        deserialize_with = "deserialize_target_branch_update"
+    )]
+    pub target_branch: Option<Option<String>>,
+}
+
+fn deserialize_target_branch_update<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::UpdateSessionRequest;
+
+    #[test]
+    fn update_session_request_accepts_null_target_branch_clear() {
+        let req: UpdateSessionRequest = serde_json::from_value(json!({
+            "target_branch": null,
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(req.target_branch, Some(None));
+    }
+
+    #[test]
+    fn update_session_request_accepts_camel_case_target_branch_alias() {
+        let req: UpdateSessionRequest = serde_json::from_value(json!({
+            "targetBranch": "feature/mobile-continuation",
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(
+            req.target_branch
+                .as_ref()
+                .and_then(|branch| branch.as_deref()),
+            Some("feature/mobile-continuation")
+        );
+    }
 }
 
 #[derive(Deserialize)]
@@ -109,6 +156,8 @@ pub struct SessionStateResponse {
     pub mode: WorkMode,
     /// Interrupted-turn recovery state, if any.
     pub recovery: Option<SessionRecoveryState>,
+    /// Reload-safe pending tool approvals, user questions, and plan confirmations.
+    pub pending_interactions: Vec<PendingInteractionSnapshot>,
     /// Authoritative in-flight partial assistant state for active sessions.
     pub live_partial_assistant: Option<PartialAssistantState>,
     /// Active delegated tool snapshots for this session, keyed by top-level tool call.

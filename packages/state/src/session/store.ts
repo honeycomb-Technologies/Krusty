@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type {
   KrustyClient,
   SessionStateResponse as ApiSessionStateResponse,
+  StreamCallbacks,
 } from '@krusty/api';
 import type { createPlanStore } from '../plan';
 import type { createSessionsStore } from '../sessions';
@@ -26,7 +27,13 @@ import {
   persistSessionModel,
   syncSessionPresence,
 } from './persistence';
-import { applySessionSnapshot } from './serverState';
+import {
+  applySessionSnapshot,
+  isActionableSessionAgentState,
+  isActiveSessionAgentState,
+  pendingInteractionsFromSnapshot,
+  shouldStopSessionStatePolling,
+} from './serverState';
 import { createStreamCallbacks } from './streaming';
 import {
   applyLivePartialAssistant,
@@ -41,6 +48,7 @@ import type {
   AssistantMessageRef,
   Attachment,
   PermissionMode,
+  SendMessageOptions,
   SessionMode,
   SessionStoreState,
   ThinkingLevel,
@@ -51,6 +59,15 @@ import {
   supportsFastMode,
   thinkingLevelToApiValue,
 } from './thinking';
+
+function hasOwnProperty<T extends object>(value: T, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function normalizeTargetBranch(targetBranch: string | null | undefined): string | null {
+  const trimmed = targetBranch?.trim();
+  return trimmed ? trimmed : null;
+}
 
 export function createSessionStore(
   client: KrustyClient,
@@ -159,8 +176,81 @@ export function createSessionStore(
   // Create the Zustand store
   // -------------------------------------------------------------------------
 
-  return create<SessionStoreState>((set, get) => ({
-    ...initialState,
+  return create<SessionStoreState>((set, get) => {
+    function applyStreamFailure(err: unknown) {
+      set((s) => ({
+        isLoading: false,
+        isStreaming: false,
+        isThinking: false,
+        thinkingContent: "",
+        messages: pruneEmptyAssistantMessages(
+          finalizeTransientAssistantMessages(s.messages),
+        ),
+        error: toErrorMessage(err),
+      }));
+    }
+
+    async function recoverAfterStreamInterruption(
+      sessionId: string,
+    ): Promise<boolean> {
+      try {
+        const serverState = await client.getSessionState(sessionId);
+        applySessionSnapshot(sessionId, serverState, true, set, get, planStore);
+
+        if (isActiveSessionAgentState(serverState.agent_state)) {
+          set({ isLoading: false, error: null });
+          get().startStatePolling(sessionId);
+          return true;
+        }
+
+        if (isActionableSessionAgentState(serverState.agent_state)) {
+          get().stopStatePolling();
+          set({
+            isLoading: false,
+            isStreaming: false,
+            isThinking: false,
+            thinkingContent: "",
+            error: null,
+          });
+          await get().loadSession(sessionId, true);
+          return true;
+        }
+      } catch {
+        // Fall through to regular stream error handling.
+      }
+
+      return false;
+    }
+
+    function createRecoveringStreamCallbacks(
+      callbacks: StreamCallbacks,
+      sessionId: string | null,
+      recoveryRef: { promise: Promise<boolean> | null },
+    ): StreamCallbacks {
+      return {
+        ...callbacks,
+        onError: (error) => {
+          if (!sessionId) {
+            callbacks.onError(error);
+            return;
+          }
+
+          if (!recoveryRef.promise) {
+            recoveryRef.promise = recoverAfterStreamInterruption(sessionId).then(
+              (recovered) => {
+                if (!recovered) {
+                  callbacks.onError(error);
+                }
+                return recovered;
+              },
+            );
+          }
+        },
+      };
+    }
+
+    return {
+      ...initialState,
 
     // -- sendMessage --------------------------------------------------------
 
@@ -168,6 +258,7 @@ export function createSessionStore(
       content: string,
       attachments: Attachment[] = [],
       researchEnabled = false,
+      sendOptions: SendMessageOptions = {},
     ) {
       const state = get();
       const ws = workspace.getState();
@@ -208,7 +299,7 @@ export function createSessionStore(
           return {
             queuedMessages: [
               ...s.queuedMessages,
-              { content, attachments, researchEnabled },
+              { content, attachments, researchEnabled, sendOptions },
             ],
             messages: [
               ...s.messages,
@@ -257,20 +348,82 @@ export function createSessionStore(
         get().startStatePolling(pollingSessionId);
       }
 
+      const streamRecovery: { promise: Promise<boolean> | null } = { promise: null };
+      const callbacks = createRecoveringStreamCallbacks(
+        createStreamCallbacks(ref, set, get, {
+          planStore,
+          sessionsStore,
+          persistSessionMode: persistMode,
+        }),
+        pollingSessionId,
+        streamRecovery,
+      );
+      let keepStatePolling = false;
+
       try {
         const contentBlocks =
           attachments.length > 0
             ? buildContentBlocks(requestMessage, attachments)
             : undefined;
+        const isNewSessionRequest = !state.sessionId;
+        const sendOptionHasProjectDir = sendOptions
+          ? hasOwnProperty(sendOptions, "projectDir")
+          : false;
+        const sendOptionHasWorkingDir = sendOptions
+          ? hasOwnProperty(sendOptions, "workingDir")
+          : false;
+        const sendOptionHasWorkspaceMode = sendOptions
+          ? hasOwnProperty(sendOptions, "workspaceMode")
+          : false;
+        const sendOptionHasSessionType = sendOptions
+          ? hasOwnProperty(sendOptions, "sessionType")
+          : false;
+        const sendOptionHasTargetBranch = sendOptions
+          ? hasOwnProperty(sendOptions, "targetBranch")
+          : false;
+        const requestedProjectDir = isNewSessionRequest
+          ? sendOptionHasProjectDir
+            ? sendOptions?.projectDir ?? null
+            : ws.directory
+          : undefined;
+        const requestedWorkingDir = isNewSessionRequest
+          ? sendOptionHasWorkingDir
+            ? sendOptions?.workingDir ?? null
+            : sendOptionHasProjectDir
+              ? requestedProjectDir
+              : ws.directory
+          : undefined;
+        const requestedWorkspaceMode = isNewSessionRequest
+          ? sendOptionHasWorkspaceMode
+            ? sendOptions?.workspaceMode
+            : ws.mode
+          : undefined;
+        const requestedSessionType = isNewSessionRequest
+          ? sendOptionHasSessionType
+            ? sendOptions?.sessionType
+            : undefined
+          : undefined;
+        const requestedTargetBranch = isNewSessionRequest
+          ? normalizeTargetBranch(
+              sendOptionHasTargetBranch
+                ? sendOptions?.targetBranch
+                : ws.targetBranch,
+            )
+          : undefined;
 
         await client.streamChat(
           {
             session_id: state.sessionId ?? undefined,
             message: requestMessage,
             content: contentBlocks,
-            project_dir: state.sessionId ? undefined : ws.directory,
-            working_dir: state.sessionId ? undefined : ws.directory,
-            workspace_mode: state.sessionId ? undefined : ws.mode,
+            project_dir: requestedProjectDir,
+            working_dir: requestedWorkingDir,
+            workspace_mode: requestedWorkspaceMode,
+            session_type: requestedSessionType,
+            target_branch:
+              sendOptionHasTargetBranch || requestedTargetBranch
+                ? requestedTargetBranch
+                : undefined,
             research_enabled: researchEnabled || undefined,
             model: state.model ?? undefined,
             fast_mode: state.fastModeEnabled || undefined,
@@ -278,26 +431,36 @@ export function createSessionStore(
             permission_mode: state.permissionMode,
             mode: state.mode,
           },
-          createStreamCallbacks(ref, set, get, {
-            planStore,
-            sessionsStore,
-            persistSessionMode: persistMode,
-          }),
+          callbacks,
           abortController.signal,
         );
+
+        const completedSessionId = get().sessionId;
+        if (isNewSessionRequest && completedSessionId) {
+          const nextDirectory = requestedProjectDir ?? requestedWorkingDir ?? null;
+          workspace.getState().setWorkspace(
+            nextDirectory,
+            completedSessionId,
+            requestedWorkspaceMode ?? (nextDirectory ? "selected" : "neutral"),
+            requestedTargetBranch ?? null,
+          );
+        }
       } catch (err) {
-        set((s) => ({
-          isLoading: false,
-          isStreaming: false,
-          isThinking: false,
-          thinkingContent: "",
-          messages: pruneEmptyAssistantMessages(
-            finalizeTransientAssistantMessages(s.messages),
-          ),
-          error: toErrorMessage(err),
-        }));
+        if (pollingSessionId) {
+          streamRecovery.promise ??=
+            recoverAfterStreamInterruption(pollingSessionId);
+          keepStatePolling = await streamRecovery.promise;
+        }
+        if (!keepStatePolling) {
+          applyStreamFailure(err);
+        }
       } finally {
-        get().stopStatePolling();
+        if (streamRecovery.promise) {
+          keepStatePolling = await streamRecovery.promise;
+        }
+        if (!keepStatePolling) {
+          get().stopStatePolling();
+        }
       }
     },
 
@@ -347,6 +510,7 @@ export function createSessionStore(
               ),
               serverState?.live_partial_assistant,
               serverState?.agent_state ?? "idle",
+              pendingInteractionsFromSnapshot(serverState),
             ),
             isLoading: false,
           };
@@ -362,6 +526,7 @@ export function createSessionStore(
               ((data.session.project_dir ?? data.session.working_dir)
                 ? "selected"
                 : "neutral")) as "neutral" | "selected" | "created",
+            data.session.target_branch ?? null,
           );
 
         applySessionSnapshot(sessionId, serverState, isRefresh, set, get, planStore);
@@ -553,6 +718,18 @@ export function createSessionStore(
         messages: upsertTransientAssistantMessage(s.messages, ref.current),
       }));
 
+      const streamRecovery: { promise: Promise<boolean> | null } = { promise: null };
+      const callbacks = createRecoveringStreamCallbacks(
+        createStreamCallbacks(ref, set, get, {
+          planStore,
+          sessionsStore,
+          persistSessionMode: persistMode,
+        }),
+        state.sessionId,
+        streamRecovery,
+      );
+      let keepStatePolling = false;
+
       try {
         await client.streamToolResult(
           {
@@ -561,26 +738,23 @@ export function createSessionStore(
             result,
             fast_mode: state.fastModeEnabled,
           },
-          createStreamCallbacks(ref, set, get, {
-            planStore,
-            sessionsStore,
-            persistSessionMode: persistMode,
-          }),
+          callbacks,
           abortController.signal,
         );
       } catch (err) {
-        set((s) => ({
-          isLoading: false,
-          isStreaming: false,
-          isThinking: false,
-          thinkingContent: "",
-          messages: pruneEmptyAssistantMessages(
-            finalizeTransientAssistantMessages(s.messages),
-          ),
-          error: toErrorMessage(err),
-        }));
+        streamRecovery.promise ??=
+          recoverAfterStreamInterruption(state.sessionId);
+        keepStatePolling = await streamRecovery.promise;
+        if (!keepStatePolling) {
+          applyStreamFailure(err);
+        }
       } finally {
-        get().stopStatePolling();
+        if (streamRecovery.promise) {
+          keepStatePolling = await streamRecovery.promise;
+        }
+        if (!keepStatePolling) {
+          get().stopStatePolling();
+        }
       }
     },
 
@@ -638,12 +812,14 @@ export function createSessionStore(
           const serverState = await client.getSessionState(sessionId);
           applySessionSnapshot(sessionId, serverState, true, set, get, planStore);
 
-          if (
-            serverState.agent_state === "idle" ||
-            serverState.agent_state === "awaiting_input"
-          ) {
+          if (shouldStopSessionStatePolling(serverState.agent_state)) {
             get().stopStatePolling();
-            set({ isStreaming: false, isThinking: false });
+            set({
+              isStreaming: false,
+              isThinking: false,
+              thinkingContent: "",
+              error: null,
+            });
             await get().loadSession(sessionId, true);
           }
         } catch {
@@ -690,5 +866,6 @@ export function createSessionStore(
       const state = get();
       get().stopPresenceHeartbeat(state.sessionId);
     },
-  }));
+    };
+  });
 }

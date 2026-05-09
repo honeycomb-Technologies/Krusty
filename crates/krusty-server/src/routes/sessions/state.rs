@@ -37,6 +37,10 @@ pub(super) async fn get_session_state(
 
     let agent_state = load_agent_state_or_idle(&session_manager, &id)?;
     let recovery = session_manager.load_recovery_state(&id)?;
+    let pending_interactions = recovery
+        .as_ref()
+        .map(|recovery| recovery.pending_interactions.clone())
+        .unwrap_or_default();
     let live_partial_assistant =
         live_partial_assistant_for_state(&agent_state.state, recovery.as_ref());
     let last_event_sequence = session_manager.load_runtime_trace_latest_sequence(&id)?;
@@ -60,6 +64,7 @@ pub(super) async fn get_session_state(
         last_event_at: agent_state.last_event_at,
         mode: session.work_mode,
         recovery,
+        pending_interactions,
         live_partial_assistant,
         delegated_tools,
         recent_delegated_runs,

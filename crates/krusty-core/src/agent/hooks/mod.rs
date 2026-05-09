@@ -11,7 +11,7 @@
 //! Implement `PreToolHook` or `PostToolHook` traits for custom behavior.
 
 mod builtins;
-mod shell_policy;
+pub(crate) mod shell_policy;
 
 use std::time::Duration;
 

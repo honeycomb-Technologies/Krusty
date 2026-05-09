@@ -12,7 +12,7 @@ use krusty_core::agent::plan_handler::parse_plan_confirm_choice;
 use krusty_core::agent::LoopInput;
 use krusty_core::ai::types::{Content, ModelMessage, Role};
 use krusty_core::plan::PlanManager;
-use krusty_core::storage::{Database, WorkMode};
+use krusty_core::storage::{Database, PendingInteractionSnapshot, WorkMode};
 use krusty_core::tools::registry::PermissionMode;
 use krusty_core::SessionManager;
 
@@ -151,10 +151,20 @@ pub(crate) async fn submit_tool_approval(
     let session_manager = SessionManager::new(Database::new(&state.db_path)?);
     ensure_owned_session(&session_manager, &req.session_id, user)?;
 
-    let inputs = state.session_inputs.read().await;
-    let sender = inputs
-        .get(&req.session_id)
-        .ok_or_else(|| AppError::NotFound("No active session".into()))?;
+    let sender = {
+        let inputs = state.session_inputs.read().await;
+        inputs.get(&req.session_id).cloned()
+    };
+    let Some(sender) = sender else {
+        if recovery_has_pending_tool_approval(&session_manager, &req.session_id, &req.tool_call_id)?
+        {
+            return Err(AppError::Conflict(format!(
+                "Session {} has recoverable pending tool approval {}, but the approval channel unavailable after reload or restart. Reload /sessions/{}/state for pending_interactions and retry once the session is active.",
+                req.session_id, req.tool_call_id, req.session_id
+            )));
+        }
+        return Err(AppError::NotFound("No active session".into()));
+    };
     sender
         .send(LoopInput::ToolApproval {
             tool_call_id: req.tool_call_id,
@@ -167,4 +177,22 @@ pub(crate) async fn submit_tool_approval(
             ))
         })?;
     Ok(Json(json!({"status": "ok"})))
+}
+
+fn recovery_has_pending_tool_approval(
+    session_manager: &SessionManager,
+    session_id: &str,
+    tool_call_id: &str,
+) -> Result<bool, AppError> {
+    let Some(recovery) = session_manager.load_recovery_state(session_id)? else {
+        return Ok(false);
+    };
+
+    Ok(recovery.pending_interactions.iter().any(|pending| {
+        matches!(
+            pending,
+            PendingInteractionSnapshot::ToolApproval { tool_call }
+                if tool_call.id == tool_call_id
+        )
+    }))
 }

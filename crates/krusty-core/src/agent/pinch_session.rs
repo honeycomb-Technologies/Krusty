@@ -45,6 +45,13 @@ pub async fn create_pinched_session(
 
     let db = Database::new(request.db_path)?;
     let session_manager = SessionManager::new(db);
+    let source_session = session_manager.get_session(request.session_id)?;
+    let project_context_dir = resolve_project_context_dir(
+        request.working_dir,
+        source_session
+            .as_ref()
+            .and_then(|session| session.project_dir.as_deref()),
+    );
     let ranked_files = ranked_files_for_pinch(&session_manager, request.session_id);
     let file_contents = load_key_file_contents(
         request.session_id,
@@ -52,7 +59,7 @@ pub async fn create_pinched_session(
         &ranked_files,
         PINCH_SUMMARY_FILE_CONTENT_LIMIT,
     );
-    let project_context = load_project_context(request.working_dir);
+    let project_context = load_project_context(&project_context_dir);
     let active_plan = load_active_plan(request.db_path, request.session_id);
     let summary = summarize_pinch(
         request.ai_client,
@@ -110,6 +117,7 @@ pub async fn create_pinched_session(
         }
     }
 
+    let mut saved_initial_user_message = false;
     if let Some(message) = request
         .initial_user_message
         .as_deref()
@@ -120,6 +128,11 @@ pub async fn create_pinched_session(
             text: message.to_string(),
         }])?;
         session_manager.save_message(&new_session_id, "user", &content_json)?;
+        saved_initial_user_message = true;
+    }
+
+    if saved_initial_user_message {
+        session_manager.clear_recovery_state(request.session_id)?;
     }
 
     Ok(CreatePinchedSessionResult {
@@ -171,6 +184,18 @@ fn ranked_files_for_pinch(session_manager: &SessionManager, session_id: &str) ->
             );
             Vec::new()
         }
+    }
+}
+
+fn resolve_project_context_dir(working_dir: &Path, project_dir: Option<&str>) -> PathBuf {
+    let Some(project_dir) = project_dir.map(str::trim).filter(|value| !value.is_empty()) else {
+        return working_dir.to_path_buf();
+    };
+    let project_dir = PathBuf::from(project_dir);
+    if project_dir.is_absolute() {
+        project_dir
+    } else {
+        working_dir.join(project_dir)
     }
 }
 
@@ -230,9 +255,13 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{create_pinched_session, CreatePinchedSessionRequest};
+    use crate::agent::loop_events::LoopStopReason;
     use crate::ai::types::{Content, ModelMessage, Role};
     use crate::plan::PlanManager;
-    use crate::storage::{Database, SessionManager};
+    use crate::storage::{
+        Database, PartialAssistantState, RecoveryDecision, RecoveryStatus, SessionManager,
+        SessionRecoveryState, SessionType, WorkspaceMode,
+    };
 
     #[tokio::test]
     async fn create_pinched_session_preserves_system_context_and_plan() {
@@ -311,5 +340,160 @@ mod tests {
             .expect("child plan");
         assert_eq!(child_plan.title, plan.title);
         assert_eq!(result.summary.work_summary, "No summary available.");
+    }
+
+    #[tokio::test]
+    async fn automatic_pinch_creates_child_with_initial_continue_message_and_clears_parent_recovery(
+    ) {
+        let temp = TempDir::new().expect("temp dir");
+        let db_path = temp.path().join("pinch.db");
+        let session_manager = SessionManager::new(Database::new(&db_path).expect("db"));
+        let session_id = session_manager
+            .create_session(
+                "Auto Pinch Source",
+                Some("test-model"),
+                Some(temp.path().to_str().expect("path string")),
+            )
+            .expect("source session");
+        session_manager
+            .save_message(
+                &session_id,
+                "user",
+                &serde_json::to_string(&vec![Content::Text {
+                    text: "Keep going after compaction.".to_string(),
+                }])
+                .expect("user json"),
+            )
+            .expect("save source message");
+        session_manager
+            .update_recovery_state(
+                &session_id,
+                &SessionRecoveryState::new(
+                    RecoveryStatus::Streaming,
+                    Some(LoopStopReason::StreamIdleTimeout),
+                    Some("stream timeout".to_string()),
+                    PartialAssistantState::default(),
+                    RecoveryDecision::Resumable {
+                        latest_user_objective: "Keep going after compaction.".to_string(),
+                    },
+                ),
+            )
+            .expect("persist recovery state");
+
+        let result = create_pinched_session(CreatePinchedSessionRequest {
+            db_path: &db_path,
+            ai_client: None,
+            session_id: &session_id,
+            source_session_title: "Auto Pinch Source",
+            conversation: &[ModelMessage {
+                role: Role::User,
+                content: vec![Content::Text {
+                    text: "Keep going after compaction.".to_string(),
+                }],
+            }],
+            working_dir: temp.path(),
+            model: Some("test-model"),
+            target_branch: None,
+            preservation_hints: None,
+            direction: None,
+            initial_user_message: Some("Continue working on the current task.".to_string()),
+        })
+        .await
+        .expect("automatic pinch should succeed");
+
+        let messages = session_manager
+            .load_session_messages(&result.new_session_id)
+            .expect("load child messages");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].0, "system");
+        assert_eq!(messages[1].0, "user");
+        assert!(messages[1]
+            .1
+            .contains("Continue working on the current task."));
+        assert!(
+            session_manager
+                .load_recovery_state(&session_id)
+                .expect("reload recovery state")
+                .is_none(),
+            "source recovery state should be cleared after automatic pinch"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_pinched_session_preserves_workspace_project_mode_and_branch() {
+        let temp = TempDir::new().expect("temp dir");
+        let db_path = temp.path().join("pinch.db");
+        let working_dir = temp.path().join("worktree");
+        let project_dir = working_dir.join("apps/mobile");
+        std::fs::create_dir_all(&project_dir).expect("project dir");
+        std::fs::write(project_dir.join("AGENTS.md"), "mobile-only instructions")
+            .expect("project instructions");
+        let working_dir_str = working_dir.to_str().expect("working dir string");
+        let project_dir_str = project_dir.to_str().expect("project dir string");
+        let session_manager = SessionManager::new(Database::new(&db_path).expect("db"));
+        let session_id = session_manager
+            .create_session_for_user_with_config(
+                "Workspace Pinch Source",
+                Some("test-model"),
+                Some(working_dir_str),
+                Some(project_dir_str),
+                WorkspaceMode::Created,
+                None,
+                Some("feature/mobile-intent"),
+                SessionType::Code,
+            )
+            .expect("source session");
+        session_manager
+            .save_message(
+                &session_id,
+                "user",
+                &serde_json::to_string(&vec![Content::Text {
+                    text: "Continue in the mobile project.".to_string(),
+                }])
+                .expect("user json"),
+            )
+            .expect("save source message");
+
+        let result = create_pinched_session(CreatePinchedSessionRequest {
+            db_path: &db_path,
+            ai_client: None,
+            session_id: &session_id,
+            source_session_title: "Workspace Pinch Source",
+            conversation: &[ModelMessage {
+                role: Role::User,
+                content: vec![Content::Text {
+                    text: "Continue in the mobile project.".to_string(),
+                }],
+            }],
+            working_dir: &working_dir,
+            model: Some("test-model"),
+            target_branch: None,
+            preservation_hints: None,
+            direction: None,
+            initial_user_message: None,
+        })
+        .await
+        .expect("pinch should succeed");
+
+        let child = session_manager
+            .get_session(&result.new_session_id)
+            .expect("load child")
+            .expect("child exists");
+        assert_eq!(child.working_dir.as_deref(), Some(working_dir_str));
+        assert_eq!(child.project_dir.as_deref(), Some(project_dir_str));
+        assert_eq!(child.workspace_mode, WorkspaceMode::Created);
+        assert_eq!(
+            child.target_branch.as_deref(),
+            Some("feature/mobile-intent")
+        );
+        assert!(
+            result
+                .pinch_context
+                .project_context
+                .as_deref()
+                .unwrap_or_default()
+                .contains("mobile-only instructions"),
+            "pinch context should load source project_dir instructions, not just working_dir"
+        );
     }
 }

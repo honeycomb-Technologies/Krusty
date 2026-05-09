@@ -250,8 +250,10 @@ pub(super) async fn update_session(
         }
     }
 
-    if let Some(target_branch) = req.target_branch.as_deref() {
-        let normalized = trimmed_nonempty(Some(target_branch));
+    if let Some(target_branch) = req.target_branch.as_ref() {
+        let normalized = target_branch
+            .as_deref()
+            .and_then(|target_branch| trimmed_nonempty(Some(target_branch)));
         session_manager.update_session_target_branch(&id, normalized)?;
     }
 

@@ -94,7 +94,8 @@ impl SessionManager {
     }
 
     /// Clear persisted non-resumable recovery snapshots that should not survive
-    /// a fresh server start.
+    /// a fresh server start. Actionable pending human interactions are preserved
+    /// so reload/restart can surface them without resuming tool execution.
     pub fn clear_stale_transient_recovery_states(&self) -> Result<usize> {
         let mut stmt = self.db.conn().prepare(
             "SELECT id, recovery_json
@@ -110,7 +111,7 @@ impl SessionManager {
             .filter_map(|(session_id, recovery_json)| {
                 let recovery_json = recovery_json?;
                 let state: SessionRecoveryState = serde_json::from_str(&recovery_json).ok()?;
-                if state.is_resumable() {
+                if state.is_resumable() || state.has_pending_interactions() {
                     None
                 } else {
                     Some(session_id)

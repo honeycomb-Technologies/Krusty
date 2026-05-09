@@ -14,6 +14,11 @@ import {
   tabForSessionType,
   type WorkspaceMode,
 } from "./helpers";
+import {
+  findCodeSessionForProject,
+  resolveSendIntent,
+  type ResolvedSendIntent,
+} from "./sendIntent";
 
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
 type ConnectionClient = ReturnType<typeof useConnection>["client"];
@@ -77,7 +82,12 @@ export function useSessionActions({
       sessionStore.getState().initSession(session.id, session.title || "");
       workspace
         .getState()
-        .initFromSession(session.id, directory, workspaceMode);
+        .initFromSession(
+          session.id,
+          directory,
+          workspaceMode,
+          session.target_branch ?? null,
+        );
 
       if (currentModel) {
         const modelInfo = models.find((candidate) => candidate.id === currentModel);
@@ -93,7 +103,7 @@ export function useSessionActions({
   );
 
   const createSessionForCurrentTab = useCallback(
-    async (directory?: string) => {
+    async (directory?: string, targetBranch?: string | null) => {
       if (!client) {
         return null;
       }
@@ -105,8 +115,8 @@ export function useSessionActions({
         const session = await client.createSession(
           undefined,
           directory,
-          undefined,
-          directory ? "selected" : undefined,
+          targetBranch ?? undefined,
+          directory ? "selected" : "neutral",
           sessionTypeForTab(activeTab),
         );
         await bootstrapSession(session);
@@ -131,10 +141,19 @@ export function useSessionActions({
     ],
   );
 
-  const ensureSessionForSend = useCallback(async () => {
+  const ensureSessionForSend = useCallback(async (): Promise<ResolvedSendIntent | null> => {
     const currentSessionId = sessionStore.getState().sessionId;
-    if (currentSessionId) {
-      return currentSessionId;
+    const wsState = workspace.getState();
+    const intent = resolveSendIntent({
+      activeTab,
+      currentSessionId,
+      workspaceDirectory: wsState.directory,
+      workspaceMode: wsState.mode,
+      targetBranch: wsState.targetBranch,
+    });
+
+    if (!intent.shouldPrecreate) {
+      return intent;
     }
 
     if (!client) {
@@ -142,19 +161,20 @@ export function useSessionActions({
     }
 
     try {
+      const precreate = intent.precreate;
       const session = await client.createSession(
         undefined,
-        undefined,
-        undefined,
-        undefined,
-        sessionTypeForTab(activeTab),
+        precreate?.projectDir ?? undefined,
+        precreate?.targetBranch ?? undefined,
+        precreate?.workspaceMode,
+        precreate?.sessionType ?? sessionTypeForTab(activeTab),
       );
       await bootstrapSession(session);
-      return session.id;
+      return { ...intent, sendOptions: undefined };
     } catch {
       return null;
     }
-  }, [activeTab, bootstrapSession, client, sessionStore]);
+  }, [activeTab, bootstrapSession, client, sessionStore, workspace]);
 
   const loadSession = useCallback(
     async (session: SessionResponse) => {
@@ -177,7 +197,7 @@ export function useSessionActions({
   );
 
   const openProjectInCode = useCallback(
-    async (projectDir: string) => {
+    async (projectDir: string, targetBranch?: string | null) => {
       if (!client) {
         return;
       }
@@ -186,10 +206,10 @@ export function useSessionActions({
       setDrawerOpen(false);
       setActiveTab(1);
 
-      const existing = sessions.find(
-        (session) =>
-          session.session_type === "code" &&
-          (session.project_dir === projectDir || session.working_dir === projectDir),
+      const existing = findCodeSessionForProject(
+        sessions,
+        projectDir,
+        targetBranch ?? null,
       );
 
       if (existing) {
@@ -202,7 +222,7 @@ export function useSessionActions({
         const session = await client.createSession(
           undefined,
           projectDir,
-          undefined,
+          targetBranch ?? undefined,
           "selected",
           "code",
         );
@@ -316,15 +336,20 @@ export function useSessionActions({
         return;
       }
 
-      const ensuredSessionId = await ensureSessionForSend();
-      if (!ensuredSessionId) {
+      const sendIntent = await ensureSessionForSend();
+      if (!sendIntent) {
         return;
       }
 
       try {
         await sessionStore
           .getState()
-          .sendMessage(trimmed, attachments, researchEnabled);
+          .sendMessage(
+            trimmed,
+            attachments,
+            researchEnabled,
+            sendIntent.sendOptions,
+          );
       } catch (err) {
         sessionStore.setState({
           error:
@@ -335,11 +360,13 @@ export function useSessionActions({
       }
     },
     [
+      activeTab,
       client,
       ensureModelReady,
       ensureSessionForSend,
       researchEnabled,
       sessionStore,
+      workspace,
     ],
   );
 

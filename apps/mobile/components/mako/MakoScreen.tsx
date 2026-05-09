@@ -24,7 +24,7 @@ interface MakoScreenProps {
   requestedTopLevel?: MakoTopLevelView;
   chat: MakoChatContext;
   onOpenRunById: (runId: string) => Promise<void>;
-  onOpenProject?: (projectDir: string) => Promise<void> | void;
+  onOpenProject?: (projectDir: string, targetBranch?: string | null) => Promise<void> | void;
   onDeleteRun: (runId: string) => void;
   onOpenMenu?: () => void;
   onTopLevelChange?: (view: MakoTopLevelView) => void;

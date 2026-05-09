@@ -60,6 +60,7 @@ pub(super) struct MakoAttentionItemSummary {
     pub(super) session_id: Option<String>,
     pub(super) run_id: Option<String>,
     pub(super) project_dir: Option<String>,
+    pub(super) target_branch: Option<String>,
     pub(super) tool_call_id: Option<String>,
     pub(super) thread_session_id: Option<String>,
     pub(super) thread_message_id: Option<String>,
@@ -315,6 +316,7 @@ fn build_attention_items(
                 session_id: Some(approval.session_id.clone()),
                 run_id: Some(approval.session_id.clone()),
                 project_dir: approval.project_dir.clone(),
+                target_branch: approval.target_branch.clone(),
                 tool_call_id: Some(approval.tool_call_id.clone()),
                 thread_session_id: thread_context.map(|context| context.session_id.clone()),
                 thread_message_id: thread_context.and_then(|context| {
@@ -411,6 +413,7 @@ fn build_run_action_attention_item(
 ) -> Option<MakoAttentionItemSummary> {
     let run_id = run.session_id.clone();
     let project_dir = run.project_dir.clone();
+    let target_branch = run.target_branch.clone();
     let thread_session_id = thread_context.map(|context| context.session_id.clone());
     let thread_message_id =
         thread_context.and_then(|context| find_thread_message_id(context, run.updated_at.as_str()));
@@ -443,6 +446,7 @@ fn build_run_action_attention_item(
         session_id: Some(run_id.clone()),
         run_id: Some(run_id),
         project_dir,
+        target_branch,
         tool_call_id: None,
         thread_session_id,
         thread_message_id,
@@ -477,6 +481,7 @@ fn build_scheduled_started_attention_item(
         session_id: Some(run.session_id.clone()),
         run_id: Some(run.session_id.clone()),
         project_dir: run.project_dir.clone(),
+        target_branch: run.target_branch.clone(),
         tool_call_id: None,
         thread_session_id: thread_context.map(|context| context.session_id.clone()),
         thread_message_id: thread_context
@@ -533,6 +538,7 @@ fn build_delegated_completion_attention_item(
         session_id: Some(run.session_id.clone()),
         run_id: Some(run.session_id.clone()),
         project_dir: run.project_dir.clone(),
+        target_branch: run.target_branch.clone(),
         tool_call_id: delegated.parent_tool_call_id.clone(),
         thread_session_id: thread_context.map(|context| context.session_id.clone()),
         thread_message_id: thread_context
@@ -602,6 +608,7 @@ fn build_run_completion_attention_item(
         session_id: Some(run.session_id.clone()),
         run_id: Some(run.session_id.clone()),
         project_dir: run.project_dir.clone(),
+        target_branch: run.target_branch.clone(),
         tool_call_id: None,
         thread_session_id: thread_context.map(|context| context.session_id.clone()),
         thread_message_id: thread_context

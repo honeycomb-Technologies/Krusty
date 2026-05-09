@@ -38,6 +38,7 @@ pub(super) struct MakoCurrentRunSummary {
     pub(super) title: String,
     pub(super) updated_at: String,
     pub(super) project_dir: Option<String>,
+    pub(super) target_branch: Option<String>,
     pub(super) agent_state: String,
     pub(super) runtime: Option<MakoRuntimeState>,
     pub(super) pending_tasks: usize,
@@ -54,6 +55,7 @@ pub(super) struct MakoPendingApprovalSummary {
     pub(super) session_id: String,
     pub(super) session_title: String,
     pub(super) project_dir: Option<String>,
+    pub(super) target_branch: Option<String>,
     pub(super) tool_call_id: String,
     pub(super) tool_name: String,
     pub(super) arguments: Value,
@@ -206,6 +208,7 @@ pub(super) async fn build_mako_current_response(
             &session.id,
             &session.title,
             session.project_dir.as_deref(),
+            session.target_branch.as_deref(),
             runtime
                 .as_ref()
                 .map(|state| state.priority)
@@ -286,6 +289,7 @@ pub(super) async fn build_mako_current_response(
             title: session.title.clone(),
             updated_at: session.updated_at.to_rfc3339(),
             project_dir: session.project_dir.clone(),
+            target_branch: session.target_branch.clone(),
             agent_state,
             runtime,
             pending_tasks: task_counts.pending,

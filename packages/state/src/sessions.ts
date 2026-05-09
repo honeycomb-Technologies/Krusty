@@ -22,7 +22,7 @@ export interface SessionsStoreState {
   error: string | null;
   loadSessions: () => Promise<void>;
   loadDirectories: () => Promise<void>;
-  createSession: (title?: string, workingDir?: string, targetBranch?: string) => Promise<SessionListItem | null>;
+  createSession: (title?: string, workingDir?: string, targetBranch?: string | null) => Promise<SessionListItem | null>;
   deleteSession: (id: string) => Promise<boolean>;
   selectSession: (id: string) => Promise<void>;
 }
@@ -65,7 +65,7 @@ export function createSessionsStore(
       }
     },
 
-    async createSession(title?: string, workingDir?: string, targetBranch?: string) {
+    async createSession(title?: string, workingDir?: string, targetBranch?: string | null) {
       set((s) => ({ ...s, isLoading: true }));
 
       try {
@@ -87,6 +87,7 @@ export function createSessionsStore(
           data.project_dir ?? workingDir ?? null,
           data.id,
           (data.workspace_mode ?? workspaceMode) as 'neutral' | 'selected' | 'created',
+          data.target_branch ?? targetBranch ?? null,
         );
 
         return data as SessionListItem;
@@ -139,6 +140,7 @@ export function createSessionsStore(
         session?.project_dir ?? session?.working_dir ?? null,
         id,
         (session?.workspace_mode ?? ((session?.project_dir ?? session?.working_dir) ? 'selected' : 'neutral')) as 'neutral' | 'selected' | 'created',
+        session?.target_branch ?? null,
       );
     },
   }));

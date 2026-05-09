@@ -22,10 +22,51 @@ export interface SessionWithMessagesResponse {
   messages: MessageResponse[];
 }
 
+export interface RecoveryToolArguments {
+  value: unknown;
+  redacted_paths?: string[];
+}
+
 export interface RecoveryToolCall {
   id: string;
   name: string;
+  arguments?: RecoveryToolArguments | null;
 }
+
+export interface PendingQuestionOptionSnapshot {
+  label: string;
+  description?: string | null;
+}
+
+export interface PendingQuestionSnapshot {
+  header: string;
+  question: string;
+  options?: PendingQuestionOptionSnapshot[];
+  multi_select?: boolean;
+}
+
+export interface PendingPlanTaskSnapshot {
+  description: string;
+  completed: boolean;
+}
+
+export type PendingInteractionSnapshot =
+  | {
+      kind: 'tool_approval';
+      tool_call: RecoveryToolCall;
+    }
+  | {
+      kind: 'ask_user_question';
+      tool_call_id: string;
+      questions: PendingQuestionSnapshot[];
+    }
+  | {
+      kind: 'plan_confirm';
+      tool_call_id: string;
+      title: string;
+      task_count: number;
+      tasks?: PendingPlanTaskSnapshot[];
+    };
 
 export interface SessionRecoveryState {
   schema_version: number;
@@ -33,6 +74,7 @@ export interface SessionRecoveryState {
   stop_reason: string | null;
   last_error: string | null;
   partial_assistant: PartialAssistantState;
+  pending_interactions?: PendingInteractionSnapshot[];
   decision: Record<string, unknown>;
 }
 
@@ -49,6 +91,7 @@ export interface SessionStateResponse {
   last_event_at: string | null;
   mode: SessionMode;
   recovery?: SessionRecoveryState | null;
+  pending_interactions?: PendingInteractionSnapshot[];
   live_partial_assistant?: PartialAssistantState | null;
   delegated_tools?: DelegatedToolStateResponse[];
   recent_delegated_runs?: DelegatedRunResponse[];
@@ -107,6 +150,8 @@ export interface ChatRequest {
   project_dir?: string | null;
   working_dir?: string | null;
   workspace_mode?: WorkspaceMode;
+  target_branch?: string | null;
+  targetBranch?: string | null;
   session_type?: SessionType;
   research_enabled?: boolean;
   model?: string;
@@ -362,6 +407,7 @@ export interface MakoSessionSummary {
   title: string;
   updated_at: string;
   project_dir?: string | null;
+  target_branch?: string | null;
   agent_state: string;
   runtime?: MakoRuntimeState | null;
 }
@@ -381,6 +427,7 @@ export interface MakoCurrentRunSummary {
   title: string;
   updated_at: string;
   project_dir?: string | null;
+  target_branch?: string | null;
   agent_state: string;
   runtime?: MakoRuntimeState | null;
   pending_tasks: number;
@@ -408,6 +455,7 @@ export interface MakoPendingApproval {
   session_id: string;
   session_title: string;
   project_dir?: string | null;
+  target_branch?: string | null;
   tool_call_id: string;
   tool_name: string;
   arguments: unknown;
@@ -441,6 +489,7 @@ export interface MakoAttentionItem {
   session_id?: string | null;
   run_id?: string | null;
   project_dir?: string | null;
+  target_branch?: string | null;
   tool_call_id?: string | null;
   thread_session_id?: string | null;
   thread_message_id?: string | null;

@@ -17,13 +17,16 @@ use krusty_core::mcp::McpManager;
 use krusty_core::process::ProcessRegistry;
 use krusty_core::skills::SkillsManager;
 use krusty_core::storage::credentials::CredentialStore;
-use krusty_core::storage::{Database, SessionType, WorkspaceMode};
+use krusty_core::storage::{
+    Database, PartialAssistantState, PendingInteractionSnapshot, RecoveryDecision,
+    RecoveryNonResumableReason, RecoveryStatus, SessionRecoveryState, SessionType, WorkspaceMode,
+};
 use krusty_core::tools::registry::ToolRegistry;
 use krusty_core::SessionManager;
 
 use super::{
-    build_user_content, chat, forward_loop_event, run_orchestrator_event_bridge,
-    select_model_for_chat_request, tool_approval, RequestedModel,
+    build_user_content, chat, forward_loop_event, prepare_chat_contract_for_test,
+    run_orchestrator_event_bridge, select_model_for_chat_request, tool_approval, RequestedModel,
 };
 use crate::auth::{AuthenticatedUser, CurrentUser};
 use crate::error::AppError;
@@ -88,6 +91,206 @@ fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
         user_id: Some(user_id.to_string()),
         home_dir: Some(home_dir.to_path_buf()),
     })
+}
+
+#[tokio::test]
+async fn chat_new_session_contract_includes_target_branch_intent() {
+    let (state, temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let user_root = temp_dir.join("alice-home");
+    let project_parent = user_root.join("projects");
+    std::fs::create_dir_all(&project_parent).expect("project parent should exist");
+    let project_dir = project_parent.join("fresh-contract-repo");
+
+    let contract = prepare_chat_contract_for_test(
+        &state,
+        Some(current_user("alice", &user_root)),
+        ChatRequest {
+            session_id: None,
+            message: "continue in this workspace".to_string(),
+            content: Vec::new(),
+            project_dir: Some(project_dir.to_string_lossy().to_string()),
+            working_dir: None,
+            workspace_mode: Some(WorkspaceMode::Created),
+            target_branch: Some("feature/mobile-continuation".to_string()),
+            session_type: Some(SessionType::Code),
+            model: Some("openai/gpt-5.5".to_string()),
+            thinking_enabled: crate::types::ThinkingLevel::Off,
+            fast_mode: true,
+            mode: None,
+            permission_mode: krusty_core::tools::registry::PermissionMode::default(),
+            research_enabled: None,
+        },
+    )
+    .await
+    .unwrap_or_else(|_| panic!("chat contract should prepare without a real AI client"));
+
+    let expected_project = project_dir.to_string_lossy().to_string();
+    assert!(contract.is_first_message);
+    assert_eq!(contract.session_type, SessionType::Code);
+    assert_eq!(contract.workspace_mode, WorkspaceMode::Created);
+    assert_eq!(contract.working_dir.to_string_lossy(), expected_project);
+    assert_eq!(
+        contract
+            .project_dir
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string())
+            .as_deref(),
+        Some(expected_project.as_str())
+    );
+    assert_eq!(
+        contract.target_branch.as_deref(),
+        Some("feature/mobile-continuation")
+    );
+    assert_eq!(contract.model.as_deref(), Some("openai/gpt-5.5"));
+    assert!(contract.fast_mode);
+    assert!(
+        !contract
+            .model
+            .as_deref()
+            .expect("model should be present")
+            .contains("mini"),
+        "fast mode must stay independent from mini model selection"
+    );
+}
+
+#[tokio::test]
+async fn chat_existing_session_uses_persisted_target_branch_intent_when_request_omits_override() {
+    let (state, temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let user_root = temp_dir.join("alice-home");
+    let persisted_project = user_root.join("repo");
+    let ignored_project = user_root.join("ignored-repo");
+    std::fs::create_dir_all(&persisted_project).expect("persisted project should exist");
+    std::fs::create_dir_all(&ignored_project).expect("ignored project should exist");
+
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user_with_config(
+            "Persisted Contract",
+            Some("openai/gpt-5.5-mini"),
+            Some(persisted_project.to_string_lossy().as_ref()),
+            Some(persisted_project.to_string_lossy().as_ref()),
+            WorkspaceMode::Selected,
+            Some("alice"),
+            Some("feature/contract"),
+            SessionType::Code,
+        )
+        .expect("session should be created");
+
+    let contract = prepare_chat_contract_for_test(
+        &state,
+        Some(current_user("alice", &user_root)),
+        ChatRequest {
+            session_id: Some(session_id.clone()),
+            message: "continue the existing work".to_string(),
+            content: Vec::new(),
+            project_dir: Some(ignored_project.to_string_lossy().to_string()),
+            working_dir: Some(ignored_project.to_string_lossy().to_string()),
+            workspace_mode: Some(WorkspaceMode::Created),
+            target_branch: None,
+            session_type: Some(SessionType::Chat),
+            model: None,
+            thinking_enabled: crate::types::ThinkingLevel::Off,
+            fast_mode: true,
+            mode: None,
+            permission_mode: krusty_core::tools::registry::PermissionMode::default(),
+            research_enabled: None,
+        },
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!("existing session contract should prepare without a real AI client")
+    });
+
+    let expected_project = persisted_project.to_string_lossy().to_string();
+    assert!(contract.is_first_message);
+    assert_eq!(contract.session_id, session_id);
+    assert_eq!(contract.session_type, SessionType::Code);
+    assert_eq!(contract.workspace_mode, WorkspaceMode::Selected);
+    assert_eq!(contract.working_dir.to_string_lossy(), expected_project);
+    assert_eq!(
+        contract
+            .project_dir
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string())
+            .as_deref(),
+        Some(expected_project.as_str())
+    );
+    assert_eq!(contract.model.as_deref(), Some("openai/gpt-5.5-mini"));
+    assert_eq!(contract.target_branch.as_deref(), Some("feature/contract"));
+    assert!(contract.fast_mode);
+}
+
+#[tokio::test]
+async fn chat_existing_session_allows_explicit_target_branch_intent_override() {
+    let (state, temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let user_root = temp_dir.join("alice-home");
+    let persisted_project = user_root.join("repo");
+    let ignored_project = user_root.join("ignored-repo");
+    std::fs::create_dir_all(&persisted_project).expect("persisted project should exist");
+    std::fs::create_dir_all(&ignored_project).expect("ignored project should exist");
+
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user_with_config(
+            "Persisted Contract",
+            Some("openai/gpt-5.5-mini"),
+            Some(persisted_project.to_string_lossy().as_ref()),
+            Some(persisted_project.to_string_lossy().as_ref()),
+            WorkspaceMode::Selected,
+            Some("alice"),
+            Some("feature/persisted"),
+            SessionType::Code,
+        )
+        .expect("session should be created");
+
+    let contract = prepare_chat_contract_for_test(
+        &state,
+        Some(current_user("alice", &user_root)),
+        ChatRequest {
+            session_id: Some(session_id.clone()),
+            message: "continue with requested target".to_string(),
+            content: Vec::new(),
+            project_dir: Some(ignored_project.to_string_lossy().to_string()),
+            working_dir: Some(ignored_project.to_string_lossy().to_string()),
+            workspace_mode: Some(WorkspaceMode::Created),
+            target_branch: Some("  feature/request-override  ".to_string()),
+            session_type: Some(SessionType::Chat),
+            model: None,
+            thinking_enabled: crate::types::ThinkingLevel::Off,
+            fast_mode: false,
+            mode: None,
+            permission_mode: krusty_core::tools::registry::PermissionMode::default(),
+            research_enabled: None,
+        },
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!("existing session contract should prepare without a real AI client")
+    });
+
+    let expected_project = persisted_project.to_string_lossy().to_string();
+    assert_eq!(contract.session_id, session_id);
+    assert_eq!(contract.session_type, SessionType::Code);
+    assert_eq!(contract.workspace_mode, WorkspaceMode::Selected);
+    assert_eq!(contract.working_dir.to_string_lossy(), expected_project);
+    assert_eq!(
+        contract.target_branch.as_deref(),
+        Some("feature/request-override")
+    );
+
+    let reloaded = session_manager
+        .get_session(&session_id)
+        .expect("session lookup should succeed")
+        .expect("session should exist");
+    assert_eq!(
+        reloaded.target_branch.as_deref(),
+        Some("feature/request-override")
+    );
 }
 
 fn model(
@@ -371,6 +574,56 @@ async fn tool_approval_rejects_closed_session_channel() {
 }
 
 #[tokio::test]
+async fn submit_tool_approval_returns_recoverable_pending_approval_error_when_channel_missing() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user("Owned Session", None, None, Some("alice"))
+        .expect("session creation should succeed");
+    let pending_interaction = PendingInteractionSnapshot::tool_approval_from_call(
+        "tool-1",
+        "edit",
+        &serde_json::json!({ "file_path": "src/lib.rs", "api_token": "hidden" }),
+    );
+    let recovery = SessionRecoveryState::new_with_pending_interactions(
+        RecoveryStatus::AwaitingInput,
+        Some(LoopStopReason::AwaitingInput),
+        None,
+        PartialAssistantState::default(),
+        vec![pending_interaction],
+        RecoveryDecision::NonResumable {
+            reason: RecoveryNonResumableReason::AwaitingHumanInput,
+        },
+    );
+    session_manager
+        .update_recovery_state(&session_id, &recovery)
+        .expect("pending approval recovery should persist");
+
+    let result = tool_approval(
+        State(state),
+        Some(current_user("alice", std::path::Path::new("/tmp"))),
+        Json(ToolApprovalRequest {
+            session_id: session_id.clone(),
+            tool_call_id: "tool-1".to_string(),
+            approved: true,
+        }),
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(AppError::Conflict(message))
+            if message.contains(&session_id)
+                && message.contains("tool-1")
+                && message.contains("approval channel unavailable")
+                && message.contains("recoverable")
+    ));
+}
+
+#[tokio::test]
 async fn tool_approval_survives_sse_disconnect_until_run_finishes() {
     let (state, _temp_dir) = create_test_state();
     create_test_user(&state, "alice");
@@ -483,6 +736,7 @@ async fn chat_does_not_persist_model_override_when_setup_fails() {
             project_dir: None,
             working_dir: None,
             workspace_mode: None,
+            target_branch: None,
             session_type: None,
             model: Some("openai/gpt-5".to_string()),
             thinking_enabled: crate::types::ThinkingLevel::Off,
@@ -528,6 +782,7 @@ async fn chat_rejects_missing_model_before_creating_session() {
             project_dir: Some(fresh_project_dir.to_string_lossy().to_string()),
             working_dir: None,
             workspace_mode: Some(WorkspaceMode::Selected),
+            target_branch: None,
             session_type: Some(SessionType::Code),
             model: None,
             thinking_enabled: crate::types::ThinkingLevel::Off,
@@ -577,6 +832,7 @@ async fn chat_rejects_unsupported_image_before_creating_session() {
             project_dir: None,
             working_dir: None,
             workspace_mode: None,
+            target_branch: None,
             session_type: Some(SessionType::Chat),
             model: None,
             thinking_enabled: crate::types::ThinkingLevel::Off,
@@ -601,6 +857,69 @@ async fn chat_rejects_unsupported_image_before_creating_session() {
         .expect("session listing should succeed");
 
     assert!(sessions.is_empty());
+}
+
+#[tokio::test]
+async fn sse_critical_tool_approval_survives_full_buffer_with_lag_signal() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let mut skipped_events = 0usize;
+
+    assert!(
+        forward_loop_event(
+            &tx,
+            "session-1",
+            LoopEvent::TextDelta {
+                delta: "first".to_string(),
+            },
+            &mut skipped_events,
+        )
+        .await
+    );
+    assert!(
+        forward_loop_event(
+            &tx,
+            "session-1",
+            LoopEvent::TextDelta {
+                delta: "second".to_string(),
+            },
+            &mut skipped_events,
+        )
+        .await
+    );
+    assert_eq!(skipped_events, 1);
+
+    let approval_tx = tx.clone();
+    let approval_handle = tokio::spawn(async move {
+        forward_loop_event(
+            &approval_tx,
+            "session-1",
+            LoopEvent::ToolApprovalRequired {
+                id: "tool-1".to_string(),
+                name: "edit".to_string(),
+                arguments: serde_json::json!({"path": "src/lib.rs"}),
+            },
+            &mut skipped_events,
+        )
+        .await
+    });
+
+    let first = rx.recv().await.expect("first event should arrive");
+    let first = first.expect("sse event should be ok");
+    assert!(format!("{first:?}").contains("text_delta"));
+
+    let lagged = rx.recv().await.expect("lag signal should arrive");
+    let lagged = lagged.expect("lag signal should be ok");
+    let lagged = format!("{lagged:?}");
+    assert!(lagged.contains("lagged"));
+    assert!(lagged.contains("skipped"));
+
+    let approval = rx.recv().await.expect("critical approval should arrive");
+    let approval = approval.expect("approval event should be ok");
+    let approval = format!("{approval:?}");
+    assert!(approval.contains("tool_approval_required"));
+    assert!(approval.contains("tool-1"));
+
+    assert!(approval_handle.await.expect("approval task should join"));
 }
 
 #[tokio::test]

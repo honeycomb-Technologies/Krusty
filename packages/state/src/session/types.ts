@@ -1,4 +1,9 @@
-import type { DelegatedRunStage, DelegatedToolKind } from '@krusty/api';
+import type {
+  DelegatedRunStage,
+  DelegatedToolKind,
+  SessionType,
+  WorkspaceMode,
+} from '@krusty/api';
 
 export interface ToolCall {
   id: string;
@@ -89,10 +94,19 @@ export interface Attachment {
   text?: string;
 }
 
+export interface SendMessageOptions {
+  projectDir?: string | null;
+  workingDir?: string | null;
+  workspaceMode?: WorkspaceMode;
+  sessionType?: SessionType;
+  targetBranch?: string | null;
+}
+
 export interface QueuedMessage {
   content: string;
   attachments: Attachment[];
   researchEnabled: boolean;
+  sendOptions?: SendMessageOptions;
 }
 
 export interface SessionStoreState {
@@ -119,6 +133,7 @@ export interface SessionStoreState {
     content: string,
     attachments?: Attachment[],
     researchEnabled?: boolean,
+    sendOptions?: SendMessageOptions,
   ) => Promise<void>;
   loadSession: (sessionId: string, isRefresh?: boolean) => Promise<void>;
   clearSession: () => void;
