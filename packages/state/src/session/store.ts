@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type {
   KrustyClient,
   SessionStateResponse as ApiSessionStateResponse,
+  StreamCallbacks,
 } from '@krusty/api';
 import type { createPlanStore } from '../plan';
 import type { createSessionsStore } from '../sessions';
@@ -26,7 +27,13 @@ import {
   persistSessionModel,
   syncSessionPresence,
 } from './persistence';
-import { applySessionSnapshot } from './serverState';
+import {
+  applySessionSnapshot,
+  isActionableSessionAgentState,
+  isActiveSessionAgentState,
+  pendingInteractionsFromSnapshot,
+  shouldStopSessionStatePolling,
+} from './serverState';
 import { createStreamCallbacks } from './streaming';
 import {
   applyLivePartialAssistant,
@@ -160,7 +167,80 @@ export function createSessionStore(
   // Create the Zustand store
   // -------------------------------------------------------------------------
 
-  return create<SessionStoreState>((set, get) => ({
+  return create<SessionStoreState>((set, get) => {
+    function applyStreamFailure(err: unknown) {
+      set((s) => ({
+        isLoading: false,
+        isStreaming: false,
+        isThinking: false,
+        thinkingContent: "",
+        messages: pruneEmptyAssistantMessages(
+          finalizeTransientAssistantMessages(s.messages),
+        ),
+        error: toErrorMessage(err),
+      }));
+    }
+
+    async function recoverAfterStreamInterruption(
+      sessionId: string,
+    ): Promise<boolean> {
+      try {
+        const serverState = await client.getSessionState(sessionId);
+        applySessionSnapshot(sessionId, serverState, true, set, get, planStore);
+
+        if (isActiveSessionAgentState(serverState.agent_state)) {
+          set({ isLoading: false, error: null });
+          get().startStatePolling(sessionId);
+          return true;
+        }
+
+        if (isActionableSessionAgentState(serverState.agent_state)) {
+          get().stopStatePolling();
+          set({
+            isLoading: false,
+            isStreaming: false,
+            isThinking: false,
+            thinkingContent: "",
+            error: null,
+          });
+          await get().loadSession(sessionId, true);
+          return true;
+        }
+      } catch {
+        // Fall through to regular stream error handling.
+      }
+
+      return false;
+    }
+
+    function createRecoveringStreamCallbacks(
+      callbacks: StreamCallbacks,
+      sessionId: string | null,
+      recoveryRef: { promise: Promise<boolean> | null },
+    ): StreamCallbacks {
+      return {
+        ...callbacks,
+        onError: (error) => {
+          if (!sessionId) {
+            callbacks.onError(error);
+            return;
+          }
+
+          if (!recoveryRef.promise) {
+            recoveryRef.promise = recoverAfterStreamInterruption(sessionId).then(
+              (recovered) => {
+                if (!recovered) {
+                  callbacks.onError(error);
+                }
+                return recovered;
+              },
+            );
+          }
+        },
+      };
+    }
+
+    return ({
     ...initialState,
 
     // -- sendMessage --------------------------------------------------------
@@ -259,6 +339,18 @@ export function createSessionStore(
         get().startStatePolling(pollingSessionId);
       }
 
+      const streamRecovery: { promise: Promise<boolean> | null } = { promise: null };
+      const callbacks = createRecoveringStreamCallbacks(
+        createStreamCallbacks(ref, set, get, {
+          planStore,
+          sessionsStore,
+          persistSessionMode: persistMode,
+        }),
+        pollingSessionId,
+        streamRecovery,
+      );
+      let keepStatePolling = false;
+
       try {
         const contentBlocks =
           attachments.length > 0
@@ -294,26 +386,25 @@ export function createSessionStore(
             permission_mode: state.permissionMode,
             mode: state.mode,
           },
-          createStreamCallbacks(ref, set, get, {
-            planStore,
-            sessionsStore,
-            persistSessionMode: persistMode,
-          }),
+          callbacks,
           abortController.signal,
         );
       } catch (err) {
-        set((s) => ({
-          isLoading: false,
-          isStreaming: false,
-          isThinking: false,
-          thinkingContent: "",
-          messages: pruneEmptyAssistantMessages(
-            finalizeTransientAssistantMessages(s.messages),
-          ),
-          error: toErrorMessage(err),
-        }));
+        if (pollingSessionId) {
+          streamRecovery.promise ??=
+            recoverAfterStreamInterruption(pollingSessionId);
+          keepStatePolling = await streamRecovery.promise;
+        }
+        if (!keepStatePolling) {
+          applyStreamFailure(err);
+        }
       } finally {
-        get().stopStatePolling();
+        if (streamRecovery.promise) {
+          keepStatePolling = await streamRecovery.promise;
+        }
+        if (!keepStatePolling) {
+          get().stopStatePolling();
+        }
       }
     },
 
@@ -363,6 +454,7 @@ export function createSessionStore(
               ),
               serverState?.live_partial_assistant,
               serverState?.agent_state ?? "idle",
+              pendingInteractionsFromSnapshot(serverState),
             ),
             isLoading: false,
           };
@@ -569,6 +661,18 @@ export function createSessionStore(
         messages: upsertTransientAssistantMessage(s.messages, ref.current),
       }));
 
+      const streamRecovery: { promise: Promise<boolean> | null } = { promise: null };
+      const callbacks = createRecoveringStreamCallbacks(
+        createStreamCallbacks(ref, set, get, {
+          planStore,
+          sessionsStore,
+          persistSessionMode: persistMode,
+        }),
+        state.sessionId,
+        streamRecovery,
+      );
+      let keepStatePolling = false;
+
       try {
         await client.streamToolResult(
           {
@@ -577,26 +681,23 @@ export function createSessionStore(
             result,
             fast_mode: state.fastModeEnabled,
           },
-          createStreamCallbacks(ref, set, get, {
-            planStore,
-            sessionsStore,
-            persistSessionMode: persistMode,
-          }),
+          callbacks,
           abortController.signal,
         );
       } catch (err) {
-        set((s) => ({
-          isLoading: false,
-          isStreaming: false,
-          isThinking: false,
-          thinkingContent: "",
-          messages: pruneEmptyAssistantMessages(
-            finalizeTransientAssistantMessages(s.messages),
-          ),
-          error: toErrorMessage(err),
-        }));
+        streamRecovery.promise ??=
+          recoverAfterStreamInterruption(state.sessionId);
+        keepStatePolling = await streamRecovery.promise;
+        if (!keepStatePolling) {
+          applyStreamFailure(err);
+        }
       } finally {
-        get().stopStatePolling();
+        if (streamRecovery.promise) {
+          keepStatePolling = await streamRecovery.promise;
+        }
+        if (!keepStatePolling) {
+          get().stopStatePolling();
+        }
       }
     },
 
@@ -654,12 +755,14 @@ export function createSessionStore(
           const serverState = await client.getSessionState(sessionId);
           applySessionSnapshot(sessionId, serverState, true, set, get, planStore);
 
-          if (
-            serverState.agent_state === "idle" ||
-            serverState.agent_state === "awaiting_input"
-          ) {
+          if (shouldStopSessionStatePolling(serverState.agent_state)) {
             get().stopStatePolling();
-            set({ isStreaming: false, isThinking: false });
+            set({
+              isStreaming: false,
+              isThinking: false,
+              thinkingContent: "",
+              error: null,
+            });
             await get().loadSession(sessionId, true);
           }
         } catch {
@@ -706,5 +809,6 @@ export function createSessionStore(
       const state = get();
       get().stopPresenceHeartbeat(state.sessionId);
     },
-  }));
+    });
+  });
 }

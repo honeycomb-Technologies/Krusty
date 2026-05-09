@@ -1,5 +1,7 @@
 import type {
   PartialAssistantState as ApiPartialAssistantState,
+  PendingInteractionSnapshot as ApiPendingInteractionSnapshot,
+  RecoveryToolArguments as ApiRecoveryToolArguments,
   SessionRecoveryState as ApiRecoveryState,
 } from '@krusty/api';
 
@@ -163,6 +165,92 @@ export function applyRecoveryParity(
   return nextMessages;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function unwrapRecoveryToolArguments(
+  args: ApiRecoveryToolArguments | null | undefined,
+): Record<string, unknown> | undefined {
+  if (!args || args.value === undefined || args.value === null) {
+    return undefined;
+  }
+  return isRecord(args.value) ? args.value : { value: args.value };
+}
+
+function buildPendingInteractionToolCall(
+  interaction: ApiPendingInteractionSnapshot,
+): ToolCall {
+  switch (interaction.kind) {
+    case 'tool_approval': {
+      const delegatedKind = resolveDelegatedKind(
+        interaction.tool_call.name,
+        unwrapRecoveryToolArguments(interaction.tool_call.arguments),
+      );
+      return {
+        id: interaction.tool_call.id,
+        name: interaction.tool_call.name,
+        arguments: unwrapRecoveryToolArguments(interaction.tool_call.arguments),
+        delegated: delegatedKind
+          ? createDelegatedArtifactState(delegatedKind)
+          : undefined,
+        status: 'awaiting_approval',
+      };
+    }
+    case 'ask_user_question':
+      return {
+        id: interaction.tool_call_id,
+        name: 'AskUserQuestion',
+        arguments: {
+          questions: interaction.questions.map((question) => ({
+            header: question.header,
+            question: question.question,
+            options: question.options ?? [],
+            multiSelect: question.multi_select ?? false,
+          })),
+        },
+        status: 'awaiting_approval',
+      };
+    case 'plan_confirm':
+      return {
+        id: interaction.tool_call_id,
+        name: 'PlanConfirm',
+        arguments: {
+          title: interaction.title,
+          task_count: interaction.task_count,
+          tasks: interaction.tasks,
+        },
+        status: 'awaiting_approval',
+      };
+  }
+}
+
+function applyPendingInteractionsToToolCalls(
+  toolCalls: ToolCall[],
+  pendingInteractions: ApiPendingInteractionSnapshot[] | null | undefined,
+): ToolCall[] {
+  if (!pendingInteractions?.length) {
+    return toolCalls;
+  }
+
+  const pendingToolCalls = pendingInteractions.map(buildPendingInteractionToolCall);
+  const pendingById = new Map(
+    pendingToolCalls.map((toolCall) => [toolCall.id, toolCall]),
+  );
+  const nextToolCalls = toolCalls.map((toolCall) => {
+    const pendingToolCall = pendingById.get(toolCall.id);
+    if (!pendingToolCall) return toolCall;
+    pendingById.delete(toolCall.id);
+    return {
+      ...toolCall,
+      ...pendingToolCall,
+      delegated: pendingToolCall.delegated ?? toolCall.delegated,
+    };
+  });
+
+  return [...nextToolCalls, ...pendingById.values()];
+}
+
 function livePartialToolStatus(agentState: string): ToolCall['status'] {
   switch (agentState) {
     case 'tool_executing':
@@ -178,28 +266,32 @@ export function applyLivePartialAssistant(
   messages: ChatMessage[],
   livePartial: ApiPartialAssistantState | null | undefined,
   agentState: string,
+  pendingInteractions?: ApiPendingInteractionSnapshot[] | null,
 ): ChatMessage[] {
   const nextMessages = messages.filter((message) => message.kind !== 'live_partial');
-  if (
-    !livePartial
-    || !['streaming', 'tool_executing', 'awaiting_input'].includes(agentState)
-  ) {
+  if (!['streaming', 'tool_executing', 'awaiting_input'].includes(agentState)) {
     return nextMessages;
   }
 
-  const hasContent = livePartial.text.trim().length > 0;
-  const hasThinking = (livePartial.thinking?.trim().length ?? 0) > 0;
-  const toolCalls = livePartial.tool_calls.map((toolCall) => {
-    const delegatedKind = resolveDelegatedKind(toolCall.name);
-    return {
-      id: toolCall.id,
-      name: toolCall.name,
-      delegated: delegatedKind
-        ? createDelegatedArtifactState(delegatedKind)
-        : undefined,
-      status: livePartialToolStatus(agentState),
-    } satisfies ToolCall;
-  });
+  const hasContent = (livePartial?.text.trim().length ?? 0) > 0;
+  const hasThinking = (livePartial?.thinking?.trim().length ?? 0) > 0;
+  const liveToolCalls = livePartial?.tool_calls ?? [];
+  const toolCalls = applyPendingInteractionsToToolCalls(
+    liveToolCalls.map((toolCall) => {
+      const argumentsValue = unwrapRecoveryToolArguments(toolCall.arguments);
+      const delegatedKind = resolveDelegatedKind(toolCall.name, argumentsValue);
+      return {
+        id: toolCall.id,
+        name: toolCall.name,
+        arguments: argumentsValue,
+        delegated: delegatedKind
+          ? createDelegatedArtifactState(delegatedKind)
+          : undefined,
+        status: livePartialToolStatus(agentState),
+      } satisfies ToolCall;
+    }),
+    pendingInteractions,
+  );
 
   if (!hasContent && !hasThinking && toolCalls.length === 0) {
     return nextMessages;
@@ -208,8 +300,8 @@ export function applyLivePartialAssistant(
   return upsertTransientAssistantMessage(nextMessages, {
     id: createChatMessageId('live-partial'),
     role: 'assistant',
-    content: livePartial.text,
-    thinking: livePartial.thinking,
+    content: livePartial?.text ?? '',
+    thinking: livePartial?.thinking,
     toolCalls,
     kind: 'live_partial',
   });

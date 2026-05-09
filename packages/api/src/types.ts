@@ -30,7 +30,7 @@ export interface RecoveryToolArguments {
 export interface RecoveryToolCall {
   id: string;
   name: string;
-  arguments: RecoveryToolArguments;
+  arguments?: RecoveryToolArguments | null;
 }
 
 export interface PendingQuestionOptionSnapshot {
@@ -91,7 +91,7 @@ export interface SessionStateResponse {
   last_event_at: string | null;
   mode: SessionMode;
   recovery?: SessionRecoveryState | null;
-  pending_interactions: PendingInteractionSnapshot[];
+  pending_interactions?: PendingInteractionSnapshot[];
   live_partial_assistant?: PartialAssistantState | null;
   delegated_tools?: DelegatedToolStateResponse[];
   recent_delegated_runs?: DelegatedRunResponse[];
