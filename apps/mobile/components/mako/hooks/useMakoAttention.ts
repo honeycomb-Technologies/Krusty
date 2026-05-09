@@ -23,6 +23,7 @@ function mapItem(
     active: item.active,
     runId: item.run_id ?? null,
     projectDir: item.project_dir ?? null,
+    targetBranch: item.target_branch ?? null,
     toolCallId: item.tool_call_id ?? null,
     sessionId: item.session_id ?? null,
     threadSessionId: item.thread_session_id ?? null,

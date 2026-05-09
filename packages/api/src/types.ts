@@ -407,6 +407,7 @@ export interface MakoSessionSummary {
   title: string;
   updated_at: string;
   project_dir?: string | null;
+  target_branch?: string | null;
   agent_state: string;
   runtime?: MakoRuntimeState | null;
 }
@@ -426,6 +427,7 @@ export interface MakoCurrentRunSummary {
   title: string;
   updated_at: string;
   project_dir?: string | null;
+  target_branch?: string | null;
   agent_state: string;
   runtime?: MakoRuntimeState | null;
   pending_tasks: number;
@@ -453,6 +455,7 @@ export interface MakoPendingApproval {
   session_id: string;
   session_title: string;
   project_dir?: string | null;
+  target_branch?: string | null;
   tool_call_id: string;
   tool_name: string;
   arguments: unknown;
@@ -486,6 +489,7 @@ export interface MakoAttentionItem {
   session_id?: string | null;
   run_id?: string | null;
   project_dir?: string | null;
+  target_branch?: string | null;
   tool_call_id?: string | null;
   thread_session_id?: string | null;
   thread_message_id?: string | null;

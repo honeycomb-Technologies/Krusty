@@ -1,58 +1,100 @@
-import type { SessionType } from "@krusty/api";
+import type { SessionResponse, SessionType, WorkspaceMode } from "@krusty/api";
 import type { SendMessageOptions } from "@krusty/state";
 
-export interface WorkspaceSnapshot {
-  directory: string | null;
-  mode: "neutral" | "selected" | "created";
-  sessionId: string | null;
-  /**
-   * TODO(targetBranch-mobile): workspace state does not expose first-send branch
-   * intent yet. When that dependent card lands, pass it through this typed field;
-   * @krusty/state intentionally keeps it out of /api/chat until the server chat
-   * contract accepts target_branch.
-   */
+const TAB_SESSION_TYPES: SessionType[] = ["chat", "code", "mako"];
+
+interface ResolveSendIntentArgs {
+  activeTab: number;
+  currentSessionId: string | null;
+  workspaceDirectory: string | null;
+  workspaceMode: WorkspaceMode;
   targetBranch?: string | null;
 }
 
-export interface FirstSendIntent {
-  shouldCreateSessionBeforeSend: boolean;
-  sendOptions: SendMessageOptions;
+interface PrecreateSessionIntent {
+  projectDir?: string | null;
+  targetBranch?: string | null;
+  workspaceMode?: WorkspaceMode;
+  sessionType: SessionType;
 }
 
-function selectedDirectory(workspace: WorkspaceSnapshot): string | null {
-  const directory = workspace.directory?.trim();
-  if (!directory || workspace.mode === "neutral") {
+export interface ResolvedSendIntent {
+  shouldPrecreate: boolean;
+  precreate?: PrecreateSessionIntent;
+  sendOptions?: SendMessageOptions;
+}
+
+function sessionTypeForTab(index: number): SessionType {
+  return TAB_SESSION_TYPES[index] ?? "code";
+}
+
+function normalizeNullable(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function sameTargetBranch(left: string | null | undefined, right: string | null | undefined): boolean {
+  return normalizeNullable(left) === normalizeNullable(right);
+}
+
+export function findCodeSessionForProject(
+  sessions: SessionResponse[],
+  projectDir: string,
+  targetBranch?: string | null,
+): SessionResponse | null {
+  const normalizedProjectDir = projectDir.trim();
+  if (!normalizedProjectDir) {
     return null;
   }
-  return workspace.directory;
+
+  return (
+    sessions.find((session) => {
+      const sessionProjectDir = session.project_dir ?? session.working_dir ?? null;
+      return (
+        session.session_type === "code" &&
+        sessionProjectDir === normalizedProjectDir &&
+        sameTargetBranch(session.target_branch, targetBranch)
+      );
+    }) ?? null
+  );
 }
 
-export function resolveFirstSendIntent({
+export function resolveSendIntent({
+  activeTab,
   currentSessionId,
-  sessionType,
-  workspace,
-}: {
-  currentSessionId: string | null;
-  sessionType: SessionType;
-  workspace: WorkspaceSnapshot;
-}): FirstSendIntent {
-  const sendOptions: SendMessageOptions = { sessionType };
-  const directory = selectedDirectory(workspace);
-  const shouldStreamCodeWorkspaceSession =
-    !currentSessionId && sessionType === "code" && directory !== null;
+  workspaceDirectory,
+  workspaceMode,
+  targetBranch,
+}: ResolveSendIntentArgs): ResolvedSendIntent {
+  if (currentSessionId) {
+    return { shouldPrecreate: false };
+  }
 
-  if (shouldStreamCodeWorkspaceSession) {
-    sendOptions.projectDir = directory;
-    sendOptions.workingDir = directory;
-    sendOptions.workspaceMode = workspace.mode;
-    if (workspace.targetBranch?.trim()) {
-      sendOptions.targetBranch = workspace.targetBranch;
-    }
+  const sessionType = sessionTypeForTab(activeTab);
+  const normalizedDirectory = workspaceDirectory?.trim() || null;
+
+  if (
+    sessionType === "code" &&
+    workspaceMode !== "neutral" &&
+    normalizedDirectory
+  ) {
+    return {
+      shouldPrecreate: false,
+      sendOptions: {
+        projectDir: normalizedDirectory,
+        workingDir: normalizedDirectory,
+        workspaceMode,
+        sessionType: "code",
+        targetBranch: normalizeNullable(targetBranch),
+      },
+    };
   }
 
   return {
-    shouldCreateSessionBeforeSend:
-      !currentSessionId && !shouldStreamCodeWorkspaceSession,
-    sendOptions,
+    shouldPrecreate: true,
+    precreate: {
+      workspaceMode: "neutral",
+      sessionType,
+    },
   };
 }

@@ -80,6 +80,7 @@ pub(super) struct MakoSessionSummary {
     pub(super) title: String,
     pub(super) updated_at: String,
     pub(super) project_dir: Option<String>,
+    pub(super) target_branch: Option<String>,
     pub(super) agent_state: String,
     pub(super) runtime: Option<MakoRuntimeState>,
 }
@@ -206,6 +207,7 @@ pub(super) async fn list_sessions(
             title: session.title,
             updated_at: session.updated_at.to_rfc3339(),
             project_dir: session.project_dir,
+            target_branch: session.target_branch,
             agent_state,
             runtime,
         });

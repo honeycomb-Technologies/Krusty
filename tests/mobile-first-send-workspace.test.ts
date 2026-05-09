@@ -4,8 +4,22 @@ import assert from 'node:assert/strict';
 import type { ChatRequest, StreamCallbacks } from '../packages/api/src/types';
 import { createSessionStore } from '../packages/state/src/session/store';
 import { MemoryStorage } from '../packages/state/src/storage';
-import { createWorkspaceStore } from '../packages/state/src/workspace';
-import { resolveFirstSendIntent } from '../apps/mobile/app/(tabs)/chat-screen/sendIntent';
+import { createWorkspaceStore, type WorkspaceStoreState } from '../packages/state/src/workspace';
+import { resolveSendIntent } from '../apps/mobile/app/(tabs)/chat-screen/sendIntent';
+
+function resolveIntentForWorkspace(
+  activeTab: number,
+  currentSessionId: string | null,
+  workspace: WorkspaceStoreState,
+) {
+  return resolveSendIntent({
+    activeTab,
+    currentSessionId,
+    workspaceDirectory: workspace.directory,
+    workspaceMode: workspace.mode,
+    targetBranch: workspace.targetBranch,
+  });
+}
 
 function createStoreHarness() {
   const streamRequests: ChatRequest[] = [];
@@ -59,13 +73,9 @@ test('code first-send with a selected workspace streams a new code session with 
   const { sessionStore, streamRequests, workspace } = createStoreHarness();
   workspace.getState().setWorkspace('/repo/project', null, 'selected');
 
-  const intent = resolveFirstSendIntent({
-    currentSessionId: null,
-    sessionType: 'code',
-    workspace: workspace.getState(),
-  });
+  const intent = resolveIntentForWorkspace(1, null, workspace.getState());
 
-  assert.equal(intent.shouldCreateSessionBeforeSend, false);
+  assert.equal(intent.shouldPrecreate, false);
   await sessionStore
     .getState()
     .sendMessage('inspect this repository', [], false, intent.sendOptions);
@@ -79,6 +89,7 @@ test('code first-send with a selected workspace streams a new code session with 
     working_dir: '/repo/project',
     workspace_mode: 'selected',
     session_type: 'code',
+    target_branch: null,
     research_enabled: undefined,
     model: undefined,
     fast_mode: undefined,
@@ -91,26 +102,40 @@ test('code first-send with a selected workspace streams a new code session with 
 test('code first-send without a selected workspace keeps explicit neutral precreate behavior', () => {
   const { workspace } = createStoreHarness();
 
-  const intent = resolveFirstSendIntent({
-    currentSessionId: null,
-    sessionType: 'code',
-    workspace: workspace.getState(),
-  });
+  const intent = resolveIntentForWorkspace(1, null, workspace.getState());
 
-  assert.equal(intent.shouldCreateSessionBeforeSend, true);
-  assert.deepEqual(intent.sendOptions, { sessionType: 'code' });
+  assert.equal(intent.shouldPrecreate, true);
+  assert.deepEqual(intent.precreate, {
+    workspaceMode: 'neutral',
+    sessionType: 'code',
+  });
+  assert.equal(intent.sendOptions, undefined);
+});
+
+test('code first-send treats neutral mode as no selected workspace even if a directory is persisted', () => {
+  const { workspace } = createStoreHarness();
+  workspace.getState().setWorkspace('/repo/stale-project', null, 'neutral', 'feature/stale');
+
+  const intent = resolveIntentForWorkspace(1, null, workspace.getState());
+
+  assert.equal(intent.shouldPrecreate, true);
+  assert.deepEqual(intent.precreate, {
+    workspaceMode: 'neutral',
+    sessionType: 'code',
+  });
+  assert.equal(intent.sendOptions, undefined);
 });
 
 test('chat first-send does not inherit a stale selected code workspace implicitly', () => {
   const { workspace } = createStoreHarness();
   workspace.getState().setWorkspace('/repo/previous-code-session', 'old-code-session', 'selected');
 
-  const intent = resolveFirstSendIntent({
-    currentSessionId: null,
-    sessionType: 'chat',
-    workspace: workspace.getState(),
-  });
+  const intent = resolveIntentForWorkspace(0, null, workspace.getState());
 
-  assert.equal(intent.shouldCreateSessionBeforeSend, true);
-  assert.deepEqual(intent.sendOptions, { sessionType: 'chat' });
+  assert.equal(intent.shouldPrecreate, true);
+  assert.deepEqual(intent.precreate, {
+    workspaceMode: 'neutral',
+    sessionType: 'chat',
+  });
+  assert.equal(intent.sendOptions, undefined);
 });

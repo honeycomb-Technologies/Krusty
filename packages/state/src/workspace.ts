@@ -3,25 +3,50 @@ import type { KrustyStorage } from './storage';
 
 const STORAGE_KEY = 'krusty:workspace';
 
+type WorkspaceMode = 'neutral' | 'selected' | 'created';
+
 export interface WorkspaceStoreState {
   directory: string | null;
-  mode: 'neutral' | 'selected' | 'created';
+  targetBranch: string | null;
+  mode: WorkspaceMode;
   sessionId: string | null;
   initialized: boolean;
-  setWorkspace: (directory: string | null, sessionId: string | null, mode?: 'neutral' | 'selected' | 'created') => void;
+  setWorkspace: (
+    directory: string | null,
+    sessionId: string | null,
+    mode?: WorkspaceMode,
+    targetBranch?: string | null,
+  ) => void;
   setSession: (sessionId: string | null) => void;
-  setDirectory: (directory: string | null) => void;
+  setDirectory: (directory: string | null, targetBranch?: string | null) => void;
+  setTargetBranch: (targetBranch: string | null) => void;
   clear: () => void;
-  initFromSession: (sessionId: string, directory: string | null, mode?: 'neutral' | 'selected' | 'created') => void;
+  initFromSession: (
+    sessionId: string,
+    directory: string | null,
+    mode?: WorkspaceMode,
+    targetBranch?: string | null,
+  ) => void;
 }
 
-function loadState(storage: KrustyStorage): Omit<WorkspaceStoreState, 'setWorkspace' | 'setSession' | 'setDirectory' | 'clear' | 'initFromSession'> {
+type PersistedWorkspaceState = Pick<
+  WorkspaceStoreState,
+  'directory' | 'targetBranch' | 'mode' | 'sessionId' | 'initialized'
+>;
+
+function normalizeTargetBranch(targetBranch: string | null | undefined): string | null {
+  const trimmed = targetBranch?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function loadState(storage: KrustyStorage): Omit<WorkspaceStoreState, 'setWorkspace' | 'setSession' | 'setDirectory' | 'setTargetBranch' | 'clear' | 'initFromSession'> {
   try {
     const stored = storage.get(STORAGE_KEY);
     if (stored) {
-      const parsed = JSON.parse(stored) as Partial<WorkspaceStoreState>;
+      const parsed = JSON.parse(stored) as Partial<PersistedWorkspaceState>;
       return {
         directory: parsed.directory ?? null,
+        targetBranch: normalizeTargetBranch(parsed.targetBranch),
         mode: parsed.mode ?? 'neutral',
         sessionId: parsed.sessionId ?? null,
         initialized: true,
@@ -30,13 +55,22 @@ function loadState(storage: KrustyStorage): Omit<WorkspaceStoreState, 'setWorksp
   } catch {
     // Ignore parse errors
   }
-  return { directory: null, mode: 'neutral', sessionId: null, initialized: true };
+  return { directory: null, targetBranch: null, mode: 'neutral', sessionId: null, initialized: true };
 }
 
-function saveState(storage: KrustyStorage, state: { directory: string | null; mode: string; sessionId: string | null }) {
+function saveState(
+  storage: KrustyStorage,
+  state: {
+    directory: string | null;
+    targetBranch: string | null;
+    mode: string;
+    sessionId: string | null;
+  },
+) {
   try {
     storage.set(STORAGE_KEY, JSON.stringify({
       directory: state.directory,
+      targetBranch: state.targetBranch,
       mode: state.mode,
       sessionId: state.sessionId,
     }));
@@ -54,9 +88,16 @@ export function createWorkspaceStore(storage: KrustyStorage) {
     setWorkspace(
       directory: string | null,
       sessionId: string | null,
-      mode: 'neutral' | 'selected' | 'created' = directory ? 'selected' : 'neutral',
+      mode: WorkspaceMode = directory ? 'selected' : 'neutral',
+      targetBranch: string | null = null,
     ) {
-      const newState = { directory, mode, sessionId, initialized: true };
+      const newState = {
+        directory,
+        targetBranch: normalizeTargetBranch(targetBranch),
+        mode,
+        sessionId,
+        initialized: true,
+      };
       set(newState);
       saveState(storage, newState);
     },
@@ -68,18 +109,39 @@ export function createWorkspaceStore(storage: KrustyStorage) {
       saveState(storage, newState);
     },
 
-    setDirectory(directory: string | null) {
+    setDirectory(directory: string | null, targetBranch: string | null = null) {
       const prev = get();
       const mode = directory
         ? (prev.mode === 'created' ? 'created' : 'selected')
         : 'neutral';
-      const newState = { ...prev, directory, mode };
-      set({ directory, mode });
+      const newState = {
+        ...prev,
+        directory,
+        targetBranch: normalizeTargetBranch(targetBranch),
+        mode,
+      };
+      set({ directory, targetBranch: newState.targetBranch, mode });
+      saveState(storage, newState);
+    },
+
+    setTargetBranch(targetBranch: string | null) {
+      const prev = get();
+      const newState = {
+        ...prev,
+        targetBranch: normalizeTargetBranch(targetBranch),
+      };
+      set({ targetBranch: newState.targetBranch });
       saveState(storage, newState);
     },
 
     clear() {
-      const newState = { directory: null, mode: 'neutral' as const, sessionId: null, initialized: true };
+      const newState = {
+        directory: null,
+        targetBranch: null,
+        mode: 'neutral' as const,
+        sessionId: null,
+        initialized: true,
+      };
       set(newState);
       saveState(storage, newState);
     },
@@ -87,9 +149,16 @@ export function createWorkspaceStore(storage: KrustyStorage) {
     initFromSession(
       sessionId: string,
       directory: string | null,
-      mode: 'neutral' | 'selected' | 'created' = directory ? 'selected' : 'neutral',
+      mode: WorkspaceMode = directory ? 'selected' : 'neutral',
+      targetBranch: string | null = null,
     ) {
-      const newState = { directory, mode, sessionId, initialized: true };
+      const newState = {
+        directory,
+        targetBranch: normalizeTargetBranch(targetBranch),
+        mode,
+        sessionId,
+        initialized: true,
+      };
       set(newState);
       saveState(storage, newState);
     },

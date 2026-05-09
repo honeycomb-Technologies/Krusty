@@ -65,6 +65,9 @@ export function MakoAttentionItem({
     if (item.projectDir) {
       parts.push(formatProjectLabel(item.projectDir));
     }
+    if (item.targetBranch) {
+      parts.push(`branch ${item.targetBranch}`);
+    }
     return parts.join(" • ");
   }, [item]);
 

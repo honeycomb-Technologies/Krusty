@@ -60,6 +60,15 @@ import {
   thinkingLevelToApiValue,
 } from './thinking';
 
+function hasOwnProperty<T extends object>(value: T, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function normalizeTargetBranch(targetBranch: string | null | undefined): string | null {
+  const trimmed = targetBranch?.trim();
+  return trimmed ? trimmed : null;
+}
+
 export function createSessionStore(
   client: KrustyClient,
   storage: KrustyStorage,
@@ -240,8 +249,8 @@ export function createSessionStore(
       };
     }
 
-    return ({
-    ...initialState,
+    return {
+      ...initialState,
 
     // -- sendMessage --------------------------------------------------------
 
@@ -249,7 +258,7 @@ export function createSessionStore(
       content: string,
       attachments: Attachment[] = [],
       researchEnabled = false,
-      options: SendMessageOptions = {},
+      sendOptions: SendMessageOptions = {},
     ) {
       const state = get();
       const ws = workspace.getState();
@@ -290,7 +299,7 @@ export function createSessionStore(
           return {
             queuedMessages: [
               ...s.queuedMessages,
-              { content, attachments, researchEnabled },
+              { content, attachments, researchEnabled, sendOptions },
             ],
             messages: [
               ...s.messages,
@@ -356,29 +365,65 @@ export function createSessionStore(
           attachments.length > 0
             ? buildContentBlocks(requestMessage, attachments)
             : undefined;
-
-        const hasActiveSession = Boolean(state.sessionId);
-        const hasSendOption = (key: keyof SendMessageOptions) =>
-          Object.prototype.hasOwnProperty.call(options, key);
-        const projectDir = hasSendOption("projectDir")
-          ? options.projectDir
-          : ws.directory;
-        const workingDir = hasSendOption("workingDir")
-          ? options.workingDir
-          : projectDir;
-        const workspaceMode = hasSendOption("workspaceMode")
-          ? options.workspaceMode
-          : ws.mode;
+        const isNewSessionRequest = !state.sessionId;
+        const sendOptionHasProjectDir = sendOptions
+          ? hasOwnProperty(sendOptions, "projectDir")
+          : false;
+        const sendOptionHasWorkingDir = sendOptions
+          ? hasOwnProperty(sendOptions, "workingDir")
+          : false;
+        const sendOptionHasWorkspaceMode = sendOptions
+          ? hasOwnProperty(sendOptions, "workspaceMode")
+          : false;
+        const sendOptionHasSessionType = sendOptions
+          ? hasOwnProperty(sendOptions, "sessionType")
+          : false;
+        const sendOptionHasTargetBranch = sendOptions
+          ? hasOwnProperty(sendOptions, "targetBranch")
+          : false;
+        const requestedProjectDir = isNewSessionRequest
+          ? sendOptionHasProjectDir
+            ? sendOptions?.projectDir ?? null
+            : ws.directory
+          : undefined;
+        const requestedWorkingDir = isNewSessionRequest
+          ? sendOptionHasWorkingDir
+            ? sendOptions?.workingDir ?? null
+            : sendOptionHasProjectDir
+              ? requestedProjectDir
+              : ws.directory
+          : undefined;
+        const requestedWorkspaceMode = isNewSessionRequest
+          ? sendOptionHasWorkspaceMode
+            ? sendOptions?.workspaceMode
+            : ws.mode
+          : undefined;
+        const requestedSessionType = isNewSessionRequest
+          ? sendOptionHasSessionType
+            ? sendOptions?.sessionType
+            : undefined
+          : undefined;
+        const requestedTargetBranch = isNewSessionRequest
+          ? normalizeTargetBranch(
+              sendOptionHasTargetBranch
+                ? sendOptions?.targetBranch
+                : ws.targetBranch,
+            )
+          : undefined;
 
         await client.streamChat(
           {
             session_id: state.sessionId ?? undefined,
             message: requestMessage,
             content: contentBlocks,
-            project_dir: hasActiveSession ? undefined : projectDir,
-            working_dir: hasActiveSession ? undefined : workingDir,
-            workspace_mode: hasActiveSession ? undefined : workspaceMode,
-            session_type: hasActiveSession ? undefined : options.sessionType,
+            project_dir: requestedProjectDir,
+            working_dir: requestedWorkingDir,
+            workspace_mode: requestedWorkspaceMode,
+            session_type: requestedSessionType,
+            target_branch:
+              sendOptionHasTargetBranch || requestedTargetBranch
+                ? requestedTargetBranch
+                : undefined,
             research_enabled: researchEnabled || undefined,
             model: state.model ?? undefined,
             fast_mode: state.fastModeEnabled || undefined,
@@ -389,6 +434,17 @@ export function createSessionStore(
           callbacks,
           abortController.signal,
         );
+
+        const completedSessionId = get().sessionId;
+        if (isNewSessionRequest && completedSessionId) {
+          const nextDirectory = requestedProjectDir ?? requestedWorkingDir ?? null;
+          workspace.getState().setWorkspace(
+            nextDirectory,
+            completedSessionId,
+            requestedWorkspaceMode ?? (nextDirectory ? "selected" : "neutral"),
+            requestedTargetBranch ?? null,
+          );
+        }
       } catch (err) {
         if (pollingSessionId) {
           streamRecovery.promise ??=
@@ -470,6 +526,7 @@ export function createSessionStore(
               ((data.session.project_dir ?? data.session.working_dir)
                 ? "selected"
                 : "neutral")) as "neutral" | "selected" | "created",
+            data.session.target_branch ?? null,
           );
 
         applySessionSnapshot(sessionId, serverState, isRefresh, set, get, planStore);
@@ -809,6 +866,6 @@ export function createSessionStore(
       const state = get();
       get().stopPresenceHeartbeat(state.sessionId);
     },
-    });
+    };
   });
 }
