@@ -1,4 +1,9 @@
-import type { DelegatedRunStage, DelegatedToolKind } from '@krusty/api';
+import type {
+  DelegatedRunStage,
+  DelegatedToolKind,
+  SessionType,
+  WorkspaceMode,
+} from '@krusty/api';
 
 export interface ToolCall {
   id: string;
@@ -89,6 +94,19 @@ export interface Attachment {
   text?: string;
 }
 
+export interface SendMessageOptions {
+  projectDir?: string | null;
+  workingDir?: string | null;
+  workspaceMode?: WorkspaceMode;
+  sessionType?: SessionType;
+  /**
+   * TODO(targetBranch-mobile): preserve this typed intent here, but do not send it
+   * until the /api/chat request contract grows target_branch support. Session
+   * creation already supports target_branch; streaming first-send does not yet.
+   */
+  targetBranch?: string | null;
+}
+
 export interface QueuedMessage {
   content: string;
   attachments: Attachment[];
@@ -119,6 +137,7 @@ export interface SessionStoreState {
     content: string,
     attachments?: Attachment[],
     researchEnabled?: boolean,
+    options?: SendMessageOptions,
   ) => Promise<void>;
   loadSession: (sessionId: string, isRefresh?: boolean) => Promise<void>;
   clearSession: () => void;

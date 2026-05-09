@@ -14,6 +14,7 @@ import {
   tabForSessionType,
   type WorkspaceMode,
 } from "./helpers";
+import { resolveFirstSendIntent } from "./sendIntent";
 
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
 type ConnectionClient = ReturnType<typeof useConnection>["client"];
@@ -106,7 +107,7 @@ export function useSessionActions({
           undefined,
           directory,
           undefined,
-          directory ? "selected" : undefined,
+          directory ? "selected" : "neutral",
           sessionTypeForTab(activeTab),
         );
         await bootstrapSession(session);
@@ -146,7 +147,7 @@ export function useSessionActions({
         undefined,
         undefined,
         undefined,
-        undefined,
+        "neutral",
         sessionTypeForTab(activeTab),
       );
       await bootstrapSession(session);
@@ -316,15 +317,28 @@ export function useSessionActions({
         return;
       }
 
-      const ensuredSessionId = await ensureSessionForSend();
-      if (!ensuredSessionId) {
-        return;
+      const sendIntent = resolveFirstSendIntent({
+        currentSessionId: sessionStore.getState().sessionId,
+        sessionType: sessionTypeForTab(activeTab),
+        workspace: workspace.getState(),
+      });
+
+      if (sendIntent.shouldCreateSessionBeforeSend) {
+        const ensuredSessionId = await ensureSessionForSend();
+        if (!ensuredSessionId) {
+          return;
+        }
       }
 
       try {
         await sessionStore
           .getState()
-          .sendMessage(trimmed, attachments, researchEnabled);
+          .sendMessage(
+            trimmed,
+            attachments,
+            researchEnabled,
+            sendIntent.sendOptions,
+          );
       } catch (err) {
         sessionStore.setState({
           error:
@@ -335,11 +349,13 @@ export function useSessionActions({
       }
     },
     [
+      activeTab,
       client,
       ensureModelReady,
       ensureSessionForSend,
       researchEnabled,
       sessionStore,
+      workspace,
     ],
   );
 

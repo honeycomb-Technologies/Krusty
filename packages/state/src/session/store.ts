@@ -41,6 +41,7 @@ import type {
   AssistantMessageRef,
   Attachment,
   PermissionMode,
+  SendMessageOptions,
   SessionMode,
   SessionStoreState,
   ThinkingLevel,
@@ -168,6 +169,7 @@ export function createSessionStore(
       content: string,
       attachments: Attachment[] = [],
       researchEnabled = false,
+      options: SendMessageOptions = {},
     ) {
       const state = get();
       const ws = workspace.getState();
@@ -263,14 +265,28 @@ export function createSessionStore(
             ? buildContentBlocks(requestMessage, attachments)
             : undefined;
 
+        const hasActiveSession = Boolean(state.sessionId);
+        const hasSendOption = (key: keyof SendMessageOptions) =>
+          Object.prototype.hasOwnProperty.call(options, key);
+        const projectDir = hasSendOption("projectDir")
+          ? options.projectDir
+          : ws.directory;
+        const workingDir = hasSendOption("workingDir")
+          ? options.workingDir
+          : projectDir;
+        const workspaceMode = hasSendOption("workspaceMode")
+          ? options.workspaceMode
+          : ws.mode;
+
         await client.streamChat(
           {
             session_id: state.sessionId ?? undefined,
             message: requestMessage,
             content: contentBlocks,
-            project_dir: state.sessionId ? undefined : ws.directory,
-            working_dir: state.sessionId ? undefined : ws.directory,
-            workspace_mode: state.sessionId ? undefined : ws.mode,
+            project_dir: hasActiveSession ? undefined : projectDir,
+            working_dir: hasActiveSession ? undefined : workingDir,
+            workspace_mode: hasActiveSession ? undefined : workspaceMode,
+            session_type: hasActiveSession ? undefined : options.sessionType,
             research_enabled: researchEnabled || undefined,
             model: state.model ?? undefined,
             fast_mode: state.fastModeEnabled || undefined,
