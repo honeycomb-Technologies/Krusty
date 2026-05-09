@@ -94,8 +94,7 @@ fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
 }
 
 #[tokio::test]
-async fn chat_new_session_contract_includes_session_type_workspace_model_and_fast_mode_without_ai()
-{
+async fn chat_new_session_contract_includes_target_branch_intent() {
     let (state, temp_dir) = create_test_state();
     create_test_user(&state, "alice");
     let user_root = temp_dir.join("alice-home");
@@ -113,6 +112,7 @@ async fn chat_new_session_contract_includes_session_type_workspace_model_and_fas
             project_dir: Some(project_dir.to_string_lossy().to_string()),
             working_dir: None,
             workspace_mode: Some(WorkspaceMode::Created),
+            target_branch: Some("feature/mobile-continuation".to_string()),
             session_type: Some(SessionType::Code),
             model: Some("openai/gpt-5.5".to_string()),
             thinking_enabled: crate::types::ThinkingLevel::Off,
@@ -138,6 +138,10 @@ async fn chat_new_session_contract_includes_session_type_workspace_model_and_fas
             .as_deref(),
         Some(expected_project.as_str())
     );
+    assert_eq!(
+        contract.target_branch.as_deref(),
+        Some("feature/mobile-continuation")
+    );
     assert_eq!(contract.model.as_deref(), Some("openai/gpt-5.5"));
     assert!(contract.fast_mode);
     assert!(
@@ -148,11 +152,10 @@ async fn chat_new_session_contract_includes_session_type_workspace_model_and_fas
             .contains("mini"),
         "fast mode must stay independent from mini model selection"
     );
-    assert_eq!(contract.target_branch, None);
 }
 
 #[tokio::test]
-async fn chat_existing_session_contract_uses_persisted_workspace_surface_and_target() {
+async fn chat_existing_session_uses_persisted_target_branch_intent_when_request_omits_override() {
     let (state, temp_dir) = create_test_state();
     create_test_user(&state, "alice");
     let user_root = temp_dir.join("alice-home");
@@ -186,6 +189,7 @@ async fn chat_existing_session_contract_uses_persisted_workspace_surface_and_tar
             project_dir: Some(ignored_project.to_string_lossy().to_string()),
             working_dir: Some(ignored_project.to_string_lossy().to_string()),
             workspace_mode: Some(WorkspaceMode::Created),
+            target_branch: None,
             session_type: Some(SessionType::Chat),
             model: None,
             thinking_enabled: crate::types::ThinkingLevel::Off,
@@ -217,6 +221,76 @@ async fn chat_existing_session_contract_uses_persisted_workspace_surface_and_tar
     assert_eq!(contract.model.as_deref(), Some("openai/gpt-5.5-mini"));
     assert_eq!(contract.target_branch.as_deref(), Some("feature/contract"));
     assert!(contract.fast_mode);
+}
+
+#[tokio::test]
+async fn chat_existing_session_allows_explicit_target_branch_intent_override() {
+    let (state, temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let user_root = temp_dir.join("alice-home");
+    let persisted_project = user_root.join("repo");
+    let ignored_project = user_root.join("ignored-repo");
+    std::fs::create_dir_all(&persisted_project).expect("persisted project should exist");
+    std::fs::create_dir_all(&ignored_project).expect("ignored project should exist");
+
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user_with_config(
+            "Persisted Contract",
+            Some("openai/gpt-5.5-mini"),
+            Some(persisted_project.to_string_lossy().as_ref()),
+            Some(persisted_project.to_string_lossy().as_ref()),
+            WorkspaceMode::Selected,
+            Some("alice"),
+            Some("feature/persisted"),
+            SessionType::Code,
+        )
+        .expect("session should be created");
+
+    let contract = prepare_chat_contract_for_test(
+        &state,
+        Some(current_user("alice", &user_root)),
+        ChatRequest {
+            session_id: Some(session_id.clone()),
+            message: "continue with requested target".to_string(),
+            content: Vec::new(),
+            project_dir: Some(ignored_project.to_string_lossy().to_string()),
+            working_dir: Some(ignored_project.to_string_lossy().to_string()),
+            workspace_mode: Some(WorkspaceMode::Created),
+            target_branch: Some("  feature/request-override  ".to_string()),
+            session_type: Some(SessionType::Chat),
+            model: None,
+            thinking_enabled: crate::types::ThinkingLevel::Off,
+            fast_mode: false,
+            mode: None,
+            permission_mode: krusty_core::tools::registry::PermissionMode::default(),
+            research_enabled: None,
+        },
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!("existing session contract should prepare without a real AI client")
+    });
+
+    let expected_project = persisted_project.to_string_lossy().to_string();
+    assert_eq!(contract.session_id, session_id);
+    assert_eq!(contract.session_type, SessionType::Code);
+    assert_eq!(contract.workspace_mode, WorkspaceMode::Selected);
+    assert_eq!(contract.working_dir.to_string_lossy(), expected_project);
+    assert_eq!(
+        contract.target_branch.as_deref(),
+        Some("feature/request-override")
+    );
+
+    let reloaded = session_manager
+        .get_session(&session_id)
+        .expect("session lookup should succeed")
+        .expect("session should exist");
+    assert_eq!(
+        reloaded.target_branch.as_deref(),
+        Some("feature/request-override")
+    );
 }
 
 fn model(
@@ -662,6 +736,7 @@ async fn chat_does_not_persist_model_override_when_setup_fails() {
             project_dir: None,
             working_dir: None,
             workspace_mode: None,
+            target_branch: None,
             session_type: None,
             model: Some("openai/gpt-5".to_string()),
             thinking_enabled: crate::types::ThinkingLevel::Off,
@@ -707,6 +782,7 @@ async fn chat_rejects_missing_model_before_creating_session() {
             project_dir: Some(fresh_project_dir.to_string_lossy().to_string()),
             working_dir: None,
             workspace_mode: Some(WorkspaceMode::Selected),
+            target_branch: None,
             session_type: Some(SessionType::Code),
             model: None,
             thinking_enabled: crate::types::ThinkingLevel::Off,
@@ -756,6 +832,7 @@ async fn chat_rejects_unsupported_image_before_creating_session() {
             project_dir: None,
             working_dir: None,
             workspace_mode: None,
+            target_branch: None,
             session_type: Some(SessionType::Chat),
             model: None,
             thinking_enabled: crate::types::ThinkingLevel::Off,

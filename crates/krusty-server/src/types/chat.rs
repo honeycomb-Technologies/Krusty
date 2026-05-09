@@ -91,6 +91,9 @@ pub struct ChatRequest {
     pub working_dir: Option<String>,
     /// Explicit semantic workspace mode for newly created sessions.
     pub workspace_mode: Option<WorkspaceMode>,
+    /// Optional target branch intent metadata. This does not checkout or mutate branches.
+    #[serde(default, alias = "targetBranch")]
+    pub target_branch: Option<String>,
     /// High-level session surface for newly created sessions.
     pub session_type: Option<SessionType>,
     /// Model override
@@ -157,6 +160,34 @@ mod tests {
         .expect("request should deserialize");
 
         assert!(req.fast_mode);
+    }
+
+    #[test]
+    fn chat_request_accepts_snake_case_target_branch() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "message": "hello",
+            "target_branch": "feature/mobile-continuation"
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(
+            req.target_branch.as_deref(),
+            Some("feature/mobile-continuation")
+        );
+    }
+
+    #[test]
+    fn chat_request_accepts_camel_case_target_branch_alias() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "message": "hello",
+            "targetBranch": "feature/mobile-continuation"
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(
+            req.target_branch.as_deref(),
+            Some("feature/mobile-continuation")
+        );
     }
 
     #[test]

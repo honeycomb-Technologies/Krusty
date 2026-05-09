@@ -118,6 +118,9 @@ pub(super) async fn prepare_chat_route_session(
             let db = Database::new(&state.db_path)?;
             let sm = SessionManager::new(db);
             ensure_owned_session(&sm, id, user)?;
+            if let Some(target_branch) = req.target_branch.as_deref() {
+                sm.update_session_target_branch(id, trimmed_nonempty(Some(target_branch)))?;
+            }
             let messages = sm.load_session_messages(id)?;
             Ok(PreparedChatRouteSession {
                 session_id: id.to_string(),
@@ -164,6 +167,7 @@ pub(super) async fn prepare_chat_route_session(
                     "No model selected. Choose a model and try again.".to_string(),
                 ));
             }
+            let initial_target_branch = trimmed_nonempty(req.target_branch.as_deref());
             let session_id = sm.create_session_for_user_with_config(
                 &title,
                 initial_model.as_deref(),
@@ -171,7 +175,7 @@ pub(super) async fn prepare_chat_route_session(
                 workspace.project_dir.as_deref(),
                 workspace.workspace_mode,
                 user_id.as_deref(),
-                None,
+                initial_target_branch,
                 requested_session_type,
             )?;
             let should_persist_current_model = match requested_model {

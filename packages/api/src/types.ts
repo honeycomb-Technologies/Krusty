@@ -150,6 +150,8 @@ export interface ChatRequest {
   project_dir?: string | null;
   working_dir?: string | null;
   workspace_mode?: WorkspaceMode;
+  target_branch?: string | null;
+  targetBranch?: string | null;
   session_type?: SessionType;
   research_enabled?: boolean;
   model?: string;
