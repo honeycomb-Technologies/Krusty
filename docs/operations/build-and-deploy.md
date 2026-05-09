@@ -12,7 +12,7 @@ The Rust side of Krusty is organized as a Cargo workspace with three crates:
 
 The workspace root `Cargo.toml` sets a few important release profile options: link-time optimization (`lto = true`), a single codegen unit (`codegen-units = 1`), and symbol stripping (`strip = true`). These produce smaller, faster release binaries at the cost of longer compile times. The workspace also defines shared lint rules so all three crates enforce the same code quality standards through Clippy.
 
-All three crates share version `0.6.0` and edition 2021.
+All three crates share version `0.6.1` and edition 2021.
 
 ## Build commands
 
@@ -60,7 +60,7 @@ The preflight is safe for validation: it reads repository metadata, remote refs,
 
 ## Release automation
 
-Releases are triggered by pushing a Git tag that matches `v*` (for example, `v0.6.0`). The release workflow (`.github/workflows/release.yml`) has three stages:
+Releases are triggered by pushing a Git tag that matches `v*` (for example, `v0.6.1`). The release workflow (`.github/workflows/release.yml`) has three stages:
 
 **1. Build matrix.** A matrix job compiles release binaries for five targets:
 
@@ -95,7 +95,7 @@ The script (`install.sh`) detects the host OS and architecture, fetches the late
 You can pin a specific version by setting `VERSION` before running the script:
 
 ```bash
-VERSION=v0.6.0 curl -fsSL ... | sh
+VERSION=v0.6.1 curl -fsSL ... | sh
 ```
 
 ### Homebrew tap
