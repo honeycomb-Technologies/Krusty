@@ -37,7 +37,8 @@ use crate::constants;
 use crate::process::ProcessRegistry;
 use crate::skills::SkillsManager;
 use crate::storage::{
-    PartialAssistantState, ProjectSettings, RecoveryStatus, SessionManager, SessionType, WorkMode,
+    PartialAssistantState, PendingInteractionSnapshot, ProjectSettings, RecoveryStatus,
+    SessionManager, SessionType, WorkMode,
 };
 use crate::tools::registry::{PermissionMode, ToolRegistry};
 
@@ -58,7 +59,8 @@ use self::persistence::{
 };
 use self::plan_flow::handle_plan_detection;
 use self::recovery::{
-    build_partial_assistant_state, build_recovery_state, continuation_recovery_message,
+    build_awaiting_input_recovery_state, build_partial_assistant_state, build_recovery_state,
+    continuation_recovery_message,
 };
 use self::title::maybe_generate_title;
 
@@ -525,27 +527,34 @@ impl AgenticOrchestrator {
 
             // No tool calls → check plan detection → finish turn
             if result.tool_calls.is_empty() {
-                if work_mode == WorkMode::Plan
-                    && handle_plan_detection(
+                if work_mode == WorkMode::Plan {
+                    if let Some(pending_interaction) = handle_plan_detection(
                         &result.text,
                         &session_id,
                         &working_dir,
                         &db_path,
                         &event_tx,
-                    )
-                {
-                    // Plan detected — emit events and return.
-                    // The server's tool-result handler manages confirmation.
-                    if last_token_count > 0 {
-                        update_token_count(&db_path, &session_id, last_token_count);
+                    ) {
+                        // Plan detected — emit events, persist the pending confirmation snapshot, and return.
+                        // The server's tool-result handler manages confirmation.
+                        if last_token_count > 0 {
+                            update_token_count(&db_path, &session_id, last_token_count);
+                        }
+                        persist_recovery_state(
+                            &db_path,
+                            &session_id,
+                            &build_awaiting_input_recovery_state(
+                                build_partial_assistant_state(&result.recovery_checkpoint),
+                                vec![pending_interaction],
+                            ),
+                        );
+                        set_agent_state(&db_path, &session_id, "awaiting_input");
+                        let _ = event_tx.send(LoopEvent::Finished {
+                            session_id: session_id.clone(),
+                            stop_reason: LoopStopReason::AwaitingInput,
+                        });
+                        return;
                     }
-                    clear_recovery_state(&db_path, &session_id);
-                    set_agent_state(&db_path, &session_id, "awaiting_input");
-                    let _ = event_tx.send(LoopEvent::Finished {
-                        session_id: session_id.clone(),
-                        stop_reason: LoopStopReason::AwaitingInput,
-                    });
-                    return;
                 }
 
                 let _ = event_tx.send(LoopEvent::TurnComplete {
@@ -572,6 +581,14 @@ impl AgenticOrchestrator {
                     .partition::<Vec<_>, _>(|t| t.name == "AskUserQuestion");
 
             if !ask_user_calls.is_empty() {
+                let ask_user_partial_assistant =
+                    build_partial_assistant_state(&result.recovery_checkpoint);
+                let ask_user_pending_interactions = ask_user_calls
+                    .iter()
+                    .map(|call| {
+                        PendingInteractionSnapshot::ask_user_from_call(&call.id, &call.arguments)
+                    })
+                    .collect::<Vec<_>>();
                 let mut all_results: Vec<Content> = Vec::new();
 
                 // Execute non-AskUser tools first
@@ -590,6 +607,7 @@ impl AgenticOrchestrator {
                         user_id.as_deref(),
                         permission_mode,
                         work_mode,
+                        Some(&ask_user_partial_assistant),
                         delegated_progress_tx.as_ref(),
                         &event_tx,
                         &mut input_rx,
@@ -628,7 +646,14 @@ impl AgenticOrchestrator {
                 if last_token_count > 0 {
                     update_token_count(&db_path, &session_id, last_token_count);
                 }
-                clear_recovery_state(&db_path, &session_id);
+                persist_recovery_state(
+                    &db_path,
+                    &session_id,
+                    &build_awaiting_input_recovery_state(
+                        ask_user_partial_assistant,
+                        ask_user_pending_interactions,
+                    ),
+                );
                 set_agent_state(&db_path, &session_id, "awaiting_input");
                 let _ = event_tx.send(LoopEvent::Finished {
                     session_id: session_id.clone(),
@@ -691,6 +716,8 @@ impl AgenticOrchestrator {
             }
 
             // Execute tools
+            let tool_execution_partial_assistant =
+                build_partial_assistant_state(&result.recovery_checkpoint);
             persist_recovery_state(
                 &db_path,
                 &session_id,
@@ -699,7 +726,7 @@ impl AgenticOrchestrator {
                     RecoveryStatus::ToolExecuting,
                     None,
                     None,
-                    build_partial_assistant_state(&result.recovery_checkpoint),
+                    tool_execution_partial_assistant.clone(),
                 ),
             );
             set_agent_state(&db_path, &session_id, "tool_executing");
@@ -715,6 +742,7 @@ impl AgenticOrchestrator {
                 user_id.as_deref(),
                 permission_mode,
                 work_mode,
+                Some(&tool_execution_partial_assistant),
                 delegated_progress_tx.as_ref(),
                 &event_tx,
                 &mut input_rx,
