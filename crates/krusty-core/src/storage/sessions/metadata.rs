@@ -69,6 +69,39 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Update the full persisted workspace contract.
+    ///
+    /// This is intentionally narrower than `update_session_workspace`: callers
+    /// use it when both runtime `working_dir` and semantic `project_dir` are
+    /// already normalized and must remain distinct.
+    pub fn update_session_workspace_contract(
+        &self,
+        session_id: &str,
+        working_dir: Option<&str>,
+        project_dir: Option<&str>,
+        workspace_mode: WorkspaceMode,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.db.conn().execute(
+            "UPDATE sessions
+             SET working_dir = ?1,
+                 project_dir = ?2,
+                 workspace_mode = ?3,
+                 updated_at = ?4
+             WHERE id = ?5",
+            params![
+                working_dir,
+                project_dir,
+                workspace_mode.to_string(),
+                now,
+                session_id
+            ],
+        )?;
+
+        Ok(())
+    }
+
     /// Update session work mode
     pub fn update_session_work_mode(&self, session_id: &str, work_mode: WorkMode) -> Result<()> {
         let now = Utc::now().to_rfc3339();
