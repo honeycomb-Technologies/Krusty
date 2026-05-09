@@ -16,7 +16,8 @@ use krusty_core::process::ProcessRegistry;
 use krusty_core::skills::SkillsManager;
 use krusty_core::storage::credentials::CredentialStore;
 use krusty_core::storage::{
-    Database, PartialAssistantState, RecoveryDecision, RecoveryStatus, RecoveryToolCall,
+    Database, PartialAssistantState, PendingInteractionSnapshot, PendingPlanTaskSnapshot,
+    RecoveryDecision, RecoveryNonResumableReason, RecoveryStatus, RecoveryToolCall,
     RuntimeTraceEvent, RuntimeTraceStore, SessionRecoveryState, SessionType, WorkspaceMode,
 };
 use krusty_core::tools::registry::ToolRegistry;
@@ -449,10 +450,7 @@ async fn session_state_exposes_recovery_live_partial_and_trace_sequence() {
         PartialAssistantState {
             text: "partial answer".to_string(),
             thinking: "working notes".to_string(),
-            tool_calls: vec![RecoveryToolCall {
-                id: "tool-1".to_string(),
-                name: "edit".to_string(),
-            }],
+            tool_calls: vec![RecoveryToolCall::summary("tool-1", "edit")],
         },
         RecoveryDecision::Resumable {
             latest_user_objective: "finish the contract harness".to_string(),
@@ -493,6 +491,99 @@ async fn session_state_exposes_recovery_live_partial_and_trace_sequence() {
         Some("partial answer")
     );
     assert_eq!(response.last_event_sequence, Some(42));
+}
+
+#[tokio::test]
+async fn get_session_state_exposes_awaiting_input_details_after_reload() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user_with_config(
+            "Awaiting Input Session",
+            Some("openai/gpt-5.5"),
+            None,
+            None,
+            WorkspaceMode::Neutral,
+            Some("alice"),
+            None,
+            SessionType::Code,
+        )
+        .expect("session creation should succeed");
+    session_manager
+        .set_agent_state(&session_id, "idle")
+        .expect("agent state should simulate a fresh server process");
+
+    let pending_interactions = vec![
+        PendingInteractionSnapshot::ask_user_from_call(
+            "ask-1",
+            &serde_json::json!({
+                "questions": [{
+                    "header": "Choose deploy target",
+                    "question": "Which environment should Krusty continue against?",
+                    "options": [{ "label": "staging", "description": "Safe validation" }],
+                    "multi_select": false
+                }]
+            }),
+        ),
+        PendingInteractionSnapshot::tool_approval_from_call(
+            "tool-1",
+            "edit",
+            &serde_json::json!({
+                "file_path": "src/lib.rs",
+                "api_token": "super-secret-token",
+                "content": "raw file content should not be replayed to clients"
+            }),
+        ),
+        PendingInteractionSnapshot::plan_confirm(
+            "plan-1",
+            "Ship reload-safe prompts",
+            2,
+            vec![PendingPlanTaskSnapshot {
+                description: "Expose the server contract".to_string(),
+                completed: false,
+            }],
+        ),
+    ];
+    let recovery = SessionRecoveryState::new_with_pending_interactions(
+        RecoveryStatus::AwaitingInput,
+        Some(LoopStopReason::AwaitingInput),
+        None,
+        PartialAssistantState::default(),
+        pending_interactions.clone(),
+        RecoveryDecision::NonResumable {
+            reason: RecoveryNonResumableReason::AwaitingHumanInput,
+        },
+    );
+    session_manager
+        .update_recovery_state(&session_id, &recovery)
+        .expect("recovery state should persist");
+
+    let Json(response) = get_session_state(
+        State(state),
+        Some(current_user("alice", std::path::Path::new("/tmp"))),
+        Path(session_id.clone()),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("session state should load"));
+
+    assert_eq!(response.id, session_id);
+    assert_eq!(response.agent_state, "idle");
+    assert_eq!(response.recovery.as_ref(), Some(&recovery));
+    assert_eq!(response.pending_interactions, pending_interactions);
+
+    let PendingInteractionSnapshot::ToolApproval { tool_call } = &response.pending_interactions[1]
+    else {
+        panic!("expected a tool approval pending interaction");
+    };
+    assert_eq!(tool_call.arguments.value["file_path"], "src/lib.rs");
+    assert_eq!(tool_call.arguments.value["api_token"], "[REDACTED]");
+    assert!(tool_call
+        .arguments
+        .redacted_paths
+        .contains(&"$.api_token".to_string()));
 }
 
 #[tokio::test]

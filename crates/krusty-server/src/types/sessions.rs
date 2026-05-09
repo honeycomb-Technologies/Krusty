@@ -1,6 +1,7 @@
 use krusty_core::storage::{
-    DelegatedRunRecord, DelegatedRunScope, PartialAssistantState, RuntimeTraceEvent,
-    RuntimeTraceSummary, SessionInfo, SessionRecoveryState, SessionType, WorkMode, WorkspaceMode,
+    DelegatedRunRecord, DelegatedRunScope, PartialAssistantState, PendingInteractionSnapshot,
+    RuntimeTraceEvent, RuntimeTraceSummary, SessionInfo, SessionRecoveryState, SessionType,
+    WorkMode, WorkspaceMode,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -109,6 +110,8 @@ pub struct SessionStateResponse {
     pub mode: WorkMode,
     /// Interrupted-turn recovery state, if any.
     pub recovery: Option<SessionRecoveryState>,
+    /// Reload-safe pending tool approvals, user questions, and plan confirmations.
+    pub pending_interactions: Vec<PendingInteractionSnapshot>,
     /// Authoritative in-flight partial assistant state for active sessions.
     pub live_partial_assistant: Option<PartialAssistantState>,
     /// Active delegated tool snapshots for this session, keyed by top-level tool call.

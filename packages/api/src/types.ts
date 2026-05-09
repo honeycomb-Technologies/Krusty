@@ -22,10 +22,51 @@ export interface SessionWithMessagesResponse {
   messages: MessageResponse[];
 }
 
+export interface RecoveryToolArguments {
+  value: unknown;
+  redacted_paths?: string[];
+}
+
 export interface RecoveryToolCall {
   id: string;
   name: string;
+  arguments: RecoveryToolArguments;
 }
+
+export interface PendingQuestionOptionSnapshot {
+  label: string;
+  description?: string | null;
+}
+
+export interface PendingQuestionSnapshot {
+  header: string;
+  question: string;
+  options?: PendingQuestionOptionSnapshot[];
+  multi_select?: boolean;
+}
+
+export interface PendingPlanTaskSnapshot {
+  description: string;
+  completed: boolean;
+}
+
+export type PendingInteractionSnapshot =
+  | {
+      kind: 'tool_approval';
+      tool_call: RecoveryToolCall;
+    }
+  | {
+      kind: 'ask_user_question';
+      tool_call_id: string;
+      questions: PendingQuestionSnapshot[];
+    }
+  | {
+      kind: 'plan_confirm';
+      tool_call_id: string;
+      title: string;
+      task_count: number;
+      tasks?: PendingPlanTaskSnapshot[];
+    };
 
 export interface SessionRecoveryState {
   schema_version: number;
@@ -33,6 +74,7 @@ export interface SessionRecoveryState {
   stop_reason: string | null;
   last_error: string | null;
   partial_assistant: PartialAssistantState;
+  pending_interactions?: PendingInteractionSnapshot[];
   decision: Record<string, unknown>;
 }
 
@@ -49,6 +91,7 @@ export interface SessionStateResponse {
   last_event_at: string | null;
   mode: SessionMode;
   recovery?: SessionRecoveryState | null;
+  pending_interactions: PendingInteractionSnapshot[];
   live_partial_assistant?: PartialAssistantState | null;
   delegated_tools?: DelegatedToolStateResponse[];
   recent_delegated_runs?: DelegatedRunResponse[];

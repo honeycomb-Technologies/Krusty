@@ -17,7 +17,10 @@ use krusty_core::mcp::McpManager;
 use krusty_core::process::ProcessRegistry;
 use krusty_core::skills::SkillsManager;
 use krusty_core::storage::credentials::CredentialStore;
-use krusty_core::storage::{Database, SessionType, WorkspaceMode};
+use krusty_core::storage::{
+    Database, PartialAssistantState, PendingInteractionSnapshot, RecoveryDecision,
+    RecoveryNonResumableReason, RecoveryStatus, SessionRecoveryState, SessionType, WorkspaceMode,
+};
 use krusty_core::tools::registry::ToolRegistry;
 use krusty_core::SessionManager;
 
@@ -494,6 +497,56 @@ async fn tool_approval_rejects_closed_session_channel() {
     .await;
 
     assert!(matches!(result, Err(AppError::Conflict(_))));
+}
+
+#[tokio::test]
+async fn submit_tool_approval_returns_recoverable_pending_approval_error_when_channel_missing() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user("Owned Session", None, None, Some("alice"))
+        .expect("session creation should succeed");
+    let pending_interaction = PendingInteractionSnapshot::tool_approval_from_call(
+        "tool-1",
+        "edit",
+        &serde_json::json!({ "file_path": "src/lib.rs", "api_token": "hidden" }),
+    );
+    let recovery = SessionRecoveryState::new_with_pending_interactions(
+        RecoveryStatus::AwaitingInput,
+        Some(LoopStopReason::AwaitingInput),
+        None,
+        PartialAssistantState::default(),
+        vec![pending_interaction],
+        RecoveryDecision::NonResumable {
+            reason: RecoveryNonResumableReason::AwaitingHumanInput,
+        },
+    );
+    session_manager
+        .update_recovery_state(&session_id, &recovery)
+        .expect("pending approval recovery should persist");
+
+    let result = tool_approval(
+        State(state),
+        Some(current_user("alice", std::path::Path::new("/tmp"))),
+        Json(ToolApprovalRequest {
+            session_id: session_id.clone(),
+            tool_call_id: "tool-1".to_string(),
+            approved: true,
+        }),
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(AppError::Conflict(message))
+            if message.contains(&session_id)
+                && message.contains("tool-1")
+                && message.contains("approval channel unavailable")
+                && message.contains("recoverable")
+    ));
 }
 
 #[tokio::test]
