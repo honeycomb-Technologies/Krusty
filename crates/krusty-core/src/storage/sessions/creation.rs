@@ -6,6 +6,15 @@ use crate::agent::PinchContext;
 
 use super::{SessionManager, SessionType, WorkspaceMode};
 
+struct LinkedSessionContract {
+    user_id: Option<String>,
+    session_type: SessionType,
+    working_dir: Option<String>,
+    project_dir: Option<String>,
+    workspace_mode: WorkspaceMode,
+    target_branch: Option<String>,
+}
+
 impl SessionManager {
     pub fn create_session(
         &self,
@@ -119,19 +128,49 @@ impl SessionManager {
     ) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        let (parent_user_id, parent_session_type) = self
+        let parent_contract = self
             .db
             .conn()
             .query_row(
-                "SELECT user_id, session_type FROM sessions WHERE id = ?1",
+                "SELECT user_id, session_type, working_dir, project_dir, workspace_mode, target_branch
+                 FROM sessions WHERE id = ?1",
                 [parent_session_id],
-                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    let session_type_raw: String = row.get(1)?;
+                    let workspace_mode_raw: String = row.get(4)?;
+                    Ok(LinkedSessionContract {
+                        user_id: row.get(0)?,
+                        session_type: session_type_raw.parse().unwrap_or(SessionType::Code),
+                        working_dir: row.get(2)?,
+                        project_dir: row.get(3)?,
+                        workspace_mode: workspace_mode_raw.parse().unwrap_or_else(|_| {
+                            let project_dir: Option<String> = row.get(3).ok().flatten();
+                            let working_dir: Option<String> = row.get(2).ok().flatten();
+                            if project_dir.is_some() || working_dir.is_some() {
+                                WorkspaceMode::Selected
+                            } else {
+                                WorkspaceMode::Neutral
+                            }
+                        }),
+                        target_branch: row.get(5)?,
+                    })
+                },
             )
-            .optional()?
-            .map(|(user_id, session_type)| {
-                (user_id, session_type.parse().unwrap_or(SessionType::Code))
-            })
-            .unwrap_or((None, SessionType::Code));
+            .optional()?;
+
+        let fallback_workspace_mode = if working_dir.is_some() {
+            WorkspaceMode::Selected
+        } else {
+            WorkspaceMode::Neutral
+        };
+        let contract = parent_contract.unwrap_or_else(|| LinkedSessionContract {
+            user_id: None,
+            session_type: SessionType::Code,
+            working_dir: working_dir.map(ToOwned::to_owned),
+            project_dir: working_dir.map(ToOwned::to_owned),
+            workspace_mode: fallback_workspace_mode,
+            target_branch: target_branch.map(ToOwned::to_owned),
+        });
 
         // Create new session with parent reference
         self.db.conn().execute(
@@ -143,17 +182,13 @@ impl SessionManager {
                 now,
                 now,
                 model,
-                working_dir,
-                working_dir,
-                if working_dir.is_some() {
-                    WorkspaceMode::Selected.to_string()
-                } else {
-                    WorkspaceMode::Neutral.to_string()
-                },
-                parent_session_type.to_string(),
-                parent_user_id,
+                contract.working_dir,
+                contract.project_dir,
+                contract.workspace_mode.to_string(),
+                contract.session_type.to_string(),
+                contract.user_id,
                 parent_session_id,
-                target_branch
+                contract.target_branch
             ],
         )?;
 

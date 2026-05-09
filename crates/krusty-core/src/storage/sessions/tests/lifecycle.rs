@@ -4,6 +4,120 @@ use crate::agent::summarizer::SummarizationResult;
 use crate::storage::sessions::SessionManager;
 use crate::storage::{SessionType, WorkspaceMode};
 
+fn empty_pinch_context(parent_session_id: &str) -> PinchContext {
+    PinchContext::from_input(PinchContextInput {
+        source_session_id: parent_session_id.to_string(),
+        source_session_title: "Parent Session".to_string(),
+        summary: SummarizationResult::default(),
+        ranked_files: vec![],
+        preservation_hints: None,
+        direction: None,
+        project_context: None,
+        key_file_contents: vec![],
+        active_plan: None,
+    })
+}
+
+#[test]
+fn create_linked_session_preserves_workspace_contract() {
+    let (db, _temp) = create_test_db();
+    let user_id = "workspace-user";
+    create_test_user(&db, user_id);
+
+    let manager = SessionManager::new(db);
+    let parent_session_id = manager
+        .create_session_for_user_with_config(
+            "Parent Session",
+            Some("gpt-5"),
+            Some("/tmp/worktree"),
+            Some("/tmp/worktree/apps/mobile"),
+            WorkspaceMode::Created,
+            Some(user_id),
+            Some("feature/mobile-intent"),
+            SessionType::Mako,
+        )
+        .expect("Failed to create parent session");
+    let pinch_ctx = empty_pinch_context(&parent_session_id);
+
+    let child_session_id = manager
+        .create_linked_session(
+            "Child Session",
+            &parent_session_id,
+            &pinch_ctx,
+            Some("gpt-5"),
+            Some("/tmp/incorrect-runtime-fallback"),
+            None,
+        )
+        .expect("Failed to create child session");
+
+    let child_session = manager
+        .get_session(&child_session_id)
+        .expect("Failed to load child session")
+        .expect("Child session should exist");
+
+    assert_eq!(child_session.session_type, SessionType::Mako);
+    assert_eq!(child_session.working_dir.as_deref(), Some("/tmp/worktree"));
+    assert_eq!(
+        child_session.project_dir.as_deref(),
+        Some("/tmp/worktree/apps/mobile")
+    );
+    assert_eq!(child_session.workspace_mode, WorkspaceMode::Created);
+    assert_eq!(
+        child_session.target_branch.as_deref(),
+        Some("feature/mobile-intent")
+    );
+    assert_eq!(child_session.user_id.as_deref(), Some(user_id));
+    assert_eq!(
+        child_session.parent_session_id.as_deref(),
+        Some(parent_session_id.as_str())
+    );
+}
+
+#[test]
+fn create_linked_session_preserves_neutral_workspace_without_project() {
+    let (db, _temp) = create_test_db();
+    let manager = SessionManager::new(db);
+    let parent_session_id = manager
+        .create_session_for_user_with_config(
+            "Neutral Parent",
+            Some("gpt-5"),
+            None,
+            None,
+            WorkspaceMode::Neutral,
+            None,
+            None,
+            SessionType::Chat,
+        )
+        .expect("Failed to create neutral parent session");
+    let pinch_ctx = empty_pinch_context(&parent_session_id);
+
+    let child_session_id = manager
+        .create_linked_session(
+            "Neutral Child",
+            &parent_session_id,
+            &pinch_ctx,
+            Some("gpt-5"),
+            Some("/tmp/server-default-should-not-leak"),
+            Some("feature/should-not-leak"),
+        )
+        .expect("Failed to create neutral child session");
+
+    let child_session = manager
+        .get_session(&child_session_id)
+        .expect("Failed to load child session")
+        .expect("Child session should exist");
+
+    assert_eq!(child_session.session_type, SessionType::Chat);
+    assert_eq!(child_session.workspace_mode, WorkspaceMode::Neutral);
+    assert_eq!(child_session.working_dir, None);
+    assert_eq!(child_session.project_dir, None);
+    assert_eq!(child_session.target_branch, None);
+    assert_eq!(
+        child_session.parent_session_id.as_deref(),
+        Some(parent_session_id.as_str())
+    );
+}
+
 #[test]
 fn test_create_linked_session_preserves_parent_user_id() {
     let (db, _temp) = create_test_db();
