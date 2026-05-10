@@ -126,7 +126,25 @@ mod tests {
         assert_eq!(ctx.permission_mode, PermissionMode::Autonomous);
         assert_eq!(ctx.subagent_max_turns, Some(17));
         assert_eq!(ctx.delegation_policy, Some(policy));
-        assert!(ctx.sandbox_root.is_none());
+        assert_eq!(ctx.sandbox_root, Some(working_dir));
+    }
+
+    #[test]
+    fn build_subagent_tool_context_preserves_inherited_sandbox_root() {
+        let working_dir = PathBuf::from("/tmp/krusty-subagent/project");
+        let sandbox_root = PathBuf::from("/tmp/krusty-subagent");
+        let task = SubAgentTask::new("task", "prompt")
+            .with_working_dir(working_dir.clone())
+            .with_sandbox_root(sandbox_root.clone())
+            .with_delegation_policy(DelegationPolicy::for_subagent_build(
+                PermissionMode::Autonomous,
+                Some(17),
+            ));
+
+        let ctx = build_subagent_tool_context(&task, 45);
+
+        assert_eq!(ctx.working_dir, working_dir);
+        assert_eq!(ctx.sandbox_root, Some(sandbox_root));
     }
 
     #[test]

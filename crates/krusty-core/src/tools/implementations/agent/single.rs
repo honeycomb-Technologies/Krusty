@@ -110,9 +110,14 @@ impl AgentTool {
             }
         }
 
+        let inherited_sandbox = ctx
+            .sandbox_root
+            .clone()
+            .unwrap_or_else(|| working_dir.clone());
         let mut task = SubAgentTask::new("explorer-0", &task_prompt)
             .with_name(scope_label.clone())
             .with_working_dir(working_dir)
+            .with_sandbox_root(inherited_sandbox)
             .with_delegated_run_id(delegated_run_id.clone())
             .with_delegation_policy(delegation_policy.clone());
         if let Some(max_turns) = ctx.subagent_max_turns {
@@ -277,6 +282,11 @@ impl AgentTool {
         let mut task = SubAgentTask::new("planner-0", &params.prompt)
             .with_name("planner")
             .with_working_dir(ctx.working_dir.clone())
+            .with_sandbox_root(
+                ctx.sandbox_root
+                    .clone()
+                    .unwrap_or_else(|| ctx.working_dir.clone()),
+            )
             .with_delegated_run_id(delegated_run_id.clone())
             .with_delegation_policy(delegation_policy.clone());
         if let Some(max_turns) = ctx.subagent_max_turns {
@@ -432,6 +442,11 @@ impl AgentTool {
         let mut task = SubAgentTask::new("verifier-0", &params.prompt)
             .with_name("verifier")
             .with_working_dir(ctx.working_dir.clone())
+            .with_sandbox_root(
+                ctx.sandbox_root
+                    .clone()
+                    .unwrap_or_else(|| ctx.working_dir.clone()),
+            )
             .with_delegated_run_id(delegated_run_id.clone())
             .with_delegation_policy(delegation_policy.clone());
         if let Some(max_turns) = ctx.subagent_max_turns {
