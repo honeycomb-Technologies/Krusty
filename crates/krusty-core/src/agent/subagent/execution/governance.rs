@@ -28,9 +28,15 @@ pub(super) fn build_subagent_tool_context(task: &SubAgentTask, timeout_secs: u64
             .with_delegation_policy(policy);
     }
 
-    if delegated_is_explore(task) {
-        ctx = ctx.with_sandbox(task.working_dir.clone());
-    }
+    // Delegated agents must never silently drop the parent filesystem sandbox.
+    // When a task is constructed without an explicit inherited sandbox, fail closed
+    // to the assigned working directory instead of using ToolContext::default()'s
+    // unrestricted path behavior.
+    let sandbox_root = task
+        .sandbox_root
+        .clone()
+        .unwrap_or_else(|| task.working_dir.clone());
+    ctx = ctx.with_sandbox(sandbox_root);
 
     ctx
 }
