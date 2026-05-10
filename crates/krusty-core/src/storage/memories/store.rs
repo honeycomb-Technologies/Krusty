@@ -185,6 +185,8 @@ impl MemoryStore {
                 " AND (user_id = ?{} OR user_id IS NULL)",
                 bound.len()
             ));
+        } else {
+            sql.push_str(" AND user_id IS NULL");
         }
 
         sql.push_str(" ORDER BY updated_at DESC LIMIT 1");

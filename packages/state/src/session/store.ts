@@ -737,6 +737,7 @@ export function createSessionStore(
             tool_call_id: toolCallId,
             result,
             fast_mode: state.fastModeEnabled,
+            permission_mode: state.permissionMode,
           },
           callbacks,
           abortController.signal,
