@@ -1,72 +1,43 @@
 use anyhow::{Context, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use super::expansion::expand_env_var;
 use super::types::{McpConfig, McpServerConfig, McpServerConfigRaw, RemoteMcpServer};
 
 impl McpConfig {
-    /// Built-in MCP servers included by default.
-    /// User configs in `.mcp.json` override these by name.
-    fn builtin_servers() -> HashMap<String, McpServerConfigRaw> {
-        HashMap::from([(
-            "minimax".to_string(),
-            McpServerConfigRaw::Local {
-                command: "uvx".to_string(),
-                args: vec!["minimax-coding-plan-mcp".to_string(), "-y".to_string()],
-                env: HashMap::from([
-                    (
-                        "MINIMAX_API_KEY".to_string(),
-                        "${MINIMAX_API_KEY}".to_string(),
-                    ),
-                    (
-                        "MINIMAX_API_HOST".to_string(),
-                        "https://api.minimax.io".to_string(),
-                    ),
-                ]),
-            },
-        )])
-    }
-
-    /// Load config from .mcp.json in project root, merged with built-in defaults.
+    /// Load config from .mcp.json in project root.
     pub async fn load(working_dir: &Path) -> Result<Self> {
-        let mut servers = Self::builtin_servers();
-        let mut auto_connect_local_servers: HashSet<String> = servers.keys().cloned().collect();
-
         let config_path = working_dir.join(".mcp.json");
 
-        if config_path.exists() {
-            let content = tokio::fs::read_to_string(&config_path)
-                .await
-                .with_context(|| format!("Failed to read {:?}", config_path))?;
-
-            let user_config: McpConfig = serde_json::from_str(&content)
-                .with_context(|| format!("Failed to parse {:?}", config_path))?;
-
-            tracing::info!(
-                "Loaded MCP config with {} servers from {:?}",
-                user_config.mcp_servers.len(),
-                config_path
-            );
-
-            for (name, server) in user_config.mcp_servers {
-                if matches!(server, McpServerConfigRaw::Local { .. }) {
-                    tracing::warn!(
-                        "Loaded project MCP local server '{}' in disconnected state; connect explicitly from /mcp to trust and run it",
-                        name
-                    );
-                }
-                auto_connect_local_servers.remove(&name);
-                servers.insert(name, server);
-            }
-        } else {
+        if !config_path.exists() {
             tracing::debug!("No .mcp.json found at {:?}", config_path);
+            return Ok(Self::default());
         }
 
-        Ok(Self {
-            mcp_servers: servers,
-            auto_connect_local_servers,
-        })
+        let content = tokio::fs::read_to_string(&config_path)
+            .await
+            .with_context(|| format!("Failed to read {:?}", config_path))?;
+
+        let config: McpConfig = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse {:?}", config_path))?;
+
+        tracing::info!(
+            "Loaded MCP config with {} servers from {:?}",
+            config.mcp_servers.len(),
+            config_path
+        );
+
+        for (name, server) in &config.mcp_servers {
+            if matches!(server, McpServerConfigRaw::Local { .. }) {
+                tracing::warn!(
+                    "Loaded project MCP local server '{}' in disconnected state; connect explicitly from /mcp to trust and run it",
+                    name
+                );
+            }
+        }
+
+        Ok(config)
     }
 
     /// Get resolved server configurations

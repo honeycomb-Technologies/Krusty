@@ -43,7 +43,7 @@ MCP servers are declared in a `.mcp.json` file at the project root. The format u
 
 Local servers need a `command` and optional `args` and `env`. Remote servers need `type: "url"` and a `url`, with an optional `authorization_token`. Environment variables in the config support `${VAR}` expansion -- Krusty checks the process environment first, then falls back to its internal credential store at `~/.krusty/tokens/credentials.json`.
 
-Krusty ships with one built-in MCP server (minimax) that gets merged with your `.mcp.json` configuration. User-defined servers override built-ins by name.
+Krusty does not start any MCP servers unless they are explicitly declared in the project's `.mcp.json`. This keeps local MCP subprocess execution opt-in and project-controlled.
 
 ### Tool Registration
 
