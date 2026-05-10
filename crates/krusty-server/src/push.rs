@@ -24,6 +24,55 @@ use krusty_core::storage::{
 const MAX_PUSH_ATTEMPTS: usize = 3;
 const PUSH_RETRY_BASE_DELAY_MS: u64 = 300;
 
+const ALLOWED_PUSH_ENDPOINT_HOSTS: &[&str] = &[
+    "fcm.googleapis.com",
+    "updates.push.services.mozilla.com",
+    "webpush.push.apple.com",
+];
+const ALLOWED_PUSH_ENDPOINT_SUFFIXES: &[&str] = &[
+    ".push.services.mozilla.com",
+    ".notify.windows.com",
+    ".push.apple.com",
+];
+
+/// Validate and normalize a browser Web Push endpoint before it is persisted or used.
+///
+/// Push delivery is an outbound server request, so endpoints are restricted to HTTPS
+/// origins operated by known browser push providers. This prevents attacker-supplied
+/// subscriptions from turning push test/diagnostic routes into SSRF probes.
+pub fn normalize_push_endpoint(endpoint: &str) -> Result<String> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        anyhow::bail!("Push subscription endpoint is required");
+    }
+
+    let uri: http::Uri = endpoint
+        .parse()
+        .context("Push subscription endpoint must be a valid URL")?;
+
+    if uri.scheme_str() != Some("https") || uri.host().is_none() {
+        anyhow::bail!("Push subscription endpoint must be an https URL");
+    }
+
+    let host = uri
+        .host()
+        .unwrap_or_default()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if !is_allowed_push_endpoint_host(&host) {
+        anyhow::bail!("Push subscription endpoint host is not a supported push service");
+    }
+
+    Ok(endpoint.to_string())
+}
+
+fn is_allowed_push_endpoint_host(host: &str) -> bool {
+    ALLOWED_PUSH_ENDPOINT_HOSTS.contains(&host)
+        || ALLOWED_PUSH_ENDPOINT_SUFFIXES
+            .iter()
+            .any(|suffix| host.ends_with(suffix))
+}
+
 /// Payload sent inside a push notification.
 #[derive(Debug, Clone, Serialize)]
 pub struct PushPayload {
@@ -121,7 +170,10 @@ impl PushService {
             public_key_base64url,
             contact,
             db_path,
-            http_client: reqwest::Client::new(),
+            http_client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .context("Failed to create push HTTP client")?,
         })
     }
 
@@ -138,6 +190,8 @@ impl PushService {
         auth: &str,
         payload: &PushPayload,
     ) -> Result<reqwest::Response> {
+        let endpoint =
+            normalize_push_endpoint(endpoint).context("Invalid push subscription endpoint")?;
         let endpoint_uri: http::Uri = endpoint
             .parse()
             .context("Invalid push subscription endpoint")?;
@@ -210,12 +264,7 @@ impl PushService {
                         return DeliveryOutcome::Stale { status, latency_ms };
                     }
 
-                    let body = response.text().await.unwrap_or_default();
-                    let reason = if body.is_empty() {
-                        format!("Push failed with status {}", status)
-                    } else {
-                        format!("Push failed with status {}: {}", status, body)
-                    };
+                    let reason = format!("Push failed with status {}", status);
 
                     if is_transient_status(status) && attempt < MAX_PUSH_ATTEMPTS {
                         tracing::warn!(
