@@ -561,6 +561,7 @@ impl AgenticOrchestrator {
                             &build_awaiting_input_recovery_state(
                                 build_partial_assistant_state(&result.recovery_checkpoint),
                                 vec![pending_interaction],
+                                permission_mode,
                             ),
                         );
                         set_agent_state(&db_path, &session_id, "awaiting_input");
@@ -667,6 +668,7 @@ impl AgenticOrchestrator {
                     &build_awaiting_input_recovery_state(
                         ask_user_partial_assistant,
                         ask_user_pending_interactions,
+                        permission_mode,
                     ),
                 );
                 set_agent_state(&db_path, &session_id, "awaiting_input");
