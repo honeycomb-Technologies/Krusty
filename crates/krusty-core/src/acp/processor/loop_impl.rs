@@ -1,6 +1,8 @@
 use agent_client_protocol::{
-    Client as AcpClient, ContentBlock as AcpContent, ContentChunk, SessionNotification,
-    SessionUpdate, StopReason, TextContent, ToolCall, ToolCallId,
+    Client as AcpClient, ContentBlock as AcpContent, ContentChunk, PermissionOption,
+    PermissionOptionId, PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
+    SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallId,
+    ToolCallUpdate, ToolCallUpdateFields,
 };
 use anyhow::Result;
 
@@ -8,7 +10,7 @@ use crate::ai::client::CallOptions;
 use crate::ai::streaming::StreamPart;
 use crate::ai::types::{AiToolCall, Content, FinishReason};
 use crate::tools::git_identity::GitIdentityMode;
-use crate::tools::registry::PermissionMode;
+use crate::tools::registry::{tool_policy, PermissionMode};
 use crate::tools::{ToolContext, ToolResult};
 
 use super::content::convert_acp_content;
@@ -203,7 +205,7 @@ impl PromptProcessor {
             working_dir: session.cwd.clone(),
             ..Default::default()
         }
-        .with_permission_mode(PermissionMode::Autonomous)
+        .with_permission_mode(PermissionMode::Supervised)
         .with_subagent_max_turns(self.agent_config.subagent_max_turns)
         .with_ai_client(ai_client.clone());
 
@@ -229,10 +231,24 @@ impl PromptProcessor {
                 tracing::warn!("Failed to send tool start: {}", e);
             }
 
-            let result = self
-                .tools
-                .execute(&tool_call.name, tool_call.arguments.clone(), &ctx)
-                .await;
+            let result = if requires_acp_permission(&tool_call) {
+                match request_tool_permission(session, &tool_call, connection).await? {
+                    ToolPermissionDecision::Allow => {
+                        self.tools
+                            .execute(&tool_call.name, tool_call.arguments.clone(), &ctx)
+                            .await
+                    }
+                    ToolPermissionDecision::Deny => Some(ToolResult::error_with_code(
+                        "permission_denied",
+                        format!("Tool '{}' was denied by the ACP client", tool_call.name),
+                    )),
+                    ToolPermissionDecision::Cancelled => return Ok(StopReason::Cancelled),
+                }
+            } else {
+                self.tools
+                    .execute(&tool_call.name, tool_call.arguments.clone(), &ctx)
+                    .await
+            };
 
             let (update, output_for_history, is_error_for_history) = match &result {
                 Some(ToolResult { output, is_error }) if !*is_error => {
@@ -281,6 +297,62 @@ impl PromptProcessor {
         }
 
         Ok(StopReason::EndTurn)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolPermissionDecision {
+    Allow,
+    Deny,
+    Cancelled,
+}
+
+fn requires_acp_permission(tool_call: &AiToolCall) -> bool {
+    tool_policy(&tool_call.name).requires_supervised_approval
+}
+
+async fn request_tool_permission<C: AcpClient>(
+    session: &SessionState,
+    tool_call: &AiToolCall,
+    connection: &C,
+) -> Result<ToolPermissionDecision, AcpError> {
+    let request = RequestPermissionRequest::new(
+        session.id.clone(),
+        ToolCallUpdate::new(
+            ToolCallId::from(tool_call.id.clone()),
+            ToolCallUpdateFields::new()
+                .title(format!("Run {}", tool_call.name))
+                .kind(tool_name_to_kind(&tool_call.name))
+                .raw_input(tool_call.arguments.clone()),
+        ),
+        vec![
+            PermissionOption::new(
+                PermissionOptionId::new("allow-once"),
+                "Allow once",
+                PermissionOptionKind::AllowOnce,
+            ),
+            PermissionOption::new(
+                PermissionOptionId::new("reject-once"),
+                "Reject",
+                PermissionOptionKind::RejectOnce,
+            ),
+        ],
+    );
+
+    let response = connection
+        .request_permission(request)
+        .await
+        .map_err(|e| AcpError::ProtocolError(e.to_string()))?;
+
+    match response.outcome {
+        RequestPermissionOutcome::Selected(selected)
+            if selected.option_id.0.as_ref().starts_with("allow") =>
+        {
+            Ok(ToolPermissionDecision::Allow)
+        }
+        RequestPermissionOutcome::Selected(_) => Ok(ToolPermissionDecision::Deny),
+        RequestPermissionOutcome::Cancelled => Ok(ToolPermissionDecision::Cancelled),
+        _ => Ok(ToolPermissionDecision::Deny),
     }
 }
 

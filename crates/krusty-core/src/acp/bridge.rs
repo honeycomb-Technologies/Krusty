@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use agent_client_protocol::{
-    Client, Error as AcpError, PermissionOptionId, RequestPermissionOutcome,
+    Client, Error as AcpError, PermissionOptionKind, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, Result as AcpResult,
     SelectedPermissionOutcome, SessionNotification,
 };
@@ -39,24 +39,36 @@ impl NotificationBridge {
 ///
 /// # Security Note
 ///
-/// In headless/ACP mode, permissions are auto-approved because there's no UI
-/// to prompt the user. This is expected behavior for background agent execution.
-/// The editor (Zed, etc.) is responsible for user consent before spawning the agent.
+/// In headless bridge mode there is no UI that can safely confirm sensitive tool
+/// requests. The bridge therefore rejects permission requests by default instead
+/// of silently granting write or shell access. Interactive ACP clients can still
+/// approve by implementing `request_permission` on their real connection.
 #[async_trait::async_trait(?Send)]
 impl Client for NotificationBridge {
     async fn request_permission(
         &self,
         request: RequestPermissionRequest,
     ) -> AcpResult<RequestPermissionResponse> {
-        // In headless mode, auto-approve permissions since there's no UI to prompt.
-        // The editor is responsible for user consent before spawning the agent.
-        let option_id = request
+        // No UI is available on the notification bridge, so choose the safest
+        // provided option. Prefer an explicit reject choice; if the caller did
+        // not provide one, return Cancelled instead of granting access.
+        let Some(option_id) = request
             .options
-            .first()
+            .iter()
+            .find(|opt| {
+                matches!(
+                    opt.kind,
+                    PermissionOptionKind::RejectOnce | PermissionOptionKind::RejectAlways
+                )
+            })
             .map(|opt| opt.option_id.clone())
-            .unwrap_or_else(|| PermissionOptionId::from("allow"));
+        else {
+            warn!("Permission request cancelled in headless mode: no reject option provided");
+            return Ok(RequestPermissionResponse::new(
+                RequestPermissionOutcome::Cancelled,
+            ));
+        };
 
-        // Log what permission is being granted
         let tool_desc = request
             .tool_call
             .fields
@@ -64,7 +76,7 @@ impl Client for NotificationBridge {
             .as_deref()
             .unwrap_or("unknown operation");
         info!(
-            "Permission auto-granted for '{}' (headless mode, option: {})",
+            "Permission rejected for '{}' (headless mode, option: {})",
             tool_desc, option_id
         );
 
@@ -115,7 +127,8 @@ pub fn create_notification_channel() -> (NotificationBridge, mpsc::Receiver<Sess
 mod tests {
     use super::*;
     use agent_client_protocol::{
-        ContentBlock, ContentChunk, SessionId, SessionUpdate, TextContent,
+        ContentBlock, ContentChunk, PermissionOption, PermissionOptionId, RequestPermissionOutcome,
+        SessionId, SessionUpdate, TextContent, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
     };
 
     #[tokio::test]
@@ -133,6 +146,67 @@ mod tests {
         assert!(matches!(
             received.update,
             SessionUpdate::AgentMessageChunk(_)
+        ));
+    }
+    #[tokio::test]
+    async fn test_bridge_rejects_permission_requests_in_headless_mode() {
+        let (bridge, _rx) = create_notification_channel();
+
+        let response = bridge
+            .request_permission(RequestPermissionRequest::new(
+                SessionId::from("test-session"),
+                ToolCallUpdate::new(
+                    ToolCallId::from("write-001"),
+                    ToolCallUpdateFields::new().title("Run write"),
+                ),
+                vec![
+                    PermissionOption::new(
+                        PermissionOptionId::new("allow-once"),
+                        "Allow once",
+                        PermissionOptionKind::AllowOnce,
+                    ),
+                    PermissionOption::new(
+                        PermissionOptionId::new("reject-once"),
+                        "Reject",
+                        PermissionOptionKind::RejectOnce,
+                    ),
+                ],
+            ))
+            .await
+            .unwrap();
+
+        match response.outcome {
+            RequestPermissionOutcome::Selected(selected) => {
+                assert_eq!(selected.option_id.0.as_ref(), "reject-once");
+            }
+            RequestPermissionOutcome::Cancelled => panic!("expected explicit rejection"),
+            _ => panic!("unexpected permission outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bridge_cancels_permission_without_reject_option() {
+        let (bridge, _rx) = create_notification_channel();
+
+        let response = bridge
+            .request_permission(RequestPermissionRequest::new(
+                SessionId::from("test-session"),
+                ToolCallUpdate::new(
+                    ToolCallId::from("write-001"),
+                    ToolCallUpdateFields::new().title("Run write"),
+                ),
+                vec![PermissionOption::new(
+                    PermissionOptionId::new("allow-once"),
+                    "Allow once",
+                    PermissionOptionKind::AllowOnce,
+                )],
+            ))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            response.outcome,
+            RequestPermissionOutcome::Cancelled
         ));
     }
 }
