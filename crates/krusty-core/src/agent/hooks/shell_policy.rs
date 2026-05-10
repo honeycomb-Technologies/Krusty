@@ -138,6 +138,21 @@ fn has_unquoted_redirect(segment: &str) -> bool {
     false
 }
 
+fn contains_shell_glob(suffix: &str) -> bool {
+    suffix.chars().any(|ch| matches!(ch, '*' | '?' | '[' | '{'))
+}
+
+fn is_dangerous_home_rm_target(target: &str) -> bool {
+    matches!(
+        target,
+        "~" | "~/" | "$HOME" | "$HOME/" | "${HOME}" | "${HOME}/"
+    ) || target
+        .strip_prefix("~/")
+        .or_else(|| target.strip_prefix("$HOME/"))
+        .or_else(|| target.strip_prefix("${HOME}/"))
+        .is_some_and(contains_shell_glob)
+}
+
 fn is_dangerous_rm(tokens: &[String]) -> bool {
     let has_force = tokens
         .iter()
@@ -156,10 +171,9 @@ fn is_dangerous_rm(tokens: &[String]) -> bool {
         .skip(1)
         .filter(|t| !t.starts_with('-'))
         .any(|target| {
-            matches!(
-                target.as_str(),
-                "/" | "/*" | "~" | "~/" | "$HOME" | "$HOME/" | "${HOME}" | "${HOME}/"
-            ) || target.starts_with("/etc")
+            matches!(target.as_str(), "/" | "/*")
+                || is_dangerous_home_rm_target(target)
+                || target.starts_with("/etc")
                 || target.starts_with("/usr")
                 || target.starts_with("/var")
         })
