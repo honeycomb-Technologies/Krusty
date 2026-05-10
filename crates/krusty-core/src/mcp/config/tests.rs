@@ -44,7 +44,50 @@ async fn test_parse_remote_server() {
 #[tokio::test]
 async fn test_expand_env_var() {
     assert_eq!(
-        expand_env_var("https://api.example.com").await,
+        expand_env_var("https://api.example.com", false).await,
         "https://api.example.com"
     );
+}
+
+#[tokio::test]
+async fn test_project_local_servers_do_not_auto_connect() {
+    let dir = tempfile::tempdir().unwrap();
+    tokio::fs::write(
+        dir.path().join(".mcp.json"),
+        r#"{
+            "mcpServers": {
+                "evil": {
+                    "command": "sh",
+                    "args": ["-c", "echo should-not-run"],
+                    "env": {"OPENAI_API_KEY": "${OPENAI_API_KEY}"}
+                }
+            }
+        }"#,
+    )
+    .await
+    .unwrap();
+
+    let config = McpConfig::load(dir.path()).await.unwrap();
+    let servers = config.servers().await;
+    assert!(matches!(
+        servers.get("evil"),
+        Some(McpServerConfig::Local {
+            auto_connect: false,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn test_builtin_local_servers_can_auto_connect() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = McpConfig::load(dir.path()).await.unwrap();
+    let servers = config.servers().await;
+    assert!(matches!(
+        servers.get("minimax"),
+        Some(McpServerConfig::Local {
+            auto_connect: true,
+            ..
+        })
+    ));
 }

@@ -59,6 +59,16 @@ impl ToolPolicy {
         }
     }
 
+    const fn interactive_with_supervised_approval() -> Self {
+        Self {
+            category: ToolCategory::Interactive,
+            requires_supervised_approval: true,
+            retry_timeout_once: false,
+            allowed_in_plan_mode: true,
+            timeout_override: None,
+        }
+    }
+
     const fn write() -> Self {
         Self {
             category: ToolCategory::Write,
@@ -219,19 +229,10 @@ pub fn tool_policy(name: &str) -> ToolPolicy {
         "read" | "glob" | "grep" | "list" | "web_search" | "web_fetch" | "skill" => {
             ToolPolicy::read_only()
         }
-        "AskUserQuestion"
-        | "PlanConfirm"
-        | "enter_plan_mode"
-        | "set_work_mode"
-        | "set_workspace_context"
-        | "task_start"
-        | "task_complete"
-        | "add_subtask"
-        | "set_dependency"
-        | "send_user_message"
-        | "sleep"
-        | "autonomous_task"
-        | "report" => ToolPolicy::interactive(),
+        "AskUserQuestion" | "PlanConfirm" | "enter_plan_mode" | "memory" | "set_work_mode"
+        | "task_start" | "task_complete" | "add_subtask" | "set_dependency"
+        | "send_user_message" | "sleep" | "autonomous_task" | "report" => ToolPolicy::interactive(),
+        "set_workspace_context" => ToolPolicy::interactive_with_supervised_approval(),
         _ => ToolPolicy::write(),
     }
 }

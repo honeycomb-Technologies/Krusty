@@ -22,6 +22,8 @@ use super::super::preview_settings::load_preview_settings;
 use super::probe::probe_port_previewability;
 
 const MAX_PROXY_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
+const PREVIEW_PROXY_SANDBOX_CSP: &str =
+    "sandbox allow-downloads allow-forms allow-modals allow-popups allow-pointer-lock allow-scripts";
 
 pub(super) async fn proxy_root(
     State(state): State<AppState>,
@@ -183,6 +185,7 @@ async fn proxy_http_request(
             response_builder = response_builder.header(name, value);
         }
     }
+    response_builder = apply_preview_proxy_security_headers(response_builder);
 
     response_builder
         .body(axum::body::Body::from(response_body))
@@ -347,6 +350,15 @@ fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
     has_upgrade && has_connection_upgrade
 }
 
+fn apply_preview_proxy_security_headers(
+    response_builder: axum::http::response::Builder,
+) -> axum::http::response::Builder {
+    response_builder
+        .header(header::CONTENT_SECURITY_POLICY, PREVIEW_PROXY_SANDBOX_CSP)
+        .header(header::REFERRER_POLICY, "no-referrer")
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+}
+
 fn should_forward_request_header(name: &HeaderName) -> bool {
     !is_hop_by_hop_header(name) && *name != header::HOST
 }
@@ -382,6 +394,33 @@ mod tests {
         assert_eq!(
             build_upstream_path(Some("foo"), Some("a=1&b=2")),
             "/foo?a=1&b=2"
+        );
+    }
+
+    #[test]
+    fn preview_proxy_security_headers_sandbox_without_same_origin() {
+        let response = apply_preview_proxy_security_headers(Response::builder())
+            .body(axum::body::Body::empty())
+            .expect("response should build");
+
+        let csp = response
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .and_then(|value| value.to_str().ok())
+            .expect("content security policy should be present");
+        assert!(csp.starts_with("sandbox"));
+        assert!(csp.contains("allow-scripts"));
+        assert!(!csp.contains("allow-same-origin"));
+        assert_eq!(
+            response.headers().get(header::REFERRER_POLICY).unwrap(),
+            "no-referrer"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "*"
         );
     }
 
