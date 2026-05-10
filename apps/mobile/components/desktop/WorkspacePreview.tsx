@@ -30,6 +30,12 @@ import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";
 
 const PREVIEW_SESSION_KEY = "krusty_preview_tabs_v1";
+// Preview content is untrusted localhost app output served through the Krusty proxy.
+// Keep scripts/forms working for dev previews, but intentionally omit
+// allow-same-origin and top-navigation so preview JavaScript cannot access the
+// Krusty parent app or call privileged same-origin APIs.
+const PREVIEW_IFRAME_SANDBOX =
+  "allow-downloads allow-forms allow-modals allow-pointer-lock allow-popups allow-presentation allow-scripts";
 
 type PersistedPreviewTab = {
   id: string;
@@ -809,6 +815,7 @@ export function WorkspacePreview({ visible, style }: WorkspacePreviewProps) {
                     <iframe
                       key={`${tab.id}:${tab.historyIndex}:${tab.reloadKey}`}
                       src={tab.history[tab.historyIndex]}
+                      sandbox={PREVIEW_IFRAME_SANDBOX}
                       style={{ width: "100%", height: "100%", border: "none" }}
                       title={tab.title}
                       onLoad={() => {
