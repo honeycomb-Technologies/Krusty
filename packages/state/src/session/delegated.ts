@@ -13,9 +13,28 @@ import type {
 } from './types';
 
 type DelegatedToolName = DelegatedToolKind | 'agent';
+type ParsedToolEnvelope = {
+  ok?: boolean;
+  data?: Record<string, unknown>;
+  error?: { message?: string };
+  warnings?: string[];
+};
 
 function isDelegatedKind(value: unknown): value is DelegatedToolKind {
   return value === 'explore' || value === 'plan' || value === 'verify' || value === 'build';
+}
+
+export function formatToolOutputForDisplay(
+  toolName: string,
+  output?: string,
+  args?: Record<string, unknown>,
+): string | undefined {
+  const delegatedKind = resolveDelegatedKind(toolName, args);
+  if (delegatedKind) {
+    return conciseDelegatedOutput(delegatedKind, output, args);
+  }
+
+  return output;
 }
 
 export function isDelegatedToolName(name: string): name is DelegatedToolName {
@@ -115,6 +134,102 @@ function buildSeedDelegatedAgents(
   }));
 }
 
+function parseToolEnvelope(output: string): ParsedToolEnvelope | undefined {
+  try {
+    const parsed = JSON.parse(output) as Record<string, unknown>;
+    return {
+      ok: typeof parsed.ok === 'boolean' ? parsed.ok : undefined,
+      data:
+        parsed.data && typeof parsed.data === 'object'
+          ? (parsed.data as Record<string, unknown>)
+          : parsed,
+      error:
+        parsed.error && typeof parsed.error === 'object'
+          ? (parsed.error as { message?: string })
+          : undefined,
+      warnings: Array.isArray(parsed.warnings)
+        ? parsed.warnings.filter((warning): warning is string => typeof warning === 'string')
+        : [],
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function conciseDelegatedOutput(
+  kind: DelegatedToolKind,
+  output?: string,
+  args?: Record<string, unknown>,
+): string | undefined {
+  if (!output) return output;
+  const envelope = parseToolEnvelope(output);
+  const payload = envelope?.data;
+  if (!payload) return output;
+
+  const lines: string[] = [];
+  const outcome =
+    typeof payload.outcome === 'string'
+      ? payload.outcome
+      : typeof payload.success === 'boolean'
+        ? payload.success
+          ? 'success'
+          : 'failed'
+        : undefined;
+  const delegatedRunId =
+    typeof payload.delegated_run_id === 'string'
+      ? payload.delegated_run_id
+      : undefined;
+  const headline =
+    typeof payload.message === 'string'
+      ? payload.message
+      : typeof payload.investigation_summary === 'string'
+        ? payload.investigation_summary
+        : typeof payload.findings === 'string'
+          ? payload.findings
+          : undefined;
+
+  lines.push(`${kind} ${outcome ?? (envelope?.ok === false ? 'failed' : 'completed')}`);
+  if (delegatedRunId) lines.push(`run: ${delegatedRunId}`);
+  if (headline) lines.push(headline.slice(0, 1200));
+
+  const agentCount =
+    typeof payload.agent_count === 'number'
+      ? payload.agent_count
+      : typeof payload.builder_count === 'number'
+        ? payload.builder_count
+        : undefined;
+  const failedAgents =
+    typeof payload.failed_agents === 'number' ? payload.failed_agents : undefined;
+  const turns =
+    typeof payload.total_turns === 'number'
+      ? payload.total_turns
+      : typeof payload.turns_used === 'number'
+        ? payload.turns_used
+        : undefined;
+  const files =
+    typeof payload.paths_examined_count === 'number'
+      ? payload.paths_examined_count
+      : typeof payload.files_examined_count === 'number'
+        ? payload.files_examined_count
+        : undefined;
+  const stats = [
+    agentCount !== undefined ? `${agentCount} agent${agentCount === 1 ? '' : 's'}` : undefined,
+    failedAgents !== undefined ? `${failedAgents} failed` : undefined,
+    turns !== undefined ? `${turns} turns` : undefined,
+    files !== undefined ? `${files} paths` : undefined,
+  ].filter(Boolean);
+  if (stats.length > 0) lines.push(stats.join(' · '));
+
+  const targets = buildDelegatedTargets(kind, args).slice(0, 3);
+  if (targets.length > 0) lines.push(`targets: ${targets.join(', ')}`);
+
+  const warnings = envelope?.warnings?.slice(0, 2) ?? [];
+  for (const warning of warnings) lines.push(`warning: ${warning}`);
+  if (envelope?.error?.message) lines.push(`error: ${envelope.error.message}`);
+
+  return lines.filter((line) => line.trim().length > 0).join('\n');
+}
+
 export function createDelegatedArtifactState(
   kind: DelegatedToolKind,
   args?: Record<string, unknown>,
@@ -203,12 +318,11 @@ export function parseDelegatedArtifactState(
 ): DelegatedArtifactState | undefined {
   if (!output) return undefined;
 
+  const envelope = parseToolEnvelope(output);
+  const payload = envelope?.data;
+  if (!payload) return undefined;
+
   try {
-    const parsed = JSON.parse(output) as Record<string, unknown>;
-    const payload =
-      parsed?.data && typeof parsed.data === 'object'
-        ? (parsed.data as Record<string, unknown>)
-        : parsed;
     const kind = resolveDelegatedKind(toolName, args, fallbackKind);
     if (!kind) return undefined;
 
@@ -279,7 +393,9 @@ export function parseDelegatedArtifactState(
           : [],
       errors: Array.isArray(payload.errors)
         ? payload.errors.filter((value): value is string => typeof value === 'string')
-        : [],
+        : envelope.error?.message
+          ? [envelope.error.message]
+          : [],
       agentCount:
         typeof payload.agent_count === 'number'
           ? payload.agent_count

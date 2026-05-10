@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use tracing::info;
+use tracing::{debug, info};
 
 use super::{Database, SCHEMA_VERSION};
 
@@ -46,7 +46,7 @@ impl Database {
     /// Run database migrations incrementally
     pub(crate) fn run_migrations(&self) -> Result<()> {
         let current_version = self.get_schema_version();
-        info!(
+        debug!(
             "Database schema version: {} (target: {})",
             current_version, SCHEMA_VERSION
         );

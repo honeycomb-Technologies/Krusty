@@ -8,6 +8,7 @@ import type { createSessionsStore } from '../sessions';
 import {
   applyDelegatedProgress,
   createDelegatedArtifactState,
+  formatToolOutputForDisplay,
   mergeDelegatedArtifactState,
   parseDelegatedArtifactState,
   resolveDelegatedKind,
@@ -187,7 +188,16 @@ export function createStreamCallbacks(
               : isError
                 ? 'error'
                 : 'success';
-        return { ...toolCall, output, delegated, status };
+        return {
+          ...toolCall,
+          output: formatToolOutputForDisplay(
+            toolCall.name,
+            output,
+            toolCall.arguments,
+          ),
+          delegated,
+          status,
+        };
       });
     },
 

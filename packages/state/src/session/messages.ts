@@ -4,7 +4,7 @@ import {
   MAX_MESSAGE_CONTENT_LENGTH,
   SUPPORTED_IMAGE_MIME_TYPES,
 } from './constants';
-import { parseDelegatedArtifactState } from './delegated';
+import { formatToolOutputForDisplay, parseDelegatedArtifactState } from './delegated';
 import { buildStoredMessageId } from './transient';
 import type { Attachment, ChatMessage, ToolCall } from './types';
 
@@ -82,7 +82,11 @@ function parseStoredMessage(
         id: block.id,
         name: block.name,
         arguments: block.input,
-        output: toolResult?.output,
+        output: formatToolOutputForDisplay(
+          block.name,
+          toolResult?.output,
+          block.input,
+        ),
         delegatedRunId: delegated?.delegatedRunId,
         delegated,
         status,

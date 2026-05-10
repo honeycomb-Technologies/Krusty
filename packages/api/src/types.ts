@@ -337,6 +337,7 @@ export type MakoRunDiagnosticKind =
   | 'awaiting_approval'
   | 'awaiting_input'
   | 'failed'
+  | 'stalled_stream'
   | 'overdue_wake'
   | 'stale_active'
   | 'stale_waiting'

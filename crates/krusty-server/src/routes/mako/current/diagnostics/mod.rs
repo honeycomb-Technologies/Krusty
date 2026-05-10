@@ -71,6 +71,25 @@ pub(super) fn build_run_diagnostic(
     }
 
     if run_state == RunState::Failed || run_summary_failed(&trace.latest_run_summary) {
+        if trace
+            .latest_run_summary
+            .failure_categories
+            .iter()
+            .any(|category| matches!(category, TraceFailureCategory::StreamIdleTimeout))
+        {
+            return Some(MakoRunDiagnosticSummary {
+                kind: "stalled_stream".to_string(),
+                severity: "critical".to_string(),
+                summary: "Provider stream stalled".to_string(),
+                detail: failure_detail(trace, runtime),
+                last_activity_at,
+                last_trace_at: trace.latest_trace_at.clone(),
+                stalled_for_secs,
+                overdue_by_secs: None,
+                failure_streak: trace.failure_streak,
+            });
+        }
+
         let severity = if trace.failure_streak > 1 {
             "critical"
         } else {
@@ -261,7 +280,7 @@ fn format_duration_seconds(seconds: u64) -> String {
 pub(super) fn is_stalled_diagnostic(kind: &str) -> bool {
     matches!(
         kind,
-        "stale_active" | "stale_waiting" | "stale_queued" | "overdue_wake"
+        "stalled_stream" | "stale_active" | "stale_waiting" | "stale_queued" | "overdue_wake"
     )
 }
 

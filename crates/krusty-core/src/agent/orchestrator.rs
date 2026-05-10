@@ -31,6 +31,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
 use crate::ai::client::{AiClient, CallOptions};
+use crate::ai::model_profile::ModelProfile;
 use crate::ai::models::resolve_context_window;
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::constants;
@@ -304,6 +305,15 @@ impl AgenticOrchestrator {
         persist_context_state(&db_path, &session_id, &context_ledger);
         clear_recovery_state(&db_path, &session_id);
 
+        let model_profile = ModelProfile::resolve(
+            ai_client.provider_id(),
+            ai_client.config().api_format,
+            &ai_client.config().model,
+        );
+        let effective_stream_idle_timeout = stream_idle_timeout.max(
+            std::time::Duration::from_secs(model_profile.stream_idle_timeout_secs),
+        );
+
         set_agent_state(&db_path, &session_id, "streaming");
 
         loop {
@@ -477,8 +487,11 @@ impl AgenticOrchestrator {
                 }
             };
 
-            let result =
-                stream::process_stream(api_rx, &event_tx, stream_idle_timeout, |checkpoint| {
+            let result = stream::process_stream(
+                api_rx,
+                &event_tx,
+                effective_stream_idle_timeout,
+                |checkpoint| {
                     persist_recovery_state(
                         &db_path,
                         &session_id,
@@ -490,8 +503,9 @@ impl AgenticOrchestrator {
                             build_partial_assistant_state(checkpoint),
                         ),
                     );
-                })
-                .await;
+                },
+            )
+            .await;
 
             if result.total_tokens > 0 {
                 last_token_count = result.total_tokens;

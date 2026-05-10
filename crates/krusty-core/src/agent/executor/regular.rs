@@ -104,7 +104,7 @@ pub(super) async fn execute_regular_tool(
 
             let tool_call_id = call.id.clone();
             let parent_session_id = session_id.to_string();
-            let kind = DelegatedToolKind::Explore;
+            let kind = delegated_kind_from_agent_call(&call.arguments);
             delegated_forwarder_handle = Some(tokio::spawn(async move {
                 while let Some(progress) = progress_rx.recv().await {
                     let delegated_run_id = progress
@@ -138,6 +138,46 @@ pub(super) async fn execute_regular_tool(
     }
     let _ = forwarder_handle.await;
     result
+}
+
+fn delegated_kind_from_agent_call(arguments: &serde_json::Value) -> DelegatedToolKind {
+    match arguments
+        .get("agent_type")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+    {
+        "plan" => DelegatedToolKind::Plan,
+        "verify" => DelegatedToolKind::Verify,
+        "build" => DelegatedToolKind::Build,
+        _ => DelegatedToolKind::Explore,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::delegated_kind_from_agent_call;
+    use crate::agent::DelegatedToolKind;
+    use serde_json::json;
+
+    #[test]
+    fn delegated_kind_tracks_agent_type() {
+        assert_eq!(
+            delegated_kind_from_agent_call(&json!({"agent_type":"plan"})),
+            DelegatedToolKind::Plan
+        );
+        assert_eq!(
+            delegated_kind_from_agent_call(&json!({"agent_type":"verify"})),
+            DelegatedToolKind::Verify
+        );
+        assert_eq!(
+            delegated_kind_from_agent_call(&json!({"agent_type":"build"})),
+            DelegatedToolKind::Build
+        );
+        assert_eq!(
+            delegated_kind_from_agent_call(&json!({"agent_type":"explore"})),
+            DelegatedToolKind::Explore
+        );
+    }
 }
 
 fn delegated_stage_from_progress(progress: &AgentProgress) -> DelegatedRunStage {

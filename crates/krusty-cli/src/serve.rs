@@ -9,9 +9,11 @@ use std::io::{self, Write};
 use std::net::{Ipv4Addr, TcpListener as StdTcpListener};
 
 use krusty_core::ai::providers::ProviderId;
+use krusty_core::paths;
 use krusty_core::server_instance;
 use krusty_core::storage::credentials::CredentialStore;
 use krusty_core::tailscale::{self, TailscaleServeSetup};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 const DEFAULT_SERVER_PORT: u16 = 3000;
 const DEFAULT_PORT_SEARCH_SPAN: u16 = 100;
@@ -60,13 +62,7 @@ pub async fn run(port: u16) -> Result<()> {
     // Setup Tailscale serve (non-blocking, best-effort)
     print_tailscale_status(tailscale::setup_tailscale_serve(port));
 
-    // Initialize tracing for server mode (stdout, not file)
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .init();
+    init_server_tracing();
 
     let config = krusty_server::ServerConfig {
         port,
@@ -88,6 +84,45 @@ pub async fn run(port: u16) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn init_server_tracing() {
+    let filter = EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into());
+    let stdout_layer = fmt::layer().with_ansi(true);
+
+    let log_dir = paths::logs_dir();
+    if let Err(error) = std::fs::create_dir_all(&log_dir) {
+        eprintln!("Failed to create server log directory: {}", error);
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(stdout_layer)
+            .init();
+        return;
+    }
+
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("krusty-serve.log"))
+    {
+        Ok(log_file) => {
+            let file_layer = fmt::layer()
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(log_file));
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(stdout_layer)
+                .with(file_layer)
+                .init();
+        }
+        Err(error) => {
+            eprintln!("Failed to open server log file: {}", error);
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(stdout_layer)
+                .init();
+        }
+    }
 }
 
 fn reserve_server_listener(port: u16) -> Result<(u16, tokio::net::TcpListener)> {

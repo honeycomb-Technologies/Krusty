@@ -51,7 +51,7 @@ import type {
   SimpleOkResponse,
 } from './types';
 
-const STREAM_ACTIVITY_TIMEOUT = 120_000;
+const STREAM_ACTIVITY_TIMEOUT = 240_000;
 
 export interface KrustyClientConfig {
   baseUrl: string;

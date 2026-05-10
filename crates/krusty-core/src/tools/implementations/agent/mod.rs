@@ -225,13 +225,14 @@ impl AgentTool {
     }
 
     /// Resolve a fast/cheap model for lightweight agent tasks (e.g., explore).
-    /// Only downgrades for providers that have a known fast tier — otherwise
-    /// inherits the parent model.
+    /// Only downgrades for providers that have a known compatible fast tier — otherwise
+    /// inherits the parent model. OpenAI ChatGPT/Codex accounts do not support every
+    /// "mini" model on the websocket tool path, so keep OpenAI delegated runs on the
+    /// selected parent model instead of silently switching to a mini variant.
     fn resolve_fast_model(&self, ctx: &ToolContext, client: &AiClient) -> String {
         use crate::ai::providers::ProviderId;
         match client.provider_id() {
             ProviderId::Anthropic => "claude-haiku-4-5-20251001".to_string(),
-            ProviderId::OpenAI => "gpt-5.5-mini".to_string(),
             _ => self.resolve_model(ctx, client),
         }
     }

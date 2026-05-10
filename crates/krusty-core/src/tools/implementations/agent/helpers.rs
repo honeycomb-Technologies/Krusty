@@ -51,16 +51,26 @@ pub(super) fn build_single_agent_artifact(
     result: &SubAgentResult,
     delegation_policy: &DelegationPolicy,
 ) -> SingleAgentArtifact {
+    let agent = result.evidence_json();
     let review_summary = truncate_utf8(&result.output, 500).to_string();
     let payload = json!({
         "delegated_run_id": delegated_run_id,
         "findings": result.output,
         "files_examined": result.files_examined,
         "files_examined_count": result.files_examined.len(),
+        "paths_examined": result.files_examined,
+        "paths_examined_count": result.files_examined.len(),
         "duration_ms": result.duration_ms,
         "turns_used": result.turns_used,
         "success": result.success,
         "outcome": if result.success { "success" } else { "failed" },
+        "outcome_reason": if result.success { "usable_evidence" } else { "api_or_tool_error" },
+        "agent_count": 1,
+        "successful_agents": if result.success { 1 } else { 0 },
+        "usable_agents": if result.success { 1 } else { 0 },
+        "degraded_agents": 0,
+        "failed_agents": if result.success { 0 } else { 1 },
+        "agents": [agent],
         "delegation_policy": delegation_policy.audit_json(),
     });
 

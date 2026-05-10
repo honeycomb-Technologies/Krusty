@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { View, Text, Pressable, StyleSheet } from 'react-native';
-import { Check, X, Loader, Clock, ChevronDown, ChevronRight, FileText, Search, FolderTree } from 'lucide-react-native';
+import { Check, X, Loader, Clock, ChevronDown, ChevronRight, FileText, Search, FolderTree, Users } from 'lucide-react-native';
 import * as Haptics from '../../platform/haptics';
 import { useThemeContext } from '../../hooks/useTheme';
 import { BashOutput } from './BashOutput';
@@ -44,6 +44,53 @@ export function ToolCallCard({ toolCall, isStreaming }: ToolCallCardProps) {
   // Tool-specific rendering
   const renderBody = () => {
     const name = toolCall.name;
+
+    if (toolCall.delegated) {
+      const delegated = toolCall.delegated;
+      const statusLine = [
+        delegated.outcome ?? delegated.stage,
+        delegated.agentCount !== undefined ? `${delegated.agentCount} agent${delegated.agentCount === 1 ? '' : 's'}` : undefined,
+        delegated.failedAgents !== undefined ? `${delegated.failedAgents} failed` : undefined,
+        delegated.filesExaminedCount !== undefined ? `${delegated.filesExaminedCount} paths` : undefined,
+      ].filter(Boolean).join(' · ');
+      const summary =
+        delegated.message ||
+        delegated.investigationSummary ||
+        delegated.humanReview ||
+        toolCall.output;
+
+      return (
+        <View style={styles.delegatedBody}>
+          <View style={styles.fileRow}>
+            <Users size={14} color={t.mutedForeground} strokeWidth={1.5} />
+            <Text style={[styles.filePath, { color: t.mutedForeground }]} numberOfLines={1}>
+              {delegated.kind}{delegated.delegatedRunId ? ` · ${delegated.delegatedRunId}` : ''}
+            </Text>
+          </View>
+          {statusLine ? (
+            <Text style={[styles.countBadge, { color: t.mutedForeground }]}>{statusLine}</Text>
+          ) : null}
+          {summary ? (
+            <Text
+              style={[styles.outputText, { color: t.foreground }]}
+              selectable
+              numberOfLines={expanded ? 30 : 3}
+            >
+              {summary.slice(0, expanded ? 3000 : 600)}
+            </Text>
+          ) : null}
+          {expanded && delegated.agents.length > 0 ? (
+            <View style={styles.agentList}>
+              {delegated.agents.slice(0, 8).map((agent) => (
+                <Text key={agent.taskId} style={[styles.agentLine, { color: t.mutedForeground }]} numberOfLines={2}>
+                  {agent.status} · {agent.name}{agent.currentAction ? ` — ${agent.currentAction}` : ''}
+                </Text>
+              ))}
+            </View>
+          ) : null}
+        </View>
+      );
+    }
 
     // Bash tool — terminal output
     if (name === 'bash' || name === 'Bash') {
@@ -153,6 +200,9 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     fontFamily: 'Courier',
   },
+  delegatedBody: { marginTop: 6, gap: 4 },
+  agentList: { marginTop: 6, gap: 3 },
+  agentLine: { fontSize: 11, fontFamily: 'Courier', lineHeight: 15 },
   diffSummary: { marginTop: 6, gap: 4 },
   diffStats: { flexDirection: 'row', gap: 10 },
   addedText: { color: '#22c55e', fontSize: 12, fontFamily: 'Courier' },

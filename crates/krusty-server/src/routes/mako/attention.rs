@@ -421,7 +421,12 @@ fn build_run_action_attention_item(
     let diagnostic = run.diagnostic.as_ref()?;
     if !matches!(
         diagnostic.kind.as_str(),
-        "awaiting_input" | "failed" | "stale_active" | "stale_waiting" | "stale_queued"
+        "awaiting_input"
+            | "failed"
+            | "stalled_stream"
+            | "stale_active"
+            | "stale_waiting"
+            | "stale_queued"
     ) {
         return None;
     }

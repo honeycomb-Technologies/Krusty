@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::stream::Stream;
@@ -10,6 +11,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use krusty_core::agent::{
     AgenticOrchestrator, LoopEvent, OrchestratorConfig, OrchestratorServices,
 };
+use krusty_core::ai::model_profile::ModelProfile;
 use krusty_core::storage::{ProjectSettings, SessionType, WorkMode};
 use krusty_core::tools::registry::PermissionMode;
 
@@ -18,6 +20,8 @@ use super::{ChatSessionContext, SSE_CHANNEL_BUFFER};
 use crate::error::AppError;
 use crate::types::AgenticEvent;
 use crate::AppState;
+
+const SSE_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
 // ── Orchestrator → SSE bridge ────────────────────────────────────────
 
@@ -110,6 +114,7 @@ pub(super) async fn start_orchestrator_sse(
     generate_title: bool,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
     let (sse_tx, sse_rx) = mpsc::channel::<Result<Event, Infallible>>(SSE_CHANNEL_BUFFER);
+    let stream_idle_timeout = model_stream_idle_timeout(&ctx.ai_client);
 
     let services = OrchestratorServices {
         ai_client: ctx.ai_client,
@@ -129,6 +134,7 @@ pub(super) async fn start_orchestrator_sse(
         permission_mode,
         user_id: ctx.user_id.clone(),
         initial_work_mode: work_mode,
+        stream_idle_timeout,
         generate_title,
         ..Default::default()
     };
@@ -178,7 +184,16 @@ pub(super) async fn start_orchestrator_sse(
     });
 
     let stream = ReceiverStream::new(sse_rx);
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEP_ALIVE_INTERVAL)))
+}
+
+fn model_stream_idle_timeout(ai_client: &Arc<krusty_core::ai::client::AiClient>) -> Duration {
+    let profile = ModelProfile::resolve(
+        ai_client.provider_id(),
+        ai_client.config().api_format,
+        &ai_client.config().model,
+    );
+    Duration::from_secs(profile.stream_idle_timeout_secs)
 }
 
 pub(super) async fn run_orchestrator_event_bridge(

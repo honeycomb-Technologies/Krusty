@@ -56,7 +56,12 @@ export function MessageBubble({
 
   const toolCalls = message.toolCalls ?? [];
   const delegatedTools = toolCalls.filter(
-    (toolCall) => toolCall.name === "explore" || toolCall.name === "build",
+    (toolCall) =>
+      toolCall.name === "agent" ||
+      toolCall.name === "explore" ||
+      toolCall.name === "plan" ||
+      toolCall.name === "verify" ||
+      toolCall.name === "build",
   );
   const questionTools = toolCalls.filter(
     (toolCall) => toolCall.name === "AskUserQuestion",
@@ -67,7 +72,10 @@ export function MessageBubble({
   const standardTools = toolCalls.filter(
     (toolCall) =>
       toolCall.name !== "explore" &&
+      toolCall.name !== "plan" &&
+      toolCall.name !== "verify" &&
       toolCall.name !== "build" &&
+      toolCall.name !== "agent" &&
       toolCall.name !== "AskUserQuestion" &&
       toolCall.name !== "PlanConfirm" &&
       !INTERNAL_TOOL_NAMES.has(toolCall.name),

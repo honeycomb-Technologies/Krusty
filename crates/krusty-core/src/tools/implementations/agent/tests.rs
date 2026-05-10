@@ -165,6 +165,13 @@ fn single_agent_artifact_keeps_payload_shape() {
     assert_eq!(artifact.payload["files_examined_count"], 2);
     assert_eq!(artifact.payload["success"], true);
     assert_eq!(artifact.payload["outcome"], "success");
+    assert_eq!(artifact.payload["agent_count"], 1);
+    assert_eq!(artifact.payload["usable_agents"], 1);
+    assert_eq!(artifact.payload["failed_agents"], 0);
+    assert_eq!(
+        artifact.payload["agents"][0]["summary"],
+        "Found the relevant code paths"
+    );
     assert_eq!(
         artifact.payload["delegation_policy"]["surface"],
         "subagent_plan"
