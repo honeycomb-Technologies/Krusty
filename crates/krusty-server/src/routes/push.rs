@@ -2,7 +2,6 @@
 
 use axum::{
     extract::State,
-    http::Uri,
     routing::{delete, get, post},
     Json, Router,
 };
@@ -14,7 +13,7 @@ use krusty_core::storage::{Database, PushDeliveryAttemptStore, PushSubscriptionS
 
 use crate::auth::CurrentUser;
 use crate::error::AppError;
-use crate::push::{PushEventType, PushPayload};
+use crate::push::{normalize_push_endpoint, PushEventType, PushPayload};
 use crate::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -154,24 +153,7 @@ struct SubscribeResponse {
 }
 
 fn normalize_endpoint(endpoint: &str) -> Result<String, AppError> {
-    let endpoint = endpoint.trim();
-    if endpoint.is_empty() {
-        return Err(AppError::BadRequest(
-            "Push subscription endpoint is required".to_string(),
-        ));
-    }
-
-    let uri: Uri = endpoint.parse().map_err(|_| {
-        AppError::BadRequest("Push subscription endpoint must be a valid URL".to_string())
-    })?;
-
-    if uri.scheme_str() != Some("https") || uri.host().is_none() {
-        return Err(AppError::BadRequest(
-            "Push subscription endpoint must be an https URL".to_string(),
-        ));
-    }
-
-    Ok(endpoint.to_string())
+    normalize_push_endpoint(endpoint).map_err(|err| AppError::BadRequest(err.to_string()))
 }
 
 fn normalize_auth_secret(auth: &str) -> Result<String, AppError> {
@@ -263,9 +245,23 @@ mod tests {
 
     #[test]
     fn subscribe_validation_rejects_non_https_endpoints() {
-        let error = normalize_endpoint("http://push.example.test/subscription")
+        let error = normalize_endpoint("http://fcm.googleapis.com/subscription")
             .expect_err("http endpoint should be rejected");
         assert!(matches!(error, super::AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn subscribe_validation_rejects_loopback_and_untrusted_hosts() {
+        for endpoint in [
+            "https://127.0.0.1/internal",
+            "https://localhost/internal",
+            "https://192.168.0.10/internal",
+            "https://push.example.test/subscription",
+        ] {
+            let error = normalize_endpoint(endpoint)
+                .expect_err("unsupported push endpoint host should be rejected");
+            assert!(matches!(error, super::AppError::BadRequest(_)));
+        }
     }
 
     #[test]
@@ -278,7 +274,7 @@ mod tests {
     #[test]
     fn subscribe_validation_accepts_valid_push_keys() {
         let auth = Base64UrlUnpadded::encode_string(b"abcdefghijklmnop");
-        assert!(normalize_endpoint("https://push.example.test/subscription").is_ok());
+        assert!(normalize_endpoint("https://fcm.googleapis.com/fcm/send/test").is_ok());
         assert!(normalize_auth_secret(&auth).is_ok());
         assert!(normalize_p256dh_key(&valid_p256dh_key()).is_ok());
     }
