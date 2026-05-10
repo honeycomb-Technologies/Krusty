@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// MCP configuration from .mcp.json
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -7,6 +7,8 @@ use std::collections::HashMap;
 pub struct McpConfig {
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfigRaw>,
+    #[serde(skip)]
+    pub auto_connect_local_servers: HashSet<String>,
 }
 
 /// Raw server configuration from JSON
@@ -41,6 +43,7 @@ pub enum McpServerConfig {
         command: String,
         args: Vec<String>,
         env: HashMap<String, String>,
+        auto_connect: bool,
     },
     /// Remote server - we connect directly via HTTP/SSE, or pass to Anthropic API
     Remote {
@@ -68,6 +71,13 @@ impl McpServerConfig {
 
     pub fn is_remote(&self) -> bool {
         matches!(self, McpServerConfig::Remote { .. })
+    }
+
+    pub fn should_auto_connect(&self) -> bool {
+        match self {
+            McpServerConfig::Local { auto_connect, .. } => *auto_connect,
+            McpServerConfig::Remote { .. } => true,
+        }
     }
 
     pub fn transport_type(&self) -> &'static str {
