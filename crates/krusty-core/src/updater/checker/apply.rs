@@ -173,6 +173,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pending_updates_use_private_config_directory() {
+        let pending = pending_update_path();
+        assert!(pending.starts_with(crate::paths::config_dir()));
+        assert!(!pending.starts_with(std::env::temp_dir()));
+        assert_eq!(
+            pending.file_name().and_then(|name| name.to_str()),
+            Some("krusty-pending-update")
+        );
+    }
+
+    #[test]
     fn rejects_non_regular_pending_update() {
         let dir = tempfile::tempdir().expect("tempdir");
         let pending_dir = dir.path().join("pending-dir");

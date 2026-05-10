@@ -25,6 +25,10 @@ pub fn pending_update_path() -> PathBuf {
     pending_update_dir().join("krusty-pending-update")
 }
 
+pub(super) fn pending_archive_path(ext: &str) -> PathBuf {
+    pending_update_dir().join(format!("krusty-download.{}", ext))
+}
+
 pub(super) fn pending_version_path() -> PathBuf {
     pending_update_dir().join("krusty-pending-update.version")
 }

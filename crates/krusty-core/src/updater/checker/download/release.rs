@@ -4,7 +4,8 @@ use tracing::{debug, info};
 
 use crate::updater::checker::extract::{extract_tar_gz, extract_zip};
 use crate::updater::checker::paths::{
-    detect_platform, ensure_pending_update_dir, pending_update_path, pending_version_path,
+    detect_platform, ensure_pending_update_dir, pending_archive_path, pending_update_path,
+    pending_version_path,
 };
 use crate::updater::checker::types::UpdateStatus;
 use crate::updater::checker::GITHUB_REPO;
@@ -44,8 +45,8 @@ pub(super) async fn download_update_release(
         progress: "Extracting...".into(),
     });
 
-    let update_dir = ensure_pending_update_dir()?;
-    let archive_path = update_dir.join(format!("krusty-download.{}", ext));
+    ensure_pending_update_dir()?;
+    let archive_path = pending_archive_path(ext);
     std::fs::write(&archive_path, &bytes)?;
     debug!("Saved archive to: {}", archive_path.display());
 
