@@ -132,7 +132,19 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG_NAME" artifacts/**/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$TAG_NAME" \
-            --generate-notes
+          mapfile -t release_assets < <(find artifacts -type f -print | sort)
+          if [ "${#release_assets[@]}" -eq 0 ]; then
+            echo "No release assets found" >&2
+            exit 1
+          fi
+
+          if gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" "${release_assets[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create "$TAG_NAME" "${release_assets[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG_NAME" \
+              --generate-notes
+          fi
