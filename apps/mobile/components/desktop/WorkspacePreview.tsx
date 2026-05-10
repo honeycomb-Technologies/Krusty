@@ -809,6 +809,7 @@ export function WorkspacePreview({ visible, style }: WorkspacePreviewProps) {
                     <iframe
                       key={`${tab.id}:${tab.historyIndex}:${tab.reloadKey}`}
                       src={tab.history[tab.historyIndex]}
+                      sandbox="allow-downloads allow-forms allow-modals allow-popups allow-pointer-lock allow-scripts"
                       style={{ width: "100%", height: "100%", border: "none" }}
                       title={tab.title}
                       onLoad={() => {
