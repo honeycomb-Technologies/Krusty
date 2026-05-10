@@ -227,6 +227,7 @@ fn inject_context_skips_project_instructions_without_explicit_project_dir() {
         None,
         None,
         None,
+        None,
     );
 
     assert_eq!(injected.len(), 3);
@@ -241,6 +242,69 @@ fn inject_context_skips_project_instructions_without_explicit_project_dir() {
         Content::Text { text } if text.contains("[ENVIRONMENT]")
     ));
     assert_eq!(injected[2].role, Role::User);
+}
+
+#[test]
+fn inject_context_filters_persistent_memory_by_user_id() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    let db_path = repo.join("krusty.db");
+    let memory_store = MemoryStore::new(Database::new(&db_path).unwrap());
+    memory_store
+        .save(
+            MemoryType::User,
+            "Alice secret",
+            "alice-only instruction",
+            None,
+            Some("alice"),
+        )
+        .unwrap();
+    memory_store
+        .save(
+            MemoryType::User,
+            "Bob preference",
+            "bob-only preference",
+            None,
+            Some("bob"),
+        )
+        .unwrap();
+
+    let skills = RwLock::new(SkillsManager::with_defaults(repo));
+    let conversation = vec![ModelMessage {
+        role: Role::User,
+        content: vec![Content::Text {
+            text: "hello".to_string(),
+        }],
+    }];
+
+    let injected = inject_context(
+        &conversation,
+        db_path.as_path(),
+        "session-id",
+        repo,
+        None,
+        WorkMode::Build,
+        &skills,
+        None,
+        None,
+        None,
+        Some("bob"),
+    );
+
+    let context = injected
+        .iter()
+        .filter_map(|message| match &message.content[0] {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(context.contains("Bob preference"));
+    assert!(context.contains("bob-only preference"));
+    assert!(!context.contains("Alice secret"));
+    assert!(!context.contains("alice-only instruction"));
 }
 
 #[test]
@@ -270,6 +334,7 @@ fn inject_context_includes_mako_identity_only_for_mako_sessions() {
         None,
         Some("mako"),
         None,
+        None,
     );
     let code_injected = inject_context(
         &conversation,
@@ -281,6 +346,7 @@ fn inject_context_includes_mako_identity_only_for_mako_sessions() {
         &skills,
         None,
         Some("code"),
+        None,
         None,
     );
 
@@ -337,6 +403,7 @@ fn inject_context_places_all_mako_layers_before_project_settings() {
         None,
         Some("mako"),
         None,
+        None,
     );
 
     let texts = injected
@@ -385,6 +452,7 @@ fn inject_context_does_not_inline_mako_coordinator_prompt() {
         &skills,
         None,
         Some("mako"),
+        None,
         None,
     );
 
@@ -452,6 +520,7 @@ fn inject_context_includes_mako_knowledge_from_memory_and_reports() {
         &skills,
         None,
         Some("mako"),
+        None,
         None,
     );
 
@@ -526,6 +595,7 @@ fn inject_context_prioritizes_relevant_reports_over_recent_reports() {
         &skills,
         None,
         Some("code"),
+        None,
         None,
     );
 
@@ -604,6 +674,7 @@ fn inject_context_uses_active_mako_tasks_for_report_relevance() {
         None,
         Some("mako"),
         None,
+        None,
     );
 
     assert!(injected.iter().any(|message| {
@@ -673,6 +744,7 @@ fn inject_context_does_not_duplicate_generic_memory_and_report_blocks_for_mako()
         &skills,
         None,
         Some("mako"),
+        None,
         None,
     );
 
@@ -747,6 +819,7 @@ fn inject_context_includes_recent_delegated_run_guidance() {
         Some(repo),
         WorkMode::Build,
         &skills,
+        None,
         None,
         None,
         None,
