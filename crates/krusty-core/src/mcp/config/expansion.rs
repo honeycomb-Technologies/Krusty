@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 /// Expand ${VAR} environment variables, with fallback to credentials store
-pub(super) async fn expand_env_var(s: &str) -> String {
+pub(super) async fn expand_env_var(s: &str, allow_credential_store: bool) -> String {
     let mut result = s.to_string();
 
     while let Some(start) = result.find("${") {
@@ -16,28 +16,36 @@ pub(super) async fn expand_env_var(s: &str) -> String {
                     v
                 }
                 Err(_) => {
-                    if let Some(cred_key) = credential_key_for_env(var_name) {
-                        tracing::debug!(
-                            "Looking up {} in credential store as '{}'",
-                            var_name,
-                            cred_key
-                        );
-                        match get_credential(cred_key).await {
-                            Some(v) => {
-                                tracing::debug!(
-                                    "Found {} in credential store (len={})",
-                                    var_name,
-                                    v.len()
-                                );
-                                v
+                    if allow_credential_store {
+                        if let Some(cred_key) = credential_key_for_env(var_name) {
+                            tracing::debug!(
+                                "Looking up {} in credential store as '{}'",
+                                var_name,
+                                cred_key
+                            );
+                            match get_credential(cred_key).await {
+                                Some(v) => {
+                                    tracing::debug!(
+                                        "Found {} in credential store (len={})",
+                                        var_name,
+                                        v.len()
+                                    );
+                                    v
+                                }
+                                None => {
+                                    tracing::warn!("Credential '{}' not found in store", cred_key);
+                                    String::new()
+                                }
                             }
-                            None => {
-                                tracing::warn!("Credential '{}' not found in store", cred_key);
-                                String::new()
-                            }
+                        } else {
+                            tracing::warn!("No credential mapping for {}", var_name);
+                            String::new()
                         }
                     } else {
-                        tracing::warn!("No credential mapping for {}", var_name);
+                        tracing::warn!(
+                            "Skipping credential-store lookup for {} in untrusted MCP config",
+                            var_name
+                        );
                         String::new()
                     }
                 }

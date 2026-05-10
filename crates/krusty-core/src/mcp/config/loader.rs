@@ -28,6 +28,15 @@ impl McpConfig {
             config_path
         );
 
+        for (name, server) in &config.mcp_servers {
+            if matches!(server, McpServerConfigRaw::Local { .. }) {
+                tracing::warn!(
+                    "Loaded project MCP local server '{}' in disconnected state; connect explicitly from /mcp to trust and run it",
+                    name
+                );
+            }
+        }
+
         Ok(config)
     }
 
@@ -38,13 +47,15 @@ impl McpConfig {
             let config = match raw {
                 McpServerConfigRaw::Local { command, args, env } => {
                     let mut expanded_env = HashMap::new();
+                    let auto_connect = self.auto_connect_local_servers.contains(name);
                     for (k, v) in env {
-                        expanded_env.insert(k.clone(), expand_env_var(v).await);
+                        expanded_env.insert(k.clone(), expand_env_var(v, auto_connect).await);
                     }
                     McpServerConfig::Local {
                         command: command.clone(),
                         args: args.clone(),
                         env: expanded_env,
+                        auto_connect,
                     }
                 }
                 McpServerConfigRaw::Remote {
@@ -54,7 +65,7 @@ impl McpConfig {
                     ..
                 } => {
                     let token = match authorization_token {
-                        Some(t) => Some(expand_env_var(t).await),
+                        Some(t) => Some(expand_env_var(t, false).await),
                         None => None,
                     };
                     McpServerConfig::Remote {
@@ -80,7 +91,7 @@ impl McpConfig {
             } = raw
             {
                 let token = match authorization_token {
-                    Some(t) => Some(expand_env_var(t).await),
+                    Some(t) => Some(expand_env_var(t, false).await),
                     None => None,
                 };
                 result.push(RemoteMcpServer {
