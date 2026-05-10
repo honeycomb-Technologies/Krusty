@@ -84,6 +84,18 @@ pub(super) async fn oauth_callback(
         }
     };
 
+    if query.state.as_deref() != Some(expected_state.as_str()) {
+        state
+            .oauth_flows
+            .lock()
+            .await
+            .remove(provider_id.storage_key());
+        return callback_error_page(
+            provider_id.storage_key().to_string(),
+            "The returned sign-in state did not match the active request.".to_string(),
+        );
+    }
+
     if let Some(error_code) = query.error.as_deref() {
         state
             .oauth_flows
@@ -97,18 +109,6 @@ pub(super) async fn oauth_callback(
         return callback_error_page(
             provider_id.storage_key().to_string(),
             format!("{} ({})", description, error_code),
-        );
-    }
-
-    if query.state.as_deref() != Some(expected_state.as_str()) {
-        state
-            .oauth_flows
-            .lock()
-            .await
-            .remove(provider_id.storage_key());
-        return callback_error_page(
-            provider_id.storage_key().to_string(),
-            "The returned sign-in state did not match the active request.".to_string(),
         );
     }
 
@@ -201,9 +201,11 @@ fn callback_page(
             .map(|duration| duration.as_millis())
             .unwrap_or(0),
     });
-    let payload_json =
-        serde_json::to_string(&payload).unwrap_or_else(|_| "{\"success\":false}".to_string());
-    let return_url = serde_json::to_string("/").unwrap_or_else(|_| "\"/\"".to_string());
+    let payload_json = script_safe_json(
+        &serde_json::to_string(&payload).unwrap_or_else(|_| "{\"success\":false}".to_string()),
+    );
+    let return_url =
+        script_safe_json(&serde_json::to_string("/").unwrap_or_else(|_| "\"/\"".to_string()));
     let headline_class = if success { "status ok" } else { "status error" };
     let headline_text = escape_html(&headline);
     let message_text = escape_html(&message);
@@ -335,6 +337,14 @@ fn callback_page(
     Html(html).into_response()
 }
 
+fn script_safe_json(json: &str) -> String {
+    json.replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
 fn escape_html(input: &str) -> String {
     input
         .replace('&', "&amp;")
@@ -342,4 +352,41 @@ fn escape_html(input: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body;
+
+    use super::*;
+
+    #[test]
+    fn script_safe_json_escapes_html_script_breakouts() {
+        let input = r#"{"error":"</script><script>alert(1)</script>&\u2028\u2029"}"#;
+        let escaped = script_safe_json(input);
+
+        assert!(!escaped.contains("</script>"));
+        assert!(!escaped.contains("<script>"));
+        assert!(escaped.contains(r#"\u003c/script\u003e"#));
+        assert!(escaped.contains(r#"\u003cscript\u003e"#));
+        assert!(escaped.contains(r#"\u0026"#));
+    }
+
+    #[tokio::test]
+    async fn callback_page_does_not_embed_raw_script_end_tag_in_payload() {
+        let response = callback_error_page(
+            "openai".to_string(),
+            "</script><script>window.__krusty_xss=1</script> (access_denied)".to_string(),
+        );
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("callback page body should be readable");
+        let html = String::from_utf8(bytes.to_vec()).expect("callback page should be utf-8");
+
+        assert!(html.contains("&lt;/script&gt;&lt;script&gt;window.__krusty_xss=1&lt;/script&gt;"));
+        assert!(html.contains(
+            r#"\u003c/script\u003e\u003cscript\u003ewindow.__krusty_xss=1\u003c/script\u003e"#
+        ));
+        assert!(!html.contains("const payload = {\"error\":\"</script>"));
+    }
 }

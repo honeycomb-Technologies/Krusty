@@ -1,41 +1,40 @@
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 
 pub(super) fn pending_update_dir() -> PathBuf {
     crate::paths::config_dir().join("updates")
 }
 
-pub fn pending_update_path() -> PathBuf {
-    pending_update_dir().join("pending-update")
-}
-
-pub(super) fn pending_archive_path(ext: &str) -> PathBuf {
-    pending_update_dir().join(format!("download.{}", ext))
-}
-
-pub(super) fn pending_version_path() -> PathBuf {
-    pending_update_dir().join("pending-update.version")
-}
-
-pub(super) fn update_marker_path() -> PathBuf {
-    crate::paths::config_dir().join("last-update-version")
-}
-
 pub(super) fn ensure_pending_update_dir() -> Result<PathBuf> {
     let dir = pending_update_dir();
-    std::fs::create_dir_all(&dir)?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create update directory {}", dir.display()))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-
-        let mut perms = std::fs::metadata(&dir)?.permissions();
-        perms.set_mode(0o700);
-        std::fs::set_permissions(&dir, perms)?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("failed to secure update directory {}", dir.display()))?;
     }
 
     Ok(dir)
+}
+
+pub fn pending_update_path() -> PathBuf {
+    pending_update_dir().join("krusty-pending-update")
+}
+
+pub(super) fn pending_archive_path(ext: &str) -> PathBuf {
+    pending_update_dir().join(format!("krusty-download.{}", ext))
+}
+
+pub(super) fn pending_version_path() -> PathBuf {
+    pending_update_dir().join("krusty-pending-update.version")
+}
+
+pub(super) fn update_marker_path() -> PathBuf {
+    crate::paths::config_dir().join("last-update-version")
 }
 
 pub fn has_pending_update() -> bool {

@@ -62,6 +62,14 @@ pub(super) async fn download_update_release(
         return Err(anyhow!("Extraction failed - binary not found"));
     }
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&binary_path)?.permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&binary_path, perms)?;
+    }
+
     let metadata = std::fs::metadata(&binary_path)?;
     info!("Extracted binary: {} bytes", metadata.len());
 

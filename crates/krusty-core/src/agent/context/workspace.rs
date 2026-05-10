@@ -1,7 +1,7 @@
 use std::path::Path;
-use std::process::Command;
-
 use tracing::warn;
+
+use git2::{Repository, Status, StatusOptions};
 
 use crate::storage::ProjectSettings;
 
@@ -65,50 +65,74 @@ pub(super) fn build_workspace_context(working_dir: &Path, project_dir: Option<&P
     )
 }
 
-fn run_git_context_command(working_dir: &Path, args: &[&str]) -> Option<std::process::Output> {
-    match Command::new("git")
-        .args(args)
-        .current_dir(working_dir)
-        .output()
-    {
-        Ok(output) if output.status.success() => Some(output),
-        Ok(output) => {
-            warn!(
-                working_dir = %working_dir.display(),
-                ?args,
-                status = ?output.status,
-                "Git probe failed while building environment context"
-            );
-            None
-        }
+fn open_git_repository(working_dir: &Path) -> Option<Repository> {
+    match Repository::open(working_dir) {
+        Ok(repo) => Some(repo),
         Err(error) => {
             warn!(
                 working_dir = %working_dir.display(),
-                ?args,
                 error = %error,
-                "Failed to run git probe while building environment context"
+                "Failed to open git repository while building environment context"
             );
             None
         }
     }
 }
 
-pub(super) fn summarize_git_status(status_text: &str) -> Option<String> {
+fn current_git_branch(repo: &Repository) -> Option<String> {
+    let head = repo.head().ok()?;
+    let branch = head.shorthand()?.trim();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch.to_string())
+    }
+}
+
+fn summarize_git_statuses(repo: &Repository) -> Option<String> {
+    let mut options = StatusOptions::new();
+    options.include_untracked(true);
+
+    let statuses = match repo.statuses(Some(&mut options)) {
+        Ok(statuses) => statuses,
+        Err(error) => {
+            warn!(
+                error = %error,
+                "Failed to inspect git status while building environment context"
+            );
+            return None;
+        }
+    };
+
     let mut modified = 0usize;
     let mut staged = 0usize;
     let mut untracked = 0usize;
 
-    for line in status_text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("??") {
+    for entry in statuses.iter() {
+        let status = entry.status();
+        if status.contains(Status::WT_NEW) {
             untracked += 1;
-        } else if trimmed.starts_with('A') {
+        }
+        if status.intersects(
+            Status::INDEX_NEW
+                | Status::INDEX_MODIFIED
+                | Status::INDEX_DELETED
+                | Status::INDEX_RENAMED
+                | Status::INDEX_TYPECHANGE,
+        ) {
             staged += 1;
-        } else if trimmed.starts_with('M') || trimmed.contains('M') {
+        }
+        if status.intersects(
+            Status::WT_MODIFIED | Status::WT_DELETED | Status::WT_RENAMED | Status::WT_TYPECHANGE,
+        ) {
             modified += 1;
         }
     }
 
+    format_git_status_summary(modified, staged, untracked)
+}
+
+fn format_git_status_summary(modified: usize, staged: usize, untracked: usize) -> Option<String> {
     let mut parts = Vec::new();
     if modified > 0 {
         parts.push(format!("{} modified", modified));
@@ -127,10 +151,31 @@ pub(super) fn summarize_git_status(status_text: &str) -> Option<String> {
     }
 }
 
+#[cfg(test)]
+pub(super) fn summarize_git_status(status_text: &str) -> Option<String> {
+    let mut modified = 0usize;
+    let mut staged = 0usize;
+    let mut untracked = 0usize;
+
+    for line in status_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("??") {
+            untracked += 1;
+        } else if trimmed.starts_with('A') {
+            staged += 1;
+        } else if trimmed.starts_with('M') || trimmed.contains('M') {
+            modified += 1;
+        }
+    }
+
+    format_git_status_summary(modified, staged, untracked)
+}
+
 /// Build environment context with runtime information.
 ///
 /// Gathers working directory, git status, platform, shell, date, and model
-/// information. Git commands that fail are skipped with warnings.
+/// information. Repository metadata is read through libgit2 so context collection
+/// does not spawn repo-configurable Git helper commands.
 pub(super) fn build_environment_context(working_dir: &Path, model_id: Option<&str>) -> String {
     let mut lines = vec![
         "[ENVIRONMENT]".to_string(),
@@ -144,18 +189,12 @@ pub(super) fn build_environment_context(working_dir: &Path, model_id: Option<&st
     ));
 
     if is_git_repo {
-        if let Some(output) =
-            run_git_context_command(working_dir, &["rev-parse", "--abbrev-ref", "HEAD"])
-        {
-            let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !branch.is_empty() {
+        if let Some(repo) = open_git_repository(working_dir) {
+            if let Some(branch) = current_git_branch(&repo) {
                 lines.push(format!("Git branch: {}", branch));
             }
-        }
 
-        if let Some(output) = run_git_context_command(working_dir, &["status", "--short"]) {
-            let status_text = String::from_utf8_lossy(&output.stdout);
-            if let Some(summary) = summarize_git_status(&status_text) {
+            if let Some(summary) = summarize_git_statuses(&repo) {
                 lines.push(format!("Git status: {}", summary));
             }
         }

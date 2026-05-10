@@ -230,6 +230,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn safety_hook_blocks_destructive_home_glob_rm() {
+        let hook = SafetyHook::new();
+        let ctx = default_context();
+
+        for command in [
+            "rm -rf ~/*",
+            "rm -rf $HOME/*",
+            "rm -rf ${HOME}/*",
+            "DEBUG=1 rm -rf $HOME/*",
+        ] {
+            let result = hook
+                .before_execute("bash", &json!({ "command": command }), &ctx)
+                .await;
+            assert!(
+                matches!(result, HookResult::Block { .. }),
+                "expected safety hook to block {command:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn safety_hook_blocks_network_pipe_to_shell() {
         let hook = SafetyHook::new();
         let ctx = default_context();

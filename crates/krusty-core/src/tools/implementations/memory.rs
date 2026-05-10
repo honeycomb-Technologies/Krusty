@@ -116,8 +116,8 @@ Actions:
 
         match params.action.as_str() {
             "save" => execute_save(&store, db_path, &params, project_dir.as_deref(), user_id),
-            "update" => execute_update(&store, db_path, &params),
-            "delete" => execute_delete(&store, db_path, &params),
+            "update" => execute_update(&store, db_path, &params, user_id),
+            "delete" => execute_delete(&store, db_path, &params, user_id),
             "list" => execute_list(&store, &params, project_dir.as_deref(), user_id),
             other => ToolResult::invalid_parameters(format!(
                 "Unknown action '{}'. Valid actions: save, update, delete, list",
@@ -174,7 +174,12 @@ fn execute_save(
     }
 }
 
-fn execute_update(store: &MemoryStore, db_path: &std::path::Path, params: &Params) -> ToolResult {
+fn execute_update(
+    store: &MemoryStore,
+    db_path: &std::path::Path,
+    params: &Params,
+    user_id: Option<&str>,
+) -> ToolResult {
     let Some(id) = params.memory_id.as_deref().filter(|i| !i.is_empty()) else {
         return ToolResult::invalid_parameters("'update' requires memory_id");
     };
@@ -196,6 +201,12 @@ fn execute_update(store: &MemoryStore, db_path: &std::path::Path, params: &Param
     };
     if is_current_snapshot(&existing) {
         return ToolResult::invalid_parameters("Current Snapshot is managed automatically");
+    }
+    if !can_mutate_memory(&existing, user_id) {
+        return ToolResult::error(format!(
+            "failed to update memory: memory '{}' not found",
+            id
+        ));
     }
     if title.is_some_and(is_current_snapshot_title) {
         return ToolResult::invalid_parameters("Current Snapshot is managed automatically");
@@ -222,7 +233,12 @@ fn execute_update(store: &MemoryStore, db_path: &std::path::Path, params: &Param
     }
 }
 
-fn execute_delete(store: &MemoryStore, db_path: &std::path::Path, params: &Params) -> ToolResult {
+fn execute_delete(
+    store: &MemoryStore,
+    db_path: &std::path::Path,
+    params: &Params,
+    user_id: Option<&str>,
+) -> ToolResult {
     let Some(id) = params.memory_id.as_deref().filter(|i| !i.is_empty()) else {
         return ToolResult::invalid_parameters("'delete' requires memory_id");
     };
@@ -235,6 +251,12 @@ fn execute_delete(store: &MemoryStore, db_path: &std::path::Path, params: &Param
     };
     if is_current_snapshot(&existing) {
         return ToolResult::invalid_parameters("Current Snapshot is managed automatically");
+    }
+    if !can_mutate_memory(&existing, user_id) {
+        return ToolResult::error(format!(
+            "failed to delete memory: memory '{}' not found",
+            id
+        ));
     }
 
     match store.delete(id) {
@@ -255,6 +277,13 @@ fn execute_delete(store: &MemoryStore, db_path: &std::path::Path, params: &Param
             }))
         }
         Err(err) => ToolResult::error(format!("failed to delete memory: {err}")),
+    }
+}
+
+fn can_mutate_memory(memory: &crate::storage::AgentMemory, user_id: Option<&str>) -> bool {
+    match user_id {
+        Some(uid) => memory.user_id.as_deref() == Some(uid),
+        None => memory.user_id.is_none(),
     }
 }
 
@@ -407,6 +436,56 @@ mod tests {
         let list_result = MemoryTool.execute(json!({ "action": "list" }), &ctx).await;
         let parsed: Value = serde_json::from_str(&list_result.output).unwrap();
         assert_eq!(parsed["data"]["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn update_and_delete_require_matching_user_scope() {
+        let (mut alice_ctx, _tmp) = test_ctx();
+        let db_path = alice_ctx.db_path.clone();
+        alice_ctx.user_id = Some("alice".to_string());
+        let bob_ctx = ToolContext {
+            db_path,
+            user_id: Some("bob".to_string()),
+            ..Default::default()
+        };
+
+        let save_result = MemoryTool
+            .execute(
+                json!({
+                    "action": "save",
+                    "memory_type": "feedback",
+                    "title": "Private",
+                    "content": "Alice only"
+                }),
+                &alice_ctx,
+            )
+            .await;
+        let parsed: Value = serde_json::from_str(&save_result.output).unwrap();
+        let id = parsed["data"]["id"].as_str().unwrap().to_string();
+
+        let update_result = MemoryTool
+            .execute(
+                json!({
+                    "action": "update",
+                    "memory_id": id,
+                    "content": "Bob cannot change this"
+                }),
+                &bob_ctx,
+            )
+            .await;
+        assert!(update_result.is_error);
+
+        let delete_result = MemoryTool
+            .execute(json!({ "action": "delete", "memory_id": id }), &bob_ctx)
+            .await;
+        assert!(delete_result.is_error);
+
+        let list_result = MemoryTool
+            .execute(json!({ "action": "list" }), &alice_ctx)
+            .await;
+        let parsed: Value = serde_json::from_str(&list_result.output).unwrap();
+        assert_eq!(parsed["data"]["count"], 1);
+        assert_eq!(parsed["data"]["memories"][0]["content"], "Alice only");
     }
 
     #[tokio::test]

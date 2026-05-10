@@ -46,7 +46,6 @@ pub(super) async fn download_update_dev(
     });
 
     ensure_pending_update_dir()?;
-
     let source = repo_path.join("target/release/krusty");
     let dest = pending_update_path();
 
@@ -56,7 +55,7 @@ pub(super) async fn download_update_dev(
     {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(&dest)?.permissions();
-        perms.set_mode(0o755);
+        perms.set_mode(0o700);
         std::fs::set_permissions(&dest, perms)?;
     }
 

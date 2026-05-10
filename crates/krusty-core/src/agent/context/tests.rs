@@ -1,10 +1,11 @@
 use std::fs;
+use std::io::Write;
 
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 
 use super::mako::{build_mako_context_sections, build_mako_context_sections_with_home};
-use super::workspace::summarize_git_status;
+use super::workspace::{build_environment_context, summarize_git_status};
 use super::{build_plan_context, build_project_context, build_skills_context, inject_context};
 
 use crate::agent::DelegatedRunStage;
@@ -185,6 +186,46 @@ fn build_skills_context_returns_empty_when_manager_is_busy() {
 }
 
 #[test]
+fn build_environment_context_does_not_execute_repo_local_git_commands() {
+    let temp = TempDir::new().unwrap();
+    let repo_path = temp.path().join("repo");
+    fs::create_dir_all(&repo_path).unwrap();
+    git2::Repository::init(&repo_path).unwrap();
+
+    let payload_path = repo_path.join("fsmonitor-payload.sh");
+    let marker_path = repo_path.join("fsmonitor-marker");
+    fs::write(
+        &payload_path,
+        format!("#!/bin/sh\necho vulnerable > {}\n", marker_path.display()),
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&payload_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&payload_path, permissions).unwrap();
+    }
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(repo_path.join(".git").join("config"))
+        .unwrap()
+        .write_all(format!("\n[core]\n	fsmonitor = {}\n", payload_path.display()).as_bytes())
+        .unwrap();
+
+    let context = build_environment_context(&repo_path, Some("test-model"));
+
+    assert!(context.contains("Git repository: yes"));
+    assert!(context.contains("Model: test-model"));
+    assert!(
+        !marker_path.exists(),
+        "environment context must not execute repo-local git helpers"
+    );
+}
+
+#[test]
 fn summarize_git_status_counts_modified_staged_and_untracked() {
     let summary = summarize_git_status(" M src/lib.rs\nA  Cargo.toml\n?? scratch.txt\n");
 
@@ -227,6 +268,7 @@ fn inject_context_skips_project_instructions_without_explicit_project_dir() {
         None,
         None,
         None,
+        None,
     );
 
     assert_eq!(injected.len(), 3);
@@ -241,6 +283,69 @@ fn inject_context_skips_project_instructions_without_explicit_project_dir() {
         Content::Text { text } if text.contains("[ENVIRONMENT]")
     ));
     assert_eq!(injected[2].role, Role::User);
+}
+
+#[test]
+fn inject_context_filters_persistent_memory_by_user_id() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    let db_path = repo.join("krusty.db");
+    let memory_store = MemoryStore::new(Database::new(&db_path).unwrap());
+    memory_store
+        .save(
+            MemoryType::User,
+            "Alice secret",
+            "alice-only instruction",
+            None,
+            Some("alice"),
+        )
+        .unwrap();
+    memory_store
+        .save(
+            MemoryType::User,
+            "Bob preference",
+            "bob-only preference",
+            None,
+            Some("bob"),
+        )
+        .unwrap();
+
+    let skills = RwLock::new(SkillsManager::with_defaults(repo));
+    let conversation = vec![ModelMessage {
+        role: Role::User,
+        content: vec![Content::Text {
+            text: "hello".to_string(),
+        }],
+    }];
+
+    let injected = inject_context(
+        &conversation,
+        db_path.as_path(),
+        "session-id",
+        repo,
+        None,
+        WorkMode::Build,
+        &skills,
+        None,
+        None,
+        None,
+        Some("bob"),
+    );
+
+    let context = injected
+        .iter()
+        .filter_map(|message| match &message.content[0] {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(context.contains("Bob preference"));
+    assert!(context.contains("bob-only preference"));
+    assert!(!context.contains("Alice secret"));
+    assert!(!context.contains("alice-only instruction"));
 }
 
 #[test]
@@ -270,6 +375,7 @@ fn inject_context_includes_mako_identity_only_for_mako_sessions() {
         None,
         Some("mako"),
         None,
+        None,
     );
     let code_injected = inject_context(
         &conversation,
@@ -281,6 +387,7 @@ fn inject_context_includes_mako_identity_only_for_mako_sessions() {
         &skills,
         None,
         Some("code"),
+        None,
         None,
     );
 
@@ -337,6 +444,7 @@ fn inject_context_places_all_mako_layers_before_project_settings() {
         None,
         Some("mako"),
         None,
+        None,
     );
 
     let texts = injected
@@ -385,6 +493,7 @@ fn inject_context_does_not_inline_mako_coordinator_prompt() {
         &skills,
         None,
         Some("mako"),
+        None,
         None,
     );
 
@@ -452,6 +561,7 @@ fn inject_context_includes_mako_knowledge_from_memory_and_reports() {
         &skills,
         None,
         Some("mako"),
+        None,
         None,
     );
 
@@ -526,6 +636,7 @@ fn inject_context_prioritizes_relevant_reports_over_recent_reports() {
         &skills,
         None,
         Some("code"),
+        None,
         None,
     );
 
@@ -604,6 +715,7 @@ fn inject_context_uses_active_mako_tasks_for_report_relevance() {
         None,
         Some("mako"),
         None,
+        None,
     );
 
     assert!(injected.iter().any(|message| {
@@ -673,6 +785,7 @@ fn inject_context_does_not_duplicate_generic_memory_and_report_blocks_for_mako()
         &skills,
         None,
         Some("mako"),
+        None,
         None,
     );
 
@@ -747,6 +860,7 @@ fn inject_context_includes_recent_delegated_run_guidance() {
         Some(repo),
         WorkMode::Build,
         &skills,
+        None,
         None,
         None,
         None,

@@ -4,6 +4,7 @@ use crate::storage::{
     PartialAssistantState, PendingInteractionSnapshot, RecoveryDecision,
     RecoveryNonResumableReason, RecoveryStatus, RecoveryToolCall, SessionRecoveryState,
 };
+use crate::tools::registry::PermissionMode;
 
 use super::super::loop_events::LoopStopReason;
 
@@ -55,6 +56,7 @@ pub(super) fn build_recovery_state(
 pub(super) fn build_awaiting_input_recovery_state(
     partial_assistant: PartialAssistantState,
     pending_interactions: Vec<PendingInteractionSnapshot>,
+    permission_mode: PermissionMode,
 ) -> SessionRecoveryState {
     SessionRecoveryState::new_with_pending_interactions(
         RecoveryStatus::AwaitingInput,
@@ -66,6 +68,7 @@ pub(super) fn build_awaiting_input_recovery_state(
             reason: RecoveryNonResumableReason::AwaitingHumanInput,
         },
     )
+    .with_permission_mode(permission_mode)
 }
 
 fn recovery_decision(
@@ -150,6 +153,7 @@ mod tests {
             vec![PendingInteractionSnapshot::ask_user_from_call(
                 "ask-1", &arguments,
             )],
+            PermissionMode::Supervised,
         );
 
         assert_eq!(state.status, RecoveryStatus::AwaitingInput);
@@ -159,6 +163,7 @@ mod tests {
                 reason: RecoveryNonResumableReason::AwaitingHumanInput
             }
         );
+        assert_eq!(state.permission_mode, Some(PermissionMode::Supervised));
         assert_eq!(state.pending_interactions.len(), 1);
         match &state.pending_interactions[0] {
             PendingInteractionSnapshot::AskUserQuestion {

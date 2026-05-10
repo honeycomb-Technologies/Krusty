@@ -54,6 +54,8 @@ pub struct SubAgentTask {
     pub name: String,
     pub prompt: String,
     pub working_dir: PathBuf,
+    /// Filesystem sandbox root inherited from the parent tool context.
+    pub sandbox_root: Option<PathBuf>,
     /// Stable delegated runtime unit identifier shared by all tasks in one parent invocation.
     pub delegated_run_id: Option<String>,
     /// Plan task ID this agent completes (for auto-marking).
@@ -75,6 +77,7 @@ impl SubAgentTask {
             name,
             prompt: prompt.into(),
             working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            sandbox_root: None,
             delegated_run_id: None,
             plan_task_id: None,
             thinking_enabled: false,
@@ -90,6 +93,11 @@ impl SubAgentTask {
 
     pub fn with_working_dir(mut self, dir: PathBuf) -> Self {
         self.working_dir = dir;
+        self
+    }
+
+    pub fn with_sandbox_root(mut self, sandbox_root: PathBuf) -> Self {
+        self.sandbox_root = Some(sandbox_root);
         self
     }
 
