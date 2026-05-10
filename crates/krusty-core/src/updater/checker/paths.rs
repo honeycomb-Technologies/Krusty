@@ -2,16 +2,40 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 
+pub(super) fn pending_update_dir() -> PathBuf {
+    crate::paths::config_dir().join("updates")
+}
+
 pub fn pending_update_path() -> PathBuf {
-    std::env::temp_dir().join("krusty-pending-update")
+    pending_update_dir().join("pending-update")
+}
+
+pub(super) fn pending_archive_path(ext: &str) -> PathBuf {
+    pending_update_dir().join(format!("download.{}", ext))
 }
 
 pub(super) fn pending_version_path() -> PathBuf {
-    std::env::temp_dir().join("krusty-pending-update.version")
+    pending_update_dir().join("pending-update.version")
 }
 
 pub(super) fn update_marker_path() -> PathBuf {
     crate::paths::config_dir().join("last-update-version")
+}
+
+pub(super) fn ensure_pending_update_dir() -> Result<PathBuf> {
+    let dir = pending_update_dir();
+    std::fs::create_dir_all(&dir)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut perms = std::fs::metadata(&dir)?.permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&dir, perms)?;
+    }
+
+    Ok(dir)
 }
 
 pub fn has_pending_update() -> bool {

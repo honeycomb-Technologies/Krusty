@@ -1,7 +1,10 @@
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
+use std::path::Path;
 use tracing::{debug, info};
 
-use super::paths::{pending_update_path, pending_version_path, update_marker_path};
+use super::paths::{
+    pending_update_dir, pending_update_path, pending_version_path, update_marker_path,
+};
 
 pub fn apply_pending_update() -> Result<Option<String>> {
     let pending = pending_update_path();
@@ -9,6 +12,8 @@ pub fn apply_pending_update() -> Result<Option<String>> {
     if !pending.exists() {
         return Ok(None);
     }
+
+    validate_pending_update(&pending)?;
 
     info!("Found pending update at: {}", pending.display());
 
@@ -53,6 +58,72 @@ pub fn apply_pending_update() -> Result<Option<String>> {
     Ok(Some(version))
 }
 
+fn validate_pending_update(pending: &Path) -> Result<()> {
+    if pending != pending_update_path() {
+        return Err(anyhow!(
+            "pending update path is not the trusted updater path"
+        ));
+    }
+
+    #[cfg(unix)]
+    validate_pending_update_unix(pending)?;
+
+    #[cfg(windows)]
+    {
+        let metadata = std::fs::symlink_metadata(pending)?;
+        if !metadata.file_type().is_file() {
+            return Err(anyhow!("pending update is not a regular file"));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_pending_update_unix(pending: &Path) -> Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let update_dir = pending_update_dir();
+    let uid = unsafe { libc::geteuid() };
+
+    let dir_metadata = std::fs::symlink_metadata(&update_dir).with_context(|| {
+        format!(
+            "failed to inspect update directory {}",
+            update_dir.display()
+        )
+    })?;
+    if !dir_metadata.file_type().is_dir() {
+        return Err(anyhow!("pending update directory is not a directory"));
+    }
+    if dir_metadata.uid() != uid {
+        return Err(anyhow!(
+            "pending update directory is not owned by the current user"
+        ));
+    }
+    if dir_metadata.mode() & 0o022 != 0 {
+        return Err(anyhow!(
+            "pending update directory is writable by group or other users"
+        ));
+    }
+
+    let metadata = std::fs::symlink_metadata(pending)
+        .with_context(|| format!("failed to inspect pending update {}", pending.display()))?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() || !file_type.is_file() || file_type.is_socket() {
+        return Err(anyhow!("pending update is not a regular file"));
+    }
+    if metadata.uid() != uid {
+        return Err(anyhow!("pending update is not owned by the current user"));
+    }
+    if metadata.mode() & 0o022 != 0 {
+        return Err(anyhow!(
+            "pending update is writable by group or other users"
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn read_update_marker() -> Option<String> {
     let path = update_marker_path();
     let version = std::fs::read_to_string(&path).ok()?;
@@ -67,5 +138,21 @@ pub fn cleanup_pending_update() {
         let _ = std::fs::remove_file(&pending);
         let _ = std::fs::remove_file(pending_version_path());
         info!("Cleaned up pending update");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_updates_use_private_config_directory() {
+        let pending = pending_update_path();
+        assert!(pending.starts_with(crate::paths::config_dir()));
+        assert!(!pending.starts_with(std::env::temp_dir()));
+        assert_eq!(
+            pending.file_name().and_then(|name| name.to_str()),
+            Some("pending-update")
+        );
     }
 }

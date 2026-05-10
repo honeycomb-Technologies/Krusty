@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Result};
 use tokio::sync::mpsc;
 
-use crate::updater::checker::paths::{pending_update_path, pending_version_path};
+use crate::updater::checker::paths::{
+    ensure_pending_update_dir, pending_update_path, pending_version_path,
+};
 use crate::updater::checker::types::UpdateStatus;
 
 pub(super) async fn download_update_dev(
@@ -42,6 +44,8 @@ pub(super) async fn download_update_dev(
     let _ = progress_tx.send(UpdateStatus::Downloading {
         progress: "Preparing update...".into(),
     });
+
+    ensure_pending_update_dir()?;
 
     let source = repo_path.join("target/release/krusty");
     let dest = pending_update_path();
