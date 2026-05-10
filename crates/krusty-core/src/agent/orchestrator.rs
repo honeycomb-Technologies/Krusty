@@ -115,6 +115,39 @@ pub struct OrchestratorServices {
     pub skills_manager: Arc<RwLock<SkillsManager>>,
 }
 
+fn resolve_project_permission_mode(
+    requested_permission_mode: PermissionMode,
+    project_settings: &ProjectSettings,
+) -> PermissionMode {
+    let Some(ref mode_str) = project_settings.permission_mode else {
+        return requested_permission_mode;
+    };
+
+    match mode_str.as_str() {
+        "supervised" => {
+            tracing::info!("Project settings override: permission_mode = supervised");
+            PermissionMode::Supervised
+        }
+        "autonomous" if requested_permission_mode == PermissionMode::Autonomous => {
+            tracing::info!("Project settings confirm: permission_mode = autonomous");
+            PermissionMode::Autonomous
+        }
+        "autonomous" => {
+            tracing::warn!(
+                "Ignoring project settings permission_mode = autonomous because the request is supervised"
+            );
+            requested_permission_mode
+        }
+        other => {
+            tracing::warn!(
+                "Unknown permission_mode in project settings: {:?}, keeping requested mode",
+                other
+            );
+            requested_permission_mode
+        }
+    }
+}
+
 /// The agentic orchestrator — runs the complete AI agent loop.
 pub struct AgenticOrchestrator {
     services: OrchestratorServices,
@@ -236,28 +269,7 @@ impl AgenticOrchestrator {
             .map(ProjectSettings::load)
             .unwrap_or_default();
 
-        // Apply permission_mode override from project settings
-        let permission_mode = if let Some(ref mode_str) = project_settings.permission_mode {
-            match mode_str.as_str() {
-                "autonomous" => {
-                    tracing::info!("Project settings override: permission_mode = autonomous");
-                    PermissionMode::Autonomous
-                }
-                "supervised" => {
-                    tracing::info!("Project settings override: permission_mode = supervised");
-                    PermissionMode::Supervised
-                }
-                other => {
-                    tracing::warn!(
-                        "Unknown permission_mode in project settings: {:?}, keeping default",
-                        other
-                    );
-                    permission_mode
-                }
-            }
-        } else {
-            permission_mode
-        };
+        let permission_mode = resolve_project_permission_mode(permission_mode, &project_settings);
 
         // Log model override (consumed by the presentation layer that constructs AiClient)
         if let Some(ref model) = project_settings.model {
@@ -868,12 +880,50 @@ mod tests {
 
     use super::inject_runtime_context;
     use super::message_builder::finalize_explore_only_turn;
+    use super::resolve_project_permission_mode;
     use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
     use crate::skills::SkillsManager;
-    use crate::storage::{SessionType, WorkMode};
+    use crate::storage::{ProjectSettings, SessionType, WorkMode};
+    use crate::tools::registry::PermissionMode;
     use serde_json::json;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
+
+    #[test]
+    fn project_settings_cannot_elevate_supervised_permission_mode() {
+        let settings = ProjectSettings {
+            permission_mode: Some("autonomous".to_string()),
+            ..Default::default()
+        };
+
+        let resolved = resolve_project_permission_mode(PermissionMode::Supervised, &settings);
+
+        assert_eq!(resolved, PermissionMode::Supervised);
+    }
+
+    #[test]
+    fn project_settings_can_restrict_autonomous_permission_mode() {
+        let settings = ProjectSettings {
+            permission_mode: Some("supervised".to_string()),
+            ..Default::default()
+        };
+
+        let resolved = resolve_project_permission_mode(PermissionMode::Autonomous, &settings);
+
+        assert_eq!(resolved, PermissionMode::Supervised);
+    }
+
+    #[test]
+    fn project_settings_preserve_requested_autonomous_permission_mode() {
+        let settings = ProjectSettings {
+            permission_mode: Some("autonomous".to_string()),
+            ..Default::default()
+        };
+
+        let resolved = resolve_project_permission_mode(PermissionMode::Autonomous, &settings);
+
+        assert_eq!(resolved, PermissionMode::Autonomous);
+    }
 
     #[test]
     fn finalize_explore_only_turn_returns_summary_for_successful_explore() {
