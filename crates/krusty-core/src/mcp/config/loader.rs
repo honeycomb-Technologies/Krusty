@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::expansion::expand_env_var;
@@ -31,6 +31,7 @@ impl McpConfig {
     /// Load config from .mcp.json in project root, merged with built-in defaults.
     pub async fn load(working_dir: &Path) -> Result<Self> {
         let mut servers = Self::builtin_servers();
+        let mut auto_connect_local_servers: HashSet<String> = servers.keys().cloned().collect();
 
         let config_path = working_dir.join(".mcp.json");
 
@@ -48,13 +49,23 @@ impl McpConfig {
                 config_path
             );
 
-            servers.extend(user_config.mcp_servers);
+            for (name, server) in user_config.mcp_servers {
+                if matches!(server, McpServerConfigRaw::Local { .. }) {
+                    tracing::warn!(
+                        "Loaded project MCP local server '{}' in disconnected state; connect explicitly from /mcp to trust and run it",
+                        name
+                    );
+                }
+                auto_connect_local_servers.remove(&name);
+                servers.insert(name, server);
+            }
         } else {
             tracing::debug!("No .mcp.json found at {:?}", config_path);
         }
 
         Ok(Self {
             mcp_servers: servers,
+            auto_connect_local_servers,
         })
     }
 
@@ -65,13 +76,15 @@ impl McpConfig {
             let config = match raw {
                 McpServerConfigRaw::Local { command, args, env } => {
                     let mut expanded_env = HashMap::new();
+                    let auto_connect = self.auto_connect_local_servers.contains(name);
                     for (k, v) in env {
-                        expanded_env.insert(k.clone(), expand_env_var(v).await);
+                        expanded_env.insert(k.clone(), expand_env_var(v, auto_connect).await);
                     }
                     McpServerConfig::Local {
                         command: command.clone(),
                         args: args.clone(),
                         env: expanded_env,
+                        auto_connect,
                     }
                 }
                 McpServerConfigRaw::Remote {
@@ -81,7 +94,7 @@ impl McpConfig {
                     ..
                 } => {
                     let token = match authorization_token {
-                        Some(t) => Some(expand_env_var(t).await),
+                        Some(t) => Some(expand_env_var(t, false).await),
                         None => None,
                     };
                     McpServerConfig::Remote {
@@ -107,7 +120,7 @@ impl McpConfig {
             } = raw
             {
                 let token = match authorization_token {
-                    Some(t) => Some(expand_env_var(t).await),
+                    Some(t) => Some(expand_env_var(t, false).await),
                     None => None,
                 };
                 result.push(RemoteMcpServer {

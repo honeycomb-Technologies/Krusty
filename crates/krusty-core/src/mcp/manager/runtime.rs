@@ -50,6 +50,7 @@ impl McpManager {
             let configs = self.configs.read().await;
             configs
                 .iter()
+                .filter(|(_, c)| c.should_auto_connect())
                 .map(|(n, c)| (n.clone(), c.clone()))
                 .collect()
         };
@@ -58,7 +59,10 @@ impl McpManager {
             return Ok(());
         }
 
-        info!("Connecting to {} MCP servers in parallel", configs.len());
+        info!(
+            "Auto-connecting to {} trusted MCP servers in parallel",
+            configs.len()
+        );
 
         let connect_futures: Vec<_> = configs
             .iter()
@@ -95,11 +99,11 @@ impl McpManager {
         self.disconnect(name).await;
 
         let client = match &config {
-            McpServerConfig::Local { command, args, env } => {
-                McpClient::connect_local(name, command, args, env, &self.working_dir)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{}", e))?
-            }
+            McpServerConfig::Local {
+                command, args, env, ..
+            } => McpClient::connect_local(name, command, args, env, &self.working_dir)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?,
             McpServerConfig::Remote {
                 url,
                 authorization_token,
