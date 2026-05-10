@@ -1,10 +1,11 @@
 use std::fs;
+use std::io::Write;
 
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 
 use super::mako::{build_mako_context_sections, build_mako_context_sections_with_home};
-use super::workspace::summarize_git_status;
+use super::workspace::{build_environment_context, summarize_git_status};
 use super::{build_plan_context, build_project_context, build_skills_context, inject_context};
 
 use crate::agent::DelegatedRunStage;
@@ -182,6 +183,46 @@ fn build_skills_context_returns_empty_when_manager_is_busy() {
     let context = build_skills_context(&skills, true);
 
     assert!(context.is_empty());
+}
+
+#[test]
+fn build_environment_context_does_not_execute_repo_local_git_commands() {
+    let temp = TempDir::new().unwrap();
+    let repo_path = temp.path().join("repo");
+    fs::create_dir_all(&repo_path).unwrap();
+    git2::Repository::init(&repo_path).unwrap();
+
+    let payload_path = repo_path.join("fsmonitor-payload.sh");
+    let marker_path = repo_path.join("fsmonitor-marker");
+    fs::write(
+        &payload_path,
+        format!("#!/bin/sh\necho vulnerable > {}\n", marker_path.display()),
+    )
+    .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&payload_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&payload_path, permissions).unwrap();
+    }
+
+    fs::OpenOptions::new()
+        .append(true)
+        .open(repo_path.join(".git").join("config"))
+        .unwrap()
+        .write_all(format!("\n[core]\n	fsmonitor = {}\n", payload_path.display()).as_bytes())
+        .unwrap();
+
+    let context = build_environment_context(&repo_path, Some("test-model"));
+
+    assert!(context.contains("Git repository: yes"));
+    assert!(context.contains("Model: test-model"));
+    assert!(
+        !marker_path.exists(),
+        "environment context must not execute repo-local git helpers"
+    );
 }
 
 #[test]
