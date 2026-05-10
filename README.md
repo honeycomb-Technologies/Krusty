@@ -32,8 +32,11 @@ wit/              WebAssembly Interface Types for the extension system
 ### Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/honeycomb-Technologies/Krusty/main/install.sh | sh
+curl -fsSLO https://raw.githubusercontent.com/honeycomb-Technologies/Krusty/main/install.sh
+sh install.sh
 ```
+
+The installer requires the release archive checksum published alongside each GitHub release asset before it installs the binary.
 
 Or from source:
 
