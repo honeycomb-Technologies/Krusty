@@ -4,6 +4,8 @@
 //! the user selects or creates a concrete project directory.
 
 use async_trait::async_trait;
+use std::path::{Path, PathBuf};
+
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -86,19 +88,28 @@ Do not switch to neutral unless the user explicitly wants to leave project conte
             .map(str::trim)
             .filter(|path| !path.is_empty());
 
-        match params.mode {
-            WorkspaceMode::Neutral if normalized_project_dir.is_some() => {
-                return ToolResult::error("workspace mode 'neutral' cannot include a project_dir");
+        let validated_project_dir = match params.mode {
+            WorkspaceMode::Neutral => {
+                if normalized_project_dir.is_some() {
+                    return ToolResult::error(
+                        "workspace mode 'neutral' cannot include a project_dir",
+                    );
+                }
+                None
             }
-            WorkspaceMode::Selected | WorkspaceMode::Created
-                if normalized_project_dir.is_none() =>
-            {
-                return ToolResult::error(
-                    "workspace modes 'selected' and 'created' require a project_dir",
-                );
+            WorkspaceMode::Selected | WorkspaceMode::Created => {
+                let Some(project_dir) = normalized_project_dir else {
+                    return ToolResult::error(
+                        "workspace modes 'selected' and 'created' require a project_dir",
+                    );
+                };
+
+                match validate_project_dir(project_dir, ctx) {
+                    Ok(project_dir) => Some(project_dir),
+                    Err(err) => return ToolResult::error(err),
+                }
             }
-            _ => {}
-        }
+        };
 
         let db = match Database::new(db_path) {
             Ok(db) => db,
@@ -109,19 +120,56 @@ Do not switch to neutral unless the user explicitly wants to leave project conte
             }
         };
         let manager = SessionManager::new(db);
-        if let Err(err) =
-            manager.update_session_workspace(session_id, normalized_project_dir, params.mode)
-        {
+        if let Err(err) = manager.update_session_workspace(
+            session_id,
+            validated_project_dir.as_deref(),
+            params.mode,
+        ) {
             return ToolResult::error(format!("failed to update workspace context: {err}"));
         }
 
         ToolResult::success_data(json!({
             "session_id": session_id,
             "workspace_mode": params.mode,
-            "project_dir": normalized_project_dir,
+            "project_dir": validated_project_dir,
             "reason": params.reason,
         }))
     }
+}
+
+fn validate_project_dir(project_dir: &str, ctx: &ToolContext) -> Result<String, String> {
+    let path = Path::new(project_dir);
+    if !path.is_absolute() {
+        return Err("workspace project_dir must be an absolute path".to_string());
+    }
+
+    let canonical_project_dir = path
+        .canonicalize()
+        .map_err(|err| format!("workspace project_dir must exist and be accessible: {err}"))?;
+
+    if !canonical_project_dir.is_dir() {
+        return Err("workspace project_dir must be an existing directory".to_string());
+    }
+
+    if let Some(sandbox_root) = ctx.sandbox_root.as_deref() {
+        let canonical_sandbox = sandbox_root
+            .canonicalize()
+            .map_err(|err| format!("workspace sandbox root is not accessible: {err}"))?;
+        if !canonical_project_dir.starts_with(&canonical_sandbox) {
+            return Err(format!(
+                "Access denied: workspace project_dir '{}' is outside workspace",
+                project_dir
+            ));
+        }
+    }
+
+    path_to_string(canonical_project_dir)
+}
+
+fn path_to_string(path: PathBuf) -> Result<String, String> {
+    path.into_os_string()
+        .into_string()
+        .map_err(|_| "workspace project_dir must be valid UTF-8".to_string())
 }
 
 #[cfg(test)]
@@ -146,19 +194,29 @@ mod tests {
     async fn promotes_session_into_created_workspace_mode() {
         let (temp_dir, session_id) = create_test_session();
         let db_path = temp_dir.path().join("krusty.db");
-        let ctx = ToolContext::default().with_session_metadata(session_id.clone(), db_path.clone());
+        let workspace = temp_dir.path().join("workspace");
+        let project_dir = workspace.join("demo-app");
+        std::fs::create_dir_all(&project_dir).expect("project dir should create");
+        let expected_project_dir = project_dir
+            .canonicalize()
+            .expect("project dir should canonicalize")
+            .to_string_lossy()
+            .to_string();
+        let ctx = ToolContext::default()
+            .with_session_metadata(session_id.clone(), db_path.clone())
+            .with_sandbox(workspace);
 
         let result = SetWorkspaceContextTool
             .execute(
                 json!({
                     "mode": "created",
-                    "project_dir": "/tmp/demo-app"
+                    "project_dir": project_dir
                 }),
                 &ctx,
             )
             .await;
 
-        assert!(!result.is_error);
+        assert!(!result.is_error, "{}", result.output);
 
         let db = Database::new(&db_path).expect("database should open");
         let manager = SessionManager::new(db);
@@ -166,8 +224,71 @@ mod tests {
             .get_session(&session_id)
             .expect("session should load")
             .expect("session should exist");
-        assert_eq!(session.project_dir.as_deref(), Some("/tmp/demo-app"));
+        assert_eq!(
+            session.project_dir.as_deref(),
+            Some(expected_project_dir.as_str())
+        );
+        assert_eq!(
+            session.working_dir.as_deref(),
+            Some(expected_project_dir.as_str())
+        );
         assert_eq!(session.workspace_mode, WorkspaceMode::Created);
+    }
+
+    #[tokio::test]
+    async fn rejects_project_dir_outside_current_sandbox() {
+        let (temp_dir, session_id) = create_test_session();
+        let db_path = temp_dir.path().join("krusty.db");
+        let workspace = temp_dir.path().join("workspace");
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&workspace).expect("workspace should create");
+        std::fs::create_dir_all(&outside).expect("outside dir should create");
+        let ctx = ToolContext::default()
+            .with_session_metadata(session_id.clone(), db_path.clone())
+            .with_sandbox(workspace);
+
+        let result = SetWorkspaceContextTool
+            .execute(
+                json!({
+                    "mode": "selected",
+                    "project_dir": outside
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.output.contains("outside workspace"));
+
+        let db = Database::new(&db_path).expect("database should open");
+        let manager = SessionManager::new(db);
+        let session = manager
+            .get_session(&session_id)
+            .expect("session should load")
+            .expect("session should exist");
+        assert_eq!(session.project_dir, None);
+        assert_eq!(session.working_dir, None);
+        assert_eq!(session.workspace_mode, WorkspaceMode::Neutral);
+    }
+
+    #[tokio::test]
+    async fn rejects_relative_project_dir() {
+        let (temp_dir, session_id) = create_test_session();
+        let db_path = temp_dir.path().join("krusty.db");
+        let ctx = ToolContext::default().with_session_metadata(session_id, db_path);
+
+        let result = SetWorkspaceContextTool
+            .execute(
+                json!({
+                    "mode": "selected",
+                    "project_dir": "relative-project"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.output.contains("absolute path"));
     }
 
     #[tokio::test]

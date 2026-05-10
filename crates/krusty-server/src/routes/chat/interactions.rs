@@ -12,7 +12,7 @@ use krusty_core::agent::plan_handler::parse_plan_confirm_choice;
 use krusty_core::agent::LoopInput;
 use krusty_core::ai::types::{Content, ModelMessage, Role};
 use krusty_core::plan::PlanManager;
-use krusty_core::storage::{Database, PendingInteractionSnapshot, WorkMode};
+use krusty_core::storage::{Database, PendingInteractionSnapshot, SessionType, WorkMode};
 use krusty_core::tools::registry::PermissionMode;
 use krusty_core::SessionManager;
 
@@ -41,6 +41,8 @@ pub(super) async fn tool_result(
         false,
     )
     .await?;
+
+    let permission_mode = resumed_permission_mode(ctx.session_type, req.permission_mode);
 
     // Plan confirmation is an internal orchestrator event, not a real tool call.
     // Don't add a ToolResult — instead add a user message to resume the conversation.
@@ -78,8 +80,7 @@ pub(super) async fn tool_result(
                 .save_message(&req.session_id, "user", &user_json)?;
             ctx.work_mode
         };
-        return start_orchestrator_sse(&state, ctx, work_mode, PermissionMode::Autonomous, false)
-            .await;
+        return start_orchestrator_sse(&state, ctx, work_mode, permission_mode, false).await;
     }
 
     let has_thinking = ctx.conversation.iter().any(|msg| {
@@ -132,7 +133,18 @@ pub(super) async fn tool_result(
     }
 
     let work_mode = ctx.work_mode;
-    start_orchestrator_sse(&state, ctx, work_mode, PermissionMode::Autonomous, false).await
+    start_orchestrator_sse(&state, ctx, work_mode, permission_mode, false).await
+}
+
+fn resumed_permission_mode(
+    session_type: SessionType,
+    requested_permission_mode: PermissionMode,
+) -> PermissionMode {
+    if session_type == SessionType::Mako {
+        PermissionMode::Autonomous
+    } else {
+        requested_permission_mode
+    }
 }
 
 pub(super) async fn tool_approval(
@@ -195,4 +207,33 @@ fn recovery_has_pending_tool_approval(
                 if tool_call.id == tool_call_id
         )
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resumed_permission_mode_preserves_supervised_for_code_sessions() {
+        assert_eq!(
+            resumed_permission_mode(SessionType::Code, PermissionMode::Supervised),
+            PermissionMode::Supervised
+        );
+    }
+
+    #[test]
+    fn resumed_permission_mode_preserves_autonomous_for_code_sessions() {
+        assert_eq!(
+            resumed_permission_mode(SessionType::Code, PermissionMode::Autonomous),
+            PermissionMode::Autonomous
+        );
+    }
+
+    #[test]
+    fn resumed_permission_mode_keeps_mako_sessions_autonomous() {
+        assert_eq!(
+            resumed_permission_mode(SessionType::Mako, PermissionMode::Supervised),
+            PermissionMode::Autonomous
+        );
+    }
 }

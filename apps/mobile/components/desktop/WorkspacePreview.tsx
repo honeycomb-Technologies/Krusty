@@ -812,13 +812,13 @@ export function WorkspacePreview({ visible, style }: WorkspacePreviewProps) {
                   ) : null}
 
                   <div style={{ width: "100%", height: "100%" }}>
-                    <iframe
-                      key={`${tab.id}:${tab.historyIndex}:${tab.reloadKey}`}
-                      src={tab.history[tab.historyIndex]}
-                      sandbox={PREVIEW_IFRAME_SANDBOX}
-                      style={{ width: "100%", height: "100%", border: "none" }}
-                      title={tab.title}
-                      onLoad={() => {
+                      <iframe
+                        key={`${tab.id}:${tab.historyIndex}:${tab.reloadKey}`}
+                        src={tab.history[tab.historyIndex]}
+                        sandbox={PREVIEW_IFRAME_SANDBOX}
+                        style={{ width: "100%", height: "100%", border: "none" }}
+                        title={tab.title}
+                        onLoad={() => {
                         setPreviewTabs((tabs) =>
                           tabs.map((entry) =>
                             entry.id === tab.id

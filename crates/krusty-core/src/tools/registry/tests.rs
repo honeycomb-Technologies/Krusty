@@ -84,6 +84,11 @@ fn test_tool_policy_contracts() {
     assert_eq!(interactive_policy.category, ToolCategory::Interactive);
     assert!(interactive_policy.allowed_in_plan_mode);
     assert!(!interactive_policy.requires_supervised_approval);
+
+    let workspace_policy = tool_policy("set_workspace_context");
+    assert_eq!(workspace_policy.category, ToolCategory::Interactive);
+    assert!(workspace_policy.allowed_in_plan_mode);
+    assert!(workspace_policy.requires_supervised_approval);
 }
 
 #[test]

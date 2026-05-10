@@ -160,6 +160,10 @@ mod tests {
         .expect("request should deserialize");
 
         assert!(req.fast_mode);
+        assert_eq!(
+            req.permission_mode,
+            krusty_core::tools::registry::PermissionMode::default()
+        );
     }
 
     #[test]
@@ -201,6 +205,26 @@ mod tests {
         .expect("request should deserialize");
 
         assert!(req.fast_mode);
+        assert_eq!(
+            req.permission_mode,
+            krusty_core::tools::registry::PermissionMode::default()
+        );
+    }
+
+    #[test]
+    fn tool_result_request_accepts_permission_mode() {
+        let req: super::ToolResultRequest = serde_json::from_value(json!({
+            "session_id": "session-1",
+            "tool_call_id": "tool-1",
+            "result": "ok",
+            "permission_mode": "autonomous"
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(
+            req.permission_mode,
+            krusty_core::tools::registry::PermissionMode::Autonomous
+        );
     }
 
     #[test]
@@ -354,6 +378,9 @@ pub struct ToolResultRequest {
     /// Request provider fast/priority service tier while resuming after a tool result
     #[serde(default)]
     pub fast_mode: bool,
+    /// Permission mode to preserve while resuming after an interactive tool result.
+    #[serde(default)]
+    pub permission_mode: PermissionMode,
 }
 
 #[derive(Deserialize)]
