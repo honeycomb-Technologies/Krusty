@@ -7,9 +7,17 @@ use tracing::debug;
 pub(super) fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<()> {
     debug!("Extracting {} to {}", archive.display(), dest.display());
 
-    let extract_dir = std::env::temp_dir().join("krusty-extract");
+    let extract_dir = archive
+        .parent()
+        .ok_or_else(|| anyhow!("Archive path has no parent: {}", archive.display()))?
+        .join("krusty-extract");
     let _ = std::fs::remove_dir_all(&extract_dir);
     std::fs::create_dir_all(&extract_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&extract_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
     let archive_str = archive
         .to_str()
         .ok_or_else(|| anyhow!("Archive path is not valid UTF-8: {}", archive.display()))?;
@@ -42,6 +50,7 @@ pub(super) fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<()> {
         return Err(anyhow!("Binary 'krusty' not found in archive"));
     }
 
+    let _ = std::fs::remove_file(dest);
     std::fs::copy(&extracted_binary, dest)?;
 
     #[cfg(unix)]
@@ -60,7 +69,10 @@ pub(super) fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<()> {
 
 #[cfg(windows)]
 pub(super) fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
-    let extract_dir = std::env::temp_dir().join("krusty-extract");
+    let extract_dir = archive
+        .parent()
+        .ok_or_else(|| anyhow!("Archive path has no parent: {}", archive.display()))?
+        .join("krusty-extract");
     let _ = std::fs::remove_dir_all(&extract_dir);
     std::fs::create_dir_all(&extract_dir)?;
 
@@ -81,6 +93,7 @@ pub(super) fn extract_zip(archive: &Path, dest: &Path) -> Result<()> {
     }
 
     let extracted = extract_dir.join("krusty.exe");
+    let _ = std::fs::remove_file(dest);
     std::fs::copy(&extracted, dest)?;
     let _ = std::fs::remove_dir_all(&extract_dir);
 

@@ -1,13 +1,32 @@
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
+
+pub(super) fn pending_update_dir() -> PathBuf {
+    crate::paths::config_dir().join("updates")
+}
+
+pub(super) fn ensure_pending_update_dir() -> Result<PathBuf> {
+    let dir = pending_update_dir();
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create update directory {}", dir.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("failed to secure update directory {}", dir.display()))?;
+    }
+
+    Ok(dir)
+}
 
 pub fn pending_update_path() -> PathBuf {
-    std::env::temp_dir().join("krusty-pending-update")
+    pending_update_dir().join("krusty-pending-update")
 }
 
 pub(super) fn pending_version_path() -> PathBuf {
-    std::env::temp_dir().join("krusty-pending-update.version")
+    pending_update_dir().join("krusty-pending-update.version")
 }
 
 pub(super) fn update_marker_path() -> PathBuf {
