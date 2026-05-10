@@ -69,7 +69,7 @@ jobs:
           sha256sum krusty-${{ matrix.target }}.zip > krusty-${{ matrix.target }}.zip.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@ea165f8 # v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: krusty-${{ matrix.target }}
           path: krusty-${{ matrix.target }}.*
@@ -102,7 +102,7 @@ jobs:
           bun run build
 
       - name: Upload desktop Linux artifacts
-        uses: actions/upload-artifact@ea165f8 # v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: krusty-desktop-linux
           path: |
