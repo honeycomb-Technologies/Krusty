@@ -222,7 +222,6 @@ pub fn tool_policy(name: &str) -> ToolPolicy {
         "AskUserQuestion"
         | "PlanConfirm"
         | "enter_plan_mode"
-        | "memory"
         | "set_work_mode"
         | "set_workspace_context"
         | "task_start"

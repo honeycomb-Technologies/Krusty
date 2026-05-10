@@ -35,6 +35,26 @@ fn save_and_list_memories() {
 }
 
 #[test]
+fn list_without_user_id_excludes_user_scoped_memories() {
+    let (store, _tmp) = create_store();
+    store
+        .save(MemoryType::User, "Global", "shared", None, None)
+        .unwrap();
+    store
+        .save(MemoryType::User, "Alice", "alice-only", None, Some("alice"))
+        .unwrap();
+
+    let unscoped = store.list(None, None);
+    assert_eq!(unscoped.len(), 1);
+    assert_eq!(unscoped[0].title, "Global");
+
+    let alice = store.list(None, Some("alice"));
+    assert_eq!(alice.len(), 2);
+    assert!(alice.iter().any(|memory| memory.title == "Alice"));
+    assert!(alice.iter().any(|memory| memory.title == "Global"));
+}
+
+#[test]
 fn update_memory() {
     let (store, _tmp) = create_store();
     let mem = store
@@ -139,6 +159,9 @@ fn find_by_title_for_user_respects_scope_and_owner() {
 
     assert_eq!(alice.unwrap().content, "Blue/green");
     assert_eq!(bob.unwrap().content, "Canary");
+    assert!(store
+        .find_by_title_for_user("Deployment", Some("/proj-a"), None)
+        .is_none());
 }
 
 #[test]

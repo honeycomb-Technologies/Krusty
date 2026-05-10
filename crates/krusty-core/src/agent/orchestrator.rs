@@ -140,6 +140,7 @@ fn inject_runtime_context(
     skills_manager: &RwLock<SkillsManager>,
     model: Option<&str>,
     session_type: SessionType,
+    user_id: Option<&str>,
 ) -> Vec<ModelMessage> {
     context::inject_context(
         conversation,
@@ -152,6 +153,7 @@ fn inject_runtime_context(
         model,
         Some(session_type_name(session_type)),
         mako_crew_slug,
+        user_id,
     )
 }
 
@@ -323,6 +325,7 @@ impl AgenticOrchestrator {
                 &skills_manager,
                 Some(ai_client.config().model.as_str()),
                 session_type,
+                user_id.as_deref(),
             );
             let estimated_tokens_before =
                 super::estimate_conversation_tokens(&conversation_with_context);
@@ -955,6 +958,7 @@ mod tests {
             &skills,
             None,
             SessionType::Mako,
+            None,
         );
         let code_injected = inject_runtime_context(
             &conversation,
@@ -967,6 +971,7 @@ mod tests {
             &skills,
             None,
             SessionType::Code,
+            None,
         );
 
         assert!(mako_injected.iter().any(|message| {
