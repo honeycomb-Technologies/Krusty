@@ -12,7 +12,7 @@ use krusty_core::agent::plan_handler::parse_plan_confirm_choice;
 use krusty_core::agent::LoopInput;
 use krusty_core::ai::types::{Content, ModelMessage, Role};
 use krusty_core::plan::PlanManager;
-use krusty_core::storage::{Database, PendingInteractionSnapshot, WorkMode};
+use krusty_core::storage::{Database, PendingInteractionSnapshot, SessionType, WorkMode};
 use krusty_core::tools::registry::PermissionMode;
 use krusty_core::SessionManager;
 
@@ -78,8 +78,8 @@ pub(super) async fn tool_result(
                 .save_message(&req.session_id, "user", &user_json)?;
             ctx.work_mode
         };
-        return start_orchestrator_sse(&state, ctx, work_mode, PermissionMode::Autonomous, false)
-            .await;
+        let permission_mode = continuation_permission_mode(&ctx);
+        return start_orchestrator_sse(&state, ctx, work_mode, permission_mode, false).await;
     }
 
     let has_thinking = ctx.conversation.iter().any(|msg| {
@@ -132,7 +132,21 @@ pub(super) async fn tool_result(
     }
 
     let work_mode = ctx.work_mode;
-    start_orchestrator_sse(&state, ctx, work_mode, PermissionMode::Autonomous, false).await
+    let permission_mode = continuation_permission_mode(&ctx);
+    start_orchestrator_sse(&state, ctx, work_mode, permission_mode, false).await
+}
+
+fn continuation_permission_mode(ctx: &super::session::ChatSessionContext) -> PermissionMode {
+    if ctx.session_type == SessionType::Mako {
+        return PermissionMode::Autonomous;
+    }
+
+    ctx.session_manager
+        .load_recovery_state(&ctx.session_id)
+        .ok()
+        .flatten()
+        .and_then(|state| state.permission_mode)
+        .unwrap_or(PermissionMode::Supervised)
 }
 
 pub(super) async fn tool_approval(

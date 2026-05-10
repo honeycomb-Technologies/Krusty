@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::agent::loop_events::LoopStopReason;
+use crate::tools::registry::PermissionMode;
 
 pub const REDACTED_ARGUMENT_VALUE: &str = "[REDACTED]";
 const MAX_ARGUMENT_STRING_CHARS: usize = 2_048;
@@ -241,6 +242,10 @@ pub struct SessionRecoveryState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_interactions: Vec<PendingInteractionSnapshot>,
     pub decision: RecoveryDecision,
+    /// Effective permission mode for the interrupted turn, used to resume
+    /// interactive continuations without weakening tool approval policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<PermissionMode>,
 }
 
 impl SessionRecoveryState {
@@ -277,6 +282,7 @@ impl SessionRecoveryState {
             partial_assistant,
             pending_interactions,
             decision,
+            permission_mode: None,
         }
     }
 
@@ -285,6 +291,11 @@ impl SessionRecoveryState {
         pending_interactions: Vec<PendingInteractionSnapshot>,
     ) -> Self {
         self.pending_interactions = pending_interactions;
+        self
+    }
+
+    pub fn with_permission_mode(mut self, permission_mode: PermissionMode) -> Self {
+        self.permission_mode = Some(permission_mode);
         self
     }
 
@@ -527,6 +538,39 @@ fn contains_sensitive_string_marker(text: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn recovery_state_permission_mode_is_optional_for_legacy_snapshots() {
+        let state: SessionRecoveryState = serde_json::from_value(json!({
+            "schema_version": 1,
+            "status": "awaiting_input",
+            "stop_reason": "awaiting_input",
+            "last_error": null,
+            "partial_assistant": {"text": "", "thinking": "", "tool_calls": []},
+            "pending_interactions": [],
+            "decision": {"kind": "non_resumable", "reason": "awaiting_human_input"}
+        }))
+        .expect("legacy recovery state should deserialize");
+
+        assert_eq!(state.permission_mode, None);
+    }
+
+    #[test]
+    fn recovery_state_serializes_permission_mode_when_present() {
+        let state = SessionRecoveryState::new(
+            RecoveryStatus::AwaitingInput,
+            Some(LoopStopReason::AwaitingInput),
+            None,
+            PartialAssistantState::default(),
+            RecoveryDecision::NonResumable {
+                reason: RecoveryNonResumableReason::AwaitingHumanInput,
+            },
+        )
+        .with_permission_mode(PermissionMode::Supervised);
+
+        let serialized = serde_json::to_value(&state).expect("state should serialize");
+        assert_eq!(serialized["permission_mode"], "supervised");
+    }
 
     #[test]
     fn resumable_notice_mentions_objective() {
