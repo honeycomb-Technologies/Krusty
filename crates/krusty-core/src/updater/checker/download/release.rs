@@ -3,7 +3,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use crate::updater::checker::extract::{extract_tar_gz, extract_zip};
-use crate::updater::checker::paths::{detect_platform, pending_update_path, pending_version_path};
+use crate::updater::checker::paths::{
+    detect_platform, ensure_pending_update_dir, pending_update_path, pending_version_path,
+};
 use crate::updater::checker::types::UpdateStatus;
 use crate::updater::checker::GITHUB_REPO;
 
@@ -42,8 +44,8 @@ pub(super) async fn download_update_release(
         progress: "Extracting...".into(),
     });
 
-    let temp_dir = std::env::temp_dir();
-    let archive_path = temp_dir.join(format!("krusty-download.{}", ext));
+    let update_dir = ensure_pending_update_dir()?;
+    let archive_path = update_dir.join(format!("krusty-download.{}", ext));
     std::fs::write(&archive_path, &bytes)?;
     debug!("Saved archive to: {}", archive_path.display());
 
@@ -57,6 +59,14 @@ pub(super) async fn download_update_release(
 
     if !binary_path.exists() {
         return Err(anyhow!("Extraction failed - binary not found"));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&binary_path)?.permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&binary_path, perms)?;
     }
 
     let metadata = std::fs::metadata(&binary_path)?;
