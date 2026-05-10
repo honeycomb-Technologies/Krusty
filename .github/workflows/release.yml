@@ -125,7 +125,7 @@ jobs:
       - name: Download all artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh run download "$GITHUB_RUN_ID" --dir artifacts
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir artifacts
 
       - name: Create Release
         env:
