@@ -2,6 +2,8 @@ use agent_client_protocol::{
     Client as AcpClient, ContentBlock as AcpContent, ContentChunk, SessionNotification,
     SessionUpdate, StopReason, TextContent, ToolCall, ToolCallId,
 };
+use std::path::PathBuf;
+
 use anyhow::Result;
 
 use crate::ai::client::CallOptions;
@@ -199,8 +201,12 @@ impl PromptProcessor {
             AcpError::NotAuthenticated("AI client not initialized - authenticate first".into())
         })?;
 
+        let workspace_root = canonical_acp_workspace_root(session)?;
+
         let mut ctx = ToolContext {
-            working_dir: session.cwd.clone(),
+            working_dir: workspace_root.clone(),
+            project_dir: Some(workspace_root.clone()),
+            sandbox_root: Some(workspace_root),
             ..Default::default()
         }
         .with_permission_mode(PermissionMode::Autonomous)
@@ -282,6 +288,16 @@ impl PromptProcessor {
 
         Ok(StopReason::EndTurn)
     }
+}
+
+pub(super) fn canonical_acp_workspace_root(session: &SessionState) -> Result<PathBuf, AcpError> {
+    session.cwd.canonicalize().map_err(|error| {
+        AcpError::InvalidRequest(format!(
+            "session working directory '{}' is not accessible: {}",
+            session.cwd.display(),
+            error
+        ))
+    })
 }
 
 /// Convert AI finish reason to ACP stop reason.

@@ -37,24 +37,21 @@ pub async fn register_all_tools(registry: &ToolRegistry) {
     registry.register(Arc::new(SleepTool)).await;
 }
 
-/// Register tools for ACP (excludes TUI-only tools)
+/// Register tools for ACP.
 ///
-/// Excludes:
-/// - AskUserQuestionTool (requires TUI interaction)
-/// - TaskCompleteTool (requires TUI plan mode)
-/// - EnterPlanModeTool (requires TUI plan mode)
-/// - SkillTool (requires skills manager setup)
+/// ACP currently has no editor-backed user approval flow, so do not expose tools
+/// that can execute arbitrary commands or manage long-lived host processes. File
+/// tools remain available and are constrained to the session workspace by the ACP
+/// processor's sandboxed [`ToolContext`].
 pub async fn register_acp_tools(registry: &ToolRegistry) {
     registry.register(Arc::new(ReadTool)).await;
     registry.register(Arc::new(WriteTool)).await;
     registry.register(Arc::new(EditTool)).await;
     registry.register(Arc::new(MultiEditTool)).await;
-    registry.register(Arc::new(BashTool)).await;
     registry.register(Arc::new(GrepTool)).await;
     registry.register(Arc::new(GlobTool)).await;
     registry.register(Arc::new(ListTool)).await;
     registry.register(Arc::new(ApplyPatchTool)).await;
-    registry.register(Arc::new(ProcessesTool)).await;
 }
 
 /// Register the unified agent tool (explore, plan, verify, build)
@@ -79,4 +76,25 @@ pub async fn register_agent_tool(
 pub async fn register_mako_tools(registry: &ToolRegistry) {
     registry.register(Arc::new(AutonomousTaskTool)).await;
     registry.register(Arc::new(ReportTool)).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::registry::ToolRegistry;
+
+    #[tokio::test]
+    async fn acp_tools_exclude_unsandboxable_host_execution_tools() {
+        let registry = ToolRegistry::new();
+
+        register_acp_tools(&registry).await;
+
+        assert!(registry.get("read").await.is_some());
+        assert!(registry.get("write").await.is_some());
+        assert!(registry.get("edit").await.is_some());
+        assert!(registry.get("grep").await.is_some());
+        assert!(registry.get("glob").await.is_some());
+        assert!(registry.get("bash").await.is_none());
+        assert!(registry.get("processes").await.is_none());
+    }
 }
