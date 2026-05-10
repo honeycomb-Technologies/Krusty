@@ -13,6 +13,7 @@ import type {
   OAuthExchangeResponse,
   ServerAccessResponse,
   ChatRequest,
+  ToolResultRequest,
   StreamCallbacks,
   StreamEvent,
   DelegatedProgressEvent,
@@ -377,10 +378,22 @@ export class KrustyClient {
     });
   }
 
-  async submitToolResult(sessionId: string, toolCallId: string, result: string, fastMode = false): Promise<void> {
+  async submitToolResult(
+    sessionId: string,
+    toolCallId: string,
+    result: string,
+    fastMode = false,
+    permissionMode?: ToolResultRequest['permission_mode'],
+  ): Promise<void> {
     await this.request('/chat/tool-result', {
       method: 'POST',
-      body: JSON.stringify({ session_id: sessionId, tool_call_id: toolCallId, result, fast_mode: fastMode }),
+      body: JSON.stringify({
+        session_id: sessionId,
+        tool_call_id: toolCallId,
+        result,
+        fast_mode: fastMode,
+        permission_mode: permissionMode,
+      }),
     });
   }
 
@@ -633,7 +646,7 @@ export class KrustyClient {
   }
 
   async streamToolResult(
-    request: { session_id: string; tool_call_id: string; result: string; fast_mode?: boolean },
+    request: ToolResultRequest,
     callbacks: StreamCallbacks,
     signal?: AbortSignal,
   ): Promise<void> {

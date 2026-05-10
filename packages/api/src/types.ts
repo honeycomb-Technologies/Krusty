@@ -143,6 +143,14 @@ export interface ToolCall {
 // Chat Request
 // ============================================================================
 
+export interface ToolResultRequest {
+  session_id: string;
+  tool_call_id: string;
+  result: string;
+  fast_mode?: boolean;
+  permission_mode?: PermissionMode;
+}
+
 export interface ChatRequest {
   session_id?: string;
   message: string;
