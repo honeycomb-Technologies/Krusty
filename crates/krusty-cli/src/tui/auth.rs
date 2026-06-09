@@ -31,6 +31,11 @@ pub fn create_client_config(
         return AiClientConfig::for_openai_with_auth_detection(model, credential_store);
     }
 
+    // Grok uses the Grok CLI proxy with model-specific OpenAI-compatible routing.
+    if provider == ProviderId::Grok {
+        return AiClientConfig::for_grok(model);
+    }
+
     let provider_config = match get_provider(provider) {
         Some(config) => config,
         None => {

@@ -137,7 +137,7 @@ export interface SessionStoreState {
   ) => Promise<void>;
   loadSession: (sessionId: string, isRefresh?: boolean) => Promise<void>;
   clearSession: () => void;
-  initSession: (sessionId: string, title: string) => void;
+  initSession: (sessionId: string, title: string, permissionMode?: PermissionMode) => void;
   setTitle: (title: string) => void;
   updateTitle: (sessionId: string, title: string) => Promise<void>;
   setMode: (mode: SessionMode) => void;

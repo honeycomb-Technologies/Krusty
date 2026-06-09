@@ -22,15 +22,12 @@ impl App {
 
         self.runtime.current_model = model_id.clone();
 
-        if self.runtime.api_key.is_some() {
+        let auth = self.resolve_auth_for_active_provider();
+        self.runtime.api_key = auth.clone();
+        self.runtime.ai_client = auth.map(|key| {
             let config = self.create_client_config();
-            if let Some(key) = &self.runtime.api_key {
-                self.runtime.ai_client = Some(crate::ai::client::AiClient::with_api_key(
-                    config,
-                    key.clone(),
-                ));
-            }
-        }
+            crate::ai::client::AiClient::with_api_key(config, key)
+        });
 
         let registry = self.services.model_registry.clone();
         futures::executor::block_on(async {
@@ -82,20 +79,10 @@ impl App {
             return;
         }
 
-        let credential = match provider {
-            ProviderId::OpenAI => {
-                krusty_core::auth::resolve_openai_auth(
-                    &self.services.credential_store,
-                    &self.runtime.current_model,
-                )
-                .credential
-            }
-            ProviderId::Anthropic => {
-                krusty_core::auth::resolve_anthropic_auth(&self.services.credential_store)
-                    .credential
-            }
-            _ => self.services.credential_store.get_auth(&provider),
-        };
+        let credential = crate::ai::catalog::credential_for_dynamic_models(
+            provider,
+            &self.services.credential_store,
+        );
 
         let Some(credential) = credential else {
             tracing::warn!(

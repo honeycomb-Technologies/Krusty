@@ -1,7 +1,8 @@
-//! RetroArch Plugin
+//! Game Boy Color Plugin
 //!
-//! Runs libretro cores (game emulators) with Kitty graphics output.
-//! Supports any libretro-compatible core (NES, SNES, GB, GBA, etc.)
+//! Runs Game Boy and Game Boy Color ROMs through bundled or system libretro cores
+//! with Kitty graphics output. The emulator runtime is host-owned and survives
+//! plugin shell replacement/reload.
 
 use std::any::Any;
 use std::os::unix::io::AsRawFd;
@@ -77,6 +78,9 @@ use super::libretro::{
     EnvironmentCmd, GameInfo, JoypadButton, LibRetroCore, PixelFormat, SystemAvInfo,
 };
 use super::{Plugin, PluginContext, PluginEventResult, PluginFrame, PluginRenderMode};
+
+const RETROARCH_PLUGIN_ID: &str = "retroarch";
+const NO_CORE_LABEL: &str = "No core loaded";
 
 // ============================================================================
 // STATE MACHINE
@@ -335,14 +339,14 @@ extern "C" fn input_state(_port: u32, device: u32, _index: u32, id: u32) -> i16 
 // Static paths for environment callbacks (avoid repeated allocations)
 static SYSTEM_DIR: std::sync::LazyLock<CString> = std::sync::LazyLock::new(|| {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let dir = home.join(".config/krusty/retroarch/system");
+    let dir = home.join(".config/krusty/gameboy-color/system");
     let _ = std::fs::create_dir_all(&dir);
     CString::new(dir.to_string_lossy().as_ref()).unwrap_or_default()
 });
 
 static SAVE_DIR: std::sync::LazyLock<CString> = std::sync::LazyLock::new(|| {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let dir = home.join(".config/krusty/retroarch/saves");
+    let dir = home.join(".config/krusty/gameboy-color/saves");
     let _ = std::fs::create_dir_all(&dir);
     CString::new(dir.to_string_lossy().as_ref()).unwrap_or_default()
 });
@@ -416,7 +420,7 @@ extern "C" fn environment(cmd: u32, data: *mut std::ffi::c_void) -> bool {
     }
 }
 
-/// RetroArch plugin for running libretro cores
+/// Game Boy Color plugin shell for running Game Boy and Game Boy Color ROMs.
 pub struct RetroArchPlugin {
     /// Loaded core (if any)
     core: Option<LibRetroCore>,
@@ -465,8 +469,9 @@ struct FileListRenderParams<'a> {
     show_full_name: bool,
 }
 
-/// Krusty RetroArch directories
+/// Krusty Game Boy Color directories
 struct KrustyDirs {
+    cores: PathBuf,
     system: PathBuf,
     saves: PathBuf,
     states: PathBuf,
@@ -476,9 +481,10 @@ struct KrustyDirs {
 impl KrustyDirs {
     fn new() -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let base = home.join(".config/krusty/retroarch");
+        let base = home.join(".config/krusty/gameboy-color");
 
         let dirs = Self {
+            cores: base.join("cores"),
             system: base.join("system"),
             saves: base.join("saves"),
             states: base.join("states"),
@@ -486,6 +492,7 @@ impl KrustyDirs {
         };
 
         // Create directories if they don't exist
+        let _ = std::fs::create_dir_all(&dirs.cores);
         let _ = std::fs::create_dir_all(&dirs.system);
         let _ = std::fs::create_dir_all(&dirs.saves);
         let _ = std::fs::create_dir_all(&dirs.states);
@@ -504,17 +511,18 @@ fn is_parent_dir_entry(path: &Path) -> bool {
 
 impl RetroArchPlugin {
     pub fn new() -> Self {
-        Self {
-            core: None,
-            rom_path: None,
-            core_name: "No core loaded".to_string(),
-            shared_state: Arc::new(Mutex::new(SharedState::default())),
-            running: false,
-            av_info: None,
-            error: None,
+        let runtime = GAMEBOY_RUNTIME.clone();
+        let plugin_state = if runtime.lock().running {
+            RetroArchState::Playing
+        } else {
+            RetroArchState::default()
+        };
 
-            // State machine - start in menu
-            plugin_state: RetroArchState::default(),
+        Self {
+            runtime,
+
+            // State machine - start in menu unless a host-owned game is already running
+            plugin_state,
 
             // Menu state
             cores: Vec::new(),
@@ -528,135 +536,29 @@ impl RetroArchPlugin {
         }
     }
 
-    /// Load a libretro core
+    /// Load a libretro core into the host-owned runtime.
     pub fn load_core(&mut self, core_path: &Path) -> Result<(), String> {
-        // Unload existing core
-        self.unload();
-
-        // Suppress stdout/stderr during core loading
-        let _guard = SuppressStdio::new();
-
-        // SAFETY: LibRetroCore::load performs dynamic library loading via libloading.
-        // The path is validated to exist by the caller. The core is a libretro-compliant
-        // shared library that exports the required symbols. Any loading failures are
-        // returned as errors rather than causing undefined behavior.
-        let core = unsafe { LibRetroCore::load(core_path)? };
-
-        // Set up callbacks
-        set_shared_state(self.shared_state.clone());
-        (core.retro_set_environment)(environment);
-        (core.retro_set_video_refresh)(video_refresh);
-        (core.retro_set_audio_sample)(audio_sample);
-        (core.retro_set_audio_sample_batch)(audio_sample_batch);
-        (core.retro_set_input_poll)(input_poll);
-        (core.retro_set_input_state)(input_state);
-
-        // Initialize
-        (core.retro_init)();
-
-        self.core_name = format!("{} {}", core.name(), core.version());
-        self.core = Some(core);
-        self.error = None;
-
-        // Verify state is set (log after SuppressStdio guard is dropped)
-        drop(_guard);
-        let state_set = SHARED_STATE.lock().is_some();
-        tracing::info!("load_core: Complete, SHARED_STATE is_some={}", state_set);
-
-        Ok(())
+        self.runtime.lock().load_core(core_path)
     }
 
-    /// Load a ROM file
+    /// Load a ROM file into the host-owned runtime.
     pub fn load_rom(&mut self, rom_path: &Path) -> Result<(), String> {
-        let core = self.core.as_ref().ok_or("No core loaded")?;
-
-        // Read ROM file
-        let rom_data = std::fs::read(rom_path).map_err(|e| format!("Failed to read ROM: {}", e))?;
-
-        let path_cstr =
-            CString::new(rom_path.to_string_lossy().as_ref()).map_err(|e| e.to_string())?;
-
-        let game_info = GameInfo {
-            path: path_cstr.as_ptr(),
-            data: rom_data.as_ptr() as *const std::ffi::c_void,
-            size: rom_data.len(),
-            meta: std::ptr::null(),
-        };
-
-        // Suppress stdout/stderr during ROM loading
-        let _guard = SuppressStdio::new();
-
-        let loaded = (core.retro_load_game)(&game_info);
-        if !loaded {
-            return Err("Core failed to load ROM".to_string());
-        }
-
-        // Get AV info
-        let mut av_info = SystemAvInfo {
-            geometry: super::libretro::GameGeometry {
-                base_width: 0,
-                base_height: 0,
-                max_width: 0,
-                max_height: 0,
-                aspect_ratio: 0.0,
-            },
-            timing: super::libretro::SystemTiming {
-                fps: 60.0,
-                sample_rate: 44100.0,
-            },
-        };
-        (core.retro_get_system_av_info)(&mut av_info);
-        self.av_info = Some(av_info);
-
-        // Set controller
-        (core.retro_set_controller_port_device)(0, 1); // Port 0, Joypad
-
-        self.rom_path = Some(rom_path.to_path_buf());
-        self.running = true;
-        self.error = None;
-
-        // Load SRAM if available (battery saves)
-        if let Err(e) = self.load_sram() {
-            tracing::warn!("Failed to load SRAM: {}", e);
-        }
-
-        Ok(())
+        self.runtime.lock().load_rom(rom_path)
     }
 
-    /// Unload core and ROM
+    /// Unload core and ROM from the host-owned runtime.
     pub fn unload(&mut self) {
-        if let Some(core) = self.core.take() {
-            if self.rom_path.is_some() {
-                (core.retro_unload_game)();
-            }
-            (core.retro_deinit)();
-        }
-        // Only clear global state if we own it (prevents dropped plugins from
-        // clearing another plugin's state)
-        clear_shared_state_if_owner(&self.shared_state);
-        self.rom_path = None;
-        self.running = false;
-        self.av_info = None;
-        self.core_name = "No core loaded".to_string();
+        self.runtime.lock().unload();
     }
 
-    /// Run one frame
+    /// Run one frame in the host-owned runtime.
     pub fn run_frame(&mut self) {
-        if let Some(core) = &self.core {
-            if self.running {
-                // Don't suppress stdout during frame execution - too expensive (60fps)
-                // Only suppress during initial load when cores print debug info
-                (core.retro_run)();
-            }
-        }
+        self.runtime.lock().run_frame();
     }
 
     /// Press a button by its libretro button ID (called from gamepad handler)
     pub fn press_button(&mut self, button_id: u8) {
-        if button_id < 16 {
-            let mut state = self.shared_state.lock();
-            state.button_press_frame[button_id as usize] = state.frame_count;
-        }
+        self.runtime.lock().press_button(button_id);
     }
 
     /// Map keyboard to joypad
@@ -1413,7 +1315,7 @@ impl Default for RetroArchPlugin {
 
 impl Plugin for RetroArchPlugin {
     fn id(&self) -> &str {
-        "retroarch"
+        RETROARCH_PLUGIN_ID
     }
 
     fn name(&self) -> &str {

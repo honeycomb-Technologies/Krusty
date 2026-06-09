@@ -36,11 +36,9 @@ impl Tool for MultiEditTool {
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            r#"Use when you need multiple edits to the same file. Reads and writes the file once instead of per-edit, so it's faster and avoids intermediate state issues.
+            r#"Use for 3+ edits to the same file. Read the file first; each edit still needs a unique old_string match.
 
-Edits are applied sequentially — later edits see changes from earlier ones in the same call. Each edit still requires a unique old_string match. Read the file first, same as with the edit tool.
-
-Prefer this over multiple separate edit calls when you have 3+ changes to one file."#,
+Edits apply sequentially, so later edits see earlier changes. Prefer this over multiple separate edit calls for one file."#,
         )
     }
 
@@ -50,7 +48,7 @@ Prefer this over multiple separate edit calls when you have 3+ changes to one fi
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "The absolute path to the file to modify"
+                    "description": "The path to the file to modify"
                 },
                 "edits": {
                     "type": "array",
@@ -101,6 +99,11 @@ Prefer this over multiple separate edit calls when you have 3+ changes to one fi
         if !path.exists() {
             return ToolResult::error(format!("File not found: {}", path.display()));
         }
+
+        let path = match ctx.require_file_observation(&path) {
+            Ok(path) => path,
+            Err(e) => return ToolResult::error_with_code("read_required", e),
+        };
 
         let original = match fs::read_to_string(&path).await {
             Ok(c) => c,
@@ -184,4 +187,76 @@ fn generate_compact_diff(old: &str, new: &str, path: &std::path::Path) -> String
         return String::new();
     }
     format!("--- {}\n+++ {}\n{}", path.display(), path.display(), output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn multiedit_requires_prior_file_observation() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should create");
+        let file_path = temp_dir.path().join("sample.txt");
+        fs::write(&file_path, "one\ntwo\n")
+            .await
+            .expect("test file should write");
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+
+        let result = MultiEditTool
+            .execute(
+                json!({
+                    "file_path": file_path.display().to_string(),
+                    "edits": [{ "old_string": "one", "new_string": "ONE" }],
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_error);
+        let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(parsed["error"]["code"], "read_required");
+    }
+
+    #[tokio::test]
+    async fn multiedit_succeeds_after_prior_file_observation() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should create");
+        let file_path = temp_dir.path().join("sample.txt");
+        fs::write(&file_path, "one\ntwo\n")
+            .await
+            .expect("test file should write");
+        let canonical = file_path
+            .canonicalize()
+            .expect("test file should canonicalize");
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        ctx.record_file_observation(canonical);
+
+        let result = MultiEditTool
+            .execute(
+                json!({
+                    "file_path": file_path.display().to_string(),
+                    "edits": [
+                        { "old_string": "one", "new_string": "ONE" },
+                        { "old_string": "two", "new_string": "TWO" }
+                    ],
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(
+            !result.is_error,
+            "unexpected multiedit error: {}",
+            result.output
+        );
+        let updated = fs::read_to_string(&file_path)
+            .await
+            .expect("updated file should read");
+        assert_eq!(updated, "ONE\nTWO\n");
+    }
 }

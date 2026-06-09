@@ -4,6 +4,7 @@
 
 mod channels;
 pub mod clipboard;
+pub mod edit_diff;
 mod syntax;
 mod text;
 mod title;

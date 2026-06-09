@@ -58,6 +58,9 @@ pub(crate) fn build_history_tool_result(
         .unwrap_or_else(|_| Value::String(raw_output.to_string()));
 
     let summary = summarize_tool_result(tool_name, &parsed_output, raw_output, is_error);
+    let error_code = is_error
+        .then(|| parsed_error_code(&parsed_output))
+        .flatten();
     let result = match retention {
         ToolRetention::RetainFull => bounded_full_result(&parsed_output),
         ToolRetention::SummarizeAfterTurn | ToolRetention::DropAfterCompaction => {
@@ -65,13 +68,36 @@ pub(crate) fn build_history_tool_result(
         }
     };
 
-    json!({
+    let mut history = json!({
         "tool": tool_name,
         "retention": retention.as_str(),
         "summary": summary,
         "is_error": is_error,
         "result": result,
-    })
+    });
+    if let Some(error_code) = error_code {
+        if let Some(object) = history.as_object_mut() {
+            object.insert("error_code".to_string(), Value::String(error_code));
+        }
+    }
+    history
+}
+
+fn parsed_error_code(parsed: &Value) -> Option<String> {
+    let error = parsed.get("error")?;
+    if let Some(code) = error
+        .get("code")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Some(code.to_ascii_lowercase());
+    }
+
+    error
+        .as_str()
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(|_| "tool_error".to_string())
 }
 
 fn bounded_full_result(parsed: &Value) -> Value {
@@ -211,6 +237,40 @@ mod tests {
             .get("summary")
             .and_then(|value| value.as_str())
             .is_some_and(|summary| summary.contains("2 matches")));
+    }
+
+    #[test]
+    fn bash_error_history_keeps_actionable_output_and_code() {
+        let output = json!({
+            "ok": false,
+            "error": {
+                "code": "command_failed",
+                "message": "Command exited with code 2"
+            },
+            "data": {
+                "output": "crates/grok-auth/README.md:76: trailing whitespace.\n+Just use the default path.  "
+            },
+            "metadata": {
+                "exit_code": 2,
+                "killed": false
+            }
+        })
+        .to_string();
+
+        let history = build_history_tool_result("bash", &output, true);
+        assert_eq!(
+            history.get("error_code").and_then(|value| value.as_str()),
+            Some("command_failed")
+        );
+        assert!(history
+            .get("summary")
+            .and_then(|value| value.as_str())
+            .is_some_and(|summary| summary.contains("trailing whitespace")));
+        assert!(history
+            .get("result")
+            .and_then(|value| value.get("output_preview"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|preview| preview.contains("crates/grok-auth/README.md:76")));
     }
 
     #[test]

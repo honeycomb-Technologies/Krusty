@@ -10,7 +10,7 @@ use super::pr::resolve_pr_number;
 mod diff;
 mod parse;
 
-use diff::compute_branch_diff_summary;
+use diff::{compute_branch_diff_summary, compute_worktree_diff_summary};
 #[cfg(test)]
 pub(super) use parse::{parse_numstat, parse_status_output, parse_worktree_output};
 
@@ -40,6 +40,12 @@ pub fn status(path: &Path) -> Result<Option<GitStatusSummary>> {
         status.branch_files = diff.files;
         status.branch_additions = diff.additions;
         status.branch_deletions = diff.deletions;
+    }
+    if status.total_changes() > 0 {
+        if let Some(diff) = compute_worktree_diff_summary(&status.repo_root) {
+            status.worktree_additions = diff.additions;
+            status.worktree_deletions = diff.deletions;
+        }
     }
     status.pr_number = resolve_pr_number(&status.repo_root, status.branch.as_deref());
 

@@ -7,6 +7,7 @@ pub fn parse_provider(s: &str) -> Option<ProviderId> {
         "z_ai" | "zai" => Some(ProviderId::ZAi),
         "openai" => Some(ProviderId::OpenAI),
         "anthropic" => Some(ProviderId::Anthropic),
+        "grok" | "xai" | "x_ai" => Some(ProviderId::Grok),
         _ => None,
     }
 }

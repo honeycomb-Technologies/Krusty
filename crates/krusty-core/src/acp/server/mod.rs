@@ -89,7 +89,8 @@ impl AcpServer {
                  - KRUSTY_PROVIDER + KRUSTY_API_KEY (+ optional KRUSTY_MODEL)\n\
                  - MINIMAX_API_KEY\n\
                  - OPENROUTER_API_KEY\n\
-                 - ZAI_API_KEY"
+                 - ZAI_API_KEY\n\
+                 - ~/.grok/auth.json for Grok (`grok login` or Krusty OAuth)"
             );
         }
 
@@ -181,7 +182,7 @@ pub struct AcpEnvConfig {
 /// 3. Krusty's stored credentials (~/.krusty/tokens/credentials.json)
 ///
 /// Environment variable options:
-/// - KRUSTY_PROVIDER: minimax, openrouter, zai
+/// - KRUSTY_PROVIDER: minimax, openrouter, zai, openai, anthropic, grok
 /// - KRUSTY_MODEL: Override the default model for the provider
 /// - KRUSTY_API_KEY: Generic API key (used with KRUSTY_PROVIDER)
 fn detect_api_key_from_env() -> Option<AcpEnvConfig> {
@@ -198,15 +199,21 @@ fn detect_api_key_from_env() -> Option<AcpEnvConfig> {
             "zai" | "z.ai" => Some(ProviderId::ZAi),
             "openai" => Some(ProviderId::OpenAI),
             "anthropic" => Some(ProviderId::Anthropic),
+            "grok" | "xai" | "x.ai" | "x_ai" => Some(ProviderId::Grok),
             _ => None,
         };
 
         if let Some(provider) = provider {
-            // Look for KRUSTY_API_KEY or provider-specific key
-            let api_key = std::env::var("KRUSTY_API_KEY")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .or_else(|| get_provider_api_key(provider));
+            // Look for KRUSTY_API_KEY/provider env for API-key providers; Grok uses X-sub auth.
+            let api_key = if provider == ProviderId::Grok {
+                get_provider_auth_from_store(provider)
+            } else {
+                std::env::var("KRUSTY_API_KEY")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| get_provider_api_key(provider))
+                    .or_else(|| get_provider_auth_from_store(provider))
+            };
 
             if let Some(api_key) = api_key {
                 return Some(AcpEnvConfig {
@@ -304,6 +311,13 @@ fn load_current_model_preference() -> Option<String> {
         .filter(|model| !model.is_empty())
 }
 
+/// Get provider auth from Krusty's credential store or OAuth integrations.
+fn get_provider_auth_from_store(provider: ProviderId) -> Option<String> {
+    CredentialStore::load()
+        .ok()
+        .and_then(|store| store.get_auth(&provider))
+}
+
 /// Get API key for a specific provider from environment
 fn get_provider_api_key(provider: ProviderId) -> Option<String> {
     let env_var = match provider {
@@ -312,6 +326,7 @@ fn get_provider_api_key(provider: ProviderId) -> Option<String> {
         ProviderId::ZAi => "ZAI_API_KEY",
         ProviderId::Anthropic => "ANTHROPIC_API_KEY",
         ProviderId::OpenAI => "OPENAI_API_KEY",
+        ProviderId::Grok => "GROK_ACCESS_TOKEN",
     };
     std::env::var(env_var).ok().filter(|s| !s.is_empty())
 }

@@ -8,7 +8,7 @@ use super::create_test_db;
 fn test_database_creation() {
     let (db, _temp) = create_test_db();
     let version = db.get_schema_version();
-    assert_eq!(version, 30, "Expected current schema version to be 30");
+    assert_eq!(version, 31, "Expected current schema version to be 31");
 }
 
 #[test]
@@ -55,7 +55,7 @@ fn test_schema_version_increments() {
     let db = Database::new(&db_path).expect("Failed to create database");
     let version = db.get_schema_version();
 
-    assert_eq!(version, 30, "Expected final schema version");
+    assert_eq!(version, 31, "Expected final schema version");
 }
 
 #[test]

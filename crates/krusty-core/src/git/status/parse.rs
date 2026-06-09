@@ -35,6 +35,8 @@ pub(crate) fn parse_status_output(repo_root: PathBuf, output: &str) -> GitStatus
         branch_files: 0,
         branch_additions: 0,
         branch_deletions: 0,
+        worktree_additions: 0,
+        worktree_deletions: 0,
         pr_number: None,
         ahead: 0,
         behind: 0,

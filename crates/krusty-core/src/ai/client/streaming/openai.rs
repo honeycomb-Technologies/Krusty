@@ -40,7 +40,8 @@ impl AiClient {
                 .await;
         } else {
             info!(
-                "Using OpenAI chat/completions format for {}",
+                "Using OpenAI-compatible {:?} format for {}",
+                self.config().api_format,
                 self.config().model
             );
         }
@@ -114,6 +115,12 @@ impl AiClient {
 
         if let Some(service_tier) = options.service_tier_for_provider(self.provider_id()) {
             body["service_tier"] = serde_json::json!(service_tier);
+        }
+
+        if matches!(self.config().api_format, ApiFormat::OpenAIResponses) {
+            if let Some(cache_key) = options.session_id.as_deref().filter(|key| !key.is_empty()) {
+                body["prompt_cache_key"] = serde_json::json!(cache_key);
+            }
         }
 
         // Add tools — sorted deterministically for stable prefix ordering.

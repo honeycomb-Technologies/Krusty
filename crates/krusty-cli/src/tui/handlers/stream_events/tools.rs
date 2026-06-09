@@ -45,6 +45,7 @@ impl App {
     pub(super) fn handle_tool_result(&mut self, id: String, output: String) {
         self.update_tool_result_block(&id, &output);
         self.update_read_block(&id, &output);
+        self.update_edit_block(&id, &output);
         self.update_bash_block(&id, &output);
         self.update_explore_block(&id, &output);
         self.update_build_block(&id, &output);

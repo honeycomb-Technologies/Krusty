@@ -8,6 +8,7 @@ pub mod catalog;
 pub mod client;
 pub mod format;
 pub mod format_detection;
+pub mod grok;
 pub mod retry;
 
 // Provider-specific configuration

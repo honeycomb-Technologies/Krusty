@@ -3,6 +3,7 @@ use chrono::Utc;
 use rusqlite::{params, OptionalExtension};
 
 use crate::agent::PinchContext;
+use crate::tools::registry::PermissionMode;
 
 use super::{SessionManager, SessionType, WorkspaceMode};
 
@@ -65,12 +66,38 @@ impl SessionManager {
         target_branch: Option<&str>,
         session_type: SessionType,
     ) -> Result<String> {
+        self.create_session_for_user_with_config_and_permission(
+            title,
+            model,
+            working_dir,
+            project_dir,
+            workspace_mode,
+            user_id,
+            target_branch,
+            session_type,
+            PermissionMode::default(),
+        )
+    }
+
+    /// Create a new session with explicit workspace, surface, and permission metadata.
+    pub fn create_session_for_user_with_config_and_permission(
+        &self,
+        title: &str,
+        model: Option<&str>,
+        working_dir: Option<&str>,
+        project_dir: Option<&str>,
+        workspace_mode: WorkspaceMode,
+        user_id: Option<&str>,
+        target_branch: Option<&str>,
+        session_type: SessionType,
+        permission_mode: PermissionMode,
+    ) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
 
         self.db.conn().execute(
-            "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, project_dir, workspace_mode, session_type, user_id, target_branch)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, project_dir, workspace_mode, session_type, user_id, target_branch, permission_mode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 id,
                 title,
@@ -82,7 +109,8 @@ impl SessionManager {
                 workspace_mode.to_string(),
                 session_type.to_string(),
                 user_id,
-                target_branch
+                target_branch,
+                permission_mode.as_str()
             ],
         )?;
 
@@ -125,6 +153,7 @@ impl SessionManager {
         model: Option<&str>,
         working_dir: Option<&str>,
         target_branch: Option<&str>,
+        permission_mode: PermissionMode,
     ) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
@@ -174,8 +203,8 @@ impl SessionManager {
 
         // Create new session with parent reference
         self.db.conn().execute(
-            "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, project_dir, workspace_mode, session_type, user_id, parent_session_id, target_branch)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, project_dir, workspace_mode, session_type, user_id, parent_session_id, target_branch, permission_mode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 id,
                 title,
@@ -188,7 +217,8 @@ impl SessionManager {
                 contract.session_type.to_string(),
                 contract.user_id,
                 parent_session_id,
-                contract.target_branch
+                contract.target_branch,
+                permission_mode.as_str()
             ],
         )?;
 

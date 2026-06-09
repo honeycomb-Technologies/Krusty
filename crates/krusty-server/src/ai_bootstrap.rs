@@ -2,9 +2,8 @@ use std::path::Path;
 
 use anyhow::Result;
 use krusty_core::ai::client::{AiClient, AiClientConfig};
-use krusty_core::ai::models::{
-    resolve_model_metadata, ApiFormat, ModelMetadata, SharedModelRegistry,
-};
+use krusty_core::ai::format_detection::detect_api_format;
+use krusty_core::ai::models::{resolve_model_metadata, ModelMetadata, SharedModelRegistry};
 use krusty_core::ai::providers::{builtin_providers, get_provider, ProviderId};
 use krusty_core::constants;
 use krusty_core::storage::credentials::{ActiveProviderStore, CredentialStore};
@@ -41,11 +40,8 @@ impl AiBootstrapPolicy {
             ProviderId::ZAi => "Z_AI_API_KEY",
             ProviderId::Anthropic => "ANTHROPIC_API_KEY",
             ProviderId::OpenAI => "OPENAI_API_KEY",
+            ProviderId::Grok => "GROK_ACCESS_TOKEN",
         }
-    }
-
-    fn openai_catalog_auth_model(self) -> Option<&'static str> {
-        get_provider(ProviderId::OpenAI).map(|provider| provider.default_model())
     }
 
     async fn provider_for_model(
@@ -211,9 +207,13 @@ fn create_ai_client_for_provider(
     model: String,
 ) -> Option<AiClient> {
     let policy = AiBootstrapPolicy;
-    let auth = credentials
-        .get_auth(&provider)
-        .or_else(|| std::env::var(policy.credential_env_key(provider)).ok());
+    let auth = if provider == ProviderId::Grok {
+        credentials.get_auth(&provider)
+    } else {
+        credentials
+            .get_auth(&provider)
+            .or_else(|| std::env::var(policy.credential_env_key(provider)).ok())
+    };
 
     let provider_cfg = get_provider(provider)?;
 
@@ -245,6 +245,20 @@ fn create_ai_client_for_provider(
                     tracing::warn!(
                         "No credentials found for provider {}; chat API will be unavailable until credentials are configured",
                         provider
+                    );
+                    return None;
+                }
+            };
+            (config, api_key)
+        }
+        ProviderId::Grok => {
+            let config = AiClientConfig::for_grok(&model);
+            let resolved = krusty_core::auth::resolve_grok_auth(credentials);
+            let api_key = match resolved.credential {
+                Some(key) => key,
+                None => {
+                    tracing::warn!(
+                        "No Grok X-subscription credentials found; run Grok OAuth or `grok login`"
                     );
                     return None;
                 }
@@ -287,9 +301,10 @@ pub async fn initialize_models(registry: &SharedModelRegistry, credentials: &Cre
             .models
             .iter()
             .map(|m| {
+                let api_format = detect_api_format(provider.id, &m.id);
                 let mut model = ModelMetadata::new(&m.id, &m.display_name, provider.id)
                     .with_context(m.context_window, m.max_output);
-                let inferred = resolve_model_metadata(provider.id, &m.id, ApiFormat::Anthropic);
+                let inferred = resolve_model_metadata(provider.id, &m.id, api_format);
 
                 if let Some(reasoning) = m.reasoning {
                     model = model.with_thinking(reasoning);
@@ -305,27 +320,23 @@ pub async fn initialize_models(registry: &SharedModelRegistry, credentials: &Cre
         registry.set_models(provider.id, models).await;
     }
 
-    if let Some(api_key) = credentials.get(&ProviderId::OpenRouter) {
-        match krusty_core::ai::openrouter::fetch_models(api_key).await {
-            Ok(models) => {
-                tracing::info!("Fetched {} OpenRouter models", models.len());
-                registry.set_models(ProviderId::OpenRouter, models).await;
-            }
-            Err(e) => tracing::warn!("Failed to fetch OpenRouter models: {}", e),
-        }
-    }
+    for provider in [ProviderId::OpenRouter, ProviderId::OpenAI, ProviderId::Grok] {
+        let Some(credential) =
+            krusty_core::ai::catalog::credential_for_dynamic_models(provider, credentials)
+        else {
+            tracing::debug!(
+                "Skipping {:?} dynamic model refresh: no catalog API key configured",
+                provider
+            );
+            continue;
+        };
 
-    if let Some(model) = AiBootstrapPolicy.openai_catalog_auth_model() {
-        let openai_credential =
-            krusty_core::auth::resolve_openai_auth(credentials, model).credential;
-        if let Some(api_key) = openai_credential {
-            match krusty_core::ai::openai::fetch_models(&api_key).await {
-                Ok(models) => {
-                    tracing::info!("Fetched {} OpenAI models", models.len());
-                    registry.set_models(ProviderId::OpenAI, models).await;
-                }
-                Err(e) => tracing::warn!("Failed to fetch OpenAI models: {}", e),
+        match krusty_core::ai::catalog::fetch_dynamic_models(provider, &credential).await {
+            Ok(models) => {
+                tracing::info!("Fetched {} {:?} models", models.len(), provider);
+                registry.set_models(provider, models).await;
             }
+            Err(e) => tracing::warn!("Failed to fetch {:?} models: {}", provider, e),
         }
     }
 }

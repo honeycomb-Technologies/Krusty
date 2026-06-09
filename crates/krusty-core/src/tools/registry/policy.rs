@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::str::FromStr;
 use std::time::Duration;
 
 /// Default tool execution timeout (2 minutes)
@@ -26,6 +27,27 @@ pub struct ToolPolicy {
     pub retry_timeout_once: bool,
     pub allowed_in_plan_mode: bool,
     pub timeout_override: Option<Duration>,
+}
+
+/// Runtime authorization result for a concrete tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolAuthorization {
+    /// The tool call may execute immediately.
+    Execute,
+    /// The tool call may execute only after user approval.
+    RequiresApproval,
+    /// The tool call is blocked because it is not allowed in plan mode.
+    BlockedInPlanMode,
+}
+
+impl ToolAuthorization {
+    pub fn requires_approval(self) -> bool {
+        self == Self::RequiresApproval
+    }
+
+    pub fn is_blocked(self) -> bool {
+        self == Self::BlockedInPlanMode
+    }
 }
 
 impl ToolPolicy {
@@ -78,15 +100,46 @@ impl ToolPolicy {
             timeout_override: None,
         }
     }
+
+    const fn write_with_timeout(timeout_override: Duration) -> Self {
+        Self {
+            category: ToolCategory::Write,
+            requires_supervised_approval: true,
+            retry_timeout_once: false,
+            allowed_in_plan_mode: false,
+            timeout_override: Some(timeout_override),
+        }
+    }
 }
 
 /// Permission mode for tool execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum PermissionMode {
-    #[default]
     Supervised,
+    #[default]
     Autonomous,
+}
+
+impl PermissionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Supervised => "supervised",
+            Self::Autonomous => "autonomous",
+        }
+    }
+}
+
+impl FromStr for PermissionMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "supervised" => Ok(Self::Supervised),
+            "autonomous" => Ok(Self::Autonomous),
+            other => Err(format!("Unknown permission mode: {other}")),
+        }
+    }
 }
 
 /// Delegated execution surface type for governance/audit.
@@ -166,7 +219,28 @@ impl DelegationPolicy {
     }
 
     pub fn authorize_tool(&self, tool_name: &str, plan_mode: bool) -> Result<(), String> {
-        let policy = tool_policy(tool_name);
+        self.authorize_tool_policy(tool_name, tool_policy(tool_name), plan_mode)
+    }
+
+    pub fn authorize_tool_call(
+        &self,
+        tool_name: &str,
+        params: &Value,
+        plan_mode: bool,
+    ) -> Result<(), String> {
+        self.authorize_tool_policy(
+            tool_name,
+            tool_policy_for_call(tool_name, params),
+            plan_mode,
+        )
+    }
+
+    fn authorize_tool_policy(
+        &self,
+        tool_name: &str,
+        policy: ToolPolicy,
+        plan_mode: bool,
+    ) -> Result<(), String> {
         if self.read_only_only
             && policy.category != ToolCategory::ReadOnly
             && !(self.bash_allowed && tool_name == "bash")
@@ -217,12 +291,53 @@ impl DelegationPolicy {
     }
 }
 
+/// Authorize a concrete top-level tool call under the current runtime mode.
+pub fn authorize_tool_call(
+    name: &str,
+    params: &Value,
+    permission_mode: PermissionMode,
+    plan_mode: bool,
+) -> ToolAuthorization {
+    let policy = tool_policy_for_call(name, params);
+    if plan_mode && !policy.allowed_in_plan_mode {
+        return ToolAuthorization::BlockedInPlanMode;
+    }
+
+    if permission_mode == PermissionMode::Supervised && policy.requires_supervised_approval {
+        return ToolAuthorization::RequiresApproval;
+    }
+
+    ToolAuthorization::Execute
+}
+
 /// Categorize a tool by name.
 pub fn tool_category(name: &str) -> ToolCategory {
     tool_policy(name).category
 }
 
-/// Resolve the canonical policy for a tool.
+/// Resolve the canonical policy for a concrete tool call.
+///
+/// This extends the name-only policy with argument-aware intent detection for
+/// polymorphic tools. In particular, `agent(agent_type = "build")` is
+/// write-capable even though other agent subtypes are read-only delegations.
+pub fn tool_policy_for_call(name: &str, params: &Value) -> ToolPolicy {
+    match name {
+        "agent" => agent_tool_policy(params),
+        _ => tool_policy(name),
+    }
+}
+
+fn agent_tool_policy(params: &Value) -> ToolPolicy {
+    match params.get("agent_type").and_then(Value::as_str) {
+        Some("explore" | "plan" | "verify") => {
+            ToolPolicy::read_only_with_timeout(DELEGATED_TOOL_TIMEOUT)
+        }
+        Some("build") => ToolPolicy::write_with_timeout(DELEGATED_TOOL_TIMEOUT),
+        _ => ToolPolicy::write_with_timeout(DELEGATED_TOOL_TIMEOUT),
+    }
+}
+
+/// Resolve the canonical policy for a tool name.
 pub fn tool_policy(name: &str) -> ToolPolicy {
     match name {
         "agent" => ToolPolicy::read_only_with_timeout(DELEGATED_TOOL_TIMEOUT),

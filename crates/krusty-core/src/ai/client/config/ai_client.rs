@@ -67,9 +67,13 @@ impl AiClientConfig {
         matches!(self.api_format, ApiFormat::Google)
     }
 
-    /// Check if this config uses ChatGPT Codex (Responses API) format
+    /// Check if this config uses the ChatGPT Codex OAuth transport.
     pub fn uses_chatgpt_codex_format(&self) -> bool {
-        matches!(self.api_format, ApiFormat::OpenAIResponses)
+        self.provider_id == ProviderId::OpenAI
+            && self
+                .base_url
+                .as_deref()
+                .is_some_and(|url| url.contains("chatgpt.com"))
     }
 
     /// Check if this provider uses Anthropic-compatible API
@@ -124,6 +128,55 @@ impl AiClientConfig {
         }
     }
 
+    /// Create config for Grok/X subscription authentication.
+    pub fn for_grok(model: &str) -> Self {
+        use crate::ai::format_detection::detect_api_format;
+        use crate::ai::models::resolve_model_metadata;
+        use crate::ai::providers::get_provider;
+
+        let provider = get_provider(ProviderId::Grok);
+        let api_format = detect_api_format(ProviderId::Grok, model);
+        let metadata = resolve_model_metadata(ProviderId::Grok, model, api_format);
+        let mut custom_headers = provider
+            .map(|config| config.custom_headers.clone())
+            .unwrap_or_default();
+        custom_headers.insert(
+            "x-grok-client-version".to_string(),
+            std::env::var("GROK_CLIENT_VERSION")
+                .unwrap_or_else(|_| grok_auth::DEFAULT_CLIENT_VERSION.to_string()),
+        );
+        custom_headers.insert("X-XAI-Token-Auth".to_string(), "xai-grok-cli".to_string());
+        custom_headers.insert("x-grok-model-override".to_string(), model.to_string());
+        custom_headers.insert(
+            "x-grok-context-window".to_string(),
+            metadata.context_window.to_string(),
+        );
+        custom_headers.insert(
+            "x-grok-max-completion-tokens".to_string(),
+            metadata.max_output.to_string(),
+        );
+
+        let base_url = std::env::var("GROK_CLI_CHAT_PROXY_BASE_URL")
+            .map(|base| grok_endpoint_url(&base, api_format))
+            .unwrap_or_else(|_| {
+                provider
+                    .map(|config| grok_endpoint_url(&config.base_url, api_format))
+                    .unwrap_or_else(|| {
+                        grok_endpoint_url("https://cli-chat-proxy.grok.com/v1", api_format)
+                    })
+            });
+
+        Self {
+            model: model.to_string(),
+            max_tokens: metadata.max_output,
+            base_url: Some(base_url),
+            auth_header: AuthHeader::Bearer,
+            provider_id: ProviderId::Grok,
+            api_format,
+            custom_headers,
+        }
+    }
+
     /// Create config for Anthropic with automatic auth type detection
     ///
     /// Detects whether OAuth token or API key is being used:
@@ -164,5 +217,73 @@ impl AiClientConfig {
             api_format: ApiFormat::Anthropic,
             custom_headers,
         }
+    }
+}
+
+fn grok_endpoint_url(base_url: &str, api_format: ApiFormat) -> String {
+    let base = base_url
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches("/chat/completions")
+        .trim_end_matches("/responses")
+        .trim_end_matches("/messages");
+    let path = match api_format {
+        ApiFormat::OpenAIResponses => "responses",
+        ApiFormat::OpenAI => "chat/completions",
+        ApiFormat::Anthropic => "messages",
+        ApiFormat::Google => "models",
+    };
+    format!("{base}/{path}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AiClientConfig;
+    use crate::ai::models::ApiFormat;
+    use crate::ai::providers::ProviderId;
+
+    #[test]
+    fn grok_config_uses_build_responses_endpoint_and_cli_headers() {
+        let config = AiClientConfig::for_grok("grok-build");
+
+        assert_eq!(config.provider_id, ProviderId::Grok);
+        assert_eq!(config.api_format, ApiFormat::OpenAIResponses);
+        assert!(config
+            .base_url
+            .as_deref()
+            .is_some_and(|url| url.ends_with("/responses")));
+        assert_eq!(
+            config
+                .custom_headers
+                .get("x-grok-model-override")
+                .map(String::as_str),
+            Some("grok-build")
+        );
+        assert_eq!(
+            config
+                .custom_headers
+                .get("X-XAI-Token-Auth")
+                .map(String::as_str),
+            Some("xai-grok-cli")
+        );
+        assert_eq!(
+            config
+                .custom_headers
+                .get("x-grok-context-window")
+                .map(String::as_str),
+            Some("512000")
+        );
+        assert!(!config.uses_chatgpt_codex_format());
+        assert!(config.uses_openai_format());
+    }
+
+    #[test]
+    fn grok_config_strips_endpoint_suffix_from_proxy_base_override() {
+        let url = super::grok_endpoint_url(
+            "https://proxy.example/v1/chat/completions",
+            ApiFormat::OpenAIResponses,
+        );
+
+        assert_eq!(url, "https://proxy.example/v1/responses");
     }
 }

@@ -3,6 +3,7 @@ use crate::agent::pinch_context::{PinchContext, PinchContextInput};
 use crate::agent::summarizer::SummarizationResult;
 use crate::storage::sessions::SessionManager;
 use crate::storage::{SessionType, WorkspaceMode};
+use crate::tools::registry::PermissionMode;
 
 fn empty_pinch_context(parent_session_id: &str) -> PinchContext {
     PinchContext::from_input(PinchContextInput {
@@ -47,6 +48,7 @@ fn create_linked_session_preserves_workspace_contract() {
             Some("gpt-5"),
             Some("/tmp/incorrect-runtime-fallback"),
             None,
+            PermissionMode::default(),
         )
         .expect("Failed to create child session");
 
@@ -71,6 +73,46 @@ fn create_linked_session_preserves_workspace_contract() {
         child_session.parent_session_id.as_deref(),
         Some(parent_session_id.as_str())
     );
+    assert_eq!(child_session.permission_mode, PermissionMode::default());
+}
+
+#[test]
+fn create_linked_session_preserves_explicit_permission_mode() {
+    let (db, _temp) = create_test_db();
+    let manager = SessionManager::new(db);
+    let parent_session_id = manager
+        .create_session_for_user_with_config_and_permission(
+            "Supervised Parent",
+            Some("gpt-5"),
+            Some("/tmp/worktree"),
+            Some("/tmp/worktree"),
+            WorkspaceMode::Selected,
+            None,
+            None,
+            SessionType::Code,
+            PermissionMode::Supervised,
+        )
+        .expect("Failed to create parent session");
+    let pinch_ctx = empty_pinch_context(&parent_session_id);
+
+    let child_session_id = manager
+        .create_linked_session(
+            "Supervised Child",
+            &parent_session_id,
+            &pinch_ctx,
+            Some("gpt-5"),
+            Some("/tmp/worktree"),
+            None,
+            PermissionMode::Supervised,
+        )
+        .expect("Failed to create child session");
+
+    let child_session = manager
+        .get_session(&child_session_id)
+        .expect("Failed to load child session")
+        .expect("Child session should exist");
+
+    assert_eq!(child_session.permission_mode, PermissionMode::Supervised);
 }
 
 #[test]
@@ -99,6 +141,7 @@ fn create_linked_session_preserves_neutral_workspace_without_project() {
             Some("gpt-5"),
             Some("/tmp/server-default-should-not-leak"),
             Some("feature/should-not-leak"),
+            PermissionMode::default(),
         )
         .expect("Failed to create neutral child session");
 
@@ -153,6 +196,7 @@ fn test_create_linked_session_preserves_parent_user_id() {
             Some("claude-3-5-sonnet"),
             Some("/tmp"),
             None,
+            PermissionMode::default(),
         )
         .expect("Failed to create child session");
 
@@ -190,6 +234,7 @@ fn test_get_session() {
     assert_eq!(session.working_dir, Some("/tmp".to_string()));
     assert_eq!(session.session_type, SessionType::Code);
     assert_eq!(session.target_branch, None);
+    assert_eq!(session.permission_mode, PermissionMode::default());
 }
 
 #[test]

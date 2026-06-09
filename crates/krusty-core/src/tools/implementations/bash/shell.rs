@@ -2,23 +2,10 @@ use tokio::process::Command;
 
 use crate::tools::ToolContext;
 
-/// Keep the tail of a string within `max_bytes`, preserving UTF-8 boundaries.
-fn tail_by_bytes(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_string();
-    }
-
-    let mut start = text.len().saturating_sub(max_bytes);
-    while start < text.len() && !text.is_char_boundary(start) {
-        start += 1;
-    }
-    text[start..].to_string()
-}
-
 /// Strip ANSI escape sequences from text.
 pub(super) fn strip_ansi(text: &str) -> String {
     let re = regex::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\[[\?0-9;]*[a-zA-Z]")
-        .expect("valid regex");
+        .unwrap_or_else(|error| panic!("valid ANSI regex: {error}"));
     re.replace_all(text, "").into_owned()
 }
 
@@ -96,9 +83,4 @@ pub(super) fn configure_foreground_process_group(cmd: &mut Command) {
     {
         cmd.process_group(0);
     }
-}
-
-#[allow(dead_code)]
-fn _tail_by_bytes_for_tests(text: &str, max_bytes: usize) -> String {
-    tail_by_bytes(text, max_bytes)
 }

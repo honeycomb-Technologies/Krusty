@@ -124,8 +124,10 @@ async fn chat(
     let permission_mode = if ctx.session_type == SessionType::Mako {
         PermissionMode::Autonomous
     } else {
-        req.permission_mode
+        req.permission_mode.unwrap_or(ctx.permission_mode)
     };
+    ctx.session_manager
+        .update_session_permission_mode(&session_id, permission_mode)?;
 
     start_orchestrator_sse(&state, ctx, work_mode, permission_mode, is_first_message).await
 }

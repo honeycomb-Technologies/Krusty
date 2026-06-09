@@ -110,6 +110,7 @@ async fn session_create_persists_full_continuation_contract() {
             workspace_mode: Some(WorkspaceMode::Created),
             target_branch: Some("feature/continue".to_string()),
             session_type: Some(SessionType::Code),
+            permission_mode: None,
         }),
     )
     .await
@@ -165,6 +166,7 @@ async fn create_session_persists_user_ownership() {
             workspace_mode: None,
             target_branch: None,
             session_type: None,
+            permission_mode: None,
         }),
     )
     .await;
@@ -201,6 +203,7 @@ async fn create_session_resolves_relative_workspace_paths_within_user_root() {
             workspace_mode: Some(WorkspaceMode::Selected),
             target_branch: None,
             session_type: None,
+            permission_mode: None,
         }),
     )
     .await
@@ -232,6 +235,7 @@ async fn create_session_accepts_fresh_absolute_workspace_path_with_existing_ance
             workspace_mode: Some(WorkspaceMode::Selected),
             target_branch: None,
             session_type: Some(SessionType::Code),
+            permission_mode: None,
         }),
     )
     .await
@@ -260,6 +264,7 @@ async fn create_session_rejects_invalid_workspace_payloads() {
             workspace_mode: Some(WorkspaceMode::Selected),
             target_branch: None,
             session_type: None,
+            permission_mode: None,
         }),
     )
     .await;
@@ -286,6 +291,7 @@ async fn create_session_rejects_invalid_workspace_payloads() {
             workspace_mode: Some(WorkspaceMode::Neutral),
             target_branch: None,
             session_type: None,
+            permission_mode: None,
         }),
     )
     .await;
@@ -797,6 +803,7 @@ async fn session_routes_normalize_blank_model_input_to_none() {
             workspace_mode: None,
             target_branch: None,
             session_type: None,
+            permission_mode: None,
         }),
     )
     .await
@@ -816,6 +823,7 @@ async fn session_routes_normalize_blank_model_input_to_none() {
             mode: None,
             model: Some("  gpt-5  ".to_string()),
             target_branch: None,
+            permission_mode: None,
         }),
     )
     .await
@@ -835,6 +843,7 @@ async fn session_routes_normalize_blank_model_input_to_none() {
             mode: None,
             model: Some("   ".to_string()),
             target_branch: None,
+            permission_mode: None,
         }),
     )
     .await
@@ -861,6 +870,7 @@ async fn session_routes_apply_workspace_updates() {
             workspace_mode: None,
             target_branch: None,
             session_type: None,
+            permission_mode: None,
         }),
     )
     .await
@@ -878,6 +888,7 @@ async fn session_routes_apply_workspace_updates() {
             mode: None,
             model: None,
             target_branch: None,
+            permission_mode: None,
         }),
     )
     .await
@@ -905,6 +916,7 @@ async fn session_routes_apply_workspace_updates() {
             mode: None,
             model: None,
             target_branch: None,
+            permission_mode: None,
         }),
     )
     .await
@@ -931,6 +943,7 @@ async fn session_routes_reject_invalid_workspace_payloads() {
             workspace_mode: None,
             target_branch: None,
             session_type: None,
+            permission_mode: None,
         }),
     )
     .await
@@ -948,6 +961,7 @@ async fn session_routes_reject_invalid_workspace_payloads() {
             mode: None,
             model: None,
             target_branch: None,
+            permission_mode: None,
         }),
     )
     .await;
@@ -984,6 +998,7 @@ async fn session_routes_reject_working_dir_updates_outside_user_root() {
             workspace_mode: None,
             target_branch: None,
             session_type: None,
+            permission_mode: None,
         }),
     )
     .await
@@ -1001,6 +1016,7 @@ async fn session_routes_reject_working_dir_updates_outside_user_root() {
             mode: None,
             model: None,
             target_branch: None,
+            permission_mode: None,
         }),
     )
     .await;

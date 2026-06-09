@@ -11,7 +11,9 @@ use crate::ai::client::AiClient;
 use crate::ai::types::AiToolCall;
 use crate::process::ProcessRegistry;
 use crate::storage::{WorkMode, WorkspaceMode};
-use crate::tools::registry::{PermissionMode, ToolContext, ToolRegistry, ToolResult};
+use crate::tools::registry::{
+    FileObservationTracker, PermissionMode, ToolContext, ToolRegistry, ToolResult,
+};
 
 use super::super::loop_events::LoopEvent;
 
@@ -32,6 +34,7 @@ pub(super) async fn execute_regular_tool(
     delegated_progress_tx: Option<&mpsc::UnboundedSender<DelegatedProgressEvent>>,
     event_tx: &mpsc::UnboundedSender<LoopEvent>,
     subagent_max_turns_override: Option<usize>,
+    file_observations: Arc<FileObservationTracker>,
 ) -> ToolResult {
     let (output_tx, mut output_rx) =
         mpsc::unbounded_channel::<crate::tools::registry::ToolOutputChunk>();
@@ -94,6 +97,7 @@ pub(super) async fn execute_regular_tool(
     .with_ai_client(ai_client.clone())
     .with_tool_registry(Arc::clone(tool_registry))
     .with_loop_event_tx(event_tx.clone())
+    .with_file_observation_tracker(file_observations)
     .with_output_stream(output_tx, call.id.clone());
 
     let mut delegated_forwarder_handle = None;

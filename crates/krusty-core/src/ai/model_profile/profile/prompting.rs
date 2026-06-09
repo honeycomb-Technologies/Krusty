@@ -75,7 +75,7 @@ fn provider_prompt_overlay(provider: ProviderId) -> &'static str {
             r#"- Keep tool and plan state explicit so long-running sessions survive compaction cleanly.
 - Prefer steady, incremental repository work over broad speculative rewrites."#
         }
-        ProviderId::OpenAI => {
+        ProviderId::OpenAI | ProviderId::Grok => {
             r#"- Preserve exact task continuity across tool turns and continue execution instead of re-explaining the plan.
 - Keep tool arguments precise; avoid wasting reasoning budget on restating known context."#
         }

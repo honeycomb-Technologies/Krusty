@@ -33,11 +33,11 @@ impl Tool for WriteTool {
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            r#"Use Write for creating new files. For modifying existing files, prefer Edit — Write replaces the entire file content.
+            r#"Use Write for new files; prefer Edit for existing files because Write replaces the whole file.
 
-If the file already exists, read it first to avoid accidental data loss. Parent directories are created automatically. Max content size is 10MB.
+Existing files must be read first. Parent directories are created automatically. Max content size is 10MB.
 
-Don't create documentation files (README.md, CHANGELOG.md, etc.) unless the user explicitly asks for them."#,
+Don't create documentation files unless explicitly requested."#,
         )
     }
 
@@ -47,7 +47,7 @@ Don't create documentation files (README.md, CHANGELOG.md, etc.) unless the user
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "The absolute path to the file to write"
+                    "description": "The path to the file to write"
                 },
                 "content": {
                     "type": "string",
@@ -83,6 +83,15 @@ Don't create documentation files (README.md, CHANGELOG.md, etc.) unless the user
             "Write tool: resolved path = {:?}, working_dir = {:?}",
             path, ctx.working_dir
         );
+
+        let path = if path.is_file() {
+            match ctx.require_file_observation(&path) {
+                Ok(path) => path,
+                Err(e) => return ToolResult::error_with_code("read_required", e),
+            }
+        } else {
+            path
+        };
 
         // Read existing content for diff (before writing)
         let old_content = if path.is_file() {
@@ -146,4 +155,107 @@ fn generate_compact_diff(old: &str, new: &str, path: &std::path::Path) -> String
         return String::new();
     }
     format!("--- {}\n+++ {}\n{}", path.display(), path.display(), output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn write_creates_new_file_without_prior_observation() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should create");
+        let file_path = temp_dir.path().join("new.txt");
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+
+        let result = WriteTool
+            .execute(
+                json!({
+                    "file_path": file_path.display().to_string(),
+                    "content": "created\n",
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(
+            !result.is_error,
+            "unexpected write error: {}",
+            result.output
+        );
+        let content = fs::read_to_string(&file_path)
+            .await
+            .expect("created file should read");
+        assert_eq!(content, "created\n");
+    }
+
+    #[tokio::test]
+    async fn write_overwrite_requires_prior_file_observation() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should create");
+        let file_path = temp_dir.path().join("existing.txt");
+        fs::write(&file_path, "old\n")
+            .await
+            .expect("test file should write");
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+
+        let result = WriteTool
+            .execute(
+                json!({
+                    "file_path": file_path.display().to_string(),
+                    "content": "new\n",
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_error);
+        let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(parsed["error"]["code"], "read_required");
+        let content = fs::read_to_string(&file_path)
+            .await
+            .expect("existing file should read");
+        assert_eq!(content, "old\n");
+    }
+
+    #[tokio::test]
+    async fn write_overwrite_succeeds_after_prior_file_observation() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should create");
+        let file_path = temp_dir.path().join("existing.txt");
+        fs::write(&file_path, "old\n")
+            .await
+            .expect("test file should write");
+        let canonical = file_path
+            .canonicalize()
+            .expect("test file should canonicalize");
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        ctx.record_file_observation(canonical);
+
+        let result = WriteTool
+            .execute(
+                json!({
+                    "file_path": file_path.display().to_string(),
+                    "content": "new\n",
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(
+            !result.is_error,
+            "unexpected write error: {}",
+            result.output
+        );
+        let content = fs::read_to_string(&file_path)
+            .await
+            .expect("updated file should read");
+        assert_eq!(content, "new\n");
+    }
 }

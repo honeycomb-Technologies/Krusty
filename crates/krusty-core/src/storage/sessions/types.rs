@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
+use crate::tools::registry::PermissionMode;
+
 /// Session metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
@@ -28,6 +30,8 @@ pub struct SessionInfo {
     pub model: Option<String>,
     /// Optional target branch selected for this session
     pub target_branch: Option<String>,
+    /// Permission mode selected for this session's tool execution.
+    pub permission_mode: PermissionMode,
 }
 
 /// Session type for high-level product surfaces.

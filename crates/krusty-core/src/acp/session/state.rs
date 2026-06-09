@@ -8,7 +8,8 @@ use tracing::{debug, info, warn};
 
 use crate::ai::types::{ModelMessage, Role};
 use crate::storage::{SessionManager as StorageSessionManager, SessionRecoveryState};
-use crate::tools::ToolContext;
+use crate::tools::registry::PermissionMode;
+use crate::tools::{FileObservationTracker, ToolContext};
 
 use super::super::error::AcpError;
 
@@ -31,6 +32,8 @@ pub struct SessionState {
     cancelled: AtomicBool,
     /// Tool context for this session.
     pub tool_context: RwLock<Option<ToolContext>>,
+    /// File observations shared across tool calls in this ACP session.
+    pub file_observations: Arc<FileObservationTracker>,
     /// Storage session ID for persistence (links to SQLite storage).
     storage_session_id: RwLock<Option<String>>,
     /// Reference to storage manager for persisting messages.
@@ -65,6 +68,7 @@ impl SessionState {
             messages: RwLock::new(Vec::new()),
             cancelled: AtomicBool::new(false),
             tool_context: RwLock::new(None),
+            file_observations: Arc::new(FileObservationTracker::default()),
             storage_session_id: RwLock::new(None),
             storage,
             recovery_state: RwLock::new(None),
@@ -218,6 +222,24 @@ impl SessionState {
     /// Get the storage session ID if linked.
     pub async fn get_storage_session_id(&self) -> Option<String> {
         self.storage_session_id.read().await.clone()
+    }
+
+    /// Get the current persisted permission mode for this session.
+    pub async fn permission_mode(&self) -> PermissionMode {
+        let Some(ref storage) = self.storage else {
+            return PermissionMode::default();
+        };
+        let Some(session_id) = self.storage_session_id.read().await.clone() else {
+            return PermissionMode::default();
+        };
+
+        let storage = storage.lock().await;
+        storage
+            .get_session(&session_id)
+            .ok()
+            .flatten()
+            .map(|session| session.permission_mode)
+            .unwrap_or_default()
     }
 
     /// Get all messages.

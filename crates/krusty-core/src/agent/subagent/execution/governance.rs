@@ -28,15 +28,12 @@ pub(super) fn build_subagent_tool_context(task: &SubAgentTask, timeout_secs: u64
             .with_delegation_policy(policy);
     }
 
-    // Delegated agents must never silently drop the parent filesystem sandbox.
-    // When a task is constructed without an explicit inherited sandbox, fail closed
-    // to the assigned working directory instead of using ToolContext::default()'s
-    // unrestricted path behavior.
-    let sandbox_root = task
-        .sandbox_root
-        .clone()
-        .unwrap_or_else(|| task.working_dir.clone());
-    ctx = ctx.with_sandbox(sandbox_root);
+    // Delegated agents inherit the parent's filesystem access boundary when one
+    // is present. Unrestricted local parents remain unrestricted; read-only
+    // delegation is enforced by the delegation policy, not by inventing a path root.
+    if let Some(sandbox_root) = task.sandbox_root.clone() {
+        ctx = ctx.with_sandbox(sandbox_root);
+    }
 
     ctx
 }

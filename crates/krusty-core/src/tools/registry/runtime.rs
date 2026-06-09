@@ -10,7 +10,7 @@ use crate::agent::hooks::{HookResult, PostToolHook, PreToolHook};
 use crate::ai::types::AiTool;
 
 use super::policy::DEFAULT_TOOL_TIMEOUT;
-use super::{tool_policy, DelegationPolicy, ToolContext, ToolResult};
+use super::{tool_policy_for_call, DelegationPolicy, ToolContext, ToolResult};
 
 /// Trait for tool implementations
 #[async_trait]
@@ -163,7 +163,7 @@ impl ToolRegistry {
         tracing::info!(tool = name, "ToolRegistry: tool found, executing");
         let timeout = ctx
             .timeout
-            .or(tool_policy(name).timeout_override)
+            .or(tool_policy_for_call(name, &params).timeout_override)
             .unwrap_or(self.default_timeout);
         let start = Instant::now();
 

@@ -2,6 +2,8 @@
 
 use anyhow::Result;
 
+use crate::storage::CredentialStore;
+
 use super::models::ModelMetadata;
 use super::providers::{get_provider, ProviderId};
 
@@ -12,6 +14,45 @@ pub fn supports_dynamic_models(provider: ProviderId) -> bool {
         .unwrap_or(false)
 }
 
+/// Resolve the credential that is valid for runtime model discovery.
+///
+/// This intentionally differs from chat auth resolution. For example, OpenAI's
+/// `/v1/models` endpoint accepts OpenAI API keys, but ChatGPT/Codex OAuth
+/// tokens are for `chatgpt.com/backend-api/codex/*` inference calls and return
+/// 403 when reused for catalog refreshes.
+pub fn credential_for_dynamic_models(
+    provider: ProviderId,
+    credentials: &CredentialStore,
+) -> Option<String> {
+    credential_for_dynamic_models_with_env(provider, credentials, env_credential)
+}
+
+fn credential_for_dynamic_models_with_env(
+    provider: ProviderId,
+    credentials: &CredentialStore,
+    env: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    match provider {
+        ProviderId::OpenRouter => credentials
+            .get(&ProviderId::OpenRouter)
+            .cloned()
+            .or_else(|| env("OPENROUTER_API_KEY")),
+        ProviderId::OpenAI => credentials
+            .get(&ProviderId::OpenAI)
+            .cloned()
+            .or_else(|| env("OPENAI_API_KEY")),
+        ProviderId::Grok => crate::auth::resolve_grok_auth(credentials).credential,
+        _ => None,
+    }
+}
+
+fn env_credential(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// Fetch runtime model metadata for a provider.
 pub async fn fetch_dynamic_models(
     provider: ProviderId,
@@ -20,9 +61,51 @@ pub async fn fetch_dynamic_models(
     match provider {
         ProviderId::OpenRouter => super::openrouter::fetch_models(credential).await,
         ProviderId::OpenAI => super::openai::fetch_models(credential).await,
+        ProviderId::Grok => super::grok::fetch_models(credential).await,
         _ => anyhow::bail!(
             "Provider {:?} does not support dynamic model discovery",
             provider
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ai::catalog::credential_for_dynamic_models_with_env;
+    use crate::ai::providers::ProviderId;
+    use crate::storage::CredentialStore;
+
+    #[test]
+    fn openai_dynamic_catalog_uses_api_key_not_oauth_fallback() {
+        let credentials = CredentialStore::default();
+
+        let credential =
+            credential_for_dynamic_models_with_env(ProviderId::OpenAI, &credentials, |_| None);
+
+        assert!(credential.is_none());
+    }
+
+    #[test]
+    fn openai_dynamic_catalog_reads_stored_api_key() {
+        let mut credentials = CredentialStore::default();
+        credentials.set(ProviderId::OpenAI, "sk-openai".to_string());
+
+        let credential =
+            credential_for_dynamic_models_with_env(ProviderId::OpenAI, &credentials, |_| None);
+
+        assert_eq!(credential.as_deref(), Some("sk-openai"));
+    }
+
+    #[test]
+    fn dynamic_catalog_ignores_static_providers() {
+        let mut credentials = CredentialStore::default();
+        credentials.set(ProviderId::MiniMax, "minimax-key".to_string());
+
+        let credential =
+            credential_for_dynamic_models_with_env(ProviderId::MiniMax, &credentials, |_| {
+                Some("env-key".to_string())
+            });
+
+        assert!(credential.is_none());
     }
 }

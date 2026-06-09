@@ -38,7 +38,9 @@ impl Tool for SetWorkspaceContextTool {
         Some(
             r#"Modes: "neutral" means no project is active (general conversation). "selected" means the user picked an existing directory. "created" means you just scaffolded a new project.
 
-Use this when transitioning from general chat to project-focused work, for example after the user says "let's work on /home/user/myapp" or after you run `mkdir` plus `cargo init`. Always provide the absolute project_dir path for selected/created modes.
+Use this when transitioning from general chat to project-focused work, for example after the user says "let's work on /home/user/myapp" or after you run `mkdir` plus `cargo init`. Provide the absolute project_dir path for selected/created modes.
+
+Workspace context orients future work; it is not a default filesystem permission boundary. If this tool rejects a path, treat that as an explicit runtime access policy.
 
 Do not switch to neutral unless the user explicitly wants to leave project context."#,
         )
@@ -151,13 +153,13 @@ fn validate_project_dir(project_dir: &str, ctx: &ToolContext) -> Result<String, 
         return Err("workspace project_dir must be an existing directory".to_string());
     }
 
-    if let Some(sandbox_root) = ctx.sandbox_root.as_deref() {
-        let canonical_sandbox = sandbox_root
+    if let Some(access_root) = ctx.filesystem_access_root() {
+        let canonical_access_root = access_root
             .canonicalize()
-            .map_err(|err| format!("workspace sandbox root is not accessible: {err}"))?;
-        if !canonical_project_dir.starts_with(&canonical_sandbox) {
+            .map_err(|err| format!("filesystem access root is not accessible: {err}"))?;
+        if !canonical_project_dir.starts_with(&canonical_access_root) {
             return Err(format!(
-                "Access denied: workspace project_dir '{}' is outside workspace",
+                "Access denied: workspace project_dir '{}' is outside the configured filesystem access root",
                 project_dir
             ));
         }
@@ -236,7 +238,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_project_dir_outside_current_sandbox() {
+    async fn unrestricted_context_allows_selected_project_outside_working_dir() {
+        let (temp_dir, session_id) = create_test_session();
+        let db_path = temp_dir.path().join("krusty.db");
+        let working_dir = temp_dir.path().join("workspace");
+        let sibling_repo = temp_dir.path().join("sibling-repo");
+        std::fs::create_dir_all(&working_dir).expect("workspace should create");
+        std::fs::create_dir_all(&sibling_repo).expect("sibling repo should create");
+        let expected_project_dir = sibling_repo
+            .canonicalize()
+            .expect("sibling repo should canonicalize")
+            .to_string_lossy()
+            .to_string();
+        let ctx = ToolContext {
+            working_dir,
+            ..Default::default()
+        }
+        .with_session_metadata(session_id.clone(), db_path.clone());
+
+        let result = SetWorkspaceContextTool
+            .execute(
+                json!({
+                    "mode": "selected",
+                    "project_dir": sibling_repo
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.output);
+
+        let db = Database::new(&db_path).expect("database should open");
+        let manager = SessionManager::new(db);
+        let session = manager
+            .get_session(&session_id)
+            .expect("session should load")
+            .expect("session should exist");
+        assert_eq!(
+            session.project_dir.as_deref(),
+            Some(expected_project_dir.as_str())
+        );
+        assert_eq!(
+            session.working_dir.as_deref(),
+            Some(expected_project_dir.as_str())
+        );
+        assert_eq!(session.workspace_mode, WorkspaceMode::Selected);
+    }
+
+    #[tokio::test]
+    async fn rejects_project_dir_outside_configured_filesystem_access_root() {
         let (temp_dir, session_id) = create_test_session();
         let db_path = temp_dir.path().join("krusty.db");
         let workspace = temp_dir.path().join("workspace");
@@ -258,7 +308,7 @@ mod tests {
             .await;
 
         assert!(result.is_error);
-        assert!(result.output.contains("outside workspace"));
+        assert!(result.output.contains("filesystem access root"));
 
         let db = Database::new(&db_path).expect("database should open");
         let manager = SessionManager::new(db);

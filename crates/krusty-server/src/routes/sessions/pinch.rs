@@ -71,6 +71,7 @@ pub(super) async fn pinch_session(
         working_dir: &working_dir,
         model: summary_model,
         target_branch: source_session.target_branch.as_deref(),
+        permission_mode: source_session.permission_mode,
         preservation_hints: req.preservation_hints,
         direction: req.direction,
         initial_user_message: None,

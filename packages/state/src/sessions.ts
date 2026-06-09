@@ -13,6 +13,7 @@ export interface SessionListItem {
   workspace_mode?: 'neutral' | 'selected' | 'created';
   session_type?: 'chat' | 'code' | 'mako';
   target_branch?: string | null;
+  permission_mode?: 'supervised' | 'autonomous';
 }
 
 export interface SessionsStoreState {

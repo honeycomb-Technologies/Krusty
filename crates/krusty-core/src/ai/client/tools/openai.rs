@@ -18,6 +18,7 @@ fn build_openai_tool_request_body(
     tools: Vec<Value>,
     reasoning_effort: Option<&str>,
     service_tier: Option<&str>,
+    prompt_cache_key: Option<&str>,
 ) -> Value {
     let responses_format = matches!(api_format, ApiFormat::OpenAIResponses);
     let messages_key = if responses_format {
@@ -66,6 +67,12 @@ fn build_openai_tool_request_body(
 
     if let Some(tier) = service_tier {
         body["service_tier"] = serde_json::json!(tier);
+    }
+
+    if responses_format {
+        if let Some(cache_key) = prompt_cache_key.filter(|key| !key.is_empty()) {
+            body["prompt_cache_key"] = serde_json::json!(cache_key);
+        }
     }
 
     body
@@ -313,6 +320,7 @@ impl AiClient {
             tools,
             effort.as_deref(),
             options.service_tier_for_provider(self.provider_id()),
+            options.session_id.as_deref(),
         );
 
         let body =
@@ -363,6 +371,7 @@ mod tests {
             ],
             Some("xhigh"),
             Some("priority"),
+            Some("session-123"),
         );
 
         assert!(body.get("messages").is_none());
@@ -371,6 +380,7 @@ mod tests {
         assert_eq!(body["max_output_tokens"], 4096);
         assert_eq!(body["reasoning"]["effort"], "xhigh");
         assert_eq!(body["service_tier"], "priority");
+        assert_eq!(body["prompt_cache_key"], "session-123");
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "read");
         assert!(body["tools"][0].get("function").is_none());

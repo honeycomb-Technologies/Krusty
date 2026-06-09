@@ -12,7 +12,7 @@ use crate::ai::client::CallOptions;
 use crate::ai::streaming::StreamPart;
 use crate::ai::types::{AiToolCall, Content, FinishReason};
 use crate::tools::git_identity::GitIdentityMode;
-use crate::tools::registry::{tool_policy, PermissionMode};
+use crate::tools::registry::tool_policy;
 use crate::tools::{ToolContext, ToolResult};
 
 use super::content::convert_acp_content;
@@ -204,6 +204,7 @@ impl PromptProcessor {
         })?;
 
         let workspace_root = canonical_acp_workspace_root(session)?;
+        let permission_mode = session.permission_mode().await;
 
         let mut ctx = ToolContext {
             working_dir: workspace_root.clone(),
@@ -211,9 +212,10 @@ impl PromptProcessor {
             sandbox_root: Some(workspace_root),
             ..Default::default()
         }
-        .with_permission_mode(PermissionMode::Supervised)
+        .with_permission_mode(permission_mode)
         .with_subagent_max_turns(self.agent_config.subagent_max_turns)
-        .with_ai_client(ai_client.clone());
+        .with_ai_client(ai_client.clone())
+        .with_file_observation_tracker(session.file_observations.clone());
 
         if let Some(ref identity) = self.git_identity {
             if identity.mode != GitIdentityMode::Disabled {

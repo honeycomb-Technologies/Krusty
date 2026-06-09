@@ -21,4 +21,6 @@ pub use implementations::{
     ProcessesTool, ReadTool, ReportTool, SendUserMessageTool, SetDependencyTool, SetWorkModeTool,
     SetWorkspaceContextTool, SkillTool, SleepTool, TaskCompleteTool, TaskStartTool, WriteTool,
 };
-pub use registry::{parse_params, ToolContext, ToolOutputChunk, ToolRegistry, ToolResult};
+pub use registry::{
+    parse_params, FileObservationTracker, ToolContext, ToolOutputChunk, ToolRegistry, ToolResult,
+};

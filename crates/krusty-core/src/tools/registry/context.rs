@@ -1,4 +1,6 @@
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Duration;
 
 use tokio::sync::{mpsc, RwLock};
@@ -14,6 +16,72 @@ use crate::storage::WorkspaceMode;
 use crate::tools::git_identity::GitIdentity;
 
 use super::{DelegationPolicy, PermissionMode, ToolRegistry};
+
+/// Filesystem access policy for local tool execution.
+///
+/// Workspace/project context is orientation for the model. This policy is the
+/// explicit runtime filesystem boundary: local sessions default to unrestricted
+/// access, while server/remote/multi-tenant paths can opt into a scoped root.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum FilesystemAccess {
+    /// Resolve paths relative to the working directory without imposing a root.
+    #[default]
+    Unrestricted,
+    /// Require filesystem paths to stay under the configured root.
+    Scoped { root: PathBuf },
+}
+
+impl FilesystemAccess {
+    pub fn scoped(root: impl Into<PathBuf>) -> Self {
+        Self::Scoped { root: root.into() }
+    }
+
+    pub fn scoped_root(&self) -> Option<&PathBuf> {
+        match self {
+            Self::Unrestricted => None,
+            Self::Scoped { root } => Some(root),
+        }
+    }
+}
+
+/// Shared record of files successfully observed by read-capable tools.
+#[derive(Debug, Default)]
+pub struct FileObservationTracker {
+    observed_files: StdRwLock<HashSet<PathBuf>>,
+}
+
+impl FileObservationTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record(&self, path: impl Into<PathBuf>) {
+        let path = path.into();
+        let mut observed = self.observed_files.write().unwrap_or_else(|poisoned| {
+            tracing::warn!("File observation tracker write lock was poisoned; recovering");
+            poisoned.into_inner()
+        });
+        observed.insert(path);
+    }
+
+    pub fn contains(&self, path: &Path) -> bool {
+        let observed = self.observed_files.read().unwrap_or_else(|poisoned| {
+            tracing::warn!("File observation tracker read lock was poisoned; recovering");
+            poisoned.into_inner()
+        });
+        observed.contains(path)
+    }
+
+    pub fn snapshot(&self) -> Vec<PathBuf> {
+        let observed = self.observed_files.read().unwrap_or_else(|poisoned| {
+            tracing::warn!("File observation tracker read lock was poisoned; recovering");
+            poisoned.into_inner()
+        });
+        let mut paths = observed.iter().cloned().collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+}
 
 /// Output chunk from a streaming tool (like bash)
 #[derive(Debug, Clone)]
@@ -31,9 +99,12 @@ pub struct ToolContext {
     pub workspace_mode: WorkspaceMode,
     pub session_id: Option<String>,
     pub db_path: Option<std::path::PathBuf>,
-    /// Sandbox root for multi-tenant path isolation (e.g., /workspaces/{user_id})
-    /// If set, all file operations must be within this directory.
-    pub sandbox_root: Option<std::path::PathBuf>,
+    /// Deprecated compatibility mirror for scoped filesystem access. New code
+    /// should use `filesystem_access`; resolver helpers still consult this field
+    /// while the legacy sandbox terminology is migrated.
+    pub sandbox_root: Option<PathBuf>,
+    /// Explicit runtime filesystem access policy.
+    pub filesystem_access: FilesystemAccess,
     /// User ID for multi-tenant operation scoping (processes, etc.)
     pub user_id: Option<String>,
     pub process_registry: Option<Arc<ProcessRegistry>>,
@@ -67,6 +138,8 @@ pub struct ToolContext {
     pub parent_conversation: Option<Arc<Vec<ModelMessage>>>,
     /// Canonical loop-event sink for hooks/tools that need to surface runtime events.
     pub loop_event_tx: Option<mpsc::UnboundedSender<LoopEvent>>,
+    /// Shared file-observation tracker used to enforce read-before-edit policy.
+    pub file_observations: Arc<FileObservationTracker>,
 }
 
 impl Default for ToolContext {
@@ -78,6 +151,7 @@ impl Default for ToolContext {
             session_id: None,
             db_path: None,
             sandbox_root: None,
+            filesystem_access: FilesystemAccess::Unrestricted,
             user_id: None,
             process_registry: None,
             skills_manager: None,
@@ -90,12 +164,13 @@ impl Default for ToolContext {
             current_model: None,
             ai_client: None,
             git_identity: None,
-            permission_mode: PermissionMode::Supervised,
+            permission_mode: PermissionMode::default(),
             subagent_max_turns: None,
             delegation_policy: None,
             tool_registry: None,
             parent_conversation: None,
             loop_event_tx: None,
+            file_observations: Arc::new(FileObservationTracker::default()),
         }
     }
 }
@@ -133,10 +208,44 @@ impl ToolContext {
         self
     }
 
-    /// Set sandbox root for multi-tenant path isolation.
-    pub fn with_sandbox(mut self, sandbox_root: std::path::PathBuf) -> Self {
-        self.sandbox_root = Some(sandbox_root);
+    /// Set an explicit filesystem access policy.
+    pub fn with_filesystem_access(mut self, access: FilesystemAccess) -> Self {
+        self.sandbox_root = access.scoped_root().cloned();
+        self.filesystem_access = access;
         self
+    }
+
+    /// Clear any scoped filesystem boundary.
+    pub fn with_unrestricted_filesystem_access(mut self) -> Self {
+        self.sandbox_root = None;
+        self.filesystem_access = FilesystemAccess::Unrestricted;
+        self
+    }
+
+    /// Set a scoped filesystem access root for host-level isolation.
+    pub fn with_sandbox(mut self, sandbox_root: PathBuf) -> Self {
+        self.sandbox_root = Some(sandbox_root.clone());
+        self.filesystem_access = FilesystemAccess::scoped(sandbox_root);
+        self
+    }
+
+    /// Effective filesystem access policy, including legacy `sandbox_root`
+    /// struct-literal compatibility while call sites migrate.
+    pub fn filesystem_access(&self) -> FilesystemAccess {
+        if let Some(root) = self.sandbox_root.clone() {
+            FilesystemAccess::Scoped { root }
+        } else if let Some(root) = self.filesystem_access.scoped_root() {
+            FilesystemAccess::Scoped { root: root.clone() }
+        } else {
+            FilesystemAccess::Unrestricted
+        }
+    }
+
+    pub fn filesystem_access_root(&self) -> Option<PathBuf> {
+        match self.filesystem_access() {
+            FilesystemAccess::Unrestricted => None,
+            FilesystemAccess::Scoped { root } => Some(root),
+        }
     }
 
     /// Set user ID for multi-tenant operation scoping.
@@ -228,6 +337,45 @@ impl ToolContext {
         self
     }
 
+    /// Attach a shared file-observation tracker.
+    pub fn with_file_observation_tracker(mut self, tracker: Arc<FileObservationTracker>) -> Self {
+        self.file_observations = tracker;
+        self
+    }
+
+    /// Record that a canonical file path has been successfully observed.
+    pub fn record_file_observation(&self, path: impl Into<PathBuf>) {
+        self.file_observations.record(path);
+    }
+
+    /// Check whether a canonical file path has been successfully observed.
+    pub fn has_file_observation(&self, path: &Path) -> bool {
+        self.file_observations.contains(path)
+    }
+
+    /// Require a resolved existing file path to have been observed first.
+    ///
+    /// Returns the canonical path used for observation matching.
+    pub fn require_file_observation(&self, path: &Path) -> Result<PathBuf, String> {
+        let canonical = path
+            .canonicalize()
+            .map_err(|e| format!("Failed to resolve file path '{}': {}", path.display(), e))?;
+
+        if self.has_file_observation(&canonical) {
+            return Ok(canonical);
+        }
+
+        Err(format!(
+            "Read required before modifying '{}'. Use the read tool on this file before edit, multiedit, or overwrite operations.",
+            canonical.display()
+        ))
+    }
+
+    /// Return a deterministic snapshot of observed file paths.
+    pub fn observed_files_snapshot(&self) -> Vec<PathBuf> {
+        self.file_observations.snapshot()
+    }
+
     /// Resolve a path relative to working directory (absolute paths pass through)
     pub fn resolve_path(&self, path: &str) -> std::path::PathBuf {
         let p = std::path::PathBuf::from(path);
@@ -238,24 +386,32 @@ impl ToolContext {
         }
     }
 
-    /// Resolve a path with sandbox enforcement for multi-tenant isolation.
+    /// Resolve a path under the configured filesystem access policy.
     ///
-    /// If sandbox_root is set, ensures the resolved path is within the sandbox.
-    /// Returns an error if the path escapes the sandbox via symlinks or `..`.
+    /// Unrestricted local contexts return the path relative to `working_dir`.
+    /// Scoped contexts canonicalize the target and require it to remain under
+    /// the configured access root.
     pub fn sandboxed_resolve(&self, path: &str) -> Result<std::path::PathBuf, String> {
         let resolved = self.resolve_path(path);
 
-        let Some(ref sandbox) = self.sandbox_root else {
+        let Some(access_root) = self.filesystem_access_root() else {
             return Ok(resolved);
         };
 
+        let canonical_root = access_root.canonicalize().map_err(|e| {
+            format!(
+                "Invalid filesystem access root '{}': {}",
+                access_root.display(),
+                e
+            )
+        })?;
         let canonical = resolved
             .canonicalize()
             .map_err(|e| format!("Invalid path '{}': {}", path, e))?;
 
-        if !canonical.starts_with(sandbox) {
+        if !canonical.starts_with(&canonical_root) {
             return Err(format!(
-                "Access denied: path '{}' is outside workspace",
+                "Access denied: path '{}' is outside configured filesystem access root",
                 path
             ));
         }
@@ -263,26 +419,32 @@ impl ToolContext {
         Ok(canonical)
     }
 
-    /// Check if a path is within the sandbox (for validation without resolving).
+    /// Check if a path is allowed by the configured filesystem access policy.
     pub fn is_path_allowed(&self, path: &std::path::Path) -> bool {
-        let Some(ref sandbox) = self.sandbox_root else {
+        let Some(access_root) = self.filesystem_access_root() else {
             return true;
         };
 
+        let Ok(canonical_root) = access_root.canonicalize() else {
+            return false;
+        };
+
         path.canonicalize()
-            .map(|p| p.starts_with(sandbox))
+            .map(|p| p.starts_with(canonical_root))
             .unwrap_or(false)
     }
 
-    /// Resolve a path that may not exist yet (for write operations) with sandbox enforcement.
+    /// Resolve a path that may not exist yet (for write operations) under the
+    /// configured filesystem access policy.
     ///
     /// Unlike `sandboxed_resolve`, this handles paths where parent directories don't exist yet.
-    /// It finds the nearest existing ancestor, canonicalizes it, validates it's within sandbox,
-    /// then appends the remaining path components (which are verified to not contain traversal).
+    /// It finds the nearest existing ancestor, canonicalizes it, validates it
+    /// against the configured access root, then appends the remaining path
+    /// components (which are verified to not contain traversal).
     pub fn sandboxed_resolve_new_path(&self, path: &str) -> Result<std::path::PathBuf, String> {
         let resolved = self.resolve_path(path);
 
-        let Some(ref sandbox) = self.sandbox_root else {
+        let Some(access_root) = self.filesystem_access_root() else {
             return Ok(resolved);
         };
 
@@ -292,12 +454,22 @@ impl ToolContext {
             }
         }
 
+        let canonical_root = access_root.canonicalize().map_err(|e| {
+            format!(
+                "Invalid filesystem access root '{}': {}",
+                access_root.display(),
+                e
+            )
+        })?;
+
         if resolved.exists() {
             let canonical = resolved
                 .canonicalize()
                 .map_err(|e| format!("Cannot resolve path: {}", e))?;
-            if !canonical.starts_with(sandbox) {
-                return Err("Access denied: path is outside workspace".into());
+            if !canonical.starts_with(&canonical_root) {
+                return Err(
+                    "Access denied: path is outside configured filesystem access root".into(),
+                );
             }
             return Ok(canonical);
         }
@@ -315,15 +487,15 @@ impl ToolContext {
         }
 
         let canonical_base = if check.as_os_str().is_empty() || !check.exists() {
-            sandbox.clone()
+            canonical_root.clone()
         } else {
             check
                 .canonicalize()
                 .map_err(|e| format!("Cannot resolve path: {}", e))?
         };
 
-        if !canonical_base.starts_with(sandbox) {
-            return Err("Access denied: path is outside workspace".into());
+        if !canonical_base.starts_with(&canonical_root) {
+            return Err("Access denied: path is outside configured filesystem access root".into());
         }
 
         let mut final_path = canonical_base;

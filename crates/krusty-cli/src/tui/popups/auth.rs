@@ -856,6 +856,7 @@ impl AuthPopup {
             ProviderId::MiniMax => "https://platform.minimax.io/",
             ProviderId::Anthropic => "https://console.anthropic.com/settings/keys",
             ProviderId::OpenAI => "https://platform.openai.com/api-keys",
+            ProviderId::Grok => "https://console.x.ai/",
         };
 
         let instructions = Paragraph::new(vec![
@@ -1073,7 +1074,7 @@ impl AuthPopup {
         let content = vec![
             Line::from(""),
             Line::from(Span::styled(
-                "API key saved successfully!",
+                "Authentication saved successfully!",
                 Style::default()
                     .fg(theme.success_color)
                     .add_modifier(Modifier::BOLD),

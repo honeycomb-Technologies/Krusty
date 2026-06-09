@@ -95,6 +95,23 @@ mod tests {
     }
 
     #[test]
+    fn request_transform_sets_parallel_tool_calls_for_grok_responses() {
+        let body = json!({
+            "model": "grok-build",
+            "tools": [{"name": "read"}]
+        });
+
+        let transformed = apply_request_body_transform(
+            body,
+            ProviderId::Grok,
+            ApiFormat::OpenAIResponses,
+            "grok-build",
+        );
+
+        assert_eq!(transformed["parallel_tool_calls"], Value::Bool(true));
+    }
+
+    #[test]
     fn request_transform_sanitizes_message_tool_ids() {
         let body = json!({
             "messages": [{

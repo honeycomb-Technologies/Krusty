@@ -233,7 +233,7 @@ impl AppRuntime {
             blocks: BlockManager::new(),
             tool_results: ToolResultCache::new(),
             attached_files: std::collections::HashMap::new(),
-            permission_mode: PermissionMode::Supervised,
+            permission_mode: PermissionMode::default(),
             approval_requested_at: None,
             pending_ask_user_calls: Vec::new(),
             just_updated: false,

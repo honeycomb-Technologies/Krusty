@@ -63,16 +63,11 @@ impl Tool for ApplyPatchTool {
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            r#"Use for coordinated multi-file changes when you have a complete patch ready.
+            r#"Use for coordinated multi-file changes when you have a complete patch.
 
-Format: Wrap in *** Begin Patch / *** End Patch markers. Each file operation starts with:
-- *** Update File: path/to/file — modify existing file
-- *** Add File: path/to/file — create new file
-- *** Delete File: path/to/file — remove file
+Wrap content in *** Begin Patch / *** End Patch. Operations: *** Update File, *** Add File, *** Delete File. Use -, +, and space-prefixed lines for removals, additions, and context.
 
-Lines prefixed with - (remove), + (add), or space (unchanged context). Fuzzy matching handles minor line differences.
-
-Prefer edit/multiedit for targeted changes to 1-2 files. Use apply_patch when changes span many files or you want atomic multi-file application."#,
+Prefer edit/multiedit for targeted 1-2 file changes."#,
         )
     }
 
@@ -270,6 +265,9 @@ async fn apply_update(path: &str, chunks: &[Chunk], ctx: &ToolContext) -> Result
     let resolved = ctx
         .sandboxed_resolve(path)
         .map_err(|e| format!("Path error: {}", e))?;
+    let resolved = ctx
+        .require_file_observation(&resolved)
+        .map_err(|e| format!("Read-before-patch error: {}", e))?;
 
     let content = fs::read_to_string(&resolved)
         .await
@@ -346,10 +344,145 @@ async fn apply_update(path: &str, chunks: &[Chunk], ctx: &ToolContext) -> Result
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn update_patch(path: &std::path::Path) -> String {
+        format!(
+            "*** Begin Patch\n*** Update File: {}\n-old\n+new\n*** End Patch",
+            path.display()
+        )
+    }
+
+    fn delete_patch(path: &std::path::Path) -> String {
+        format!(
+            "*** Begin Patch\n*** Delete File: {}\n*** End Patch",
+            path.display()
+        )
+    }
+
+    fn add_patch(path: &std::path::Path) -> String {
+        format!(
+            "*** Begin Patch\n*** Add File: {}\n+created\n*** End Patch",
+            path.display()
+        )
+    }
+
+    #[tokio::test]
+    async fn update_file_requires_prior_observation() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should create");
+        let file_path = temp_dir.path().join("sample.txt");
+        fs::write(&file_path, "old\n")
+            .await
+            .expect("test file should write");
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+
+        let result = ApplyPatchTool
+            .execute(json!({ "patch": update_patch(&file_path) }), &ctx)
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.output.contains("Read-before-patch error"));
+        let content = fs::read_to_string(&file_path)
+            .await
+            .expect("file should remain readable");
+        assert_eq!(content, "old\n");
+    }
+
+    #[tokio::test]
+    async fn update_file_succeeds_after_prior_observation() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should create");
+        let file_path = temp_dir.path().join("sample.txt");
+        fs::write(&file_path, "old\n")
+            .await
+            .expect("test file should write");
+        let canonical = file_path
+            .canonicalize()
+            .expect("test file should canonicalize");
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        ctx.record_file_observation(canonical);
+
+        let result = ApplyPatchTool
+            .execute(json!({ "patch": update_patch(&file_path) }), &ctx)
+            .await;
+
+        assert!(
+            !result.is_error,
+            "unexpected patch error: {}",
+            result.output
+        );
+        let content = fs::read_to_string(&file_path)
+            .await
+            .expect("updated file should read");
+        assert_eq!(content, "new\n");
+    }
+
+    #[tokio::test]
+    async fn delete_file_requires_prior_observation() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should create");
+        let file_path = temp_dir.path().join("delete.txt");
+        fs::write(&file_path, "remove me\n")
+            .await
+            .expect("test file should write");
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+
+        let result = ApplyPatchTool
+            .execute(json!({ "patch": delete_patch(&file_path) }), &ctx)
+            .await;
+
+        assert!(result.is_error);
+        assert!(file_path.exists());
+    }
+
+    #[tokio::test]
+    async fn add_file_rejects_existing_target_without_overwrite() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should create");
+        let file_path = temp_dir.path().join("existing.txt");
+        fs::write(&file_path, "existing\n")
+            .await
+            .expect("test file should write");
+        let canonical = file_path
+            .canonicalize()
+            .expect("test file should canonicalize");
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        ctx.record_file_observation(canonical);
+
+        let result = ApplyPatchTool
+            .execute(json!({ "patch": add_patch(&file_path) }), &ctx)
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.output.contains("Add File target already exists"));
+        let content = fs::read_to_string(&file_path)
+            .await
+            .expect("existing file should read");
+        assert_eq!(content, "existing\n");
+    }
+}
+
 async fn apply_add(path: &str, content: &str, ctx: &ToolContext) -> Result<(), String> {
     let resolved = ctx
         .sandboxed_resolve_new_path(path)
         .map_err(|e| format!("Path error: {}", e))?;
+
+    if resolved.exists() {
+        return Err(
+            "Add File target already exists; read it and use Update File to modify it".to_string(),
+        );
+    }
 
     // Create parent directories
     if let Some(parent) = resolved.parent() {
@@ -369,6 +502,9 @@ async fn apply_delete(path: &str, ctx: &ToolContext) -> Result<(), String> {
     let resolved = ctx
         .sandboxed_resolve(path)
         .map_err(|e| format!("Path error: {}", e))?;
+    let resolved = ctx
+        .require_file_observation(&resolved)
+        .map_err(|e| format!("Read-before-patch error: {}", e))?;
 
     fs::remove_file(&resolved)
         .await

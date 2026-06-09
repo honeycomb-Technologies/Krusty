@@ -15,6 +15,7 @@ export interface SessionResponse {
   updated_at: string;
   model?: string | null;
   target_branch?: string | null;
+  permission_mode: PermissionMode;
 }
 
 export interface SessionWithMessagesResponse {
@@ -90,6 +91,7 @@ export interface SessionStateResponse {
   started_at: string | null;
   last_event_at: string | null;
   mode: SessionMode;
+  permission_mode: PermissionMode;
   recovery?: SessionRecoveryState | null;
   pending_interactions?: PendingInteractionSnapshot[];
   live_partial_assistant?: PartialAssistantState | null;

@@ -20,6 +20,7 @@ impl AiClient {
         &self,
         messages: &[ModelMessage],
         system_prompt: &str,
+        volatile_context: Option<&str>,
         _max_tokens: usize,
         options: &CallOptions,
         format_handler: &OpenAIFormat,
@@ -121,6 +122,20 @@ impl AiClient {
                     }]
                 }));
             }
+        }
+
+        if let Some(context) = volatile_context
+            .map(str::trim)
+            .filter(|context| !context.is_empty())
+        {
+            input_messages.push(serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": format!("[CURRENT RUNTIME CONTEXT]\n\n{}", context)
+                }]
+            }));
         }
 
         let prompt_cache_key = Self::codex_prompt_cache_key(options);
@@ -227,10 +242,53 @@ mod tests {
             }],
         }];
 
-        let body =
-            client.build_chatgpt_codex_body(&messages, "system", 4096, &options, &format_handler);
+        let body = client.build_chatgpt_codex_body(
+            &messages,
+            "system",
+            None,
+            4096,
+            &options,
+            &format_handler,
+        );
 
         assert_eq!(body["model"], "gpt-5.5");
         assert_eq!(body["service_tier"], "priority");
+    }
+
+    #[test]
+    fn chatgpt_codex_body_keeps_volatile_context_out_of_instructions() {
+        let client = openai_responses_client();
+        let format_handler = OpenAIFormat::new(ApiFormat::OpenAIResponses);
+        let options = CallOptions::default();
+        let messages = vec![ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "continue".to_string(),
+            }],
+        }];
+
+        let body = client.build_chatgpt_codex_body(
+            &messages,
+            "stable instructions",
+            Some("volatile plan progress"),
+            4096,
+            &options,
+            &format_handler,
+        );
+
+        assert_eq!(body["instructions"], "stable instructions");
+        assert_eq!(
+            body["input"]
+                .as_array()
+                .and_then(|items| items.last())
+                .and_then(|item| {
+                    item.get("content")
+                        .and_then(|content| content.as_array())
+                        .and_then(|content| content.first())
+                        .and_then(|content| content.get("text"))
+                        .and_then(|text| text.as_str())
+                }),
+            Some("[CURRENT RUNTIME CONTEXT]\n\nvolatile plan progress")
+        );
     }
 }

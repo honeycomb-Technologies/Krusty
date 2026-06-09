@@ -6,6 +6,7 @@ use super::super::core::AiClient;
 use super::shared::trim_or_empty;
 use crate::ai::format::openai::OpenAIFormat;
 use crate::ai::format::FormatHandler;
+use crate::ai::models::ApiFormat;
 use crate::ai::transform::apply_request_body_transform;
 use crate::ai::types::ModelMessage;
 
@@ -18,14 +19,15 @@ impl AiClient {
         user_message: &str,
         max_tokens: usize,
     ) -> Result<String> {
-        let body = serde_json::json!({
-            "model": model,
-            "max_tokens": max_tokens,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message}
-            ]
-        });
+        let body = openai_simple_body(
+            self.config().api_format,
+            model,
+            max_tokens,
+            vec![
+                serde_json::json!({"role": "system", "content": system_prompt}),
+                serde_json::json!({"role": "user", "content": user_message}),
+            ],
+        );
 
         let body =
             apply_request_body_transform(body, self.provider_id(), self.config().api_format, model);
@@ -35,15 +37,7 @@ impl AiClient {
 
         let json: Value = response.json().await?;
 
-        // Extract text from OpenAI response format
-        Ok(trim_or_empty(
-            json.get("choices")
-                .and_then(|c| c.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|choice| choice.get("message"))
-                .and_then(|msg| msg.get("content"))
-                .and_then(|t| t.as_str()),
-        ))
+        Ok(trim_or_empty(extract_openai_text(&json)))
     }
 
     /// Cache-safe conversation call using OpenAI format.
@@ -78,11 +72,7 @@ impl AiClient {
             "content": appended_user_message
         }));
 
-        let body = serde_json::json!({
-            "model": model,
-            "max_tokens": max_tokens,
-            "messages": api_messages,
-        });
+        let body = openai_simple_body(self.config().api_format, model, max_tokens, api_messages);
 
         debug!(
             "Cache-safe OpenAI call: {} conversation messages + appended user message",
@@ -97,13 +87,88 @@ impl AiClient {
 
         let json: Value = response.json().await?;
 
-        Ok(trim_or_empty(
-            json.get("choices")
-                .and_then(|c| c.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|choice| choice.get("message"))
-                .and_then(|msg| msg.get("content"))
-                .and_then(|t| t.as_str()),
-        ))
+        Ok(trim_or_empty(extract_openai_text(&json)))
+    }
+}
+
+fn openai_simple_body(
+    api_format: ApiFormat,
+    model: &str,
+    max_tokens: usize,
+    messages: Vec<Value>,
+) -> Value {
+    if matches!(api_format, ApiFormat::OpenAIResponses) {
+        serde_json::json!({
+            "model": model,
+            "max_output_tokens": max_tokens,
+            "input": messages,
+        })
+    } else {
+        serde_json::json!({
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": messages,
+        })
+    }
+}
+
+fn extract_openai_text(json: &Value) -> Option<&str> {
+    json.get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|msg| msg.get("content"))
+        .and_then(|content| content.as_str())
+        .or_else(|| json.get("output_text").and_then(|text| text.as_str()))
+        .or_else(|| extract_responses_output_text(json))
+}
+
+fn extract_responses_output_text(json: &Value) -> Option<&str> {
+    json.get("output")
+        .and_then(|output| output.as_array())
+        .and_then(|items| {
+            items.iter().find_map(|item| {
+                item.get("content")
+                    .and_then(|content| content.as_array())
+                    .and_then(|content| {
+                        content.iter().find_map(|part| {
+                            part.get("text")
+                                .or_else(|| part.get("content"))
+                                .and_then(|text| text.as_str())
+                        })
+                    })
+            })
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn simple_body_uses_responses_shape() {
+        let body = openai_simple_body(
+            ApiFormat::OpenAIResponses,
+            "grok-build",
+            42,
+            vec![json!({"role": "user", "content": "hello"})],
+        );
+
+        assert!(body.get("messages").is_none());
+        assert_eq!(body["input"][0]["content"], "hello");
+        assert_eq!(body["max_output_tokens"], 42);
+    }
+
+    #[test]
+    fn extracts_responses_output_text() {
+        let json = json!({
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "hello"}]
+            }]
+        });
+
+        assert_eq!(extract_openai_text(&json), Some("hello"));
     }
 }

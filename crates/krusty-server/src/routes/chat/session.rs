@@ -12,6 +12,7 @@ use krusty_core::plan::PlanManager;
 use krusty_core::storage::{
     Database, MakoRuntimeStateStore, SessionInfo, SessionType, WorkMode, WorkspaceMode,
 };
+use krusty_core::tools::registry::PermissionMode;
 use krusty_core::SessionManager;
 
 use super::super::session_access::{
@@ -41,6 +42,7 @@ pub(super) struct ChatSessionContext {
     pub(super) project_dir: Option<PathBuf>,
     pub(super) work_mode: WorkMode,
     pub(super) session_type: SessionType,
+    pub(super) permission_mode: PermissionMode,
     pub(super) mako_crew_slug: Option<String>,
     pub(super) user_id: Option<String>,
     pub(super) guard: OwnedMutexGuard<()>,
@@ -98,6 +100,7 @@ pub(super) struct ChatContinuationContract {
     pub(super) work_mode: WorkMode,
     pub(super) model: Option<String>,
     pub(super) target_branch: Option<String>,
+    pub(super) permission_mode: PermissionMode,
     pub(super) fast_mode: bool,
     pub(super) user_id: Option<String>,
 }
@@ -168,7 +171,7 @@ pub(super) async fn prepare_chat_route_session(
                 ));
             }
             let initial_target_branch = trimmed_nonempty(req.target_branch.as_deref());
-            let session_id = sm.create_session_for_user_with_config(
+            let session_id = sm.create_session_for_user_with_config_and_permission(
                 &title,
                 initial_model.as_deref(),
                 workspace.working_dir.as_deref(),
@@ -177,6 +180,7 @@ pub(super) async fn prepare_chat_route_session(
                 user_id.as_deref(),
                 initial_target_branch,
                 requested_session_type,
+                req.permission_mode.unwrap_or_default(),
             )?;
             let should_persist_current_model = match requested_model {
                 RequestedModel::Set(_) => true,
@@ -225,6 +229,7 @@ pub(super) fn build_chat_continuation_contract(
         work_mode,
         model: session.model.clone(),
         target_branch: session.target_branch.clone(),
+        permission_mode: session.permission_mode,
         fast_mode,
         user_id: session.user_id.clone(),
     }
@@ -500,6 +505,7 @@ pub(super) async fn setup_chat_session(
         project_dir,
         work_mode: effective_work_mode,
         session_type: session.session_type,
+        permission_mode: session.permission_mode,
         mako_crew_slug: mako_runtime.and_then(|runtime| runtime.crew_slug),
         user_id,
         guard,

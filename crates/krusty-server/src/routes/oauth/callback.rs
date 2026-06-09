@@ -145,7 +145,6 @@ pub(super) async fn oauth_callback(
                     );
                 }
             };
-            let access_token = token_data.access_token.clone();
             store.set(provider_id, token_data);
             if let Err(error) = store.save() {
                 return callback_error_page(
@@ -156,7 +155,7 @@ pub(super) async fn oauth_callback(
 
             let registry = state.model_registry.clone();
             tokio::spawn(async move {
-                refresh_openai_models(registry, access_token).await;
+                refresh_openai_models(registry).await;
             });
 
             callback_success_page(provider_id.storage_key().to_string())
@@ -373,20 +372,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn callback_page_does_not_embed_raw_script_end_tag_in_payload() {
+    async fn callback_page_does_not_embed_raw_script_end_tag_in_payload() -> anyhow::Result<()> {
         let response = callback_error_page(
             "openai".to_string(),
             "</script><script>window.__krusty_xss=1</script> (access_denied)".to_string(),
         );
-        let bytes = body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("callback page body should be readable");
-        let html = String::from_utf8(bytes.to_vec()).expect("callback page should be utf-8");
+        let bytes = body::to_bytes(response.into_body(), usize::MAX).await?;
+        let html = String::from_utf8(bytes.to_vec())?;
 
         assert!(html.contains("&lt;/script&gt;&lt;script&gt;window.__krusty_xss=1&lt;/script&gt;"));
         assert!(html.contains(
             r#"\u003c/script\u003e\u003cscript\u003ewindow.__krusty_xss=1\u003c/script\u003e"#
         ));
         assert!(!html.contains("const payload = {\"error\":\"</script>"));
+        Ok(())
     }
 }

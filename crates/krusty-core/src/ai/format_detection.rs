@@ -10,13 +10,19 @@ use super::providers::ProviderId;
 ///
 /// This is the canonical format detection logic used across Krusty.
 /// Provider-specific routing:
-/// - OpenAI: OpenAI chat/completions format
+/// - Grok Build models: OpenAI Responses format through the Grok CLI proxy
+/// - OpenAI: OpenAI chat/completions format unless auth/model routing overrides it
 /// - All others (OpenRouter, MiniMax, ZAi): Anthropic format
-pub fn detect_api_format(provider: ProviderId, _model: &str) -> ApiFormat {
+pub fn detect_api_format(provider: ProviderId, model: &str) -> ApiFormat {
     match provider {
+        ProviderId::Grok => grok_api_format(model),
         ProviderId::OpenAI => ApiFormat::OpenAI,
         _ => ApiFormat::Anthropic,
     }
+}
+
+fn grok_api_format(_model: &str) -> ApiFormat {
+    ApiFormat::OpenAIResponses
 }
 
 #[cfg(test)]
@@ -28,6 +34,18 @@ mod tests {
         assert!(matches!(
             detect_api_format(ProviderId::OpenAI, "gpt-4"),
             ApiFormat::OpenAI
+        ));
+    }
+
+    #[test]
+    fn test_detect_api_format_grok_provider() {
+        assert!(matches!(
+            detect_api_format(ProviderId::Grok, "grok-build"),
+            ApiFormat::OpenAIResponses
+        ));
+        assert!(matches!(
+            detect_api_format(ProviderId::Grok, "grok-composer-2.5-fast"),
+            ApiFormat::OpenAIResponses
         ));
     }
 

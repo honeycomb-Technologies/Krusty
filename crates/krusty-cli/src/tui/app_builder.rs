@@ -268,11 +268,16 @@ fn init_model_registry(preferences: &Option<Preferences>) -> SharedModelRegistry
             .models
             .iter()
             .map(|m| {
+                let api_format = crate::ai::format_detection::detect_api_format(provider.id, &m.id);
                 let mut meta = ModelMetadata::new(&m.id, &m.display_name, provider.id)
                     .with_context(m.context_window, m.max_output);
                 if let Some(format) = m.reasoning {
                     meta = meta.with_thinking(format);
                 }
+                meta.api_format = api_format;
+                meta.supports_vision =
+                    krusty_core::ai::models::resolve_model_metadata(provider.id, &m.id, api_format)
+                        .supports_vision;
                 meta
             })
             .collect();

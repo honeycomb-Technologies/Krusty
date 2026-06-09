@@ -41,7 +41,7 @@ use crate::storage::{
     PartialAssistantState, PendingInteractionSnapshot, ProjectSettings, RecoveryStatus,
     SessionManager, SessionType, WorkMode,
 };
-use crate::tools::registry::{PermissionMode, ToolRegistry};
+use crate::tools::registry::{FileObservationTracker, PermissionMode, ToolRegistry};
 
 use super::compaction::CompactionManager;
 use super::context;
@@ -67,6 +67,38 @@ use self::title::maybe_generate_title;
 
 const EXPLORATION_BUDGET_SOFT: usize = 15;
 const EXPLORATION_BUDGET_HARD: usize = 30;
+const CHATGPT_CODEX_EFFECTIVE_CONTEXT_WINDOW: usize = 256_000;
+
+fn effective_context_window_for_runtime(
+    uses_chatgpt_codex: bool,
+    resolved_context_window: usize,
+) -> usize {
+    if uses_chatgpt_codex {
+        resolved_context_window.min(CHATGPT_CODEX_EFFECTIVE_CONTEXT_WINDOW)
+    } else {
+        resolved_context_window
+    }
+}
+
+fn terminal_agent_state_after_interruption(stop_reason: &LoopStopReason) -> &'static str {
+    match stop_reason {
+        LoopStopReason::StreamIdleTimeout | LoopStopReason::UserAbort => "idle",
+        LoopStopReason::ProviderError | LoopStopReason::PinchFailed => "error",
+        _ => "idle",
+    }
+}
+
+fn should_retry_empty_stream_idle(
+    stop_reason: Option<&LoopStopReason>,
+    text: &str,
+    has_pending_or_complete_tool_calls: bool,
+    retry_attempted: bool,
+) -> bool {
+    matches!(stop_reason, Some(LoopStopReason::StreamIdleTimeout))
+        && !retry_attempted
+        && text.trim().is_empty()
+        && !has_pending_or_complete_tool_calls
+}
 
 /// Configuration for an orchestrator run.
 pub struct OrchestratorConfig {
@@ -290,10 +322,13 @@ impl AgenticOrchestrator {
         let mut tool_pattern_signatures: HashMap<String, usize> = HashMap::new();
         let mut title_generated = !generate_title;
         let mut iteration = 0usize;
-        let model_context_window = resolve_context_window(
-            ai_client.provider_id(),
-            &ai_client.config().model,
-            ai_client.config().api_format,
+        let model_context_window = effective_context_window_for_runtime(
+            ai_client.config().uses_chatgpt_codex_format(),
+            resolve_context_window(
+                ai_client.provider_id(),
+                &ai_client.config().model,
+                ai_client.config().api_format,
+            ),
         );
         let compaction_manager = CompactionManager::for_model(
             ai_client.provider_id(),
@@ -302,6 +337,8 @@ impl AgenticOrchestrator {
             model_context_window,
         );
         let mut context_ledger = ContextLedger::from_conversation(&conversation);
+        let mut empty_stream_idle_retry_attempted = false;
+        let file_observations = Arc::new(FileObservationTracker::default());
         persist_context_state(&db_path, &session_id, &context_ledger);
         clear_recovery_state(&db_path, &session_id);
 
@@ -388,6 +425,7 @@ impl AgenticOrchestrator {
                     working_dir: &working_dir,
                     model: Some(model_for_child),
                     target_branch,
+                    permission_mode,
                     preservation_hints: None,
                     direction: None,
                     initial_user_message: Some("Continue working on the current task.".to_string()),
@@ -511,6 +549,31 @@ impl AgenticOrchestrator {
                 last_token_count = result.total_tokens;
             }
 
+            if should_retry_empty_stream_idle(
+                result.stop_reason.as_ref(),
+                &result.recovery_checkpoint.text,
+                !result.tool_calls.is_empty() || !result.recovery_checkpoint.tool_calls.is_empty(),
+                empty_stream_idle_retry_attempted,
+            ) {
+                empty_stream_idle_retry_attempted = true;
+                tracing::warn!(
+                    session_id = %session_id,
+                    "Provider stream went idle before text or tool calls; retrying once"
+                );
+                let _ = event_tx.send(LoopEvent::Error {
+                    error: "Provider stream went idle before producing text or tool calls; retrying once automatically.".to_string(),
+                });
+                conversation.push(ModelMessage {
+                    role: Role::System,
+                    content: vec![Content::Text {
+                        text: "The previous provider stream went idle before producing text or tool calls. Continue from the last completed tool results; either call the next required tool or provide a concise final answer. Do not repeat completed work.".to_string(),
+                    }],
+                });
+                clear_recovery_state(&db_path, &session_id);
+                set_agent_state(&db_path, &session_id, "streaming");
+                continue;
+            }
+
             if let Some(stop_reason) = result.stop_reason.clone() {
                 persist_recovery_state(
                     &db_path,
@@ -530,7 +593,11 @@ impl AgenticOrchestrator {
                 if last_token_count > 0 {
                     update_token_count(&db_path, &session_id, last_token_count);
                 }
-                set_agent_state(&db_path, &session_id, "error");
+                set_agent_state(
+                    &db_path,
+                    &session_id,
+                    terminal_agent_state_after_interruption(&stop_reason),
+                );
                 let _ = event_tx.send(LoopEvent::Finished {
                     session_id: session_id.clone(),
                     stop_reason,
@@ -643,6 +710,7 @@ impl AgenticOrchestrator {
                         &mut input_rx,
                         project_settings.subagent_max_turns,
                         project_settings.disabled_tools.as_deref(),
+                        Arc::clone(&file_observations),
                     )
                     .await;
                     all_results.extend(other_results);
@@ -779,6 +847,7 @@ impl AgenticOrchestrator {
                 &mut input_rx,
                 project_settings.subagent_max_turns,
                 project_settings.disabled_tools.as_deref(),
+                Arc::clone(&file_observations),
             )
             .await;
             work_mode = next_work_mode;
@@ -895,9 +964,13 @@ impl AgenticOrchestrator {
 mod tests {
     use std::fs;
 
+    use super::effective_context_window_for_runtime;
     use super::inject_runtime_context;
     use super::message_builder::finalize_explore_only_turn;
     use super::resolve_project_permission_mode;
+    use super::should_retry_empty_stream_idle;
+    use super::terminal_agent_state_after_interruption;
+    use crate::agent::loop_events::LoopStopReason;
     use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
     use crate::skills::SkillsManager;
     use crate::storage::{ProjectSettings, SessionType, WorkMode};
@@ -905,6 +978,56 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
+
+    #[test]
+    fn chatgpt_codex_runtime_uses_conservative_context_window() {
+        assert_eq!(effective_context_window_for_runtime(true, 400_000), 256_000);
+        assert_eq!(effective_context_window_for_runtime(true, 128_000), 128_000);
+        assert_eq!(
+            effective_context_window_for_runtime(false, 400_000),
+            400_000
+        );
+    }
+
+    #[test]
+    fn empty_stream_idle_retries_once_before_recovery() {
+        assert!(should_retry_empty_stream_idle(
+            Some(&LoopStopReason::StreamIdleTimeout),
+            "",
+            false,
+            false
+        ));
+        assert!(!should_retry_empty_stream_idle(
+            Some(&LoopStopReason::StreamIdleTimeout),
+            "partial text",
+            false,
+            false
+        ));
+        assert!(!should_retry_empty_stream_idle(
+            Some(&LoopStopReason::StreamIdleTimeout),
+            "",
+            true,
+            false
+        ));
+        assert!(!should_retry_empty_stream_idle(
+            Some(&LoopStopReason::StreamIdleTimeout),
+            "",
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn stream_idle_timeout_is_terminal_but_not_active_processing() {
+        assert_eq!(
+            terminal_agent_state_after_interruption(&LoopStopReason::StreamIdleTimeout),
+            "idle"
+        );
+        assert_eq!(
+            terminal_agent_state_after_interruption(&LoopStopReason::ProviderError),
+            "error"
+        );
+    }
 
     #[test]
     fn project_settings_cannot_elevate_supervised_permission_mode() {
@@ -943,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_explore_only_turn_returns_summary_for_successful_explore() {
+    fn finalize_explore_only_turn_returns_summary_for_successful_explore() -> anyhow::Result<()> {
         let tool_calls = vec![AiToolCall {
             id: "call-1".to_string(),
             name: "explore".to_string(),
@@ -967,11 +1090,12 @@ mod tests {
         }];
 
         let summary = finalize_explore_only_turn(&tool_calls, &tool_results)
-            .expect("explore should finalize");
+            .ok_or_else(|| anyhow::anyhow!("explore should finalize"))?;
 
         assert!(summary.contains("Architecture review completed across 2 targets."));
         assert!(summary.contains("agent: Owns orchestration."));
         assert!(!summary.contains("Evidence examined: 15 tracked paths/files."));
+        Ok(())
     }
 
     #[test]
@@ -997,12 +1121,12 @@ mod tests {
     }
 
     #[test]
-    fn inject_runtime_context_applies_mako_session_identity() {
-        let temp = TempDir::new().expect("temp dir should exist");
+    fn inject_runtime_context_applies_mako_session_identity() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
         let repo = temp.path();
-        fs::create_dir_all(repo.join(".git")).expect("git dir should exist");
-        fs::write(repo.join("AGENTS.md"), "repo instructions").expect("agents should exist");
-        fs::write(repo.join("MAKO.md"), "Always Swimming.").expect("mako identity should exist");
+        fs::create_dir_all(repo.join(".git"))?;
+        fs::write(repo.join("AGENTS.md"), "repo instructions")?;
+        fs::write(repo.join("MAKO.md"), "Always Swimming.")?;
 
         let skills = RwLock::new(SkillsManager::with_defaults(repo));
         let conversation = vec![ModelMessage {
@@ -1053,5 +1177,6 @@ mod tests {
                 Content::Text { text } if text.contains("[MAKO PROJECT OVERLAY - MAKO.md]")
             )
         }));
+        Ok(())
     }
 }

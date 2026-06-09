@@ -41,6 +41,14 @@ impl App {
             Some(&working_dir_str),
         ) {
             Ok(id) => {
+                if let Err(error) =
+                    sm.update_session_permission_mode(&id, self.runtime.permission_mode)
+                {
+                    tracing::warn!(
+                        "Failed to persist permission mode for new session: {}",
+                        error
+                    );
+                }
                 tracing::info!("Created new session: {}", id);
                 self.runtime.current_session_id = Some(id.clone());
                 self.runtime.session_title = Some(fallback_title);

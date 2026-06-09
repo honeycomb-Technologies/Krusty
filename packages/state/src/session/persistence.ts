@@ -1,6 +1,6 @@
 import type { KrustyClient } from '@krusty/api';
 import type { createSessionsStore } from '../sessions';
-import type { SessionMode, SessionStoreState } from './types';
+import type { PermissionMode, SessionMode, SessionStoreState } from './types';
 
 export async function syncSessionPresence(
   client: KrustyClient,
@@ -34,6 +34,23 @@ export async function persistSessionMode(
 
   try {
     await client.updateSession(state.sessionId, { mode });
+    sessionsStore.getState().loadSessions();
+  } catch {
+    // Failed to persist
+  }
+}
+
+export async function persistSessionPermissionMode(
+  client: KrustyClient,
+  sessionsStore: ReturnType<typeof createSessionsStore>,
+  getState: () => SessionStoreState,
+  permissionMode: PermissionMode,
+) {
+  const state = getState();
+  if (!state.sessionId) return;
+
+  try {
+    await client.updateSession(state.sessionId, { permission_mode: permissionMode });
     sessionsStore.getState().loadSessions();
   } catch {
     // Failed to persist

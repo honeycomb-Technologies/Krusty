@@ -82,4 +82,15 @@ mod tests {
         assert!(metadata.supports_thinking);
         assert_eq!(metadata.context_window, 204_800);
     }
+
+    #[test]
+    fn resolves_grok_build_metadata_as_responses_reasoning() {
+        let metadata =
+            resolve_model_metadata(ProviderId::Grok, "grok-build", ApiFormat::OpenAIResponses);
+
+        assert_eq!(metadata.api_format, ApiFormat::OpenAIResponses);
+        assert_eq!(metadata.reasoning_format, Some(ReasoningFormat::OpenAI));
+        assert!(metadata.supports_thinking);
+        assert_eq!(metadata.context_window, 512_000);
+    }
 }

@@ -64,12 +64,10 @@ import {
   flattenToolCalls,
   getActiveToolCall,
   getLastAssistantMessage,
-  getWorkspaceMode,
   isModelUsable,
   normalizeProviderId,
   sessionTypeForTab,
   tabForSessionType,
-  type WorkspaceMode,
 } from "./chat-screen/helpers";
 import { styles } from "./chat-screen/styles";
 import { useSessionActions } from "./chat-screen/useSessionActions";
@@ -77,7 +75,6 @@ import { useSessionActions } from "./chat-screen/useSessionActions";
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
 
 export default function ChatScreen() {
-  const { theme } = useThemeContext();
   const {
     status,
     error: connectionError,
@@ -126,7 +123,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const thinkingLevel =
     useSessionStore((state) => state.thinkingLevel) ?? "medium";
   const permissionMode =
-    useSessionStore((state) => state.permissionMode) ?? "supervised";
+    useSessionStore((state) => state.permissionMode) ?? "autonomous";
   const fastModeStoreEnabled =
     useSessionStore((state) => state.fastModeEnabled) ?? false;
   const mode = useSessionStore((state) => state.mode) ?? "build";
@@ -257,7 +254,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
 
       try {
         await client.registerApnsDevice(deviceToken);
-      } catch {}
+      } catch (error) {
+        console.debug("Failed to register APNs device", error);
+      }
     },
     [client, isConnected],
   );

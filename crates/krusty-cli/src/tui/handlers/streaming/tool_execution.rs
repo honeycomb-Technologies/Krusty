@@ -9,6 +9,7 @@ use std::time::Duration;
 use crate::ai::types::AiToolCall;
 use crate::tui::app::App;
 use crate::tui::components::{PromptOption, PromptQuestion};
+use crate::tui::utils::edit_diff;
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -165,11 +166,22 @@ impl App {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let start_line = 1;
+                let start_line = edit_diff::find_start_line_in_file(
+                    &self.runtime.working_dir,
+                    &file_path,
+                    &old_string,
+                )
+                .unwrap_or(1);
 
                 if let Some(block) = self.runtime.blocks.edit.last_mut() {
                     if block.is_pending() {
+                        block.set_tool_use_id(tool_call.id.clone());
                         block.set_diff_data(file_path, old_string, new_string, start_line);
+                    }
+                }
+                if let Some((kind, id)) = self.runtime.chat.messages.last_mut() {
+                    if kind == "edit" && id.is_empty() {
+                        *id = tool_call.id.clone();
                     }
                 }
             }
@@ -304,6 +316,20 @@ impl App {
                     let line_count = output_str.lines().count();
                     block.set_content(output_str.to_string(), line_count, line_count);
                 }
+                break;
+            }
+        }
+    }
+
+    /// Mark EditBlock complete when the edit tool finishes.
+    pub(crate) fn update_edit_block(&mut self, tool_use_id: &str, output_str: &str) {
+        for block in &mut self.runtime.blocks.edit {
+            if block.tool_use_id() == Some(tool_use_id) {
+                if let Some(start_line) = edit_diff::start_line_from_tool_output(output_str) {
+                    block.set_start_line(start_line);
+                }
+                block.complete();
+                self.ui.block_ui.set_collapsed(tool_use_id, false);
                 break;
             }
         }

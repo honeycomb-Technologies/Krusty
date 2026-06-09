@@ -25,6 +25,7 @@ import {
   persistCurrentModel,
   persistSessionMode,
   persistSessionModel,
+  persistSessionPermissionMode,
   syncSessionPresence,
 } from './persistence';
 import {
@@ -61,7 +62,7 @@ import {
 } from './thinking';
 
 function hasOwnProperty<T extends object>(value: T, key: PropertyKey): boolean {
-  return Object.prototype.hasOwnProperty.call(value, key);
+  return  Object.hasOwn(value, key);
 }
 
 function normalizeTargetBranch(targetBranch: string | null | undefined): string | null {
@@ -105,7 +106,7 @@ export function createSessionStore(
     } catch {
       /* ignore */
     }
-    return "supervised";
+    return "autonomous";
   }
 
 
@@ -116,6 +117,11 @@ export function createSessionStore(
     getState: () => SessionStoreState,
     model: string | null,
   ) => persistSessionModel(client, sessionsStore, getState, model);
+
+  const persistPermissionMode = (
+    getState: () => SessionStoreState,
+    permissionMode: PermissionMode,
+  ) => persistSessionPermissionMode(client, sessionsStore, getState, permissionMode);
 
   const persistCurrentSelectedModel = (model: string | null) =>
     persistCurrentModel(client, model);
@@ -481,6 +487,8 @@ export function createSessionStore(
         }
 
         const mode = serverState?.mode ?? data.session.mode ?? "build";
+        const permissionMode =
+          serverState?.permission_mode ?? data.session.permission_mode ?? "autonomous";
         const previousModel = get().model;
         const sessionModel = data.session.model?.trim() || null;
         set((s) => {
@@ -494,6 +502,7 @@ export function createSessionStore(
             sessionId: data.session.id,
             title: data.session.title || "Untitled",
             mode,
+            permissionMode,
             model: sessionModel ?? s.model,
             modelProvider: nextModelProvider,
             fastModeEnabled: sessionModel
@@ -515,6 +524,12 @@ export function createSessionStore(
             isLoading: false,
           };
         });
+        try {
+          storage.set("krusty-permission-mode", permissionMode);
+        } catch {
+          /* ignore */
+        }
+
         planStore.getState().setVisible(mode === "plan");
 
         workspace
@@ -561,12 +576,18 @@ export function createSessionStore(
 
     // -- initSession --------------------------------------------------------
 
-    initSession(sessionId: string, title: string) {
+    initSession(sessionId: string, title: string, permissionMode?: PermissionMode) {
       const current = get();
       get().stopPresenceHeartbeat(current.sessionId);
+      const nextPermissionMode = permissionMode ?? current.permissionMode;
+      try {
+        storage.set("krusty-permission-mode", nextPermissionMode);
+      } catch {
+        /* ignore */
+      }
       set({
         ...initialState,
-        permissionMode: current.permissionMode,
+        permissionMode: nextPermissionMode,
         model: current.model,
         modelProvider: current.modelProvider,
         thinkingLevel: current.thinkingLevel,
@@ -675,6 +696,7 @@ export function createSessionStore(
         } catch {
           /* ignore */
         }
+        void persistPermissionMode(get, newMode);
         return { permissionMode: newMode };
       });
     },

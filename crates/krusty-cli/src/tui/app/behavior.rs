@@ -45,20 +45,30 @@ impl App {
                 || self.runtime.current_model.contains("opus-4.6"))
     }
 
+    /// Whether Tab should cycle Grok Build/Composer thinking effort levels.
+    pub fn is_grok_thinking_mode(&self) -> bool {
+        self.runtime.active_provider == ProviderId::Grok
+            && (self.runtime.current_model == "grok-build"
+                || self.runtime.current_model.starts_with("grok-composer-"))
+    }
+
     /// Whether this model supports multi-level thinking cycling.
     pub fn has_multi_level_thinking(&self) -> bool {
-        self.is_openai_xhigh_thinking_mode() || self.is_anthropic_opus_thinking_mode()
+        self.is_openai_xhigh_thinking_mode()
+            || self.is_anthropic_opus_thinking_mode()
+            || self.is_grok_thinking_mode()
     }
 
     /// Handle Tab thinking toggle/cycle.
     pub fn cycle_thinking_level(&mut self) {
-        self.runtime.thinking_level = if self.is_openai_xhigh_thinking_mode() {
-            self.runtime.thinking_level.cycle_codex()
-        } else if self.is_anthropic_opus_thinking_mode() {
-            self.runtime.thinking_level.cycle_anthropic()
-        } else {
-            self.runtime.thinking_level.toggle_basic()
-        };
+        self.runtime.thinking_level =
+            if self.is_openai_xhigh_thinking_mode() || self.is_grok_thinking_mode() {
+                self.runtime.thinking_level.cycle_codex()
+            } else if self.is_anthropic_opus_thinking_mode() {
+                self.runtime.thinking_level.cycle_anthropic()
+            } else {
+                self.runtime.thinking_level.toggle_basic()
+            };
         tracing::info!(
             model = %self.runtime.current_model,
             multi_level = self.has_multi_level_thinking(),

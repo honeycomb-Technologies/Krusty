@@ -59,17 +59,15 @@ impl Tool for BashTool {
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            r#"Do not use bash for file reading (cat/head/tail), editing (sed/awk), or searching (grep/find/rg) — use the dedicated Read, Edit, Grep, and Glob tools instead. Bash is for git, build systems, package managers, compilers, and system utilities.
+            r#"Use bash for git, builds, package managers, compilers, servers/watchers, and system utilities. Use dedicated tools for routine file read/search/edit operations.
 
-Chain dependent commands with `&&`. For independent commands, make parallel tool calls instead of chaining. Never use trailing `&` for background processes — set `run_in_background:true` instead.
+Chain dependent commands with `&&`; run independent commands as separate parallel tool calls. Use `run_in_background:true` for servers/watchers instead of a trailing `&`.
 
-Default timeout is 30 seconds. Set `timeout` explicitly for long-running commands (max 600000ms / 10 minutes). For servers, watchers, and long builds, use `run_in_background:true`.
+Default timeout is 30 seconds; set `timeout` explicitly for long-running commands (max 600000ms). Include a concise `description` for logging/progress.
 
-Always include a `description` parameter with a clear 5-10 word summary of what the command does (e.g., "Install npm dependencies", "Run test suite"). This is used for logging and progress display.
+Relative paths resolve from the tool working directory; chain `cd dir && command` when a command must run from a specific directory. Avoid interactive commands; avoid `sudo` unless explicitly requested.
 
-Use absolute paths for file arguments. The working directory resets between calls, so `cd` is unreliable — prefer absolute paths or chain `cd dir && command`.
-
-Avoid interactive commands (requiring stdin). Avoid `sudo` unless the user explicitly requests it. Prefer `--yes`/`-y` flags for package managers to avoid interactive prompts."#,
+If a validation/preflight command fails with actionable file diagnostics (for example `git diff --check` reporting trailing whitespace), fix the reported files with the dedicated edit tools, re-stage affected paths when needed, then rerun the check. If `git diff --cached --check` fails, remember that the staged index is stale until you run `git add <reported-path>` after the edit. Do not repeat the same failing command unchanged."#,
         )
     }
 
@@ -123,7 +121,7 @@ Avoid interactive commands (requiring stdin). Avoid `sudo` unless the user expli
             };
             if !canonical.starts_with(sandbox) {
                 return ToolResult::error(
-                    "Access denied: working directory is outside workspace".to_string(),
+                    "Access denied: working directory is outside the configured filesystem access root".to_string(),
                 );
             }
         }

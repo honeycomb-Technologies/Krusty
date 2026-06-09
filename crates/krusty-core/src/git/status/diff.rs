@@ -23,6 +23,12 @@ pub(super) fn compute_branch_diff_summary(
     Some(parse_numstat(&stdout))
 }
 
+pub(super) fn compute_worktree_diff_summary(repo_root: &Path) -> Option<BranchDiffSummary> {
+    let diff_output = run_git(&["diff", "--numstat", "HEAD", "--"], repo_root).ok()?;
+    let stdout = String::from_utf8_lossy(&diff_output.stdout);
+    Some(parse_numstat(&stdout))
+}
+
 fn resolve_base_ref(repo_root: &Path, upstream: Option<&str>) -> Option<String> {
     if let Some(upstream) = upstream.filter(|u| !u.trim().is_empty()) {
         if ref_exists(repo_root, upstream) {

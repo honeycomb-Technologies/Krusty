@@ -64,7 +64,10 @@ impl ModelProfile {
             };
         }
 
-        if provider == ProviderId::OpenAI || normalized.starts_with("openai/") {
+        if matches!(provider, ProviderId::OpenAI | ProviderId::Grok)
+            || normalized.starts_with("openai/")
+            || normalized.contains("grok")
+        {
             return Self {
                 prompt_family: PromptFamily::OpenAiReasoning,
                 usable_context_ratio: 0.75,

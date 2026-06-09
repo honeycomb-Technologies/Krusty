@@ -191,6 +191,38 @@ mod tests {
     }
 
     #[test]
+    fn responses_usage_keeps_cached_tokens_separate() {
+        let parser = OpenAIParser::new();
+        let done_event = json!({
+            "type": "response.done",
+            "response": {
+                "status": "completed",
+                "usage": {
+                    "input_tokens": 40747,
+                    "input_tokens_details": {"cached_tokens": 40704},
+                    "output_tokens": 244,
+                    "total_tokens": 40991
+                }
+            }
+        });
+
+        let event = parser
+            .parse_responses_api_event(&done_event, "response.done")
+            .expect("usage event should parse");
+
+        let SseEvent::Finish {
+            usage: Some(usage), ..
+        } = event
+        else {
+            panic!("expected finish event with usage");
+        };
+        assert_eq!(usage.prompt_tokens, 43);
+        assert_eq!(usage.cache_read_input_tokens, 40_704);
+        assert_eq!(usage.completion_tokens, 244);
+        assert_eq!(usage.total_tokens, 40_991);
+    }
+
+    #[test]
     fn responses_argument_deltas_still_accumulate() {
         let parser = OpenAIParser::new();
 

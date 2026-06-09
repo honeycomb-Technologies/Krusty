@@ -3,9 +3,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::tools::registry::{tool_policy, ToolContext, ToolResult};
+use crate::tools::registry::{authorize_tool_call, PermissionMode, ToolContext, ToolResult};
 
-use super::shell_policy::{is_modifying_bash_command, safety_violation};
+use super::shell_policy::{
+    classify_bash_command, BashCommandClassification, BashFileOperationKind,
+};
 use super::{HookResult, PostToolHook, PreToolHook};
 
 /// Safety hook that blocks dangerous bash commands using regex patterns
@@ -28,18 +30,62 @@ impl SafetyHook {
     pub fn new() -> Self {
         Self
     }
+
+    fn bash_file_operation_policy_from_classification(
+        &self,
+        command: &str,
+        classification: BashCommandClassification,
+        ctx: &ToolContext,
+    ) -> HookResult {
+        let Some(operation) = classification.file_operation else {
+            return HookResult::Continue;
+        };
+
+        let reason = format!(
+            "Bash {} via '{}' is not allowed here; use the dedicated {} tool instead. Segment: {}",
+            operation.kind.as_str(),
+            operation.command,
+            operation.recommended_tool,
+            operation.segment
+        );
+
+        if operation.kind == BashFileOperationKind::Edit
+            || ctx.permission_mode == PermissionMode::Autonomous
+        {
+            tracing::warn!(
+                command = command,
+                file_operation = operation.kind.as_str(),
+                detected_command = operation.command,
+                recommended_tool = operation.recommended_tool,
+                segment = operation.segment,
+                "Safety hook blocked bash file-operation misuse"
+            );
+            return HookResult::Block { reason };
+        }
+
+        tracing::warn!(
+            command = command,
+            file_operation = operation.kind.as_str(),
+            detected_command = operation.command,
+            recommended_tool = operation.recommended_tool,
+            segment = operation.segment,
+            "Bash file-operation misuse detected; allowing in supervised mode"
+        );
+        HookResult::Continue
+    }
 }
 
 #[async_trait]
 impl PreToolHook for SafetyHook {
-    async fn before_execute(&self, name: &str, params: &Value, _ctx: &ToolContext) -> HookResult {
+    async fn before_execute(&self, name: &str, params: &Value, ctx: &ToolContext) -> HookResult {
         if name != "bash" && name != "shell" && name != "execute" {
             return HookResult::Continue;
         }
 
         let command = params.get("command").and_then(|v| v.as_str()).unwrap_or("");
 
-        if let Some(pattern) = safety_violation(command) {
+        let classification = classify_bash_command(command);
+        if let Some(pattern) = classification.safety_violation {
             tracing::warn!(
                 tool = name,
                 command = command,
@@ -49,6 +95,11 @@ impl PreToolHook for SafetyHook {
             return HookResult::Block {
                 reason: format!("Blocked dangerous pattern: '{}'", pattern),
             };
+        }
+
+        match self.bash_file_operation_policy_from_classification(command, classification, ctx) {
+            HookResult::Continue => {}
+            blocked => return blocked,
         }
 
         HookResult::Continue
@@ -77,12 +128,12 @@ impl PlanModeHook {
         Self
     }
 
-    fn is_write_tool(&self, name: &str) -> bool {
-        !tool_policy(name).allowed_in_plan_mode
+    fn is_blocked_in_plan_mode(&self, name: &str, params: &Value, ctx: &ToolContext) -> bool {
+        authorize_tool_call(name, params, ctx.permission_mode, true).is_blocked()
     }
 
     fn is_modifying_bash(&self, command: &str) -> bool {
-        is_modifying_bash_command(command)
+        classify_bash_command(command).modifies_filesystem_or_process
     }
 }
 
@@ -110,7 +161,7 @@ impl PreToolHook for PlanModeHook {
             return HookResult::Continue;
         }
 
-        if self.is_write_tool(name) {
+        if self.is_blocked_in_plan_mode(name, params, ctx) {
             tracing::info!(tool = name, "Plan mode blocked write tool");
             return HookResult::Block {
                 reason: format!(
@@ -166,12 +217,22 @@ mod tests {
     use super::*;
 
     fn default_context() -> ToolContext {
-        ToolContext::default()
+        ToolContext {
+            permission_mode: PermissionMode::Supervised,
+            ..Default::default()
+        }
     }
 
     fn plan_mode_context() -> ToolContext {
         ToolContext {
             plan_mode: true,
+            ..Default::default()
+        }
+    }
+
+    fn autonomous_context() -> ToolContext {
+        ToolContext {
+            permission_mode: PermissionMode::Autonomous,
             ..Default::default()
         }
     }
@@ -183,6 +244,22 @@ mod tests {
 
         let result = hook.before_execute("apply_patch", &json!({}), &ctx).await;
         assert!(matches!(result, HookResult::Block { .. }));
+    }
+
+    #[tokio::test]
+    async fn plan_mode_blocks_agent_build_but_allows_read_only_agents() {
+        let hook = PlanModeHook::new();
+        let ctx = plan_mode_context();
+
+        let build_result = hook
+            .before_execute("agent", &json!({ "agent_type": "build" }), &ctx)
+            .await;
+        assert!(matches!(build_result, HookResult::Block { .. }));
+
+        let explore_result = hook
+            .before_execute("agent", &json!({ "agent_type": "explore" }), &ctx)
+            .await;
+        assert!(matches!(explore_result, HookResult::Continue));
     }
 
     #[tokio::test]
@@ -266,6 +343,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn safety_hook_blocks_destructive_git_commands() {
+        let hook = SafetyHook::new();
+        let ctx = default_context();
+
+        for command in [
+            "git reset --hard",
+            "git push --force-with-lease origin main",
+            "git checkout -- src/lib.rs",
+            "git restore src/lib.rs",
+            "git clean -fd",
+            "git branch -D old-topic",
+        ] {
+            let result = hook
+                .before_execute("bash", &json!({ "command": command }), &ctx)
+                .await;
+            assert!(
+                matches!(result, HookResult::Block { .. }),
+                "expected safety hook to block {command:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn safety_hook_allows_read_only_commands() {
         let hook = SafetyHook::new();
         let ctx = default_context();
@@ -274,5 +374,53 @@ mod tests {
             .before_execute("bash", &json!({ "command": "ls -la && git status" }), &ctx)
             .await;
         assert!(matches!(result, HookResult::Continue));
+    }
+
+    #[tokio::test]
+    async fn safety_hook_warns_but_allows_supervised_bash_file_read_and_search() {
+        let hook = SafetyHook::new();
+        let ctx = default_context();
+
+        for command in ["cat Cargo.toml", "rg needle crates"] {
+            let result = hook
+                .before_execute("bash", &json!({ "command": command }), &ctx)
+                .await;
+            assert!(
+                matches!(result, HookResult::Continue),
+                "expected supervised command {command:?} to be allowed with warning"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn safety_hook_blocks_autonomous_bash_file_read_and_search() {
+        let hook = SafetyHook::new();
+        let ctx = autonomous_context();
+
+        for command in ["cat Cargo.toml", "find . -name '*.rs'"] {
+            let result = hook
+                .before_execute("bash", &json!({ "command": command }), &ctx)
+                .await;
+            assert!(
+                matches!(result, HookResult::Block { .. }),
+                "expected autonomous command {command:?} to be blocked"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn safety_hook_blocks_bash_file_edit_even_in_supervised_mode() {
+        let hook = SafetyHook::new();
+        let ctx = default_context();
+
+        let result = hook
+            .before_execute(
+                "bash",
+                &json!({ "command": "sed -i 's/old/new/' src/lib.rs" }),
+                &ctx,
+            )
+            .await;
+
+        assert!(matches!(result, HookResult::Block { .. }));
     }
 }

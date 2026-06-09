@@ -173,13 +173,12 @@ async fn start_openai_device_oauth(
                 }
 
                 if let Ok(mut store) = OAuthTokenStore::load() {
-                    let access_token = token_data.access_token.clone();
                     store.set(provider_id, token_data);
                     if let Err(error) = store.save() {
                         tracing::error!("Failed to save OAuth token: {}", error);
                     } else {
                         tracing::info!("OpenAI OAuth token stored successfully");
-                        refresh_openai_models(model_registry.clone(), access_token).await;
+                        refresh_openai_models(model_registry.clone()).await;
                     }
                 }
             }
@@ -246,11 +245,28 @@ fn device_code_response(code: &OpenAIDeviceCodeResponse) -> OAuthDeviceCodeRespo
     }
 }
 
-pub(super) async fn refresh_openai_models(
-    registry: krusty_core::ai::models::SharedModelRegistry,
-    access_token: String,
-) {
-    match krusty_core::ai::openai::fetch_models(&access_token).await {
+pub(super) async fn refresh_openai_models(registry: krusty_core::ai::models::SharedModelRegistry) {
+    let credentials = match krusty_core::storage::CredentialStore::load() {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            tracing::warn!(
+                "Failed to load credentials for OpenAI model refresh: {}",
+                error
+            );
+            return;
+        }
+    };
+
+    let Some(credential) =
+        krusty_core::ai::catalog::credential_for_dynamic_models(ProviderId::OpenAI, &credentials)
+    else {
+        tracing::debug!(
+            "Skipping OpenAI model refresh after OAuth: OpenAI API key is required for /v1/models"
+        );
+        return;
+    };
+
+    match krusty_core::ai::catalog::fetch_dynamic_models(ProviderId::OpenAI, &credential).await {
         Ok(models) => registry.set_models(ProviderId::OpenAI, models).await,
         Err(error) => tracing::warn!("Failed to refresh OpenAI models after OAuth: {}", error),
     }

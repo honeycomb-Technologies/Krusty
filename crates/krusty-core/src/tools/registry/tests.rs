@@ -89,6 +89,61 @@ fn test_tool_policy_contracts() {
     assert_eq!(workspace_policy.category, ToolCategory::Interactive);
     assert!(workspace_policy.allowed_in_plan_mode);
     assert!(workspace_policy.requires_supervised_approval);
+
+    let agent_build_policy = tool_policy_for_call("agent", &json!({ "agent_type": "build" }));
+    assert_eq!(agent_build_policy.category, ToolCategory::Write);
+    assert!(agent_build_policy.requires_supervised_approval);
+    assert!(!agent_build_policy.allowed_in_plan_mode);
+    assert_eq!(
+        agent_build_policy.timeout_override,
+        Some(DELEGATED_TOOL_TIMEOUT)
+    );
+
+    let agent_explore_policy = tool_policy_for_call("agent", &json!({ "agent_type": "explore" }));
+    assert_eq!(agent_explore_policy.category, ToolCategory::ReadOnly);
+    assert!(!agent_explore_policy.requires_supervised_approval);
+    assert!(agent_explore_policy.allowed_in_plan_mode);
+
+    let agent_unknown_policy = tool_policy_for_call("agent", &json!({ "agent_type": "unknown" }));
+    assert_eq!(agent_unknown_policy.category, ToolCategory::Write);
+    assert!(agent_unknown_policy.requires_supervised_approval);
+
+    assert_eq!(
+        authorize_tool_call(
+            "agent",
+            &json!({ "agent_type": "build" }),
+            PermissionMode::Supervised,
+            false,
+        ),
+        ToolAuthorization::RequiresApproval
+    );
+    assert_eq!(
+        authorize_tool_call(
+            "agent",
+            &json!({ "agent_type": "build" }),
+            PermissionMode::Autonomous,
+            false,
+        ),
+        ToolAuthorization::Execute
+    );
+    assert_eq!(
+        authorize_tool_call(
+            "agent",
+            &json!({ "agent_type": "build" }),
+            PermissionMode::Autonomous,
+            true,
+        ),
+        ToolAuthorization::BlockedInPlanMode
+    );
+    assert_eq!(
+        authorize_tool_call(
+            "agent",
+            &json!({ "agent_type": "verify" }),
+            PermissionMode::Supervised,
+            true,
+        ),
+        ToolAuthorization::Execute
+    );
 }
 
 #[test]
@@ -96,6 +151,12 @@ fn delegated_explore_policy_blocks_write_tools() {
     let policy = DelegationPolicy::for_subagent_explore(PermissionMode::Autonomous, Some(20));
     assert!(policy.authorize_tool("read", false).is_ok());
     assert!(policy.authorize_tool("edit", false).is_err());
+    assert!(policy
+        .authorize_tool_call("agent", &json!({ "agent_type": "explore" }), false)
+        .is_ok());
+    assert!(policy
+        .authorize_tool_call("agent", &json!({ "agent_type": "build" }), false)
+        .is_err());
 }
 
 #[test]

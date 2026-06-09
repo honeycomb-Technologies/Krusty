@@ -17,7 +17,6 @@ import type {
   StreamCallbacks,
   StreamEvent,
   DelegatedProgressEvent,
-  PlanItem,
   SessionType,
   TreeEntry,
   WorkspaceMode,
@@ -45,6 +44,7 @@ import type {
   MakoRecoverDaemonResponse,
   MakoRunPriority,
   MakoSessionSummary,
+  PermissionMode,
   MakoSessionStatus,
   ApnsRegisterResponse,
   ApnsStatusResponse,
@@ -145,6 +145,7 @@ export class KrustyClient {
     targetBranch?: string | null,
     workspaceMode?: WorkspaceMode,
     sessionType?: SessionType,
+    permissionMode?: PermissionMode,
   ): Promise<SessionResponse> {
     return this.request('/sessions', {
       method: 'POST',
@@ -154,6 +155,7 @@ export class KrustyClient {
         target_branch: targetBranch ?? undefined,
         workspace_mode: workspaceMode ?? undefined,
         session_type: sessionType ?? undefined,
+        permission_mode: permissionMode ?? undefined,
       }),
     });
   }
@@ -166,6 +168,7 @@ export class KrustyClient {
       model: string | null;
       target_branch: string | null;
       targetBranch: string | null;
+      permission_mode: PermissionMode;
     }>,
   ): Promise<SessionResponse> {
     return this.request(`/sessions/${id}`, {

@@ -45,6 +45,14 @@ impl ProviderCapabilities {
                 web_plugins: false,
                 supports_vision: true,
             },
+            ProviderId::Grok => Self {
+                web_search: false,
+                web_fetch: false,
+                context_management: false,
+                prompt_caching: true,
+                web_plugins: false,
+                supports_vision: true,
+            },
             ProviderId::ZAi | ProviderId::MiniMax => Self::default(),
         }
     }
@@ -78,6 +86,12 @@ mod tests {
         assert!(!openai.web_search);
         assert!(!openai.web_plugins);
         assert!(openai.supports_vision);
+
+        let grok = ProviderCapabilities::for_provider(ProviderId::Grok);
+        assert!(!grok.web_search);
+        assert!(!grok.web_plugins);
+        assert!(grok.prompt_caching);
+        assert!(grok.supports_vision);
 
         let minimax = ProviderCapabilities::for_provider(ProviderId::MiniMax);
         assert!(!minimax.web_search);

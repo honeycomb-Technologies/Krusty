@@ -62,7 +62,7 @@ fn create_test_state() -> (AppState, PathBuf) {
             delegated_state: Arc::new(RwLock::new(HashMap::new())),
             remote_access: Arc::new(RwLock::new(crate::remote_access::RemoteAccessConfig {
                 enabled: true,
-                token: "test-token".to_string(),
+                token: String::new(),
             })),
             active_agent_streams: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             peak_rss_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -118,7 +118,7 @@ async fn chat_new_session_contract_includes_target_branch_intent() {
             thinking_enabled: crate::types::ThinkingLevel::Off,
             fast_mode: true,
             mode: None,
-            permission_mode: krusty_core::tools::registry::PermissionMode::default(),
+            permission_mode: Some(krusty_core::tools::registry::PermissionMode::default()),
             research_enabled: None,
         },
     )
@@ -167,7 +167,7 @@ async fn chat_existing_session_uses_persisted_target_branch_intent_when_request_
     let session_manager =
         SessionManager::new(Database::new(&state.db_path).expect("database should open"));
     let session_id = session_manager
-        .create_session_for_user_with_config(
+        .create_session_for_user_with_config_and_permission(
             "Persisted Contract",
             Some("openai/gpt-5.5-mini"),
             Some(persisted_project.to_string_lossy().as_ref()),
@@ -176,6 +176,7 @@ async fn chat_existing_session_uses_persisted_target_branch_intent_when_request_
             Some("alice"),
             Some("feature/contract"),
             SessionType::Code,
+            krusty_core::tools::registry::PermissionMode::Supervised,
         )
         .expect("session should be created");
 
@@ -195,7 +196,7 @@ async fn chat_existing_session_uses_persisted_target_branch_intent_when_request_
             thinking_enabled: crate::types::ThinkingLevel::Off,
             fast_mode: true,
             mode: None,
-            permission_mode: krusty_core::tools::registry::PermissionMode::default(),
+            permission_mode: None,
             research_enabled: None,
         },
     )
@@ -220,6 +221,10 @@ async fn chat_existing_session_uses_persisted_target_branch_intent_when_request_
     );
     assert_eq!(contract.model.as_deref(), Some("openai/gpt-5.5-mini"));
     assert_eq!(contract.target_branch.as_deref(), Some("feature/contract"));
+    assert_eq!(
+        contract.permission_mode,
+        krusty_core::tools::registry::PermissionMode::Supervised
+    );
     assert!(contract.fast_mode);
 }
 
@@ -264,7 +269,7 @@ async fn chat_existing_session_allows_explicit_target_branch_intent_override() {
             thinking_enabled: crate::types::ThinkingLevel::Off,
             fast_mode: false,
             mode: None,
-            permission_mode: krusty_core::tools::registry::PermissionMode::default(),
+            permission_mode: Some(krusty_core::tools::registry::PermissionMode::default()),
             research_enabled: None,
         },
     )
@@ -742,7 +747,7 @@ async fn chat_does_not_persist_model_override_when_setup_fails() {
             thinking_enabled: crate::types::ThinkingLevel::Off,
             fast_mode: false,
             mode: None,
-            permission_mode: krusty_core::tools::registry::PermissionMode::default(),
+            permission_mode: Some(krusty_core::tools::registry::PermissionMode::default()),
             research_enabled: None,
         }),
     )
@@ -788,7 +793,7 @@ async fn chat_rejects_missing_model_before_creating_session() {
             thinking_enabled: crate::types::ThinkingLevel::Off,
             fast_mode: false,
             mode: None,
-            permission_mode: krusty_core::tools::registry::PermissionMode::default(),
+            permission_mode: Some(krusty_core::tools::registry::PermissionMode::default()),
             research_enabled: None,
         }),
     )
@@ -838,7 +843,7 @@ async fn chat_rejects_unsupported_image_before_creating_session() {
             thinking_enabled: crate::types::ThinkingLevel::Off,
             fast_mode: false,
             mode: None,
-            permission_mode: krusty_core::tools::registry::PermissionMode::default(),
+            permission_mode: Some(krusty_core::tools::registry::PermissionMode::default()),
             research_enabled: None,
         }),
     )

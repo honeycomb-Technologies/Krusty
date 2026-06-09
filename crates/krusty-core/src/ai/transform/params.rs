@@ -150,7 +150,7 @@ pub fn wrap_provider_options(options: Value, provider_id: ProviderId) -> Provide
             anthropic: Some(options),
             ..Default::default()
         },
-        ProviderId::ZAi | ProviderId::MiniMax | ProviderId::OpenAI => {
+        ProviderId::ZAi | ProviderId::MiniMax | ProviderId::OpenAI | ProviderId::Grok => {
             if options
                 .as_object()
                 .and_then(|o| o.get("reasoning_content"))

@@ -71,16 +71,23 @@ pub fn render_status_bar(f: &mut Frame, area: Rect, props: StatusBarProps<'_>) {
         }
     }
 
-    // Git summary in local-dirty format:
-    // Dirty: 12
+    // Git diff summary for uncommitted tracked changes: +927 -927.
     if let Some(git) = git_status {
-        let dirty_text = format!("Dirty: {}", git.total_changes());
-        left_width += 3 + dirty_text.width() as u16;
-        left_spans.push(Span::styled(" │ ", Style::default().fg(theme.dim_color)));
-        left_spans.push(Span::styled(
-            dirty_text,
-            Style::default().fg(theme.dim_color),
-        ));
+        if git.total_changes() > 0 {
+            let additions_text = format!("+{}", git.worktree_additions);
+            let deletions_text = format!("-{}", git.worktree_deletions);
+            left_width += 3 + additions_text.width() as u16 + 1 + deletions_text.width() as u16;
+            left_spans.push(Span::styled(" │ ", Style::default().fg(theme.dim_color)));
+            left_spans.push(Span::styled(
+                additions_text,
+                Style::default().fg(theme.diff_add_color),
+            ));
+            left_spans.push(Span::raw(" "));
+            left_spans.push(Span::styled(
+                deletions_text,
+                Style::default().fg(theme.diff_remove_color),
+            ));
+        }
     }
 
     // Add context indicator if available (fixed width to prevent flashing)

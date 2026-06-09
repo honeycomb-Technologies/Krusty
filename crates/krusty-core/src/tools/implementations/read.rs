@@ -37,11 +37,11 @@ impl Tool for ReadTool {
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            r#"Use absolute paths only — relative paths will fail. Default reads 2000 lines from the start. Use offset/limit when you know which section you need or when the file is large.
+            r#"Prefer absolute paths for clarity; relative paths resolve against the current working directory. Default reads 2000 lines; use offset/limit for large files.
 
-Results include 1-indexed line numbers in `cat -n` format. Binary files are detected and rejected. Images and PDFs can be read for multimodal analysis.
+Results include 1-indexed line numbers. Binary files are rejected; images/PDFs can be read for multimodal analysis.
 
-Always read a file before editing it — the Edit tool will reject blind edits. When re-reading after an edit, use offset/limit to read just the changed region instead of the whole file."#,
+Read a file before modifying it: edit, multiedit, and overwrite-via-write enforce this."#,
         )
     }
 
@@ -51,7 +51,7 @@ Always read a file before editing it — the Edit tool will reject blind edits. 
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "The absolute path to the file to read"
+                    "description": "The path to the file to read"
                 },
                 "offset": {
                     "type": "number",
@@ -73,7 +73,7 @@ Always read a file before editing it — the Edit tool will reject blind edits. 
             Err(e) => return e,
         };
 
-        // Use sandboxed resolve for multi-tenant path isolation
+        // Resolve under the configured filesystem access policy.
         let path = match ctx.sandboxed_resolve(&params.file_path) {
             Ok(p) => p,
             Err(e) => {
@@ -96,6 +96,11 @@ Always read a file before editing it — the Edit tool will reject blind edits. 
         if !path.is_file() {
             return ToolResult::error(format!("Path is not a file: {}", path.display()));
         }
+
+        let canonical_path = match fs::canonicalize(&path).await {
+            Ok(path) => path,
+            Err(e) => return ToolResult::error(format!("Failed to resolve file path: {}", e)),
+        };
 
         // Check file size before reading to prevent memory exhaustion
         let metadata = match fs::metadata(&path).await {
@@ -125,6 +130,7 @@ Always read a file before editing it — the Edit tool will reject blind edits. 
                 1024..1_048_576 => format!("{:.1} KB", size as f64 / 1024.0),
                 _ => format!("{:.1} MB", size as f64 / 1_048_576.0),
             };
+            ctx.record_file_observation(canonical_path);
             return ToolResult::success_data(json!({
                 "content": format!("Binary file: {} ({})", path.display(), size_str),
                 "total_lines": 0,
@@ -155,6 +161,8 @@ Always read a file before editing it — the Edit tool will reject blind edits. 
 
         let content = lines[start..end].join("\n");
 
+        ctx.record_file_observation(canonical_path);
+
         ToolResult::success_data(json!({
             "content": content,
             "total_lines": total_lines,
@@ -172,7 +180,9 @@ fn find_suggestions(file_path: &str, ctx: &ToolContext) -> Vec<String> {
         None => return Vec::new(),
     };
 
-    let search_root = ctx.sandbox_root.as_deref().unwrap_or(&ctx.working_dir);
+    let search_root = ctx
+        .filesystem_access_root()
+        .unwrap_or_else(|| ctx.working_dir.clone());
 
     let pattern = format!("**/{}", filename);
     let full_pattern = format!("{}/{}", search_root.display(), pattern);
@@ -190,4 +200,56 @@ fn find_suggestions(file_path: &str, ctx: &ToolContext) -> Vec<String> {
     }
 
     suggestions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn successful_read_records_canonical_file_observation() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should create");
+        let file_path = temp_dir.path().join("sample.txt");
+        fs::write(&file_path, "hello\nworld\n")
+            .await
+            .expect("test file should write");
+        let canonical = file_path
+            .canonicalize()
+            .expect("test file should canonicalize");
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+
+        let result = ReadTool
+            .execute(
+                json!({
+                    "file_path": file_path.display().to_string(),
+                    "limit": 1,
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "unexpected read error: {}", result.output);
+        assert!(ctx.has_file_observation(&canonical));
+        assert_eq!(ctx.observed_files_snapshot(), vec![canonical]);
+    }
+
+    #[tokio::test]
+    async fn failed_read_does_not_record_observation() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should create");
+        let missing = temp_dir.path().join("missing.txt");
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+
+        let result = ReadTool
+            .execute(json!({ "file_path": missing.display().to_string() }), &ctx)
+            .await;
+
+        assert!(result.is_error);
+        assert!(ctx.observed_files_snapshot().is_empty());
+    }
 }

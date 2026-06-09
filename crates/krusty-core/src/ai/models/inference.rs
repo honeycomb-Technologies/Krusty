@@ -27,8 +27,9 @@ pub fn infer_model_metadata(
     let mut metadata =
         ModelMetadata::new(model_id, model_id, provider).with_context(context_window, max_output);
 
-    metadata.api_format = if provider == ProviderId::OpenAI
-        && crate::ai::providers::ProviderConfig::openai_prefers_responses_api(model_id)
+    metadata.api_format = if provider == ProviderId::Grok
+        || (provider == ProviderId::OpenAI
+            && crate::ai::providers::ProviderConfig::openai_prefers_responses_api(model_id))
     {
         ApiFormat::OpenAIResponses
     } else {
@@ -40,7 +41,9 @@ pub fn infer_model_metadata(
             Some(ReasoningFormat::Anthropic)
         } else if normalized.contains("deepseek") {
             Some(ReasoningFormat::DeepSeek)
-        } else if crate::ai::providers::ProviderConfig::openai_prefers_responses_api(model_id) {
+        } else if provider == ProviderId::Grok
+            || crate::ai::providers::ProviderConfig::openai_prefers_responses_api(model_id)
+        {
             Some(ReasoningFormat::OpenAI)
         } else {
             None
@@ -52,7 +55,8 @@ pub fn infer_model_metadata(
         || normalized.contains("gpt-5")
         || normalized.contains("gpt-6")
         || normalized.contains("gemini")
-        || normalized.contains("claude");
+        || normalized.contains("claude")
+        || normalized.contains("grok");
 
     metadata
 }
@@ -77,9 +81,11 @@ pub fn resolve_model_metadata(
             metadata.supports_thinking = model.reasoning.is_some();
             metadata.supports_vision =
                 infer_model_metadata(provider, model_id, api_format).supports_vision;
-            metadata.api_format = if provider == ProviderId::OpenAI
-                && crate::ai::providers::ProviderConfig::openai_prefers_responses_api(&model.id)
-            {
+            metadata.api_format = if provider == ProviderId::Grok
+                || (provider == ProviderId::OpenAI
+                    && crate::ai::providers::ProviderConfig::openai_prefers_responses_api(
+                        &model.id,
+                    )) {
                 ApiFormat::OpenAIResponses
             } else {
                 api_format
@@ -118,6 +124,14 @@ pub fn resolve_context_window(
 fn infer_context_window(model_id: &str, api_format: ApiFormat) -> Option<usize> {
     let normalized = model_id.trim().to_ascii_lowercase();
     let id = normalized.strip_prefix("openai/").unwrap_or(&normalized);
+
+    if normalized == "grok-build" {
+        return Some(512_000);
+    }
+
+    if normalized.starts_with("grok-composer-") {
+        return Some(200_000);
+    }
 
     if normalized.contains("claude-sonnet-4.5") || normalized.contains("gemini-2.5") {
         return Some(1_000_000);

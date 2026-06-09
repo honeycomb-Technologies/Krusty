@@ -38,12 +38,15 @@ async fn list_providers(State(state): State<AppState>) -> Json<Vec<ProviderStatu
 
     let providers = ProviderId::all()
         .iter()
-        .map(|id| ProviderStatus {
-            id: id.storage_key().to_string(),
-            name: id.to_string(),
-            configured: store.has_key(id),
-            has_oauth: oauth_store.has_token(id),
-            supports_oauth: id.supports_oauth(),
+        .map(|id| {
+            let has_oauth = has_provider_oauth(*id, &oauth_store, &store);
+            ProviderStatus {
+                id: id.storage_key().to_string(),
+                name: id.to_string(),
+                configured: store.has_key(id) || has_oauth,
+                has_oauth,
+                supports_oauth: id.supports_oauth(),
+            }
         })
         .collect();
 
@@ -58,11 +61,13 @@ async fn get_provider(
     let store = state.credential_store.read().await;
     let oauth_store = load_oauth_store_or_default("loading credential provider");
 
+    let has_oauth = has_provider_oauth(provider_id, &oauth_store, &store);
+
     Ok(Json(ProviderStatus {
         id: provider_id.storage_key().to_string(),
         name: provider_id.to_string(),
-        configured: store.has_key(&provider_id),
-        has_oauth: oauth_store.has_token(&provider_id),
+        configured: store.has_key(&provider_id) || has_oauth,
+        has_oauth,
         supports_oauth: provider_id.supports_oauth(),
     }))
 }
@@ -136,6 +141,21 @@ async fn delete_credential(
 fn parse_provider(s: &str) -> Result<ProviderId, AppError> {
     crate::utils::providers::parse_provider(s)
         .ok_or_else(|| AppError::BadRequest(format!("Unknown provider: {}", s)))
+}
+
+fn has_provider_oauth(
+    provider_id: ProviderId,
+    oauth_store: &OAuthTokenStore,
+    credentials: &krusty_core::storage::CredentialStore,
+) -> bool {
+    if oauth_store.has_token(&provider_id) {
+        return true;
+    }
+
+    provider_id == ProviderId::Grok
+        && krusty_core::auth::resolve_grok_auth(credentials)
+            .credential
+            .is_some()
 }
 
 fn load_oauth_store_or_default(context: &'static str) -> OAuthTokenStore {

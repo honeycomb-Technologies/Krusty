@@ -43,6 +43,7 @@ pub(super) fn build_workspace_context(working_dir: &Path, project_dir: Option<&P
              Execution directory: {}\n\
              Project directory: {}\n\
              - Treat the project directory above as the canonical repository root for this session\n\
+             - Use the workspace for orientation, not as an assumed filesystem security boundary\n\
              - Prefer absolute paths rooted in that project directory when referring to files\n\
              - Do not invent alternate workspace roots or mirror paths if tools already revealed the real filesystem layout",
             execution_dir,

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::ai::types::AiTool;
-use crate::tools::registry::{Tool, ToolContext, ToolResult};
+use crate::tools::registry::{DelegationPolicy, Tool, ToolContext, ToolResult};
 use crate::tools::{BashTool, EditTool, GlobTool, GrepTool, ReadTool, WriteTool};
 
 use super::build_context::{BuilderInterface, SharedBuildContext};
@@ -188,6 +188,10 @@ impl BuilderTools {
         params: Value,
         ctx: &ToolContext,
     ) -> Option<ToolResult> {
+        if let Some(blocked) = authorize_builder_tool(name, &params, ctx) {
+            return Some(blocked);
+        }
+
         match name {
             "glob" => Some(self.glob.execute(params, ctx).await),
             "grep" => Some(self.grep.execute(params, ctx).await),
@@ -340,5 +344,90 @@ impl BuilderTools {
             }
             _ => None,
         }
+    }
+}
+
+fn authorize_builder_tool(name: &str, params: &Value, ctx: &ToolContext) -> Option<ToolResult> {
+    let Some(policy) = ctx.delegation_policy.as_ref() else {
+        return Some(delegated_policy_error(
+            DelegationPolicy::for_subagent_build(ctx.permission_mode, ctx.subagent_max_turns),
+            name,
+            "Builder tool dispatch requires delegated policy metadata".to_string(),
+        ));
+    };
+
+    match policy.authorize_tool_call(name, params, ctx.plan_mode) {
+        Ok(()) => None,
+        Err(reason) => Some(delegated_policy_error(policy.clone(), name, reason)),
+    }
+}
+
+fn delegated_policy_error(policy: DelegationPolicy, tool_name: &str, reason: String) -> ToolResult {
+    ToolResult::error_with_details(
+        "delegated_policy_block",
+        reason,
+        None,
+        Some(json!({
+            "tool": tool_name,
+            "delegation_policy": policy.audit_json(),
+        })),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::registry::PermissionMode;
+
+    #[tokio::test]
+    async fn builder_dispatch_blocks_supervised_write_without_approval_path() {
+        let build_context = Arc::new(SharedBuildContext::new());
+        let tools = BuilderTools::new(build_context, "builder-test".to_string());
+        let ctx = ToolContext::default()
+            .with_permission_mode(PermissionMode::Supervised)
+            .with_delegation_policy(DelegationPolicy::for_subagent_build(
+                PermissionMode::Supervised,
+                Some(10),
+            ));
+
+        let result = tools
+            .execute(
+                "write",
+                json!({
+                    "file_path": "/tmp/blocked.txt",
+                    "content": "blocked"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("builder write should return a result");
+
+        assert!(result.is_error);
+        let parsed: Value = serde_json::from_str(&result.output).expect("structured error");
+        assert_eq!(parsed["error"]["code"], "delegated_policy_block");
+        assert_eq!(
+            parsed["metadata"]["delegation_policy"]["permission_mode"],
+            "supervised"
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_dispatch_blocks_when_policy_metadata_missing() {
+        let build_context = Arc::new(SharedBuildContext::new());
+        let tools = BuilderTools::new(build_context, "builder-test".to_string());
+        let ctx = ToolContext::default().with_permission_mode(PermissionMode::Autonomous);
+
+        let result = tools
+            .execute("bash", json!({ "command": "cargo check" }), &ctx)
+            .await
+            .expect("builder bash should return a result");
+
+        assert!(result.is_error);
+        let parsed: Value = serde_json::from_str(&result.output).expect("structured error");
+        assert_eq!(parsed["error"]["code"], "delegated_policy_block");
+        assert!(parsed["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("requires delegated policy metadata"));
     }
 }

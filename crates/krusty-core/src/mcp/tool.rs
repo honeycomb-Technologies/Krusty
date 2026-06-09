@@ -2,8 +2,9 @@
 //!
 //! Wraps MCP tools as our Tool trait for seamless integration.
 //!
-//! NOTE: MCP tools execute on external servers and bypass Krusty's sandbox.
-//! When sandbox_root is configured, a warning is logged for visibility.
+//! NOTE: MCP tools execute on external servers and are outside Krusty's local
+//! filesystem access policy. When a scoped access root is configured, a warning
+//! is logged for visibility.
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -122,13 +123,14 @@ impl Tool for McpTool {
     }
 
     async fn execute(&self, params: Value, ctx: &ToolContext) -> ToolResult {
-        let sandbox_warning =
-            "MCP tool bypasses local sandbox restrictions because it executes on an external server.";
+        let scoped_access_warning =
+            "MCP tool executes on an external server outside Krusty's local filesystem access policy.";
 
-        // Warn when MCP tools are used in sandboxed mode - they bypass sandbox restrictions
-        if ctx.sandbox_root.is_some() {
+        // Warn when MCP tools are used with a scoped local access root: the remote
+        // MCP server applies its own host-side access rules.
+        if ctx.filesystem_access_root().is_some() {
             warn!(
-                "MCP tool '{}' executing in sandboxed context - MCP servers bypass sandbox restrictions",
+                "MCP tool '{}' executing with a scoped local access root; remote MCP server applies its own access rules",
                 self.full_name
             );
         }
@@ -153,8 +155,8 @@ impl Tool for McpTool {
                     "is_remote_execution": true,
                     "content_items": result.content.len()
                 }));
-                let warnings = if ctx.sandbox_root.is_some() {
-                    vec![sandbox_warning.to_string()]
+                let warnings = if ctx.filesystem_access_root().is_some() {
+                    vec![scoped_access_warning.to_string()]
                 } else {
                     Vec::new()
                 };

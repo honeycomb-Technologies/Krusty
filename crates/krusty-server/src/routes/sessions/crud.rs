@@ -112,7 +112,7 @@ pub(super) async fn create_session(
             Some(b)
         }
     });
-    let session_id = session_manager.create_session_for_user_with_config(
+    let session_id = session_manager.create_session_for_user_with_config_and_permission(
         title,
         requested_model,
         workspace.working_dir.as_deref(),
@@ -121,6 +121,7 @@ pub(super) async fn create_session(
         current_user_id(user.as_ref()),
         target_branch,
         req.session_type.unwrap_or(SessionType::Code),
+        req.permission_mode.unwrap_or_default(),
     )?;
 
     if let Some(model) = requested_model {
@@ -197,9 +198,10 @@ pub(super) async fn update_session(
         && req.mode.is_none()
         && req.model.is_none()
         && req.target_branch.is_none()
+        && req.permission_mode.is_none()
     {
         return Err(AppError::BadRequest(
-            "At least one of title, working_dir, project_dir, workspace_mode, mode, model, or target_branch must be provided".to_string(),
+            "At least one of title, working_dir, project_dir, workspace_mode, mode, model, target_branch, or permission_mode must be provided".to_string(),
         ));
     }
 
@@ -255,6 +257,10 @@ pub(super) async fn update_session(
             .as_deref()
             .and_then(|target_branch| trimmed_nonempty(Some(target_branch)));
         session_manager.update_session_target_branch(&id, normalized)?;
+    }
+
+    if let Some(permission_mode) = req.permission_mode {
+        session_manager.update_session_permission_mode(&id, permission_mode)?;
     }
 
     let session = session_manager

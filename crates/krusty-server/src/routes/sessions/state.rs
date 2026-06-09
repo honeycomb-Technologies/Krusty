@@ -63,6 +63,7 @@ pub(super) async fn get_session_state(
         started_at: agent_state.started_at,
         last_event_at: agent_state.last_event_at,
         mode: session.work_mode,
+        permission_mode: session.permission_mode,
         recovery,
         pending_interactions,
         live_partial_assistant,

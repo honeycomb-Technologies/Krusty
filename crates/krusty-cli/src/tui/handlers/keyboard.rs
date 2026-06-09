@@ -638,6 +638,20 @@ impl App {
                     } else {
                         krusty_core::tools::registry::PermissionMode::Autonomous
                     };
+                    if let (Some(sm), Some(session_id)) = (
+                        &self.services.session_manager,
+                        self.runtime.current_session_id.as_deref(),
+                    ) {
+                        if let Err(error) = sm.update_session_permission_mode(
+                            session_id,
+                            self.runtime.permission_mode,
+                        ) {
+                            tracing::warn!(
+                                "Failed to persist permission mode for session: {}",
+                                error
+                            );
+                        }
+                    }
                 }
             }
         }

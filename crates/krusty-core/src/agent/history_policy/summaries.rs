@@ -5,6 +5,8 @@ use super::{
     MAX_BASH_OUTPUT_CHARS, MAX_LIST_ITEMS, MAX_MATCH_ITEMS, MAX_PREVIEW_CHARS,
 };
 
+const MAX_BASH_ERROR_SUMMARY_OUTPUT_CHARS: usize = 700;
+
 pub(super) fn summarize_tool_result(
     tool_name: &str,
     parsed: &Value,
@@ -158,10 +160,27 @@ fn summarize_bash(parsed: &Value, is_error: bool) -> String {
             .and_then(|value| value.get("message"))
             .and_then(|value| value.as_str())
             .unwrap_or("command failed");
+        if let Some(output_preview) =
+            bash_output_preview(parsed, MAX_BASH_ERROR_SUMMARY_OUTPUT_CHARS)
+        {
+            return format!(
+                "bash failed (exit {}): {}; output: {}",
+                exit_code, message, output_preview
+            );
+        }
         return format!("bash failed (exit {}): {}", exit_code, message);
     }
 
     format!("bash completed successfully (exit {})", exit_code)
+}
+
+fn bash_output_preview(parsed: &Value, limit: usize) -> Option<String> {
+    tool_payload(parsed)
+        .get("output")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|output| !output.is_empty())
+        .map(|output| truncate_utf8(output, limit))
 }
 
 fn summarize_write(parsed: &Value, is_error: bool) -> String {

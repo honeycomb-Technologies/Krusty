@@ -9,6 +9,7 @@ pub(super) fn curated_providers() -> Vec<ProviderConfig> {
         minimax_provider(),
         anthropic_provider(),
         openai_provider(),
+        grok_provider(),
     ]
 }
 
@@ -150,6 +151,34 @@ fn anthropic_provider() -> ProviderConfig {
         dynamic_models: false,
         pricing_hint: None,
         custom_headers: HashMap::new(),
+    }
+}
+
+fn grok_provider() -> ProviderConfig {
+    let mut custom_headers = HashMap::new();
+    custom_headers.insert(
+        "x-grok-client-version".to_string(),
+        grok_auth::DEFAULT_CLIENT_VERSION.to_string(),
+    );
+    custom_headers.insert("x-grok-client-identifier".to_string(), "krusty".to_string());
+    custom_headers.insert("X-XAI-Token-Auth".to_string(), "xai-grok-cli".to_string());
+
+    ProviderConfig {
+        id: ProviderId::Grok,
+        name: "Grok".to_string(),
+        description: "Grok Build via X subscription auth".to_string(),
+        base_url: "https://cli-chat-proxy.grok.com/v1/responses".to_string(),
+        auth_header: AuthHeader::Bearer,
+        models: vec![
+            ModelInfo::new("grok-build", "Grok Build", 512_000, 32_768)
+                .with_reasoning(ReasoningFormat::OpenAI),
+            ModelInfo::new("grok-composer-2.5-fast", "Composer 2.5", 200_000, 32_768)
+                .with_reasoning(ReasoningFormat::OpenAI),
+        ],
+        supports_tools: true,
+        dynamic_models: true,
+        pricing_hint: Some("Uses your X/Grok subscription session".to_string()),
+        custom_headers,
     }
 }
 

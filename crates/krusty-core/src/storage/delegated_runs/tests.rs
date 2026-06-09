@@ -5,6 +5,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::agent::DelegatedRunStage;
 use crate::storage::Database;
+use crate::tools::registry::{DelegationPolicy, PermissionMode};
 
 fn create_store() -> (DelegatedRunStore, TempDir) {
     let temp_dir = TempDir::new().expect("temp dir");
@@ -101,6 +102,55 @@ fn round_trip_persisted_delegated_run() {
         record.human_review.as_deref(),
         Some("Storage owns session persistence and runtime traces.")
     );
+}
+
+#[test]
+fn finalized_background_artifact_preserves_delegation_policy_metadata() {
+    let (store, _tmp) = create_store();
+    let delegated_run_id = "run-policy".to_string();
+    let policy = DelegationPolicy::for_subagent_build(PermissionMode::Supervised, Some(12));
+
+    store
+        .create_run(&DelegatedRunStartInput {
+            delegated_run_id: delegated_run_id.clone(),
+            parent_session_id: "session-1".to_string(),
+            parent_tool_call_id: Some("tool-1".to_string()),
+            role: DelegatedRunRole::Build,
+            stage: DelegatedRunStage::Created,
+            provider: Some("openai".to_string()),
+            model: Some("gpt-test".to_string()),
+            resumable: true,
+            resumed_from_run_id: None,
+            target_scope: vec![scope("main", ".", "project")],
+        })
+        .expect("create run");
+
+    store
+        .finalize_run(
+            &delegated_run_id,
+            DelegatedRunStage::Complete,
+            &serde_json::json!({
+                "delegated_run_id": delegated_run_id,
+                "outcome": "success",
+                "delegation_policy": policy.audit_json(),
+            }),
+            Some("Build complete"),
+            false,
+        )
+        .expect("finalize run");
+
+    let record = store
+        .get_run("run-policy")
+        .expect("get run")
+        .expect("record exists");
+    let artifact = record.artifact.expect("artifact persisted");
+    assert_eq!(artifact["delegation_policy"]["surface"], "subagent_build");
+    assert_eq!(
+        artifact["delegation_policy"]["permission_mode"],
+        "supervised"
+    );
+    assert_eq!(artifact["delegation_policy"]["max_turns"], 12);
+    assert_eq!(artifact["delegation_policy"]["read_only_only"], false);
 }
 
 #[test]

@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::ai::types::{AiToolCall, Content};
-use crate::tools::registry::{tool_policy, PermissionMode, ToolResult};
+use crate::tools::registry::{authorize_tool_call, tool_policy, PermissionMode, ToolResult};
 
 use super::history_policy::build_history_tool_result;
 use super::loop_events::{LoopEvent, LoopInput};
@@ -80,8 +80,8 @@ impl ToolControl {
     }
 
     pub(crate) fn requires_approval(&self, call: &AiToolCall) -> bool {
-        self.permission_mode == PermissionMode::Supervised
-            && tool_policy(&call.name).requires_supervised_approval
+        authorize_tool_call(&call.name, &call.arguments, self.permission_mode, false)
+            .requires_approval()
     }
 
     pub(crate) async fn authorize(
@@ -253,6 +253,14 @@ mod tests {
         }
     }
 
+    fn agent_call(agent_type: &str) -> AiToolCall {
+        AiToolCall {
+            id: format!("call_agent_{agent_type}"),
+            name: "agent".to_string(),
+            arguments: json!({"agent_type": agent_type}),
+        }
+    }
+
     #[test]
     fn approval_only_required_for_supervised_write_tools() {
         let supervised = ToolControl::new(PermissionMode::Supervised);
@@ -261,6 +269,35 @@ mod tests {
         assert!(supervised.requires_approval(&edit_call()));
         assert!(!supervised.requires_approval(&read_call()));
         assert!(!autonomous.requires_approval(&edit_call()));
+        assert!(supervised.requires_approval(&agent_call("build")));
+        assert!(!supervised.requires_approval(&agent_call("explore")));
+        assert!(!autonomous.requires_approval(&agent_call("build")));
+    }
+
+    #[tokio::test]
+    async fn authorize_emits_approval_events_for_agent_build() {
+        let control = ToolControl::new(PermissionMode::Supervised);
+        let call = agent_call("build");
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+        input_tx
+            .send(LoopInput::ToolApproval {
+                tool_call_id: call.id.clone(),
+                approved: true,
+            })
+            .unwrap();
+
+        let decision = control.authorize(&call, &event_tx, &mut input_rx).await;
+
+        assert_eq!(decision, AuthorizationDecision::Execute);
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(LoopEvent::ToolApprovalRequired { name, .. }) if name == "agent"
+        ));
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(LoopEvent::ToolApproved { .. })
+        ));
     }
 
     #[tokio::test]

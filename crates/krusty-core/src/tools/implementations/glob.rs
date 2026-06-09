@@ -29,17 +29,11 @@ impl Tool for GlobTool {
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            r#"Use this for all file discovery instead of find or ls via bash.
+            r#"Use for file discovery by name/path instead of shell find/ls. Results are sorted newest-first and capped at 100.
 
-Returns up to 100 paths sorted by modification time (newest first). In large codebases, use specific subdirectory patterns to avoid hitting the cap.
+Use specific subdirectory patterns in large repos. Examples: "**/*.rs", "src/**/*.ts", "*.{js,jsx}".
 
-Common patterns:
-- "**/*.rs" — all Rust files recursively
-- "src/**/*.ts" — TypeScript under src/
-- "*.{js,jsx}" — JS and JSX in current directory
-- "tests/**/test_*.py" — Python test files
-
-To search file contents (not names), use Grep instead. To see directory structure, use List instead."#,
+Use Grep for file contents and List for directory trees."#,
         )
     }
 
@@ -67,7 +61,7 @@ To search file contents (not names), use Grep instead. To see directory structur
             Err(e) => return e,
         };
 
-        // Resolve and validate base path within sandbox
+        // Resolve and validate the base path under the configured filesystem access policy.
         let base_path = match &params.path {
             Some(path) => match ctx.sandboxed_resolve(path) {
                 Ok(p) => p,
@@ -83,20 +77,20 @@ To search file contents (not names), use Grep instead. To see directory structur
             Err(e) => return ToolResult::error(format!("Invalid pattern: {}", e)),
         };
 
-        // Collect with mtime, filter to sandbox, sort newest first, limit to 100
+        // Collect with mtime, filter to the configured access root when scoped, sort newest first, limit to 100
+        let access_root = ctx.filesystem_access_root();
         let mut files: Vec<_> = entries
             .flatten()
             .filter_map(|entry| {
-                // Filter out paths outside sandbox - deny if canonicalize fails in sandboxed mode
-                if let Some(ref sandbox) = ctx.sandbox_root {
+                // In scoped mode, deny paths that cannot be verified under the access root.
+                if let Some(ref root) = access_root {
                     match entry.canonicalize() {
                         Ok(canonical) => {
-                            if !canonical.starts_with(sandbox) {
+                            if !canonical.starts_with(root) {
                                 return None;
                             }
                         }
                         Err(_) => {
-                            // Cannot verify path is within sandbox - deny it
                             return None;
                         }
                     }

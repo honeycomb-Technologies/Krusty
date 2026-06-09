@@ -31,6 +31,9 @@ impl App {
 
         // Set session info
         self.runtime.session_title = session_info.as_ref().map(|i| i.title.clone());
+        if let Some(info) = session_info.as_ref() {
+            self.runtime.permission_mode = info.permission_mode;
+        }
         let stored_token_count = session_info.as_ref().and_then(|i| i.token_count);
         if let Some(model) = session_info
             .as_ref()

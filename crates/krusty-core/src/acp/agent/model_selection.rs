@@ -1,10 +1,52 @@
 use crate::ai::providers::{get_provider, ProviderId};
-use crate::auth::{resolve_anthropic_auth, resolve_openai_auth};
+use crate::auth::{resolve_anthropic_auth, resolve_grok_auth, resolve_openai_auth};
 use crate::storage::credentials::CredentialStore;
 
 use super::{
     persist_shared_current_model, AcpError, AvailableModelRecord, KrustyAgent, ModelConfig,
 };
+
+fn credential_for_model(
+    store: &CredentialStore,
+    provider: ProviderId,
+    model_id: &str,
+) -> Option<String> {
+    match provider {
+        ProviderId::OpenAI => resolve_openai_auth(store, model_id).credential,
+        ProviderId::Anthropic => resolve_anthropic_auth(store).credential,
+        ProviderId::Grok => resolve_grok_auth(store).credential,
+        _ => store.get_auth(&provider),
+    }
+}
+
+fn push_static_provider_models(
+    models: &mut Vec<AvailableModelRecord>,
+    store: &CredentialStore,
+    provider: ProviderId,
+) {
+    let Some(provider_config) = get_provider(provider) else {
+        return;
+    };
+
+    for model_info in &provider_config.models {
+        let Some(credential) = credential_for_model(store, provider, &model_info.id) else {
+            continue;
+        };
+        let model_id = format!("{}:{}", provider.storage_key(), model_info.id);
+        models.push((
+            model_id,
+            provider,
+            model_info.id.clone(),
+            credential,
+            model_info.display_name.clone(),
+        ));
+        tracing::debug!(
+            "Added model: {} from {:?}",
+            model_info.display_name,
+            provider
+        );
+    }
+}
 
 impl KrustyAgent {
     /// Detect all available models from configured providers.
@@ -28,62 +70,40 @@ impl KrustyAgent {
                 continue;
             }
 
-            let credential = match provider {
-                ProviderId::OpenAI => resolve_openai_auth(&store, "gpt-5.3-codex").credential,
-                ProviderId::Anthropic => resolve_anthropic_auth(&store).credential,
-                _ => store.get_auth(&provider),
+            if !crate::ai::catalog::supports_dynamic_models(provider) {
+                push_static_provider_models(&mut models, &store, provider);
+                continue;
+            }
+
+            let Some(catalog_credential) =
+                crate::ai::catalog::credential_for_dynamic_models(provider, &store)
+            else {
+                tracing::debug!(
+                    "Skipping dynamic {:?} model fetch: no catalog API key configured",
+                    provider
+                );
+                push_static_provider_models(&mut models, &store, provider);
+                continue;
             };
 
-            if let Some(api_key) = credential {
-                if crate::ai::catalog::supports_dynamic_models(provider) {
-                    match crate::ai::catalog::fetch_dynamic_models(provider, &api_key).await {
-                        Ok(fetched) => {
-                            let fetched_count = fetched.len();
-                            for model in fetched {
-                                let model_id = format!("{}:{}", provider.storage_key(), model.id);
-                                models.push((
-                                    model_id,
-                                    provider,
-                                    model.id.clone(),
-                                    api_key.clone(),
-                                    model.display_name.clone(),
-                                ));
-                            }
-                            tracing::info!("Added {} models from {:?}", fetched_count, provider);
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to fetch {:?} models: {}", provider, e);
-                            if let Some(provider_config) = get_provider(provider) {
-                                for model_info in &provider_config.models {
-                                    let model_id =
-                                        format!("{}:{}", provider.storage_key(), model_info.id);
-                                    models.push((
-                                        model_id,
-                                        provider,
-                                        model_info.id.clone(),
-                                        api_key.clone(),
-                                        model_info.display_name.clone(),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                } else if let Some(provider_config) = get_provider(provider) {
-                    for model_info in &provider_config.models {
-                        let model_id = format!("{}:{}", provider.storage_key(), model_info.id);
+            match crate::ai::catalog::fetch_dynamic_models(provider, &catalog_credential).await {
+                Ok(fetched) => {
+                    let fetched_count = fetched.len();
+                    for model in fetched {
+                        let model_id = format!("{}:{}", provider.storage_key(), model.id);
                         models.push((
                             model_id,
                             provider,
-                            model_info.id.clone(),
-                            api_key.clone(),
-                            model_info.display_name.clone(),
+                            model.id.clone(),
+                            catalog_credential.clone(),
+                            model.display_name.clone(),
                         ));
-                        tracing::debug!(
-                            "Added model: {} from {:?}",
-                            model_info.display_name,
-                            provider
-                        );
                     }
+                    tracing::info!("Added {} models from {:?}", fetched_count, provider);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to fetch {:?} models: {}", provider, e);
+                    push_static_provider_models(&mut models, &store, provider);
                 }
             }
         }
@@ -102,7 +122,11 @@ impl KrustyAgent {
 
         let provider = model_config.1;
         let actual_model_id = model_config.2.clone();
-        let api_key = model_config.3.clone();
+        let listed_credential = model_config.3.clone();
+        let api_key = CredentialStore::load()
+            .ok()
+            .and_then(|store| credential_for_model(&store, provider, &actual_model_id))
+            .unwrap_or(listed_credential);
 
         tracing::info!(
             "Switching to model: {} (provider: {:?})",

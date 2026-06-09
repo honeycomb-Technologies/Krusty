@@ -34,13 +34,9 @@ impl Tool for EditTool {
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            r#"ALWAYS read the file first — never edit blind. The tool will reject edits on files you haven't read.
+            r#"Read the file first. old_string must match exactly one location; add surrounding context when needed.
 
-old_string must uniquely match one location in the file. If it matches multiple times, include more surrounding context lines to disambiguate. Preserve exact indentation (tabs vs spaces) from the file when constructing old_string and new_string.
-
-Prefer Edit over Write for modifying existing files — Write destroys the entire file content. Use replace_all:true ONLY for bulk rename operations (variable/function renaming across a file).
-
-Keep changes minimal. Don't add comments, docstrings, or type annotations to lines you didn't change."#,
+Preserve exact indentation and prefer small replacements. Use replace_all:true only for exact bulk renames."#,
         )
     }
 
@@ -50,7 +46,7 @@ Keep changes minimal. Don't add comments, docstrings, or type annotations to lin
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "The absolute path to the file to modify"
+                    "description": "The path to the file to modify"
                 },
                 "old_string": {
                     "type": "string",
@@ -91,6 +87,11 @@ Keep changes minimal. Don't add comments, docstrings, or type annotations to lin
         if !path.exists() {
             return ToolResult::error(format!("File not found: {}", path.display()));
         }
+
+        let path = match ctx.require_file_observation(&path) {
+            Ok(path) => path,
+            Err(e) => return ToolResult::error_with_code("read_required", e),
+        };
 
         let content = match fs::read_to_string(&path).await {
             Ok(c) => c,
@@ -192,4 +193,71 @@ fn generate_compact_diff(old: &str, new: &str, path: &std::path::Path) -> String
         return String::new();
     }
     format!("--- {}\n+++ {}\n{}", path.display(), path.display(), output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn edit_requires_prior_file_observation() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should create");
+        let file_path = temp_dir.path().join("sample.txt");
+        fs::write(&file_path, "before\n")
+            .await
+            .expect("test file should write");
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+
+        let result = EditTool
+            .execute(
+                json!({
+                    "file_path": file_path.display().to_string(),
+                    "old_string": "before",
+                    "new_string": "after",
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_error);
+        let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(parsed["error"]["code"], "read_required");
+    }
+
+    #[tokio::test]
+    async fn edit_succeeds_after_prior_file_observation() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should create");
+        let file_path = temp_dir.path().join("sample.txt");
+        fs::write(&file_path, "before\n")
+            .await
+            .expect("test file should write");
+        let canonical = file_path
+            .canonicalize()
+            .expect("test file should canonicalize");
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        ctx.record_file_observation(canonical);
+
+        let result = EditTool
+            .execute(
+                json!({
+                    "file_path": file_path.display().to_string(),
+                    "old_string": "before",
+                    "new_string": "after",
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "unexpected edit error: {}", result.output);
+        let updated = fs::read_to_string(&file_path)
+            .await
+            .expect("updated file should read");
+        assert_eq!(updated, "after\n");
+    }
 }

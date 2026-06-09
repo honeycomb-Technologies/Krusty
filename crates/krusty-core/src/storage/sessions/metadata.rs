@@ -2,6 +2,8 @@ use anyhow::Result;
 use chrono::Utc;
 use rusqlite::params;
 
+use crate::tools::registry::PermissionMode;
+
 use super::{SessionManager, WorkMode, WorkspaceMode};
 
 impl SessionManager {
@@ -137,6 +139,22 @@ impl SessionManager {
         self.db.conn().execute(
             "UPDATE sessions SET target_branch = ?1, updated_at = ?2 WHERE id = ?3",
             params![target_branch, now, session_id],
+        )?;
+
+        Ok(())
+    }
+
+    /// Update session permission mode.
+    pub fn update_session_permission_mode(
+        &self,
+        session_id: &str,
+        permission_mode: PermissionMode,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.db.conn().execute(
+            "UPDATE sessions SET permission_mode = ?1, updated_at = ?2 WHERE id = ?3",
+            params![permission_mode.as_str(), now, session_id],
         )?;
 
         Ok(())

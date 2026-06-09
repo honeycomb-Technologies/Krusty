@@ -2,7 +2,7 @@ import type { SessionStateResponse as ApiSessionStateResponse } from '@krusty/ap
 import type { createPlanStore } from '../plan';
 import { applyDelegatedSessionState } from './delegated';
 import { applyLivePartialAssistant, applyRecoveryParity } from './transient';
-import type { SessionMode, SessionStoreState } from './types';
+import type { PermissionMode, SessionMode, SessionStoreState } from './types';
 
 type SessionStateSetter = (
   partial:
@@ -49,9 +49,11 @@ export function applySessionSnapshot(
   if (!serverState) return;
 
   const nextMode: SessionMode = serverState.mode ?? 'build';
+  const nextPermissionMode: PermissionMode = serverState.permission_mode ?? get().permissionMode;
   const pendingInteractions = pendingInteractionsFromSnapshot(serverState);
   set((state) => ({
     mode: nextMode,
+    permissionMode: nextPermissionMode,
     isStreaming: isActiveSessionAgentState(serverState.agent_state),
     isThinking:
       serverState.agent_state === 'streaming'

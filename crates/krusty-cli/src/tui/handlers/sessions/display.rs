@@ -4,6 +4,7 @@ use crate::tui::blocks::{
     BashBlock, EditBlock, ReadBlock, ThinkingBlock, ToolResultBlock, WriteBlock,
 };
 use crate::tui::state::{hash_content, BlockManager};
+use crate::tui::utils::edit_diff;
 
 impl App {
     /// Build tool results cache from conversation
@@ -232,9 +233,24 @@ impl App {
                                         .unwrap_or("")
                                         .to_string();
 
+                                    let start_line = result
+                                        .and_then(|result| {
+                                            edit_diff::start_line_from_tool_output(&result.output)
+                                        })
+                                        .or_else(|| {
+                                            edit_diff::find_start_line_in_file(
+                                                &self.runtime.working_dir,
+                                                &file_path,
+                                                &old_string,
+                                            )
+                                        })
+                                        .unwrap_or(1);
+
                                     let mut block = EditBlock::new_pending(file_path.clone());
                                     block.set_tool_use_id(id.clone());
-                                    block.set_diff_data(file_path, old_string, new_string, 1);
+                                    block.set_diff_data(
+                                        file_path, old_string, new_string, start_line,
+                                    );
                                     block.complete();
                                     block.set_collapsed(false);
                                     self.ui.block_ui.set_collapsed(id, false);

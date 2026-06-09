@@ -269,17 +269,18 @@ impl App {
         let tools = self.services.cached_ai_tools.clone();
         let can_use_thinking = self.runtime.thinking_level.is_enabled();
         let thinking = can_use_thinking.then(ThinkingConfig::default);
-        let codex_reasoning_effort = if self.is_openai_xhigh_thinking_mode() {
-            match self.runtime.thinking_level {
-                ThinkingLevel::Off => None,
-                ThinkingLevel::Low => Some(CodexReasoningEffort::Low),
-                ThinkingLevel::Medium => Some(CodexReasoningEffort::Medium),
-                ThinkingLevel::High => Some(CodexReasoningEffort::High),
-                ThinkingLevel::XHigh => Some(CodexReasoningEffort::XHigh),
-            }
-        } else {
-            None
-        };
+        let codex_reasoning_effort =
+            if self.is_openai_xhigh_thinking_mode() || self.is_grok_thinking_mode() {
+                match self.runtime.thinking_level {
+                    ThinkingLevel::Off => None,
+                    ThinkingLevel::Low => Some(CodexReasoningEffort::Low),
+                    ThinkingLevel::Medium => Some(CodexReasoningEffort::Medium),
+                    ThinkingLevel::High => Some(CodexReasoningEffort::High),
+                    ThinkingLevel::XHigh => Some(CodexReasoningEffort::XHigh),
+                }
+            } else {
+                None
+            };
         let anthropic_adaptive_effort = if self.is_anthropic_opus_thinking_mode() {
             match self.runtime.thinking_level {
                 ThinkingLevel::Off => None,
@@ -341,6 +342,16 @@ impl App {
         };
 
         self.persist_current_work_mode();
+        if let (Some(sm), Some(session_id)) = (
+            &self.services.session_manager,
+            self.runtime.current_session_id.as_deref(),
+        ) {
+            if let Err(error) =
+                sm.update_session_permission_mode(session_id, self.runtime.permission_mode)
+            {
+                tracing::warn!("Failed to persist permission mode for session: {}", error);
+            }
+        }
 
         let conversation = self.runtime.chat.conversation.clone();
         let orchestrator = crate::agent::AgenticOrchestrator::new(services, config);

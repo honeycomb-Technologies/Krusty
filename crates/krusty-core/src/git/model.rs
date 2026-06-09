@@ -13,6 +13,10 @@ pub struct GitStatusSummary {
     pub branch_additions: usize,
     /// Deleted lines in branch diff.
     pub branch_deletions: usize,
+    /// Added lines in the current uncommitted tracked diff.
+    pub worktree_additions: usize,
+    /// Deleted lines in the current uncommitted tracked diff.
+    pub worktree_deletions: usize,
     /// Current branch PR number (if discoverable).
     pub pr_number: Option<u64>,
     pub ahead: usize,

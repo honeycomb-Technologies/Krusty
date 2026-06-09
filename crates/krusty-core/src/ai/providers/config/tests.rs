@@ -9,6 +9,7 @@ fn test_provider_id_display() {
     assert_eq!(ProviderId::ZAi.to_string(), "Z.ai");
     assert_eq!(ProviderId::Anthropic.to_string(), "Anthropic");
     assert_eq!(ProviderId::OpenAI.to_string(), "OpenAI");
+    assert_eq!(ProviderId::Grok.to_string(), "Grok");
 }
 
 #[test]
@@ -17,6 +18,7 @@ fn test_storage_keys() {
     assert_eq!(ProviderId::ZAi.storage_key(), "z_ai");
     assert_eq!(ProviderId::Anthropic.storage_key(), "anthropic");
     assert_eq!(ProviderId::OpenAI.storage_key(), "openai");
+    assert_eq!(ProviderId::Grok.storage_key(), "grok");
 }
 
 #[test]
@@ -50,6 +52,10 @@ fn test_oauth_support() {
     assert!(anthropic_methods.contains(&AuthMethod::OAuthBrowser));
     assert!(!anthropic_methods.contains(&AuthMethod::OAuthDevice));
     assert!(anthropic_methods.contains(&AuthMethod::ApiKey));
+
+    assert!(ProviderId::Grok.supports_oauth());
+    let grok_methods = ProviderId::Grok.auth_methods();
+    assert_eq!(grok_methods, vec![AuthMethod::OAuthBrowser]);
 
     assert!(!ProviderId::MiniMax.supports_oauth());
     let minimax_methods = ProviderId::MiniMax.auth_methods();

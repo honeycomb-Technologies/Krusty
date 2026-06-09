@@ -6,13 +6,13 @@ use super::super::{RuntimeTraceEvent, RuntimeTraceStore, RuntimeTraceSummary};
 use super::{SessionInfo, SessionManager};
 
 const LIST_ACTIVE_SESSIONS_SQL_ALL: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type,
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode,
             agent_state, agent_started_at, agent_last_event_at
              FROM sessions
              WHERE agent_state != 'idle'
              ORDER BY id";
 const LIST_ACTIVE_SESSIONS_SQL_BY_USER: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type,
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode,
             agent_state, agent_started_at, agent_last_event_at
              FROM sessions
              WHERE agent_state != 'idle' AND user_id = ?1

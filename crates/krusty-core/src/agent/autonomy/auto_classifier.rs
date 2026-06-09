@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tracing::info;
 
-use crate::agent::hooks::{shell_policy::safety_violation, HookResult, PreToolHook};
+use crate::agent::hooks::{shell_policy::classify_bash_command, HookResult, PreToolHook};
 use crate::agent::loop_events::LoopEvent;
 use crate::ai::client::AiClient;
 use crate::tools::registry::{PermissionMode, ToolContext};
@@ -107,14 +107,11 @@ impl AutoClassifierHook {
     fn obvious_unsafe_payload_reason(name: &str, params: &Value) -> Option<String> {
         if matches!(name, "bash" | "shell" | "execute") {
             let command = params.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            if let Some(reason) = safety_violation(command) {
+            if let Some(reason) = classify_bash_command(command).safety_violation {
                 return Some(reason);
             }
 
             let command = command.to_ascii_lowercase();
-            if Self::contains_destructive_git_operation(&command) {
-                return Some("destructive git operation".to_string());
-            }
             if Self::contains_system_package_install(&command) {
                 return Some("system package installation".to_string());
             }
@@ -128,40 +125,6 @@ impl AutoClassifierHook {
         }
 
         None
-    }
-
-    fn contains_destructive_git_operation(command: &str) -> bool {
-        command.split([';', '&', '|']).any(|segment| {
-            let tokens: Vec<&str> = segment.split_whitespace().collect();
-            let Some(git_idx) = tokens.iter().position(|token| *token == "git") else {
-                return false;
-            };
-            let git_args = &tokens[git_idx + 1..];
-
-            let has_subcommand = |subcommand: &str| git_args.contains(&subcommand);
-            if has_subcommand("push")
-                && git_args
-                    .iter()
-                    .any(|token| *token == "-f" || token.starts_with("--force"))
-            {
-                return true;
-            }
-
-            if has_subcommand("reset")
-                && git_args.contains(&"--hard")
-                && git_args
-                    .iter()
-                    .any(|token| token.contains('/') && !token.starts_with('-'))
-            {
-                return true;
-            }
-
-            has_subcommand("branch")
-                && git_args.contains(&"-d")
-                && git_args
-                    .iter()
-                    .any(|token| matches!(*token, "main" | "master"))
-        })
     }
 
     fn contains_system_package_install(command: &str) -> bool {
@@ -459,17 +422,17 @@ mod tests {
             (
                 "bash",
                 json!({"command": "git push --force origin main"}),
-                "destructive git operation",
+                "destructive git force push",
             ),
             (
                 "bash",
                 json!({"command": "git push origin main --force-with-lease"}),
-                "destructive git operation",
+                "destructive git force push",
             ),
             (
                 "bash",
                 json!({"command": "git reset --hard upstream/main"}),
-                "destructive git operation",
+                "destructive git reset --hard",
             ),
             (
                 "write",
@@ -550,7 +513,10 @@ mod tests {
         let config = crate::ai::client::AiClientConfig::default();
         let client = Arc::new(AiClient::new(config, "test-key".to_string()));
         let hook = AutoClassifierHook::new(client);
-        let ctx = ToolContext::default(); // Supervised by default
+        let ctx = ToolContext {
+            permission_mode: PermissionMode::Supervised,
+            ..Default::default()
+        };
 
         let result = hook
             .before_execute("bash", &json!({"command": "rm -rf /"}), &ctx)

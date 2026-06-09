@@ -72,7 +72,9 @@ impl Database {
                     model TEXT,
                     working_dir TEXT,
                     session_type TEXT NOT NULL DEFAULT 'code'
-                        CHECK (session_type IN ('chat', 'code', 'mako'))
+                        CHECK (session_type IN ('chat', 'code', 'mako')),
+                    permission_mode TEXT NOT NULL DEFAULT 'autonomous'
+                        CHECK (permission_mode IN ('supervised', 'autonomous'))
                 );
 
                 -- Messages table
@@ -887,6 +889,19 @@ impl Database {
             )
             .context("Migration 30: Mako attention state")?;
             self.set_schema_version_tx(&tx, 30)?;
+        }
+
+        // Migration 31: Persist session permission mode
+        if current_version < 31 {
+            info!("Running migration 31: Session permission mode");
+            if !Self::column_exists(&tx, "sessions", "permission_mode") {
+                tx.execute_batch(
+                    "ALTER TABLE sessions
+                     ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'autonomous'
+                     CHECK (permission_mode IN ('supervised', 'autonomous'));",
+                )?;
+            }
+            self.set_schema_version_tx(&tx, 31)?;
         }
 
         tx.commit()?;

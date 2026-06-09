@@ -115,7 +115,10 @@ fn classify_error_code(message: &str) -> &'static str {
         || lower.contains("unknown field")
     {
         "invalid_parameters"
-    } else if lower.contains("access denied") || lower.contains("outside workspace") {
+    } else if lower.contains("access denied")
+        || lower.contains("outside workspace")
+        || lower.contains("filesystem access root")
+    {
         "access_denied"
     } else if lower.contains("timed out") || lower.contains("timeout") {
         "timeout"

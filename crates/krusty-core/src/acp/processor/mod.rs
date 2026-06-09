@@ -13,7 +13,9 @@ use std::sync::Arc;
 use crate::agent::AgentConfig;
 use crate::ai::client::{AiClient, AiClientConfig};
 use crate::ai::format_detection::detect_api_format;
-use crate::ai::providers::{get_provider, AuthHeader, ProviderId};
+use crate::ai::providers::{get_provider, AuthHeader, ProviderConfig, ProviderId};
+use crate::auth::{resolve_anthropic_auth, resolve_openai_auth, AnthropicAuthType, OpenAIAuthType};
+use crate::storage::CredentialStore;
 use crate::tools::git_identity::GitIdentity;
 use crate::tools::ToolRegistry;
 
@@ -55,8 +57,6 @@ impl PromptProcessor {
         provider: ProviderId,
         model_override: Option<String>,
     ) -> bool {
-        use std::collections::HashMap;
-
         let Some(model) = model_override
             .map(|model| model.trim().to_string())
             .filter(|model| !model.is_empty())
@@ -69,29 +69,8 @@ impl PromptProcessor {
             return false;
         };
 
-        let provider_config = get_provider(provider);
-
-        let (base_url, auth_header, custom_headers) = if let Some(pc) = provider_config {
-            (
-                Some(pc.base_url.clone()),
-                pc.auth_header,
-                pc.custom_headers.clone(),
-            )
-        } else {
-            (None, AuthHeader::XApiKey, HashMap::new())
-        };
-
-        let api_format = detect_api_format(provider, &model);
-
-        let config = AiClientConfig {
-            model: model.clone(),
-            max_tokens: ACP_DEFAULT_MAX_TOKENS,
-            base_url,
-            auth_header,
-            provider_id: provider,
-            api_format,
-            custom_headers,
-        };
+        let mut config = self.config_for_selected_credential(provider, &model, &api_key);
+        config.max_tokens = ACP_DEFAULT_MAX_TOKENS;
 
         let client = Arc::new(AiClient::new(config, api_key));
         self.ai_client = Some(client);
@@ -102,5 +81,95 @@ impl PromptProcessor {
             model
         );
         true
+    }
+
+    fn config_for_selected_credential(
+        &self,
+        provider: ProviderId,
+        model: &str,
+        credential: &str,
+    ) -> AiClientConfig {
+        match provider {
+            ProviderId::OpenAI => self.openai_config_for_selected_credential(model, credential),
+            ProviderId::Anthropic => {
+                self.anthropic_config_for_selected_credential(model, credential)
+            }
+            ProviderId::Grok => AiClientConfig::for_grok(model),
+            _ => self.generic_provider_config(provider, model),
+        }
+    }
+
+    fn openai_config_for_selected_credential(
+        &self,
+        model: &str,
+        credential: &str,
+    ) -> AiClientConfig {
+        let credentials = CredentialStore::load().unwrap_or_default();
+        let resolved = resolve_openai_auth(&credentials, model);
+        let auth_type = if resolved.credential.as_deref() == Some(credential) {
+            resolved.auth_type
+        } else {
+            OpenAIAuthType::ApiKey
+        };
+        let mut custom_headers = std::collections::HashMap::new();
+        if matches!(auth_type, OpenAIAuthType::ChatGptOAuth) {
+            if let Some(account_id) = resolved.account_id {
+                custom_headers.insert("ChatGPT-Account-Id".to_string(), account_id);
+            }
+        }
+
+        AiClientConfig {
+            model: model.to_string(),
+            max_tokens: ACP_DEFAULT_MAX_TOKENS,
+            base_url: Some(ProviderConfig::openai_url_for_auth(model, auth_type).to_string()),
+            auth_header: AuthHeader::Bearer,
+            provider_id: ProviderId::OpenAI,
+            api_format: ProviderConfig::openai_format_for_auth(model, auth_type),
+            custom_headers,
+        }
+    }
+
+    fn anthropic_config_for_selected_credential(
+        &self,
+        model: &str,
+        credential: &str,
+    ) -> AiClientConfig {
+        let credentials = CredentialStore::load().unwrap_or_default();
+        let resolved = resolve_anthropic_auth(&credentials);
+        let auth_type = if resolved.credential.as_deref() == Some(credential) {
+            resolved.auth_type
+        } else {
+            AnthropicAuthType::ApiKey
+        };
+
+        let mut config = AiClientConfig::for_anthropic_with_auth_detection(model, &credentials);
+        config.auth_header = ProviderConfig::anthropic_auth_header_for_auth(auth_type);
+        if !matches!(auth_type, AnthropicAuthType::OAuth) {
+            config.custom_headers.clear();
+        }
+        config
+    }
+
+    fn generic_provider_config(&self, provider: ProviderId, model: &str) -> AiClientConfig {
+        let provider_config = get_provider(provider);
+        let (base_url, auth_header, custom_headers) = if let Some(pc) = provider_config {
+            (
+                Some(pc.base_url.clone()),
+                pc.auth_header,
+                pc.custom_headers.clone(),
+            )
+        } else {
+            (None, AuthHeader::XApiKey, std::collections::HashMap::new())
+        };
+
+        AiClientConfig {
+            model: model.to_string(),
+            max_tokens: ACP_DEFAULT_MAX_TOKENS,
+            base_url,
+            auth_header,
+            provider_id: provider,
+            api_format: detect_api_format(provider, model),
+            custom_headers,
+        }
     }
 }

@@ -108,13 +108,11 @@ impl AgentTool {
                 let mut task = SubAgentTask::new(format!("builder-{}", i), task_prompt)
                     .with_name(name)
                     .with_working_dir(ctx.working_dir.clone())
-                    .with_sandbox_root(
-                        ctx.sandbox_root
-                            .clone()
-                            .unwrap_or_else(|| ctx.working_dir.clone()),
-                    )
                     .with_delegated_run_id(delegated_run_id.clone())
                     .with_delegation_policy(delegation_policy.clone());
+                if let Some(sandbox_root) = ctx.sandbox_root.clone() {
+                    task = task.with_sandbox_root(sandbox_root);
+                }
                 if let Some(max_turns) = ctx.subagent_max_turns {
                     task = task.with_max_turns(max_turns);
                 }
@@ -143,13 +141,11 @@ impl AgentTool {
             let mut task = SubAgentTask::new("builder-main", params.prompt.clone())
                 .with_name("main")
                 .with_working_dir(ctx.working_dir.clone())
-                .with_sandbox_root(
-                    ctx.sandbox_root
-                        .clone()
-                        .unwrap_or_else(|| ctx.working_dir.clone()),
-                )
                 .with_delegated_run_id(delegated_run_id.clone())
                 .with_delegation_policy(delegation_policy.clone());
+            if let Some(sandbox_root) = ctx.sandbox_root.clone() {
+                task = task.with_sandbox_root(sandbox_root);
+            }
             if let Some(max_turns) = ctx.subagent_max_turns {
                 task = task.with_max_turns(max_turns);
             }

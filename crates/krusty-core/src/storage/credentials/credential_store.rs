@@ -120,7 +120,12 @@ impl CredentialStore {
     }
 
     /// This checks API keys first, then falls back to OAuth tokens.
+    /// Grok is X-subscription only and resolves from the shared `~/.grok/auth.json` store.
     pub fn get_auth(&self, provider: &ProviderId) -> Option<String> {
+        if *provider == ProviderId::Grok {
+            return crate::auth::resolve_grok_auth(self).credential;
+        }
+
         if let Some(key) = self.get(provider) {
             return Some(key.clone());
         }

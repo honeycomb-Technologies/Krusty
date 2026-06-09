@@ -70,6 +70,11 @@ impl EditBlock {
         self.tool_use_id = Some(id);
     }
 
+    /// Get the associated tool use ID.
+    pub fn tool_use_id(&self) -> Option<&str> {
+        self.tool_use_id.as_deref()
+    }
+
     /// Set collapsed state directly (for session restoration)
     pub fn set_collapsed(&mut self, collapsed: bool) {
         self.collapsed = collapsed;
@@ -97,6 +102,16 @@ impl EditBlock {
         self.old_string = old_string;
         self.new_string = new_string;
         self.start_line = start_line;
+        self.recompute_display_diff();
+    }
+
+    /// Update the starting line number and recompute displayed diff metadata.
+    pub fn set_start_line(&mut self, start_line: usize) {
+        self.start_line = start_line;
+        self.recompute_display_diff();
+    }
+
+    fn recompute_display_diff(&mut self) {
         self.compute_diff();
         self.compute_sbs_pairs();
         let content_lines = self.visible_lines();

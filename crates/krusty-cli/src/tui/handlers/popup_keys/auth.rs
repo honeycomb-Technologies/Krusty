@@ -276,6 +276,34 @@ impl App {
                     .auth
                     .set_oauth_browser_status("Opening browser...");
 
+                if provider == ProviderId::Grok {
+                    tokio::spawn(async move {
+                        match krusty_core::auth::force_grok_browser_login().await {
+                            Ok(token) => {
+                                let _ = status_tx.send(OAuthStatusUpdate {
+                                    provider,
+                                    success: true,
+                                    message: "Authentication successful".to_string(),
+                                    device_code: None,
+                                    token: Some(krusty_core::auth::grok_auth_token_to_oauth_data(
+                                        &token,
+                                    )),
+                                });
+                            }
+                            Err(e) => {
+                                let _ = status_tx.send(OAuthStatusUpdate {
+                                    provider,
+                                    success: false,
+                                    message: format!("Grok OAuth failed: {}", e),
+                                    device_code: None,
+                                    token: None,
+                                });
+                            }
+                        }
+                    });
+                    return;
+                }
+
                 tokio::spawn(async move {
                     let config = match provider {
                         ProviderId::OpenAI => openai_oauth_config(),

@@ -23,6 +23,8 @@ u UU N... 100644 100644 100644 100644 abcdef0 abcdef0 abcdef0 conflicted.txt\n\
     assert_eq!(status.branch_files, 0);
     assert_eq!(status.branch_additions, 0);
     assert_eq!(status.branch_deletions, 0);
+    assert_eq!(status.worktree_additions, 0);
+    assert_eq!(status.worktree_deletions, 0);
     assert_eq!(status.pr_number, None);
     assert_eq!(status.ahead, 2);
     assert_eq!(status.behind, 1);

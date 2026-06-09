@@ -34,7 +34,11 @@ impl OpenAIParser {
         }
 
         Some(Usage {
-            prompt_tokens: input,
+            // OpenAI/Grok Responses `input_tokens` already includes cached tokens.
+            // Krusty's Usage shape keeps cache reads separate, matching the
+            // provider runtime schema's `inputTokens` + `cachedInputTokens`
+            // accounting without double-counting in cache-hit-rate math.
+            prompt_tokens: input.saturating_sub(cached),
             completion_tokens: output,
             total_tokens: input + output,
             cache_creation_input_tokens: 0,

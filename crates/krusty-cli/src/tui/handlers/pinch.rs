@@ -391,6 +391,7 @@ impl App {
                 .git_status
                 .as_ref()
                 .and_then(|status| status.branch.as_deref()),
+            self.runtime.permission_mode,
         ) {
             Ok(new_id) => {
                 // Save pinch context as first message
@@ -559,6 +560,7 @@ impl App {
                 .git_status
                 .as_ref()
                 .and_then(|status| status.branch.as_deref()),
+            self.runtime.permission_mode,
         ) {
             Ok(new_id) => {
                 // Save pinch context as first message

@@ -79,7 +79,9 @@ export function useSessionActions({
       const workspaceMode = (session.workspace_mode ??
         getWorkspaceMode(directory)) as WorkspaceMode;
 
-      sessionStore.getState().initSession(session.id, session.title || "");
+      sessionStore
+        .getState()
+        .initSession(session.id, session.title || "", session.permission_mode);
       workspace
         .getState()
         .initFromSession(
@@ -118,6 +120,7 @@ export function useSessionActions({
           targetBranch ?? undefined,
           directory ? "selected" : "neutral",
           sessionTypeForTab(activeTab),
+          sessionStore.getState().permissionMode,
         );
         await bootstrapSession(session);
         setActiveToolCallId(null);
@@ -135,6 +138,7 @@ export function useSessionActions({
       bootstrapSession,
       client,
       ensureModelReady,
+      sessionStore,
       setActiveToolCallId,
       setDrawerOpen,
       stopCurrentStream,
@@ -168,6 +172,7 @@ export function useSessionActions({
         precreate?.targetBranch ?? undefined,
         precreate?.workspaceMode,
         precreate?.sessionType ?? sessionTypeForTab(activeTab),
+        sessionStore.getState().permissionMode,
       );
       await bootstrapSession(session);
       return { ...intent, sendOptions: undefined };
@@ -225,6 +230,7 @@ export function useSessionActions({
           targetBranch ?? undefined,
           "selected",
           "code",
+          sessionStore.getState().permissionMode,
         );
         await bootstrapSession(session);
         setActiveToolCallId(null);

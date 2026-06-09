@@ -103,9 +103,10 @@ pub struct ChatRequest {
     pub thinking_enabled: ThinkingLevel,
     /// Optional mode override for the session before starting this turn
     pub mode: Option<WorkMode>,
-    /// Permission mode for tool execution
+    /// Permission mode for tool execution. If omitted for an existing session,
+    /// the server uses the session's persisted mode.
     #[serde(default)]
-    pub permission_mode: PermissionMode,
+    pub permission_mode: Option<PermissionMode>,
     /// Request provider fast/priority service tier without changing the selected model
     #[serde(default)]
     pub fast_mode: bool,
@@ -160,10 +161,7 @@ mod tests {
         .expect("request should deserialize");
 
         assert!(req.fast_mode);
-        assert_eq!(
-            req.permission_mode,
-            krusty_core::tools::registry::PermissionMode::default()
-        );
+        assert_eq!(req.permission_mode, None);
     }
 
     #[test]
@@ -205,10 +203,7 @@ mod tests {
         .expect("request should deserialize");
 
         assert!(req.fast_mode);
-        assert_eq!(
-            req.permission_mode,
-            krusty_core::tools::registry::PermissionMode::default()
-        );
+        assert_eq!(req.permission_mode, None);
     }
 
     #[test]
@@ -223,7 +218,7 @@ mod tests {
 
         assert_eq!(
             req.permission_mode,
-            krusty_core::tools::registry::PermissionMode::Autonomous
+            Some(krusty_core::tools::registry::PermissionMode::Autonomous)
         );
     }
 
@@ -379,8 +374,9 @@ pub struct ToolResultRequest {
     #[serde(default)]
     pub fast_mode: bool,
     /// Permission mode to preserve while resuming after an interactive tool result.
+    /// If omitted, the server uses recovery/session metadata.
     #[serde(default)]
-    pub permission_mode: PermissionMode,
+    pub permission_mode: Option<PermissionMode>,
 }
 
 #[derive(Deserialize)]

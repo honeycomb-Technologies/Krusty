@@ -9,9 +9,9 @@ use axum::{
 };
 use serde::Serialize;
 
-use super::session_access::request_workspace_scope;
+use super::session_access::{request_workspace_scope, RequestWorkspaceScope};
 use krusty_core::agent::AgentConfig as RuntimeAgentConfig;
-use krusty_core::tools::registry::{PermissionMode, ToolContext};
+use krusty_core::tools::registry::{FilesystemAccess, PermissionMode, ToolContext};
 
 use crate::auth::CurrentUser;
 use crate::error::AppError;
@@ -54,7 +54,8 @@ async fn execute_tool(
     user: Option<CurrentUser>,
     Json(req): Json<ToolExecuteRequest>,
 ) -> Result<Json<ToolExecuteResponse>, AppError> {
-    let working_dir = resolve_tool_working_dir(&state, user.as_ref(), req.working_dir.as_deref())?;
+    let (working_dir, workspace_scope) =
+        resolve_tool_working_dir(&state, user.as_ref(), req.working_dir.as_deref())?;
     let user_id = user
         .as_ref()
         .and_then(|current_user| current_user.0.user_id.as_deref());
@@ -67,6 +68,9 @@ async fn execute_tool(
         ..Default::default()
     }
     .with_permission_mode(PermissionMode::Autonomous)
+    .with_filesystem_access(FilesystemAccess::scoped(
+        workspace_scope.allowed_root.clone(),
+    ))
     .with_subagent_max_turns(RuntimeAgentConfig::default().subagent_max_turns)
     .with_mcp_manager(state.mcp_manager.clone())
     .with_skills_manager(state.skills_manager.clone());
@@ -94,13 +98,14 @@ fn resolve_tool_working_dir(
     state: &AppState,
     user: Option<&CurrentUser>,
     requested: Option<&str>,
-) -> Result<PathBuf, AppError> {
+) -> Result<(PathBuf, RequestWorkspaceScope), AppError> {
     let workspace_scope = request_workspace_scope(state, user);
-    resolve_scoped_workspace_path(
+    let working_dir = resolve_scoped_workspace_path(
         requested,
         &workspace_scope.base_dir,
         &workspace_scope.allowed_root,
-    )
+    )?;
+    Ok((working_dir, workspace_scope))
 }
 
 #[cfg(test)]
@@ -204,11 +209,20 @@ mod tests {
             Some(&current_user("alice", &user_root)),
             Some("repo"),
         );
-        let working_dir = match result {
-            Ok(working_dir) => working_dir,
+        let (working_dir, scope) = match result {
+            Ok(resolved) => resolved,
             Err(_) => panic!("working dir should resolve"),
         };
 
         assert_eq!(working_dir, repo_dir);
+        assert_eq!(scope.allowed_root, user_root);
+    }
+
+    #[tokio::test]
+    async fn resolve_tool_working_dir_rejects_absolute_paths_outside_server_root_without_user() {
+        let (state, _temp_dir) = create_test_state();
+        let result = resolve_tool_working_dir(&state, None, Some("/etc"));
+
+        assert!(matches!(result, Err(AppError::BadRequest(_))));
     }
 }

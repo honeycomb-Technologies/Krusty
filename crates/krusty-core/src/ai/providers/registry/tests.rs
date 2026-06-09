@@ -3,11 +3,12 @@ use crate::ai::providers::{builtin_providers, get_provider, AuthHeader, Provider
 #[test]
 fn test_builtin_providers() {
     let providers = builtin_providers();
-    assert_eq!(providers.len(), 5);
+    assert_eq!(providers.len(), 6);
     assert!(providers.iter().any(|p| p.id == ProviderId::MiniMax));
     assert!(providers.iter().any(|p| p.id == ProviderId::OpenRouter));
     assert!(providers.iter().any(|p| p.id == ProviderId::Anthropic));
     assert!(providers.iter().any(|p| p.id == ProviderId::OpenAI));
+    assert!(providers.iter().any(|p| p.id == ProviderId::Grok));
     assert!(providers.iter().any(|p| p.id == ProviderId::ZAi));
 }
 
@@ -61,6 +62,35 @@ fn test_openai_config_uses_curated_models() {
         .models
         .iter()
         .all(|model| model.reasoning.is_some()));
+}
+
+#[test]
+fn test_grok_config() {
+    let provider = get_provider(ProviderId::Grok).unwrap();
+    assert_eq!(provider.name, "Grok");
+    assert_eq!(
+        provider.base_url,
+        "https://cli-chat-proxy.grok.com/v1/responses"
+    );
+    assert_eq!(provider.auth_header, AuthHeader::Bearer);
+    assert_eq!(provider.default_model(), "grok-build");
+    assert!(provider.has_model("grok-composer-2.5-fast"));
+    assert!(provider
+        .models
+        .iter()
+        .all(|model| model.reasoning.is_some()));
+    assert!(provider.supports_tools);
+    assert!(provider.dynamic_models);
+    assert!(provider
+        .custom_headers
+        .contains_key("x-grok-client-version"));
+    assert_eq!(
+        provider
+            .custom_headers
+            .get("X-XAI-Token-Auth")
+            .map(String::as_str),
+        Some("xai-grok-cli")
+    );
 }
 
 #[test]

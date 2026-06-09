@@ -7,10 +7,10 @@ mod policy;
 mod result;
 mod runtime;
 
-pub use context::{ToolContext, ToolOutputChunk};
+pub use context::{FileObservationTracker, FilesystemAccess, ToolContext, ToolOutputChunk};
 pub use policy::{
-    tool_category, tool_policy, DelegationPolicy, DelegationSurface, PermissionMode, ToolCategory,
-    ToolPolicy,
+    authorize_tool_call, tool_category, tool_policy, tool_policy_for_call, DelegationPolicy,
+    DelegationSurface, PermissionMode, ToolAuthorization, ToolCategory, ToolPolicy,
 };
 pub use result::{parse_params, ToolResult};
 pub use runtime::{Tool, ToolRegistry};

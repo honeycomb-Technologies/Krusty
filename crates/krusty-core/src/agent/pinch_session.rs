@@ -7,6 +7,7 @@ use crate::ai::client::AiClient;
 use crate::ai::types::{Content, ModelMessage};
 use crate::plan::{PlanFile, PlanManager};
 use crate::storage::{Database, FileActivityTracker, RankedFile, SessionManager};
+use crate::tools::registry::PermissionMode;
 
 use super::build_project_context;
 use super::pinch_context::{PinchContext, PinchContextInput};
@@ -25,6 +26,7 @@ pub struct CreatePinchedSessionRequest<'a> {
     pub working_dir: &'a Path,
     pub model: Option<&'a str>,
     pub target_branch: Option<&'a str>,
+    pub permission_mode: PermissionMode,
     pub preservation_hints: Option<String>,
     pub direction: Option<String>,
     pub initial_user_message: Option<String>,
@@ -98,6 +100,7 @@ pub async fn create_pinched_session(
         request.model,
         Some(working_dir_for_child.as_str()),
         request.target_branch,
+        request.permission_mode,
     )?;
 
     let system_msg_json =
@@ -262,6 +265,7 @@ mod tests {
         Database, PartialAssistantState, RecoveryDecision, RecoveryStatus, SessionManager,
         SessionRecoveryState, SessionType, WorkspaceMode,
     };
+    use crate::tools::registry::PermissionMode;
 
     #[tokio::test]
     async fn create_pinched_session_preserves_system_context_and_plan() {
@@ -310,6 +314,7 @@ mod tests {
             working_dir: temp.path(),
             model: Some("test-model"),
             target_branch: Some("feature/refactor"),
+            permission_mode: PermissionMode::Supervised,
             preservation_hints: Some("Preserve the route split.".to_string()),
             direction: Some("Continue modularity work.".to_string()),
             initial_user_message: Some("Continue.".to_string()),
@@ -325,6 +330,7 @@ mod tests {
             child.parent_session_id.as_deref(),
             Some(session_id.as_str())
         );
+        assert_eq!(child.permission_mode, PermissionMode::Supervised);
 
         let messages = session_manager
             .load_session_messages(&result.new_session_id)
@@ -394,6 +400,7 @@ mod tests {
             working_dir: temp.path(),
             model: Some("test-model"),
             target_branch: None,
+            permission_mode: PermissionMode::default(),
             preservation_hints: None,
             direction: None,
             initial_user_message: Some("Continue working on the current task.".to_string()),
@@ -410,6 +417,11 @@ mod tests {
         assert!(messages[1]
             .1
             .contains("Continue working on the current task."));
+        let child = session_manager
+            .get_session(&result.new_session_id)
+            .expect("load child")
+            .expect("child exists");
+        assert_eq!(child.permission_mode, PermissionMode::default());
         assert!(
             session_manager
                 .load_recovery_state(&session_id)
@@ -468,6 +480,7 @@ mod tests {
             working_dir: &working_dir,
             model: Some("test-model"),
             target_branch: None,
+            permission_mode: PermissionMode::default(),
             preservation_hints: None,
             direction: None,
             initial_user_message: None,

@@ -22,7 +22,7 @@ use crate::storage::{
     Database, PartialAssistantState, PendingInteractionSnapshot, RecoveryDecision,
     RecoveryNonResumableReason, RecoveryStatus, SessionManager, SessionRecoveryState, WorkMode,
 };
-use crate::tools::registry::{PermissionMode, ToolRegistry, ToolResult};
+use crate::tools::registry::{FileObservationTracker, PermissionMode, ToolRegistry, ToolResult};
 
 use super::loop_events::{LoopEvent, LoopInput};
 use super::plan_handler;
@@ -54,6 +54,7 @@ pub(crate) async fn execute_tools(
     input_rx: &mut mpsc::UnboundedReceiver<LoopInput>,
     subagent_max_turns_override: Option<usize>,
     disabled_tools: Option<&[String]>,
+    file_observations: Arc<FileObservationTracker>,
 ) -> (Vec<Content>, WorkMode) {
     let mut work_mode = current_mode;
     let mut results = Vec::new();
@@ -163,6 +164,7 @@ pub(crate) async fn execute_tools(
                 delegated_progress_tx,
                 event_tx,
                 subagent_max_turns_override,
+                Arc::clone(&file_observations),
             )
             .await;
 

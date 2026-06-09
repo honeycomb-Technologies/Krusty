@@ -50,13 +50,16 @@ impl CodexReasoningEffort {
 
 pub fn supports_openai_xhigh_reasoning(model_id: &str) -> bool {
     let raw = model_id.trim();
-    let normalized = raw
-        .to_ascii_lowercase()
+    let lower = raw.to_ascii_lowercase();
+    let normalized = lower
         .strip_prefix("openai/")
-        .unwrap_or(raw)
-        .to_ascii_lowercase();
+        .or_else(|| lower.strip_prefix("grok/"))
+        .unwrap_or(&lower);
 
-    normalized.contains("codex") || supports_gpt5_xhigh_reasoning(&normalized)
+    normalized.contains("codex")
+        || normalized == "grok-build"
+        || normalized.starts_with("grok-composer-")
+        || supports_gpt5_xhigh_reasoning(normalized)
 }
 
 fn supports_gpt5_xhigh_reasoning(model_id: &str) -> bool {
@@ -99,6 +102,12 @@ mod tests {
         assert!(!supports_openai_xhigh_reasoning("gpt-5"));
         assert!(!supports_openai_xhigh_reasoning("gpt-5.2"));
         assert!(!supports_openai_xhigh_reasoning("gpt-4.1"));
+    }
+
+    #[test]
+    fn grok_build_models_support_xhigh_reasoning() {
+        assert!(supports_openai_xhigh_reasoning("grok-build"));
+        assert!(supports_openai_xhigh_reasoning("grok-composer-2.5-fast"));
     }
 
     #[test]

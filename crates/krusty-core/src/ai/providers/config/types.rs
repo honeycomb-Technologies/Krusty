@@ -23,6 +23,7 @@ pub enum ProviderId {
     ZAi,
     Anthropic,
     OpenAI,
+    Grok,
 }
 
 impl ProviderId {
@@ -33,6 +34,7 @@ impl ProviderId {
             ProviderId::MiniMax,
             ProviderId::Anthropic,
             ProviderId::OpenAI,
+            ProviderId::Grok,
             ProviderId::ZAi,
             ProviderId::OpenRouter,
         ]
@@ -46,12 +48,16 @@ impl ProviderId {
             ProviderId::ZAi => "z_ai",
             ProviderId::Anthropic => "anthropic",
             ProviderId::OpenAI => "openai",
+            ProviderId::Grok => "grok",
         }
     }
 
     /// Check if this provider supports OAuth authentication.
     pub fn supports_oauth(&self) -> bool {
-        matches!(self, ProviderId::OpenAI | ProviderId::Anthropic)
+        matches!(
+            self,
+            ProviderId::OpenAI | ProviderId::Anthropic | ProviderId::Grok
+        )
     }
 
     /// Get the authentication methods supported by this provider.
@@ -64,6 +70,7 @@ impl ProviderId {
                 AuthMethod::ApiKey,
             ],
             ProviderId::Anthropic => vec![AuthMethod::OAuthBrowser, AuthMethod::ApiKey],
+            ProviderId::Grok => vec![AuthMethod::OAuthBrowser],
             _ => vec![AuthMethod::ApiKey],
         }
     }
@@ -77,6 +84,7 @@ impl fmt::Display for ProviderId {
             ProviderId::ZAi => write!(f, "Z.ai"),
             ProviderId::Anthropic => write!(f, "Anthropic"),
             ProviderId::OpenAI => write!(f, "OpenAI"),
+            ProviderId::Grok => write!(f, "Grok"),
         }
     }
 }
@@ -92,12 +100,12 @@ pub enum AuthHeader {
 }
 
 /// Different reasoning/thinking formats used by various providers.
-/// When enabled, we always use max effort.
+/// When enabled, the request layer maps the active UI effort to provider wire values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReasoningFormat {
     /// Anthropic Claude: `thinking.budget_tokens`.
     Anthropic,
-    /// OpenAI o1/o3/GPT-5: `reasoning_effort: "high"`.
+    /// OpenAI o1/o3/GPT-5 and Grok Build: OpenAI-style `reasoning` / `reasoning_effort`.
     OpenAI,
     /// DeepSeek R1: `reasoning.enabled: true`.
     DeepSeek,
@@ -176,6 +184,7 @@ impl ProviderConfig {
             match self.id {
                 ProviderId::OpenRouter => "openai/gpt-5-codex",
                 ProviderId::OpenAI => "gpt-5.5",
+                ProviderId::Grok => "grok-build",
                 _ => "MiniMax-M2.5",
             }
         }

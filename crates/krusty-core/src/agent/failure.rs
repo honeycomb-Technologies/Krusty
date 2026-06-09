@@ -72,7 +72,7 @@ pub fn detect_repeated_failures(
 
         if *count >= REPEATED_FAILURE_THRESHOLD {
             return Some(format!(
-                "Stopping tool loop: '{}' failed {} times with the same '{}' error. A different strategy is required.",
+                "Stopping tool loop: '{}' failed {} times with the same '{}' error. Do not retry the same command unchanged; inspect the previous output, fix the reported issue, or choose a different strategy.",
                 tool_name, *count, error_code
             ));
         }
@@ -324,12 +324,47 @@ fn extract_error_signature(output_str: &str) -> (String, String) {
                 );
             }
         }
+
+        if let Some(signature) = extract_history_tool_error_signature(&value) {
+            return signature;
+        }
     }
 
     (
         classify_error_code(output_str).to_string(),
         normalize_error_fingerprint(output_str),
     )
+}
+
+fn extract_history_tool_error_signature(value: &serde_json::Value) -> Option<(String, String)> {
+    let summary = value.get("summary").and_then(|v| v.as_str())?;
+    let result = value.get("result");
+
+    let mut message_parts = vec![summary.to_string()];
+    if let Some(error) = result
+        .and_then(|v| v.get("error"))
+        .and_then(|v| v.as_str())
+        .filter(|text| !text.trim().is_empty())
+    {
+        message_parts.push(error.to_string());
+    }
+    if let Some(output_preview) = result
+        .and_then(|v| v.get("output_preview"))
+        .and_then(|v| v.as_str())
+        .filter(|text| !text.trim().is_empty())
+    {
+        message_parts.push(output_preview.to_string());
+    }
+
+    let message = message_parts.join("\n");
+    let code = value
+        .get("error_code")
+        .and_then(|v| v.as_str())
+        .map(|code| code.to_ascii_lowercase())
+        .filter(|code| !code.is_empty())
+        .unwrap_or_else(|| classify_error_code(&message).to_string());
+
+    Some((code, normalize_error_fingerprint(&message)))
 }
 
 fn classify_error_code(message: &str) -> &'static str {
@@ -480,6 +515,52 @@ mod tests {
             &[fail_result, ok_result],
         );
         assert!(second.is_some());
+    }
+
+    #[test]
+    fn repeated_failure_uses_history_error_code_and_output_fingerprint() {
+        let call = AiToolCall {
+            id: "call_1".to_string(),
+            name: "bash".to_string(),
+            arguments: json!({"command":"git diff --cached --check"}),
+        };
+        let raw_output = json!({
+            "ok": false,
+            "error": {
+                "code": "command_failed",
+                "message": "Command exited with code 2"
+            },
+            "data": {
+                "output": "crates/grok-auth/README.md:76: trailing whitespace.\n+Just use the default path.  "
+            },
+            "metadata": {"exit_code": 2, "killed": false}
+        })
+        .to_string();
+        let result = Content::ToolResult {
+            tool_use_id: "call_1".to_string(),
+            output: crate::agent::history_policy::build_history_tool_result(
+                "bash",
+                &raw_output,
+                true,
+            ),
+            is_error: Some(true),
+        };
+
+        let mut counters = HashMap::new();
+        assert!(detect_repeated_failures(
+            &mut counters,
+            std::slice::from_ref(&call),
+            std::slice::from_ref(&result),
+        )
+        .is_none());
+        let diagnostic = detect_repeated_failures(
+            &mut counters,
+            std::slice::from_ref(&call),
+            std::slice::from_ref(&result),
+        )
+        .expect("second identical command failure should trip loop guard");
+
+        assert!(diagnostic.contains("same 'command_failed' error"));
     }
 
     #[test]

@@ -13,6 +13,7 @@ use super::super::shared::{
     ensure_success_stream_response, log_system_prompt_layers, start_sse_stream,
 };
 use crate::ai::format::openai::OpenAIFormat;
+use crate::ai::model_profile::SystemPromptSections;
 use crate::ai::parsers::OpenAIParser;
 use crate::ai::sse::{create_streaming_channels, spawn_buffer_processor, SseStreamProcessor};
 use crate::ai::streaming::StreamPart;
@@ -22,6 +23,19 @@ enum CodexPayloadState {
     Continue,
     Complete,
     Error,
+}
+
+fn codex_cache_stable_instructions(prompt_sections: &SystemPromptSections) -> String {
+    let mut sections = Vec::new();
+
+    if !prompt_sections.base_prompt.is_empty() {
+        sections.push(prompt_sections.base_prompt.as_str());
+    }
+    if !prompt_sections.project_context.is_empty() {
+        sections.push(prompt_sections.project_context.as_str());
+    }
+
+    sections.join("\n\n---\n\n")
 }
 
 async fn process_codex_ws_payload(
@@ -79,12 +93,15 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
         &prompt_sections,
         options.system_prompt.is_some(),
     );
-    let system_prompt = prompt_sections.combined();
+    let system_prompt = codex_cache_stable_instructions(&prompt_sections);
+    let volatile_context = (!prompt_sections.session_context.trim().is_empty())
+        .then_some(prompt_sections.session_context.as_str());
 
     let max_tokens = options.max_tokens.unwrap_or(client.config().max_tokens);
     let body = client.build_chatgpt_codex_body(
         &messages,
         &system_prompt,
+        volatile_context,
         max_tokens,
         options,
         &format_handler,

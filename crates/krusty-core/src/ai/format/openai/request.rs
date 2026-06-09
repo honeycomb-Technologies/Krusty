@@ -53,6 +53,16 @@ impl OpenAIFormat {
             body["stream"] = serde_json::json!(true);
         }
 
+        if self.is_responses_format() {
+            if let Some(cache_key) = options
+                .call_options
+                .and_then(|call| call.session_id.as_deref())
+                .filter(|key| !key.is_empty())
+            {
+                body["prompt_cache_key"] = serde_json::json!(cache_key);
+            }
+        }
+
         if let Some(system) = options.system_prompt {
             if let Some(msgs) = body.get_mut(messages_key).and_then(|m| m.as_array_mut()) {
                 msgs.insert(

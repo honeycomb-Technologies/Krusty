@@ -126,7 +126,11 @@ mod tests {
         assert_eq!(ctx.permission_mode, PermissionMode::Autonomous);
         assert_eq!(ctx.subagent_max_turns, Some(17));
         assert_eq!(ctx.delegation_policy, Some(policy));
-        assert_eq!(ctx.sandbox_root, Some(working_dir));
+        assert_eq!(ctx.sandbox_root, None);
+        assert!(matches!(
+            ctx.filesystem_access,
+            crate::tools::registry::FilesystemAccess::Unrestricted
+        ));
     }
 
     #[test]
@@ -148,7 +152,7 @@ mod tests {
     }
 
     #[test]
-    fn explore_subagent_tool_context_sandboxes_to_assigned_scope() {
+    fn explore_subagent_tool_context_inherits_unrestricted_parent_access() {
         let working_dir = PathBuf::from("/tmp/krusty-explore-scope");
         let policy = DelegationPolicy::for_subagent_explore(PermissionMode::Autonomous, Some(9));
         let task = SubAgentTask::new("task", "prompt")
@@ -158,10 +162,11 @@ mod tests {
         let ctx = build_subagent_tool_context(&task, 30);
 
         assert_eq!(ctx.working_dir, working_dir);
-        assert_eq!(
-            ctx.sandbox_root,
-            Some(PathBuf::from("/tmp/krusty-explore-scope"))
-        );
+        assert_eq!(ctx.sandbox_root, None);
+        assert!(matches!(
+            ctx.filesystem_access,
+            crate::tools::registry::FilesystemAccess::Unrestricted
+        ));
     }
 
     #[test]

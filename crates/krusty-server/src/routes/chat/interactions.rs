@@ -43,6 +43,8 @@ pub(super) async fn tool_result(
     .await?;
 
     let permission_mode = continuation_permission_mode(&ctx, req.permission_mode);
+    ctx.session_manager
+        .update_session_permission_mode(&req.session_id, permission_mode)?;
 
     // Plan confirmation is an internal orchestrator event, not a real tool call.
     // Don't add a ToolResult — instead add a user message to resume the conversation.
@@ -138,7 +140,7 @@ pub(super) async fn tool_result(
 
 fn continuation_permission_mode(
     ctx: &super::session::ChatSessionContext,
-    requested_permission_mode: PermissionMode,
+    requested_permission_mode: Option<PermissionMode>,
 ) -> PermissionMode {
     let recovered_permission_mode = ctx
         .session_manager
@@ -151,18 +153,22 @@ fn continuation_permission_mode(
         ctx.session_type,
         requested_permission_mode,
         recovered_permission_mode,
+        ctx.permission_mode,
     )
 }
 
 fn resumed_permission_mode(
     session_type: SessionType,
-    requested_permission_mode: PermissionMode,
+    requested_permission_mode: Option<PermissionMode>,
     recovered_permission_mode: Option<PermissionMode>,
+    session_permission_mode: PermissionMode,
 ) -> PermissionMode {
     if session_type == SessionType::Mako {
         PermissionMode::Autonomous
     } else {
-        recovered_permission_mode.unwrap_or(requested_permission_mode)
+        recovered_permission_mode
+            .or(requested_permission_mode)
+            .unwrap_or(session_permission_mode)
     }
 }
 
@@ -235,7 +241,12 @@ mod tests {
     #[test]
     fn resumed_permission_mode_preserves_supervised_for_code_sessions() {
         assert_eq!(
-            resumed_permission_mode(SessionType::Code, PermissionMode::Supervised, None),
+            resumed_permission_mode(
+                SessionType::Code,
+                Some(PermissionMode::Supervised),
+                None,
+                PermissionMode::Autonomous
+            ),
             PermissionMode::Supervised
         );
     }
@@ -243,7 +254,12 @@ mod tests {
     #[test]
     fn resumed_permission_mode_preserves_autonomous_for_code_sessions() {
         assert_eq!(
-            resumed_permission_mode(SessionType::Code, PermissionMode::Autonomous, None),
+            resumed_permission_mode(
+                SessionType::Code,
+                Some(PermissionMode::Autonomous),
+                None,
+                PermissionMode::Supervised
+            ),
             PermissionMode::Autonomous
         );
     }
@@ -253,9 +269,18 @@ mod tests {
         assert_eq!(
             resumed_permission_mode(
                 SessionType::Code,
-                PermissionMode::Autonomous,
-                Some(PermissionMode::Supervised)
+                Some(PermissionMode::Autonomous),
+                Some(PermissionMode::Supervised),
+                PermissionMode::Autonomous
             ),
+            PermissionMode::Supervised
+        );
+    }
+
+    #[test]
+    fn resumed_permission_mode_uses_session_mode_when_request_omits_it() {
+        assert_eq!(
+            resumed_permission_mode(SessionType::Code, None, None, PermissionMode::Supervised),
             PermissionMode::Supervised
         );
     }
@@ -265,8 +290,9 @@ mod tests {
         assert_eq!(
             resumed_permission_mode(
                 SessionType::Mako,
-                PermissionMode::Supervised,
-                Some(PermissionMode::Supervised)
+                Some(PermissionMode::Supervised),
+                Some(PermissionMode::Supervised),
+                PermissionMode::Supervised
             ),
             PermissionMode::Autonomous
         );

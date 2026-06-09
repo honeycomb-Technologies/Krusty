@@ -3,6 +3,7 @@ use krusty_core::storage::{
     RuntimeTraceEvent, RuntimeTraceSummary, SessionInfo, SessionRecoveryState, SessionType,
     WorkMode, WorkspaceMode,
 };
+use krusty_core::tools::registry::PermissionMode;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
@@ -20,7 +21,10 @@ pub struct CreateSessionRequest {
     pub working_dir: Option<String>,
     pub workspace_mode: Option<WorkspaceMode>,
     pub target_branch: Option<String>,
+    #[serde(default)]
     pub session_type: Option<SessionType>,
+    #[serde(default)]
+    pub permission_mode: Option<PermissionMode>,
 }
 
 #[derive(Deserialize)]
@@ -37,6 +41,7 @@ pub struct UpdateSessionRequest {
         deserialize_with = "deserialize_target_branch_update"
     )]
     pub target_branch: Option<Option<String>>,
+    pub permission_mode: Option<PermissionMode>,
 }
 
 fn deserialize_target_branch_update<'de, D>(
@@ -114,6 +119,7 @@ pub struct SessionResponse {
     pub mode: WorkMode,
     pub model: Option<String>,
     pub target_branch: Option<String>,
+    pub permission_mode: PermissionMode,
 }
 
 impl From<SessionInfo> for SessionResponse {
@@ -131,6 +137,7 @@ impl From<SessionInfo> for SessionResponse {
             mode: s.work_mode,
             model: s.model,
             target_branch: s.target_branch,
+            permission_mode: s.permission_mode,
         }
     }
 }
@@ -154,6 +161,8 @@ pub struct SessionStateResponse {
     pub last_event_at: Option<String>,
     /// Current persisted work mode
     pub mode: WorkMode,
+    /// Current persisted permission mode.
+    pub permission_mode: PermissionMode,
     /// Interrupted-turn recovery state, if any.
     pub recovery: Option<SessionRecoveryState>,
     /// Reload-safe pending tool approvals, user questions, and plan confirmations.

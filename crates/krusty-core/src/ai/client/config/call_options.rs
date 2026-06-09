@@ -109,7 +109,9 @@ impl CallOptions {
             options.web_fetch = None;
         }
 
-        if !(provider == ProviderId::OpenAI && matches!(api_format, ApiFormat::OpenAIResponses)) {
+        if !(matches!(provider, ProviderId::OpenAI | ProviderId::Grok)
+            && matches!(api_format, ApiFormat::OpenAIResponses))
+        {
             options.codex_parallel_tool_calls = false;
         }
 
@@ -186,6 +188,27 @@ mod tests {
             options.canonicalized_for(ProviderId::MiniMax, "MiniMax-M2.5", ApiFormat::Anthropic);
 
         assert_eq!(canonical.reasoning_format, Some(ReasoningFormat::Anthropic));
+        assert!(canonical.thinking.is_some());
+    }
+
+    #[test]
+    fn canonicalization_preserves_grok_responses_reasoning_controls() {
+        let options = CallOptions {
+            thinking: Some(ThinkingConfig::default()),
+            codex_reasoning_effort: Some(CodexReasoningEffort::XHigh),
+            codex_parallel_tool_calls: true,
+            ..Default::default()
+        };
+
+        let canonical =
+            options.canonicalized_for(ProviderId::Grok, "grok-build", ApiFormat::OpenAIResponses);
+
+        assert_eq!(canonical.reasoning_format, Some(ReasoningFormat::OpenAI));
+        assert_eq!(
+            canonical.codex_reasoning_effort,
+            Some(CodexReasoningEffort::XHigh)
+        );
+        assert!(canonical.codex_parallel_tool_calls);
         assert!(canonical.thinking.is_some());
     }
 

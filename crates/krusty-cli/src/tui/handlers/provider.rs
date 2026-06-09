@@ -63,7 +63,7 @@ impl App {
             .unwrap_or(false)
     }
 
-    fn resolve_auth_for_active_provider(&self) -> Option<String> {
+    pub(crate) fn resolve_auth_for_active_provider(&self) -> Option<String> {
         if self.runtime.active_provider == ProviderId::Anthropic {
             let resolved =
                 krusty_core::auth::resolve_anthropic_auth(&self.services.credential_store);
@@ -75,6 +75,11 @@ impl App {
                 &self.services.credential_store,
                 &self.runtime.current_model,
             );
+            return resolved.credential;
+        }
+
+        if self.runtime.active_provider == ProviderId::Grok {
+            let resolved = krusty_core::auth::resolve_grok_auth(&self.services.credential_store);
             return resolved.credential;
         }
 
@@ -161,21 +166,26 @@ impl App {
 
     /// Set API key for current provider and create client
     pub fn set_api_key(&mut self, key: String) {
-        self.runtime.api_key = Some(key.clone());
-        self.runtime.ai_client = if self.has_selected_model() {
-            let config = self.create_client_config();
-            Some(AiClient::with_api_key(config, key.clone()))
-        } else {
-            None
-        };
-
-        // Save to credential store (unified storage for all providers)
+        // Save to credential store first, then re-resolve auth for the selected
+        // model so OpenAI endpoint/config detection and credential choice stay
+        // in sync when both API-key and OAuth credentials exist.
         self.services
             .credential_store
             .set(self.runtime.active_provider, key);
         if let Err(e) = self.services.credential_store.save() {
             tracing::warn!("Failed to save credential store: {}", e);
         }
+
+        let auth = self.resolve_auth_for_active_provider();
+        self.runtime.api_key = auth.clone();
+        self.runtime.ai_client = if self.has_selected_model() {
+            auth.map(|key| {
+                let config = self.create_client_config();
+                AiClient::with_api_key(config, key)
+            })
+        } else {
+            None
+        };
     }
 
     /// Switch to a different provider.

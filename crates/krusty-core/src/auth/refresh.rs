@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use super::credential_loading::extract_openai_account_id;
 use super::providers::{anthropic_oauth_config, openai_oauth_config};
-use super::{OAuthTokenData, OAuthTokenStore};
+use super::{refresh_grok_oauth_token, OAuthTokenData, OAuthTokenStore};
 use crate::ai::providers::ProviderId;
 
 #[derive(Deserialize)]
@@ -21,6 +21,7 @@ struct TokenResponse {
 pub async fn refresh_oauth_token(provider_id: ProviderId) -> Result<OAuthTokenData> {
     match provider_id {
         ProviderId::Anthropic => refresh_anthropic_oauth_token().await,
+        ProviderId::Grok => refresh_grok_oauth_token().await,
         _ => refresh_openai_oauth_token(provider_id).await,
     }
 }
