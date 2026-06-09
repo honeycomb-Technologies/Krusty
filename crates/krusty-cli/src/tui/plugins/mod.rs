@@ -29,7 +29,7 @@ pub use gamepad::GamepadHandler;
 pub use kitty_graphics::{KittyGraphics, PluginFrame};
 pub use managed::ManagedPlugin;
 #[cfg(unix)]
-pub use retroarch::RetroArchPlugin;
+pub use retroarch::{RetroArchPlugin, GAME_BOY_COLOR_PLUGIN_ID, LEGACY_RETROARCH_PLUGIN_ID};
 
 /// Runtime descriptor for installable managed plugins.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,7 +182,7 @@ pub fn builtin_plugins() -> Vec<Box<dyn Plugin>> {
 /// Get a plugin by ID
 pub fn get_plugin_by_id(id: &str) -> Option<Box<dyn Plugin>> {
     #[cfg(unix)]
-    if id == "retroarch" {
+    if id == GAME_BOY_COLOR_PLUGIN_ID || id == LEGACY_RETROARCH_PLUGIN_ID {
         return Some(Box::new(RetroArchPlugin::new()));
     }
 

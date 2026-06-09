@@ -79,8 +79,18 @@ use super::libretro::{
 };
 use super::{Plugin, PluginContext, PluginEventResult, PluginFrame, PluginRenderMode};
 
-const RETROARCH_PLUGIN_ID: &str = "retroarch";
-const NO_CORE_LABEL: &str = "No core loaded";
+pub const GAME_BOY_COLOR_PLUGIN_ID: &str = "gameboy-color";
+pub const LEGACY_RETROARCH_PLUGIN_ID: &str = "retroarch";
+const GAME_BOY_COLOR_TITLE: &str = "Game Boy Color";
+const NO_CORE_LABEL: &str = "No Game Boy core loaded";
+const GAME_BOY_ROM_EXTENSIONS: &[&str] = &["gb", "gbc"];
+const GAME_BOY_CORE_HINTS: &[&str] = &["gambatte", "sameboy", "gearboy", "mgba"];
+const GAME_BOY_CORE_FILENAMES: &[&str] = &[
+    "gambatte_libretro.so",
+    "sameboy_libretro.so",
+    "gearboy_libretro.so",
+    "mgba_libretro.so",
+];
 
 // ============================================================================
 // STATE MACHINE
@@ -420,8 +430,11 @@ extern "C" fn environment(cmd: u32, data: *mut std::ffi::c_void) -> bool {
     }
 }
 
-/// Game Boy Color plugin shell for running Game Boy and Game Boy Color ROMs.
-pub struct RetroArchPlugin {
+/// Host-owned Game Boy emulator runtime.
+///
+/// UI/plugin shell instances are cheap and may be replaced while this runtime keeps
+/// the loaded libretro core, ROM state, SRAM, and frame buffer alive.
+struct GameBoyRuntime {
     /// Loaded core (if any)
     core: Option<LibRetroCore>,
     /// Path to loaded ROM
@@ -436,6 +449,29 @@ pub struct RetroArchPlugin {
     av_info: Option<SystemAvInfo>,
     /// Error message to display
     error: Option<String>,
+}
+
+impl GameBoyRuntime {
+    fn new() -> Self {
+        Self {
+            core: None,
+            rom_path: None,
+            core_name: NO_CORE_LABEL.to_string(),
+            shared_state: Arc::new(Mutex::new(SharedState::default())),
+            running: false,
+            av_info: None,
+            error: None,
+        }
+    }
+}
+
+static GAMEBOY_RUNTIME: std::sync::LazyLock<Arc<Mutex<GameBoyRuntime>>> =
+    std::sync::LazyLock::new(|| Arc::new(Mutex::new(GameBoyRuntime::new())));
+
+/// Game Boy Color plugin shell for running Game Boy and Game Boy Color ROMs.
+pub struct RetroArchPlugin {
+    /// Host-owned emulator runtime shared across shell replacements/reloads.
+    runtime: Arc<Mutex<GameBoyRuntime>>,
 
     // State machine
     /// Current plugin state (Menu, Playing, Paused)
@@ -509,6 +545,241 @@ fn is_parent_dir_entry(path: &Path) -> bool {
     path.as_os_str() == OsStr::new(PARENT_DIR_ENTRY)
 }
 
+impl GameBoyRuntime {
+    /// Load a libretro core into the host-owned runtime.
+    fn load_core(&mut self, core_path: &Path) -> Result<(), String> {
+        self.unload();
+
+        let _guard = SuppressStdio::new();
+
+        // SAFETY: LibRetroCore::load performs dynamic library loading via libloading.
+        // The path is validated by discovery/user choice. Loading failures are returned.
+        let core = unsafe { LibRetroCore::load(core_path)? };
+
+        set_shared_state(self.shared_state.clone());
+        (core.retro_set_environment)(environment);
+        (core.retro_set_video_refresh)(video_refresh);
+        (core.retro_set_audio_sample)(audio_sample);
+        (core.retro_set_audio_sample_batch)(audio_sample_batch);
+        (core.retro_set_input_poll)(input_poll);
+        (core.retro_set_input_state)(input_state);
+
+        (core.retro_init)();
+
+        self.core_name = format!("{} {}", core.name(), core.version());
+        self.core = Some(core);
+        self.error = None;
+
+        drop(_guard);
+        let state_set = SHARED_STATE.lock().is_some();
+        tracing::info!(
+            "gameboy-color load_core: complete, SHARED_STATE is_some={}",
+            state_set
+        );
+
+        Ok(())
+    }
+
+    /// Load a ROM file into the already-loaded core.
+    fn load_rom(&mut self, rom_path: &Path) -> Result<(), String> {
+        let core = self.core.as_ref().ok_or("No Game Boy core loaded")?;
+
+        let rom_data = std::fs::read(rom_path).map_err(|e| format!("Failed to read ROM: {}", e))?;
+        let path_cstr =
+            CString::new(rom_path.to_string_lossy().as_ref()).map_err(|e| e.to_string())?;
+
+        let game_info = GameInfo {
+            path: path_cstr.as_ptr(),
+            data: rom_data.as_ptr() as *const std::ffi::c_void,
+            size: rom_data.len(),
+            meta: std::ptr::null(),
+        };
+
+        let _guard = SuppressStdio::new();
+
+        let loaded = (core.retro_load_game)(&game_info);
+        if !loaded {
+            return Err("Game Boy core failed to load ROM".to_string());
+        }
+
+        let mut av_info = SystemAvInfo {
+            geometry: super::libretro::GameGeometry {
+                base_width: 0,
+                base_height: 0,
+                max_width: 0,
+                max_height: 0,
+                aspect_ratio: 0.0,
+            },
+            timing: super::libretro::SystemTiming {
+                fps: 60.0,
+                sample_rate: 44100.0,
+            },
+        };
+        (core.retro_get_system_av_info)(&mut av_info);
+        self.av_info = Some(av_info);
+
+        (core.retro_set_controller_port_device)(0, 1); // Port 0, Joypad
+
+        self.rom_path = Some(rom_path.to_path_buf());
+        self.running = true;
+        self.error = None;
+
+        if let Err(e) = self.load_sram() {
+            tracing::warn!("Failed to load SRAM: {}", e);
+        }
+
+        Ok(())
+    }
+
+    /// Unload core and ROM. Called by explicit user action, not shell drop.
+    fn unload(&mut self) {
+        if let Some(core) = self.core.take() {
+            if self.rom_path.is_some() {
+                (core.retro_unload_game)();
+            }
+            (core.retro_deinit)();
+        }
+        clear_shared_state_if_owner(&self.shared_state);
+        self.rom_path = None;
+        self.running = false;
+        self.av_info = None;
+        self.core_name = NO_CORE_LABEL.to_string();
+    }
+
+    /// Run one frame.
+    fn run_frame(&mut self) {
+        if let Some(core) = &self.core {
+            if self.running {
+                (core.retro_run)();
+            }
+        }
+    }
+
+    /// Press a button by its libretro button ID.
+    fn press_button(&mut self, button_id: u8) {
+        if button_id < 16 {
+            let mut state = self.shared_state.lock();
+            state.button_press_frame[button_id as usize] = state.frame_count;
+        }
+    }
+
+    /// Get the save state path for a given slot.
+    fn state_path(&self, slot: u8) -> Option<PathBuf> {
+        let rom_name = self.rom_path.as_ref()?.file_stem()?.to_string_lossy();
+        let filename = if slot == 0 {
+            format!("{}.state", rom_name)
+        } else {
+            format!("{}.state{}", rom_name, slot)
+        };
+        Some(KRUSTY_DIRS.states.join(filename))
+    }
+
+    /// Save state to a slot (0 = quick save).
+    fn save_state(&mut self, slot: u8) -> Result<(), String> {
+        let core = self.core.as_ref().ok_or("No Game Boy core loaded")?;
+        let path = self.state_path(slot).ok_or("No ROM loaded")?;
+
+        let size = (core.retro_serialize_size)();
+        if size == 0 {
+            return Err("Core does not support save states".to_string());
+        }
+
+        let mut data = vec![0u8; size];
+        let success = (core.retro_serialize)(data.as_mut_ptr() as *mut std::ffi::c_void, size);
+        if !success {
+            return Err("Failed to serialize state".to_string());
+        }
+
+        std::fs::write(&path, &data).map_err(|e| format!("Failed to write state: {}", e))?;
+        tracing::info!("Saved state to {:?} ({} bytes)", path, size);
+        Ok(())
+    }
+
+    /// Load state from a slot (0 = quick save).
+    fn load_state(&mut self, slot: u8) -> Result<(), String> {
+        let core = self.core.as_ref().ok_or("No Game Boy core loaded")?;
+        let path = self.state_path(slot).ok_or("No ROM loaded")?;
+
+        if !path.exists() {
+            return Err(format!("No save state in slot {}", slot));
+        }
+
+        let data = std::fs::read(&path).map_err(|e| format!("Failed to read state: {}", e))?;
+        let success =
+            (core.retro_unserialize)(data.as_ptr() as *const std::ffi::c_void, data.len());
+        if !success {
+            return Err("Failed to deserialize state".to_string());
+        }
+
+        tracing::info!("Loaded state from {:?} ({} bytes)", path, data.len());
+        Ok(())
+    }
+
+    /// Get the SRAM save path for current ROM.
+    fn sram_path(&self) -> Option<PathBuf> {
+        let rom_name = self.rom_path.as_ref()?.file_stem()?.to_string_lossy();
+        Some(KRUSTY_DIRS.saves.join(format!("{}.srm", rom_name)))
+    }
+
+    /// Save SRAM (battery save) to disk.
+    fn save_sram(&self) -> Result<(), String> {
+        use super::libretro::RETRO_MEMORY_SAVE_RAM;
+
+        let core = self.core.as_ref().ok_or("No Game Boy core loaded")?;
+        let path = self.sram_path().ok_or("No ROM loaded")?;
+
+        let size = (core.retro_get_memory_size)(RETRO_MEMORY_SAVE_RAM);
+        if size == 0 {
+            return Ok(());
+        }
+
+        let data_ptr = (core.retro_get_memory_data)(RETRO_MEMORY_SAVE_RAM);
+        if data_ptr.is_null() {
+            return Err("Failed to get SRAM data pointer".to_string());
+        }
+
+        // SAFETY: The null check above ensures data_ptr is valid. The size comes from
+        // retro_get_memory_size which returns the valid memory region size.
+        let data = unsafe { std::slice::from_raw_parts(data_ptr as *const u8, size) };
+        std::fs::write(&path, data).map_err(|e| format!("Failed to write SRAM: {}", e))?;
+        tracing::info!("Saved SRAM to {:?} ({} bytes)", path, size);
+        Ok(())
+    }
+
+    /// Load SRAM (battery save) from disk.
+    fn load_sram(&self) -> Result<(), String> {
+        use super::libretro::RETRO_MEMORY_SAVE_RAM;
+
+        let core = self.core.as_ref().ok_or("No Game Boy core loaded")?;
+        let path = self.sram_path().ok_or("No ROM loaded")?;
+
+        if !path.exists() {
+            return Ok(());
+        }
+
+        let size = (core.retro_get_memory_size)(RETRO_MEMORY_SAVE_RAM);
+        if size == 0 {
+            return Ok(());
+        }
+
+        let data_ptr = (core.retro_get_memory_data)(RETRO_MEMORY_SAVE_RAM);
+        if data_ptr.is_null() {
+            return Err("Failed to get SRAM data pointer".to_string());
+        }
+
+        let file_data = std::fs::read(&path).map_err(|e| format!("Failed to read SRAM: {}", e))?;
+        let copy_size = file_data.len().min(size);
+
+        // SAFETY: data_ptr is validated non-null above and copy_size is bounded by size.
+        unsafe {
+            std::ptr::copy_nonoverlapping(file_data.as_ptr(), data_ptr as *mut u8, copy_size);
+        }
+
+        tracing::info!("Loaded SRAM from {:?} ({} bytes)", path, copy_size);
+        Ok(())
+    }
+}
+
 impl RetroArchPlugin {
     pub fn new() -> Self {
         let runtime = GAMEBOY_RUNTIME.clone();
@@ -561,6 +832,50 @@ impl RetroArchPlugin {
         self.runtime.lock().press_button(button_id);
     }
 
+    fn runtime_shared_state(&self) -> Arc<Mutex<SharedState>> {
+        self.runtime.lock().shared_state.clone()
+    }
+
+    fn runtime_running(&self) -> bool {
+        self.runtime.lock().running
+    }
+
+    fn runtime_has_core(&self) -> bool {
+        self.runtime.lock().core.is_some()
+    }
+
+    fn runtime_core_name(&self) -> String {
+        self.runtime.lock().core_name.clone()
+    }
+
+    fn runtime_rom_name(&self) -> String {
+        self.runtime
+            .lock()
+            .rom_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Unknown".to_string())
+    }
+
+    fn runtime_error(&self) -> Option<String> {
+        self.runtime.lock().error.clone()
+    }
+
+    fn set_runtime_error(&self, error: impl Into<String>) {
+        self.runtime.lock().error = Some(error.into());
+    }
+
+    fn clear_runtime_error(&self) {
+        self.runtime.lock().error = None;
+    }
+
+    fn reset_runtime_core(&self) {
+        if let Some(core) = &self.runtime.lock().core {
+            (core.retro_reset)();
+        }
+    }
+
     /// Map keyboard to joypad
     fn key_to_button(key: KeyCode, _modifiers: KeyModifiers) -> Option<JoypadButton> {
         // Default mapping (can be customized later)
@@ -585,19 +900,113 @@ impl RetroArchPlugin {
     // MENU METHODS
     // =========================================================================
 
-    /// Scan for available libretro cores
+    /// Scan for bundled, user-installed, and system Game Boy libretro cores.
     fn scan_cores(&mut self) {
         self.cores.clear();
-        let core_dir = PathBuf::from("/usr/lib/libretro");
-        if let Ok(entries) = std::fs::read_dir(&core_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().map(|e| e == "so").unwrap_or(false) {
+        let mut seen = std::collections::HashSet::new();
+
+        for env_var in ["KRUSTY_GAMEBOY_COLOR_CORE", "KRUSTY_RETROARCH_CORE"] {
+            if let Ok(core_path) = std::env::var(env_var) {
+                let path = PathBuf::from(core_path);
+                if Self::is_game_boy_core(&path) && seen.insert(path.clone()) {
                     self.cores.push(path);
                 }
             }
         }
-        self.cores.sort();
+
+        for core_dir in Self::core_search_dirs() {
+            if let Ok(entries) = std::fs::read_dir(&core_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if Self::is_game_boy_core(&path) && seen.insert(path.clone()) {
+                        self.cores.push(path);
+                    }
+                }
+            }
+        }
+
+        self.cores.sort_by(|left, right| {
+            let left_key = (
+                Self::core_priority(left).unwrap_or(usize::MAX),
+                left.display().to_string(),
+            );
+            let right_key = (
+                Self::core_priority(right).unwrap_or(usize::MAX),
+                right.display().to_string(),
+            );
+            left_key.cmp(&right_key)
+        });
+    }
+
+    fn core_search_dirs() -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+
+        if let Ok(paths) = std::env::var("KRUSTY_GAMEBOY_COLOR_CORES") {
+            dirs.extend(std::env::split_paths(&paths));
+        }
+
+        dirs.push(KRUSTY_DIRS.cores.clone());
+
+        if let Some(home) = dirs::home_dir() {
+            dirs.push(home.join(".config/retroarch/cores"));
+        }
+
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                dirs.push(exe_dir.join("gameboy-color/cores"));
+                dirs.push(exe_dir.join("cores/gameboy-color"));
+                dirs.push(exe_dir.join("../share/krusty/gameboy-color/cores"));
+                dirs.push(exe_dir.join("../lib/krusty/gameboy-color/cores"));
+            }
+        }
+
+        dirs.push(PathBuf::from("/usr/lib/libretro"));
+        dirs.push(PathBuf::from("/usr/local/lib/libretro"));
+
+        let mut seen = std::collections::HashSet::new();
+        dirs.into_iter()
+            .filter(|dir| seen.insert(dir.clone()))
+            .collect()
+    }
+
+    fn core_priority(path: &Path) -> Option<usize> {
+        let file_name = path.file_name()?.to_string_lossy().to_lowercase();
+
+        GAME_BOY_CORE_FILENAMES
+            .iter()
+            .position(|candidate| file_name == *candidate)
+            .or_else(|| {
+                GAME_BOY_CORE_HINTS
+                    .iter()
+                    .position(|hint| file_name.contains(hint))
+                    .map(|index| 100 + index)
+            })
+    }
+
+    fn is_game_boy_core(path: &Path) -> bool {
+        let is_shared_library = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "so" | "dylib"));
+
+        is_shared_library && Self::core_priority(path).is_some()
+    }
+
+    fn ensure_selected_core(&mut self) -> Result<PathBuf, String> {
+        if let Some(core) = self.selected_core.as_ref().filter(|path| path.exists()) {
+            return Ok(core.clone());
+        }
+
+        self.scan_cores();
+        if let Some(core) = self.cores.first().cloned() {
+            self.selected_core = Some(core.clone());
+            Ok(core)
+        } else {
+            Err(format!(
+                "No Game Boy libretro core found. Install gambatte/sameboy or place gambatte_libretro.so in {}.",
+                KRUSTY_DIRS.cores.display()
+            ))
+        }
     }
 
     /// Scan for ROMs in current directory
@@ -642,48 +1051,16 @@ impl RetroArchPlugin {
         }
     }
 
-    /// Check if a file is a ROM based on extension and selected core
-    fn is_rom_file(path: &Path, selected_core: Option<&Path>) -> bool {
+    /// Check if a file is a Game Boy / Game Boy Color ROM.
+    fn is_rom_file(path: &Path, _selected_core: Option<&Path>) -> bool {
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or_default();
 
-        // Get core-specific extensions if we know the core
-        if let Some(core_path) = selected_core {
-            let core_name = core_path
-                .file_stem()
-                .map(|n| n.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
-
-            // Match core to supported extensions
-            let extensions: &[&str] = match core_name.as_str() {
-                s if s.contains("gambatte") => &["gb", "gbc"],
-                s if s.contains("mgba") || s.contains("vba") => &["gba", "gb", "gbc"],
-                s if s.contains("snes9x") || s.contains("bsnes") => &["sfc", "smc"],
-                s if s.contains("nestopia") || s.contains("fceumm") => &["nes"],
-                s if s.contains("genesis") || s.contains("picodrive") => &["md", "gen", "smd"],
-                s if s.contains("mupen") || s.contains("parallel") => &["n64", "z64", "v64"],
-                s if s.contains("pcsx") || s.contains("beetle_psx") => &["bin", "cue", "iso"],
-                s if s.contains("desmume") || s.contains("melonds") => &["nds"],
-                s if s.contains("ppsspp") => &["iso", "cso"],
-                _ => &[
-                    "gb", "gbc", "gba", "nes", "sfc", "smc", "md", "gen", "n64", "nds",
-                ],
-            };
-
-            return extensions
-                .iter()
-                .any(|candidate| ext.eq_ignore_ascii_case(candidate));
-        }
-
-        // Default: accept common ROM extensions
-        [
-            "gb", "gbc", "gba", "nes", "sfc", "smc", "md", "gen", "smd", "n64", "z64", "nds",
-            "iso", "cso", "bin", "cue",
-        ]
-        .iter()
-        .any(|candidate| ext.eq_ignore_ascii_case(candidate))
+        GAME_BOY_ROM_EXTENSIONS
+            .iter()
+            .any(|candidate| ext.eq_ignore_ascii_case(candidate))
     }
 
     fn reset_menu_cursor(&mut self) {
@@ -703,131 +1080,22 @@ impl RetroArchPlugin {
     }
 
     // =========================================================================
-    // SAVE STATE METHODS
+    // SAVE STATE / SRAM METHODS
     // =========================================================================
-
-    /// Get the save state path for a given slot
-    fn state_path(&self, slot: u8) -> Option<PathBuf> {
-        let rom_name = self.rom_path.as_ref()?.file_stem()?.to_string_lossy();
-        let filename = if slot == 0 {
-            format!("{}.state", rom_name)
-        } else {
-            format!("{}.state{}", rom_name, slot)
-        };
-        Some(KRUSTY_DIRS.states.join(filename))
-    }
 
     /// Save state to a slot (0 = quick save)
     pub fn save_state(&mut self, slot: u8) -> Result<(), String> {
-        let core = self.core.as_ref().ok_or("No core loaded")?;
-        let path = self.state_path(slot).ok_or("No ROM loaded")?;
-
-        let size = (core.retro_serialize_size)();
-        if size == 0 {
-            return Err("Core does not support save states".to_string());
-        }
-
-        let mut data = vec![0u8; size];
-        let success = (core.retro_serialize)(data.as_mut_ptr() as *mut std::ffi::c_void, size);
-        if !success {
-            return Err("Failed to serialize state".to_string());
-        }
-
-        std::fs::write(&path, &data).map_err(|e| format!("Failed to write state: {}", e))?;
-        tracing::info!("Saved state to {:?} ({} bytes)", path, size);
-        Ok(())
+        self.runtime.lock().save_state(slot)
     }
 
     /// Load state from a slot (0 = quick save)
     pub fn load_state(&mut self, slot: u8) -> Result<(), String> {
-        let core = self.core.as_ref().ok_or("No core loaded")?;
-        let path = self.state_path(slot).ok_or("No ROM loaded")?;
-
-        if !path.exists() {
-            return Err(format!("No save state in slot {}", slot));
-        }
-
-        let data = std::fs::read(&path).map_err(|e| format!("Failed to read state: {}", e))?;
-        let success =
-            (core.retro_unserialize)(data.as_ptr() as *const std::ffi::c_void, data.len());
-        if !success {
-            return Err("Failed to deserialize state".to_string());
-        }
-
-        tracing::info!("Loaded state from {:?} ({} bytes)", path, data.len());
-        Ok(())
-    }
-
-    // =========================================================================
-    // SRAM METHODS
-    // =========================================================================
-
-    /// Get the SRAM save path for current ROM
-    fn sram_path(&self) -> Option<PathBuf> {
-        let rom_name = self.rom_path.as_ref()?.file_stem()?.to_string_lossy();
-        Some(KRUSTY_DIRS.saves.join(format!("{}.srm", rom_name)))
+        self.runtime.lock().load_state(slot)
     }
 
     /// Save SRAM (battery save) to disk
     pub fn save_sram(&self) -> Result<(), String> {
-        use super::libretro::RETRO_MEMORY_SAVE_RAM;
-
-        let core = self.core.as_ref().ok_or("No core loaded")?;
-        let path = self.sram_path().ok_or("No ROM loaded")?;
-
-        let size = (core.retro_get_memory_size)(RETRO_MEMORY_SAVE_RAM);
-        if size == 0 {
-            return Ok(()); // No SRAM for this game
-        }
-
-        let data_ptr = (core.retro_get_memory_data)(RETRO_MEMORY_SAVE_RAM);
-        if data_ptr.is_null() {
-            return Err("Failed to get SRAM data pointer".to_string());
-        }
-
-        // SAFETY: The null check above ensures data_ptr is valid. The size comes from
-        // retro_get_memory_size which returns the valid memory region size. The libretro
-        // API guarantees the memory region is valid for the returned size.
-        let data = unsafe { std::slice::from_raw_parts(data_ptr as *const u8, size) };
-        std::fs::write(&path, data).map_err(|e| format!("Failed to write SRAM: {}", e))?;
-        tracing::info!("Saved SRAM to {:?} ({} bytes)", path, size);
-        Ok(())
-    }
-
-    /// Load SRAM (battery save) from disk
-    pub fn load_sram(&self) -> Result<(), String> {
-        use super::libretro::RETRO_MEMORY_SAVE_RAM;
-
-        let core = self.core.as_ref().ok_or("No core loaded")?;
-        let path = self.sram_path().ok_or("No ROM loaded")?;
-
-        if !path.exists() {
-            return Ok(()); // No save file yet
-        }
-
-        let size = (core.retro_get_memory_size)(RETRO_MEMORY_SAVE_RAM);
-        if size == 0 {
-            return Ok(()); // No SRAM for this game
-        }
-
-        let data_ptr = (core.retro_get_memory_data)(RETRO_MEMORY_SAVE_RAM);
-        if data_ptr.is_null() {
-            return Err("Failed to get SRAM data pointer".to_string());
-        }
-
-        let file_data = std::fs::read(&path).map_err(|e| format!("Failed to read SRAM: {}", e))?;
-        let copy_size = file_data.len().min(size);
-
-        // SAFETY: data_ptr is validated non-null above. size comes from retro_get_memory_size.
-        // copy_size is min(file_data.len(), size) ensuring we don't write past either buffer.
-        // The source (file_data) is a valid Rust Vec. The destination is a libretro memory
-        // region guaranteed valid for 'size' bytes.
-        unsafe {
-            std::ptr::copy_nonoverlapping(file_data.as_ptr(), data_ptr as *mut u8, copy_size);
-        }
-
-        tracing::info!("Loaded SRAM from {:?} ({} bytes)", path, copy_size);
-        Ok(())
+        self.runtime.lock().save_sram()
     }
 
     /// Get the number of items in current menu list
@@ -871,13 +1139,22 @@ impl RetroArchPlugin {
             RetroArchState::Menu(MenuState::Main) => {
                 match self.menu_index {
                     0 => {
-                        // Load Game - go to core browser
+                        // Load ROM with the best available Game Boy core.
+                        match self.ensure_selected_core() {
+                            Ok(_) => {
+                                self.plugin_state = RetroArchState::Menu(MenuState::RomBrowser);
+                                self.scan_roms();
+                                self.reset_menu_cursor();
+                                self.clear_runtime_error();
+                            }
+                            Err(e) => self.set_runtime_error(e),
+                        }
+                    }
+                    1 => {
+                        // Optional manual core selection for bundled/system fallback debugging.
                         self.plugin_state = RetroArchState::Menu(MenuState::CoreBrowser);
                         self.scan_cores();
                         self.reset_menu_cursor();
-                    }
-                    1 => {
-                        // Settings - not implemented yet
                     }
                     _ => {}
                 }
@@ -904,14 +1181,20 @@ impl RetroArchPlugin {
                         self.current_rom_dir = path;
                         self.scan_roms();
                         self.reset_menu_cursor();
-                    } else if let Some(core_path) = &self.selected_core.clone() {
-                        // ROM selected - load game
-                        if let Err(e) = self.load_core(core_path) {
-                            self.error = Some(format!("Core load failed: {}", e));
-                        } else if let Err(e) = self.load_rom(&path) {
-                            self.error = Some(format!("ROM load failed: {}", e));
-                        } else {
-                            self.plugin_state = RetroArchState::Playing;
+                    } else {
+                        // ROM selected - load game.
+                        match self.ensure_selected_core() {
+                            Ok(core_path) => {
+                                if let Err(e) = self.load_core(&core_path) {
+                                    self.set_runtime_error(format!("Core load failed: {}", e));
+                                } else if let Err(e) = self.load_rom(&path) {
+                                    self.set_runtime_error(format!("ROM load failed: {}", e));
+                                } else {
+                                    self.clear_runtime_error();
+                                    self.plugin_state = RetroArchState::Playing;
+                                }
+                            }
+                            Err(e) => self.set_runtime_error(e),
                         }
                     }
                 }
@@ -926,11 +1209,11 @@ impl RetroArchPlugin {
                         // Save State (slot 0 = quick save)
                         match self.save_state(0) {
                             Ok(()) => {
-                                self.error = None;
+                                self.clear_runtime_error();
                                 self.plugin_state = RetroArchState::Playing;
                             }
                             Err(e) => {
-                                self.error = Some(format!("Save failed: {}", e));
+                                self.set_runtime_error(format!("Save failed: {}", e));
                             }
                         }
                     }
@@ -938,19 +1221,17 @@ impl RetroArchPlugin {
                         // Load State (slot 0 = quick save)
                         match self.load_state(0) {
                             Ok(()) => {
-                                self.error = None;
+                                self.clear_runtime_error();
                                 self.plugin_state = RetroArchState::Playing;
                             }
                             Err(e) => {
-                                self.error = Some(format!("Load failed: {}", e));
+                                self.set_runtime_error(format!("Load failed: {}", e));
                             }
                         }
                     }
                     3 => {
                         // Reset
-                        if let Some(core) = &self.core {
-                            (core.retro_reset)();
-                        }
+                        self.reset_runtime_core();
                         self.plugin_state = RetroArchState::Playing;
                     }
                     4 => {
@@ -1001,9 +1282,9 @@ impl RetroArchPlugin {
     ) {
         // Draw title
         let title = match menu_state {
-            MenuState::Main => "RetroArch",
-            MenuState::CoreBrowser => "Select Core",
-            MenuState::RomBrowser => "Select ROM",
+            MenuState::Main => GAME_BOY_COLOR_TITLE,
+            MenuState::CoreBrowser => "Select Game Boy Core",
+            MenuState::RomBrowser => "Select Game Boy ROM",
         };
 
         let title_y = area.y + 1;
@@ -1025,7 +1306,8 @@ impl RetroArchPlugin {
         }
 
         // Draw error if any
-        if let Some(error) = &self.error {
+        let runtime_error = self.runtime_error();
+        if let Some(error) = &runtime_error {
             let err_y = sep_y + 1;
             let err_text = format!("Error: {}", error);
             let err_x = area.x + 2;
@@ -1038,12 +1320,12 @@ impl RetroArchPlugin {
         }
 
         // Draw menu items
-        let content_y = sep_y + if self.error.is_some() { 3 } else { 2 };
+        let content_y = sep_y + if runtime_error.is_some() { 3 } else { 2 };
         let visible_height = (area.height.saturating_sub(content_y - area.y + 3)) as usize;
 
         match menu_state {
             MenuState::Main => {
-                let items = ["Load Game", "Settings"];
+                let items = ["Load ROM", "Select Core"];
                 for (i, item) in items.iter().enumerate() {
                     let y = content_y + i as u16;
                     if y >= area.y + area.height - 2 {
@@ -1253,12 +1535,7 @@ impl RetroArchPlugin {
 
         // Draw game name
         let game_y = title_y + 1;
-        let game_name = self
-            .rom_path
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Unknown".to_string());
+        let game_name = self.runtime_rom_name();
         let game_x = area.x + (area.width.saturating_sub(game_name.len() as u16)) / 2;
         for (i, ch) in game_name.chars().enumerate() {
             if let Some(cell) = buf.cell_mut((game_x + i as u16, game_y)) {
@@ -1315,22 +1592,30 @@ impl Default for RetroArchPlugin {
 
 impl Plugin for RetroArchPlugin {
     fn id(&self) -> &str {
-        RETROARCH_PLUGIN_ID
+        GAME_BOY_COLOR_PLUGIN_ID
     }
 
     fn name(&self) -> &str {
-        "RetroArch"
+        GAME_BOY_COLOR_TITLE
     }
 
     fn display_name(&self) -> String {
         match &self.plugin_state {
-            RetroArchState::Playing => format!("RetroArch: {}", self.core_name),
-            RetroArchState::Paused => format!("RetroArch: {} (Paused)", self.core_name),
+            RetroArchState::Playing => {
+                format!("{}: {}", GAME_BOY_COLOR_TITLE, self.runtime_core_name())
+            }
+            RetroArchState::Paused => {
+                format!(
+                    "{}: {} (Paused)",
+                    GAME_BOY_COLOR_TITLE,
+                    self.runtime_core_name()
+                )
+            }
             RetroArchState::Menu(_) => {
-                if self.error.is_some() {
-                    "RetroArch (Error)".to_string()
+                if self.runtime_error().is_some() {
+                    format!("{} (Error)", GAME_BOY_COLOR_TITLE)
                 } else {
-                    "RetroArch".to_string()
+                    GAME_BOY_COLOR_TITLE.to_string()
                 }
             }
         }
@@ -1359,7 +1644,8 @@ impl Plugin for RetroArchPlugin {
     }
 
     fn render_frame(&mut self, _width: u32, _height: u32) -> Option<PluginFrame> {
-        let state = self.shared_state.lock();
+        let shared_state = self.runtime_shared_state();
+        let state = shared_state.lock();
         if !state.frame_ready || state.frame_buffer.is_empty() {
             tracing::trace!(
                 "render_frame: no frame (ready={}, buf_len={})",
@@ -1400,11 +1686,7 @@ impl Plugin for RetroArchPlugin {
 
                     // Pass game controls to libretro
                     if let Some(button) = Self::key_to_button(*code, *modifiers) {
-                        let mut state = self.shared_state.lock();
-                        let button_id = button as usize;
-                        if button_id < 16 {
-                            state.button_press_frame[button_id] = state.frame_count;
-                        }
+                        self.press_button(button as u8);
                         return PluginEventResult::Consumed;
                     }
                 }
@@ -1448,10 +1730,12 @@ impl Plugin for RetroArchPlugin {
 
     fn tick(&mut self) -> bool {
         // Only run frames when in Playing state
-        if self.plugin_state == RetroArchState::Playing && self.running {
+        if self.plugin_state == RetroArchState::Playing && self.runtime_running() {
+            let shared_state = self.runtime_shared_state();
+
             // Clear frame ready flag and increment frame counter
             {
-                let mut state = self.shared_state.lock();
+                let mut state = shared_state.lock();
                 state.frame_ready = false;
                 state.frame_count = state.frame_count.wrapping_add(1);
             }
@@ -1460,11 +1744,11 @@ impl Plugin for RetroArchPlugin {
             self.run_frame();
 
             // Check if frame was produced
-            let state = self.shared_state.lock();
+            let state = shared_state.lock();
             // Log every 300 frames (~5 seconds) to avoid spam
             if state.frame_count.is_multiple_of(300) {
                 tracing::info!(
-                    "RetroArch: frame_count={}, ready={}, buf={}B, dims={}x{}",
+                    "Game Boy Color: frame_count={}, ready={}, buf={}B, dims={}x{}",
                     state.frame_count,
                     state.frame_ready,
                     state.frame_buffer.len(),
@@ -1483,32 +1767,38 @@ impl Plugin for RetroArchPlugin {
     }
 
     fn on_activate(&mut self) {
-        set_shared_state(self.shared_state.clone());
+        set_shared_state(self.runtime_shared_state());
 
-        // Start in menu state - no auto-start
-        // Users navigate: Load Game -> Select Core -> Select ROM
-        if self.core.is_none() {
-            // Auto-load from environment variables ONLY if both are set
-            // This allows users who set env vars to still auto-start
-            if let (Ok(core), Ok(rom)) = (
-                std::env::var("KRUSTY_RETROARCH_CORE"),
-                std::env::var("KRUSTY_RETROARCH_ROM"),
-            ) {
-                let core_path = PathBuf::from(core);
-                let rom_path = PathBuf::from(rom);
+        if self.runtime_running() {
+            self.plugin_state = RetroArchState::Playing;
+            return;
+        }
 
-                if core_path.exists() && rom_path.exists() {
-                    tracing::info!("RetroArch: Auto-loading from env vars");
-                    if let Err(e) = self.load_core(&core_path) {
-                        self.error = Some(format!("Core load failed: {}", e));
-                    } else if let Err(e) = self.load_rom(&rom_path) {
-                        self.error = Some(format!("ROM load failed: {}", e));
-                    } else {
-                        self.plugin_state = RetroArchState::Playing;
+        if self.runtime_has_core() {
+            return;
+        }
+
+        let rom = std::env::var("KRUSTY_GAMEBOY_COLOR_ROM")
+            .or_else(|_| std::env::var("KRUSTY_RETROARCH_ROM"));
+
+        if let Ok(rom) = rom {
+            let rom_path = PathBuf::from(rom);
+            if rom_path.exists() && Self::is_rom_file(&rom_path, None) {
+                tracing::info!("Game Boy Color: auto-loading ROM from env vars");
+                match self.ensure_selected_core() {
+                    Ok(core_path) => {
+                        if let Err(e) = self.load_core(&core_path) {
+                            self.set_runtime_error(format!("Core load failed: {}", e));
+                        } else if let Err(e) = self.load_rom(&rom_path) {
+                            self.set_runtime_error(format!("ROM load failed: {}", e));
+                        } else {
+                            self.clear_runtime_error();
+                            self.plugin_state = RetroArchState::Playing;
+                        }
                     }
+                    Err(e) => self.set_runtime_error(e),
                 }
             }
-            // Otherwise stay in menu state (default)
         }
     }
 
@@ -1523,6 +1813,48 @@ impl Plugin for RetroArchPlugin {
 
 impl Drop for RetroArchPlugin {
     fn drop(&mut self) {
-        self.unload();
+        // Deliberately do not unload the host-owned runtime on shell drop.
+        // This lets future plugin-shell hot reloads replace menu/render/input code
+        // without resetting the loaded Game Boy core, ROM, SRAM, or frame buffer.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filters_roms_to_game_boy_formats() {
+        assert!(RetroArchPlugin::is_rom_file(
+            Path::new("pokemon-yellow.gb"),
+            None
+        ));
+        assert!(RetroArchPlugin::is_rom_file(Path::new("zelda.gbc"), None));
+        assert!(RetroArchPlugin::is_rom_file(Path::new("POKEMON.GB"), None));
+        assert!(!RetroArchPlugin::is_rom_file(
+            Path::new("metroid.gba"),
+            None
+        ));
+        assert!(!RetroArchPlugin::is_rom_file(Path::new("mario.nes"), None));
+    }
+
+    #[test]
+    fn recognizes_and_prioritizes_game_boy_cores() {
+        let gambatte = Path::new("/tmp/gambatte_libretro.so");
+        let sameboy = Path::new("/tmp/sameboy_libretro.so");
+        let snes = Path::new("/tmp/snes9x_libretro.so");
+
+        assert!(RetroArchPlugin::is_game_boy_core(gambatte));
+        assert!(RetroArchPlugin::is_game_boy_core(sameboy));
+        assert!(!RetroArchPlugin::is_game_boy_core(snes));
+        assert!(RetroArchPlugin::core_priority(gambatte) < RetroArchPlugin::core_priority(sameboy));
+    }
+
+    #[test]
+    fn plugin_shells_share_host_owned_runtime() {
+        let first = RetroArchPlugin::new();
+        let second = RetroArchPlugin::new();
+
+        assert!(Arc::ptr_eq(&first.runtime, &second.runtime));
     }
 }

@@ -247,10 +247,12 @@ impl PluginWindowState {
             needs_redraw = true;
         }
 
-        // Pass gamepad button states to RetroArch plugin (Unix only)
+        // Pass gamepad button states to the Game Boy Color/libretro plugin (Unix only)
         #[cfg(unix)]
         if let Some(ref mut plugin) = self.active_plugin {
-            if plugin.id() == "retroarch" {
+            if plugin.id() == crate::tui::plugins::GAME_BOY_COLOR_PLUGIN_ID
+                || plugin.id() == crate::tui::plugins::LEGACY_RETROARCH_PLUGIN_ID
+            {
                 if let Some(retroarch) = plugin
                     .as_any_mut()
                     .downcast_mut::<crate::tui::plugins::retroarch::RetroArchPlugin>(
