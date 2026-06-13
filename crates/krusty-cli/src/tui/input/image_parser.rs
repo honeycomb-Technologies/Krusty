@@ -207,6 +207,17 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_clipboard_image_reference() {
+        let segments = parse_input("Describe [clipboard:abc-123]", Path::new("/home"));
+        assert_eq!(segments.len(), 2);
+        assert!(matches!(&segments[0], InputSegment::Text(t) if t == "Describe"));
+        assert!(
+            matches!(&segments[1], InputSegment::ClipboardImage(id) if id == "clipboard:abc-123")
+        );
+        assert!(has_file_references("Describe [clipboard:abc-123]"));
+    }
+
+    #[test]
     fn test_parse_raw_absolute_path() {
         let segments = parse_input("/home/user/doc.pdf", Path::new("/work"));
         assert_eq!(segments.len(), 1);

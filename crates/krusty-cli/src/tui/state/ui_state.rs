@@ -92,11 +92,13 @@ impl ToolResultCache {
         output: &str,
         is_error: bool,
     ) {
-        // Parse JSON output for bash to extract actual output and exit code
+        let render_output = crate::tui::tool_presentation::renderable_tool_output(output);
+
+        // Parse JSON output for bash to extract actual output and exit code.
         let (actual_output, exit_code) = if tool_name == "bash" {
-            Self::parse_bash_output(output)
+            Self::parse_bash_output(&render_output)
         } else {
-            (output.to_string(), 0)
+            (render_output, 0)
         };
 
         self.results.insert(
@@ -109,7 +111,7 @@ impl ToolResultCache {
         );
     }
 
-    /// Parse bash JSON output from either legacy or structured tool envelopes.
+    /// Parse bash JSON output from either legacy, structured, or history-summary envelopes.
     fn parse_bash_output(output: &str) -> (String, i32) {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
             let actual_output = json
@@ -117,6 +119,7 @@ impl ToolResultCache {
                 .and_then(|v| v.get("output"))
                 .and_then(|v| v.as_str())
                 .or_else(|| json.get("output").and_then(|v| v.as_str()))
+                .or_else(|| json.get("output_preview").and_then(|v| v.as_str()))
                 .or_else(|| {
                     json.get("error")
                         .and_then(|v| v.get("message"))
@@ -134,6 +137,7 @@ impl ToolResultCache {
                         .and_then(|v| v.get("exit_code"))
                         .and_then(|v| v.as_i64())
                 })
+                .or_else(|| json.get("exit_code").and_then(|v| v.as_i64()))
                 .or_else(|| json.get("exitCode").and_then(|v| v.as_i64()))
                 .unwrap_or(0) as i32;
             (actual_output, exit_code)

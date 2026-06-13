@@ -46,6 +46,14 @@ impl ManagedPlugin {
             self.descriptor.publisher
         )));
         lines.push(Line::from(format!(
+            "runtime: {}",
+            match self.descriptor.runtime {
+                crate::plugins::PluginRuntime::Native => "native",
+                crate::plugins::PluginRuntime::Wasm => "wasm",
+                crate::plugins::PluginRuntime::Js => "js",
+            }
+        )));
+        lines.push(Line::from(format!(
             "mode: {}",
             match self.descriptor.render_mode {
                 PluginRenderMode::Text => "text",
@@ -61,7 +69,15 @@ impl ManagedPlugin {
         ));
         lines.push(Line::from(""));
         lines.push(Line::from("This plugin is loaded from ~/.krusty/plugins."));
-        lines.push(Line::from("Press r to request reload from plugin manager."));
+        lines.push(Line::from(match self.descriptor.runtime {
+            crate::plugins::PluginRuntime::Wasm => {
+                "WASM TUI execution is not wired yet; manifest/runtime support is installed."
+            }
+            crate::plugins::PluginRuntime::Js => {
+                "JS/TS execution is handled by the edon/libnode plugin host."
+            }
+            crate::plugins::PluginRuntime::Native => "Press r to request native reload.",
+        }));
         lines
     }
 }

@@ -6,7 +6,54 @@ import {
 } from './constants';
 import { formatToolOutputForDisplay, parseDelegatedArtifactState } from './delegated';
 import { buildStoredMessageId } from './transient';
-import type { Attachment, ChatMessage, ToolCall } from './types';
+import type {
+  Attachment,
+  ChatMessage,
+  ChatMessageAttachment,
+  ToolCall,
+} from './types';
+
+function extensionForImageMimeType(mimeType: string | null | undefined): string {
+  switch ((mimeType || '').trim().toLowerCase()) {
+    case 'image/png':
+      return 'png';
+    case 'image/gif':
+      return 'gif';
+    case 'image/webp':
+      return 'webp';
+    default:
+      return 'jpg';
+  }
+}
+
+function parseImageAttachment(
+  block: Record<string, any>,
+  index: number,
+): ChatMessageAttachment | null {
+  const source = block.source;
+  if (!source || typeof source !== 'object') return null;
+
+  if (source.type === 'base64' && typeof source.data === 'string') {
+    const mimeType =
+      typeof source.media_type === 'string' ? source.media_type : 'image/png';
+    return {
+      type: 'image',
+      name: `image-${index + 1}.${extensionForImageMimeType(mimeType)}`,
+      mimeType,
+      base64: source.data,
+    };
+  }
+
+  if (source.type === 'url' && typeof source.url === 'string') {
+    return {
+      type: 'image',
+      name: `image-${index + 1}`,
+      uri: source.url,
+    };
+  }
+
+  return null;
+}
 
 function extractTextContent(content: unknown): string {
   if (typeof content === 'string') return content;
@@ -45,6 +92,7 @@ function parseStoredMessage(
     toolCalls: [],
   };
   const contentArray = Array.isArray(message.content) ? message.content : [];
+  let imageIndex = 0;
 
   for (const block of contentArray) {
     if (!block || typeof block !== 'object') continue;
@@ -58,6 +106,12 @@ function parseStoredMessage(
       parsed.thinking = parsed.thinking
         ? `${parsed.thinking}\n\n${thinkingContent}`
         : thinkingContent;
+    } else if (block.type === 'image') {
+      const attachment = parseImageAttachment(block, imageIndex);
+      if (attachment) {
+        parsed.attachments = [...(parsed.attachments || []), attachment];
+        imageIndex += 1;
+      }
     } else if (
       block.type === 'tool_use'
       || ('id' in block && 'name' in block && 'input' in block)
@@ -137,7 +191,8 @@ export function processStoredMessages(
     const hasContent = parsed.content.trim().length > 0;
     const hasThinking = (parsed.thinking?.trim().length ?? 0) > 0;
     const hasToolCalls = (parsed.toolCalls?.length ?? 0) > 0;
-    if (hasContent || hasThinking || hasToolCalls) {
+    const hasAttachments = (parsed.attachments?.length ?? 0) > 0;
+    if (hasContent || hasThinking || hasToolCalls || hasAttachments) {
       parsed.id = buildStoredMessageId(result.length, parsed);
       result.push(parsed);
     }

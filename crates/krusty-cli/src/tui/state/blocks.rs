@@ -5,14 +5,15 @@
 //! - Terminal management (closing)
 
 use crate::tui::blocks::{
-    build::BuildBlock, BashBlock, DiffMode, EditBlock, ExploreBlock, ReadBlock, StreamBlock,
-    TerminalPane, ThinkingBlock, ToolResultBlock, WebSearchBlock, WriteBlock,
+    build::BuildBlock, BashBlock, DiffMode, EditBlock, ExploreBlock, PinchBlock, ReadBlock,
+    StreamBlock, TerminalPane, ThinkingBlock, ToolResultBlock, WebSearchBlock, WriteBlock,
 };
 
 /// Manages all block types in the TUI
 pub struct BlockManager {
     // Block collections
     pub thinking: Vec<ThinkingBlock>,
+    pub pinch: Vec<PinchBlock>,
     pub bash: Vec<BashBlock>,
     pub terminal: Vec<TerminalPane>,
     pub tool_result: Vec<ToolResultBlock>,
@@ -36,6 +37,7 @@ impl BlockManager {
     pub fn new() -> Self {
         Self {
             thinking: Vec::new(),
+            pinch: Vec::new(),
             bash: Vec::new(),
             terminal: Vec::new(),
             tool_result: Vec::new(),
@@ -54,6 +56,7 @@ impl BlockManager {
     /// Get total count of all blocks (for capacity estimation)
     pub fn total_count(&self) -> usize {
         self.thinking.len()
+            + self.pinch.len()
             + self.bash.len()
             + self.terminal.len()
             + self.tool_result.len()
@@ -69,6 +72,9 @@ impl BlockManager {
     pub fn tick_all(&mut self) -> bool {
         let mut animating = false;
         for block in &mut self.thinking {
+            animating |= block.tick();
+        }
+        for block in &mut self.pinch {
             animating |= block.tick();
         }
         for block in &mut self.bash {

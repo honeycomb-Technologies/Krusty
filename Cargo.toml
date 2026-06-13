@@ -1,9 +1,15 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+exclude = ["vendor/gpui"]
 
 # Default to running krusty-cli
 default-members = ["crates/krusty-cli"]
+
+[patch.crates-io]
+# Keep gpui-component on the published GPUI 0.2.2 API while allowing us to add
+# Krusty-owned mobile platform backends that crates.io GPUI does not expose.
+gpui = { path = "vendor/gpui" }
 
 [profile.release]
 lto = true

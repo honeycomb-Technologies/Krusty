@@ -28,6 +28,7 @@ import { useThemeContext } from '../../hooks/useTheme';
 import { AccordionControls } from './AccordionControls';
 import { Waveform } from './Waveform';
 import { CrabIcon } from '../ui/CrabIcon';
+import { ImagePreviewModal, imagePreviewUri } from './ImagePreviewModal';
 import Svg, { Circle } from 'react-native-svg';
 import type { ThinkingLevel, ModelInfo, SessionType } from '@krusty/api';
 import type { PermissionMode } from '@krusty/state';
@@ -139,6 +140,41 @@ function defaultImageFileName(mimeType: string, fallbackBaseName: string): strin
   return `${fallbackBaseName}.${extensionForImageMimeType(mimeType)}`;
 }
 
+function fileToBase64(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      resolve(result.split(',')[1] ?? '');
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function clipboardImageFileName(file: File, index: number): string {
+  const sourceName = file.name?.trim();
+  if (sourceName) return sourceName;
+
+  const supportedMimeType = normalizeSupportedImageMimeType(file.type, null, null) ?? 'image/png';
+  const suffix = index === 0 ? '' : `-${index + 1}`;
+  return `pasted-image${suffix}.${extensionForImageMimeType(supportedMimeType)}`;
+}
+
+async function prepareClipboardImageAttachment(file: File, index: number): Promise<Attachment> {
+  const fallbackBaseName = index === 0 ? 'pasted-image' : `pasted-image-${index + 1}`;
+  const fileName = clipboardImageFileName(file, index);
+  return prepareImageAttachment(
+    {
+      uri: URL.createObjectURL(file),
+      fileName,
+      mimeType: file.type || normalizeSupportedImageMimeType(null, fileName, null),
+      base64: await fileToBase64(file),
+    },
+    fallbackBaseName,
+  );
+}
+
 async function prepareImageAttachment(
   asset: PickedImageAsset,
   fallbackBaseName: string,
@@ -199,12 +235,15 @@ export function ChatBar(props: ChatBarProps) {
   const insets = useSafeAreaInsets();
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
+  const [hoveredAttachmentIndex, setHoveredAttachmentIndex] = useState<number | null>(null);
   const [accordionOpen, setAccordionOpen] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [micVolume, setMicVolume] = useState(0);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [sortedModels, setSortedModels] = useState<ModelInfo[]>([]);
   const [attachPickerOpen, setAttachPickerOpen] = useState(false);
+  const [inputFocused, setInputFocused] = useState(false);
   const modelPopoverScale = useSharedValue(0);
   const modelPopoverOpacity = useSharedValue(0);
   const attachPopoverScale = useSharedValue(0);
@@ -216,6 +255,46 @@ export function ChatBar(props: ChatBarProps) {
   const measuredRootHeightRef = useRef(0);
   const reportedComposerHeightRef = useRef(0);
   useEffect(() => { accordionOpenRef.current = accordionOpen; }, [accordionOpen]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || !inputFocused || disabled || isRecording) return;
+
+    const handlePaste = (event: ClipboardEvent) => {
+      const clipboard = event.clipboardData;
+      if (!clipboard) return;
+
+      const itemFiles = Array.from(clipboard.items)
+        .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+        .map(item => item.getAsFile())
+        .filter((file): file is File => Boolean(file));
+      const fileList = itemFiles.length > 0
+        ? itemFiles
+        : Array.from(clipboard.files).filter(file => file.type.startsWith('image/'));
+
+      if (fileList.length === 0) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      void (async () => {
+        try {
+          const pastedAttachments = await Promise.all(
+            fileList.map((file, index) => prepareClipboardImageAttachment(file, index)),
+          );
+          setAttachments(prev => [...prev, ...pastedAttachments]);
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        } catch (error) {
+          Alert.alert(
+            'Could not paste image',
+            error instanceof Error ? error.message : 'Image preparation failed.',
+          );
+        }
+      })();
+    };
+
+    document.addEventListener('paste', handlePaste, true);
+    return () => document.removeEventListener('paste', handlePaste, true);
+  }, [disabled, inputFocused, isRecording]);
 
   const t = theme.colors;
   const isDark = theme.scheme === 'dark';
@@ -303,6 +382,8 @@ export function ChatBar(props: ChatBarProps) {
     onSend(trimmed, attachments.length > 0 ? attachments : undefined);
     setText('');
     setAttachments([]);
+    setPreviewAttachment(null);
+    setHoveredAttachmentIndex(null);
     Keyboard.dismiss();
     if (accordionOpen) setAccordionOpen(false);
   };
@@ -450,17 +531,64 @@ export function ChatBar(props: ChatBarProps) {
       {/* Attachment previews */}
       {attachments.length > 0 && (
         <View style={styles.attachRow}>
-          {attachments.map((att, i) => (
-            <View key={i} style={[styles.attachThumb, { borderColor: t.border }]}>
-              {att.type === 'image'
-                ? <Image source={{ uri: att.uri }} style={styles.attachImg} />
+          {attachments.map((att, i) => {
+            const isImage = att.type === 'image';
+            const isHovered = hoveredAttachmentIndex === i;
+            const previewUri = imagePreviewUri(att);
+            return (
+            <View
+              key={`${att.name}-${i}`}
+              style={[
+                styles.attachThumb,
+                { borderColor: isImage && isHovered ? t.userMessage : t.border },
+              ]}
+            >
+              {isImage && previewUri
+                ? (
+                  <Pressable
+                    onPress={(event) => {
+                      event.stopPropagation();
+                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                      setPreviewAttachment(att);
+                    }}
+                    onHoverIn={() => setHoveredAttachmentIndex(i)}
+                    onHoverOut={() => setHoveredAttachmentIndex(current => current === i ? null : current)}
+                    style={({ pressed }) => [
+                      styles.attachPreviewButton,
+                      pressed && styles.attachPreviewButtonPressed,
+                    ]}
+                  >
+                    <Image source={{ uri: previewUri }} style={styles.attachImg} />
+                    <View
+                      pointerEvents="none"
+                      style={[
+                        styles.attachHoverOverlay,
+                        {
+                          borderColor: t.userMessage,
+                          backgroundColor: `${t.userMessage}22`,
+                          opacity: isHovered ? 1 : 0,
+                        },
+                      ]}
+                    />
+                  </Pressable>
+                )
                 : <Text style={[styles.attachName, { color: t.mutedForeground }]} numberOfLines={1}>{att.name}</Text>
               }
-              <Pressable onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setAttachments(p => p.filter((_, idx) => idx !== i)); }} style={styles.attachX}>
+              <Pressable
+                onPress={(event) => {
+                  event.stopPropagation();
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  setAttachments(p => p.filter((_, idx) => idx !== i));
+                  if (previewAttachment === att) setPreviewAttachment(null);
+                  setHoveredAttachmentIndex(current => current === i ? null : current);
+                }}
+                style={styles.attachX}
+              >
                 <X size={12} color="#fff" strokeWidth={3} />
               </Pressable>
             </View>
-          ))}
+          );
+          })}
         </View>
       )}
 
@@ -478,7 +606,8 @@ export function ChatBar(props: ChatBarProps) {
                   style={[styles.input, { color: t.foreground }]}
                   value={text}
                   onChangeText={setText}
-                  onFocus={() => { if (accordionOpen) setAccordionOpen(false); }}
+                  onFocus={() => { setInputFocused(true); if (accordionOpen) setAccordionOpen(false); }}
+                  onBlur={() => setInputFocused(false)}
                   placeholder={isMako ? "Message Mako..." : "Message Krusty..."}
                   placeholderTextColor={t.mutedForeground + '50'}
                   multiline
@@ -624,6 +753,12 @@ export function ChatBar(props: ChatBarProps) {
           </View>
         );
       })()}
+      <ImagePreviewModal
+        visible={Boolean(previewAttachment)}
+        uri={imagePreviewUri(previewAttachment)}
+        title={previewAttachment?.name}
+        onClose={() => setPreviewAttachment(null)}
+      />
     </View>
   );
 }
@@ -639,9 +774,12 @@ const styles = StyleSheet.create({
   },
   attachRow: { flexDirection: 'row', gap: 8, marginBottom: 8, paddingLeft: 4 },
   attachThumb: { width: 52, height: 52, borderRadius: 10, borderWidth: StyleSheet.hairlineWidth, overflow: 'hidden', justifyContent: 'center', alignItems: 'center' },
+  attachPreviewButton: { width: '100%', height: '100%' },
+  attachPreviewButtonPressed: { opacity: 0.82 },
   attachImg: { width: '100%', height: '100%' },
+  attachHoverOverlay: { ...StyleSheet.absoluteFillObject, borderRadius: 10, borderWidth: 2 },
   attachName: { fontSize: 9, paddingHorizontal: 3, textAlign: 'center' },
-  attachX: { position: 'absolute', top: 2, right: 2, width: 16, height: 16, borderRadius: 8, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
+  attachX: { position: 'absolute', top: 2, right: 2, width: 16, height: 16, borderRadius: 8, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', zIndex: 2 },
   lRow: { flexDirection: 'row', alignItems: 'flex-end', gap: GAP },
   bar: { flex: 1, borderRadius: RADIUS, overflow: 'hidden', borderWidth: StyleSheet.hairlineWidth, minHeight: PILL },
   barInner: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 8, minHeight: PILL, gap: 4 },

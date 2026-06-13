@@ -5,8 +5,8 @@ use tracing::warn;
 
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::storage::{
-    is_current_snapshot, refresh_current_snapshot, AutonomousTaskStore, MemoryStore, Report,
-    ReportStore, TaskStatus,
+    is_compaction_flush_memory, is_current_snapshot, refresh_current_snapshot, AutonomousTaskStore,
+    MemoryStore, Report, ReportStore, TaskStatus,
 };
 
 use super::memory::{format_memory_kind, MAX_MEMORY_CONTENT_CHARS};
@@ -130,6 +130,7 @@ pub(super) fn build_mako_knowledge_context(
     let carry_forward_memories = memories
         .iter()
         .filter(|memory| !is_current_snapshot(memory))
+        .filter(|memory| !is_compaction_flush_memory(memory))
         .collect::<Vec<_>>();
     let mut sections = vec![
         "[MAKO KNOWLEDGE]".to_string(),

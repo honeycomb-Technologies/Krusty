@@ -1,0 +1,12 @@
+manifest_version = 1
+id = "js-ts-demo"
+name = "JS/TS Demo"
+version = "0.1.0"
+publisher = "krusty.examples"
+description = "Minimal TypeScript plugin executed by Krusty's edon/libnode host."
+runtime = "js"
+entry_component = "src/index.ts"
+render_capabilities = ["text"]
+
+[compat]
+krusty_min = "0.7.0"

@@ -1,6 +1,6 @@
 //! Fuzzy matching cascade for edit operations
 //!
-//! 5-pass matching inspired by OpenCode/pi-mono:
+//! 5-pass matching strategy:
 //! 1. Exact match
 //! 2. Line-trimmed (trailing whitespace per line)
 //! 3. Whitespace-normalized (collapse \s+ to single space)

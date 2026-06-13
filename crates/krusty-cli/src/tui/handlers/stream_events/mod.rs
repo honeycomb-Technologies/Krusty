@@ -133,8 +133,8 @@ impl App {
             LoopEvent::ToolResult {
                 id,
                 output,
-                is_error: _,
-            } => self.handle_tool_result(id, output),
+                is_error,
+            } => self.handle_tool_result(id, output, is_error),
 
             LoopEvent::ToolApprovalRequired {
                 id,
@@ -189,6 +189,22 @@ impl App {
                 new_session_id,
                 estimated_tokens_before,
             } => self.handle_session_pinched(reason, new_session_id, estimated_tokens_before),
+            LoopEvent::ContextCompactionStarted { reason } => {
+                self.handle_compaction_started(reason)
+            }
+            LoopEvent::ContextCompacted {
+                reason,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                replaced_messages,
+                checkpoint_id: _,
+                compaction_count: _,
+            } => self.handle_context_compacted(
+                reason,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                replaced_messages,
+            ),
             LoopEvent::TitleGenerated { title } => self.handle_title_generated(title),
             LoopEvent::Finished {
                 session_id,

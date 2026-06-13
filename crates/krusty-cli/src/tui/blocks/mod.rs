@@ -10,6 +10,7 @@ pub mod bash;
 pub mod build;
 pub mod edit;
 pub mod explore;
+pub mod pinch;
 pub mod read;
 pub mod terminal_pane;
 pub mod thinking;
@@ -47,6 +48,7 @@ pub enum BlockType {
     WebSearch,
     Explore,
     Build,
+    Pinch,
 }
 
 /// Result of a block hit test
@@ -240,6 +242,7 @@ pub use bash::BashBlock;
 pub use build::BuildBlock;
 pub use edit::{DiffMode, EditBlock};
 pub use explore::ExploreBlock;
+pub use pinch::PinchBlock;
 pub use read::ReadBlock;
 pub use terminal_pane::TerminalPane;
 pub use thinking::ThinkingBlock;

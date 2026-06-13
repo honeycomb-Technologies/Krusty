@@ -21,12 +21,12 @@ pub fn anthropic_oauth_config() -> OAuthConfig {
     OAuthConfig {
         provider_id: ProviderId::Anthropic,
         client_id: ANTHROPIC_CLIENT_ID.to_string(),
-        // Anthropic OAuth endpoints (confirmed working via pi-mono reference)
+        // Anthropic OAuth endpoints for the paste-code flow.
         authorization_url: "https://claude.ai/oauth/authorize".to_string(),
         token_url: "https://console.anthropic.com/v1/oauth/token".to_string(),
         // Anthropic doesn't support device code flow
         device_auth_url: None,
-        // Anthropic OAuth scopes (matches pi-mono working implementation)
+        // Anthropic OAuth scopes required for profile and inference access.
         scopes: vec![
             "org:create_api_key".to_string(),
             "user:profile".to_string(),

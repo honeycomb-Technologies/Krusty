@@ -7,7 +7,7 @@
 //! - Text: Standard ratatui widgets
 //! - KittyGraphics: Pixel rendering via Kitty graphics protocol (60fps capable)
 
-use std::{any::Any, sync::RwLock};
+use std::{any::Any, path::PathBuf, sync::RwLock};
 
 use crossterm::event::Event;
 use once_cell::sync::Lazy;
@@ -17,17 +17,21 @@ use crate::tui::themes::Theme;
 
 #[cfg(unix)]
 pub mod gamepad;
+pub mod js;
 pub mod kitty_graphics;
 #[cfg(unix)]
 pub mod libretro;
 pub mod managed;
+pub mod native;
 #[cfg(unix)]
 pub mod retroarch;
 
 #[cfg(unix)]
 pub use gamepad::GamepadHandler;
+pub use js::JsPluginHost;
 pub use kitty_graphics::{KittyGraphics, PluginFrame};
 pub use managed::ManagedPlugin;
+pub use native::NativePluginHost;
 #[cfg(unix)]
 pub use retroarch::{RetroArchPlugin, GAME_BOY_COLOR_PLUGIN_ID, LEGACY_RETROARCH_PLUGIN_ID};
 
@@ -39,6 +43,9 @@ pub struct InstalledPluginDescriptor {
     pub version: String,
     pub publisher: String,
     pub description: Option<String>,
+    pub runtime: crate::plugins::PluginRuntime,
+    pub install_path: PathBuf,
+    pub entry_component_path: PathBuf,
     pub enabled: bool,
     pub render_mode: PluginRenderMode,
 }
@@ -61,6 +68,9 @@ impl InstalledPluginDescriptor {
             version: plugin.version.clone(),
             publisher: plugin.publisher.clone(),
             description: plugin.description.clone(),
+            runtime: plugin.runtime,
+            install_path: plugin.install_path.clone(),
+            entry_component_path: plugin.entry_component_path.clone(),
             enabled: plugin.enabled,
             render_mode,
         }
@@ -174,7 +184,7 @@ pub fn builtin_plugins() -> Vec<Box<dyn Plugin>> {
     #[cfg(unix)]
     plugins.insert(0, Box::new(RetroArchPlugin::new()));
     for descriptor in installed_plugins().into_iter().filter(|d| d.enabled) {
-        plugins.push(Box::new(ManagedPlugin::new(descriptor)));
+        plugins.push(plugin_from_descriptor(descriptor));
     }
     plugins
 }
@@ -188,11 +198,19 @@ pub fn get_plugin_by_id(id: &str) -> Option<Box<dyn Plugin>> {
 
     installed_plugin_by_id(id).and_then(|descriptor| {
         if descriptor.enabled {
-            Some(Box::new(ManagedPlugin::new(descriptor)) as Box<dyn Plugin>)
+            Some(plugin_from_descriptor(descriptor))
         } else {
             None
         }
     })
+}
+
+fn plugin_from_descriptor(descriptor: InstalledPluginDescriptor) -> Box<dyn Plugin> {
+    match descriptor.runtime {
+        crate::plugins::PluginRuntime::Native => Box::new(NativePluginHost::new(descriptor)),
+        crate::plugins::PluginRuntime::Js => Box::new(JsPluginHost::new(descriptor)),
+        crate::plugins::PluginRuntime::Wasm => Box::new(ManagedPlugin::new(descriptor)),
+    }
 }
 
 pub fn set_installed_plugins(mut descriptors: Vec<InstalledPluginDescriptor>) {

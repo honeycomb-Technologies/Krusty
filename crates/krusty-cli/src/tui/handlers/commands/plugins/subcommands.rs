@@ -18,7 +18,7 @@ impl App {
                     Ok(plugins) if plugins.is_empty() => {
                         self.runtime.chat.messages.push((
                             "system".to_string(),
-                            "No plugins installed. Use /plugins install <manifest-path-or-url>."
+                            "No plugins installed. Use /plugins install <npm:package|package-dir|manifest-path-or-url>."
                                 .to_string(),
                         ));
                     }
@@ -50,28 +50,66 @@ impl App {
                     )),
                 }
             }
+            Some("catalog") | Some("search") => {
+                match futures::executor::block_on(manager.list_catalog_plugins()) {
+                    Ok(plugins) if plugins.is_empty() => self.runtime.chat.messages.push((
+                        "system".to_string(),
+                        "Plugin directory is empty. Add a catalog with /plugins add-source <catalog-url> [name]."
+                            .to_string(),
+                    )),
+                    Ok(plugins) => {
+                        let mut message = String::from("Available plugins:\n");
+                        for plugin in plugins {
+                            message.push_str(&format!(
+                                "  • {}@{} ({}) [{}] -> {}\n",
+                                plugin.id,
+                                plugin.version,
+                                plugin.publisher,
+                                match plugin.runtime {
+                                    crate::plugins::PluginRuntime::Native => "native",
+                                    crate::plugins::PluginRuntime::Wasm => "wasm",
+                                    crate::plugins::PluginRuntime::Js => "js",
+                                },
+                                plugin.package
+                            ));
+                        }
+                        self.runtime
+                            .chat
+                            .messages
+                            .push(("system".to_string(), message));
+                    }
+                    Err(err) => self.runtime.chat.messages.push((
+                        "system".to_string(),
+                        format!("Failed to list plugin directory: {}", err),
+                    )),
+                }
+            }
             Some("install") => {
                 let Some(manifest_ref) = parts.get(2) else {
                     self.runtime.chat.messages.push((
                         "system".to_string(),
-                        "Usage: /plugins install <manifest-path-or-url>".to_string(),
+                        "Usage: /plugins install <npm:package|package-dir|manifest-path-or-url>"
+                            .to_string(),
                     ));
                     return;
                 };
 
-                match futures::executor::block_on(manager.install_from_manifest_ref(manifest_ref)) {
-                    Ok(plugin) => {
+                match futures::executor::block_on(manager.install_from_ref(manifest_ref)) {
+                    Ok(plugins) => {
                         self.refresh_plugin_catalog(true);
+                        let names = plugins
+                            .iter()
+                            .map(|plugin| format!("{}@{}", plugin.id, plugin.version))
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         self.show_toast(crate::tui::components::Toast::success(format!(
-                            "Installed plugin {} v{}",
-                            plugin.id, plugin.version
+                            "Installed plugin{} {}",
+                            if plugins.len() == 1 { "" } else { "s" },
+                            names
                         )));
                         self.runtime.chat.messages.push((
                             "system".to_string(),
-                            format!(
-                                "Installed {}@{} from {}",
-                                plugin.id, plugin.version, manifest_ref
-                            ),
+                            format!("Installed {} from {}", names, manifest_ref),
                         ));
                     }
                     Err(err) => self
@@ -119,13 +157,14 @@ impl App {
 
                 match futures::executor::block_on(manager.reload_plugin(plugin_id)) {
                     Ok(()) => {
+                        self.refresh_plugin_catalog(true);
                         if self.ui.plugin_window.active_plugin_id.as_deref() == Some(*plugin_id) {
                             let plugin = crate::tui::plugins::get_plugin_by_id(plugin_id);
                             self.ui.plugin_window.set_plugin(plugin);
                         }
                         self.runtime.chat.messages.push((
                             "system".to_string(),
-                            format!("Reload request acknowledged for {}", plugin_id),
+                            format!("Reloaded plugin shell for {}", plugin_id),
                         ));
                     }
                     Err(err) => self
@@ -139,7 +178,7 @@ impl App {
                 let Some(source_ref) = parts.get(2) else {
                     self.runtime.chat.messages.push((
                         "system".to_string(),
-                        "Usage: /plugins add-source <manifest-url> [name]".to_string(),
+                        "Usage: /plugins add-source <catalog-url-or-path> [name]".to_string(),
                     ));
                     return;
                 };
@@ -240,7 +279,7 @@ impl App {
                 self.runtime.chat.messages.push((
                     "system".to_string(),
                     format!(
-                        "Unknown /plugins subcommand '{}'. Available: list, install, enable, disable, reload, add-source, sources, allow-publisher, add-key, refresh",
+                        "Unknown /plugins subcommand '{}'. Available: list, catalog, install, enable, disable, reload, add-source, sources, allow-publisher, add-key, refresh",
                         other
                     ),
                 ));

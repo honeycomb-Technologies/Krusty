@@ -42,7 +42,10 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 unicode-width = "0.2"
 textwrap = "0.16"
 arboard = "3"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = [
+  "png",
+  "jpeg",
+] }
 palette = "0.7"
 
 
@@ -55,13 +58,13 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 # WASM Extensions (Zed compatibility) - must match Zed's versions exactly
 wasmtime = { version = "29", default-features = false, features = [
-    "async",
-    "demangle",
-    "runtime",
-    "cranelift",
-    "component-model",
-    "incremental-cache",
-    "parallel-compilation",
+  "async",
+  "demangle",
+  "runtime",
+  "cranelift",
+  "component-model",
+  "incremental-cache",
+  "parallel-compilation",
 ] }
 wasmtime-wasi = "29"
 wasmparser = "0.222"
@@ -111,6 +114,7 @@ dashmap = "6.1"
 # System
 libc = "0.2"
 libloading = "0.8"
+edon = "0.0.27"
 parking_lot = "0.12"
 moka = { version = "0.12", features = ["sync"] }
 
@@ -122,7 +126,9 @@ git2 = "0.19"
 pulldown-cmark = "0.13.0"
 
 # Syntax Highlighting
-syntect = { version = "5.2", default-features = false, features = ["default-fancy"] }
+syntect = { version = "5.2", default-features = false, features = [
+  "default-fancy",
+] }
 
 # Gamepad support (Unix only — libudev on Linux, IOKit on macOS)
 [target.'cfg(unix)'.dependencies]

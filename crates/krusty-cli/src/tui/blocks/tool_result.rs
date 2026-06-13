@@ -30,18 +30,22 @@ const MAX_CONTENT_WIDTH: usize = 76;
 /// Minimum box width for readability
 const MIN_BOX_WIDTH: usize = 20;
 
-/// Tool result block for grep/glob
+/// Tool result/status block for search results and compact generic tool status.
 pub struct ToolResultBlock {
     /// Tool use ID for matching results
     tool_use_id: String,
-    /// Tool name (grep or glob)
+    /// Tool name
     tool_name: String,
-    /// Search pattern
+    /// Search pattern, path, action, or other short label
     pattern: String,
-    /// Result lines
+    /// Result/detail lines
     results: Vec<String>,
     /// Result count
     count: usize,
+    /// Compact human summary for non-search tools
+    summary: Option<String>,
+    /// Whether result was an error
+    is_error: bool,
     /// Whether collapsed
     collapsed: bool,
     /// Whether still running
@@ -67,6 +71,8 @@ impl ToolResultBlock {
             pattern,
             results: Vec::new(),
             count: 0,
+            summary: None,
+            is_error: false,
             collapsed: true,
             streaming: true,
             start_time: now,
@@ -92,55 +98,178 @@ impl ToolResultBlock {
         self.collapsed = collapsed;
     }
 
-    /// Parse and set results from tool output
-    pub fn set_results(&mut self, output: &str) {
-        // Try to parse JSON output
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(output) {
-            let payload = json.get("data").unwrap_or(&json);
-            if self.tool_name == "glob" {
-                if let Some(matches) = payload.get("matches").and_then(|v| v.as_array()) {
-                    self.results = matches
-                        .iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect();
-                    self.count = payload
-                        .get("count")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(self.results.len() as u64)
-                        as usize;
-                }
-            } else if self.tool_name == "grep" {
-                self.count = payload
-                    .get("total_matches")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
+    /// Mark this block as an error result.
+    pub fn set_error(&mut self, is_error: bool) {
+        self.is_error = is_error;
+    }
 
-                // Content mode: matches array with file/line/line_number
-                if let Some(matches) = payload.get("matches").and_then(|v| v.as_array()) {
-                    self.results = matches
-                        .iter()
-                        .filter_map(|m| {
-                            let file = m.get("file").and_then(|f| f.as_str())?;
-                            let line_num = m.get("line_number").and_then(|n| n.as_u64());
-                            let line = m.get("line").and_then(|l| l.as_str()).unwrap_or("");
-                            if let Some(ln) = line_num {
-                                Some(format!("{}:{}: {}", file, ln, line))
-                            } else {
-                                Some(format!("{}: {}", file, line))
-                            }
+    /// Parse and set results from tool output.
+    pub fn set_results(&mut self, output: &str) {
+        let view = crate::tui::tool_presentation::ToolOutputView::from_output(output);
+        self.summary = view.summary;
+        if let Some(is_error) = view.is_error {
+            self.is_error = is_error;
+        }
+
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&view.render_output) else {
+            self.set_generic_lines(&view.render_output);
+            return;
+        };
+
+        let payload = json.get("data").unwrap_or(&json);
+        match self.tool_name.as_str() {
+            "glob" => self.set_glob_results(payload),
+            "grep" => self.set_grep_results(payload),
+            "list" => self.set_list_results(payload),
+            _ => self.set_generic_json_results(payload, &json),
+        }
+    }
+
+    fn set_glob_results(&mut self, payload: &serde_json::Value) {
+        if let Some(matches) = payload.get("matches").and_then(|v| v.as_array()) {
+            self.results = matches
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            self.count = payload
+                .get("count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(self.results.len() as u64) as usize;
+        }
+    }
+
+    fn set_grep_results(&mut self, payload: &serde_json::Value) {
+        self.count = payload
+            .get("total_matches")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+
+        // Content mode: matches array with file/line/line_number
+        if let Some(matches) = payload.get("matches").and_then(|v| v.as_array()) {
+            self.results = matches
+                .iter()
+                .filter_map(|m| {
+                    let file = m.get("file").and_then(|f| f.as_str())?;
+                    let line_num = m.get("line_number").and_then(|n| n.as_u64());
+                    let line = m.get("line").and_then(|l| l.as_str()).unwrap_or("");
+                    if let Some(ln) = line_num {
+                        Some(format!("{}:{}: {}", file, ln, line))
+                    } else {
+                        Some(format!("{}: {}", file, line))
+                    }
+                })
+                .collect();
+        }
+        // files_with_matches mode: files array
+        else if let Some(files) = payload.get("files").and_then(|v| v.as_array()) {
+            self.results = files
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            self.count = self.results.len();
+        }
+    }
+
+    fn set_list_results(&mut self, payload: &serde_json::Value) {
+        self.results = payload
+            .get("entries")
+            .or_else(|| payload.get("output"))
+            .and_then(|value| {
+                value
+                    .as_array()
+                    .map(|entries| {
+                        entries
+                            .iter()
+                            .filter_map(|entry| entry.as_str().map(ToString::to_string))
+                            .collect::<Vec<_>>()
+                    })
+                    .or_else(|| {
+                        value.as_str().map(|text| {
+                            text.lines()
+                                .filter(|line| !line.trim().is_empty())
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
                         })
-                        .collect();
-                }
-                // files_with_matches mode: files array
-                else if let Some(files) = payload.get("files").and_then(|v| v.as_array()) {
-                    self.results = files
-                        .iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect();
-                    self.count = self.results.len();
-                }
+                    })
+            })
+            .unwrap_or_default();
+        self.count = payload
+            .get("total_entries")
+            .or_else(|| payload.get("count"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(self.results.len() as u64) as usize;
+    }
+
+    fn set_generic_json_results(&mut self, payload: &serde_json::Value, full: &serde_json::Value) {
+        if self.summary.is_none() {
+            self.summary = payload
+                .get("message")
+                .or_else(|| payload.get("summary"))
+                .or_else(|| payload.get("investigation_summary"))
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string)
+                .or_else(|| {
+                    full.get("error")
+                        .and_then(|v| v.get("message"))
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string)
+                });
+        }
+
+        let mut lines = Vec::new();
+        if let Some(summary) = &self.summary {
+            lines.push(summary.clone());
+        }
+        for key in [
+            "file_path",
+            "path",
+            "url",
+            "title",
+            "memory_id",
+            "report_id",
+            "task_id",
+            "delegated_run_id",
+        ] {
+            if let Some(value) = payload.get(key).and_then(|v| v.as_str()) {
+                lines.push(format!("{}: {}", key.replace('_', " "), value));
             }
         }
+        for key in [
+            "count",
+            "result_count",
+            "total_matches",
+            "total_entries",
+            "bytes_written",
+            "line_count",
+            "files_modified",
+            "lines_added",
+            "lines_removed",
+        ] {
+            if let Some(value) = payload.get(key).and_then(|v| v.as_u64()) {
+                lines.push(format!("{}: {}", key.replace('_', " "), value));
+            }
+        }
+
+        if lines.is_empty() {
+            lines.push(crate::tui::utils::truncate_ellipsis(&full.to_string(), 220).into_owned());
+        }
+        self.count = lines.len();
+        self.results = lines;
+    }
+
+    fn set_generic_lines(&mut self, output: &str) {
+        let lines = output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .take(12)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        if self.summary.is_none() {
+            self.summary = lines.first().cloned();
+        }
+        self.count = lines.len();
+        self.results = lines;
     }
 
     pub fn complete(&mut self) {
@@ -149,8 +278,8 @@ impl ToolResultBlock {
     }
 
     pub fn toggle(&mut self) {
-        // Don't allow expanding if no results
-        if self.collapsed && self.count == 0 {
+        // Don't allow expanding if there are no details to show.
+        if self.collapsed && self.results.is_empty() {
             return;
         }
         self.collapsed = !self.collapsed;
@@ -198,6 +327,18 @@ impl ToolResultBlock {
         ((box_inner_width + 4) as u16).min(available_width)
     }
 
+    fn is_search_style(&self) -> bool {
+        matches!(self.tool_name.as_str(), "grep" | "glob" | "list")
+    }
+
+    fn compact_label(&self, pat_display: &str) -> String {
+        if pat_display.is_empty() {
+            self.tool_name.clone()
+        } else {
+            format!("{} ({})", self.tool_name, pat_display)
+        }
+    }
+
     /// Render collapsed state: single line like thinking block
     fn render_collapsed(&self, area: Rect, buf: &mut Buffer, theme: &Theme) {
         let y = area.y;
@@ -212,19 +353,24 @@ impl ToolResultBlock {
         } else {
             self.pattern.clone()
         };
+        let label = self.compact_label(&pat_display);
 
         let text = if self.streaming {
-            format!(
-                "▶ {} ({})... {}",
-                self.tool_name,
-                pat_display,
-                self.spinner_frame()
-            )
+            format!("▶ {}... {}", label, self.spinner_frame())
+        } else if self.is_search_style() {
+            format!("▶ {} {} results", label, self.count)
         } else {
-            format!(
-                "▶ {} ({}) {} results",
-                self.tool_name, pat_display, self.count
-            )
+            let marker = if self.is_error { "✗" } else { "✓" };
+            match self
+                .summary
+                .as_deref()
+                .filter(|summary| !summary.trim().is_empty())
+            {
+                Some(summary) => {
+                    format!("▶ {} {} {}", label, marker, truncate_ellipsis(summary, 72))
+                }
+                None => format!("▶ {} {}", label, marker),
+            }
         };
 
         let text_len = UnicodeWidthStr::width(text.as_str());
@@ -286,10 +432,17 @@ impl ToolResultBlock {
             .unwrap_or(MIN_BOX_WIDTH);
 
         // Also consider header width
-        let header_text = format!(
-            " ▼ {} ({}) {} results ",
-            self.tool_name, pat_display, self.count
-        );
+        let label = self.compact_label(&pat_display);
+        let count_label = if self.is_search_style() {
+            format!("{} results", self.count)
+        } else {
+            format!(
+                "{} detail{}",
+                self.results.len(),
+                if self.results.len() == 1 { "" } else { "s" }
+            )
+        };
+        let header_text = format!(" ▼ {} {} ", label, count_label);
         let header_width = UnicodeWidthStr::width(header_text.as_str());
 
         let box_inner_width = longest_line
@@ -310,10 +463,7 @@ impl ToolResultBlock {
 
         // Top border - only if not clipped
         if clip_top == 0 {
-            let header = format!(
-                " ▼ {} ({}) {} results ",
-                self.tool_name, pat_display, self.count
-            );
+            let header = format!(" ▼ {} {} ", label, count_label);
 
             if let Some(cell) = buf.cell_mut((area.x, render_y)) {
                 cell.set_char('╭');
@@ -670,29 +820,23 @@ impl StreamBlock for ToolResultBlock {
     }
 
     fn get_text_content(&self) -> Option<String> {
+        let label = self.compact_label(&self.pattern);
+        let header = if self.is_search_style() {
+            format!("{} ({} results)", label, self.count)
+        } else if let Some(summary) = &self.summary {
+            format!("{}: {}", label, summary)
+        } else {
+            label
+        };
+
         // When collapsed, only return header (matches rendered height of 1)
         if self.collapsed {
-            return if !self.pattern.is_empty() {
-                Some(format!(
-                    "{} \"{}\" ({} results)",
-                    self.tool_name, self.pattern, self.count
-                ))
-            } else {
-                Some(format!("{} ({} results)", self.tool_name, self.count))
-            };
+            return Some(header);
         }
 
         let mut result = String::new();
-
-        // Header: tool name, pattern, count
-        if !self.pattern.is_empty() {
-            result.push_str(&format!(
-                "{} \"{}\" ({} results)\n",
-                self.tool_name, self.pattern, self.count
-            ));
-        } else {
-            result.push_str(&format!("{} ({} results)\n", self.tool_name, self.count));
-        }
+        result.push_str(&header);
+        result.push('\n');
 
         // Results
         if !self.results.is_empty() {

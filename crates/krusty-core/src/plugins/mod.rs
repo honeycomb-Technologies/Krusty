@@ -9,7 +9,7 @@ mod types;
 
 pub use manager::PluginManager;
 pub use types::{
-    InstalledPlugin, PluginCompat, PluginLockEntry, PluginLockfile, PluginManifestV1,
-    PluginPermissionSet, PluginPermissionsFile, PluginRelease, PluginRenderCapability,
-    PluginSource, PluginSourcesFile, PluginTrustPolicy,
+    InstalledPlugin, PluginCatalogEntry, PluginCatalogFile, PluginCompat, PluginLockEntry,
+    PluginLockfile, PluginManifestV1, PluginPermissionSet, PluginPermissionsFile, PluginRelease,
+    PluginRenderCapability, PluginRuntime, PluginSource, PluginSourcesFile, PluginTrustPolicy,
 };

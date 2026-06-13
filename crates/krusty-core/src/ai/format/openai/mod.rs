@@ -6,6 +6,7 @@
 
 mod messages;
 mod request;
+pub mod responses_input;
 
 use serde_json::Value;
 

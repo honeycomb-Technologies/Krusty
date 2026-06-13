@@ -17,11 +17,17 @@ pub(super) async fn read_installed_from_lock_entry(
     manager: &PluginManager,
     entry: &PluginLockEntry,
 ) -> Result<InstalledPlugin> {
-    let install_path = manager
-        .installed_root()
-        .join(&entry.id)
-        .join(&entry.version);
-    let manifest_path = install_path.join("plugin.toml");
+    let install_path = entry.package_path.clone().unwrap_or_else(|| {
+        manager
+            .installed_root()
+            .join(&entry.id)
+            .join(&entry.version)
+    });
+    let manifest_path = entry
+        .manifest_path
+        .as_ref()
+        .map(|path| install_path.join(path))
+        .unwrap_or_else(|| install_path.join("plugin.toml"));
 
     let manifest: PluginManifestV1 = read_toml_or_json(&manifest_path)
         .await
@@ -37,6 +43,7 @@ pub(super) async fn read_installed_from_lock_entry(
         version: manifest.version,
         publisher: manifest.publisher,
         description: manifest.description,
+        runtime: manifest.runtime,
         install_path,
         manifest_path,
         entry_component_path,
@@ -53,14 +60,28 @@ pub(super) async fn upsert_lock_entry(
     enabled: bool,
     pinned: bool,
 ) -> Result<()> {
+    upsert_lock_entry_record(
+        manager,
+        PluginLockEntry {
+            id: plugin_id.to_string(),
+            version: version.to_string(),
+            enabled,
+            pinned,
+            package_path: None,
+            manifest_path: None,
+            source: None,
+        },
+    )
+    .await
+}
+
+pub(super) async fn upsert_lock_entry_record(
+    manager: &PluginManager,
+    entry: PluginLockEntry,
+) -> Result<()> {
     let mut lock = load_lockfile(manager).await?;
-    lock.plugins.retain(|entry| entry.id != plugin_id);
-    lock.plugins.push(PluginLockEntry {
-        id: plugin_id.to_string(),
-        version: version.to_string(),
-        enabled,
-        pinned,
-    });
+    lock.plugins.retain(|existing| existing.id != entry.id);
+    lock.plugins.push(entry);
     lock.plugins.sort_by(|a, b| a.id.cmp(&b.id));
     save_lockfile(manager, &lock).await
 }

@@ -9,9 +9,11 @@ use self::storage::{
 use self::validation::infer_source_name;
 use super::{InstalledPlugin, PluginSource};
 
+mod catalog;
 mod install;
 mod io;
 mod layout;
+mod package;
 mod storage;
 #[cfg(test)]
 mod tests;
@@ -104,7 +106,8 @@ impl PluginManager {
         save_lockfile(self, &lock).await
     }
 
-    /// Explicit reload request. v1 behavior is descriptor refresh only.
+    /// Explicit reload request. Runtime hosts perform the actual reload when the
+    /// active plugin instance is recreated by the caller.
     pub async fn reload_plugin(&self, plugin_id: &str) -> Result<()> {
         let installed = self.list_installed_plugins().await?;
         if installed.iter().all(|plugin| plugin.id != plugin_id) {

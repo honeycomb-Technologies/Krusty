@@ -58,7 +58,7 @@ pub fn inject_context(
                 text: "You are Krusty, a helpful conversational assistant. This is a chat session — you are having a natural conversation with the user.\n\nIMPORTANT: You do NOT have access to any tools in this session. Do not mention, list, or describe any tools. You cannot read files, run commands, or edit code. If the user asks about tools, explain that this is a chat-only session and suggest they switch to Code mode for coding tasks.\n\nBe friendly, helpful, and conversational.".to_string(),
             }],
         });
-        let memory_ctx = memory::build_memory_context(db_path, None, user_id);
+        let memory_ctx = memory::build_memory_context(db_path, None, user_id, conversation);
         if !memory_ctx.is_empty() {
             injected.push(ModelMessage {
                 role: Role::System,
@@ -76,7 +76,12 @@ pub fn inject_context(
     let memory_ctx = if is_mako {
         String::new()
     } else {
-        memory::build_memory_context(db_path, context_project_dir.as_deref(), user_id)
+        memory::build_memory_context(
+            db_path,
+            context_project_dir.as_deref(),
+            user_id,
+            conversation,
+        )
     };
     let plan_ctx = build_plan_context(db_path, session_id, work_mode);
     let delegated_ctx = runtime_state::build_delegated_context(db_path, session_id);

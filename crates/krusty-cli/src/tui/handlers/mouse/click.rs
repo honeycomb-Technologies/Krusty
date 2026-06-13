@@ -185,6 +185,36 @@ impl App {
             if let Some(area) = self.ui.scroll_system.layout.input_area {
                 let relative_x = x.saturating_sub(area.x);
                 let relative_y = y.saturating_sub(area.y);
+                if let Some((_start, _end, reference)) = self
+                    .ui
+                    .input
+                    .get_bracket_ref_at_click(relative_x, relative_y)
+                {
+                    if let Some(clipboard_id) = reference.strip_prefix("clipboard:") {
+                        if let Some((width, height, rgba_bytes)) =
+                            self.runtime.pending_clipboard_images.get(clipboard_id)
+                        {
+                            match crate::tui::utils::clipboard::save_clipboard_image_preview(
+                                *width,
+                                *height,
+                                rgba_bytes,
+                                clipboard_id,
+                            ) {
+                                Ok(path) => {
+                                    self.ui.popups.file_preview.open(path);
+                                    self.ui.popup = Popup::FilePreview;
+                                }
+                                Err(error) => {
+                                    self.show_toast(crate::tui::components::Toast::error(format!(
+                                        "Clipboard preview failed: {}",
+                                        error
+                                    )));
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
                 if let Some((_start, _end, path)) =
                     self.ui.input.get_file_ref_at_click(relative_x, relative_y)
                 {

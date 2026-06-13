@@ -20,12 +20,24 @@ impl App {
             }
         };
 
+        let catalog = match futures::executor::block_on(manager.list_catalog_plugins()) {
+            Ok(catalog) => catalog,
+            Err(err) => {
+                self.ui.popups.plugins.set_status_message(Some(format!(
+                    "Failed to refresh plugin directory: {}",
+                    err
+                )));
+                Vec::new()
+            }
+        };
+
         let descriptors: Vec<_> = installed
             .iter()
             .map(crate::tui::plugins::InstalledPluginDescriptor::from_installed)
             .collect();
         crate::tui::plugins::set_installed_plugins(descriptors);
         self.ui.popups.plugins.set_plugins(installed);
+        self.ui.popups.plugins.set_catalog(catalog);
 
         let previous_versions = self.runtime.plugin_versions.clone();
         self.runtime.plugin_versions = crate::tui::plugins::installed_plugin_version_map();

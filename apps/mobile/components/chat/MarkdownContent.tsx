@@ -1,10 +1,11 @@
-import { useCallback } from 'react';
-import { StyleSheet, Text, View, Pressable, Linking } from 'react-native';
+import { useCallback, useState } from 'react';
+import { Image, StyleSheet, Text, View, Pressable, Linking } from 'react-native';
 import Markdown from '@ronradtke/react-native-markdown-display';
 import * as Clipboard from '../../platform/clipboard';
 import * as Haptics from '../../platform/haptics';
 import { Copy } from 'lucide-react-native';
 import { useThemeContext } from '../../hooks/useTheme';
+import { ImagePreviewModal } from './ImagePreviewModal';
 
 interface MarkdownContentProps {
   content: string;
@@ -14,6 +15,7 @@ interface MarkdownContentProps {
 export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
+  const [previewImage, setPreviewImage] = useState<{ uri: string; title?: string } | null>(null);
 
   const handleLink = useCallback((url: string) => {
     Linking.openURL(url);
@@ -23,10 +25,40 @@ export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
   const styles = getStyles(t, isUser);
 
   return (
-    <Markdown
-      style={styles}
-      onLinkPress={handleLink}
-      rules={{
+    <>
+      <Markdown
+        style={styles}
+        onLinkPress={handleLink}
+        rules={{
+        image: (node, _children, _parent, markdownStyles) => {
+          const uri = getMarkdownImageUri(node);
+          if (!uri) return null;
+          const title = getMarkdownImageTitle(node);
+          return (
+            <Pressable
+              key={node.key}
+              onPress={(event) => {
+                event.stopPropagation();
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                setPreviewImage({ uri, title });
+              }}
+              style={({ pressed, hovered }) => [
+                markdownImageStyles.frame,
+                {
+                  borderColor: hovered ? t.userMessage : t.border,
+                  opacity: pressed ? 0.88 : 1,
+                },
+              ]}
+            >
+              <Image
+                source={{ uri }}
+                style={[markdownStyles.image, markdownImageStyles.image]}
+                resizeMode="contain"
+                accessibilityLabel={title || 'Markdown image'}
+              />
+            </Pressable>
+          );
+        },
         fence: (node, _children, _parent, markdownStyles) => {
           const lang = node.sourceInfo || '';
           const code = node.content || '';
@@ -66,11 +98,30 @@ export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
             {node.content}
           </Text>
         ),
-      }}
-    >
-      {content}
-    </Markdown>
+        }}
+      >
+        {content}
+      </Markdown>
+      <ImagePreviewModal
+        visible={Boolean(previewImage)}
+        uri={previewImage?.uri}
+        title={previewImage?.title}
+        onClose={() => setPreviewImage(null)}
+      />
+    </>
   );
+}
+
+function getMarkdownImageUri(node: any): string | null {
+  const attrs = node?.attributes ?? {};
+  const uri = attrs.src ?? attrs.href ?? node?.src ?? node?.destination ?? node?.target;
+  return typeof uri === 'string' && uri.trim() ? uri.trim() : null;
+}
+
+function getMarkdownImageTitle(node: any): string | undefined {
+  const attrs = node?.attributes ?? {};
+  const title = attrs.alt ?? attrs.title ?? node?.alt ?? node?.content;
+  return typeof title === 'string' && title.trim() ? title.trim() : undefined;
 }
 
 function getStyles(t: any, isUser?: boolean) {
@@ -138,5 +189,21 @@ const codeBlockStyles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 19,
     padding: 12,
+  },
+});
+
+const markdownImageStyles = StyleSheet.create({
+  frame: {
+    width: '100%',
+    marginVertical: 8,
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+  image: {
+    width: '100%',
+    height: 220,
+    borderRadius: 12,
   },
 });

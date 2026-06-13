@@ -3,7 +3,10 @@ use axum::{
     Json,
 };
 
-use krusty_core::agent::{create_pinched_session, CreatePinchedSessionRequest};
+use krusty_core::agent::{
+    run_compaction_pipeline, CompactionManager, CompactionRequest, CompactionTrigger,
+};
+use krusty_core::ai::models::resolve_context_window;
 use krusty_core::storage::WorkspaceMode;
 use std::path::Path as StdPath;
 
@@ -15,7 +18,7 @@ use crate::utils::messages::parse_stored_model_messages;
 use crate::utils::workspace::{resolve_optional_workspace_path, resolve_session_working_dir};
 use crate::AppState;
 
-/// Pinch a session - create a child session with summarized context
+/// Compact a session in place (manual pinch).
 pub(super) async fn pinch_session(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
@@ -31,7 +34,7 @@ pub(super) async fn pinch_session(
 
     if messages.is_empty() {
         return Err(AppError::BadRequest(
-            "Cannot pinch session with no messages".to_string(),
+            "Cannot compact session with no messages".to_string(),
         ));
     }
 
@@ -62,21 +65,45 @@ pub(super) async fn pinch_session(
     let summary_client = state
         .resolve_ai_client_for_user(summary_model, source_session.user_id.as_deref())
         .await;
-    let pinch_result = create_pinched_session(CreatePinchedSessionRequest {
+
+    let compaction_manager = if let Some(client) = summary_client.as_ref() {
+        let model = summary_model.unwrap_or(client.config().model.as_str());
+        CompactionManager::for_model(
+            client.provider_id(),
+            client.config().api_format,
+            model,
+            resolve_context_window(client.provider_id(), model, client.config().api_format),
+        )
+    } else {
+        CompactionManager::for_model(
+            krusty_core::ai::providers::ProviderId::MiniMax,
+            krusty_core::ai::models::ApiFormat::Anthropic,
+            krusty_core::constants::ai::DEFAULT_MODEL,
+            krusty_core::constants::ai::CONTEXT_WINDOW_TOKENS,
+        )
+    };
+
+    let compaction_result = run_compaction_pipeline(CompactionRequest {
         db_path: &state.db_path,
-        ai_client: summary_client.as_ref().map(|client| client.as_ref()),
         session_id: &id,
-        source_session_title: &source_session.title,
         conversation: &messages,
         working_dir: &working_dir,
+        ai_client: summary_client.as_ref().map(|client| client.as_ref()),
         model: summary_model,
-        target_branch: source_session.target_branch.as_deref(),
-        permission_mode: source_session.permission_mode,
-        preservation_hints: req.preservation_hints,
-        direction: req.direction,
-        initial_user_message: None,
+        trigger: CompactionTrigger::Manual {
+            preservation_hints: req.preservation_hints,
+            direction: req.direction,
+        },
+        compaction_manager,
+        triggering_token_estimate: None,
+        last_usage_prompt_tokens: None,
+        messages_after_usage: 0,
+        summary_override: None,
+        project_dir: resolved_project_dir.as_deref(),
+        user_id: source_session.user_id.as_deref(),
     })
-    .await?;
+    .await
+    .map_err(|error| AppError::Internal(format!("Compaction failed: {}", error)))?;
 
     if legacy_relative_workspace {
         let (working_dir, project_dir) = match source_session.workspace_mode {
@@ -87,22 +114,27 @@ pub(super) async fn pinch_session(
             ),
         };
         session_manager.update_session_workspace_contract(
-            &pinch_result.new_session_id,
+            &id,
             working_dir,
             project_dir,
             source_session.workspace_mode,
         )?;
     }
 
-    let new_session = session_manager
-        .get_session(&pinch_result.new_session_id)?
-        .ok_or_else(|| AppError::Internal("Failed to fetch new session".to_string()))?;
+    let session = session_manager
+        .get_session(&id)?
+        .ok_or_else(|| AppError::Internal("Failed to fetch compacted session".to_string()))?;
 
     Ok(Json(PinchResponse {
-        session: new_session.into(),
-        summary: pinch_result.summary.work_summary,
-        key_decisions: pinch_result.summary.key_decisions,
-        pending_tasks: pinch_result.summary.pending_tasks,
+        session: session.into(),
+        summary: compaction_result.summary.work_summary,
+        key_decisions: compaction_result.summary.key_decisions,
+        pending_tasks: compaction_result.summary.pending_tasks,
+        estimated_tokens_before: Some(compaction_result.estimated_tokens_before),
+        estimated_tokens_after: Some(compaction_result.estimated_tokens_after),
+        replaced_messages: Some(compaction_result.replaced_messages),
+        checkpoint_id: Some(compaction_result.checkpoint_id),
+        compaction_count: Some(compaction_result.compaction_count),
     }))
 }
 

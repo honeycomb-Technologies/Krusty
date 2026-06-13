@@ -1,7 +1,7 @@
 //! Provider-specific transformations and parameters
 //!
 //! Handles model-specific and provider-specific API parameters, message
-//! transformations, and compatibility layers based on OpenCode's logic.
+//! transformations, and compatibility layers.
 
 mod messages;
 mod params;
@@ -92,6 +92,28 @@ mod tests {
         );
 
         assert_eq!(transformed["parallel_tool_calls"], Value::Bool(true));
+    }
+
+    #[test]
+    fn request_transform_converts_responses_input_tool_messages() {
+        let body = json!({
+            "model": "grok-build",
+            "input": [{
+                "role": "tool",
+                "tool_call_id": "call_123",
+                "content": "segment data"
+            }]
+        });
+
+        let transformed = apply_request_body_transform(
+            body,
+            ProviderId::Grok,
+            ApiFormat::OpenAIResponses,
+            "grok-build",
+        );
+
+        assert_eq!(transformed["input"][0]["type"], "function_call_output");
+        assert_eq!(transformed["input"][0]["call_id"], "call_123");
     }
 
     #[test]

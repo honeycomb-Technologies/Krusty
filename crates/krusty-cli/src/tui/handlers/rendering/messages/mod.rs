@@ -8,6 +8,7 @@ mod selection;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BlockType {
     Thinking,
+    Pinch,
     Bash,
     Terminal,
     ToolResult,
@@ -164,6 +165,7 @@ impl App {
         let estimated_blocks = self.runtime.blocks.total_count();
         let mut block_positions: Vec<BlockPosition> = Vec::with_capacity(estimated_blocks);
         let mut thinking_idx = 0;
+        let mut pinch_idx = 0;
         let mut bash_idx = 0;
         let mut terminal_idx = 0;
         let mut tool_result_idx = 0;
@@ -193,6 +195,22 @@ impl App {
                     );
                 }
                 thinking_idx += 1;
+                continue;
+            }
+
+            if role == "pinch" {
+                if let Some(pb) = self.runtime.blocks.pinch.get(pinch_idx) {
+                    let height = pb.height(content_width, &self.ui.theme);
+                    Self::track_block_position(
+                        &mut block_positions,
+                        &mut total_lines,
+                        &mut message_heights,
+                        height,
+                        pinch_idx,
+                        BlockType::Pinch,
+                    );
+                }
+                pinch_idx += 1;
                 continue;
             }
 
@@ -380,6 +398,7 @@ impl App {
         let mut line_idx: usize = 0;
         let mut message_line_offsets: Vec<(usize, usize)> = Vec::new(); // (msg_idx, base_line)
         thinking_idx = 0;
+        pinch_idx = 0;
         bash_idx = 0;
         terminal_idx = 0;
         tool_result_idx = 0;
@@ -412,6 +431,19 @@ impl App {
                     line_idx += 1;
                 }
                 thinking_idx += 1;
+                continue;
+            }
+
+            if role == "pinch" {
+                if let Some(height) = find_position(&block_positions, BlockType::Pinch, pinch_idx) {
+                    for _ in 0..height {
+                        lines.push(Line::from(""));
+                        line_idx += 1;
+                    }
+                    lines.push(Line::from("")); // blank
+                    line_idx += 1;
+                }
+                pinch_idx += 1;
                 continue;
             }
 
@@ -805,6 +837,11 @@ impl App {
                 BlockType::Thinking => {
                     if let Some(tb) = self.runtime.blocks.thinking.get(pos.block_idx) {
                         tb.render(block_area, f.buffer_mut(), &self.ui.theme, false, clip);
+                    }
+                }
+                BlockType::Pinch => {
+                    if let Some(pb) = self.runtime.blocks.pinch.get(pos.block_idx) {
+                        pb.render(block_area, f.buffer_mut(), &self.ui.theme, false, clip);
                     }
                 }
                 BlockType::Bash => {

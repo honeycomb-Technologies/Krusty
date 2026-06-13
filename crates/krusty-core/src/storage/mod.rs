@@ -13,6 +13,7 @@ mod agent_state;
 pub mod apns_devices;
 pub mod autonomous_tasks;
 mod block_ui;
+mod compaction;
 pub mod credentials;
 mod database;
 #[cfg(test)]
@@ -39,6 +40,7 @@ pub use agent_state::AgentState;
 pub use apns_devices::{ApnsDevice, ApnsDeviceStore};
 pub use autonomous_tasks::{AutonomousTask, AutonomousTaskStore, TaskStatus};
 pub use block_ui::BlockUiState;
+pub use compaction::{CompactionSegmentRecord, CompactionStore};
 pub use credentials::CredentialStore;
 pub use database::{Database, SharedDatabase};
 pub use delegated_runs::{
@@ -61,7 +63,9 @@ pub use mako_home::{
 pub use mako_runtime_state::{
     MakoRunPriority, MakoRuntimeState, MakoRuntimeStateStatus, MakoRuntimeStateStore,
 };
-pub use memories::{AgentMemory, MemoryStore, MemoryType};
+pub use memories::{
+    is_compaction_flush_memory, AgentMemory, MemoryStore, MemoryType, COMPACTION_FLUSH_TITLE_PREFIX,
+};
 pub use messages::{MessageStore, StoredMessageRecord};
 pub use plans::{PlanStore, PlanSummary};
 pub use preferences::Preferences;

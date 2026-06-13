@@ -9,8 +9,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::storage::{
-    is_current_snapshot, is_current_snapshot_title, refresh_current_snapshot, Database,
-    MemoryStore, MemoryType,
+    is_compaction_flush_memory, is_current_snapshot, is_current_snapshot_title,
+    refresh_current_snapshot, AgentMemory, Database, MemoryStore, MemoryType,
 };
 use crate::tools::parse_params;
 use crate::tools::registry::{Tool, ToolContext, ToolResult};
@@ -28,6 +28,8 @@ struct Params {
     content: Option<String>,
     #[serde(default)]
     memory_id: Option<String>,
+    #[serde(default)]
+    include_content: Option<bool>,
 }
 
 #[async_trait]
@@ -48,13 +50,15 @@ impl Tool for MemoryTool {
 - Project decisions, deadlines, ongoing work context -> memory_type "project"
 - Pointers to external systems (issue trackers, dashboards) -> memory_type "reference"
 
-Do NOT save: code patterns (derivable from code), git history, debugging solutions, or current conversation context.
+Do NOT save: code patterns (derivable from code), git history, debugging solutions, compaction summaries, or current conversation context.
+
+Do NOT call the memory tool for generic/non-project questions unless the user explicitly asks about stored memory.
 
 Actions:
 - "save": Create a new memory (requires memory_type, title, content)
 - "update": Update an existing memory (requires memory_id, plus title and/or content)
 - "delete": Delete a memory (requires memory_id)
-- "list": List all memories (optionally filtered by memory_type)"#,
+- "list": List memory previews (optionally filtered by memory_type; full content is omitted unless include_content is true and the user asked for stored memory)"#,
         )
     }
 
@@ -83,6 +87,10 @@ Actions:
                 "memory_id": {
                     "type": "string",
                     "description": "Memory ID (required for update and delete)"
+                },
+                "include_content": {
+                    "type": "boolean",
+                    "description": "For list only: include full memory content. Defaults to false; use only when the user explicitly asks to inspect stored memory."
                 }
             },
             "required": ["action"],
@@ -287,6 +295,8 @@ fn can_mutate_memory(memory: &crate::storage::AgentMemory, user_id: Option<&str>
     }
 }
 
+const MEMORY_LIST_PREVIEW_CHARS: usize = 280;
+
 fn execute_list(
     store: &MemoryStore,
     params: &Params,
@@ -306,25 +316,56 @@ fn execute_list(
         store.list(project_dir, user_id)
     };
 
+    let include_content = params.include_content.unwrap_or(false);
     let entries: Vec<Value> = memories
         .iter()
         .filter(|memory| !is_current_snapshot(memory))
-        .map(|m| {
-            json!({
-                "id": m.id,
-                "memory_type": m.memory_type.as_str(),
-                "title": m.title,
-                "content": m.content,
-                "project_dir": m.project_dir,
-                "updated_at": m.updated_at,
-            })
-        })
+        .filter(|memory| !is_compaction_flush_memory(memory))
+        .map(|memory| memory_list_entry(memory, include_content))
         .collect();
 
     ToolResult::success_data(json!({
         "count": entries.len(),
         "memories": entries,
+        "content_included": include_content,
     }))
+}
+
+fn memory_list_entry(memory: &AgentMemory, include_content: bool) -> Value {
+    let compact = memory
+        .content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let content_chars = compact.chars().count();
+    let preview = truncate_preview(&compact, MEMORY_LIST_PREVIEW_CHARS);
+    let truncated = content_chars > MEMORY_LIST_PREVIEW_CHARS;
+
+    let mut entry = json!({
+        "id": memory.id,
+        "memory_type": memory.memory_type.as_str(),
+        "title": memory.title,
+        "content_preview": preview,
+        "content_chars": content_chars,
+        "truncated": truncated,
+        "project_dir": memory.project_dir,
+        "updated_at": memory.updated_at,
+    });
+
+    if include_content {
+        entry["content"] = json!(memory.content);
+    }
+
+    entry
+}
+
+fn truncate_preview(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut truncated = text.chars().take(max_chars).collect::<String>();
+    truncated.push_str("...");
+    truncated
 }
 
 #[cfg(test)]
@@ -485,7 +526,68 @@ mod tests {
             .await;
         let parsed: Value = serde_json::from_str(&list_result.output).unwrap();
         assert_eq!(parsed["data"]["count"], 1);
-        assert_eq!(parsed["data"]["memories"][0]["content"], "Alice only");
+        assert_eq!(
+            parsed["data"]["memories"][0]["content_preview"],
+            "Alice only"
+        );
+        assert!(parsed["data"]["memories"][0].get("content").is_none());
+    }
+
+    #[tokio::test]
+    async fn list_returns_previews_by_default_and_full_content_on_request() {
+        let (ctx, _tmp) = test_ctx();
+        let long_content = "alpha ".repeat(120);
+        let save_result = MemoryTool
+            .execute(
+                json!({
+                    "action": "save",
+                    "memory_type": "project",
+                    "title": "Long Architecture",
+                    "content": long_content
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(!save_result.is_error, "save failed: {}", save_result.output);
+
+        let list_result = MemoryTool.execute(json!({ "action": "list" }), &ctx).await;
+        let parsed: Value = serde_json::from_str(&list_result.output).unwrap();
+        let memory = &parsed["data"]["memories"][0];
+        assert!(memory.get("content").is_none());
+        assert!(memory["content_preview"].as_str().unwrap().len() < long_content.len());
+        assert_eq!(memory["truncated"], true);
+
+        let full_result = MemoryTool
+            .execute(json!({ "action": "list", "include_content": true }), &ctx)
+            .await;
+        let parsed: Value = serde_json::from_str(&full_result.output).unwrap();
+        assert_eq!(parsed["data"]["content_included"], true);
+        assert_eq!(
+            parsed["data"]["memories"][0]["content"].as_str(),
+            Some(long_content.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn list_hides_compaction_flush_memory() {
+        let (ctx, _tmp) = test_ctx();
+        let db_path = ctx.db_path.as_ref().expect("db path");
+        let store = MemoryStore::new(Database::new(db_path).expect("database"));
+        store
+            .save(
+                MemoryType::Project,
+                &format!("{}1", crate::storage::COMPACTION_FLUSH_TITLE_PREFIX),
+                "full old transcript",
+                None,
+                None,
+            )
+            .expect("flush should save");
+
+        let list_result = MemoryTool
+            .execute(json!({ "action": "list", "include_content": true }), &ctx)
+            .await;
+        let parsed: Value = serde_json::from_str(&list_result.output).unwrap();
+        assert_eq!(parsed["data"]["count"], 0);
     }
 
     #[tokio::test]

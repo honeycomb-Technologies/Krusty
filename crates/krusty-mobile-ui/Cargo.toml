@@ -1,0 +1,13 @@
+[package]
+name = "krusty-mobile-ui"
+version = "0.7.0"
+edition = "2021"
+description = "Lightweight GPUI mobile primitives for Krusty"
+
+[dependencies]
+gpui = "0.2.2"
+krusty-client-state = { path = "../krusty-client-state" }
+pulldown-cmark = "0.13"
+
+[lints]
+workspace = true

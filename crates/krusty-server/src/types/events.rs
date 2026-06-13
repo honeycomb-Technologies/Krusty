@@ -191,6 +191,17 @@ pub enum AgenticEvent {
         new_session_id: String,
         estimated_tokens_before: usize,
     },
+    /// In-place compaction started.
+    ContextCompactionStarted { reason: String },
+    /// Conversation was compacted in place.
+    ContextCompacted {
+        reason: String,
+        estimated_tokens_before: usize,
+        estimated_tokens_after: usize,
+        replaced_messages: usize,
+        checkpoint_id: String,
+        compaction_count: u32,
+    },
     /// Some non-terminal stream events were dropped because the client fell behind.
     Lagged { skipped: usize },
     /// Agentic loop finished
@@ -295,6 +306,17 @@ impl AgenticEvent {
                 source_session_id: payload.get("source_session_id")?.as_str()?.to_string(),
                 new_session_id: payload.get("new_session_id")?.as_str()?.to_string(),
                 estimated_tokens_before: payload.get("estimated_tokens_before")?.as_u64()? as usize,
+            }),
+            "context_compaction_started" => Some(Self::ContextCompactionStarted {
+                reason: payload.get("reason")?.as_str()?.to_string(),
+            }),
+            "context_compacted" => Some(Self::ContextCompacted {
+                reason: payload.get("reason")?.as_str()?.to_string(),
+                estimated_tokens_before: payload.get("estimated_tokens_before")?.as_u64()? as usize,
+                estimated_tokens_after: payload.get("estimated_tokens_after")?.as_u64()? as usize,
+                replaced_messages: payload.get("replaced_messages")?.as_u64()? as usize,
+                checkpoint_id: payload.get("checkpoint_id")?.as_str()?.to_string(),
+                compaction_count: payload.get("compaction_count")?.as_u64()? as u32,
             }),
             "error" => Some(Self::Error {
                 error: payload.get("error")?.as_str()?.to_string(),
@@ -458,6 +480,24 @@ impl From<krusty_core::agent::LoopEvent> for AgenticEvent {
                 source_session_id,
                 new_session_id,
                 estimated_tokens_before,
+            },
+            LoopEvent::ContextCompactionStarted { reason } => {
+                Self::ContextCompactionStarted { reason }
+            }
+            LoopEvent::ContextCompacted {
+                reason,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                replaced_messages,
+                checkpoint_id,
+                compaction_count,
+            } => Self::ContextCompacted {
+                reason,
+                estimated_tokens_before,
+                estimated_tokens_after,
+                replaced_messages,
+                checkpoint_id,
+                compaction_count,
             },
             LoopEvent::TitleGenerated { title } => Self::TitleUpdate { title },
             LoopEvent::Finished {

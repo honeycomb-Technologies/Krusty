@@ -3,6 +3,10 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@krusty/api": ["../api/src"]
+    },
     "strict": false,
     "noImplicitAny": false,
     "esModuleInterop": true,

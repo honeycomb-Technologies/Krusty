@@ -1,9 +1,12 @@
 use crate::ai::types::{Content, Role};
 use crate::tui::app::App;
 use crate::tui::blocks::{
-    BashBlock, EditBlock, ReadBlock, ThinkingBlock, ToolResultBlock, WriteBlock,
+    BashBlock, EditBlock, ReadBlock, ThinkingBlock, ToolResultBlock, WebSearchBlock, WriteBlock,
 };
 use crate::tui::state::{hash_content, BlockManager};
+use crate::tui::tool_presentation::{
+    display_tool_name, payload_for_render, presentation_for_tool, tool_pattern, ToolPresentation,
+};
 use crate::tui::utils::edit_diff;
 
 impl App {
@@ -54,6 +57,34 @@ impl App {
         "unknown".to_string()
     }
 
+    fn push_replayed_tool_result_block(
+        &mut self,
+        id: &str,
+        tool_name: &str,
+        input: &serde_json::Value,
+        output: Option<&str>,
+        is_error: bool,
+    ) {
+        self.runtime
+            .chat
+            .messages
+            .push(("tool_result".to_string(), id.to_string()));
+
+        let mut block = ToolResultBlock::new(
+            id.to_string(),
+            tool_name.to_string(),
+            tool_pattern(tool_name, input),
+        );
+        block.set_error(is_error);
+        if let Some(output) = output {
+            block.set_results(output);
+            block.complete();
+        }
+        block.set_collapsed(!is_error);
+        self.ui.block_ui.set_collapsed(id, !is_error);
+        self.runtime.blocks.tool_result.push(block);
+    }
+
     /// Build display messages and blocks from conversation
     ///
     /// Messages array format: (role, content) where role determines rendering:
@@ -67,7 +98,7 @@ impl App {
         self.runtime.chat.streaming_assistant_idx = None;
         self.runtime.blocks = BlockManager::new();
 
-        for msg in &self.runtime.chat.conversation {
+        for msg in self.runtime.chat.conversation.clone() {
             let base_role = match msg.role {
                 Role::User => "user",
                 Role::Assistant => "assistant",
@@ -132,9 +163,12 @@ impl App {
                     }
 
                     Content::ToolUse { id, name, input } => {
-                        // Each tool use gets its own message entry with tool-specific role
-                        match name.to_lowercase().as_str() {
-                            "bash" => {
+                        let result = self.runtime.tool_results.get(id).cloned();
+                        let is_error = result.as_ref().map(|r| r.is_error).unwrap_or(false);
+                        let presentation = presentation_for_tool(name, input);
+
+                        match presentation {
+                            ToolPresentation::Bash => {
                                 self.runtime
                                     .chat
                                     .messages
@@ -147,7 +181,7 @@ impl App {
                                     .to_string();
 
                                 let mut block = BashBlock::with_tool_id(command, id.clone());
-                                if let Some(result) = self.runtime.tool_results.get(id) {
+                                if let Some(result) = result {
                                     block.append(&result.output);
                                     block.complete(result.exit_code);
                                 }
@@ -156,7 +190,7 @@ impl App {
                                 self.runtime.blocks.bash.push(block);
                             }
 
-                            "read" => {
+                            ToolPresentation::Read => {
                                 self.runtime
                                     .chat
                                     .messages
@@ -169,13 +203,38 @@ impl App {
                                     .to_string();
 
                                 let mut block = ReadBlock::new(id.clone(), file_path);
-                                if let Some(result) = self.runtime.tool_results.get(id) {
-                                    let line_count = result.output.lines().count();
-                                    block.set_content(
-                                        result.output.clone(),
-                                        line_count,
-                                        line_count,
-                                    );
+                                if let Some(result) = result {
+                                    if let Ok(json) =
+                                        serde_json::from_str::<serde_json::Value>(&result.output)
+                                    {
+                                        let payload = json.get("data").unwrap_or(&json);
+                                        let content = payload
+                                            .get("content")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        let total_lines = payload
+                                            .get("total_lines")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0)
+                                            as usize;
+                                        let lines_returned = payload
+                                            .get("lines_returned")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(0)
+                                            as usize;
+                                        block.set_content(
+                                            content.to_string(),
+                                            total_lines,
+                                            lines_returned,
+                                        );
+                                    } else {
+                                        let line_count = result.output.lines().count();
+                                        block.set_content(
+                                            result.output.clone(),
+                                            line_count,
+                                            line_count,
+                                        );
+                                    }
                                     block.complete();
                                 }
                                 block.set_collapsed(true);
@@ -183,35 +242,16 @@ impl App {
                                 self.runtime.blocks.read.push(block);
                             }
 
-                            "edit" => {
-                                let result = self.runtime.tool_results.get(id);
-                                let is_error = result.map(|r| r.is_error).unwrap_or(false);
-
+                            ToolPresentation::Edit => {
                                 if is_error {
-                                    // Failed edit - show as tool_result with error
-                                    self.runtime
-                                        .chat
-                                        .messages
-                                        .push(("tool_result".to_string(), id.clone()));
-
-                                    let mut block = ToolResultBlock::new(
-                                        id.clone(),
-                                        "edit".to_string(),
-                                        input
-                                            .get("file_path")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("")
-                                            .to_string(),
+                                    self.push_replayed_tool_result_block(
+                                        id,
+                                        name,
+                                        input,
+                                        result.as_ref().map(|r| r.output.as_str()),
+                                        true,
                                     );
-                                    if let Some(r) = result {
-                                        block.set_results(&r.output);
-                                    }
-                                    block.complete();
-                                    block.set_collapsed(false);
-                                    self.ui.block_ui.set_collapsed(id, false);
-                                    self.runtime.blocks.tool_result.push(block);
                                 } else {
-                                    // Successful edit - show as edit block
                                     self.runtime
                                         .chat
                                         .messages
@@ -258,41 +298,16 @@ impl App {
                                 }
                             }
 
-                            "write" => {
-                                let result = self.runtime.tool_results.get(id);
-                                let is_error = result.map(|r| r.is_error).unwrap_or(false);
-                                tracing::info!(
-                                    "Write tool {} - has_result={}, is_error={}",
-                                    id,
-                                    result.is_some(),
-                                    is_error
-                                );
-
+                            ToolPresentation::Write => {
                                 if is_error {
-                                    // Failed write - show as tool_result with error
-                                    self.runtime
-                                        .chat
-                                        .messages
-                                        .push(("tool_result".to_string(), id.clone()));
-
-                                    let mut block = ToolResultBlock::new(
-                                        id.clone(),
-                                        "write".to_string(),
-                                        input
-                                            .get("file_path")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("")
-                                            .to_string(),
+                                    self.push_replayed_tool_result_block(
+                                        id,
+                                        name,
+                                        input,
+                                        result.as_ref().map(|r| r.output.as_str()),
+                                        true,
                                     );
-                                    if let Some(r) = result {
-                                        block.set_results(&r.output);
-                                    }
-                                    block.complete();
-                                    block.set_collapsed(false); // Show errors expanded
-                                    self.ui.block_ui.set_collapsed(id, false);
-                                    self.runtime.blocks.tool_result.push(block);
                                 } else {
-                                    // Successful write - show as write block
                                     self.runtime
                                         .chat
                                         .messages
@@ -319,51 +334,97 @@ impl App {
                                 }
                             }
 
-                            "grep" | "glob" => {
+                            ToolPresentation::Search | ToolPresentation::GenericStatus => {
+                                self.push_replayed_tool_result_block(
+                                    id,
+                                    &display_tool_name(name, input),
+                                    input,
+                                    result.as_ref().map(|r| r.output.as_str()),
+                                    is_error,
+                                );
+                            }
+
+                            ToolPresentation::WebSearch => {
                                 self.runtime
                                     .chat
                                     .messages
-                                    .push(("tool_result".to_string(), id.clone()));
+                                    .push(("web_search".to_string(), id.clone()));
+                                let mut block =
+                                    WebSearchBlock::new(id.clone(), tool_pattern(name, input));
+                                if let Some(result) = result {
+                                    if !is_error {
+                                        if let Some(payload) = payload_for_render(&result.output) {
+                                            let payload = payload.get("data").unwrap_or(&payload);
+                                            if let Some(results) = payload
+                                                .get("results")
+                                                .and_then(|value| value.as_array())
+                                            {
+                                                let parsed = results
+                                                    .iter()
+                                                    .filter_map(|value| serde_json::from_value(value.clone()).ok())
+                                                    .collect::<Vec<crate::ai::types::WebSearchResult>>();
+                                                block.set_results(parsed);
+                                            }
+                                        }
+                                    }
+                                    block.complete();
+                                }
+                                self.ui.block_ui.set_collapsed(id, true);
+                                self.runtime.blocks.web_search.push(block);
+                            }
 
-                                let pattern = input
-                                    .get("pattern")
+                            ToolPresentation::ExploreAgent => {
+                                self.runtime
+                                    .chat
+                                    .messages
+                                    .push(("explore".to_string(), id.clone()));
+                                let prompt = input
+                                    .get("prompt")
                                     .and_then(|v| v.as_str())
-                                    .unwrap_or("")
+                                    .unwrap_or("Exploring...")
                                     .to_string();
-
-                                let mut block =
-                                    ToolResultBlock::new(id.clone(), name.clone(), pattern);
-                                if let Some(result) = self.runtime.tool_results.get(id) {
-                                    block.set_results(&result.output);
-                                    block.complete();
+                                let mut block = crate::tui::blocks::ExploreBlock::with_tool_id(
+                                    prompt,
+                                    id.clone(),
+                                );
+                                if let Some(result) = result {
+                                    block.complete(result.output.clone());
                                 }
-                                block.set_collapsed(true);
-                                self.ui.block_ui.set_collapsed(id, true);
-                                self.runtime.blocks.tool_result.push(block);
+                                self.runtime.blocks.explore.push(block);
                             }
 
-                            // Silent tools - don't create any visual element
-                            "task_complete" | "enter_plan_mode" | "set_work_mode" | "todowrite" => {
-                                // These tools are intentionally silent and should not
-                                // create any UI blocks when rebuilding from conversation
-                            }
-
-                            _ => {
-                                // Unknown tools go to tool_result
+                            ToolPresentation::BuildAgent => {
                                 self.runtime
                                     .chat
                                     .messages
-                                    .push(("tool_result".to_string(), id.clone()));
-
-                                let mut block =
-                                    ToolResultBlock::new(id.clone(), name.clone(), String::new());
-                                if let Some(result) = self.runtime.tool_results.get(id) {
-                                    block.set_results(&result.output);
-                                    block.complete();
+                                    .push(("build".to_string(), id.clone()));
+                                let prompt = input
+                                    .get("prompt")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("Building...")
+                                    .to_string();
+                                let mut block = crate::tui::blocks::BuildBlock::with_tool_id(
+                                    prompt,
+                                    id.clone(),
+                                );
+                                if let Some(result) = result {
+                                    block.complete(result.output.clone());
                                 }
-                                block.set_collapsed(true);
-                                self.ui.block_ui.set_collapsed(id, true);
-                                self.runtime.blocks.tool_result.push(block);
+                                self.runtime.blocks.build.push(block);
+                            }
+
+                            ToolPresentation::UiOnly => {
+                                // Existing UI surfaces (plan sidebar, process popup, decision prompt)
+                                // represent these tools. Only replay failures as compact status rows.
+                                if is_error {
+                                    self.push_replayed_tool_result_block(
+                                        id,
+                                        name,
+                                        input,
+                                        result.as_ref().map(|r| r.output.as_str()),
+                                        true,
+                                    );
+                                }
                             }
                         }
                     }
@@ -398,21 +459,17 @@ impl App {
                                 other => other.to_string(),
                             };
 
+                            let is_error = is_error.unwrap_or(false);
                             let mut block = ToolResultBlock::new(
                                 tool_use_id.clone(),
                                 "unknown".to_string(),
                                 String::new(),
                             );
+                            block.set_error(is_error);
                             block.set_results(&output_str);
-                            if is_error.unwrap_or(false) {
-                                block.set_collapsed(false);
-                            } else {
-                                block.set_collapsed(true);
-                            }
+                            block.set_collapsed(!is_error);
                             block.complete();
-                            self.ui
-                                .block_ui
-                                .set_collapsed(tool_use_id, is_error.unwrap_or(false));
+                            self.ui.block_ui.set_collapsed(tool_use_id, !is_error);
                             self.runtime.blocks.tool_result.push(block);
                         }
                         // Otherwise: handled via the cache when creating ToolUse blocks

@@ -44,6 +44,16 @@ pub async fn ensure_grok_auth_token() -> Result<grok_auth::AuthToken> {
         .context("failed to resolve Grok auth token")
 }
 
+/// Remove the shared Grok CLI auth file used by `~/.grok/auth.json`.
+pub fn clear_grok_cli_auth() -> Result<()> {
+    let cfg = grok_auth::AuthConfig::from_env().context("failed to build Grok auth config")?;
+    if cfg.auth_file.exists() {
+        std::fs::remove_file(&cfg.auth_file)
+            .with_context(|| format!("failed to remove {}", cfg.auth_file.display()))?;
+    }
+    Ok(())
+}
+
 /// Run a fresh browser login and persist it to the shared Grok auth store.
 pub async fn force_grok_browser_login() -> Result<grok_auth::AuthToken> {
     let mut cfg = grok_auth::AuthConfig::from_env().context("failed to build Grok auth config")?;

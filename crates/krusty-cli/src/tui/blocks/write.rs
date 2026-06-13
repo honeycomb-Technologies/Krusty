@@ -121,6 +121,11 @@ impl WriteBlock {
         self.tool_use_id = Some(id);
     }
 
+    /// Get the associated tool use ID.
+    pub fn tool_use_id(&self) -> Option<&str> {
+        self.tool_use_id.as_deref()
+    }
+
     /// Get collapsed state
     pub fn is_collapsed(&self) -> bool {
         self.collapsed

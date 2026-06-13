@@ -3,9 +3,13 @@ use crate::tui::app::App;
 impl App {
     pub(super) fn append_streaming_assistant_delta(&mut self, delta: String) {
         // Use cached streaming assistant index (O(1)) instead of O(n) scan per delta.
+        // Tool widgets can be inserted while a provider response is still streaming.
+        // Keep appending same-response text to the original assistant message so
+        // a mid-sentence tool call does not visually split words around a widget.
+        // The cache is cleared when tool execution begins/results arrive, so the
+        // next model response after tools still starts below the tool widgets.
         let append_idx = if let Some(idx) = self.runtime.chat.streaming_assistant_idx {
             if idx < self.runtime.chat.messages.len()
-                && idx + 1 == self.runtime.chat.messages.len()
                 && self
                     .runtime
                     .chat

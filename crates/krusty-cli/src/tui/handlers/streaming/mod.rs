@@ -149,8 +149,22 @@ impl App {
                         file_count += 1;
                         check_file_limit(file_count)?;
                         let loaded = load_from_clipboard_rgba(width, height, &rgba_bytes)?;
+                        let display_name = format!(
+                            "clipboard-{}.png",
+                            clipboard_id.chars().take(8).collect::<String>()
+                        );
+                        let preview_path =
+                            crate::tui::utils::clipboard::save_clipboard_image_preview(
+                                width,
+                                height,
+                                &rgba_bytes,
+                                clipboard_id,
+                            )?;
+                        self.runtime
+                            .attached_files
+                            .insert(display_name.clone(), preview_path);
                         content_blocks.push(loaded.content);
-                        display_parts.push(format!("[Image: {}]", loaded.display_name));
+                        display_parts.push(format!("[Image: {}]", display_name));
                     } else {
                         // Clipboard image not found, treat as text
                         display_parts.push(format!("[{}]", id));
@@ -326,6 +340,9 @@ impl App {
             skills_manager: self.services.skills_manager.clone(),
         };
 
+        let (delegated_progress_tx, delegated_progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.runtime.channels.delegated_progress = Some(delegated_progress_rx);
+
         let config = OrchestratorConfig {
             session_id,
             working_dir: self.runtime.working_dir.clone(),
@@ -338,7 +355,7 @@ impl App {
             user_id: None,
             initial_work_mode: self.ui.work_mode.into(),
             generate_title: is_new_session,
-            delegated_progress_tx: None,
+            delegated_progress_tx: Some(delegated_progress_tx),
         };
 
         self.persist_current_work_mode();

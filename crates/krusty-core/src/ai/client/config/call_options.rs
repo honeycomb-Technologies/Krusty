@@ -102,11 +102,27 @@ impl CallOptions {
         if !caps.context_management {
             options.context_management = None;
         }
-        if !caps.web_search {
+
+        let hosted_web_search = provider_hosted_web_search_supported(provider, api_format, &caps);
+        let hosted_web_fetch = caps.web_fetch;
+
+        if !hosted_web_search {
             options.web_search = None;
         }
-        if !caps.web_fetch {
+        if !hosted_web_fetch {
             options.web_fetch = None;
+        }
+
+        // When a provider-native hosted web tool is active, remove the local
+        // function tool with the same name to avoid duplicate tool definitions.
+        // Unsupported providers keep the local portable web tools instead.
+        // OpenAI transport selection happens after canonicalization; it removes
+        // the local web_search function only on the standard hosted Responses path.
+        if options.web_search.is_some() && provider != ProviderId::OpenAI {
+            remove_ai_tool_named(&mut options.tools, "web_search");
+        }
+        if options.web_fetch.is_some() {
+            remove_ai_tool_named(&mut options.tools, "web_fetch");
         }
 
         if !(matches!(provider, ProviderId::OpenAI | ProviderId::Grok)
@@ -132,13 +148,47 @@ impl CallOptions {
     }
 }
 
+fn provider_hosted_web_search_supported(
+    provider: ProviderId,
+    api_format: ApiFormat,
+    caps: &ProviderCapabilities,
+) -> bool {
+    match provider {
+        ProviderId::OpenAI => caps.web_search && matches!(api_format, ApiFormat::OpenAIResponses),
+        ProviderId::OpenRouter => caps.web_plugins || caps.web_search,
+        _ => caps.web_search,
+    }
+}
+
+fn remove_ai_tool_named(tools: &mut Option<Vec<AiTool>>, name: &str) {
+    if let Some(items) = tools {
+        items.retain(|tool| tool.name != name);
+        if items.is_empty() {
+            *tools = None;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::CallOptions;
     use crate::ai::client::config::CodexReasoningEffort;
     use crate::ai::models::ApiFormat;
     use crate::ai::providers::{ProviderId, ReasoningFormat};
-    use crate::ai::types::{ContextManagement, ThinkingConfig, WebFetchConfig, WebSearchConfig};
+    use crate::ai::types::{
+        AiTool, ContextManagement, ThinkingConfig, WebFetchConfig, WebSearchConfig,
+    };
+
+    fn tool(name: &str) -> AiTool {
+        AiTool {
+            name: name.to_string(),
+            description: format!("{name} description"),
+            input_schema: json!({"type": "object"}),
+            prompt: None,
+        }
+    }
 
     #[test]
     fn canonicalization_drops_unsupported_provider_features() {
@@ -157,6 +207,127 @@ mod tests {
         assert!(canonical.web_search.is_none());
         assert!(canonical.web_fetch.is_none());
         assert!(!canonical.codex_parallel_tool_calls);
+    }
+
+    #[test]
+    fn canonicalization_prefers_hosted_web_tools_when_supported() {
+        let options = CallOptions {
+            tools: Some(vec![tool("read"), tool("web_search"), tool("web_fetch")]),
+            web_search: Some(WebSearchConfig::default()),
+            web_fetch: Some(WebFetchConfig::default()),
+            ..Default::default()
+        };
+
+        let canonical = options.canonicalized_for(
+            ProviderId::Anthropic,
+            "claude-opus-4-6",
+            ApiFormat::Anthropic,
+        );
+
+        assert!(canonical.web_search.is_some());
+        assert!(canonical.web_fetch.is_some());
+        let names = canonical
+            .tools
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["read"]);
+    }
+
+    #[test]
+    fn canonicalization_keeps_local_web_fallbacks_when_hosted_is_unsupported() {
+        let options = CallOptions {
+            tools: Some(vec![tool("web_search"), tool("web_fetch")]),
+            web_search: Some(WebSearchConfig::default()),
+            web_fetch: Some(WebFetchConfig::default()),
+            ..Default::default()
+        };
+
+        let canonical =
+            options.canonicalized_for(ProviderId::MiniMax, "MiniMax-M2.5", ApiFormat::Anthropic);
+
+        assert!(canonical.web_search.is_none());
+        assert!(canonical.web_fetch.is_none());
+        let names = canonical
+            .tools
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["web_search", "web_fetch"]);
+    }
+
+    #[test]
+    fn canonicalization_preserves_openai_local_web_tool_until_transport_selection() {
+        let options = CallOptions {
+            tools: Some(vec![tool("web_search"), tool("web_fetch")]),
+            web_search: Some(WebSearchConfig::default()),
+            web_fetch: Some(WebFetchConfig::default()),
+            ..Default::default()
+        };
+
+        let canonical =
+            options.canonicalized_for(ProviderId::OpenAI, "gpt-5.5", ApiFormat::OpenAIResponses);
+
+        assert!(canonical.web_search.is_some());
+        assert!(canonical.web_fetch.is_none());
+        let names = canonical
+            .tools
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["web_search", "web_fetch"]);
+    }
+
+    #[test]
+    fn canonicalization_uses_openrouter_server_tools_for_search_and_fetch() {
+        let options = CallOptions {
+            tools: Some(vec![tool("read"), tool("web_search"), tool("web_fetch")]),
+            web_search: Some(WebSearchConfig::default()),
+            web_fetch: Some(WebFetchConfig::default()),
+            ..Default::default()
+        };
+
+        let canonical = options.canonicalized_for(
+            ProviderId::OpenRouter,
+            "openai/gpt-5.5",
+            ApiFormat::Anthropic,
+        );
+
+        assert!(canonical.web_search.is_some());
+        assert!(canonical.web_fetch.is_some());
+        let names = canonical
+            .tools
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["read"]);
+    }
+
+    #[test]
+    fn canonicalization_keeps_local_web_fallbacks_for_grok_proxy() {
+        let options = CallOptions {
+            tools: Some(vec![tool("web_search"), tool("web_fetch")]),
+            web_search: Some(WebSearchConfig::default()),
+            web_fetch: Some(WebFetchConfig::default()),
+            ..Default::default()
+        };
+
+        let canonical =
+            options.canonicalized_for(ProviderId::Grok, "grok-build", ApiFormat::OpenAIResponses);
+
+        assert!(canonical.web_search.is_none());
+        assert!(canonical.web_fetch.is_none());
+        let names = canonical
+            .tools
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["web_search", "web_fetch"]);
     }
 
     #[test]

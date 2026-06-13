@@ -1,5 +1,5 @@
 use crate::agent::loop_events::LoopStopReason;
-use crate::storage::{AgentMemory, MemoryType, Report, TaskStatus};
+use crate::storage::{is_compaction_flush_memory, AgentMemory, MemoryType, Report, TaskStatus};
 
 use super::activity::{SnapshotRunSummary, SnapshotTaskOutcome};
 use super::promote_report_content;
@@ -20,8 +20,9 @@ pub(super) fn build_current_snapshot_content(
     let carry_forward = memories
         .iter()
         .filter(|memory| {
-            !(memory.memory_type == MemoryType::Project
-                && memory.title == super::CURRENT_SNAPSHOT_TITLE)
+            !(is_compaction_flush_memory(memory)
+                || memory.memory_type == MemoryType::Project
+                    && memory.title == super::CURRENT_SNAPSHOT_TITLE)
         })
         .collect::<Vec<_>>();
 

@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use krusty_core::agent::autonomy::coordinator_prompt::system_prompt_for_session;
 use krusty_core::ai::client::{AiClient, CallOptions};
 use krusty_core::ai::providers::ProviderId;
-use krusty_core::ai::types::ModelMessage;
+use krusty_core::ai::types::{ModelMessage, WebFetchConfig, WebSearchConfig};
 use krusty_core::plan::PlanManager;
 use krusty_core::storage::{
     Database, MakoRuntimeStateStore, SessionInfo, SessionType, WorkMode, WorkspaceMode,
@@ -476,6 +476,8 @@ pub(super) async fn setup_chat_session(
         },
         session_id: Some(session_id.to_string()),
         codex_parallel_tool_calls: true,
+        web_search: Some(WebSearchConfig::default()),
+        web_fetch: Some(WebFetchConfig::default()),
         fast_mode,
         system_prompt: match session.session_type {
             SessionType::Chat => Some(chat_system_prompt(research_enabled)),

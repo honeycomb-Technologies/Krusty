@@ -1,7 +1,10 @@
 mod api;
 mod app;
+mod branding;
+mod chat;
 mod components;
 mod design;
+mod panel_actions;
 mod panels;
 mod server;
 
@@ -83,26 +86,56 @@ fn asset_candidates(path: &str) -> Vec<PathBuf> {
 }
 
 fn load_custom_fonts(cx: &mut App) -> Result<()> {
-    let root = workspace_root();
-    let font_dir = root.join("assets/fonts");
-    if !font_dir.exists() {
-        return Ok(());
-    }
-
-    let fonts = [
-        "PlantinNowVariable-Upright.woff2",
-        "PlantinNowVariable-Italic.woff2",
-    ]
-    .into_iter()
-    .filter_map(|file| {
-        let path = font_dir.join(file);
-        path.exists().then(|| std::fs::read(path).map(Cow::Owned))
-    })
-    .collect::<std::io::Result<Vec<_>>>()?;
-
-    if !fonts.is_empty() {
-        cx.text_system().add_fonts(fonts)?;
-    }
+    cx.text_system().add_fonts(vec![
+        Cow::Borrowed(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/fonts/Inter-Regular.ttf"
+        ))),
+        Cow::Borrowed(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/fonts/NotoSans-Regular.ttf"
+        ))),
+        Cow::Borrowed(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/fonts/JetBrainsMono-Regular.ttf"
+        ))),
+        Cow::Borrowed(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/fonts/FiraCode-Regular.ttf"
+        ))),
+        Cow::Borrowed(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/fonts/FiraMono-Medium.ttf"
+        ))),
+        Cow::Borrowed(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/fonts/Hack-Regular.ttf"
+        ))),
+        Cow::Borrowed(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/fonts/SourceCodePro-Regular.ttf"
+        ))),
+        Cow::Borrowed(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/fonts/IBMPlexMono-Regular.ttf"
+        ))),
+        Cow::Borrowed(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/fonts/NotoSansMono-Regular.ttf"
+        ))),
+        Cow::Borrowed(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/fonts/Inconsolata-Regular.ttf"
+        ))),
+        Cow::Borrowed(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/fonts/SpaceMono-Regular.ttf"
+        ))),
+        Cow::Borrowed(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/fonts/VictorMono-Regular.ttf"
+        ))),
+    ])?;
 
     Ok(())
 }

@@ -12,7 +12,7 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
   - `src/tui/`: Terminal UI module with blocks, handlers, state, themes, plugins.
 - `crates/krusty-core`: Shared runtime library.
   - `src/ai/`: AI provider layer with multi-provider clients, streaming support.
-  - `src/agent/`: Agent system with event handling, hooks, sub-agents, pinch context.
+  - `src/agent/`: Agent system with event handling, hooks, sub-agents, in-place compaction.
   - `src/acp/`: Agent Client Protocol server for editor integration.
   - `src/mcp/`: Model Context Protocol client manager.
   - `src/tools/`: Tool registry and built-in tool implementations (read, write, edit, bash, grep, glob, etc.).
@@ -79,7 +79,9 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 ### Agent Core (`crates/krusty-core/src/`)
 - Keep subsystem contracts explicit between AI, tools, storage, plugins, and protocols.
 - Prefer typed boundaries over ad-hoc JSON passing.
-- Keep live compaction separate from pinch/session handoff; do not use pinch as the default overflow path.
+- Keep live in-place compaction as the default overflow path; `/pinch` and the pinch API route trigger manual compaction in the same session, not a session fork.
+- Flush durable notes to the memory store before compaction summarization; persist compaction checkpoints/segments for `search_compaction_segments` recovery.
+- On provider context-overflow/413 errors, compact once with `CompactionTrigger::Overflow` and retry the turn before surfacing a terminal provider error.
 - Keep loop budgets and streaming timeouts explicit and shared across callers; do not hide behavioral caps inside transport layers.
 - Keep UI-facing tool output separate from model-facing history retention; long raw tool output should not be preserved in conversation history unless the exact payload is still needed for the next turn.
 - Keep agent tool approval/retry/result policy centralized in the agent control layer rather than embedding it ad hoc in transport or tool implementation code.

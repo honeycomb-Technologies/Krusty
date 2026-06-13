@@ -70,11 +70,24 @@ function lastMessageLayoutSignature(messages: ChatMessage[]): string {
           ].join(":"),
       )
       .join("|") ?? "";
+  const attachmentSignature =
+    lastMessage.attachments
+      ?.map(
+        (attachment) =>
+          [
+            attachment.type,
+            attachment.name ?? "",
+            attachment.uri?.length ?? 0,
+            attachment.base64?.length ?? 0,
+          ].join(":"),
+      )
+      .join("|") ?? "";
 
   return [
     lastMessage.id,
     lastMessage.content.length,
     lastMessage.thinking?.length ?? 0,
+    attachmentSignature,
     toolSignature,
     lastMessage.isQueued ? "queued" : "steady",
     lastMessage.kind ?? "none",

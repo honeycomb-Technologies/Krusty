@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use krusty_core::ai::providers::ProviderId;
 use krusty_core::auth::{
-    anthropic_oauth_config, openai_oauth_config, HostedBrowserOAuthFlow, OAuthTokenStore,
+    anthropic_oauth_config, force_grok_browser_login, grok_auth_token_to_oauth_data,
+    openai_oauth_config, BrowserOAuthFlow, HostedBrowserOAuthFlow, OAuthTokenStore,
     OpenAIDeviceAuthFlow, OpenAIDeviceCodeResponse, PasteCodeOAuthFlow,
 };
 
@@ -33,6 +34,8 @@ struct OAuthDeviceCodeResponsePayload {
 #[derive(Deserialize)]
 pub(super) struct OAuthStartRequest {
     provider: String,
+    #[serde(default)]
+    flow_type: Option<String>,
 }
 
 pub(super) async fn start_oauth(
@@ -60,9 +63,23 @@ pub(super) async fn start_oauth(
         }
     }
 
-    match provider_id {
-        ProviderId::OpenAI => start_openai_oauth(state, provider_id, &headers).await,
-        ProviderId::Anthropic => start_anthropic_oauth(state, provider_id).await,
+    match (provider_id, req.flow_type.as_deref()) {
+        (ProviderId::OpenAI, Some("device")) => start_openai_device_oauth(state, provider_id).await,
+        (ProviderId::OpenAI, Some("browser")) => {
+            start_openai_local_browser_oauth(state, provider_id).await
+        }
+        (ProviderId::OpenAI, Some("browser_callback") | Some("callback")) => {
+            start_openai_oauth(state, provider_id, &headers).await
+        }
+        (ProviderId::OpenAI, _) => start_openai_device_oauth(state, provider_id).await,
+        (ProviderId::Anthropic, Some("device")) => Err(AppError::BadRequest(
+            "Anthropic does not support device-code OAuth".to_string(),
+        )),
+        (ProviderId::Anthropic, _) => start_anthropic_oauth(state, provider_id).await,
+        (ProviderId::Grok, Some("device")) => Err(AppError::BadRequest(
+            "xAI/Grok does not support device-code OAuth".to_string(),
+        )),
+        (ProviderId::Grok, _) => start_grok_browser_oauth(state, provider_id).await,
         _ => Err(AppError::BadRequest(
             "OAuth not implemented for this provider".to_string(),
         )),
@@ -124,6 +141,92 @@ async fn try_start_openai_browser_oauth(
         paste_code: false,
         device_code: None,
     }))
+}
+
+async fn start_openai_local_browser_oauth(
+    state: AppState,
+    provider_id: ProviderId,
+) -> Result<Json<OAuthStartResponse>, AppError> {
+    mark_spawned_oauth_flow(&state, provider_id).await;
+
+    let oauth_flows = state.oauth_flows.clone();
+    let model_registry = state.model_registry.clone();
+    tokio::spawn(async move {
+        let result = BrowserOAuthFlow::new(openai_oauth_config()).run().await;
+        match result {
+            Ok(token_data) => {
+                if let Ok(mut store) = OAuthTokenStore::load() {
+                    store.set(provider_id, token_data);
+                    if let Err(error) = store.save() {
+                        tracing::error!("Failed to save OpenAI OAuth token: {}", error);
+                    } else {
+                        tracing::info!("OpenAI browser OAuth token stored successfully");
+                        refresh_openai_models(model_registry.clone()).await;
+                    }
+                }
+            }
+            Err(error) => tracing::warn!("OpenAI browser OAuth failed: {}", error),
+        }
+
+        oauth_flows.lock().await.remove(provider_id.storage_key());
+    });
+
+    Ok(Json(OAuthStartResponse {
+        auth_url: String::new(),
+        provider: provider_id.storage_key().to_string(),
+        flow_type: "browser_process".to_string(),
+        paste_code: false,
+        device_code: None,
+    }))
+}
+
+async fn start_grok_browser_oauth(
+    state: AppState,
+    provider_id: ProviderId,
+) -> Result<Json<OAuthStartResponse>, AppError> {
+    mark_spawned_oauth_flow(&state, provider_id).await;
+
+    let oauth_flows = state.oauth_flows.clone();
+    tokio::spawn(async move {
+        let result = force_grok_browser_login().await;
+        match result {
+            Ok(token) => {
+                if let Ok(mut store) = OAuthTokenStore::load() {
+                    store.set(provider_id, grok_auth_token_to_oauth_data(&token));
+                    if let Err(error) = store.save() {
+                        tracing::error!("Failed to save xAI/Grok OAuth token: {}", error);
+                    } else {
+                        tracing::info!("xAI/Grok browser OAuth token stored successfully");
+                    }
+                }
+            }
+            Err(error) => tracing::warn!("xAI/Grok browser OAuth failed: {}", error),
+        }
+
+        oauth_flows.lock().await.remove(provider_id.storage_key());
+    });
+
+    Ok(Json(OAuthStartResponse {
+        auth_url: String::new(),
+        provider: provider_id.storage_key().to_string(),
+        flow_type: "browser_process".to_string(),
+        paste_code: false,
+        device_code: None,
+    }))
+}
+
+async fn mark_spawned_oauth_flow(state: &AppState, provider_id: ProviderId) {
+    let mut flows = state.oauth_flows.lock().await;
+    flows.insert(
+        provider_id.storage_key().to_string(),
+        OAuthFlowState {
+            started_at: Instant::now(),
+            provider_id,
+            kind: OAuthFlowKind::DeviceFlow {
+                flow_id: "browser-process".to_string(),
+            },
+        },
+    );
 }
 
 async fn start_openai_device_oauth(

@@ -3,9 +3,9 @@ use gpui::{
     div, px, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _,
 };
-use gpui_component::StyledExt as _;
 
 use crate::app::KrustyDesktop;
+use crate::components::brand;
 use crate::design::theme;
 
 const CLOSE_BUTTON_WIDTH: f32 = 16.0;
@@ -47,11 +47,12 @@ fn home_button(cx: &mut Context<KrustyDesktop>) -> gpui::Stateful<gpui::Div> {
         .border_r_1()
         .border_color(theme::hairline())
         .cursor_pointer()
+        .text_color(theme::accent())
         .hover(|style| style.bg(theme::surface_hover()))
         .on_click(cx.listener(|view, _, _window, cx| {
             view.open_landing(cx);
         }))
-        .child(div().font_semibold().child("K"))
+        .child(brand::themed_mark(23.0))
 }
 
 fn workspace_tab(

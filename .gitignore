@@ -7,6 +7,9 @@ CLAUDE.md
 # Build outputs
 target/
 .fastembed_cache/
+**/target/
+**/dist/
+**/.krusty-shadow/
 
 # MCP configuration (user-specific)
 .mcp.json

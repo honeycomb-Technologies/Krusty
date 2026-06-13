@@ -80,6 +80,41 @@ mod tests {
     use crate::ai::sse::SseEvent;
 
     #[test]
+    fn responses_web_search_call_emits_server_tool_events() {
+        let parser = OpenAIParser::new();
+        let added = json!({
+            "type": "response.output_item.added",
+            "item": {
+                "type": "web_search_call",
+                "id": "ws_123",
+                "status": "in_progress"
+            }
+        });
+        let event = parser
+            .parse_responses_api_event(&added, "response.output_item.added")
+            .expect("web search start should parse");
+        assert!(
+            matches!(event, SseEvent::ServerToolStart { id, name } if id == "ws_123" && name == "web_search")
+        );
+
+        let done = json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "web_search_call",
+                "id": "ws_123",
+                "status": "completed",
+                "action": {"type": "search", "query": "krusty web fetch"}
+            }
+        });
+        let event = parser
+            .parse_responses_api_event(&done, "response.output_item.done")
+            .expect("web search completion should parse");
+        assert!(
+            matches!(event, SseEvent::ServerToolComplete { id, name, .. } if id == "ws_123" && name == "web_search")
+        );
+    }
+
+    #[test]
     fn responses_output_item_done_does_not_duplicate_arguments() {
         let parser = OpenAIParser::new();
         let args = "{\"pattern\":\"**/*prompt*\",\"path\":\".\"}";

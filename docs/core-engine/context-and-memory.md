@@ -1,6 +1,6 @@
 # Context, Memory & Summarization
 
-Every time you send a message to Krusty, the system builds a carefully structured context payload before the AI sees anything. That payload includes project instructions, environment details, persistent memories, active plans, available skills, and the conversation history itself. As conversations grow long, the system compresses older content to stay within the model's context window. When a session truly outgrows its limits, it can be handed off to a new session through a structured summarization process called pinch.
+Every time you send a message to Krusty, the system builds a carefully structured context payload before the AI sees anything. That payload includes project instructions, environment details, persistent memories, active plans, available skills, and the conversation history itself. As conversations grow long, the system compresses older content in place to stay within the model's context window. Manual `/pinch` triggers the same in-place compaction pipeline on demand.
 
 This document explains each of those mechanisms: what gets injected, how the system tracks what it has already told the model, how it decides what to keep and what to trim, and how it bridges the gap between sessions.
 
@@ -8,7 +8,7 @@ This document explains each of those mechanisms: what gets injected, how the sys
 
 Large language models have a fixed context window. Even the largest models available today cap out at a few hundred thousand tokens. A coding conversation that spans several hours of exploration, editing, and debugging can easily produce hundreds of messages, each carrying file contents, tool outputs, diff previews, and reasoning traces. Without active management, the raw conversation would blow past the context limit long before the work is done.
 
-Krusty addresses this at three levels. First, it controls what goes into the context at the start of every turn through context injection. Second, it compacts the conversation in place when it grows too large, keeping the session alive without starting over. Third, it offers a clean session transition through pinch, which summarizes an entire conversation into a structured artifact that seeds the next session.
+Krusty addresses this at two levels. First, it controls what goes into the context at the start of every turn through context injection. Second, it compacts the conversation in place when it grows too large—or when the provider rejects an over-limit request—keeping the same session alive without starting over.
 
 ## Context Injection
 
@@ -60,19 +60,24 @@ The ledger also produces a **continuation contract** -- a serializable record th
 
 ## Conversation Compaction
 
-Compaction is the mechanism that keeps a long-running session alive when the conversation approaches the model's context limit. It operates in place, modifying the existing conversation rather than creating a new session. The implementation lives in `compaction.rs`.
+Compaction keeps a long-running session alive when the conversation approaches the model's context limit. It operates **in place**: the same session ID, database history, and UI thread continue after compaction. The pipeline lives in `crates/krusty-core/src/agent/compaction/`.
 
-The `CompactionManager` is configured per model with three token thresholds derived from the model's profile: a trigger threshold (when compaction begins), a target threshold (the goal size after compaction), and a hard failure threshold (critical overrun). Compaction proceeds in stages, from least aggressive to most:
+### Triggers
 
-**Stage 1: Strip old thinking.** Extended thinking blocks (the model's internal reasoning traces) are removed from all but the two most recent assistant messages that contain them. These blocks can be large, and older reasoning is rarely relevant to the current turn.
+| Trigger | When it runs |
+|---------|--------------|
+| **Auto** | Estimated tokens cross the model's compaction threshold before a turn |
+| **Manual** | User runs `/pinch` (TUI) or the pinch API route (server/mobile) |
+| **Overflow** | Provider returns a context-length / HTTP 413 error; orchestrator compacts once and retries |
 
-**Stage 2: Compact old tool results.** Tool results outside the most recent six messages are processed based on their retention policy. Results tagged `drop_after_compaction` (bash output, web fetches, explore results) are replaced with a compact stub containing just the summary and a note to re-run the tool if needed. Results tagged `summarize_after_turn` (grep, glob, edit, write results) or results that exceed the preview size limit are similarly compacted. Results tagged `retain_full` (like file reads) are bounded but kept more intact.
+### Pipeline
 
-**Stage 3: Summary replacement.** If the conversation still exceeds the target after stages 1 and 2, the system builds a summary of the middle portion of the conversation. It keeps the first user message and the most recent N messages (trying 6, then 4, then 2, then 1), replacing everything in between with a single assistant message containing a structured summary. The summary captures user goals, assistant progress, tool activity, and the latest user request.
+1. **Microcompact** — strip old thinking blocks and compact stale tool results using history retention policies.
+2. **Memory flush** — write a project-scoped compaction note to the memory store (equivalent to `/flush`) before summarization so durable facts survive even aggressive cuts.
+3. **Cut + summarize** — choose a cut point that preserves a recent tail, LLM-summarize the dropped segment with ranked file context, and persist a checkpoint plus segment archive.
+4. **Apply** — replace canonical session messages with a compaction boundary, structured summary, and preserved tail; emit `ContextCompacted` so clients refresh token counts in place.
 
-**Stage 4: Continuation replacement.** If even the most aggressive summary replacement doesn't reach the target, the system falls back to a continuation replacement that summarizes everything except the single most recent message. This is the nuclear option -- it preserves almost nothing of the original conversation, but it keeps the session alive.
-
-The summary text itself is structured with clear sections: a compaction header, the reason, the latest carried-forward user request, user goals still in scope, earlier progress, and important tool activity. This gives the model enough orientation to continue without the full history. Throughout all stages, system messages (especially pinned project instructions) are preserved -- they're never summarized or dropped.
+`CompactionManager` configures per-model trigger/target thresholds. Checkpoints and segments are stored in `compaction_checkpoints` and `compaction_segments`. Agents can recover dropped detail with the `search_compaction_segments` tool.
 
 ## History Policies
 
@@ -88,28 +93,13 @@ The three retention levels are:
 
 Each tool has a specialized summarizer: grep reports match/file counts, write reports line counts with a diff preview, edit reports replacement counts, bash reports exit codes. These summaries become the `summary` field in the history entry, which is what the model sees after compaction replaces the full output. This two-layer approach -- shape results at creation time, then compact them later -- means the conversation history is already leaner than raw tool output before compaction ever fires.
 
-## Pinch: Structured Session Transitions
+## Manual Pinch (`/pinch`)
 
-Pinch is Krusty's mechanism for gracefully ending one session and starting another with preserved context. Unlike compaction, which keeps the same session alive, pinch creates a clean break: a new session seeded with a structured summary of what came before. The implementation spans `pinch_context.rs` and `summarizer.rs`.
+`/pinch` is the user-facing name for **manual in-place compaction**. Running it compacts the current session immediately—no popup wizard, no session fork. The TUI shows a system message while summarization runs; the orchestrator and server routes use the same `run_compaction_pipeline` helper with `CompactionTrigger::Manual`.
 
-### The Summarization Engine
+The summarizer (`summarizer.rs`) still produces structured fields (work summary, key decisions, pending tasks, important files). Those fields are woven into the compaction summary message that replaces dropped history, not into a new session's opening prompt.
 
-When pinch is triggered (via the `/pinch` command), the summarizer calls the user's current model to analyze the conversation and produce a structured JSON summary with four fields:
-
-- **Work summary** -- Two to three paragraphs describing what was accomplished, focusing on the what and why rather than the mechanics.
-- **Key decisions** -- Architectural choices, patterns adopted, trade-offs made. Things the next session needs to understand.
-- **Pending tasks** -- Incomplete work, explicitly mentioned TODOs, or logical next steps.
-- **Important files** -- The ten most relevant file paths for continuing the work.
-
-The summarization is cache-safe by design. When conversation messages exist, the system reuses the parent conversation's cached prefix (the system prompt and all prior messages) and appends the summarization instruction as a new user message. This means most of the tokens in the API call are cache hits, and only the instruction itself is new. The model sees the full conversation in its native form rather than a flattened text dump.
-
-The user can provide preservation hints -- specific areas to weight heavily in the summary -- and the system also feeds in ranked files (scored by activity during the session) and the contents of key files.
-
-### The Pinch Context
-
-The summarization result is packaged into a `PinchContext` along with metadata: source session ID and title, the ranked file list, preservation hints, user direction for the next phase, project instructions, key file contents, and any active plan.
-
-When the new session starts, `PinchContext::to_system_message` formats all of this into a structured markdown document that becomes the opening system message. It includes: a directive header telling the model not to re-discover what's already documented, the user's priority direction (placed first for salience), the work summary, key decisions, numbered pending tasks, ranked key files, preservation notes, the full project instructions (truncated at 8KB if needed), pre-loaded key file contents, and any active plan. The result is that a pinched session starts with rich context, relevant files already loaded, and clear direction -- without carrying the full weight of the original conversation.
+Legacy session-forking helpers (`PinchContext`, linked child sessions) remain in the codebase for compatibility but are not the default overflow path.
 
 ## Skills Injection
 
@@ -131,6 +121,6 @@ The `generate_context_injection` method produces a text block that gets injected
 
 ## How It All Connects
 
-The context system operates as a pipeline with feedback loops. At the start of each turn, context injection builds the full message array. The orchestrator sends it to the model. When the model calls tools, the history policy shapes the tool results before they enter the conversation. As the conversation grows, the context ledger tracks its state. When tokens cross the trigger threshold, compaction fires and the ledger records what happened. If the session truly runs out of room, pinch offers a structured exit to a new session.
+The context system operates as a pipeline with feedback loops. At the start of each turn, context injection builds the full message array. The orchestrator sends it to the model. When the model calls tools, the history policy shapes the tool results before they enter the conversation. As the conversation grows, the context ledger tracks its state. When tokens cross the trigger threshold—or the provider rejects an over-limit request—compaction fires in place and the ledger records what happened. `/pinch` runs the same pipeline on demand.
 
 Each layer is designed to be invisible when things are working well. The user doesn't think about context budgets or retention policies. They just have a conversation, and the system quietly ensures the model always has the most relevant context available within its limits.

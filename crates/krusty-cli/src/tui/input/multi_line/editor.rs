@@ -1,6 +1,5 @@
 //! Keyboard handling for multi-line input
 
-use arboard::Clipboard;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::MultiLineInput;
@@ -78,18 +77,16 @@ impl MultiLineInput {
             // Ctrl+V - paste from clipboard (image or text)
             KeyCode::Char('v') if modifiers.contains(KeyModifiers::CONTROL) => {
                 // Try image paste via arboard first (native tools can't do images)
-                if let Ok(mut clipboard) = Clipboard::new() {
-                    if let Ok(image_data) = clipboard.get_image() {
-                        let placeholder_id = uuid::Uuid::new_v4().to_string();
-                        let placeholder = format!("[clipboard:{}]", placeholder_id);
-                        self.insert_text(&placeholder);
-                        return InputAction::ImagePasted {
-                            width: image_data.width,
-                            height: image_data.height,
-                            rgba_bytes: image_data.bytes.into_owned(),
-                            placeholder_id,
-                        };
-                    }
+                if let Some(image_data) = crate::tui::utils::clipboard::read_clipboard_image() {
+                    let placeholder_id = uuid::Uuid::new_v4().to_string();
+                    let placeholder = format!("[clipboard:{}]", placeholder_id);
+                    self.insert_text(&placeholder);
+                    return InputAction::ImagePasted {
+                        width: image_data.width,
+                        height: image_data.height,
+                        rgba_bytes: image_data.rgba_bytes,
+                        placeholder_id,
+                    };
                 }
                 // Text paste: use platform-aware helper (wl-paste/xclip on Linux)
                 if let Some(text) = crate::tui::utils::clipboard::read_clipboard_text() {

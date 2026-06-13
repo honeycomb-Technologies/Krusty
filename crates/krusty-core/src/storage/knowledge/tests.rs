@@ -43,12 +43,29 @@ fn build_current_snapshot_content_excludes_existing_snapshot_memory() {
         created_at: "2026-01-01T00:00:00Z".to_string(),
         updated_at: "2026-01-02T00:00:00Z".to_string(),
     };
+    let compaction_flush = AgentMemory {
+        id: "flush".to_string(),
+        memory_type: MemoryType::Project,
+        title: format!("{}1", crate::storage::COMPACTION_FLUSH_TITLE_PREFIX),
+        content: "Full old transcript should not enter snapshots.".to_string(),
+        project_dir: Some("/repo".to_string()),
+        user_id: None,
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        updated_at: "2026-01-03T00:00:00Z".to_string(),
+    };
 
-    let content =
-        build_current_snapshot_content(&[snapshot, durable], &[], &[], &[], Some("/repo")).unwrap();
+    let content = build_current_snapshot_content(
+        &[snapshot, durable, compaction_flush],
+        &[],
+        &[],
+        &[],
+        Some("/repo"),
+    )
+    .unwrap();
 
     assert!(content.contains("Wake cadence"));
     assert!(!content.contains("old"));
+    assert!(!content.contains("Full old transcript"));
 }
 
 #[test]

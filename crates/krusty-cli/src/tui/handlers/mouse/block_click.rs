@@ -52,6 +52,7 @@ impl App {
         let mut event_consumed = false;
 
         match hit.block_type {
+            BlockType::Pinch => {}
             BlockType::Thinking => {
                 if let Some(block) = self.runtime.blocks.thinking.get_mut(idx) {
                     let actual_width = block.box_width(block_area.width);

@@ -45,10 +45,10 @@ fn parse_provider(input: &str) -> Result<ProviderId, AppError> {
 }
 #[cfg(test)]
 mod tests {
-    use super::status::load_oauth_token_presence;
-    use crate::error::AppError;
+    use super::status::provider_has_oauth_token;
     use krusty_core::ai::providers::ProviderId;
     use krusty_core::auth::{OAuthTokenData, OAuthTokenStore};
+    use krusty_core::storage::CredentialStore;
 
     fn sample_token() -> OAuthTokenData {
         OAuthTokenData {
@@ -62,26 +62,27 @@ mod tests {
     }
 
     #[test]
-    fn load_oauth_token_presence_returns_provider_presence() {
+    fn provider_has_oauth_token_returns_provider_presence() {
         let mut store = OAuthTokenStore::default();
         store.set(ProviderId::OpenAI, sample_token());
+        let credentials = CredentialStore::default();
 
-        let has_token = load_oauth_token_presence(ProviderId::OpenAI, || Ok(store))
-            .unwrap_or_else(|_| panic!("status helper should succeed"));
-
-        assert!(has_token);
+        assert!(provider_has_oauth_token(
+            ProviderId::OpenAI,
+            &store,
+            &credentials
+        ));
     }
 
     #[test]
-    fn load_oauth_token_presence_returns_error_on_store_failure() {
-        let result = load_oauth_token_presence(ProviderId::OpenAI, || {
-            Err(anyhow::anyhow!("store unavailable"))
-        });
+    fn provider_has_oauth_token_returns_false_without_token() {
+        let store = OAuthTokenStore::default();
+        let credentials = CredentialStore::default();
 
-        match result {
-            Err(AppError::Internal(message)) => assert!(message.contains("store unavailable")),
-            Ok(_) => panic!("broken store should not report token absence"),
-            Err(_) => panic!("broken store should surface as internal error"),
-        }
+        assert!(!provider_has_oauth_token(
+            ProviderId::OpenAI,
+            &store,
+            &credentials
+        ));
     }
 }

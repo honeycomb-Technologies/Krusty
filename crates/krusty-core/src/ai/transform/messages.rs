@@ -1,3 +1,4 @@
+use crate::ai::format::openai::responses_input::transform_request_input_for_api_format;
 use crate::ai::models::ApiFormat;
 use crate::ai::providers::ProviderId;
 use serde_json::Value;
@@ -56,6 +57,9 @@ pub fn apply_request_body_transform(
     {
         body["parallel_tool_calls"] = Value::Bool(true);
     }
+
+    transform_request_input_for_api_format(&mut body, api_format, "input");
+    transform_request_input_for_api_format(&mut body, api_format, "messages");
 
     body
 }

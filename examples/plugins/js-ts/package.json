@@ -1,0 +1,9 @@
+{
+  "name": "@krusty/js-ts-demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal edon/libnode TypeScript TUI plugin for Krusty.",
+  "krusty": {
+    "plugins": ["./plugin.toml"]
+  }
+}

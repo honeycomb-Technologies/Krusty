@@ -8,7 +8,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use krusty_core::storage::{
-    is_current_snapshot, refresh_current_snapshot, AgentMemory, Database, MemoryStore, MemoryType,
+    is_compaction_flush_memory, is_current_snapshot, refresh_current_snapshot, AgentMemory,
+    Database, MemoryStore, MemoryType,
 };
 
 use super::session_access::{current_user_id, request_workspace_scope};
@@ -21,6 +22,7 @@ use crate::AppState;
 pub struct ListMemoriesQuery {
     pub project_dir: Option<String>,
     pub memory_type: Option<String>,
+    pub include_content: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +39,12 @@ pub struct MemoryResponse {
     pub project_dir: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_chars: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -55,6 +63,8 @@ pub fn router() -> Router<AppState> {
         .route("/snapshot", get(get_memory_snapshot))
 }
 
+const MEMORY_LIST_PREVIEW_CHARS: usize = 500;
+
 pub(super) fn memory_to_response(memory: AgentMemory) -> MemoryResponse {
     MemoryResponse {
         id: memory.id,
@@ -64,7 +74,46 @@ pub(super) fn memory_to_response(memory: AgentMemory) -> MemoryResponse {
         project_dir: memory.project_dir,
         created_at: memory.created_at,
         updated_at: memory.updated_at,
+        content_preview: None,
+        content_chars: None,
+        truncated: None,
     }
+}
+
+fn memory_to_list_response(memory: AgentMemory, include_content: bool) -> MemoryResponse {
+    let compact = memory
+        .content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let content_chars = compact.chars().count();
+    let preview = truncate_preview(&compact, MEMORY_LIST_PREVIEW_CHARS);
+    let truncated = content_chars > MEMORY_LIST_PREVIEW_CHARS;
+    MemoryResponse {
+        id: memory.id,
+        memory_type: memory.memory_type.as_str().to_string(),
+        title: memory.title,
+        content: if include_content {
+            memory.content
+        } else {
+            preview.clone()
+        },
+        project_dir: memory.project_dir,
+        created_at: memory.created_at,
+        updated_at: memory.updated_at,
+        content_preview: Some(preview),
+        content_chars: Some(content_chars),
+        truncated: Some(truncated),
+    }
+}
+
+fn truncate_preview(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut truncated = text.chars().take(max_chars).collect::<String>();
+    truncated.push_str("...");
+    truncated
 }
 
 async fn list_memories(
@@ -91,11 +140,13 @@ async fn list_memories(
         None => store.list(project_dir.as_deref(), user_id),
     };
 
+    let include_content = query.include_content.unwrap_or(false);
     Ok(Json(ListMemoriesResponse {
         memories: memories
             .into_iter()
             .filter(|memory| !is_current_snapshot(memory))
-            .map(memory_to_response)
+            .filter(|memory| !is_compaction_flush_memory(memory))
+            .map(|memory| memory_to_list_response(memory, include_content))
             .collect(),
     }))
 }
@@ -200,9 +251,20 @@ mod tests {
         project_dir: Option<&str>,
         memory_type: MemoryType,
     ) {
+        seed_memory_with_content(state, user_id, title, "content", project_dir, memory_type);
+    }
+
+    fn seed_memory_with_content(
+        state: &AppState,
+        user_id: &str,
+        title: &str,
+        content: &str,
+        project_dir: Option<&str>,
+        memory_type: MemoryType,
+    ) {
         let store = MemoryStore::new(Database::new(&state.db_path).expect("database should open"));
         store
-            .save(memory_type, title, "content", project_dir, Some(user_id))
+            .save(memory_type, title, content, project_dir, Some(user_id))
             .expect("memory should create");
     }
 
@@ -227,6 +289,7 @@ mod tests {
             Query(ListMemoriesQuery {
                 project_dir: Some("repo".to_string()),
                 memory_type: Some("project".to_string()),
+                include_content: None,
             }),
         )
         .await
@@ -256,6 +319,7 @@ mod tests {
             Query(ListMemoriesQuery {
                 project_dir: None,
                 memory_type: None,
+                include_content: None,
             }),
         )
         .await
@@ -285,6 +349,7 @@ mod tests {
             Query(ListMemoriesQuery {
                 project_dir: None,
                 memory_type: None,
+                include_content: None,
             }),
         )
         .await
@@ -292,6 +357,85 @@ mod tests {
 
         assert_eq!(response.memories.len(), 1);
         assert_eq!(response.memories[0].title, "Architecture");
+    }
+
+    #[tokio::test]
+    async fn list_memories_returns_previews_by_default_and_full_content_on_request() {
+        let (state, temp_dir) = create_test_state();
+        let user_root = temp_dir.join("user");
+        std::fs::create_dir_all(&user_root).expect("user root should exist");
+        let long_content = "alpha ".repeat(140);
+        seed_memory_with_content(
+            &state,
+            "alice",
+            "Long Memory",
+            &long_content,
+            None,
+            MemoryType::Project,
+        );
+
+        let Json(response) = list_memories(
+            State(state.clone()),
+            Some(current_user("alice", &user_root)),
+            Query(ListMemoriesQuery {
+                project_dir: None,
+                memory_type: None,
+                include_content: None,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("memory listing should succeed"));
+
+        assert_eq!(response.memories.len(), 1);
+        assert_eq!(response.memories[0].title, "Long Memory");
+        assert!(response.memories[0].content.len() < long_content.len());
+        assert_eq!(response.memories[0].truncated, Some(true));
+
+        let Json(full_response) = list_memories(
+            State(state),
+            Some(current_user("alice", &user_root)),
+            Query(ListMemoriesQuery {
+                project_dir: None,
+                memory_type: None,
+                include_content: Some(true),
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("memory listing should succeed"));
+
+        assert_eq!(full_response.memories[0].content, long_content);
+    }
+
+    #[tokio::test]
+    async fn list_memories_hides_compaction_flush_entries() {
+        let (state, temp_dir) = create_test_state();
+        let user_root = temp_dir.join("user");
+        std::fs::create_dir_all(&user_root).expect("user root should exist");
+        seed_memory(&state, "alice", "Architecture", None, MemoryType::Project);
+        seed_memory_with_content(
+            &state,
+            "alice",
+            &format!("{}1", krusty_core::storage::COMPACTION_FLUSH_TITLE_PREFIX),
+            "full old transcript",
+            None,
+            MemoryType::Project,
+        );
+
+        let Json(response) = list_memories(
+            State(state),
+            Some(current_user("alice", &user_root)),
+            Query(ListMemoriesQuery {
+                project_dir: None,
+                memory_type: None,
+                include_content: Some(true),
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("memory listing should succeed"));
+
+        assert_eq!(response.memories.len(), 1);
+        assert_eq!(response.memories[0].title, "Architecture");
+        assert!(!response.memories[0].content.contains("full old transcript"));
     }
 
     #[tokio::test]
@@ -343,6 +487,7 @@ mod tests {
             Query(ListMemoriesQuery {
                 project_dir: Some(outside_root.to_string_lossy().to_string()),
                 memory_type: None,
+                include_content: None,
             }),
         )
         .await;

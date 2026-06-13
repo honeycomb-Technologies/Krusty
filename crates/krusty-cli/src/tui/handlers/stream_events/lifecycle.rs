@@ -98,6 +98,28 @@ impl App {
         ));
     }
 
+    pub(super) fn handle_compaction_started(&mut self, reason: String) {
+        let _ = reason;
+        self.show_compaction_started();
+    }
+
+    pub(super) fn handle_context_compacted(
+        &mut self,
+        reason: String,
+        estimated_tokens_before: usize,
+        estimated_tokens_after: usize,
+        replaced_messages: usize,
+    ) {
+        self.reload_conversation_from_db();
+        self.runtime.context_tokens_used = estimated_tokens_after;
+        let _ = (reason, estimated_tokens_before, replaced_messages);
+        if self.runtime.active_pinch_block.is_some() {
+            self.finish_pinch_animation(true);
+        } else {
+            self.show_auto_compaction_complete();
+        }
+    }
+
     pub(super) fn handle_title_generated(&mut self, title: String) {
         self.runtime.session_title = Some(title);
     }
@@ -117,7 +139,9 @@ impl App {
         self.stop_tool_execution();
         self.runtime.channels.loop_events = None;
         self.runtime.channels.loop_input = None;
+        self.runtime.channels.delegated_progress = None;
         self.runtime.pending_ask_user_calls.clear();
+        self.runtime.live_tool_calls.clear();
         self.push_stream_recovery_banner(stop_reason, stream_telemetry);
         if let Some(new_session_id) = next_pinched_session {
             if let Err(error) = self.load_session(&new_session_id) {

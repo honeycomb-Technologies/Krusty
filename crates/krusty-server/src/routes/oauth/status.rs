@@ -5,10 +5,11 @@ use axum::{
 use serde::Serialize;
 
 use krusty_core::ai::providers::ProviderId;
-use krusty_core::auth::OAuthTokenStore;
+use krusty_core::auth::{clear_grok_cli_auth, OAuthTokenStore};
 
 use super::parse_provider;
 use crate::error::AppError;
+use crate::routes::credentials::has_provider_oauth;
 use crate::AppState;
 
 #[derive(Serialize)]
@@ -17,21 +18,12 @@ pub(super) struct OAuthStatusResponse {
     flow_active: bool,
 }
 
-pub(super) fn load_oauth_token_presence(
+pub(super) fn provider_has_oauth_token(
     provider_id: ProviderId,
-    load: impl FnOnce() -> anyhow::Result<OAuthTokenStore>,
-) -> Result<bool, AppError> {
-    match load() {
-        Ok(store) => Ok(store.has_token(&provider_id)),
-        Err(error) => {
-            tracing::warn!(
-                provider = %provider_id,
-                error = %error,
-                "Failed to load OAuth token store while serving OAuth status"
-            );
-            Err(AppError::Internal(error.to_string()))
-        }
-    }
+    oauth_store: &OAuthTokenStore,
+    credentials: &krusty_core::storage::CredentialStore,
+) -> bool {
+    has_provider_oauth(provider_id, oauth_store, credentials)
 }
 
 pub(super) async fn oauth_status(
@@ -40,7 +32,16 @@ pub(super) async fn oauth_status(
 ) -> Result<Json<OAuthStatusResponse>, AppError> {
     let provider_id = parse_provider(&provider)?;
 
-    let has_token = load_oauth_token_presence(provider_id, OAuthTokenStore::load)?;
+    let oauth_store = OAuthTokenStore::load().map_err(|error| {
+        tracing::warn!(
+            provider = %provider_id,
+            error = %error,
+            "Failed to load OAuth token store while serving OAuth status"
+        );
+        AppError::Internal(error.to_string())
+    })?;
+    let credentials = state.credential_store.read().await;
+    let has_token = provider_has_oauth_token(provider_id, &oauth_store, &credentials);
 
     let flow_active = state
         .oauth_flows
@@ -66,6 +67,12 @@ pub(super) async fn revoke_oauth(
     store
         .save()
         .map_err(|error| AppError::Internal(error.to_string()))?;
+
+    if provider_id == ProviderId::Grok {
+        if let Err(error) = clear_grok_cli_auth() {
+            tracing::warn!(error = %error, "Failed to clear Grok CLI auth file during OAuth revoke");
+        }
+    }
 
     state
         .oauth_flows

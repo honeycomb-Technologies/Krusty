@@ -1,4 +1,7 @@
-use crate::tui::app::{App, Popup};
+use crate::tui::{
+    app::{App, Popup},
+    popups::plugins::PluginBrowserSelection,
+};
 
 impl App {
     pub(super) fn open_plugins_browser(&mut self) {
@@ -11,16 +14,18 @@ impl App {
     }
 
     pub(crate) fn toggle_selected_plugin_from_popup(&mut self) {
-        let Some(plugin_id) = self
-            .ui
-            .popups
-            .plugins
-            .selected_plugin_id()
-            .map(str::to_string)
-        else {
-            return;
-        };
+        match self.ui.popups.plugins.selected_item() {
+            Some(PluginBrowserSelection::Installed { id }) => {
+                self.toggle_installed_plugin_from_popup(id)
+            }
+            Some(PluginBrowserSelection::Catalog { id, package }) => {
+                self.install_catalog_plugin_from_popup(id, package)
+            }
+            None => {}
+        }
+    }
 
+    fn toggle_installed_plugin_from_popup(&mut self, plugin_id: String) {
         let Some(descriptor) = crate::tui::plugins::plugin_descriptor_by_id(&plugin_id) else {
             self.ui.popups.plugins.set_status_message(Some(
                 "Selected plugin no longer exists in the catalog.".to_string(),
@@ -62,6 +67,46 @@ impl App {
                     .popups
                     .plugins
                     .set_status_message(Some(format!("Failed to update {}: {}", plugin_id, err)));
+            }
+        }
+    }
+
+    fn install_catalog_plugin_from_popup(&mut self, plugin_id: String, package: String) {
+        let Some(manager) = self.services.plugin_manager.as_ref() else {
+            self.ui
+                .popups
+                .plugins
+                .set_status_message(Some("Plugin manager unavailable.".to_string()));
+            return;
+        };
+
+        self.ui.popups.plugins.set_status_message(Some(format!(
+            "Installing {} from {}...",
+            plugin_id, package
+        )));
+
+        match futures::executor::block_on(manager.install_from_ref(&package)) {
+            Ok(plugins) => {
+                let installed = plugins
+                    .iter()
+                    .map(|plugin| format!("{} v{}", plugin.name, plugin.version))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.ui.popups.plugins.set_status_message(Some(format!(
+                    "Installed {} from catalog",
+                    if installed.is_empty() {
+                        plugin_id.as_str()
+                    } else {
+                        installed.as_str()
+                    }
+                )));
+                self.refresh_plugin_catalog(true);
+            }
+            Err(err) => {
+                self.ui
+                    .popups
+                    .plugins
+                    .set_status_message(Some(format!("Failed to install {}: {}", plugin_id, err)));
             }
         }
     }

@@ -176,12 +176,7 @@ impl App {
             // Poll async operations
             self.poll_dynamic_model_fetch();
             self.poll_title_generation();
-            self.poll_summarization();
-
-            // Poll auto-pinch (background pinch without popup)
-            if self.runtime.auto_pinch_in_progress {
-                self.poll_auto_pinch();
-            }
+            self.poll_compaction();
 
             // Update menu animations (only when on start menu for efficiency)
             if self.ui.view == View::StartMenu {
@@ -198,11 +193,24 @@ impl App {
             // Poll bash output channel for streaming updates
             self.poll_bash_output();
 
-            // Poll explore progress channel for agent updates
-            self.poll_explore_progress();
+            // Poll delegated/or legacy explore/build progress channels for agent updates
+            let delegated_result = self.poll_delegated_progress();
+            if delegated_result.needs_redraw {
+                self.ui.needs_redraw = true;
+            }
+            self.process_poll_actions(delegated_result);
 
-            // Poll build progress channel for builder updates
-            self.poll_build_progress();
+            let explore_result = self.poll_explore_progress();
+            if explore_result.needs_redraw {
+                self.ui.needs_redraw = true;
+            }
+            self.process_poll_actions(explore_result);
+
+            let build_result = self.poll_build_progress();
+            if build_result.needs_redraw {
+                self.ui.needs_redraw = true;
+            }
+            self.process_poll_actions(build_result);
 
             // Poll /init exploration progress and result
             // Clone cached languages to avoid borrow conflict (cleared on completion)
@@ -267,10 +275,6 @@ impl App {
             if self.tick_blocks() {
                 self.ui.needs_redraw = true;
             }
-
-            // Check if we should trigger auto-pinch (context at threshold)
-            // Only triggers when idle (not streaming, not executing tools)
-            self.trigger_pending_auto_pinch();
 
             // Process continuous edge scrolling during selection
             if self.ui.scroll_system.edge_scroll.direction.is_some() {

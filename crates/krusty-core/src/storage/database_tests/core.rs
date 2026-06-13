@@ -1,3 +1,4 @@
+use rusqlite::Connection;
 use tempfile::TempDir;
 
 use crate::storage::database::Database;
@@ -8,7 +9,7 @@ use super::create_test_db;
 fn test_database_creation() {
     let (db, _temp) = create_test_db();
     let version = db.get_schema_version();
-    assert_eq!(version, 31, "Expected current schema version to be 31");
+    assert_eq!(version, 33, "Expected current schema version to be 33");
 }
 
 #[test]
@@ -55,7 +56,7 @@ fn test_schema_version_increments() {
     let db = Database::new(&db_path).expect("Failed to create database");
     let version = db.get_schema_version();
 
-    assert_eq!(version, 31, "Expected final schema version");
+    assert_eq!(version, 33, "Expected final schema version");
 }
 
 #[test]
@@ -67,4 +68,82 @@ fn test_migration_idempotency() {
     let version2 = db.get_schema_version();
 
     assert_eq!(version1, version2, "Schema version should not change");
+}
+
+#[test]
+fn migration_33_removes_legacy_compaction_memory_and_duplicate_history() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test.db");
+    let conn = Connection::open(&db_path).expect("open seed db");
+    conn.execute_batch(
+        "CREATE TABLE schema_version (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO schema_version (version) VALUES (32);
+        CREATE TABLE agent_memories (
+            id TEXT PRIMARY KEY,
+            memory_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            project_dir TEXT,
+            user_id TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO agent_memories (id, memory_type, title, content)
+            VALUES ('flush', 'project', 'Compaction flush #1', 'old transcript');
+        INSERT INTO agent_memories (id, memory_type, title, content)
+            VALUES ('keep', 'project', 'Architecture', 'durable fact');
+        CREATE TABLE compaction_checkpoints (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            prompt_index_at_compaction INTEGER NOT NULL,
+            pre_compact_message_ids_json TEXT NOT NULL,
+            compacted_history_json TEXT NOT NULL,
+            original_user_info TEXT,
+            reread_file_paths_json TEXT NOT NULL DEFAULT '[]',
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO compaction_checkpoints (
+            id, session_id, prompt_index_at_compaction, pre_compact_message_ids_json,
+            compacted_history_json, reread_file_paths_json, created_at
+        ) VALUES ('checkpoint', 'session', 1, '[1]', 'old history', '[]', CURRENT_TIMESTAMP);",
+    )
+    .expect("seed schema");
+    drop(conn);
+
+    let db = Database::new(&db_path).expect("migrate db");
+    assert_eq!(db.get_schema_version(), 33);
+
+    let flush_count: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM agent_memories WHERE title LIKE 'Compaction flush #%';",
+            [],
+            |row| row.get(0),
+        )
+        .expect("flush count");
+    assert_eq!(flush_count, 0);
+
+    let kept_count: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM agent_memories WHERE title = 'Architecture';",
+            [],
+            |row| row.get(0),
+        )
+        .expect("kept count");
+    assert_eq!(kept_count, 1);
+
+    let compacted_history: String = db
+        .conn()
+        .query_row(
+            "SELECT compacted_history_json FROM compaction_checkpoints WHERE id = 'checkpoint';",
+            [],
+            |row| row.get(0),
+        )
+        .expect("history json");
+    assert_eq!(compacted_history, "[]");
 }

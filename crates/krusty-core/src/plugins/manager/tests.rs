@@ -422,3 +422,216 @@ async fn rejects_invalid_trusted_key_material() {
         err
     );
 }
+
+#[tokio::test]
+async fn installs_local_package_declared_by_package_json() {
+    let temp = tempdir().expect("tempdir");
+    let workspace = temp.path();
+    let package_dir = workspace.join("native-package");
+    let dist_dir = package_dir.join("dist/linux-x64");
+    fs::create_dir_all(&dist_dir).await.expect("create dist");
+    fs::write(dist_dir.join("libdemo_plugin.so"), b"not-a-real-library")
+        .await
+        .expect("write native artifact");
+    fs::write(
+        package_dir.join("package.json"),
+        r#"{
+  "name": "@krusty/demo-plugin",
+  "version": "1.0.0",
+  "krusty": { "plugins": ["./plugin.toml"] }
+}"#,
+    )
+    .await
+    .expect("write package json");
+    fs::write(
+        package_dir.join("plugin.toml"),
+        r#"
+manifest_version = 1
+id = "demo.native"
+name = "Demo Native"
+version = "1.0.0"
+publisher = "demo.publisher"
+runtime = "native"
+entry_component = "dist/linux-x64/libdemo_plugin.so"
+render_capabilities = ["text"]
+"#,
+    )
+    .await
+    .expect("write plugin manifest");
+
+    let manager = PluginManager::new(reqwest::Client::new(), workspace.join("plugins"));
+    manager.ensure_layout().await.expect("ensure layout");
+
+    let installed = manager
+        .install_from_ref(package_dir.to_str().expect("package path utf8"))
+        .await
+        .expect("install package");
+
+    assert_eq!(installed.len(), 1);
+    assert_eq!(installed[0].id, "demo.native");
+    assert_eq!(installed[0].runtime, crate::plugins::PluginRuntime::Native);
+    assert_eq!(
+        installed[0].install_path,
+        fs::canonicalize(&package_dir).await.unwrap()
+    );
+    assert!(installed[0]
+        .entry_component_path
+        .ends_with("dist/linux-x64/libdemo_plugin.so"));
+
+    let plugins = manager
+        .list_installed_plugins()
+        .await
+        .expect("list installed");
+    assert_eq!(plugins.len(), 1);
+    assert_eq!(plugins[0].id, "demo.native");
+}
+
+#[tokio::test]
+async fn local_package_install_runs_build_script_when_entry_is_missing() {
+    if which::which("npm").is_err() {
+        eprintln!("skipping npm build-script test because npm is unavailable");
+        return;
+    }
+
+    let temp = tempdir().expect("tempdir");
+    let workspace = temp.path();
+    let package_dir = workspace.join("buildable-package");
+    fs::create_dir_all(&package_dir)
+        .await
+        .expect("create package dir");
+    fs::write(
+        package_dir.join("package.json"),
+        r#"{
+  "name": "@krusty/buildable-plugin",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "mkdir -p dist/linux-x64 && printf plugin > dist/linux-x64/libdemo_plugin.so"
+  },
+  "krusty": { "plugins": ["./plugin.toml"] }
+}"#,
+    )
+    .await
+    .expect("write package json");
+    fs::write(
+        package_dir.join("plugin.toml"),
+        r#"
+manifest_version = 1
+id = "demo.buildable"
+name = "Buildable Native"
+version = "1.0.0"
+publisher = "demo.publisher"
+runtime = "native"
+entry_component = "dist/linux-x64/libdemo_plugin.so"
+render_capabilities = ["text"]
+"#,
+    )
+    .await
+    .expect("write plugin manifest");
+
+    let manager = PluginManager::new(reqwest::Client::new(), workspace.join("plugins"));
+    manager.ensure_layout().await.expect("ensure layout");
+
+    let installed = manager
+        .install_from_ref(package_dir.to_str().expect("package path utf8"))
+        .await
+        .expect("install package");
+
+    assert_eq!(installed.len(), 1);
+    assert_eq!(installed[0].id, "demo.buildable");
+    assert!(installed[0].entry_component_path.exists());
+}
+
+#[tokio::test]
+async fn lists_builtin_and_configured_catalog_plugins() {
+    let temp = tempdir().expect("tempdir");
+    let workspace = temp.path();
+    let catalog_path = workspace.join("catalog.json");
+    fs::write(
+        &catalog_path,
+        r#"{
+  "version": 1,
+  "plugins": [
+    {
+      "id": "catalog.demo",
+      "name": "Catalog Demo",
+      "version": "1.0.0",
+      "publisher": "catalog.publisher",
+      "package": "npm:@krusty/catalog-demo",
+      "runtime": "wasm",
+      "description": "Demo catalog entry",
+      "tags": ["demo"]
+    }
+  ]
+}"#,
+    )
+    .await
+    .expect("write catalog");
+
+    let manager = PluginManager::new(reqwest::Client::new(), workspace.join("plugins"));
+    manager.ensure_layout().await.expect("ensure layout");
+    manager
+        .add_source(
+            Some("local"),
+            catalog_path.to_str().expect("catalog path utf8"),
+        )
+        .await
+        .expect("add source");
+
+    let entries = manager.list_catalog_plugins().await.expect("list catalog");
+
+    assert!(entries.iter().any(|entry| entry.id == "native-rust-demo"));
+    assert!(entries.iter().any(|entry| entry.id == "catalog.demo"));
+}
+
+#[tokio::test]
+async fn installs_local_js_package_declared_by_package_json() {
+    let temp = tempdir().expect("tempdir");
+    let workspace = temp.path();
+    let package_dir = workspace.join("js-package");
+    fs::create_dir_all(package_dir.join("src"))
+        .await
+        .expect("create package dirs");
+    fs::write(
+        package_dir.join("package.json"),
+        r#"{
+  "name": "@krusty/js-plugin",
+  "version": "1.0.0",
+  "krusty": { "plugins": ["./plugin.toml"] }
+}"#,
+    )
+    .await
+    .expect("write package json");
+    fs::write(
+        package_dir.join("plugin.toml"),
+        r#"
+manifest_version = 1
+id = "demo.js"
+name = "Demo JS"
+version = "1.0.0"
+publisher = "demo.publisher"
+runtime = "js"
+entry_component = "src/index.ts"
+render_capabilities = ["text"]
+"#,
+    )
+    .await
+    .expect("write plugin manifest");
+    fs::write(
+        package_dir.join("src/index.ts"),
+        "krusty.registerPlugin({ renderText() { return ['hi']; } });",
+    )
+    .await
+    .expect("write plugin entry");
+
+    let manager = PluginManager::new(reqwest::Client::new(), workspace.join("plugins"));
+    manager.ensure_layout().await.expect("ensure layout");
+
+    let installed = manager
+        .install_from_ref(package_dir.to_str().expect("package path utf8"))
+        .await
+        .expect("install package");
+
+    assert_eq!(installed.len(), 1);
+    assert_eq!(installed[0].id, "demo.js");
+    assert_eq!(installed[0].runtime, crate::plugins::PluginRuntime::Js);
+}

@@ -5,6 +5,7 @@ use tracing::{error, info};
 
 use super::super::config::{CallOptions, CodexReasoningEffort};
 use super::super::core::AiClient;
+use crate::ai::format::openai::responses_input::convert_openai_tool_message_for_request;
 use crate::ai::format::response::{extract_text_from_content, normalize_openai_response};
 use crate::ai::models::ApiFormat;
 use crate::ai::transform::apply_request_body_transform;
@@ -40,7 +41,9 @@ fn build_openai_tool_request_body(
         }));
     }
     for message in messages {
-        request_messages.extend(convert_openai_tool_message_for_request(message, api_format));
+        request_messages.extend(convert_openai_tool_message_for_request_with_format(
+            message, api_format,
+        ));
     }
 
     let mut body = serde_json::json!({
@@ -108,61 +111,14 @@ fn openai_tool_definition(tool: &Value, api_format: ApiFormat) -> Value {
     }
 }
 
-fn convert_openai_tool_message_for_request(message: Value, api_format: ApiFormat) -> Vec<Value> {
+fn convert_openai_tool_message_for_request_with_format(
+    message: Value,
+    api_format: ApiFormat,
+) -> Vec<Value> {
     if !matches!(api_format, ApiFormat::OpenAIResponses) {
         return vec![message];
     }
-
-    let role = message.get("role").and_then(|role| role.as_str());
-    if role == Some("tool") {
-        return vec![serde_json::json!({
-            "type": "function_call_output",
-            "call_id": message
-                .get("tool_call_id")
-                .and_then(|call_id| call_id.as_str())
-                .unwrap_or(""),
-            "output": message
-                .get("content")
-                .and_then(|content| content.as_str())
-                .unwrap_or("")
-        })];
-    }
-
-    if role == Some("assistant") {
-        if let Some(tool_calls) = message.get("tool_calls").and_then(|calls| calls.as_array()) {
-            let mut converted = Vec::new();
-            if let Some(text) = message.get("content").and_then(|content| content.as_str()) {
-                if !text.is_empty() {
-                    converted.push(serde_json::json!({
-                        "role": "assistant",
-                        "content": text
-                    }));
-                }
-            }
-            for tool_call in tool_calls {
-                if let Some(function) = tool_call.get("function") {
-                    converted.push(serde_json::json!({
-                        "type": "function_call",
-                        "call_id": tool_call
-                            .get("id")
-                            .and_then(|id| id.as_str())
-                            .unwrap_or(""),
-                        "name": function
-                            .get("name")
-                            .and_then(|name| name.as_str())
-                            .unwrap_or(""),
-                        "arguments": function
-                            .get("arguments")
-                            .and_then(|arguments| arguments.as_str())
-                            .unwrap_or("{}")
-                    }));
-                }
-            }
-            return converted;
-        }
-    }
-
-    vec![message]
+    convert_openai_tool_message_for_request(message)
 }
 
 impl AiClient {

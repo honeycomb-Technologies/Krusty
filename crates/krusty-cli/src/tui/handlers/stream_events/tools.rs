@@ -1,6 +1,8 @@
 use crate::ai::types::AiToolCall;
 use crate::tui::app::App;
 use crate::tui::blocks::StreamBlock;
+use crate::tui::components::Toast;
+use crate::tui::tool_presentation::{presentation_for_tool, tool_summary};
 
 impl App {
     pub(super) fn handle_tool_call_complete(
@@ -9,22 +11,27 @@ impl App {
         name: String,
         arguments: serde_json::Value,
     ) {
-        if name == "AskUserQuestion" {
-            self.runtime.pending_ask_user_calls.push(AiToolCall {
-                id: id.clone(),
-                name: name.clone(),
-                arguments: arguments.clone(),
-            });
-        }
-
-        self.create_tool_blocks(&[AiToolCall {
+        let call = AiToolCall {
             id,
             name,
             arguments,
-        }]);
+        };
+        self.runtime
+            .live_tool_calls
+            .insert(call.id.clone(), call.clone());
+
+        if call.name == "AskUserQuestion" {
+            self.runtime.pending_ask_user_calls.push(call.clone());
+        }
+
+        self.create_tool_blocks(&[call]);
     }
 
     pub(super) fn handle_tool_executing(&mut self) {
+        // The model stream that produced the tool call has ended; any later
+        // assistant text belongs to the post-tool model response and should
+        // render after the tool widgets.
+        self.runtime.chat.streaming_assistant_idx = None;
         if !self.runtime.chat.is_executing_tools {
             self.start_tool_execution();
         }
@@ -42,13 +49,29 @@ impl App {
         }
     }
 
-    pub(super) fn handle_tool_result(&mut self, id: String, output: String) {
-        self.update_tool_result_block(&id, &output);
+    pub(super) fn handle_tool_result(&mut self, id: String, output: String, is_error: bool) {
+        // Ensure the next model response starts after this tool result instead
+        // of appending into the pre-tool assistant text.
+        self.runtime.chat.streaming_assistant_idx = None;
+
+        self.update_tool_result_block(&id, &output, is_error);
         self.update_read_block(&id, &output);
-        self.update_edit_block(&id, &output);
-        self.update_bash_block(&id, &output);
-        self.update_explore_block(&id, &output);
-        self.update_build_block(&id, &output);
+        self.update_edit_block(&id, &output, is_error);
+        self.update_write_block(&id, &output, is_error);
+        self.update_bash_block(&id, &output, is_error);
+        self.update_web_search_block(&id, &output, is_error);
+        self.update_explore_block(&id, &output, is_error);
+        self.update_build_block(&id, &output, is_error);
+
+        if is_error {
+            if let Some(call) = self.runtime.live_tool_calls.get(&id) {
+                if presentation_for_tool(&call.name, &call.arguments).is_ui_only() {
+                    let summary =
+                        tool_summary(&output).unwrap_or_else(|| "tool failed".to_string());
+                    self.show_toast(Toast::error(format!("{}: {}", call.name, summary)));
+                }
+            }
+        }
     }
 
     pub(super) fn handle_tool_approval_required(&mut self, id: String, name: String) {
@@ -85,7 +108,6 @@ impl App {
     /// Handle tool start event
     pub(super) fn handle_tool_start(&mut self, name: String) {
         self.complete_streaming_blocks();
-        self.runtime.chat.streaming_assistant_idx = None;
 
         if name == "edit" {
             self.runtime
@@ -116,45 +138,10 @@ impl App {
                 .push(("write".to_string(), String::new()));
         }
 
-        if name == "Task" || name == "explore" {
-            tracing::info!(
-                "handle_tool_start: explore tool '{}' detected, block will be created on execution",
-                name
-            );
-        }
-
-        if !matches!(
-            name.as_str(),
-            "bash"
-                | "grep"
-                | "glob"
-                | "read"
-                | "edit"
-                | "write"
-                | "processes"
-                | "Task"
-                | "explore"
-                | "build"
-                | "AskUserQuestion"
-                | "task_start"
-                | "task_complete"
-                | "add_subtask"
-                | "set_dependency"
-                | "enter_plan_mode"
-                | "set_work_mode"
-        ) {
-            self.runtime
-                .chat
-                .messages
-                .push(("tool".to_string(), format!("Using tool: {} ...", name)));
-        }
-
-        if name == "AskUserQuestion" {
-            self.runtime
-                .chat
-                .messages
-                .push(("tool".to_string(), "Preparing questions...".to_string()));
-        }
+        // Other tool families need complete arguments before deciding whether
+        // they should create a widget. Avoid transcript placeholders like
+        // "Using tool..." or "Preparing questions..."; those are protocol
+        // noise and should stay invisible.
     }
 
     /// Mark all streaming blocks as complete

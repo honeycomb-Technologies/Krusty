@@ -160,6 +160,19 @@ pub enum LoopEvent {
         estimated_tokens_before: usize,
     },
 
+    /// In-place compaction started (manual, auto, overflow, or reactive).
+    ContextCompactionStarted { reason: String },
+
+    /// Conversation was compacted in place to relieve context pressure.
+    ContextCompacted {
+        reason: String,
+        estimated_tokens_before: usize,
+        estimated_tokens_after: usize,
+        replaced_messages: usize,
+        checkpoint_id: String,
+        compaction_count: u32,
+    },
+
     /// Session title generated.
     TitleGenerated { title: String },
 

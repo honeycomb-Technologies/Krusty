@@ -277,7 +277,7 @@ pub fn get_all_commands() -> Vec<CommandSuggestion> {
         CommandSuggestion {
             primary: "/pinch",
             aliases: vec![],
-            description: "Continue in new session with context",
+            description: "Compact this session in place",
         },
         CommandSuggestion {
             primary: "/cmd",

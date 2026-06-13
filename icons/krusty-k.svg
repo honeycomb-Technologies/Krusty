@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+  <defs>
+    <linearGradient id="krusty-k-gradient" x1="136" y1="84" x2="372" y2="424" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#cd853f"/>
+      <stop offset="0.38" stop-color="#ff6b35"/>
+      <stop offset="0.52" stop-color="#ffcc00"/>
+      <stop offset="0.72" stop-color="#ff6b35"/>
+      <stop offset="1" stop-color="#8b4513"/>
+    </linearGradient>
+    <linearGradient id="krusty-k-shadow" x1="145" y1="94" x2="320" y2="420" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7b3f17" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#1a0f08" stop-opacity="0.32"/>
+    </linearGradient>
+  </defs>
+  <g fill="url(#krusty-k-gradient)">
+    <rect x="150" y="120" width="44" height="114" rx="5"/>
+    <rect x="172" y="150" width="42" height="85" rx="5"/>
+    <rect x="193" y="221" width="84" height="43" rx="5"/>
+    <rect x="172" y="264" width="43" height="115" rx="5"/>
+    <rect x="193" y="292" width="42" height="116" rx="5"/>
+    <rect x="276" y="120" width="43" height="116" rx="5"/>
+    <rect x="300" y="151" width="42" height="76" rx="5"/>
+    <rect x="276" y="263" width="43" height="115" rx="5"/>
+    <rect x="300" y="294" width="42" height="83" rx="5"/>
+    <rect x="319" y="368" width="42" height="40" rx="5"/>
+    <circle cx="256" cy="120" r="11"/>
+    <circle cx="256" cy="388" r="6"/>
+    <circle cx="340" cy="264" r="5"/>
+    <circle cx="172" cy="408" r="5"/>
+    <rect x="330" y="182" width="21" height="21" rx="4"/>
+  </g>
+  <g fill="url(#krusty-k-shadow)" opacity="0.34">
+    <rect x="150" y="120" width="20" height="114" rx="5"/>
+    <rect x="172" y="264" width="20" height="115" rx="5"/>
+    <rect x="276" y="120" width="21" height="116" rx="5"/>
+    <rect x="276" y="263" width="21" height="115" rx="5"/>
+  </g>
+</svg>

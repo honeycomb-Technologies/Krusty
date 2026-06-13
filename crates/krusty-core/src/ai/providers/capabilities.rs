@@ -22,23 +22,23 @@ impl ProviderCapabilities {
     pub fn for_provider(provider: ProviderId) -> Self {
         match provider {
             ProviderId::OpenRouter => Self {
-                web_search: false,
-                web_fetch: false,
+                web_search: true,
+                web_fetch: true,
                 context_management: false,
                 prompt_caching: true,
-                web_plugins: true,
+                web_plugins: false,
                 supports_vision: true,
             },
             ProviderId::Anthropic => Self {
-                web_search: false,
-                web_fetch: false,
+                web_search: true,
+                web_fetch: true,
                 context_management: false,
                 prompt_caching: true,
                 web_plugins: false,
                 supports_vision: true,
             },
             ProviderId::OpenAI => Self {
-                web_search: false,
+                web_search: true,
                 web_fetch: false,
                 context_management: false,
                 prompt_caching: false,
@@ -66,9 +66,9 @@ mod tests {
     #[test]
     fn test_provider_capabilities() {
         let openrouter = ProviderCapabilities::for_provider(ProviderId::OpenRouter);
-        assert!(!openrouter.web_search);
-        assert!(!openrouter.web_fetch);
-        assert!(openrouter.web_plugins);
+        assert!(openrouter.web_search);
+        assert!(openrouter.web_fetch);
+        assert!(!openrouter.web_plugins);
         assert!(openrouter.supports_vision);
 
         let zai = ProviderCapabilities::for_provider(ProviderId::ZAi);
@@ -77,13 +77,15 @@ mod tests {
         assert!(!zai.supports_vision);
 
         let anthropic = ProviderCapabilities::for_provider(ProviderId::Anthropic);
-        assert!(!anthropic.web_search);
+        assert!(anthropic.web_search);
+        assert!(anthropic.web_fetch);
         assert!(anthropic.prompt_caching);
         assert!(!anthropic.web_plugins);
         assert!(anthropic.supports_vision);
 
         let openai = ProviderCapabilities::for_provider(ProviderId::OpenAI);
-        assert!(!openai.web_search);
+        assert!(openai.web_search);
+        assert!(!openai.web_fetch);
         assert!(!openai.web_plugins);
         assert!(openai.supports_vision);
 

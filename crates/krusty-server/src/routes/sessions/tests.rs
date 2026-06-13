@@ -690,20 +690,22 @@ Status: in_progress
     .await
     .unwrap_or_else(|_| panic!("pinch should succeed"));
 
+    assert_eq!(response.session.id, session_id);
+    assert!(response.checkpoint_id.is_some());
+    assert!(response.replaced_messages.unwrap_or(0) > 0);
+
     let messages = session_manager
         .load_session_messages(&response.session.id)
-        .expect("child messages should load");
-    let (role, system_message_json) = messages.first().expect("system message should exist");
+        .expect("compacted messages should load");
+    let combined = messages
+        .iter()
+        .map(|(_, content)| content.as_str())
+        .collect::<String>();
 
-    assert_eq!(role, "system");
-    assert!(system_message_json.contains("Project Instructions"));
-    assert!(system_message_json.contains("[PROJECT INSTRUCTIONS -"));
-    assert!(system_message_json.contains("Key Files (by importance)"));
-    assert!(system_message_json.contains("src/lib.rs"));
-    assert!(system_message_json.contains("Key File Contents (Pre-loaded)"));
-    assert!(system_message_json.contains("pub fn important()"));
-    assert!(system_message_json.contains("## Active Plan"));
-    assert!(system_message_json.contains("Task 1.1: Keep session continuity"));
+    assert!(combined.contains("Conversation Compacted"));
+    assert!(combined.contains("Continue the server audit."));
+    assert!(combined.contains("src/lib.rs"));
+    assert!(combined.contains("Task 1.1: Keep session continuity"));
 }
 
 #[tokio::test]
@@ -743,7 +745,7 @@ async fn pinch_session_resolves_legacy_relative_working_dir_against_user_home() 
     let Json(response) = pinch_session(
         State(state),
         Some(current_user("alice", &user_root)),
-        Path(session_id),
+        Path(session_id.clone()),
         Json(PinchRequest {
             preservation_hints: None,
             direction: None,
@@ -751,6 +753,8 @@ async fn pinch_session_resolves_legacy_relative_working_dir_against_user_home() 
     )
     .await
     .unwrap_or_else(|_| panic!("pinch should succeed"));
+
+    assert_eq!(response.session.id, session_id);
 
     let expected = repo_dir.to_string_lossy().to_string();
     assert_eq!(

@@ -16,6 +16,7 @@ pub mod popups;
 pub mod state;
 pub mod streaming;
 pub mod themes;
+pub(crate) mod tool_presentation;
 pub mod utils;
 
 // Re-exports

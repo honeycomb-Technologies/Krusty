@@ -10,5 +10,7 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-pub use model::{AgentMemory, MemoryType};
+pub use model::{
+    is_compaction_flush_memory, AgentMemory, MemoryType, COMPACTION_FLUSH_TITLE_PREFIX,
+};
 pub use store::MemoryStore;

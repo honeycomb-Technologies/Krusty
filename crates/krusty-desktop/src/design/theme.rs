@@ -35,58 +35,78 @@ impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {
             theme_name: DEFAULT_THEME_NAME.to_owned(),
-            font: AppFont::System,
+            font: AppFont::Inter,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AppFont {
-    System,
-    Plantin,
-    Mono,
+    #[default]
+    #[serde(alias = "system", alias = "plantin")]
+    Inter,
+    NotoSans,
+    JetBrainsMono,
+    FiraCode,
+    #[serde(alias = "mono")]
+    FiraMono,
+    Hack,
+    SourceCodePro,
+    IbmPlexMono,
+    NotoSansMono,
+    Inconsolata,
+    SpaceMono,
+    VictorMono,
 }
 
 impl AppFont {
-    pub const ALL: [Self; 3] = [Self::System, Self::Plantin, Self::Mono];
-
-    pub fn id(self) -> &'static str {
-        match self {
-            Self::System => "system",
-            Self::Plantin => "plantin",
-            Self::Mono => "mono",
-        }
-    }
+    pub const ALL: [Self; 12] = [
+        Self::Inter,
+        Self::NotoSans,
+        Self::JetBrainsMono,
+        Self::FiraCode,
+        Self::FiraMono,
+        Self::Hack,
+        Self::SourceCodePro,
+        Self::IbmPlexMono,
+        Self::NotoSansMono,
+        Self::Inconsolata,
+        Self::SpaceMono,
+        Self::VictorMono,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::System => "System",
-            Self::Plantin => "Plantin",
-            Self::Mono => "Mono",
+            Self::Inter => "Inter",
+            Self::NotoSans => "Noto Sans",
+            Self::JetBrainsMono => "JetBrains Mono",
+            Self::FiraCode => "Fira Code",
+            Self::FiraMono => "Fira Mono",
+            Self::Hack => "Hack",
+            Self::SourceCodePro => "Source Code Pro",
+            Self::IbmPlexMono => "IBM Plex Mono",
+            Self::NotoSansMono => "Noto Sans Mono",
+            Self::Inconsolata => "Inconsolata",
+            Self::SpaceMono => "Space Mono",
+            Self::VictorMono => "Victor Mono",
         }
     }
 
     pub fn family(self) -> &'static str {
         match self {
-            Self::System => ".SystemUIFont",
-            Self::Plantin => "PlantinNowVariable-Upright",
-            Self::Mono => "DejaVu Sans Mono",
-        }
-    }
-
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::System => "Native platform UI font.",
-            Self::Plantin => "Bundled editorial serif when available.",
-            Self::Mono => "Monospace for dense engineering work.",
-        }
-    }
-
-    pub fn preview(self) -> &'static str {
-        match self {
-            Self::System | Self::Plantin => "Krusty keeps project work visible and organized.",
-            Self::Mono => "fn split_panel(axis: Axis, kind: PanelKind);",
+            Self::Inter => "Inter",
+            Self::NotoSans => "Noto Sans",
+            Self::JetBrainsMono => "JetBrains Mono",
+            Self::FiraCode => "Fira Code",
+            Self::FiraMono => "Fira Mono",
+            Self::Hack => "Hack",
+            Self::SourceCodePro => "Source Code Pro",
+            Self::IbmPlexMono => "IBM Plex Mono",
+            Self::NotoSansMono => "Noto Sans Mono",
+            Self::Inconsolata => "Inconsolata",
+            Self::SpaceMono => "Space Mono",
+            Self::VictorMono => "Victor Mono",
         }
     }
 }
@@ -122,7 +142,10 @@ static PALETTE: OnceLock<RwLock<Palette>> = OnceLock::new();
 
 pub fn init(cx: &mut App) {
     load_saved_appearance();
-    if let Some(themes_dir) = themes_dir().filter(|path| path.exists()) {
+    if let Err(error) = install_bundled_themes() {
+        eprintln!("failed to install bundled Krusty themes: {error:#}");
+    }
+    if let Some(themes_dir) = themes_dir() {
         if let Err(error) = gpui_component::ThemeRegistry::watch_dir(themes_dir, cx, |cx| {
             apply_component_theme(cx);
         }) {
@@ -213,9 +236,10 @@ fn apply_krusty_component_overrides(settings: &AppearanceSettings, cx: &mut App)
     theme.shadow = false;
     theme.tile_radius = px(0.0);
     theme.tile_shadow = false;
+    theme.scrollbar_show = gpui_component::scroll::ScrollbarShow::Always;
 
     theme.font_family = SharedString::from(settings.font.family());
-    if settings.font == AppFont::Mono {
+    if settings.font == AppFont::FiraMono {
         theme.mono_font_family = SharedString::from(settings.font.family());
     }
 }
@@ -297,11 +321,38 @@ fn themes_dir() -> Option<PathBuf> {
     Some(config_dir()?.join(THEMES_DIR_NAME))
 }
 
+fn install_bundled_themes() -> std::io::Result<()> {
+    let Some(target_dir) = themes_dir() else {
+        return Ok(());
+    };
+    let source_dir = bundled_themes_dir();
+    if !source_dir.exists() {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&target_dir)?;
+    for entry in std::fs::read_dir(source_dir)? {
+        let entry = entry?;
+        let source = entry.path();
+        if source.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let target = target_dir.join(entry.file_name());
+        if !target.exists() {
+            std::fs::copy(source, target)?;
+        }
+    }
+    Ok(())
+}
+
+fn bundled_themes_dir() -> PathBuf {
+    workspace_root().join("assets/gpui-component-themes")
+}
+
 fn config_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|path| path.join(CONFIG_DIR_NAME))
 }
 
-#[allow(dead_code)]
 fn workspace_root() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
@@ -341,4 +392,50 @@ pub fn hairline() -> Hsla {
 
 pub fn accent() -> Hsla {
     current_palette().accent
+}
+
+pub fn success() -> Hsla {
+    current_palette().success
+}
+
+pub fn complement() -> Hsla {
+    current_palette().complement
+}
+
+pub fn danger() -> Hsla {
+    current_palette().danger
+}
+
+pub fn logo_gradient_stops() -> [Hsla; 7] {
+    let appearance = current_appearance();
+    if matches!(
+        appearance.theme_name.as_str(),
+        "Default Dark" | "Default Light"
+    ) {
+        return original_logo_gradient_stops();
+    }
+
+    let palette = current_palette();
+    let low = palette.app_bg.blend(palette.accent.opacity(0.55));
+    let mid = palette.surface.blend(palette.accent.opacity(0.82));
+    let peak = palette.complement;
+    let tail = palette.surface.blend(palette.complement.opacity(0.72));
+
+    [low, mid, palette.accent, peak, palette.accent, tail, low]
+}
+
+fn original_logo_gradient_stops() -> [Hsla; 7] {
+    [
+        logo_color(0x8b4513),
+        logo_color(0xcd853f),
+        logo_color(0xff6b35),
+        logo_color(0xffcc00),
+        logo_color(0xff6b35),
+        logo_color(0xcd853f),
+        logo_color(0x8b4513),
+    ]
+}
+
+fn logo_color(hex: u32) -> Hsla {
+    gpui::rgb(hex).into()
 }

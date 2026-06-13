@@ -8,7 +8,7 @@ use tokio::sync::broadcast;
 use krusty_core::agent::autonomy::coordinator_prompt::system_prompt_for_session;
 use krusty_core::agent::{LoopEvent, OrchestratorConfig, OrchestratorServices};
 use krusty_core::ai::client::CallOptions;
-use krusty_core::ai::types::Role;
+use krusty_core::ai::types::{Role, WebFetchConfig, WebSearchConfig};
 use krusty_core::plan::PlanManager;
 use krusty_core::storage::{
     Database, MakoRuntimeStateStatus, MakoRuntimeStateStore, ProjectSettings, SessionManager,
@@ -122,6 +122,8 @@ async fn run_mako_session_inner(
         tools: Some(state.tool_registry.get_ai_tools().await),
         session_id: Some(session_id.clone()),
         codex_parallel_tool_calls: true,
+        web_search: Some(WebSearchConfig::default()),
+        web_fetch: Some(WebFetchConfig::default()),
         system_prompt: system_prompt_for_session(SessionType::Mako),
         ..Default::default()
     };

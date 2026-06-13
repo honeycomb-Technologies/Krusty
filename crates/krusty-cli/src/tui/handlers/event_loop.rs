@@ -3,8 +3,10 @@
 //! Poll operations and animation ticks extracted from app.rs.
 
 use crate::tui::app::{App, Popup, View};
+use crate::tui::blocks::StreamBlock;
 use crate::tui::polling::{
-    poll_bash_output, poll_build_progress, poll_explore_progress, PollAction, PollResult,
+    poll_bash_output, poll_build_progress, poll_delegated_progress, poll_explore_progress,
+    PollAction, PollResult,
 };
 use std::time::{Duration, Instant};
 
@@ -31,6 +33,15 @@ impl App {
             &mut self.runtime.blocks.build,
             &mut self.runtime.active_plan,
             self.services.plan_manager.as_ref(),
+        )
+    }
+
+    /// Poll delegated agent progress emitted by the orchestrator.
+    pub(crate) fn poll_delegated_progress(&mut self) -> PollResult {
+        poll_delegated_progress(
+            &mut self.runtime.channels,
+            &mut self.runtime.blocks.explore,
+            &mut self.runtime.blocks.build,
         )
     }
 
@@ -111,7 +122,6 @@ impl App {
     /// Tick all animations. Returns true if any animation is still running.
     pub(crate) fn tick_blocks(&mut self) -> bool {
         let blocks = self.runtime.blocks.tick_all();
-        self.ui.popups.pinch.tick();
         let sidebar = self.ui.plan_sidebar.tick();
         let plugin_window = self.ui.plugin_window.tick();
 
@@ -120,11 +130,12 @@ impl App {
             tracing::info!("Plan cleared after sidebar collapse");
         }
 
-        use crate::tui::popups::pinch::PinchStage;
-        let pinch_active = matches!(
-            self.ui.popups.pinch.stage,
-            PinchStage::Summarizing { .. } | PinchStage::Creating
-        );
+        let pinch_active = self
+            .runtime
+            .blocks
+            .pinch
+            .iter()
+            .any(|block| block.is_streaming());
         let auth_browser_waiting =
             self.ui.popup == Popup::Auth && self.ui.popups.auth.is_browser_waiting();
 

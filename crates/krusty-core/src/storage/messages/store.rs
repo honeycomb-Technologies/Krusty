@@ -68,7 +68,7 @@ impl<'a> MessageStore<'a> {
         session_id: &str,
     ) -> Result<Vec<StoredMessageRecord>> {
         let mut stmt = self.db.conn().prepare(
-            "SELECT role, content, created_at
+            "SELECT id, role, content, created_at
              FROM messages
              WHERE session_id = ?1
              ORDER BY id",
@@ -76,9 +76,10 @@ impl<'a> MessageStore<'a> {
 
         let rows = stmt.query_map([session_id], |row| {
             Ok(StoredMessageRecord {
-                role: row.get(0)?,
-                content_json: row.get(1)?,
-                created_at: row.get(2)?,
+                id: row.get(0)?,
+                role: row.get(1)?,
+                content_json: row.get(2)?,
+                created_at: row.get(3)?,
             })
         })?;
 

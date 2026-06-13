@@ -78,6 +78,7 @@ impl App {
             Some(DragTarget::Block(drag)) => {
                 if let Some(offset) = drag.calculate_offset(y) {
                     match drag.block_type {
+                        BlockType::Pinch => {}
                         BlockType::Thinking => {
                             if let Some(block) = self.runtime.blocks.thinking.get_mut(drag.index) {
                                 block.set_scroll_offset(offset);

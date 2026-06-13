@@ -21,11 +21,14 @@ impl PluginManager {
     pub async fn install_from_manifest_ref(&self, manifest_ref: &str) -> Result<InstalledPlugin> {
         let (manifest, manifest_location) = self.read_manifest_from_ref(manifest_ref).await?;
 
-        self.validate_manifest(&manifest)?;
+        self.validate_manifest(&manifest, true)?;
         self.verify_publisher_allowed(&manifest.publisher).await?;
 
-        let artifact_location =
-            resolve_artifact_location(&manifest.release.url, &manifest_location)?;
+        let release = manifest
+            .release
+            .as_ref()
+            .context("manifest release metadata is required for manifest installs")?;
+        let artifact_location = resolve_artifact_location(&release.url, &manifest_location)?;
         let artifact_bytes = self.read_artifact(&artifact_location).await?;
 
         self.verify_artifact_integrity(&manifest, &artifact_bytes)
@@ -56,6 +59,9 @@ impl PluginManager {
                 version: manifest.version,
                 enabled: true,
                 pinned: true,
+                package_path: None,
+                manifest_path: None,
+                source: None,
             },
         )
         .await
@@ -66,29 +72,31 @@ impl PluginManager {
         manifest: &PluginManifestV1,
         artifact_bytes: &[u8],
     ) -> Result<()> {
+        let release = manifest
+            .release
+            .as_ref()
+            .context("manifest release metadata is required for artifact verification")?;
+
         let digest = Sha256::digest(artifact_bytes);
         let digest_hex = format!("{:x}", digest);
-        if digest_hex != manifest.release.sha256.to_lowercase() {
+        if digest_hex != release.sha256.to_lowercase() {
             bail!(
                 "sha256 mismatch for '{}': expected {}, got {}",
                 manifest.id,
-                manifest.release.sha256,
+                release.sha256,
                 digest_hex
             );
         }
 
         let trust = load_trust_policy(self).await?;
-        let public_key = trust
-            .keys
-            .get(&manifest.release.signing_key_id)
-            .with_context(|| {
-                format!(
-                    "trusted key '{}' not found in trust policy",
-                    manifest.release.signing_key_id
-                )
-            })?;
+        let public_key = trust.keys.get(&release.signing_key_id).with_context(|| {
+            format!(
+                "trusted key '{}' not found in trust policy",
+                release.signing_key_id
+            )
+        })?;
 
-        verify_artifact_signature(artifact_bytes, &manifest.release.signature, public_key)?;
+        verify_artifact_signature(artifact_bytes, &release.signature, public_key)?;
         Ok(())
     }
 
@@ -134,7 +142,11 @@ impl PluginManager {
         }
     }
 
-    fn validate_manifest(&self, manifest: &PluginManifestV1) -> Result<()> {
+    pub(super) fn validate_manifest(
+        &self,
+        manifest: &PluginManifestV1,
+        require_release: bool,
+    ) -> Result<()> {
         if manifest.manifest_version != 1 {
             bail!(
                 "unsupported manifest version '{}'; expected version 1",
@@ -154,17 +166,22 @@ impl PluginManager {
         if manifest.publisher.trim().is_empty() {
             bail!("manifest publisher cannot be empty");
         }
-        if manifest.release.url.trim().is_empty() {
-            bail!("manifest release.url cannot be empty");
+        if require_release && manifest.release.is_none() {
+            bail!("manifest release metadata is required for manifest installs");
         }
-        if manifest.release.sha256.trim().is_empty() {
-            bail!("manifest release.sha256 cannot be empty");
-        }
-        if manifest.release.signature.trim().is_empty() {
-            bail!("manifest release.signature cannot be empty");
-        }
-        if manifest.release.signing_key_id.trim().is_empty() {
-            bail!("manifest release.signing_key_id cannot be empty");
+        if let Some(release) = &manifest.release {
+            if release.url.trim().is_empty() {
+                bail!("manifest release.url cannot be empty");
+            }
+            if release.sha256.trim().is_empty() {
+                bail!("manifest release.sha256 cannot be empty");
+            }
+            if release.signature.trim().is_empty() {
+                bail!("manifest release.signature cannot be empty");
+            }
+            if release.signing_key_id.trim().is_empty() {
+                bail!("manifest release.signing_key_id cannot be empty");
+            }
         }
 
         validate_plugin_id(&manifest.id)?;

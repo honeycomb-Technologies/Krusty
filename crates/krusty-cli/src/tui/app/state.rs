@@ -109,14 +109,8 @@ pub struct AppRuntime {
     pub current_model: String,
     /// Token usage tracking
     pub context_tokens_used: usize,
-    /// Flag to trigger auto-pinch fallback after response completes
-    pub pending_auto_pinch: bool,
-    /// Reason recorded for the pending auto-pinch fallback
-    pub pending_auto_pinch_reason: Option<String>,
-    /// Auto-pinch in progress (bypasses popup when AI is busy)
-    pub auto_pinch_in_progress: bool,
-    /// When the current pinch summarization started
-    pub summarization_started_at: Option<Instant>,
+    /// Active in-place compaction animation block index
+    pub active_pinch_block: Option<usize>,
     /// AI client
     pub ai_client: Option<AiClient>,
     /// API key
@@ -179,6 +173,8 @@ pub struct AppRuntime {
     pub approval_requested_at: Option<Instant>,
     /// AskUserQuestion tool calls stored between ToolCallComplete and AwaitingInput events
     pub pending_ask_user_calls: Vec<AiToolCall>,
+    /// Recent live tool calls keyed by tool_use_id for result presentation.
+    pub live_tool_calls: HashMap<String, AiToolCall>,
     /// Just updated flag
     pub just_updated: bool,
     /// Update status
@@ -201,10 +197,7 @@ impl AppRuntime {
             chat: ChatState::new(),
             current_model,
             context_tokens_used: 0,
-            pending_auto_pinch: false,
-            pending_auto_pinch_reason: None,
-            auto_pinch_in_progress: false,
-            summarization_started_at: None,
+            active_pinch_block: None,
             ai_client: None,
             api_key: None,
             active_provider,
@@ -236,6 +229,7 @@ impl AppRuntime {
             permission_mode: PermissionMode::default(),
             approval_requested_at: None,
             pending_ask_user_calls: Vec::new(),
+            live_tool_calls: HashMap::new(),
             just_updated: false,
             update_status: None,
             should_quit: false,

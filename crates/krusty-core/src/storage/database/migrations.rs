@@ -43,6 +43,16 @@ impl Database {
             .is_ok()
     }
 
+    /// Check if a table exists (for data-cleanup migrations against lazily-created tables).
+    fn table_exists(tx: &rusqlite::Transaction, table: &str) -> bool {
+        tx.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
+            [table],
+            |_| Ok(()),
+        )
+        .is_ok()
+    }
+
     /// Run database migrations incrementally
     pub(crate) fn run_migrations(&self) -> Result<()> {
         let current_version = self.get_schema_version();
@@ -902,6 +912,67 @@ impl Database {
                 )?;
             }
             self.set_schema_version_tx(&tx, 31)?;
+        }
+
+        // Migration 32: Compaction checkpoints and transcript segments
+        if current_version < 32 {
+            info!("Running migration 32: Compaction checkpoints and segments");
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS compaction_checkpoints (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    prompt_index_at_compaction INTEGER NOT NULL,
+                    pre_compact_message_ids_json TEXT NOT NULL,
+                    compacted_history_json TEXT NOT NULL,
+                    original_user_info TEXT,
+                    reread_file_paths_json TEXT NOT NULL DEFAULT '[]',
+                    schema_version INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_compaction_checkpoints_session
+                    ON compaction_checkpoints(session_id);
+                CREATE TABLE IF NOT EXISTS compaction_segments (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    checkpoint_id TEXT NOT NULL,
+                    message_id_start INTEGER NOT NULL,
+                    message_id_end INTEGER NOT NULL,
+                    segment_markdown TEXT NOT NULL,
+                    token_estimate INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                    FOREIGN KEY (checkpoint_id) REFERENCES compaction_checkpoints(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_compaction_segments_session
+                    ON compaction_segments(session_id);
+                CREATE INDEX IF NOT EXISTS idx_compaction_segments_checkpoint
+                    ON compaction_segments(checkpoint_id);",
+            )
+            .context("Migration 32: Compaction checkpoints and segments")?;
+            self.set_schema_version_tx(&tx, 32)?;
+        }
+
+        // Migration 33: Remove legacy compaction memory leaks and duplicate checkpoint history.
+        if current_version < 33 {
+            info!("Running migration 33: Compaction memory cleanup");
+            if Self::table_exists(&tx, "agent_memories") {
+                tx.execute(
+                    "DELETE FROM agent_memories
+                     WHERE memory_type = 'project'
+                       AND title LIKE 'Compaction flush #%';",
+                    [],
+                )
+                .context("Migration 33: delete legacy compaction flush memories")?;
+            }
+            tx.execute(
+                "UPDATE compaction_checkpoints
+                 SET compacted_history_json = '[]'
+                 WHERE compacted_history_json <> '[]';",
+                [],
+            )
+            .context("Migration 33: redact duplicate checkpoint history")?;
+            self.set_schema_version_tx(&tx, 33)?;
         }
 
         tx.commit()?;

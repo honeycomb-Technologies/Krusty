@@ -17,7 +17,6 @@ pub enum Popup {
     McpBrowser,
     ProcessList,
     PluginsBrowser,
-    Pinch,
     FilePreview,
     SkillsBrowser,
     Hooks,

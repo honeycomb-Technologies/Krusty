@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use krusty_core::ai::providers::ProviderId;
-use krusty_core::auth::OAuthTokenStore;
+use krusty_core::auth::{AuthMethod, OAuthTokenStore};
 
 use crate::error::AppError;
 use crate::AppState;
@@ -30,6 +30,8 @@ pub struct ProviderStatus {
     pub configured: bool,
     pub has_oauth: bool,
     pub supports_oauth: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auth_methods: Vec<String>,
 }
 
 async fn list_providers(State(state): State<AppState>) -> Json<Vec<ProviderStatus>> {
@@ -42,10 +44,11 @@ async fn list_providers(State(state): State<AppState>) -> Json<Vec<ProviderStatu
             let has_oauth = has_provider_oauth(*id, &oauth_store, &store);
             ProviderStatus {
                 id: id.storage_key().to_string(),
-                name: id.to_string(),
+                name: crate::utils::providers::provider_display_name(*id).to_string(),
                 configured: store.has_key(id) || has_oauth,
                 has_oauth,
                 supports_oauth: id.supports_oauth(),
+                auth_methods: auth_method_keys(*id),
             }
         })
         .collect();
@@ -65,10 +68,11 @@ async fn get_provider(
 
     Ok(Json(ProviderStatus {
         id: provider_id.storage_key().to_string(),
-        name: provider_id.to_string(),
+        name: crate::utils::providers::provider_display_name(provider_id).to_string(),
         configured: store.has_key(&provider_id) || has_oauth,
         has_oauth,
         supports_oauth: provider_id.supports_oauth(),
+        auth_methods: auth_method_keys(provider_id),
     }))
 }
 
@@ -101,12 +105,15 @@ async fn set_credential(
     }
 
     let oauth_store = load_oauth_store_or_default("setting credential provider");
+    let credentials = state.credential_store.read().await;
+    let has_oauth = has_provider_oauth(provider_id, &oauth_store, &credentials);
     Ok(Json(ProviderStatus {
         id: provider_id.storage_key().to_string(),
-        name: provider_id.to_string(),
+        name: crate::utils::providers::provider_display_name(provider_id).to_string(),
         configured: true,
-        has_oauth: oauth_store.has_token(&provider_id),
+        has_oauth,
         supports_oauth: provider_id.supports_oauth(),
+        auth_methods: auth_method_keys(provider_id),
     }))
 }
 
@@ -129,12 +136,15 @@ async fn delete_credential(
     }
 
     let oauth_store = load_oauth_store_or_default("deleting credential provider");
+    let store = state.credential_store.read().await;
+    let has_oauth = has_provider_oauth(provider_id, &oauth_store, &store);
     Ok(Json(ProviderStatus {
         id: provider_id.storage_key().to_string(),
-        name: provider_id.to_string(),
-        configured: false,
-        has_oauth: oauth_store.has_token(&provider_id),
+        name: crate::utils::providers::provider_display_name(provider_id).to_string(),
+        configured: has_oauth,
+        has_oauth,
         supports_oauth: provider_id.supports_oauth(),
+        auth_methods: auth_method_keys(provider_id),
     }))
 }
 
@@ -143,7 +153,7 @@ fn parse_provider(s: &str) -> Result<ProviderId, AppError> {
         .ok_or_else(|| AppError::BadRequest(format!("Unknown provider: {}", s)))
 }
 
-fn has_provider_oauth(
+pub(crate) fn has_provider_oauth(
     provider_id: ProviderId,
     oauth_store: &OAuthTokenStore,
     credentials: &krusty_core::storage::CredentialStore,
@@ -156,6 +166,22 @@ fn has_provider_oauth(
         && krusty_core::auth::resolve_grok_auth(credentials)
             .credential
             .is_some()
+}
+
+fn auth_method_keys(provider_id: ProviderId) -> Vec<String> {
+    provider_id
+        .auth_methods()
+        .into_iter()
+        .map(auth_method_key)
+        .collect()
+}
+
+fn auth_method_key(method: AuthMethod) -> String {
+    match method {
+        AuthMethod::ApiKey => "api_key".to_string(),
+        AuthMethod::OAuthBrowser => "oauth_browser".to_string(),
+        AuthMethod::OAuthDevice => "oauth_device".to_string(),
+    }
 }
 
 fn load_oauth_store_or_default(context: &'static str) -> OAuthTokenStore {

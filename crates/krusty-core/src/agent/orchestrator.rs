@@ -39,19 +39,21 @@ use crate::process::ProcessRegistry;
 use crate::skills::SkillsManager;
 use crate::storage::{
     PartialAssistantState, PendingInteractionSnapshot, ProjectSettings, RecoveryStatus,
-    SessionManager, SessionType, WorkMode,
+    SessionType, WorkMode,
 };
 use crate::tools::registry::{FileObservationTracker, PermissionMode, ToolRegistry};
 
-use super::compaction::CompactionManager;
+use super::compaction::{
+    is_context_overflow_error, microcompact::microcompact_messages, run_compaction_pipeline,
+    CompactionManager, CompactionRequest, CompactionResult, CompactionTrigger,
+};
 use super::context;
-use super::context_ledger::{ContextLedger, ContinuationDecision};
+use super::context_ledger::ContextLedger;
 use super::executor;
 use super::failure;
 use super::loop_events::{LoopEvent, LoopInput, LoopStopReason};
 use super::stream;
 use super::DelegatedProgressEvent;
-use super::{create_pinched_session, CreatePinchedSessionRequest};
 
 use self::message_builder::{build_assistant_message, finalize_explore_only_turn};
 use self::persistence::{
@@ -317,6 +319,8 @@ impl AgenticOrchestrator {
 
         let mut work_mode = initial_work_mode;
         let mut last_token_count = 0usize;
+        let mut last_usage_prompt_tokens = None::<usize>;
+        let mut messages_at_last_usage = 0usize;
         let mut exploration_budget_count = 0usize;
         let mut tool_failure_signatures: HashMap<String, usize> = HashMap::new();
         let mut tool_pattern_signatures: HashMap<String, usize> = HashMap::new();
@@ -338,6 +342,12 @@ impl AgenticOrchestrator {
         );
         let mut context_ledger = ContextLedger::from_conversation(&conversation);
         let mut empty_stream_idle_retry_attempted = false;
+        let mut overflow_compact_retry_attempted = false;
+        let project_dir_key = project_dir
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        let project_dir_for_compaction = project_dir_key.as_deref();
+        let user_id_for_compaction = user_id.as_deref();
         let file_observations = Arc::new(FileObservationTracker::default());
         persist_context_state(&db_path, &session_id, &context_ledger);
         clear_recovery_state(&db_path, &session_id);
@@ -372,7 +382,13 @@ impl AgenticOrchestrator {
             }
             iteration += 1;
 
-            // Build context-injected conversation
+            let micro = microcompact_messages(&conversation);
+            if micro.changed {
+                conversation = micro.messages;
+                context_ledger.update_from_conversation(&conversation);
+                persist_context_state(&db_path, &session_id, &context_ledger);
+            }
+
             let conversation_with_context = inject_runtime_context(
                 &conversation,
                 &db_path,
@@ -386,72 +402,47 @@ impl AgenticOrchestrator {
                 session_type,
                 user_id.as_deref(),
             );
-            let estimated_tokens_before =
-                super::estimate_conversation_tokens(&conversation_with_context);
+            let estimated_tokens_before = super::estimate_conversation_tokens_with_usage(
+                &conversation_with_context,
+                last_usage_prompt_tokens,
+                conversation_with_context
+                    .len()
+                    .saturating_sub(messages_at_last_usage),
+            );
 
             if compaction_manager.should_compact(estimated_tokens_before) {
-                let session_info = match crate::storage::Database::new(&db_path) {
-                    Ok(db) => SessionManager::new(db)
-                        .get_session(&session_id)
-                        .ok()
-                        .flatten(),
-                    Err(error) => {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %error,
-                            "Failed to open database while preparing automatic pinch"
-                        );
-                        None
-                    }
-                };
-                let source_session_title = session_info
-                    .as_ref()
-                    .map(|session| session.title.as_str())
-                    .unwrap_or("Session");
-                let target_branch = session_info
-                    .as_ref()
-                    .and_then(|session| session.target_branch.as_deref());
-                let model_for_child = session_info
-                    .as_ref()
-                    .and_then(|session| session.model.as_deref())
-                    .unwrap_or(ai_client.config().model.as_str());
-
-                let pinch_result = match create_pinched_session(CreatePinchedSessionRequest {
-                    db_path: &db_path,
-                    ai_client: Some(ai_client.as_ref()),
-                    session_id: &session_id,
-                    source_session_title,
-                    conversation: &conversation,
-                    working_dir: &working_dir,
-                    model: Some(model_for_child),
-                    target_branch,
-                    permission_mode,
-                    preservation_hints: None,
-                    direction: None,
-                    initial_user_message: Some("Continue working on the current task.".to_string()),
-                })
+                let messages_after_usage =
+                    conversation.len().saturating_sub(messages_at_last_usage);
+                match apply_in_place_compaction(
+                    &db_path,
+                    &session_id,
+                    &mut conversation,
+                    &mut context_ledger,
+                    &working_dir,
+                    project_dir_for_compaction,
+                    user_id_for_compaction,
+                    ai_client.as_ref(),
+                    &compaction_manager,
+                    CompactionTrigger::Auto,
+                    last_usage_prompt_tokens,
+                    messages_after_usage,
+                    Some(estimated_tokens_before),
+                    &event_tx,
+                )
                 .await
                 {
-                    Ok(result) => result,
+                    Ok(result) => {
+                        last_usage_prompt_tokens = None;
+                        messages_at_last_usage = conversation.len();
+                        last_token_count = result.estimated_tokens_after;
+                        update_token_count(&db_path, &session_id, result.estimated_tokens_after);
+                        clear_recovery_state(&db_path, &session_id);
+                        set_agent_state(&db_path, &session_id, "streaming");
+                        continue;
+                    }
                     Err(error) => {
-                        let continuation = context_ledger.continuation_decision();
-                        persist_context_state(&db_path, &session_id, &context_ledger);
-                        let continuation_hint = match continuation {
-                            ContinuationDecision::Resumable {
-                                latest_user_objective,
-                            } => format!(
-                                " continuation candidate preserved objective: {}",
-                                latest_user_objective
-                            ),
-                            ContinuationDecision::NonResumable { reason } => {
-                                format!(" continuation is non-resumable: {:?}", reason)
-                            }
-                        };
                         let _ = event_tx.send(LoopEvent::Error {
-                            error: format!(
-                                "Automatic pinch could not create a continuation session;{} ({})",
-                                continuation_hint, error
-                            ),
+                            error: format!("Automatic compaction failed: {}", error),
                         });
                         if last_token_count > 0 {
                             update_token_count(&db_path, &session_id, last_token_count);
@@ -464,22 +455,7 @@ impl AgenticOrchestrator {
                         });
                         return;
                     }
-                };
-
-                persist_context_state(&db_path, &session_id, &context_ledger);
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::SessionPinched {
-                    reason: "context_pressure".to_string(),
-                    source_session_id: session_id.clone(),
-                    new_session_id: pinch_result.new_session_id,
-                    estimated_tokens_before,
-                });
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::Pinched,
-                });
-                return;
+                }
             }
 
             // Stream AI response
@@ -501,6 +477,54 @@ impl AgenticOrchestrator {
                 Ok(rx) => rx,
                 Err(e) => {
                     let error = format!("AI error: {}", e);
+                    if !overflow_compact_retry_attempted && is_context_overflow_error(&error) {
+                        overflow_compact_retry_attempted = true;
+                        tracing::warn!(
+                            session_id = %session_id,
+                            "Provider rejected request for context overflow; compacting and retrying once"
+                        );
+                        let messages_after_usage =
+                            conversation.len().saturating_sub(messages_at_last_usage);
+                        match apply_in_place_compaction(
+                            &db_path,
+                            &session_id,
+                            &mut conversation,
+                            &mut context_ledger,
+                            &working_dir,
+                            project_dir_for_compaction,
+                            user_id_for_compaction,
+                            ai_client.as_ref(),
+                            &compaction_manager,
+                            CompactionTrigger::Overflow,
+                            last_usage_prompt_tokens,
+                            messages_after_usage,
+                            None,
+                            &event_tx,
+                        )
+                        .await
+                        {
+                            Ok(result) => {
+                                last_usage_prompt_tokens = None;
+                                messages_at_last_usage = conversation.len();
+                                last_token_count = result.estimated_tokens_after;
+                                update_token_count(
+                                    &db_path,
+                                    &session_id,
+                                    result.estimated_tokens_after,
+                                );
+                                clear_recovery_state(&db_path, &session_id);
+                                set_agent_state(&db_path, &session_id, "streaming");
+                                continue;
+                            }
+                            Err(compaction_error) => {
+                                tracing::error!(
+                                    session_id = %session_id,
+                                    error = %compaction_error,
+                                    "Reactive overflow compaction failed"
+                                );
+                            }
+                        }
+                    }
                     persist_recovery_state(
                         &db_path,
                         &session_id,
@@ -548,6 +572,10 @@ impl AgenticOrchestrator {
             if result.total_tokens > 0 {
                 last_token_count = result.total_tokens;
             }
+            if result.prompt_tokens > 0 {
+                last_usage_prompt_tokens = Some(result.prompt_tokens);
+                messages_at_last_usage = conversation.len();
+            }
 
             if should_retry_empty_stream_idle(
                 result.stop_reason.as_ref(),
@@ -575,6 +603,60 @@ impl AgenticOrchestrator {
             }
 
             if let Some(stop_reason) = result.stop_reason.clone() {
+                if !overflow_compact_retry_attempted
+                    && stop_reason == LoopStopReason::ProviderError
+                    && result
+                        .last_error
+                        .as_ref()
+                        .is_some_and(|error| is_context_overflow_error(error))
+                {
+                    overflow_compact_retry_attempted = true;
+                    tracing::warn!(
+                        session_id = %session_id,
+                        "Provider stream reported context overflow; compacting and retrying once"
+                    );
+                    let messages_after_usage =
+                        conversation.len().saturating_sub(messages_at_last_usage);
+                    match apply_in_place_compaction(
+                        &db_path,
+                        &session_id,
+                        &mut conversation,
+                        &mut context_ledger,
+                        &working_dir,
+                        project_dir_for_compaction,
+                        user_id_for_compaction,
+                        ai_client.as_ref(),
+                        &compaction_manager,
+                        CompactionTrigger::Overflow,
+                        last_usage_prompt_tokens,
+                        messages_after_usage,
+                        None,
+                        &event_tx,
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            last_usage_prompt_tokens = None;
+                            messages_at_last_usage = conversation.len();
+                            last_token_count = result.estimated_tokens_after;
+                            update_token_count(
+                                &db_path,
+                                &session_id,
+                                result.estimated_tokens_after,
+                            );
+                            clear_recovery_state(&db_path, &session_id);
+                            set_agent_state(&db_path, &session_id, "streaming");
+                            continue;
+                        }
+                        Err(compaction_error) => {
+                            tracing::error!(
+                                session_id = %session_id,
+                                error = %compaction_error,
+                                "Reactive overflow compaction failed"
+                            );
+                        }
+                    }
+                }
                 persist_recovery_state(
                     &db_path,
                     &session_id,
@@ -958,6 +1040,75 @@ impl AgenticOrchestrator {
             });
         }
     }
+}
+
+async fn apply_in_place_compaction(
+    db_path: &Path,
+    session_id: &str,
+    conversation: &mut Vec<ModelMessage>,
+    context_ledger: &mut ContextLedger,
+    working_dir: &Path,
+    project_dir: Option<&str>,
+    user_id: Option<&str>,
+    ai_client: &AiClient,
+    compaction_manager: &CompactionManager,
+    trigger: CompactionTrigger,
+    last_usage_prompt_tokens: Option<usize>,
+    messages_after_usage: usize,
+    triggering_token_estimate: Option<usize>,
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+) -> Result<CompactionResult, anyhow::Error> {
+    let reason = match &trigger {
+        CompactionTrigger::Auto => "auto",
+        CompactionTrigger::Manual { .. } => "manual",
+        CompactionTrigger::Reactive => "reactive",
+        CompactionTrigger::Overflow => "overflow",
+    }
+    .to_string();
+
+    let _ = event_tx.send(LoopEvent::ContextCompactionStarted {
+        reason: reason.clone(),
+    });
+
+    let compaction_result = run_compaction_pipeline(CompactionRequest {
+        db_path,
+        session_id,
+        conversation,
+        working_dir,
+        ai_client: Some(ai_client),
+        model: Some(ai_client.config().model.as_str()),
+        trigger,
+        compaction_manager: *compaction_manager,
+        triggering_token_estimate,
+        last_usage_prompt_tokens,
+        messages_after_usage,
+        summary_override: None,
+        project_dir,
+        user_id,
+    })
+    .await?;
+
+    *conversation = compaction_result.compacted_conversation.clone();
+    context_ledger.update_from_conversation(conversation);
+    persist_context_state(db_path, session_id, context_ledger);
+    let _ = event_tx.send(LoopEvent::ContextCompacted {
+        reason: reason.clone(),
+        estimated_tokens_before: compaction_result.estimated_tokens_before,
+        estimated_tokens_after: compaction_result.estimated_tokens_after,
+        replaced_messages: compaction_result.replaced_messages,
+        checkpoint_id: compaction_result.checkpoint_id.clone(),
+        compaction_count: compaction_result.compaction_count,
+    });
+    tracing::info!(
+        session_id = %session_id,
+        reason = %reason,
+        tokens_before = compaction_result.estimated_tokens_before,
+        tokens_after = compaction_result.estimated_tokens_after,
+        replaced = compaction_result.replaced_messages,
+        "In-place compaction completed"
+    );
+
+    Ok(compaction_result)
 }
 
 #[cfg(test)]

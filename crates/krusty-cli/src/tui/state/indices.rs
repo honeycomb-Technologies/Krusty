@@ -13,6 +13,7 @@ use crate::tui::blocks::BlockType;
 #[derive(Debug, Default)]
 pub struct BlockIndices {
     pub thinking: usize,
+    pub pinch: usize,
     pub bash: usize,
     pub terminal: usize,
     pub tool_result: usize,
@@ -40,6 +41,11 @@ impl BlockIndices {
                 let idx = self.thinking;
                 self.thinking += 1;
                 Some((BlockType::Thinking, idx))
+            }
+            "pinch" => {
+                let idx = self.pinch;
+                self.pinch += 1;
+                Some((BlockType::Pinch, idx))
             }
             "bash" => {
                 let idx = self.bash;

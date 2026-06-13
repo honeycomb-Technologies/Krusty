@@ -49,7 +49,7 @@ pub struct ProviderSpecificParams {
     pub chat_template_args: Option<Value>,
 }
 
-/// Get temperature for a model (based on OpenCode's logic)
+/// Get temperature for a model.
 ///
 /// For OpenAI-compatible models (GLM, MiniMax), delegates to glm module
 pub fn temperature_for_model(model_id: &str) -> Option<f32> {
@@ -72,7 +72,7 @@ pub fn temperature_for_model(model_id: &str) -> Option<f32> {
     None
 }
 
-/// Get top P for a model (based on OpenCode's logic)
+/// Get top P for a model.
 pub fn top_p_for_model(model_id: &str) -> Option<f32> {
     let id = model_id.to_lowercase();
 
@@ -89,7 +89,7 @@ pub fn top_p_for_model(model_id: &str) -> Option<f32> {
     None
 }
 
-/// Get top K for a model (based on OpenCode's logic)
+/// Get top K for a model.
 pub fn top_k_for_model(model_id: &str) -> Option<i32> {
     let id = model_id.to_lowercase();
 

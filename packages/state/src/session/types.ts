@@ -72,11 +72,20 @@ export interface DelegatedArtifactState {
   pendingTargets?: number;
 }
 
+export interface ChatMessageAttachment {
+  type: 'image' | 'file';
+  name?: string;
+  mimeType?: string;
+  uri?: string;
+  base64?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
   thinking?: string;
+  attachments?: ChatMessageAttachment[];
   toolCalls?: ToolCall[];
   isQueued?: boolean;
   kind?: 'recovery_notice' | 'live_partial' | 'streaming';
@@ -90,6 +99,7 @@ export interface Attachment {
   name: string;
   type: 'image' | 'file';
   mimeType: string;
+  uri?: string;
   base64?: string;
   text?: string;
 }

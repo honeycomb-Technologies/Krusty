@@ -151,7 +151,7 @@ impl HelpPopup {
             ("/auth", "Manage API providers"),
             ("/theme", "Change color theme"),
             ("/clear", "Clear chat messages"),
-            ("/pinch", "Compress context to new session"),
+            ("/pinch", "Compact this session in place"),
             ("/plan", "View/manage active plan"),
             ("/mcp", "Browse and manage MCP servers"),
             ("/skills", "Browse skills"),

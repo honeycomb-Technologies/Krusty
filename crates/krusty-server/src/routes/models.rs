@@ -55,7 +55,7 @@ async fn list_models(
         models.push(ModelResponse {
             id: m.id.clone(),
             display_name: m.display_name.clone(),
-            provider: m.provider.to_string(),
+            provider: crate::utils::providers::provider_display_name(m.provider).to_string(),
             context_window: m.context_window,
             max_output: m.max_output,
             supports_thinking: m.supports_thinking,
@@ -73,7 +73,8 @@ async fn list_models(
                 models.push(ModelResponse {
                     id: m.id.clone(),
                     display_name: m.display_name.clone(),
-                    provider: m.provider.to_string(),
+                    provider: crate::utils::providers::provider_display_name(m.provider)
+                        .to_string(),
                     context_window: m.context_window,
                     max_output: m.max_output,
                     supports_thinking: m.supports_thinking,
@@ -141,7 +142,7 @@ async fn get_model(
         return Ok(Json(ModelResponse {
             id: model.id.clone(),
             display_name: model.display_name.clone(),
-            provider: model.provider.to_string(),
+            provider: crate::utils::providers::provider_display_name(model.provider).to_string(),
             context_window: model.context_window,
             max_output: model.max_output,
             supports_thinking: model.supports_thinking,

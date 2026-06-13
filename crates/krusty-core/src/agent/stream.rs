@@ -45,6 +45,7 @@ pub(crate) struct StreamResult {
     pub recovery_checkpoint: StreamCheckpoint,
     pub last_error: Option<String>,
     pub total_tokens: usize,
+    pub prompt_tokens: usize,
     pub stop_reason: Option<LoopStopReason>,
 }
 
@@ -64,6 +65,7 @@ pub(crate) async fn process_stream(
     let mut recovery_tool_calls = Vec::new();
     let mut last_error = None;
     let mut total_tokens = 0usize;
+    let mut prompt_tokens = 0usize;
     let mut stop_reason = None;
     let mut last_checkpoint_text_len = 0usize;
 
@@ -184,6 +186,7 @@ pub(crate) async fn process_stream(
                 );
             }
             StreamPart::Usage { usage } => {
+                prompt_tokens = usage.prompt_tokens;
                 total_tokens = if usage.total_tokens > 0 {
                     usage.total_tokens
                 } else {
@@ -274,6 +277,7 @@ pub(crate) async fn process_stream(
         recovery_checkpoint,
         last_error,
         total_tokens,
+        prompt_tokens,
         stop_reason,
     }
 }

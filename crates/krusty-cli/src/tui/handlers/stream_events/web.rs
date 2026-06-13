@@ -16,6 +16,17 @@ impl App {
 
     pub(super) fn handle_server_tool_complete(&mut self, id: String, name: String) {
         tracing::info!("Server tool completed: {} ({})", name, id);
+        if name == "web_search" {
+            if let Some(block) = self
+                .runtime
+                .blocks
+                .web_search
+                .iter_mut()
+                .find(|block| block.tool_use_id() == id)
+            {
+                block.complete();
+            }
+        }
     }
 
     pub(super) fn handle_server_tool_error(&mut self, tool_use_id: String, error_code: String) {

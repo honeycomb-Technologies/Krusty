@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use crate::agent::DelegatedToolKind;
 use crate::plan::{PlanFile, PlanManager, TaskStatus};
 use crate::tui::blocks::{BuildBlock, ExploreBlock, StreamBlock};
 use crate::tui::handlers::commands::generate_krab_from_exploration;
@@ -132,6 +133,67 @@ pub fn poll_build_progress(
             }
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                 tracing::debug!("Build progress channel disconnected");
+                break;
+            }
+        }
+    }
+
+    result
+}
+
+/// Poll core delegated-agent progress and route it to visible agent widgets.
+pub fn poll_delegated_progress(
+    channels: &mut AsyncChannels,
+    explore_blocks: &mut [ExploreBlock],
+    build_blocks: &mut [BuildBlock],
+) -> PollResult {
+    let mut result = PollResult::new();
+
+    let Some(mut rx) = channels.delegated_progress.take() else {
+        return result;
+    };
+
+    loop {
+        match rx.try_recv() {
+            Ok(event) => {
+                result.needs_redraw = true;
+                match event.kind {
+                    DelegatedToolKind::Explore
+                    | DelegatedToolKind::Plan
+                    | DelegatedToolKind::Verify => {
+                        let block_idx = explore_blocks
+                            .iter()
+                            .position(|block| {
+                                block.tool_use_id() == Some(event.tool_call_id.as_str())
+                            })
+                            .or_else(|| explore_blocks.iter().position(StreamBlock::is_streaming));
+                        if let Some(idx) = block_idx {
+                            if let Some(block) = explore_blocks.get_mut(idx) {
+                                block.update_progress(event.progress);
+                            }
+                        }
+                    }
+                    DelegatedToolKind::Build => {
+                        let block_idx = build_blocks
+                            .iter()
+                            .position(|block| {
+                                block.tool_use_id() == Some(event.tool_call_id.as_str())
+                            })
+                            .or_else(|| build_blocks.iter().position(StreamBlock::is_streaming));
+                        if let Some(idx) = block_idx {
+                            if let Some(block) = build_blocks.get_mut(idx) {
+                                block.update_progress(event.progress);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                channels.delegated_progress = Some(rx);
+                break;
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                tracing::debug!("Delegated progress channel disconnected");
                 break;
             }
         }

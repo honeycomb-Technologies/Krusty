@@ -58,12 +58,6 @@ fn dock_icon(
     div()
         .id(id)
         .size(px(34.0))
-        .border_1()
-        .border_color(if selected {
-            theme::accent()
-        } else {
-            theme::hairline()
-        })
         .bg(if selected {
             theme::surface_selected()
         } else {

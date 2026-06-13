@@ -65,7 +65,11 @@ pub use autonomy::auto_classifier;
 pub use autonomy::auto_classifier::AutoClassifierHook;
 pub use autonomy::{coordinator_prompt, team, tick_engine};
 pub use cancellation::AgentCancellation;
-pub(crate) use compaction::estimate_tokens as estimate_conversation_tokens;
+pub(crate) use compaction::estimate_with_usage as estimate_conversation_tokens_with_usage;
+pub use compaction::{
+    run_compaction_pipeline, CompactionManager, CompactionRequest, CompactionResult,
+    CompactionTrigger,
+};
 pub use context::{
     build_plan_context, build_project_context, build_skills_context, inject_context,
 };

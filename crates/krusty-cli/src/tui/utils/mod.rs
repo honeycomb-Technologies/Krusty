@@ -10,8 +10,8 @@ mod text;
 mod title;
 
 pub use channels::{
-    AsyncChannels, DeviceCodeInfo, DynamicModelUpdate, InitExplorationResult, McpStatusUpdate,
-    OAuthStatusUpdate, SummarizationUpdate, TitleUpdate,
+    AsyncChannels, CompactionUpdate, DeviceCodeInfo, DynamicModelUpdate, InitExplorationResult,
+    McpStatusUpdate, OAuthStatusUpdate, TitleUpdate,
 };
 pub use syntax::highlight_code;
 pub use text::{count_wrapped_lines, truncate_ellipsis, wrap_line, wrap_text};

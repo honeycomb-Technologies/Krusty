@@ -137,14 +137,22 @@ impl App {
                     self.ui.autocomplete.prev();
                     return;
                 }
-                // Only plain Enter selects autocomplete - Shift+Enter should insert newline
+                // Only plain Enter selects autocomplete for a bare slash command.
+                // If the input already has arguments (e.g. `/plugins install ...`),
+                // submit the full typed command instead of replacing it with the
+                // selected autocomplete item.
                 KeyCode::Enter if modifiers.is_empty() => {
-                    if let Some(cmd) = self.ui.autocomplete.get_selected() {
-                        self.handle_slash_command(cmd.primary);
-                        self.ui.input.clear();
+                    let has_arguments = self.ui.input.content().chars().any(char::is_whitespace);
+                    if has_arguments {
                         self.ui.autocomplete.hide();
+                    } else {
+                        if let Some(cmd) = self.ui.autocomplete.get_selected() {
+                            self.handle_slash_command(cmd.primary);
+                            self.ui.input.clear();
+                            self.ui.autocomplete.hide();
+                        }
+                        return;
                     }
-                    return;
                 }
                 KeyCode::Esc => {
                     self.ui.autocomplete.hide();
@@ -272,21 +280,26 @@ impl App {
             }
         }
 
-        // Route paste to pinch popup if in input state
-        if let Popup::Pinch = &self.ui.popup {
-            use crate::tui::popups::pinch::PinchStage;
-            match &self.ui.popups.pinch.stage {
-                PinchStage::PreservationInput { .. } | PinchStage::DirectionInput { .. } => {
-                    for c in text.chars() {
-                        self.ui.popups.pinch.add_char(c);
-                    }
-                    return;
-                }
-                _ => {}
+        // Default: paste to main input
+        if crate::tui::utils::clipboard::looks_like_non_text_paste(&text) {
+            if let Some(image_data) = crate::tui::utils::clipboard::read_clipboard_image() {
+                let placeholder_id = uuid::Uuid::new_v4().to_string();
+                self.ui
+                    .input
+                    .insert_text(&format!("[clipboard:{}]", placeholder_id));
+                self.runtime.pending_clipboard_images.insert(
+                    placeholder_id,
+                    (image_data.width, image_data.height, image_data.rgba_bytes),
+                );
+            } else {
+                self.show_toast(crate::tui::components::Toast::error(
+                    "Clipboard image paste failed".to_string(),
+                ));
             }
+            self.update_autocomplete();
+            return;
         }
 
-        // Default: paste to main input
         // Auto-wrap file paths with brackets for preview support
         let trimmed = text.trim();
         let path = std::path::Path::new(trimmed);
@@ -461,7 +474,7 @@ impl App {
                     .iter()
                     .any(|ext| query.to_lowercase().ends_with(ext));
 
-            if is_file_path {
+            if is_file_path || query.chars().any(char::is_whitespace) {
                 self.ui.autocomplete.hide();
             } else if self.ui.autocomplete.visible {
                 self.ui.autocomplete.update(query);

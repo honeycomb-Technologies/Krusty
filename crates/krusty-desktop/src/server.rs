@@ -9,6 +9,7 @@ use anyhow::{anyhow, Context as _, Result};
 use crate::api::KrustyApiClient;
 
 const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:3000";
+const DESKTOP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SERVER_START_ATTEMPTS: usize = 50;
 const SERVER_START_POLL_INTERVAL: Duration = Duration::from_millis(400);
 
@@ -30,7 +31,7 @@ pub fn default_server_url() -> &'static str {
 
 pub fn ensure_local_server(preferred_url: String) -> Result<ServerEnsureResult> {
     let preferred = normalized_or_default(preferred_url);
-    if health_ok(&preferred) {
+    if compatible_health_ok(&preferred)? {
         return Ok(ServerEnsureResult {
             base_url: preferred.clone(),
             detail: format!("Connected to configured server at {preferred}."),
@@ -111,7 +112,34 @@ fn detect_running_server() -> Option<PidFileInstance> {
 }
 
 fn health_ok(base_url: &str) -> bool {
-    KrustyApiClient::new(base_url).health().is_ok()
+    compatible_health_ok(base_url).unwrap_or(false)
+}
+
+fn compatible_health_ok(base_url: &str) -> Result<bool> {
+    let client = KrustyApiClient::new(base_url);
+    let health = match client.health() {
+        Ok(health) => health,
+        Err(_) => return Ok(false),
+    };
+
+    if version_compatible(&health.version) {
+        Ok(true)
+    } else {
+        Err(anyhow!(
+            "Krusty server at {base_url} is v{} but this desktop expects v{}. Stop the old `krusty serve` process and restart from the current workspace.",
+            health.version,
+            DESKTOP_VERSION
+        ))
+    }
+}
+
+fn version_compatible(server_version: &str) -> bool {
+    major_minor(server_version) == major_minor(DESKTOP_VERSION)
+}
+
+fn major_minor(version: &str) -> Option<(&str, &str)> {
+    let mut parts = version.split('.');
+    Some((parts.next()?, parts.next()?))
 }
 
 fn read_pid_file() -> Option<PidFileInstance> {
@@ -146,19 +174,24 @@ fn spawn_server_process(log_path: &PathBuf) -> Result<Child> {
         fs::create_dir_all(parent)?;
     }
 
-    let first_error = match spawn_command("krusty", &["serve"], None, log_path) {
-        Ok(child) => return Ok(child),
-        Err(error) => error,
-    };
-
     let workspace = workspace_root();
-    spawn_command(
-        "cargo",
-        &["run", "-p", "krusty", "--", "serve"],
-        Some(workspace),
-        log_path,
-    )
-    .with_context(|| format!("`krusty serve` failed to spawn: {first_error}"))
+    if workspace.join("Cargo.toml").is_file() {
+        let first_error = match spawn_command(
+            "cargo",
+            &["run", "-p", "krusty", "--", "serve"],
+            Some(workspace),
+            log_path,
+        ) {
+            Ok(child) => return Ok(child),
+            Err(error) => error,
+        };
+
+        return spawn_command("krusty", &["serve"], None, log_path).with_context(|| {
+            format!("workspace `cargo run -p krusty -- serve` failed to spawn: {first_error}")
+        });
+    }
+
+    spawn_command("krusty", &["serve"], None, log_path).context("`krusty serve` failed to spawn")
 }
 
 fn spawn_command(
@@ -180,6 +213,16 @@ fn spawn_command(
         .stderr(Stdio::from(stderr));
     if let Some(current_dir) = current_dir {
         command.current_dir(current_dir);
+    }
+    for key in [
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            command.env(key, value);
+        }
     }
     command.spawn()
 }
@@ -237,5 +280,11 @@ mod tests {
     #[test]
     fn converts_port_to_loopback_url() {
         assert_eq!(url_for_port(3017), "http://127.0.0.1:3017");
+    }
+
+    #[test]
+    fn major_minor_extracts_version_pair() {
+        assert_eq!(major_minor("0.7.2"), Some(("0", "7")));
+        assert_eq!(major_minor("0"), None);
     }
 }

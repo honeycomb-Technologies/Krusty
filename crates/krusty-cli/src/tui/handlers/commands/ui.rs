@@ -73,40 +73,9 @@ impl App {
         self.runtime.blocks = crate::tui::state::BlockManager::new();
     }
 
-    /// Handle /pinch command - open pinch popup.
+    /// Handle /pinch command — compact the current session in place.
     pub(super) fn handle_pinch_command(&mut self) {
-        if self.runtime.chat.messages.is_empty() {
-            self.runtime.chat.messages.push((
-                "system".to_string(),
-                "No conversation to summarize. Start a chat first.".to_string(),
-            ));
-            return;
-        }
-
-        let max_tokens = self.max_context_tokens();
-        let usage_percent = if max_tokens > 0 {
-            ((self.runtime.context_tokens_used as f64 / max_tokens as f64) * 100.0) as u8
-        } else {
-            0
-        };
-
-        let top_files = self.get_top_files_preview(5);
-        self.ui.popups.pinch.start(usage_percent, top_files);
-        self.ui.popup = Popup::Pinch;
-    }
-
-    /// Get top N files by activity for preview.
-    pub(crate) fn get_top_files_preview(&self, n: usize) -> Vec<(String, f64)> {
-        if let (Some(sm), Some(session_id)) = (
-            &self.services.session_manager,
-            &self.runtime.current_session_id,
-        ) {
-            use crate::storage::FileActivityTracker;
-            let db = sm.db();
-            let tracker = FileActivityTracker::new(db, session_id.clone());
-            return tracker.get_top_files_preview(n);
-        }
-        Vec::new()
+        self.start_manual_compaction(false);
     }
 
     /// Handle /terminal command - spawn an interactive PTY terminal.

@@ -575,6 +575,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-stream"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476"
+dependencies = [
+ "async-stream-impl",
+ "futures-core",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "async-stream-impl"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "async-task"
 version = "4.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2453,6 +2475,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "edon"
+version = "0.0.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4f7330fe4f024d95e572b1dda018f0157ea0fb9ff7338238321dcac5f56224b"
+dependencies = [
+ "bitflags 2.11.0",
+ "ctor",
+ "libffi",
+ "libnode_sys",
+ "once_cell",
+]
+
+[[package]]
 name = "ego-tree"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3386,8 +3421,6 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "979b45cfa6ec723b6f42330915a1b3769b930d02b2d505f9697f8ca602bee707"
 dependencies = [
  "anyhow",
  "as-raw-xcb-connection",
@@ -3398,6 +3431,7 @@ dependencies = [
  "blade-macros",
  "blade-util",
  "block",
+ "block2",
  "bytemuck",
  "calloop",
  "calloop-wayland-source",
@@ -3437,6 +3471,7 @@ dependencies = [
  "naga",
  "num_cpus",
  "objc",
+ "objc2",
  "oo7",
  "open",
  "parking",
@@ -4727,6 +4762,7 @@ dependencies = [
  "crossterm",
  "dashmap",
  "dirs 6.0.0",
+ "edon",
  "flate2",
  "futures",
  "gilrs",
@@ -4784,6 +4820,30 @@ dependencies = [
  "which 7.0.3",
  "xz2",
  "zip",
+]
+
+[[package]]
+name = "krusty-client"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "krusty-client-state"
+version = "0.7.0"
+dependencies = [
+ "krusty-client",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4857,9 +4917,33 @@ dependencies = [
  "dirs 6.0.0",
  "gpui",
  "gpui-component",
+ "pulldown-cmark",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "krusty-mobile"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "gpui",
+ "gpui-component",
+ "krusty-client",
+ "krusty-client-state",
+ "krusty-mobile-ui",
+ "tokio",
+]
+
+[[package]]
+name = "krusty-mobile-ui"
+version = "0.7.0"
+dependencies = [
+ "gpui",
+ "krusty-client-state",
+ "pulldown-cmark",
 ]
 
 [[package]]
@@ -4960,6 +5044,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 
 [[package]]
+name = "libffi"
+version = "4.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0feebbe0ccd382a2790f78d380540500d7b78ed7a3498b68fcfbc1593749a94"
+dependencies = [
+ "libc",
+ "libffi-sys",
+]
+
+[[package]]
+name = "libffi-sys"
+version = "3.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90c6c6e17136d4bc439d43a2f3c6ccf0731cccc016d897473a29791d3c2160c3"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "libfuzzer-sys"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4998,6 +5101,15 @@ name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
+name = "libnode_sys"
+version = "0.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9108e8123582dd81f56ea05ff0cab887c8f2a6567a60717f06d8e861b3880809"
+dependencies = [
+ "libloading",
+]
 
 [[package]]
 name = "libredox"

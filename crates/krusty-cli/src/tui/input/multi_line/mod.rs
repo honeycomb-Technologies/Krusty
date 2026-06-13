@@ -200,12 +200,106 @@ impl MultiLineInput {
         None
     }
 
+    /// Get a bracketed reference at click position (relative to input area).
+    ///
+    /// Unlike get_file_ref_at_click, this also returns non-path refs such as
+    /// `[clipboard:<id>]` so callers can resolve them through runtime state.
+    pub fn get_bracket_ref_at_click(&self, x: u16, y: u16) -> Option<(usize, usize, String)> {
+        let content_x = x.saturating_sub(2) as usize;
+        let content_y = y.saturating_sub(1) as usize;
+        let clicked_line = self.viewport_offset + content_y;
+
+        let lines = self.get_wrapped_lines();
+        if clicked_line >= lines.len() {
+            return None;
+        }
+
+        let line_content = &lines[clicked_line];
+        let mut byte_in_line = 0;
+        let mut visual_width = 0;
+
+        for ch in line_content.chars() {
+            let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+            if visual_width >= content_x {
+                break;
+            }
+            byte_in_line += ch.len_utf8();
+            visual_width += ch_width;
+        }
+
+        let mut absolute_byte_pos = 0;
+        for (idx, line) in lines.iter().enumerate() {
+            if idx < clicked_line {
+                absolute_byte_pos += line.len();
+                if absolute_byte_pos < self.content.len()
+                    && self.content.as_bytes().get(absolute_byte_pos) == Some(&b'\n')
+                {
+                    absolute_byte_pos += 1;
+                }
+            } else {
+                absolute_byte_pos += byte_in_line;
+                break;
+            }
+        }
+
+        for caps in FILE_REF_PATTERN.captures_iter(&self.content) {
+            let m = caps.get(0)?;
+            if absolute_byte_pos >= m.start() && absolute_byte_pos < m.end() {
+                return Some((m.start(), m.end(), caps.get(1)?.as_str().to_string()));
+            }
+        }
+
+        // Clipboard refs do not look like paths and intentionally are not part
+        // of FILE_REF_PATTERN.
+        for (start, end, inner) in bracket_refs(&self.content) {
+            if absolute_byte_pos >= start && absolute_byte_pos < end {
+                return Some((start, end, inner));
+            }
+        }
+
+        None
+    }
+
     /// Get all file reference ranges in content for styling
     /// Returns vec of (byte_start, byte_end) for each file reference
     pub fn get_file_ref_ranges(&self) -> Vec<(usize, usize)> {
-        FILE_REF_PATTERN
+        let mut ranges: Vec<(usize, usize)> = FILE_REF_PATTERN
             .find_iter(&self.content)
             .map(|m| (m.start(), m.end()))
-            .collect()
+            .collect();
+
+        ranges.extend(
+            bracket_refs(&self.content)
+                .into_iter()
+                .filter(|(_, _, inner)| inner.starts_with("clipboard:"))
+                .map(|(start, end, _)| (start, end)),
+        );
+        ranges.sort_unstable();
+        ranges
     }
+}
+
+fn bracket_refs(content: &str) -> Vec<(usize, usize, String)> {
+    let mut refs = Vec::new();
+    let mut start = None;
+
+    for (idx, ch) in content.char_indices() {
+        match ch {
+            '[' if start.is_none() => start = Some(idx),
+            ']' => {
+                if let Some(start_idx) = start.take() {
+                    if start_idx + 1 < idx {
+                        refs.push((
+                            start_idx,
+                            idx + ch.len_utf8(),
+                            content[start_idx + 1..idx].to_string(),
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    refs
 }

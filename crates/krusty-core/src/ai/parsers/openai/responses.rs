@@ -75,8 +75,8 @@ impl OpenAIParser {
         }
     }
 
-    /// Parse OpenAI Responses API event format
-    /// Used by GPT-5 models via OpenCode Zen and ChatGPT Codex
+    /// Parse OpenAI Responses API event format.
+    /// Used by GPT-5-class models on OpenAI Responses-compatible transports.
     pub(super) fn parse_responses_api_event(
         &self,
         json: &Value,
@@ -153,6 +153,27 @@ impl OpenAIParser {
             | "response.output_item.added"
             | "response.output_item.done" => {
                 if let Some(item) = json.get("item") {
+                    if item.get("type").and_then(|t| t.as_str()) == Some("web_search_call") {
+                        let id = item
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("web_search")
+                            .to_string();
+
+                        return if event_type == "response.output_item.done" {
+                            Ok(SseEvent::ServerToolComplete {
+                                id,
+                                name: "web_search".to_string(),
+                                input: item.get("action").cloned().unwrap_or(Value::Null),
+                            })
+                        } else {
+                            Ok(SseEvent::ServerToolStart {
+                                id,
+                                name: "web_search".to_string(),
+                            })
+                        };
+                    }
+
                     if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
                         let call_id = item
                             .get("call_id")

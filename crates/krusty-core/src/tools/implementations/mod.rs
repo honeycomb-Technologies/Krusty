@@ -20,6 +20,7 @@ pub mod plan_mode;
 pub mod processes;
 pub mod read;
 pub mod report;
+pub mod search_compaction_segments;
 pub mod send_user_message;
 pub mod set_dependency;
 pub mod set_work_mode;
@@ -28,9 +29,12 @@ pub mod skill;
 pub mod sleep;
 pub mod task_complete;
 pub mod task_start;
+pub mod web_fetch;
+pub mod web_search;
 pub mod write;
 
 mod registration;
+mod web_utils;
 
 pub use add_subtask::AddSubtaskTool;
 pub use agent::AgentTool;
@@ -51,6 +55,7 @@ pub use registration::{
     register_acp_tools, register_agent_tool, register_all_tools, register_mako_tools,
 };
 pub use report::ReportTool;
+pub use search_compaction_segments::SearchCompactionSegmentsTool;
 pub use send_user_message::SendUserMessageTool;
 pub use set_dependency::SetDependencyTool;
 pub use set_work_mode::SetWorkModeTool;
@@ -59,4 +64,6 @@ pub use skill::SkillTool;
 pub use sleep::SleepTool;
 pub use task_complete::TaskCompleteTool;
 pub use task_start::TaskStartTool;
+pub use web_fetch::WebFetchTool;
+pub use web_search::WebSearchTool;
 pub use write::WriteTool;

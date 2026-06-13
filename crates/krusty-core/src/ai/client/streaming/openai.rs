@@ -1,4 +1,5 @@
 use anyhow::Result;
+use serde_json::Value;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
@@ -13,6 +14,47 @@ use crate::ai::parsers::OpenAIParser;
 use crate::ai::streaming::StreamPart;
 use crate::ai::transform::apply_request_body_transform;
 use crate::ai::types::ModelMessage;
+
+fn append_openai_hosted_web_search_tool(
+    body: &mut Value,
+    options: &CallOptions,
+    api_format: ApiFormat,
+) {
+    if options.web_search.is_none() || !matches!(api_format, ApiFormat::OpenAIResponses) {
+        return;
+    }
+
+    let hosted_tool = serde_json::json!({ "type": "web_search" });
+    match body.get_mut("tools") {
+        Some(Value::Array(tools)) => {
+            remove_openai_function_tool_named(tools, "web_search");
+            let already_present = tools
+                .iter()
+                .any(|tool| tool.get("type").and_then(Value::as_str) == Some("web_search"));
+            if !already_present {
+                tools.push(hosted_tool);
+            }
+        }
+        _ => {
+            body["tools"] = serde_json::json!([hosted_tool]);
+        }
+    }
+}
+
+fn remove_openai_function_tool_named(tools: &mut Vec<Value>, name: &str) {
+    tools.retain(|tool| {
+        if tool.get("type").and_then(Value::as_str) != Some("function") {
+            return true;
+        }
+
+        let direct_name = tool.get("name").and_then(Value::as_str);
+        let nested_name = tool
+            .get("function")
+            .and_then(|function| function.get("name"))
+            .and_then(Value::as_str);
+        !matches!(direct_name.or(nested_name), Some(tool_name) if tool_name == name)
+    });
+}
 
 impl AiClient {
     /// Streaming call using OpenAI format
@@ -133,6 +175,7 @@ impl AiClient {
                 body["tools"] = serde_json::json!(openai_tools);
             }
         }
+        append_openai_hosted_web_search_tool(&mut body, options, self.config().api_format);
         let body = apply_request_body_transform(
             body,
             self.provider_id(),
@@ -159,5 +202,48 @@ impl AiClient {
             self.config().api_format,
             &self.config().model,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::ai::types::WebSearchConfig;
+
+    #[test]
+    fn hosted_web_search_is_added_for_responses_api() {
+        let mut body = json!({
+            "model": "gpt-5.5",
+            "tools": [
+                {"type": "function", "name": "read"},
+                {"type": "function", "name": "web_search"}
+            ]
+        });
+        let options = CallOptions {
+            web_search: Some(WebSearchConfig::default()),
+            ..Default::default()
+        };
+
+        append_openai_hosted_web_search_tool(&mut body, &options, ApiFormat::OpenAIResponses);
+
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0], json!({"type": "function", "name": "read"}));
+        assert_eq!(tools[1], json!({"type": "web_search"}));
+    }
+
+    #[test]
+    fn hosted_web_search_is_not_added_for_chat_completions() {
+        let mut body = json!({"model": "gpt-4.1"});
+        let options = CallOptions {
+            web_search: Some(WebSearchConfig::default()),
+            ..Default::default()
+        };
+
+        append_openai_hosted_web_search_tool(&mut body, &options, ApiFormat::OpenAI);
+
+        assert!(body.get("tools").is_none());
     }
 }

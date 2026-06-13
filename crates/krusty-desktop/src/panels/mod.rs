@@ -30,6 +30,16 @@ impl PanelKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitAxis {
     Horizontal,
+    Vertical,
+}
+
+impl SplitAxis {
+    fn toggled(self) -> Self {
+        match self {
+            Self::Horizontal => Self::Vertical,
+            Self::Vertical => Self::Horizontal,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -44,7 +54,6 @@ pub enum LayoutNode {
 }
 
 impl LayoutNode {
-    #[cfg(test)]
     pub fn contains(&self, panel_id: PanelId) -> bool {
         match self {
             Self::Panel(id) => *id == panel_id,
@@ -80,6 +89,53 @@ impl LayoutNode {
             Self::Split { first, second, .. } => {
                 first.split_panel(target, axis, new_panel)
                     || second.split_panel(target, axis, new_panel)
+            }
+        }
+    }
+
+    fn swap_panel_ids(&mut self, left: PanelId, right: PanelId) -> bool {
+        let mut swaps = 0;
+        self.swap_panel_ids_inner(left, right, &mut swaps);
+        swaps == 2
+    }
+
+    fn swap_panel_ids_inner(&mut self, left: PanelId, right: PanelId, swaps: &mut usize) {
+        match self {
+            Self::Panel(id) if *id == left => {
+                *id = right;
+                *swaps += 1;
+            }
+            Self::Panel(id) if *id == right => {
+                *id = left;
+                *swaps += 1;
+            }
+            Self::Panel(_) => {}
+            Self::Split { first, second, .. } => {
+                first.swap_panel_ids_inner(left, right, swaps);
+                second.swap_panel_ids_inner(left, right, swaps);
+            }
+        }
+    }
+
+    fn toggle_split_axis_containing(&mut self, panel_id: PanelId) -> bool {
+        match self {
+            Self::Panel(_) => false,
+            Self::Split {
+                axis,
+                first,
+                second,
+                ..
+            } => {
+                if first.toggle_split_axis_containing(panel_id)
+                    || second.toggle_split_axis_containing(panel_id)
+                {
+                    return true;
+                }
+                if first.contains(panel_id) || second.contains(panel_id) {
+                    *axis = axis.toggled();
+                    return true;
+                }
+                false
             }
         }
     }
@@ -158,6 +214,30 @@ impl PanelWorkspace {
         self.focused = ids[(index + 1) % ids.len()];
     }
 
+    pub fn swap_focused_with_adjacent(&mut self) -> bool {
+        let ids = self.panel_ids();
+        if ids.len() < 2 {
+            return false;
+        }
+        let focused = ids.iter().position(|id| *id == self.focused).unwrap_or(0);
+        let swap_with = if focused + 1 < ids.len() {
+            focused + 1
+        } else {
+            focused.saturating_sub(1)
+        };
+        if focused == swap_with {
+            return false;
+        }
+        self.layout.swap_panel_ids(ids[focused], ids[swap_with])
+    }
+
+    pub fn toggle_focused_split_axis(&mut self) -> bool {
+        if self.panels.len() < 2 {
+            return false;
+        }
+        self.layout.toggle_split_axis_containing(self.focused)
+    }
+
     pub fn split_focused(&mut self, axis: SplitAxis, kind: PanelKind) -> PanelId {
         let panel = self.allocate_panel(kind);
         if !self.layout.split_panel(self.focused, axis, panel) {
@@ -207,5 +287,31 @@ mod tests {
             Some(PanelKind::ScratchCanvas)
         );
         assert!(workspace.layout().contains(id));
+    }
+
+    #[test]
+    fn swap_focused_with_adjacent_keeps_focus_and_changes_order() {
+        let mut workspace = PanelWorkspace::starter();
+        let focused = workspace.split_focused(SplitAxis::Horizontal, PanelKind::ScratchCanvas);
+        assert_eq!(workspace.panel_ids(), vec![PanelId(1), focused]);
+
+        assert!(workspace.swap_focused_with_adjacent());
+        assert_eq!(workspace.focused(), focused);
+        assert_eq!(workspace.panel_ids(), vec![focused, PanelId(1)]);
+    }
+
+    #[test]
+    fn toggle_focused_split_axis_flips_nearest_split() {
+        let mut workspace = PanelWorkspace::starter();
+        workspace.split_focused(SplitAxis::Horizontal, PanelKind::ScratchCanvas);
+
+        assert!(workspace.toggle_focused_split_axis());
+        assert!(matches!(
+            workspace.layout(),
+            LayoutNode::Split {
+                axis: SplitAxis::Vertical,
+                ..
+            }
+        ));
     }
 }

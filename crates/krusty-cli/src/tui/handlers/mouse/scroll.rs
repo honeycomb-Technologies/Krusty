@@ -138,6 +138,7 @@ impl App {
         // Route to block and check if event was consumed
         // If block returns Ignored (e.g., mouse outside actual bounds), fall through to message scroll
         match hit.block_type {
+            BlockType::Pinch => {}
             BlockType::Thinking => {
                 if let Some(block) = self.runtime.blocks.thinking.get_mut(hit.index) {
                     if !block.is_collapsed()

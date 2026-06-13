@@ -7,8 +7,9 @@ use crate::tools::registry::ToolRegistry;
 use super::{
     AddSubtaskTool, AgentTool, ApplyPatchTool, AskUserQuestionTool, AutonomousTaskTool, BashTool,
     EditTool, EnterPlanModeTool, GlobTool, GrepTool, ListTool, MemoryTool, MultiEditTool,
-    ProcessesTool, ReadTool, ReportTool, SendUserMessageTool, SetDependencyTool, SetWorkModeTool,
-    SetWorkspaceContextTool, SkillTool, SleepTool, TaskCompleteTool, TaskStartTool, WriteTool,
+    ProcessesTool, ReadTool, ReportTool, SearchCompactionSegmentsTool, SendUserMessageTool,
+    SetDependencyTool, SetWorkModeTool, SetWorkspaceContextTool, SkillTool, SleepTool,
+    TaskCompleteTool, TaskStartTool, WebFetchTool, WebSearchTool, WriteTool,
 };
 
 /// Register all built-in tools (except agent which needs client)
@@ -21,10 +22,15 @@ pub async fn register_all_tools(registry: &ToolRegistry) {
     registry.register(Arc::new(GrepTool)).await;
     registry.register(Arc::new(GlobTool)).await;
     registry.register(Arc::new(ListTool)).await;
+    registry.register(Arc::new(WebSearchTool)).await;
+    registry.register(Arc::new(WebFetchTool)).await;
     registry.register(Arc::new(ApplyPatchTool)).await;
     registry.register(Arc::new(ProcessesTool)).await;
     registry.register(Arc::new(SkillTool)).await;
     registry.register(Arc::new(MemoryTool)).await;
+    registry
+        .register(Arc::new(SearchCompactionSegmentsTool))
+        .await;
     registry.register(Arc::new(AskUserQuestionTool)).await;
     registry.register(Arc::new(TaskCompleteTool)).await;
     registry.register(Arc::new(TaskStartTool)).await;
@@ -42,7 +48,8 @@ pub async fn register_all_tools(registry: &ToolRegistry) {
 /// ACP currently has no editor-backed user approval flow, so do not expose tools
 /// that can execute arbitrary commands or manage long-lived host processes. File
 /// tools remain available and are constrained to the session workspace by the ACP
-/// processor's sandboxed [`ToolContext`].
+/// processor's sandboxed [`ToolContext`]. Read-only web tools are also exposed
+/// so ACP sessions can answer current-information questions without shell access.
 pub async fn register_acp_tools(registry: &ToolRegistry) {
     registry.register(Arc::new(ReadTool)).await;
     registry.register(Arc::new(WriteTool)).await;
@@ -51,6 +58,8 @@ pub async fn register_acp_tools(registry: &ToolRegistry) {
     registry.register(Arc::new(GrepTool)).await;
     registry.register(Arc::new(GlobTool)).await;
     registry.register(Arc::new(ListTool)).await;
+    registry.register(Arc::new(WebSearchTool)).await;
+    registry.register(Arc::new(WebFetchTool)).await;
     registry.register(Arc::new(ApplyPatchTool)).await;
 }
 
@@ -94,6 +103,8 @@ mod tests {
         assert!(registry.get("edit").await.is_some());
         assert!(registry.get("grep").await.is_some());
         assert!(registry.get("glob").await.is_some());
+        assert!(registry.get("web_search").await.is_some());
+        assert!(registry.get("web_fetch").await.is_some());
         assert!(registry.get("bash").await.is_none());
         assert!(registry.get("processes").await.is_none());
     }

@@ -156,6 +156,12 @@ impl App {
                         .thinking
                         .get(idx)
                         .map(|b| b.height(content_width, &self.ui.theme)),
+                    BlockType::Pinch => self
+                        .runtime
+                        .blocks
+                        .pinch
+                        .get(idx)
+                        .map(|b| b.height(content_width, &self.ui.theme)),
                     BlockType::Bash => self
                         .runtime
                         .blocks

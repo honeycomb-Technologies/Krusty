@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { View, Text, Pressable, StyleSheet } from "react-native";
+import { Image, View, Text, Pressable, StyleSheet } from "react-native";
 import { Brain, ChevronDown, ChevronRight, Clock } from "lucide-react-native";
 import { useThemeContext } from "../../hooks/useTheme";
 import { MarkdownContent } from "./MarkdownContent";
@@ -7,7 +7,8 @@ import { ToolCallCard } from "./ToolCallCard";
 import { ToolApprovalWidget } from "./ToolApprovalWidget";
 import { AskUserQuestionWidget } from "./AskUserQuestionWidget";
 import { PlanConfirmWidget } from "./PlanConfirmWidget";
-import type { ChatMessage } from "@krusty/api";
+import { ImagePreviewModal, imagePreviewUri } from "./ImagePreviewModal";
+import type { ChatMessage, ChatMessageAttachment } from "@krusty/api";
 import * as Clipboard from "../../platform/clipboard";
 import * as Haptics from "../../platform/haptics";
 
@@ -105,7 +106,7 @@ export function MessageBubble({
 
   return (
     <View style={[styles.container, isUser && styles.containerUser]}>
-      {isUser && message.content.length > 0 && (
+      {isUser && (message.content.length > 0 || (message.attachments?.length ?? 0) > 0) && (
         <View
           style={[styles.userWrap, message.isQueued && styles.userQueuedWrap]}
         >
@@ -117,20 +118,25 @@ export function MessageBubble({
               </Text>
             </View>
           )}
-          <Pressable
-            onLongPress={handleCopy}
-            delayLongPress={250}
-            style={[
-              styles.userBubble,
-              {
-                backgroundColor: message.isQueued
-                  ? `${t.warning}20`
-                  : t.userMessage,
-              },
-            ]}
-          >
-            <MarkdownContent content={message.content} isUser />
-          </Pressable>
+          {(message.attachments?.length ?? 0) > 0 ? (
+            <MessageAttachments attachments={message.attachments ?? []} isUser />
+          ) : null}
+          {message.content.length > 0 ? (
+            <Pressable
+              onLongPress={handleCopy}
+              delayLongPress={250}
+              style={[
+                styles.userBubble,
+                {
+                  backgroundColor: message.isQueued
+                    ? `${t.warning}20`
+                    : t.userMessage,
+                },
+              ]}
+            >
+              <MarkdownContent content={message.content} isUser />
+            </Pressable>
+          ) : null}
           {copied ? (
             <Text style={[styles.copyStatus, { color: t.mutedForeground }]}>
               Copied
@@ -188,6 +194,10 @@ export function MessageBubble({
               )}
             </View>
           )}
+
+          {(message.attachments?.length ?? 0) > 0 ? (
+            <MessageAttachments attachments={message.attachments ?? []} />
+          ) : null}
 
           {message.content.length > 0 && (
             <Pressable
@@ -250,6 +260,77 @@ export function MessageBubble({
           ) : null}
         </View>
       )}
+    </View>
+  );
+}
+
+function MessageAttachments({
+  attachments,
+  isUser,
+}: {
+  attachments: ChatMessageAttachment[];
+  isUser?: boolean;
+}) {
+  const { theme } = useThemeContext();
+  const t = theme.colors;
+  const [previewAttachment, setPreviewAttachment] =
+    useState<ChatMessageAttachment | null>(null);
+  const previewUri = imagePreviewUri(previewAttachment);
+
+  return (
+    <View style={[styles.attachmentStrip, isUser && styles.attachmentStripUser]}>
+      {attachments.map((attachment, index) => {
+        const uri = imagePreviewUri(attachment);
+        if (attachment.type === "image" && uri) {
+          return (
+            <Pressable
+              key={`${attachment.name ?? "image"}-${index}`}
+              onPress={(event) => {
+                event.stopPropagation();
+                void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                setPreviewAttachment(attachment);
+              }}
+              style={({ pressed, hovered }) => [
+                styles.messageImageThumb,
+                {
+                  borderColor: hovered ? t.userMessage : t.border,
+                  opacity: pressed ? 0.86 : 1,
+                },
+              ]}
+            >
+              <Image
+                source={{ uri }}
+                style={styles.messageImage}
+                resizeMode="cover"
+                accessibilityLabel={attachment.name ?? "Image attachment"}
+              />
+            </Pressable>
+          );
+        }
+
+        return (
+          <View
+            key={`${attachment.name ?? "file"}-${index}`}
+            style={[
+              styles.messageFileChip,
+              { borderColor: t.border, backgroundColor: t.card },
+            ]}
+          >
+            <Text
+              style={[styles.messageFileName, { color: t.mutedForeground }]}
+              numberOfLines={1}
+            >
+              {attachment.name ?? "Attached file"}
+            </Text>
+          </View>
+        );
+      })}
+      <ImagePreviewModal
+        visible={Boolean(previewAttachment)}
+        uri={previewUri}
+        title={previewAttachment?.name}
+        onClose={() => setPreviewAttachment(null)}
+      />
     </View>
   );
 }
@@ -327,6 +408,39 @@ const styles = StyleSheet.create({
     borderBottomRightRadius: 6,
     paddingHorizontal: 16,
     paddingVertical: 10,
+  },
+  attachmentStrip: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    alignItems: "center",
+  },
+  attachmentStripUser: {
+    alignSelf: "flex-end",
+    justifyContent: "flex-end",
+  },
+  messageImageThumb: {
+    width: 132,
+    height: 96,
+    borderRadius: 14,
+    overflow: "hidden",
+    borderWidth: StyleSheet.hairlineWidth,
+    backgroundColor: "rgba(255,255,255,0.06)",
+  },
+  messageImage: {
+    width: "100%",
+    height: "100%",
+  },
+  messageFileChip: {
+    maxWidth: 180,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  messageFileName: {
+    fontSize: 12,
+    fontWeight: "600",
   },
   assistantText: {
     paddingLeft: 2,

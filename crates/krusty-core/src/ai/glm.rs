@@ -4,7 +4,7 @@
 //! - GLM models (GLM-4.x via Z.ai)
 //! - MiniMax M2 (MiniMax)
 //!
-//! Based on OpenCode's handling - no effort levels, just maxed thinking or off.
+//! These models use a simple maxed-thinking toggle rather than effort levels.
 use serde::{Deserialize, Serialize};
 
 /// Simple reasoning mode toggle for OpenAI-compatible thinking models
@@ -34,7 +34,7 @@ pub struct ChatTemplateArgs {
 /// Check if a model ID is an OpenAI-compatible thinking model
 ///
 /// Note: GLM models via Z.ai's Anthropic endpoint use standard Anthropic format.
-/// This function is for OpenAI-format handling (e.g., via OpenCode Zen).
+/// This function is for OpenAI-format compatibility paths.
 pub fn is_openai_compatible_model(model_id: &str) -> bool {
     let id_lower = model_id.to_lowercase();
     id_lower.contains("glm") || id_lower.contains("minimax-m2")
@@ -70,7 +70,7 @@ pub fn get_default_temperature(model_id: &str) -> Option<f32> {
         return Some(1.0);
     }
 
-    // MiniMax M2/M2.5: 1.0 (from OpenCode)
+    // MiniMax M2/M2.5: prefer 1.0
     if id_lower.contains("minimax-m2") {
         return Some(1.0);
     }

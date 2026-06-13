@@ -1,0 +1,12 @@
+manifest_version = 1
+id = "native-rust-demo"
+name = "Native Rust Demo"
+version = "0.1.0"
+publisher = "krusty.examples"
+description = "Minimal hot-reloadable native Rust TUI plugin package."
+runtime = "native"
+entry_component = "dist/linux-x64/libkrusty_native_rust_demo.so"
+render_capabilities = ["text"]
+
+[compat]
+krusty_min = "0.7.0"

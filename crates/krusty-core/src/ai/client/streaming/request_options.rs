@@ -7,6 +7,76 @@ use crate::ai::providers::{ProviderCapabilities, ProviderId, ReasoningFormat};
 use crate::ai::reasoning::{ReasoningConfig, DEFAULT_THINKING_BUDGET};
 use crate::ai::transform::build_provider_params;
 
+fn add_anthropic_server_tools(
+    all_tools: &mut Vec<Value>,
+    options: &CallOptions,
+    capabilities: &ProviderCapabilities,
+) {
+    if capabilities.web_search {
+        if let Some(search) = &options.web_search {
+            let mut spec = serde_json::json!({
+                "type": "web_search_20250305",
+                "name": "web_search",
+            });
+            if let Some(max_uses) = search.max_uses {
+                spec["max_uses"] = serde_json::json!(max_uses);
+            }
+            all_tools.push(spec);
+            debug!("Anthropic web search tool enabled (server-side)");
+        }
+    }
+
+    if capabilities.web_fetch {
+        if let Some(fetch) = &options.web_fetch {
+            let mut spec = serde_json::json!({
+                "type": "web_fetch_20250910",
+                "name": "web_fetch",
+                "citations": { "enabled": fetch.citations_enabled },
+            });
+            if let Some(max_uses) = fetch.max_uses {
+                spec["max_uses"] = serde_json::json!(max_uses);
+            }
+            if let Some(max_tokens) = fetch.max_content_tokens {
+                spec["max_content_tokens"] = serde_json::json!(max_tokens);
+            }
+            all_tools.push(spec);
+            debug!("Anthropic web fetch tool enabled (server-side)");
+        }
+    }
+}
+
+fn add_openrouter_server_tools(
+    all_tools: &mut Vec<Value>,
+    options: &CallOptions,
+    capabilities: &ProviderCapabilities,
+) {
+    if capabilities.web_search && options.web_search.is_some() {
+        all_tools.push(serde_json::json!({ "type": "openrouter:web_search" }));
+        debug!("OpenRouter web search tool enabled (server-side)");
+    }
+
+    if capabilities.web_fetch {
+        if let Some(fetch) = &options.web_fetch {
+            let mut spec = serde_json::json!({ "type": "openrouter:web_fetch" });
+            let mut parameters = serde_json::Map::new();
+            if let Some(max_uses) = fetch.max_uses {
+                parameters.insert("max_uses".to_string(), serde_json::json!(max_uses));
+            }
+            if let Some(max_tokens) = fetch.max_content_tokens {
+                parameters.insert(
+                    "max_content_tokens".to_string(),
+                    serde_json::json!(max_tokens),
+                );
+            }
+            if !parameters.is_empty() {
+                spec["parameters"] = Value::Object(parameters);
+            }
+            all_tools.push(spec);
+            debug!("OpenRouter web fetch tool enabled (server-side)");
+        }
+    }
+}
+
 impl AiClient {
     /// Add server-executed tools (web search, web fetch) to the request
     pub(super) fn add_server_tools(
@@ -16,41 +86,24 @@ impl AiClient {
         options: &CallOptions,
         capabilities: &ProviderCapabilities,
     ) {
-        // Anthropic server-executed web tools
-        if capabilities.web_search {
-            if let Some(search) = &options.web_search {
-                let mut spec = serde_json::json!({
-                    "type": "web_search_20250305",
-                    "name": "web_search",
-                });
-                if let Some(max_uses) = search.max_uses {
-                    spec["max_uses"] = serde_json::json!(max_uses);
-                }
-                all_tools.push(spec);
-                debug!("Web search tool enabled (server-side)");
+        match self.provider_id() {
+            ProviderId::Anthropic => {
+                add_anthropic_server_tools(all_tools, options, capabilities);
             }
+            ProviderId::OpenRouter => {
+                add_openrouter_server_tools(all_tools, options, capabilities);
+            }
+            _ => {}
         }
 
-        if capabilities.web_fetch {
-            if let Some(fetch) = &options.web_fetch {
-                let mut spec = serde_json::json!({
-                    "type": "web_fetch_20250910",
-                    "name": "web_fetch",
-                    "citations": { "enabled": fetch.citations_enabled },
-                });
-                if let Some(max_uses) = fetch.max_uses {
-                    spec["max_uses"] = serde_json::json!(max_uses);
-                }
-                if let Some(max_tokens) = fetch.max_content_tokens {
-                    spec["max_content_tokens"] = serde_json::json!(max_tokens);
-                }
-                all_tools.push(spec);
-                debug!("Web fetch tool enabled (server-side)");
-            }
-        }
-
-        // OpenRouter web search: append :online suffix to model name
-        if capabilities.web_plugins && options.web_search.is_some() {
+        // OpenRouter legacy web-search plugin: append :online suffix to model name.
+        // Kept only as a fallback for older OpenRouter configurations; current
+        // OpenRouter server tools use `openrouter:web_search` / `openrouter:web_fetch`.
+        if self.provider_id() == ProviderId::OpenRouter
+            && capabilities.web_plugins
+            && options.web_search.is_some()
+            && !capabilities.web_search
+        {
             if let Some(model) = body.get("model").and_then(|m| m.as_str()) {
                 if !model.ends_with(":online") {
                     let online_model = format!("{}:online", model);
@@ -249,15 +302,63 @@ impl AiClient {
             beta_headers.push("context-management-2025-06-27");
         }
 
-        // Web tool beta headers
+        // Anthropic web tool beta headers.
         let caps = ProviderCapabilities::for_provider(self.provider_id());
-        if options.web_search.is_some() && caps.web_search {
-            beta_headers.push("web-search-2025-03-05");
-        }
-        if options.web_fetch.is_some() && caps.web_fetch {
-            beta_headers.push("web-fetch-2025-09-10");
+        if self.provider_id() == ProviderId::Anthropic {
+            if options.web_search.is_some() && caps.web_search {
+                beta_headers.push("web-search-2025-03-05");
+            }
+            if options.web_fetch.is_some() && caps.web_fetch {
+                beta_headers.push("web-fetch-2025-09-10");
+            }
         }
 
         beta_headers
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::types::{WebFetchConfig, WebSearchConfig};
+
+    #[test]
+    fn openrouter_server_tools_use_openrouter_tool_types() {
+        let mut tools = Vec::new();
+        let options = CallOptions {
+            web_search: Some(WebSearchConfig::default()),
+            web_fetch: Some(WebFetchConfig::default()),
+            ..Default::default()
+        };
+        let caps = ProviderCapabilities::for_provider(ProviderId::OpenRouter);
+
+        add_openrouter_server_tools(&mut tools, &options, &caps);
+
+        assert_eq!(
+            tools[0],
+            serde_json::json!({ "type": "openrouter:web_search" })
+        );
+        assert_eq!(tools[1]["type"], "openrouter:web_fetch");
+        assert_eq!(tools[1]["parameters"]["max_uses"], 10);
+        assert_eq!(tools[1]["parameters"]["max_content_tokens"], 100_000);
+    }
+
+    #[test]
+    fn anthropic_server_tools_use_anthropic_tool_versions() {
+        let mut tools = Vec::new();
+        let options = CallOptions {
+            web_search: Some(WebSearchConfig { max_uses: Some(3) }),
+            web_fetch: Some(WebFetchConfig::default()),
+            ..Default::default()
+        };
+        let caps = ProviderCapabilities::for_provider(ProviderId::Anthropic);
+
+        add_anthropic_server_tools(&mut tools, &options, &caps);
+
+        assert_eq!(tools[0]["type"], "web_search_20250305");
+        assert_eq!(tools[0]["name"], "web_search");
+        assert_eq!(tools[0]["max_uses"], 3);
+        assert_eq!(tools[1]["type"], "web_fetch_20250910");
+        assert_eq!(tools[1]["name"], "web_fetch");
     }
 }

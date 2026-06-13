@@ -5,7 +5,7 @@
 use tokio::sync::{mpsc, oneshot};
 
 use crate::agent::subagent::AgentProgress;
-use crate::agent::{LoopEvent, LoopInput, SummarizationResult};
+use crate::agent::{CompactionResult, DelegatedProgressEvent, LoopEvent, LoopInput};
 use crate::ai::models::ModelMetadata;
 use crate::ai::providers::ProviderId;
 use crate::tools::ToolOutputChunk;
@@ -32,9 +32,10 @@ pub struct InitExplorationResult {
     pub error: Option<String>,
 }
 
-/// AI-generated summarization result for pinch
-pub struct SummarizationUpdate {
-    pub result: Result<SummarizationResult, String>,
+/// In-place compaction result for manual pinch
+pub struct CompactionUpdate {
+    pub result: Result<CompactionResult, String>,
+    pub auto_continue: bool,
 }
 
 /// MCP server status update from background tasks
@@ -78,8 +79,8 @@ pub struct AsyncChannels {
     pub bash_output: Option<mpsc::Receiver<ToolOutputChunk>>,
     /// AI-generated title update receiver
     pub title_update: Option<oneshot::Receiver<TitleUpdate>>,
-    /// AI-generated summarization result for pinch
-    pub summarization: Option<oneshot::Receiver<SummarizationUpdate>>,
+    /// Manual pinch compaction apply result
+    pub compaction: Option<oneshot::Receiver<CompactionUpdate>>,
     /// Explore tool sub-agent progress updates (bounded for backpressure)
     pub explore_progress: Option<mpsc::Receiver<AgentProgress>>,
     /// Build tool builder agent progress updates (bounded for backpressure)
@@ -100,6 +101,8 @@ pub struct AsyncChannels {
     pub loop_events: Option<mpsc::UnboundedReceiver<LoopEvent>>,
     /// Core orchestrator input sender (for approvals, AskUser responses, cancellation)
     pub loop_input: Option<mpsc::UnboundedSender<LoopInput>>,
+    /// Delegated agent progress emitted by the core orchestrator.
+    pub delegated_progress: Option<mpsc::UnboundedReceiver<DelegatedProgressEvent>>,
 }
 
 impl AsyncChannels {

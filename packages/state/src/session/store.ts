@@ -48,6 +48,7 @@ import {
 import type {
   AssistantMessageRef,
   Attachment,
+  ChatMessageAttachment,
   PermissionMode,
   SendMessageOptions,
   SessionMode,
@@ -68,6 +69,22 @@ function hasOwnProperty<T extends object>(value: T, key: PropertyKey): boolean {
 function normalizeTargetBranch(targetBranch: string | null | undefined): string | null {
   const trimmed = targetBranch?.trim();
   return trimmed ? trimmed : null;
+}
+
+function buildDisplayAttachments(
+  attachments: Attachment[],
+): ChatMessageAttachment[] {
+  return attachments
+    .map((attachment) => ({
+      type: attachment.type,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      uri: attachment.uri,
+      base64: attachment.type === "image" ? attachment.base64 : undefined,
+    }))
+    .filter((attachment) =>
+      attachment.type !== "image" || Boolean(attachment.uri || attachment.base64),
+    );
 }
 
 export function createSessionStore(
@@ -293,6 +310,7 @@ export function createSessionStore(
           ? `${normalizedContent}\n\n${attachmentLabel}`
           : attachmentLabel
         : requestMessage;
+      const displayAttachments = buildDisplayAttachments(attachments);
 
       if (state.isStreaming) {
         set((s) => {
@@ -313,6 +331,8 @@ export function createSessionStore(
                 id: createChatMessageId("user-queued"),
                 role: "user",
                 content: displayContent,
+                attachments:
+                  displayAttachments.length > 0 ? displayAttachments : undefined,
                 isQueued: true,
               },
             ],
@@ -339,6 +359,8 @@ export function createSessionStore(
             id: createChatMessageId("user"),
             role: "user",
             content: displayContent,
+            attachments:
+              displayAttachments.length > 0 ? displayAttachments : undefined,
           },
           ref.current,
         ],

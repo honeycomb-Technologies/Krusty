@@ -26,8 +26,8 @@ pub use browser_flow::{
 pub use credential_loading::{extract_openai_account_id, is_anthropic_oauth_token};
 pub use device_flow::{DeviceCodeFlow, DeviceCodeResponse};
 pub use grok::{
-    ensure_grok_auth_token, force_grok_browser_login, grok_auth_token_to_oauth_data,
-    refresh_grok_oauth_token, resolve_grok_auth, GrokAuthResolution,
+    clear_grok_cli_auth, ensure_grok_auth_token, force_grok_browser_login,
+    grok_auth_token_to_oauth_data, refresh_grok_oauth_token, resolve_grok_auth, GrokAuthResolution,
 };
 pub use hosted_browser_flow::HostedBrowserOAuthFlow;
 pub use openai_device_flow::{OpenAIDeviceAuthFlow, OpenAIDeviceCodeResponse};

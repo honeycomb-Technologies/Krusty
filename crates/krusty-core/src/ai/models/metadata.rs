@@ -14,7 +14,7 @@ pub struct DynamicModelCacheMetadata {
 
 /// API format for model requests
 ///
-/// OpenCode Zen routes different models to different endpoints based on format.
+/// Different model families route to different provider endpoints based on format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiFormat {
@@ -66,7 +66,7 @@ pub struct ModelMetadata {
     /// Whether this is a free model (OpenRouter :free suffix)
     #[serde(default)]
     pub is_free: bool,
-    /// API format for this model (used by OpenCode Zen for routing)
+    /// API format for this model, used for provider routing.
     #[serde(default)]
     pub api_format: ApiFormat,
 }

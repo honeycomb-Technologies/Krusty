@@ -88,6 +88,7 @@ mod tests {
 #[derive(Deserialize)]
 pub struct PinchRequest {
     /// Optional hints about what to preserve
+    #[serde(alias = "hints")]
     pub preservation_hints: Option<String>,
     /// Optional direction for the new session
     pub direction: Option<String>,
@@ -95,7 +96,7 @@ pub struct PinchRequest {
 
 #[derive(Serialize)]
 pub struct PinchResponse {
-    /// The new child session
+    /// The compacted session (same id as source)
     pub session: SessionResponse,
     /// Summary of what was preserved
     pub summary: String,
@@ -103,6 +104,16 @@ pub struct PinchResponse {
     pub key_decisions: Vec<String>,
     /// Pending tasks carried forward
     pub pending_tasks: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_tokens_before: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_tokens_after: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replaced_messages: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction_count: Option<u32>,
 }
 
 #[derive(Serialize)]

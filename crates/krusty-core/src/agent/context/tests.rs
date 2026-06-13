@@ -315,7 +315,7 @@ fn inject_context_filters_persistent_memory_by_user_id() {
     let conversation = vec![ModelMessage {
         role: Role::User,
         content: vec![Content::Text {
-            text: "hello".to_string(),
+            text: "please use bob preference".to_string(),
         }],
     }];
 
@@ -346,6 +346,92 @@ fn inject_context_filters_persistent_memory_by_user_id() {
     assert!(context.contains("bob-only preference"));
     assert!(!context.contains("Alice secret"));
     assert!(!context.contains("alice-only instruction"));
+}
+
+#[test]
+fn inject_context_uses_latest_user_memory_relevance_and_hides_compaction_flushes() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    let db_path = repo.join("krusty.db");
+    let project_dir = repo.to_string_lossy();
+    let memory_store = MemoryStore::new(Database::new(&db_path).unwrap());
+    memory_store
+        .save(
+            MemoryType::Project,
+            "Compaction archive",
+            "Prior compaction cleanup notes that should not leak into unrelated trivia.",
+            Some(project_dir.as_ref()),
+            None,
+        )
+        .unwrap();
+    memory_store
+        .save(
+            MemoryType::Project,
+            "Space notes",
+            "Use space telescope examples when the user asks about space facts.",
+            Some(project_dir.as_ref()),
+            None,
+        )
+        .unwrap();
+    memory_store
+        .save(
+            MemoryType::Project,
+            &format!("{}1", crate::storage::COMPACTION_FLUSH_TITLE_PREFIX),
+            "Full old conversation transcript should never be injected as memory.",
+            Some(project_dir.as_ref()),
+            None,
+        )
+        .unwrap();
+
+    let skills = RwLock::new(SkillsManager::with_defaults(repo));
+    let conversation = vec![
+        ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "we were discussing compaction cleanup".to_string(),
+            }],
+        },
+        ModelMessage {
+            role: Role::Assistant,
+            content: vec![Content::Text {
+                text: "Understood.".to_string(),
+            }],
+        },
+        ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "tell me facts about space".to_string(),
+            }],
+        },
+    ];
+
+    let injected = inject_context(
+        &conversation,
+        db_path.as_path(),
+        "session-id",
+        repo,
+        Some(repo),
+        WorkMode::Build,
+        &skills,
+        None,
+        Some("code"),
+        None,
+        None,
+    );
+
+    let context = injected
+        .iter()
+        .filter_map(|message| match &message.content[0] {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(context.contains("Space notes"));
+    assert!(!context.contains("Compaction archive"));
+    assert!(!context.contains("Full old conversation transcript"));
 }
 
 #[test]
@@ -528,6 +614,15 @@ fn inject_context_includes_mako_knowledge_from_memory_and_reports() {
             None,
         )
         .unwrap();
+    memory_store
+        .save(
+            MemoryType::Project,
+            &format!("{}1", crate::storage::COMPACTION_FLUSH_TITLE_PREFIX),
+            "Full compacted transcript should not appear in Mako knowledge.",
+            Some(repo.to_string_lossy().as_ref()),
+            None,
+        )
+        .unwrap();
 
     let report_store = ReportStore::new(Database::new(&db_path).unwrap());
     report_store
@@ -565,17 +660,21 @@ fn inject_context_includes_mako_knowledge_from_memory_and_reports() {
         None,
     );
 
-    assert!(injected.iter().any(|message| {
-        matches!(
-            &message.content[0],
-            Content::Text { text }
-                if text.contains("[MAKO KNOWLEDGE]")
-                    && text.contains("## Carry Forward")
-                    && text.contains("Auth decision")
-                    && text.contains("## Recent Reports")
-                    && text.contains("Wake pipeline check")
-        )
-    }));
+    let context = injected
+        .iter()
+        .filter_map(|message| match &message.content[0] {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(context.contains("[MAKO KNOWLEDGE]"));
+    assert!(context.contains("## Carry Forward"));
+    assert!(context.contains("Auth decision"));
+    assert!(context.contains("## Recent Reports"));
+    assert!(context.contains("Wake pipeline check"));
+    assert!(!context.contains("Full compacted transcript"));
 }
 
 #[test]

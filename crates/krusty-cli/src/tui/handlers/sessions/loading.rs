@@ -56,6 +56,7 @@ impl App {
         self.runtime.chat.streaming_assistant_idx = None;
         self.runtime.pending_clipboard_images.clear();
         self.runtime.attached_files.clear();
+        self.runtime.live_tool_calls.clear();
         self.runtime.current_session_id = Some(session_id.to_string());
         self.runtime.pending_pinched_session_id = None;
         self.runtime.agent_state.reset();

@@ -7,7 +7,6 @@ mod auth;
 mod file_preview;
 mod hooks;
 mod mcp;
-mod pinch;
 mod plugins;
 mod process;
 mod skills;
@@ -69,9 +68,6 @@ impl App {
             }
             Popup::PluginsBrowser => {
                 self.handle_plugins_popup_key(code);
-            }
-            Popup::Pinch => {
-                self.handle_pinch_popup_key(code, modifiers);
             }
             Popup::FilePreview => {
                 self.handle_file_preview_popup_key(code);

@@ -45,6 +45,8 @@ impl FromStr for MemoryType {
     }
 }
 
+pub const COMPACTION_FLUSH_TITLE_PREFIX: &str = "Compaction flush #";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentMemory {
     pub id: String,
@@ -55,4 +57,9 @@ pub struct AgentMemory {
     pub user_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+pub fn is_compaction_flush_memory(memory: &AgentMemory) -> bool {
+    memory.memory_type == MemoryType::Project
+        && memory.title.starts_with(COMPACTION_FLUSH_TITLE_PREFIX)
 }
