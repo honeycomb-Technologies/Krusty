@@ -235,6 +235,48 @@ async fn test_parse_params_success() {
 }
 
 #[tokio::test]
+async fn test_parse_params_accepts_integral_floats_for_integer_fields() {
+    #[derive(serde::Deserialize)]
+    struct TestParams {
+        depth: Option<usize>,
+        timeout: u64,
+        nested: NestedParams,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct NestedParams {
+        limit: usize,
+    }
+
+    let params = json!({
+        "depth": 2.0,
+        "timeout": 600000.0,
+        "nested": { "limit": 5.0 }
+    });
+    let parsed: TestParams = parse_params(params).expect("integral floats should deserialize");
+
+    assert_eq!(parsed.depth, Some(2));
+    assert_eq!(parsed.timeout, 600_000);
+    assert_eq!(parsed.nested.limit, 5);
+}
+
+#[tokio::test]
+async fn test_parse_params_rejects_fractional_values_for_integer_fields() {
+    #[derive(Debug, serde::Deserialize)]
+    struct TestParams {
+        #[serde(rename = "count")]
+        _count: usize,
+    }
+
+    let result: Result<TestParams, ToolResult> = parse_params(json!({"count": 2.5}));
+
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.is_error);
+    assert!(err.output.contains("Invalid parameters"));
+}
+
+#[tokio::test]
 async fn test_parse_params_invalid_json() {
     #[derive(serde::Deserialize, Debug)]
     struct TestParams {

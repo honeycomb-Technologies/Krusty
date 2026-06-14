@@ -56,11 +56,11 @@ Use depth:1 for broad overviews; narrow path/depth in large repos. Use Glob for 
                     "description": "The directory path to list"
                 },
                 "depth": {
-                    "type": "number",
+                    "type": "integer",
                     "description": "Maximum recursion depth (default: 2)"
                 },
                 "limit": {
-                    "type": "number",
+                    "type": "integer",
                     "description": "Maximum number of entries to return (default: 200)"
                 }
             },

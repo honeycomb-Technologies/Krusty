@@ -53,7 +53,7 @@ Only fetch URLs that are relevant to the user's request. The local fallback extr
                     "description": "HTTP or HTTPS URL to fetch"
                 },
                 "max_bytes": {
-                    "type": "number",
+                    "type": "integer",
                     "description": "Maximum response bytes to download (default 250000, hard max 2000000)"
                 },
                 "raw": {

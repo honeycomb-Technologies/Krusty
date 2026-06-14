@@ -219,6 +219,11 @@ impl App {
             self.runtime.chat.conversation.len()
         );
 
+        // A prior user interrupt cancels the shared token used by the main loop
+        // and registered subagent tools. Reset it before every new turn so
+        // later agent tool calls do not inherit an already-cancelled token.
+        self.runtime.cancellation.reset();
+
         if self
             .runtime
             .agent_config

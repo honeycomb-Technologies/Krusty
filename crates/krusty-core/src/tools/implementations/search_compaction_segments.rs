@@ -54,7 +54,7 @@ Provide an optional query to filter segment markdown by keyword. Results are ord
                     "description": "Optional keyword filter applied to segment markdown"
                 },
                 "limit": {
-                    "type": "number",
+                    "type": "integer",
                     "description": "Maximum segments to return (default 5, max 20)"
                 }
             },

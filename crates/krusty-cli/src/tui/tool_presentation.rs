@@ -150,6 +150,8 @@ pub fn tool_pattern(name: &str, input: &Value) -> String {
         "list" => first_string(input, &["path"]).unwrap_or_else(|| ".".to_string()),
         "web_search" => first_string(input, &["query"]).unwrap_or_default(),
         "web_fetch" => first_string(input, &["url"]).unwrap_or_default(),
+        "multiedit" => first_string(input, &["file_path"]).unwrap_or_default(),
+        "apply_patch" => "patch".to_string(),
         "memory" | "report" | "autonomous_task" | "processes" => {
             first_string(input, &["action"]).unwrap_or_default()
         }
@@ -176,6 +178,8 @@ pub fn display_tool_name(name: &str, input: &Value) -> String {
         "search_compaction_segments" => "compaction search".to_string(),
         "send_user_message" => "user message".to_string(),
         "web_fetch" => "web fetch".to_string(),
+        "multiedit" => "multi edit".to_string(),
+        "apply_patch" => "patch".to_string(),
         other => other.replace('_', " "),
     }
 }
@@ -269,5 +273,17 @@ mod tests {
             presentation_for_tool("agent", &json!({"agent_type":"verify"})),
             ToolPresentation::GenericStatus
         );
+    }
+
+    #[test]
+    fn multiedit_has_explicit_status_label_and_file_pattern() {
+        let input = json!({"file_path":"src/lib.rs"});
+
+        assert_eq!(
+            presentation_for_tool("multiedit", &input),
+            ToolPresentation::GenericStatus
+        );
+        assert_eq!(display_tool_name("multiedit", &input), "multi edit");
+        assert_eq!(tool_pattern("multiedit", &input), "src/lib.rs");
     }
 }

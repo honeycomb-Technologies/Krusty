@@ -80,7 +80,7 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
                     "description": "The command to execute"
                 },
                 "timeout": {
-                    "type": "number",
+                    "type": "integer",
                     "description": "Optional timeout in milliseconds (max 600000)"
                 },
                 "description": {

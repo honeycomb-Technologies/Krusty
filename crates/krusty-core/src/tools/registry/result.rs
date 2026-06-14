@@ -102,10 +102,46 @@ impl ToolResult {
     }
 }
 
-/// Parse tool parameters, returning a ToolResult error on failure
-pub fn parse_params<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, ToolResult> {
+/// Parse tool parameters, returning a ToolResult error on failure.
+///
+/// Some OpenAI-compatible providers (notably the Grok CLI proxy) emit
+/// integer-looking tool arguments as JSON floats, e.g. `{ "depth": 2.0 }`.
+/// Rust tool params often use `usize`/`u64`, so normalize integral floats before
+/// deserializing while leaving true fractional values untouched.
+pub fn parse_params<T: serde::de::DeserializeOwned>(mut params: Value) -> Result<T, ToolResult> {
+    normalize_integral_floats(&mut params);
     serde_json::from_value(params)
         .map_err(|e| ToolResult::invalid_parameters(format!("Invalid parameters: {}", e)))
+}
+
+fn normalize_integral_floats(value: &mut Value) {
+    match value {
+        Value::Number(number) if number.as_i64().is_none() && number.as_u64().is_none() => {
+            let Some(float) = number.as_f64() else {
+                return;
+            };
+            if !float.is_finite() || float.fract() != 0.0 {
+                return;
+            }
+
+            if float >= i64::MIN as f64 && float <= i64::MAX as f64 {
+                *value = Value::Number(serde_json::Number::from(float as i64));
+            } else if float >= 0.0 && float <= u64::MAX as f64 {
+                *value = Value::Number(serde_json::Number::from(float as u64));
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                normalize_integral_floats(item);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values_mut() {
+                normalize_integral_floats(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn classify_error_code(message: &str) -> &'static str {

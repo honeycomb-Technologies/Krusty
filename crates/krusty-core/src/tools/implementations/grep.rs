@@ -143,11 +143,11 @@ Use multiline:true for multi-line patterns; -C for context; -i for case-insensit
                     "description": "Case insensitive search"
                 },
                 "-C": {
-                    "type": "number",
+                    "type": "integer",
                     "description": "Lines of context to show before and after each match"
                 },
                 "head_limit": {
-                    "type": "number",
+                    "type": "integer",
                     "description": "Limit output to first N matches"
                 }
             },

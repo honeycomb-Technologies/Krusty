@@ -54,11 +54,11 @@ Read a file before modifying it: edit, multiedit, and overwrite-via-write enforc
                     "description": "The path to the file to read"
                 },
                 "offset": {
-                    "type": "number",
+                    "type": "integer",
                     "description": "The line number to start reading from (1-indexed)"
                 },
                 "limit": {
-                    "type": "number",
+                    "type": "integer",
                     "description": "The number of lines to read"
                 }
             },

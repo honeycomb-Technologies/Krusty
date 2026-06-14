@@ -65,7 +65,7 @@ Prefer concise targeted queries. Cite sources in your final answer when you rely
                     "description": "Search query"
                 },
                 "max_results": {
-                    "type": "number",
+                    "type": "integer",
                     "description": "Maximum results to return (default 5, max 10)"
                 }
             },

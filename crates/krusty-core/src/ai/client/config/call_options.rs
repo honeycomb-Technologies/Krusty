@@ -75,7 +75,16 @@ impl CallOptions {
         let inferred = resolve_model_metadata(provider, model, api_format);
         let mut options = self.clone();
 
-        if inferred.reasoning_format.is_none() {
+        if provider == ProviderId::Grok {
+            // Krusty's Grok provider targets the Grok CLI proxy, which can emit
+            // reasoning blocks but rejects explicit `reasoning`/`reasoningEffort`
+            // request controls. Keep parsing reasoning output, but never send a
+            // provider-native thinking knob on this transport.
+            options.reasoning_format = None;
+            options.thinking = None;
+            options.codex_reasoning_effort = None;
+            options.anthropic_adaptive_effort = None;
+        } else if inferred.reasoning_format.is_none() {
             options.reasoning_format = None;
             options.thinking = None;
             options.codex_reasoning_effort = None;
@@ -363,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn canonicalization_preserves_grok_responses_reasoning_controls() {
+    fn canonicalization_strips_grok_proxy_reasoning_controls() {
         let options = CallOptions {
             thinking: Some(ThinkingConfig::default()),
             codex_reasoning_effort: Some(CodexReasoningEffort::XHigh),
@@ -374,13 +383,10 @@ mod tests {
         let canonical =
             options.canonicalized_for(ProviderId::Grok, "grok-build", ApiFormat::OpenAIResponses);
 
-        assert_eq!(canonical.reasoning_format, Some(ReasoningFormat::OpenAI));
-        assert_eq!(
-            canonical.codex_reasoning_effort,
-            Some(CodexReasoningEffort::XHigh)
-        );
+        assert!(canonical.reasoning_format.is_none());
+        assert!(canonical.codex_reasoning_effort.is_none());
         assert!(canonical.codex_parallel_tool_calls);
-        assert!(canonical.thinking.is_some());
+        assert!(canonical.thinking.is_none());
     }
 
     #[test]

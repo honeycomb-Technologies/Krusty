@@ -241,12 +241,36 @@ impl ToolResultBlock {
             "total_entries",
             "bytes_written",
             "line_count",
+            "edits_applied",
+            "edits_total",
             "files_modified",
+            "files_created",
+            "files_deleted",
             "lines_added",
             "lines_removed",
         ] {
             if let Some(value) = payload.get(key).and_then(|v| v.as_u64()) {
                 lines.push(format!("{}: {}", key.replace('_', " "), value));
+            }
+        }
+        if let Some(partial) = payload.get("partial").and_then(|v| v.as_bool()) {
+            lines.push(format!("partial: {}", partial));
+        }
+        if let Some(warnings) = full.get("warnings").and_then(|v| v.as_array()) {
+            for warning in warnings.iter().filter_map(|v| v.as_str()).take(6) {
+                lines.push(format!("warning: {}", warning));
+            }
+        }
+        if let Some(diff) = full.get("diff").and_then(|v| v.as_str()) {
+            let preview = diff
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .take(18)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            if !preview.is_empty() {
+                lines.push("diff preview:".to_string());
+                lines.extend(preview);
             }
         }
 
