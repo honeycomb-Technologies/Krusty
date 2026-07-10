@@ -9,6 +9,7 @@ interface ChatBootScreenProps {
   status: string;
   isConfigured: boolean;
   connectionError: string | null;
+  showLogo?: boolean;
   onRetryConnection: () => void;
   onOpenSetup: () => void;
 }
@@ -17,6 +18,7 @@ export function ChatBootScreen({
   status,
   isConfigured,
   connectionError,
+  showLogo = true,
   onRetryConnection,
   onOpenSetup,
 }: ChatBootScreenProps) {
@@ -27,13 +29,13 @@ export function ChatBootScreen({
   return (
     <SafeAreaView style={[styles.bootScreen, { backgroundColor: t.background }]}> 
       <View style={styles.bootInner}>
-        <KrustyLogo />
+        {showLogo ? <KrustyLogo /> : null}
         {status === "connecting" ? (
           <>
             <ActivityIndicator
               size="small"
               color={t.userMessage}
-              style={styles.bootSpinner}
+              style={showLogo ? styles.bootSpinner : undefined}
             />
             <Text style={[styles.bootMessage, { color: t.mutedForeground }]}> 
               Reconnecting to your server...

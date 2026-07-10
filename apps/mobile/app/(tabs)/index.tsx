@@ -82,6 +82,7 @@ export default function ChatScreen() {
     isConfigured,
   } = useConnection();
   const stores = useStores();
+  const { splashDone } = useSplashState();
 
   if (!stores) {
     return (
@@ -89,6 +90,7 @@ export default function ChatScreen() {
         status={status}
         isConfigured={isConfigured}
         connectionError={connectionError}
+        showLogo={!splashDone}
         onRetryConnection={() => {
           void reconnect();
         }}
@@ -147,6 +149,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const splitProgress = useSharedValue(0);
   const [isSplit, setIsSplit] = useState(false);
   const [researchEnabled, setResearchEnabled] = useState(false);
+  const [bottomControlsOpen, setBottomControlsOpen] = useState(false);
   const [composerReserveHeight, setComposerReserveHeight] =
     useState(CHAT_BAR_ZONE);
   const selectedModelInfo = useMemo(
@@ -719,6 +722,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
               </View>
             }
             bottomPadding={composerReserveHeight}
+            hideJumpToLatest={bottomControlsOpen}
           />
         </Animated.View>
 
@@ -752,6 +756,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
               researchEnabled={researchEnabled}
               onResearchToggle={() => setResearchEnabled((current) => !current)}
               tokenCount={tokenCount}
+              onOverlayOpenChange={setBottomControlsOpen}
             />
           </Animated.View>
         )}

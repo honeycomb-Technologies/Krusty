@@ -23,6 +23,7 @@ export function MakoThreadSurface({
   const { theme } = useThemeContext();
   const t = theme.colors;
   const [composerReserveHeight, setComposerReserveHeight] = useState(150);
+  const [bottomControlsOpen, setBottomControlsOpen] = useState(false);
 
   return (
     <View style={styles.container}>
@@ -37,6 +38,7 @@ export function MakoThreadSurface({
         onSubmitToolResult={chat.onSubmitToolResult}
         onPlanConfirm={chat.onPlanConfirm}
         bottomPadding={composerReserveHeight}
+        hideJumpToLatest={bottomControlsOpen}
         showPlanTracker={false}
         scrollToMessageId={scrollToMessageId}
         onScrollTargetHandled={onScrollTargetHandled}
@@ -90,6 +92,7 @@ export function MakoThreadSurface({
         researchEnabled={chat.researchEnabled}
         onResearchToggle={chat.onResearchToggle}
         tokenCount={chat.tokenCount}
+        onOverlayOpenChange={setBottomControlsOpen}
       />
     </View>
   );

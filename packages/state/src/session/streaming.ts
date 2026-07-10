@@ -48,6 +48,8 @@ export function createStreamCallbacks(
 ): StreamCallbacks {
 	let pinchedSessionId: string | null = null;
 	let compactedInPlace = false;
+	let pendingTextDelta = "";
+	let textFlushScheduled = false;
 
 	function updateLastAssistantMessage(
 		updater?: (state: SessionStoreState) => Partial<SessionStoreState>,
@@ -57,6 +59,29 @@ export function createStreamCallbacks(
 				...ref.current,
 			});
 			return { messages, ...updater?.(state) };
+		});
+	}
+
+	function flushPendingTextDelta() {
+		if (!pendingTextDelta) return;
+		ref.current.content += pendingTextDelta;
+		pendingTextDelta = "";
+		updateLastAssistantMessage(() => ({
+			isLoading: false,
+			isThinking: false,
+		}));
+	}
+
+	function scheduleTextFlush() {
+		if (textFlushScheduled) return;
+		textFlushScheduled = true;
+		const schedule =
+			typeof globalThis.requestAnimationFrame === "function"
+				? globalThis.requestAnimationFrame
+				: (callback: FrameRequestCallback) => setTimeout(callback, 16);
+		schedule(() => {
+			textFlushScheduled = false;
+			flushPendingTextDelta();
 		});
 	}
 
@@ -75,14 +100,12 @@ export function createStreamCallbacks(
 
 	return {
 		onTextDelta: (delta) => {
-			ref.current.content += delta;
-			updateLastAssistantMessage(() => ({
-				isLoading: false,
-				isThinking: false,
-			}));
+			pendingTextDelta += delta;
+			scheduleTextFlush();
 		},
 
 		onThinkingDelta: (thinking) => {
+			flushPendingTextDelta();
 			ref.current.thinking = (ref.current.thinking || "") + thinking;
 			const delegatedIndex = (ref.current.toolCalls || []).findIndex(
 				(toolCall) =>
@@ -128,6 +151,7 @@ export function createStreamCallbacks(
 		},
 
 		onToolCallStart: (id, name) => {
+			flushPendingTextDelta();
 			const delegatedKind = resolveDelegatedKind(name);
 			ref.current.toolCalls = [
 				...(ref.current.toolCalls || []),
@@ -144,6 +168,7 @@ export function createStreamCallbacks(
 		},
 
 		onToolCallComplete: (id, _name, args) => {
+			flushPendingTextDelta();
 			mapToolCalls(id, (toolCall) => {
 				const delegatedKind = resolveDelegatedKind(
 					toolCall.name,
@@ -164,6 +189,7 @@ export function createStreamCallbacks(
 		},
 
 		onToolResult: (id, output, isError) => {
+			flushPendingTextDelta();
 			mapToolCalls(id, (toolCall) => {
 				const delegatedKind = resolveDelegatedKind(
 					toolCall.name,
@@ -204,6 +230,7 @@ export function createStreamCallbacks(
 		},
 
 		onToolOutputDelta: (id, delta) => {
+			flushPendingTextDelta();
 			mapToolCalls(id, (toolCall) => ({
 				...toolCall,
 				output: (toolCall.output || "") + delta,
@@ -211,16 +238,19 @@ export function createStreamCallbacks(
 		},
 
 		onDelegatedProgress: (event) => {
+			flushPendingTextDelta();
 			mapToolCalls(event.tool_call_id, (toolCall) =>
 				applyDelegatedProgress(toolCall, event),
 			);
 		},
 
 		onPlanUpdate: (items: PlanItem[]) => {
+			flushPendingTextDelta();
 			planStore.getState().setItems(items);
 		},
 
 		onModeChange: (mode) => {
+			flushPendingTextDelta();
 			const nextMode: SessionMode = mode === "plan" ? "plan" : "build";
 			set({ mode: nextMode });
 			planStore.getState().setVisible(nextMode === "plan");
@@ -228,6 +258,7 @@ export function createStreamCallbacks(
 		},
 
 		onPlanComplete: (toolCallId, title, taskCount) => {
+			flushPendingTextDelta();
 			const planConfirmCall: ToolCall = {
 				id: toolCallId,
 				name: "PlanConfirm",
@@ -242,12 +273,14 @@ export function createStreamCallbacks(
 		},
 
 		onTurnComplete: (_turn, hasMore) => {
+			flushPendingTextDelta();
 			if (hasMore) {
 				updateLastAssistantMessage();
 			}
 		},
 
 		onToolApprovalRequired: (id, _name, args) => {
+			flushPendingTextDelta();
 			mapToolCalls(id, (toolCall) => ({
 				...toolCall,
 				arguments: args,
@@ -256,10 +289,12 @@ export function createStreamCallbacks(
 		},
 
 		onToolApproved: (id) => {
+			flushPendingTextDelta();
 			mapToolCalls(id, (toolCall) => ({ ...toolCall, status: "running" }));
 		},
 
 		onToolDenied: (id) => {
+			flushPendingTextDelta();
 			mapToolCalls(id, (toolCall) => ({
 				...toolCall,
 				status: "error",
@@ -268,10 +303,12 @@ export function createStreamCallbacks(
 		},
 
 		onUsage: (promptTokens, completionTokens) => {
+			flushPendingTextDelta();
 			set({ tokenCount: promptTokens + completionTokens });
 		},
 
 		onSessionPinched: (event: SessionContinuationEvent) => {
+			flushPendingTextDelta();
 			if (event.type === "session_pinched") {
 				pinchedSessionId = event.new_session_id;
 				return;
@@ -286,11 +323,13 @@ export function createStreamCallbacks(
 		},
 
 		onTitleUpdate: (title) => {
+			flushPendingTextDelta();
 			set({ title });
 			sessionsStore.getState().loadSessions();
 		},
 
 		onFinish: (sessionId) => {
+			flushPendingTextDelta();
 			const currentState = get();
 			const queued = currentState.queuedMessages;
 			const activeSessionId = pinchedSessionId ?? sessionId;

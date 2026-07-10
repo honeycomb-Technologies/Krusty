@@ -25,7 +25,10 @@ impl AgentCancellation {
 
     /// Cancel all tasks using the current token.
     pub fn cancel(&self) {
-        self.token.lock().expect("cancellation token mutex").cancel();
+        self.token
+            .lock()
+            .expect("cancellation token mutex")
+            .cancel();
     }
 
     /// Get a child token for a subtask.

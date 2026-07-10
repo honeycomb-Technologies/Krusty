@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import {
   View,
   TextInput,
@@ -11,8 +11,10 @@ import {
   Image,
   FlatList,
   Alert,
+  useWindowDimensions,
 } from 'react-native';
 import { BlurView } from '../../platform/blur';
+import { LinearGradient } from '../../platform/linear-gradient';
 import { ArrowUp, X, Mic, FlaskConical } from 'lucide-react-native';
 import * as Haptics from '../../platform/haptics';
 import * as ImagePicker from '../../platform/image-picker';
@@ -23,13 +25,16 @@ import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withSpring,
+  withRepeat,
+  withTiming,
+  Easing,
 } from 'react-native-reanimated';
 import { useThemeContext } from '../../hooks/useTheme';
 import { AccordionControls } from './AccordionControls';
 import { Waveform } from './Waveform';
 import { CrabIcon } from '../ui/CrabIcon';
 import { ImagePreviewModal, imagePreviewUri } from './ImagePreviewModal';
-import Svg, { Circle } from 'react-native-svg';
+import Svg, { Circle, Path, Polygon } from 'react-native-svg';
 import type { ThinkingLevel, ModelInfo, SessionType } from '@krusty/api';
 import type { PermissionMode } from '@krusty/state';
 
@@ -65,11 +70,34 @@ interface ChatBarProps {
   researchEnabled?: boolean;
   onResearchToggle?: () => void;
   tokenCount?: number;
+  onOverlayOpenChange?: (open: boolean) => void;
 }
 
 const PILL = 56;
 const RADIUS = 18;
 const GAP = 10;
+const ROOT_HORIZONTAL_PADDING = 10;
+const COMPOSER_MAX_HEIGHT = 112;
+const INPUT_SIDE_PADDING = 8;
+const INPUT_GROWTH_CHROME = 8;
+const GAUGE_SIZE = 28;
+const GAUGE_TOP_GAP = 6;
+const META_ROW_HEIGHT = 26;
+const RUN_LINE_HEIGHT = 3;
+const RUN_LINE_BEAM_WIDTH = 156;
+const MODEL_POPOVER_MAX_HEIGHT = PILL * 5 + GAP * 4;
+const WEB_INPUT_STYLE = Platform.OS === 'web'
+  ? ({
+      outlineStyle: 'none',
+      outlineWidth: 0,
+      resize: 'none',
+    } as any)
+  : null;
+
+interface ProviderFilter {
+  id: string;
+  label: string;
+}
 
 interface PickedImageAsset {
   uri: string;
@@ -161,6 +189,168 @@ function clipboardImageFileName(file: File, index: number): string {
   return `pasted-image${suffix}.${extensionForImageMimeType(supportedMimeType)}`;
 }
 
+function normalizeProviderKey(provider: string | null | undefined): string {
+  const raw = (provider ?? '').trim().toLowerCase();
+  const compact = raw.replace(/[^a-z0-9]/g, '');
+  if (!compact) return 'unknown';
+  if (compact.includes('openai')) return 'openai';
+  if (compact.includes('anthropic') || compact.includes('claude')) return 'anthropic';
+  if (compact.includes('openrouter')) return 'openrouter';
+  if (compact.includes('minimax')) return 'minimax';
+  if (compact === 'xai' || compact.includes('grok')) return 'xai';
+  if (compact === 'zai' || compact.includes('zai') || compact.includes('zhipu')) return 'zai';
+  return compact;
+}
+
+function providerInitials(label: string): string {
+  const words = label.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return '?';
+  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
+  return words.slice(0, 2).map(word => word[0]).join('').toUpperCase();
+}
+
+function thinkingDisplayName(level: ThinkingLevel): string {
+  switch (level) {
+    case 'off':
+      return 'Off';
+    case 'low':
+      return 'Low';
+    case 'medium':
+      return 'Medium';
+    case 'high':
+      return 'High';
+    case 'xhigh':
+      return 'Max';
+    default:
+      return 'Thinking';
+  }
+}
+
+function ProviderLogo({
+  providerId,
+  label,
+  color,
+  size = 22,
+}: {
+  providerId: string;
+  label: string;
+  color: string;
+  size?: number;
+}) {
+  switch (providerId) {
+    case 'openai':
+      return (
+        <Svg width={size} height={size} viewBox="0 0 20 20">
+          <Path
+            fill={color}
+            d="M11.248 18.25q-.825 0-1.568-.314a4.3 4.3 0 0 1-1.32-.874 4 4 0 0 1-1.304.214 4 4 0 0 1-2.046-.544 4.27 4.27 0 0 1-1.518-1.485 4 4 0 0 1-.56-2.095q0-.48.131-1.04A4.4 4.4 0 0 1 2.04 10.71a4.07 4.07 0 0 1 .017-3.4 4.2 4.2 0 0 1 1.056-1.418 3.8 3.8 0 0 1 1.6-.842 3.9 3.9 0 0 1 .76-1.683q.593-.759 1.451-1.188a4.04 4.04 0 0 1 1.832-.429q.825 0 1.567.313.742.314 1.32.875a4 4 0 0 1 1.304-.215q1.106 0 2.046.545a4.14 4.14 0 0 1 1.501 1.485q.578.941.578 2.095 0 .48-.132 1.04.66.61 1.023 1.419.363.792.363 1.666 0 .892-.38 1.717a4.3 4.3 0 0 1-1.072 1.435 3.8 3.8 0 0 1-1.584.825 3.8 3.8 0 0 1-.775 1.683 4.06 4.06 0 0 1-1.436 1.188 4.04 4.04 0 0 1-1.832.429m-4.076-2.062q.825 0 1.435-.347l3.103-1.782a.36.36 0 0 0 .164-.313v-1.42L7.881 14.62a.67.67 0 0 1-.726 0l-3.118-1.798a.5.5 0 0 1-.017.115v.198q0 .841.396 1.551.413.693 1.139 1.089a3.2 3.2 0 0 0 1.617.412m.165-2.69a.4.4 0 0 0 .181.05q.083 0 .165-.05l1.238-.71-3.977-2.31a.7.7 0 0 1-.363-.643v-3.58q-.825.362-1.32 1.122a2.9 2.9 0 0 0-.495 1.65q0 .809.413 1.55.412.743 1.072 1.123zm3.91 3.663q.875 0 1.585-.396a2.96 2.96 0 0 0 1.534-2.64v-3.564a.32.32 0 0 0-.165-.297l-1.254-.726v4.604a.7.7 0 0 1-.363.643l-3.119 1.799a3 3 0 0 0 1.783.577m.627-6.039V8.878L10.01 7.822 8.129 8.878v2.244l1.881 1.056zM7.057 5.859a.7.7 0 0 1 .363-.644l3.119-1.798a3 3 0 0 0-1.782-.578q-.874 0-1.584.396A2.96 2.96 0 0 0 6.05 4.324a3.07 3.07 0 0 0-.396 1.551v3.547q0 .199.165.314l1.237.726zm8.383 7.887q.825-.364 1.303-1.123.495-.758.495-1.65a3.15 3.15 0 0 0-.412-1.55q-.413-.743-1.073-1.123l-3.086-1.782q-.099-.065-.181-.049a.3.3 0 0 0-.165.05l-1.238.692 3.993 2.327a.6.6 0 0 1 .264.264.64.64 0 0 1 .1.363zm-3.317-8.382a.63.63 0 0 1 .726 0l3.135 1.831v-.297q0-.792-.396-1.501a2.86 2.86 0 0 0-1.105-1.155q-.71-.43-1.65-.43-.825 0-1.436.347L8.294 5.941a.36.36 0 0 0-.165.314v1.418z"
+          />
+        </Svg>
+      );
+    case 'anthropic':
+      return (
+        <Svg width={size} height={size} viewBox="0 0 24 24">
+          <Path
+            fill={color}
+            d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z"
+          />
+        </Svg>
+      );
+    case 'xai':
+      return (
+        <Svg width={size} height={size} viewBox="0 0 466.04 516.93">
+          <Polygon fill={color} points="0.12 182.71 234.14 516.92 338.15 516.92 104.13 182.71 0.12 182.71" />
+          <Polygon fill={color} points="0 516.92 104.08 516.92 156.08 442.67 104.04 368.34 0 516.92" />
+          <Polygon fill={color} points="466.04 0 361.96 0 182.1 256.86 234.15 331.18 466.04 0" />
+          <Polygon fill={color} points="380.78 516.92 466.04 516.92 466.04 37.16 380.78 158.92 380.78 516.92" />
+        </Svg>
+      );
+    case 'minimax':
+      return (
+        <Svg width={size} height={size} viewBox="0 0 24 24">
+          <Path
+            fill={color}
+            d="M11.43 3.92a.86.86 0 1 0-1.718 0v14.236a1.999 1.999 0 0 1-3.997 0V9.022a.86.86 0 1 0-1.718 0v3.87a1.999 1.999 0 0 1-3.997 0V11.49a.57.57 0 0 1 1.139 0v1.404a.86.86 0 0 0 1.719 0V9.022a1.999 1.999 0 0 1 3.997 0v9.134a.86.86 0 0 0 1.719 0V3.92a1.998 1.998 0 1 1 3.996 0v11.788a.57.57 0 1 1-1.139 0zm10.572 3.105a2 2 0 0 0-1.999 1.997v7.63a.86.86 0 0 1-1.718 0V3.923a1.999 1.999 0 0 0-3.997 0v16.16a.86.86 0 0 1-1.719 0V18.08a.57.57 0 1 0-1.138 0v2a1.998 1.998 0 0 0 3.996 0V3.92a.86.86 0 0 1 1.719 0v12.73a1.999 1.999 0 0 0 3.996 0V9.023a.86.86 0 1 1 1.72 0v6.686a.57.57 0 0 0 1.138 0V9.022a2 2 0 0 0-1.998-1.997"
+          />
+        </Svg>
+      );
+    case 'openrouter':
+      return (
+        <Svg width={size} height={size} viewBox="0 0 24 24">
+          <Path
+            fill={color}
+            d="M16.778 1.844v1.919q-.569-.026-1.138-.032-.708-.008-1.415.037c-1.93.126-4.023.728-6.149 2.237-2.911 2.066-2.731 1.95-4.14 2.75-.396.223-1.342.574-2.185.798-.841.225-1.753.333-1.751.333v4.229s.768.108 1.61.333c.842.224 1.789.575 2.185.799 1.41.798 1.228.683 4.14 2.75 2.126 1.509 4.22 2.11 6.148 2.236.88.058 1.716.041 2.555.005v1.918l7.222-4.168-7.222-4.17v2.176c-.86.038-1.611.065-2.278.021-1.364-.09-2.417-.357-3.979-1.465-2.244-1.593-2.866-2.027-3.68-2.508.889-.518 1.449-.906 3.822-2.59 1.56-1.109 2.614-1.377 3.978-1.466.667-.044 1.418-.017 2.278.02v2.176L24 6.014Z"
+          />
+        </Svg>
+      );
+    case 'zai':
+      return (
+        <Svg width={size} height={Math.round(size * 0.82)} viewBox="0 0 56 46">
+          <Path fill={color} d="M29.4256 0.436371L24.2163 7.04244H3.52728L8.73286 0.436371H29.4256Z" />
+          <Path fill={color} d="M52.2648 38.5712L47.0592 45.1739H26.4422L31.644 38.5712H52.2648Z" />
+          <Path fill={color} d="M55.9614 0.436371L20.7049 45.1742H0.0390625L5.24089 38.5715L16.7845 24.1041L30.0903 7.04244L35.2955 0.436371H55.9614Z" />
+        </Svg>
+      );
+    default:
+      return (
+        <Text style={[styles.providerInitials, { color }]}>{providerInitials(label)}</Text>
+      );
+  }
+}
+
+function RunningGradientLine({
+  active,
+  width,
+  color,
+  style,
+}: {
+  active: boolean;
+  width: number;
+  color: string;
+  style?: any;
+}) {
+  const progress = useSharedValue(0);
+
+  useEffect(() => {
+    if (!active) {
+      progress.value = 0;
+      return;
+    }
+
+    progress.value = withRepeat(
+      withTiming(1, { duration: 1350, easing: Easing.linear }),
+      -1,
+      false,
+    );
+  }, [active, progress]);
+
+  const beamStyle = useAnimatedStyle(() => ({
+    transform: [
+      {
+        translateX:
+          -RUN_LINE_BEAM_WIDTH +
+          progress.value * Math.max(width + RUN_LINE_BEAM_WIDTH * 2, RUN_LINE_BEAM_WIDTH),
+      },
+    ],
+  }));
+
+  if (!active) return null;
+
+  return (
+    <View pointerEvents="none" style={[styles.runLineTrack, style]}>
+      <Animated.View style={[styles.runLineBeam, beamStyle]}>
+        <LinearGradient
+          colors={['transparent', color, '#fff', color, 'transparent']}
+          locations={[0, 0.28, 0.5, 0.72, 1]}
+          start={{ x: 0, y: 0.5 }}
+          end={{ x: 1, y: 0.5 }}
+          style={StyleSheet.absoluteFill}
+        />
+      </Animated.View>
+    </View>
+  );
+}
+
 async function prepareClipboardImageAttachment(file: File, index: number): Promise<Attachment> {
   const fallbackBaseName = index === 0 ? 'pasted-image' : `pasted-image-${index + 1}`;
   const fileName = clipboardImageFileName(file, index);
@@ -228,33 +418,70 @@ export function ChatBar(props: ChatBarProps) {
     permissionMode, onPermissionModeToggle,
     fastModeEnabled, fastModeSupported, onFastModeToggle,
     mode, onModeToggle, onModelSelect, model, models,
-    sessionType, researchEnabled, onResearchToggle, tokenCount,
+    sessionType, researchEnabled, onResearchToggle, tokenCount, onOverlayOpenChange,
   } = props;
 
   const { theme } = useThemeContext();
   const insets = useSafeAreaInsets();
+  const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
   const [hoveredAttachmentIndex, setHoveredAttachmentIndex] = useState<number | null>(null);
   const [accordionOpen, setAccordionOpen] = useState(false);
+  const [accordionVisible, setAccordionVisible] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [micVolume, setMicVolume] = useState(0);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [modelRailOpen, setModelRailOpen] = useState(false);
   const [sortedModels, setSortedModels] = useState<ModelInfo[]>([]);
+  const [selectedProviderFilter, setSelectedProviderFilter] = useState<string | null>(null);
   const [attachPickerOpen, setAttachPickerOpen] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
+  const [inputContentHeight, setInputContentHeight] = useState(0);
   const modelPopoverScale = useSharedValue(0);
   const modelPopoverOpacity = useSharedValue(0);
-  const attachPopoverScale = useSharedValue(0);
-  const attachPopoverOpacity = useSharedValue(0);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const transcriptRef = useRef('');
+  const textRef = useRef('');
   const inputRef = useRef<TextInput>(null);
   const accordionOpenRef = useRef(false);
   const measuredRootHeightRef = useRef(0);
   const reportedComposerHeightRef = useRef(0);
+  const modelCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearModelCloseTimer = () => {
+    if (!modelCloseTimerRef.current) return;
+    clearTimeout(modelCloseTimerRef.current);
+    modelCloseTimerRef.current = null;
+  };
+
   useEffect(() => { accordionOpenRef.current = accordionOpen; }, [accordionOpen]);
+
+  useEffect(() => () => {
+    clearModelCloseTimer();
+  }, []);
+
+  const bottomOverlayOpen = accordionVisible || modelPickerOpen || attachPickerOpen;
+
+  useEffect(() => {
+    onOverlayOpenChange?.(bottomOverlayOpen);
+  }, [bottomOverlayOpen, onOverlayOpenChange]);
+
+  useEffect(() => () => {
+    onOverlayOpenChange?.(false);
+  }, [onOverlayOpenChange]);
+
+  useEffect(() => {
+    if (accordionOpen) {
+      setAccordionVisible(true);
+      return;
+    }
+
+    if (!accordionVisible) return;
+    const timer = setTimeout(() => setAccordionVisible(false), 420);
+    return () => clearTimeout(timer);
+  }, [accordionOpen, accordionVisible]);
 
   useEffect(() => {
     if (Platform.OS !== 'web' || !inputFocused || disabled || isRecording) return;
@@ -303,6 +530,45 @@ export function ChatBar(props: ChatBarProps) {
   const bgOverlay = isDark ? 'rgba(11,17,25,0.6)' : 'rgba(255,255,255,0.6)';
   const blurTint = isDark ? 'systemChromeMaterialDark' as const : 'systemChromeMaterialLight' as const;
   const pillTint = isDark ? 'systemMaterialDark' as const : 'systemMaterialLight' as const;
+  const providerFilters = useMemo<ProviderFilter[]>(() => {
+    const seen = new Set<string>();
+    const filters: ProviderFilter[] = [];
+    for (const modelInfo of sortedModels) {
+      const id = normalizeProviderKey(modelInfo.provider);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      filters.push({ id, label: modelInfo.provider });
+    }
+    return filters;
+  }, [sortedModels]);
+  const providerFilterActions = useMemo(
+    () => providerFilters.map(provider => ({
+      id: provider.id,
+      label: provider.label,
+      icon: (
+        <ProviderLogo
+          providerId={provider.id}
+          label={provider.label}
+          color="#fff"
+          size={24}
+        />
+      ),
+    })),
+    [providerFilters],
+  );
+  const filteredModels = useMemo(
+    () => selectedProviderFilter
+      ? sortedModels.filter(modelInfo =>
+          normalizeProviderKey(modelInfo.provider) === selectedProviderFilter,
+        )
+      : sortedModels,
+    [selectedProviderFilter, sortedModels],
+  );
+  const currentModelLabel = useMemo(() => {
+    if (!model) return 'No model selected';
+    return models.find(candidate => candidate.id === model)?.display_name ?? model;
+  }, [model, models]);
+  const thinkingLabel = thinkingDisplayName(thinkingLevel);
 
   // ── Keyboard tracking with LayoutAnimation ──
   useEffect(() => {
@@ -344,7 +610,11 @@ export function ChatBar(props: ChatBarProps) {
   });
   useSpeechRecognitionEvent('end', () => {
     if (transcriptRef.current) {
-      setText(prev => (prev ? prev + ' ' : '') + transcriptRef.current);
+      setText(prev => {
+        const next = (prev ? prev + ' ' : '') + transcriptRef.current;
+        textRef.current = next;
+        return next;
+      });
       transcriptRef.current = '';
     }
     setIsRecording(false);
@@ -380,7 +650,9 @@ export function ChatBar(props: ChatBarProps) {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (isRecording && ExpoSpeechRecognitionModule) { ExpoSpeechRecognitionModule.stop(); setIsRecording(false); }
     onSend(trimmed, attachments.length > 0 ? attachments : undefined);
+    textRef.current = '';
     setText('');
+    setInputContentHeight(0);
     setAttachments([]);
     setPreviewAttachment(null);
     setHoveredAttachmentIndex(null);
@@ -439,25 +711,53 @@ export function ChatBar(props: ChatBarProps) {
     toggleRecording(); // empty state = start recording
   };
 
-  const toggleAccordion = () => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setAccordionOpen(!accordionOpen); };
+  const handleTextChange = (value: string) => {
+    textRef.current = value;
+    setText(value);
+    if (!value) {
+      setInputContentHeight(0);
+    }
+  };
+
+  const toggleAccordion = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    if (accordionOpen) {
+      setAccordionOpen(false);
+      return;
+    }
+    setAccordionVisible(true);
+    setAccordionOpen(true);
+  };
 
   const openModelPicker = () => {
-    // Close attach picker if open
-    if (attachPickerOpen) closeAttachPicker();
-    // Snapshot sorted order at open time — stays static until closed
+    clearModelCloseTimer();
+    if (attachPickerOpen) {
+      setAttachPickerOpen(false);
+    }
+    // Snapshot sorted order at open time - stays static until closed.
     setSortedModels([...models].sort((a, b) => {
       if (a.id === model) return -1;
       if (b.id === model) return 1;
       return 0;
     }));
+    setSelectedProviderFilter(null);
+    modelPopoverScale.value = 0;
+    modelPopoverOpacity.value = 0;
+    setModelRailOpen(true);
     setModelPickerOpen(true);
     modelPopoverScale.value = withSpring(1, { damping: 25, stiffness: 200, mass: 1 });
-    modelPopoverOpacity.value = withSpring(1, { damping: 25, stiffness: 200 });
+    modelPopoverOpacity.value = withTiming(1, { duration: 140 });
   };
   const closeModelPicker = () => {
+    clearModelCloseTimer();
+    setModelRailOpen(false);
     modelPopoverScale.value = withSpring(0, { damping: 25, stiffness: 250 });
-    modelPopoverOpacity.value = withSpring(0, { damping: 25, stiffness: 250 });
-    setTimeout(() => setModelPickerOpen(false), 250);
+    modelPopoverOpacity.value = withTiming(0, { duration: 120 });
+    modelCloseTimerRef.current = setTimeout(() => {
+      setModelPickerOpen(false);
+      setSelectedProviderFilter(null);
+      modelCloseTimerRef.current = null;
+    }, 180);
   };
 
   const modelPopoverStyle = useAnimatedStyle(() => ({
@@ -466,21 +766,19 @@ export function ChatBar(props: ChatBarProps) {
   }));
 
   const openAttachPicker = () => {
-    // Close model picker if open
-    if (modelPickerOpen) closeModelPicker();
+    clearModelCloseTimer();
+    if (modelPickerOpen) {
+      setModelRailOpen(false);
+      modelPopoverScale.value = 0;
+      modelPopoverOpacity.value = 0;
+      setModelPickerOpen(false);
+      setSelectedProviderFilter(null);
+    }
     setAttachPickerOpen(true);
-    attachPopoverScale.value = withSpring(1, { damping: 25, stiffness: 200, mass: 1 });
-    attachPopoverOpacity.value = withSpring(1, { damping: 25, stiffness: 200 });
   };
   const closeAttachPicker = () => {
-    attachPopoverScale.value = withSpring(0, { damping: 25, stiffness: 250 });
-    attachPopoverOpacity.value = withSpring(0, { damping: 25, stiffness: 250 });
-    setTimeout(() => setAttachPickerOpen(false), 250);
+    setAttachPickerOpen(false);
   };
-  const attachPopoverStyle = useAnimatedStyle(() => ({
-    opacity: attachPopoverOpacity.value,
-    transform: [{ translateX: (1 - attachPopoverScale.value) * (PILL + GAP) }],
-  }));
   // Close popovers when accordion closes
   useEffect(() => {
     if (!accordionOpen) {
@@ -490,14 +788,31 @@ export function ChatBar(props: ChatBarProps) {
   }, [accordionOpen]);
 
   const canSend = !disabled && (isStreaming || text.trim().length > 0 || attachments.length > 0);
-  const kColor = accordionOpen ? t.thinking : t.mutedForeground;
-  const kBorder = accordionOpen ? t.thinking + '40' : borderColor;
+  const kActive = accordionOpen || accordionVisible;
+  const kColor = kActive ? t.thinking : t.mutedForeground;
+  const kBorder = kActive ? t.thinking + '40' : borderColor;
 
   // Bottom offset: keyboard height, or safe area when keyboard closed
   const bottomOffset = keyboardHeight > 0 ? keyboardHeight : insets.bottom;
   const gaugeTokens = tokenCount ?? 0;
   const gaugePct = Math.min(100, (gaugeTokens / 200000) * 100);
   const gaugeColor = gaugeTokens > 180000 ? t.error : gaugeTokens > 120000 ? t.warning : t.mutedForeground + '60';
+  const gaugeStroke = 3.5;
+  const gaugeRadius = (GAUGE_SIZE - gaugeStroke) / 2;
+  const gaugeCircumference = 2 * Math.PI * gaugeRadius;
+  const gaugeOffset = gaugeCircumference - (gaugePct / 100) * gaugeCircumference;
+  const shouldGrowComposer = inputContentHeight > PILL;
+  const composerBarHeight = isRecording || !shouldGrowComposer
+    ? PILL
+    : Math.min(COMPOSER_MAX_HEIGHT, inputContentHeight + INPUT_GROWTH_CHROME);
+  const metaReserveHeight = META_ROW_HEIGHT + GAUGE_TOP_GAP;
+  const overlayBottom = bottomOffset + metaReserveHeight + composerBarHeight + GAP;
+  const controlsLayerWidth = Math.max(PILL, viewportWidth - ROOT_HORIZONTAL_PADDING * 2);
+  const modelPopoverTopInset = Math.max(insets.top, 0) + 12;
+  const modelPopoverHeight = Math.min(
+    MODEL_POPOVER_MAX_HEIGHT,
+    Math.max(0, viewportHeight - overlayBottom - modelPopoverTopInset),
+  );
 
   useEffect(() => {
     const measuredRootHeight = measuredRootHeightRef.current;
@@ -513,6 +828,7 @@ export function ChatBar(props: ChatBarProps) {
 
   return (
     <View
+      pointerEvents="box-none"
       style={[styles.root, { paddingBottom: bottomOffset }]}
       onLayout={(event) => {
         measuredRootHeightRef.current = event.nativeEvent.layout.height;
@@ -595,7 +911,7 @@ export function ChatBar(props: ChatBarProps) {
       {/* L-shape: [input bar] + [K column] */}
       <View style={styles.lRow}>
         {/* Input bar */}
-        <View style={[styles.bar, { borderColor }]}>
+        <View style={[styles.bar, { borderColor, height: composerBarHeight }]}>
           <BlurView intensity={40} tint={blurTint} style={StyleSheet.absoluteFill} />
           <View style={[StyleSheet.absoluteFill, { backgroundColor: bgOverlay }]} />
           <View style={styles.barInner}>
@@ -603,9 +919,19 @@ export function ChatBar(props: ChatBarProps) {
               ? <Waveform active volume={micVolume} />
               : <TextInput
                   ref={inputRef}
-                  style={[styles.input, { color: t.foreground }]}
+                  style={[styles.input, WEB_INPUT_STYLE, { color: t.foreground }]}
                   value={text}
-                  onChangeText={setText}
+                  onChangeText={handleTextChange}
+                  onContentSizeChange={(event) => {
+                    if (!textRef.current) {
+                      setInputContentHeight(0);
+                      return;
+                    }
+                    const nextHeight = Math.ceil(event.nativeEvent.contentSize.height);
+                    setInputContentHeight((current) =>
+                      current === nextHeight ? current : nextHeight,
+                    );
+                  }}
                   onFocus={() => { setInputFocused(true); if (accordionOpen) setAccordionOpen(false); }}
                   onBlur={() => setInputFocused(false)}
                   placeholder={isMako ? "Message Mako..." : "Message Krusty..."}
@@ -642,25 +968,44 @@ export function ChatBar(props: ChatBarProps) {
 
         {/* K column */}
         <View style={styles.kCol}>
-          <AccordionControls
-            thinkingLevel={thinkingLevel}
-            onThinkingChange={onThinkingChange}
-            permissionMode={permissionMode}
-            onPermissionModeToggle={onPermissionModeToggle}
-            fastModeEnabled={fastModeEnabled}
-            fastModeSupported={fastModeSupported}
-            onFastModeToggle={onFastModeToggle}
-            mode={mode}
-            onModeToggle={onModeToggle}
-            onAttach={handleAttach}
-            onModelSelect={() => modelPickerOpen ? closeModelPicker() : openModelPicker()}
-            model={model}
-            isOpen={accordionOpen}
-            onToggle={toggleAccordion}
-            sessionType={sessionType}
-            researchEnabled={researchEnabled}
-            onResearchToggle={onResearchToggle}
-          />
+          {accordionVisible ? (
+            <View
+              pointerEvents="box-none"
+              style={[styles.controlsLayer, { width: controlsLayerWidth }]}
+            >
+              <AccordionControls
+                thinkingLevel={thinkingLevel}
+                onThinkingChange={onThinkingChange}
+                permissionMode={permissionMode}
+                onPermissionModeToggle={onPermissionModeToggle}
+                fastModeEnabled={fastModeEnabled}
+                fastModeSupported={fastModeSupported}
+                onFastModeToggle={onFastModeToggle}
+                mode={mode}
+                onModeToggle={onModeToggle}
+                onAttach={handleAttach}
+                attachPickerOpen={attachPickerOpen}
+                onPickPhoto={pickPhoto}
+                onPickCamera={pickCamera}
+                onPickFile={pickFile}
+                onModelSelect={() => modelPickerOpen ? closeModelPicker() : openModelPicker()}
+                modelPickerOpen={modelRailOpen}
+                providerFilters={providerFilterActions}
+                selectedProviderFilter={selectedProviderFilter}
+                onProviderFilterToggle={(providerId) => {
+                  setSelectedProviderFilter(current =>
+                    current === providerId ? null : providerId,
+                  );
+                }}
+                model={model}
+                isOpen={accordionOpen}
+                onToggle={toggleAccordion}
+                sessionType={sessionType}
+                researchEnabled={researchEnabled}
+                onResearchToggle={onResearchToggle}
+              />
+            </View>
+          ) : null}
           <Pressable onPress={toggleAccordion} style={styles.kWrap}>
             <BlurView intensity={20} tint={pillTint} style={StyleSheet.absoluteFill} />
             <View style={[StyleSheet.absoluteFill, { backgroundColor: bgOverlay }]} />
@@ -672,23 +1017,42 @@ export function ChatBar(props: ChatBarProps) {
       </View>
 
       {/* Model popover — slides out from behind accordion */}
-      {modelPickerOpen && (
-          <View style={[styles.modelClip, { bottom: bottomOffset + PILL + GAP }]}>
-            <Animated.View style={[styles.modelPopover, modelPopoverStyle]}>
-            <BlurView intensity={40} tint={pillTint} style={StyleSheet.absoluteFill} />
-            <View style={[StyleSheet.absoluteFill, { backgroundColor: isDark ? 'rgba(15,20,30,0.92)' : 'rgba(255,255,255,0.92)', borderRadius: RADIUS }]} />
+      {modelPickerOpen && modelPopoverHeight > 0 && (
+        <View style={[styles.modelClip, { bottom: overlayBottom, height: modelPopoverHeight }]}>
+          <Animated.View style={[styles.modelPopover, modelPopoverStyle]}>
+            <BlurView
+              intensity={theme.colors.glassBlur}
+              tint={pillTint}
+              style={StyleSheet.absoluteFill}
+            />
+            <View
+              style={[
+                StyleSheet.absoluteFill,
+                {
+                  backgroundColor: t.glass.background,
+                  borderRadius: RADIUS,
+                },
+              ]}
+            />
             <FlatList
-              data={sortedModels}
+              data={filteredModels}
               keyExtractor={(m: ModelInfo) => m.id}
               style={styles.modelList}
+              contentContainerStyle={styles.modelListContent}
+              extraData={model}
               showsVerticalScrollIndicator={false}
               renderItem={({ item }: { item: ModelInfo }) => (
                 <Pressable
                   onPress={() => {
                     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                     onModelSelect(item.id);
+                    closeModelPicker();
                   }}
-                  style={styles.modelItem}
+                  style={({ pressed }) => [
+                    styles.modelItem,
+                    item.id === model && { backgroundColor: t.glass.backgroundElevated },
+                    pressed && { backgroundColor: t.glass.backgroundPressed },
+                  ]}
                 >
                   <View style={styles.modelRow}>
                     <View style={styles.modelInfo}>
@@ -704,55 +1068,51 @@ export function ChatBar(props: ChatBarProps) {
                 </Pressable>
               )}
             />
-            </Animated.View>
-          </View>
+          </Animated.View>
+        </View>
       )}
 
-      {/* Attach popover — same area, slides from behind accordion */}
-      {attachPickerOpen && (
-          <View style={[styles.modelClip, { bottom: bottomOffset + PILL + GAP }]}>
-            <Animated.View style={[styles.modelPopover, attachPopoverStyle]}>
-              <BlurView intensity={40} tint={pillTint} style={StyleSheet.absoluteFill} />
-              <View style={[StyleSheet.absoluteFill, { backgroundColor: isDark ? 'rgba(15,20,30,0.92)' : 'rgba(255,255,255,0.92)', borderRadius: RADIUS }]} />
-              <View style={styles.attachOptions}>
-                <Pressable onPress={pickPhoto} style={styles.attachOption}>
-                  <Text style={[styles.attachOptionText, { color: t.foreground }]}>Photos</Text>
-                </Pressable>
-                <Pressable onPress={pickCamera} style={styles.attachOption}>
-                  <Text style={[styles.attachOptionText, { color: t.foreground }]}>Camera</Text>
-                </Pressable>
-                <Pressable onPress={pickFile} style={styles.attachOption}>
-                  <Text style={[styles.attachOptionText, { color: t.foreground }]}>Files</Text>
-                </Pressable>
-              </View>
-            </Animated.View>
-          </View>
-      )}
-
-      {/* Context ring gauge — sits in safe area zone below input */}
-      {gaugeTokens > 0 && (() => {
-        const size = 28;
-        const stroke = 3.5;
-        const r = (size - stroke) / 2;
-        const circ = 2 * Math.PI * r;
-        const offset = circ - (gaugePct / 100) * circ;
-        return (
-          <View style={styles.gaugeRow}>
+      {/* Composer status row — sits in safe area zone below input */}
+      <View pointerEvents="none" style={styles.metaRow}>
+        <View style={styles.metaLeft}>
+          {gaugeTokens > 0 && (
             <View style={styles.gaugeRing}>
-              <Svg width={size} height={size}>
-                <Circle cx={size / 2} cy={size / 2} r={r} stroke="rgba(255,255,255,0.06)" strokeWidth={stroke} fill="none" />
-                <Circle cx={size / 2} cy={size / 2} r={r} stroke={gaugeColor} strokeWidth={stroke} fill="none"
-                  strokeDasharray={`${circ}`} strokeDashoffset={offset} strokeLinecap="round"
-                  rotation={-90} origin={`${size / 2}, ${size / 2}`}
+              <Svg width={GAUGE_SIZE} height={GAUGE_SIZE}>
+                <Circle cx={GAUGE_SIZE / 2} cy={GAUGE_SIZE / 2} r={gaugeRadius} stroke="rgba(255,255,255,0.06)" strokeWidth={gaugeStroke} fill="none" />
+                <Circle cx={GAUGE_SIZE / 2} cy={GAUGE_SIZE / 2} r={gaugeRadius} stroke={gaugeColor} strokeWidth={gaugeStroke} fill="none"
+                  strokeDasharray={`${gaugeCircumference}`} strokeDashoffset={gaugeOffset} strokeLinecap="round"
+                  rotation={-90} origin={`${GAUGE_SIZE / 2}, ${GAUGE_SIZE / 2}`}
                 />
               </Svg>
               <Text style={[styles.gaugeLabel, { color: t.mutedForeground }]}>
                 {gaugeTokens >= 1000 ? `${(gaugeTokens / 1000).toFixed(0)}k` : gaugeTokens}
               </Text>
             </View>
-          </View>
-        );
-      })()}
+          )}
+          {mode === 'plan' && (
+            <Text style={[styles.metaMode, { color: t.thinking }]} numberOfLines={1}>
+              Plan
+            </Text>
+          )}
+        </View>
+        <View style={styles.metaRight}>
+          <Text style={[styles.metaModel, { color: t.mutedForeground }]} numberOfLines={1}>
+            {currentModelLabel}
+          </Text>
+          <Text style={[styles.metaDivider, { color: t.mutedForeground }]} numberOfLines={1}>
+            |
+          </Text>
+          <Text style={[styles.metaThinking, { color: t.mutedForeground }]} numberOfLines={1}>
+            {thinkingLabel}
+          </Text>
+        </View>
+      </View>
+      <RunningGradientLine
+        active={isStreaming}
+        width={viewportWidth}
+        color={t.thinking}
+        style={styles.runLineEdge}
+      />
       <ImagePreviewModal
         visible={Boolean(previewAttachment)}
         uri={imagePreviewUri(previewAttachment)}
@@ -769,7 +1129,7 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    paddingHorizontal: 10,
+    paddingHorizontal: ROOT_HORIZONTAL_PADDING,
     paddingTop: 6,
   },
   attachRow: { flexDirection: 'row', gap: 8, marginBottom: 8, paddingLeft: 4 },
@@ -780,9 +1140,43 @@ const styles = StyleSheet.create({
   attachHoverOverlay: { ...StyleSheet.absoluteFillObject, borderRadius: 10, borderWidth: 2 },
   attachName: { fontSize: 9, paddingHorizontal: 3, textAlign: 'center' },
   attachX: { position: 'absolute', top: 2, right: 2, width: 16, height: 16, borderRadius: 8, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', zIndex: 2 },
-  lRow: { flexDirection: 'row', alignItems: 'flex-end', gap: GAP },
-  bar: { flex: 1, borderRadius: RADIUS, overflow: 'hidden', borderWidth: StyleSheet.hairlineWidth, minHeight: PILL },
-  barInner: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 8, minHeight: PILL, gap: 4 },
+  runLineTrack: {
+    height: RUN_LINE_HEIGHT,
+    borderRadius: RUN_LINE_HEIGHT,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+  },
+  runLineEdge: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    borderRadius: 0,
+    zIndex: 2,
+  },
+  runLineBeam: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: RUN_LINE_BEAM_WIDTH,
+  },
+  lRow: { flexDirection: 'row', alignItems: 'flex-end', gap: GAP, minHeight: PILL },
+  bar: {
+    flex: 1,
+    height: PILL,
+    maxHeight: COMPOSER_MAX_HEIGHT,
+    borderRadius: RADIUS,
+    overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  barInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    height: '100%',
+    paddingHorizontal: INPUT_SIDE_PADDING,
+    paddingVertical: 0,
+    gap: 4,
+  },
   btn: { width: 34, height: 34, borderRadius: 17, justifyContent: 'center', alignItems: 'center' },
   actionBtn: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
   stopGlyph: {
@@ -791,18 +1185,42 @@ const styles = StyleSheet.create({
     borderRadius: 2,
     backgroundColor: '#fff',
   },
-  input: { flex: 1, fontSize: 16, lineHeight: 22, maxHeight: 120, paddingVertical: Platform.OS === 'ios' ? 6 : 4, paddingHorizontal: 6 },
-  kCol: { width: PILL, alignItems: 'center', justifyContent: 'flex-end', gap: GAP },
+  input: {
+    flex: 1,
+    height: '100%',
+    fontSize: 16,
+    lineHeight: 22,
+    maxHeight: COMPOSER_MAX_HEIGHT,
+    paddingVertical: Platform.OS === 'web' ? 17 : 0,
+    paddingHorizontal: 6,
+  },
+  kCol: {
+    width: PILL,
+    height: PILL,
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    overflow: 'visible',
+    position: 'relative',
+  },
+  controlsLayer: {
+    position: 'absolute',
+    right: 0,
+    bottom: PILL + GAP,
+    alignItems: 'flex-end',
+    zIndex: 20,
+  },
   kWrap: { width: PILL, height: PILL, borderRadius: RADIUS, overflow: 'hidden', borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.08)' },
   kInner: { flex: 1, justifyContent: 'center', alignItems: 'center' },
 
   // Clip container — hides the popover as it slides from behind accordion
   modelClip: {
     position: 'absolute',
-    left: 10,
-    right: PILL + GAP + 10,
+    left: ROOT_HORIZONTAL_PADDING,
+    right: PILL + GAP + ROOT_HORIZONTAL_PADDING,
     height: 4 * PILL + 3 * GAP,
     overflow: 'hidden',
+    zIndex: 30,
+    elevation: 30,
   },
   // Model popover — slides out from behind accordion
   modelPopover: {
@@ -813,7 +1231,19 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: 'rgba(255,255,255,0.1)',
   },
-  modelList: { padding: 8 },
+  providerInitials: {
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0,
+  },
+  modelList: {
+    flex: 1,
+    paddingHorizontal: 8,
+  },
+  modelListContent: {
+    paddingTop: 8,
+    paddingBottom: 10,
+  },
   modelItem: {
     paddingHorizontal: 14,
     paddingVertical: 12,
@@ -825,14 +1255,56 @@ const styles = StyleSheet.create({
   modelName: { fontSize: 15, fontWeight: '500' },
   modelMeta: { fontSize: 12, marginTop: 2 },
   modelCheck: { fontSize: 18, fontWeight: '700', marginLeft: 8 },
-
-  // Attach popover options
-  attachOptions: { flex: 1, justifyContent: 'center', padding: 12, gap: 8 },
-  attachOption: { flex: 1, justifyContent: 'center', paddingHorizontal: 14 },
-  attachOptionText: { fontSize: 15, fontWeight: '500' },
-
-  // Context ring gauge
-  gaugeRow: { paddingHorizontal: 4, paddingTop: 6 },
-  gaugeRing: { width: 28, height: 28, alignItems: 'center', justifyContent: 'center' },
-  gaugeLabel: { position: 'absolute', fontSize: 7, fontWeight: '600', letterSpacing: -0.3 },
+  // Composer status row
+  metaRow: {
+    height: META_ROW_HEIGHT + GAUGE_TOP_GAP,
+    paddingTop: GAUGE_TOP_GAP,
+    paddingHorizontal: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  metaLeft: {
+    flexShrink: 0,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  metaRight: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 10,
+  },
+  metaMode: {
+    flexShrink: 0,
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0,
+  },
+  metaModel: {
+    flexShrink: 1,
+    minWidth: 0,
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0,
+    textAlign: 'right',
+  },
+  metaDivider: {
+    flexShrink: 0,
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 0,
+  },
+  metaThinking: {
+    flexShrink: 0,
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0,
+  },
+  gaugeRing: { width: GAUGE_SIZE, height: GAUGE_SIZE, alignItems: 'center', justifyContent: 'center' },
+  gaugeLabel: { position: 'absolute', fontSize: 7, fontWeight: '600', letterSpacing: 0 },
 });

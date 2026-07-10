@@ -4750,7 +4750,7 @@ dependencies = [
 
 [[package]]
 name = "krusty"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -4824,7 +4824,7 @@ dependencies = [
 
 [[package]]
 name = "krusty-client"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4839,7 +4839,7 @@ dependencies = [
 
 [[package]]
 name = "krusty-client-state"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "krusty-client",
  "serde",
@@ -4848,7 +4848,7 @@ dependencies = [
 
 [[package]]
 name = "krusty-core"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4911,7 +4911,7 @@ dependencies = [
 
 [[package]]
 name = "krusty-desktop"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
@@ -4925,7 +4925,7 @@ dependencies = [
 
 [[package]]
 name = "krusty-mobile"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -4939,7 +4939,7 @@ dependencies = [
 
 [[package]]
 name = "krusty-mobile-ui"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "gpui",
  "krusty-client-state",
@@ -4948,7 +4948,7 @@ dependencies = [
 
 [[package]]
 name = "krusty-server"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "axum",

@@ -15,22 +15,35 @@ import { useThemeContext } from '../hooks/useTheme';
 import { useConnection } from '../hooks/useConnection';
 import { router } from 'expo-router';
 
+function inferInitialServerUrl(): string {
+  if (Platform.OS !== 'web' || typeof window === 'undefined') return '';
+
+  const { origin, hostname, port } = window.location;
+  if (!origin || origin === 'null') return '';
+
+  const isExpoDevServer =
+    (hostname === 'localhost' || hostname === '127.0.0.1') && port === '5173';
+  if (isExpoDevServer) return '';
+
+  return origin.replace(/\/+$/, '');
+}
+
 export default function OnboardingScreen() {
   const { theme } = useThemeContext();
   const { connect } = useConnection();
-  const [serverUrl, setServerUrl] = useState('');
+  const [serverUrl, setServerUrl] = useState(inferInitialServerUrl);
   const [token, setToken] = useState('');
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handleConnect = async () => {
-    if (!serverUrl.trim() || !token.trim()) return;
+    const url = (serverUrl.trim() || inferInitialServerUrl()).replace(/\/+$/, '');
+    if (!url || !token.trim()) return;
 
     setIsConnecting(true);
     setError(null);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
-    const url = serverUrl.trim().replace(/\/+$/, '');
     const success = await connect(url, token.trim());
 
     if (success) {
@@ -46,6 +59,7 @@ export default function OnboardingScreen() {
 
   const t = theme.colors;
   const g = theme.colors.glass;
+  const canConnect = Boolean((serverUrl.trim() || inferInitialServerUrl()) && token.trim());
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: t.background }]}>
@@ -99,11 +113,11 @@ export default function OnboardingScreen() {
               styles.button,
               {
                 backgroundColor: pressed ? t.userMessage + 'cc' : t.userMessage,
-                opacity: isConnecting || !serverUrl.trim() || !token.trim() ? 0.5 : 1,
+                opacity: isConnecting || !canConnect ? 0.5 : 1,
               },
             ]}
             onPress={handleConnect}
-            disabled={isConnecting || !serverUrl.trim() || !token.trim()}
+            disabled={isConnecting || !canConnect}
           >
             {isConnecting ? (
               <ActivityIndicator color="#fff" size="small" />

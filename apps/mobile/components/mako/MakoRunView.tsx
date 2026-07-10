@@ -170,6 +170,7 @@ export function MakoRunView({
   const [isSavingCrew, setIsSavingCrew] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [composerReserveHeight, setComposerReserveHeight] = useState(150);
+  const [bottomControlsOpen, setBottomControlsOpen] = useState(false);
   const { status, wake, isLoading, refresh } = useMakoRun(runId, true);
 
   const displayStatus = getRunDisplayStatus(
@@ -349,6 +350,7 @@ export function MakoRunView({
               </View>
             }
             bottomPadding={composerReserveHeight}
+            hideJumpToLatest={bottomControlsOpen}
             showPlanTracker={false}
           />
 
@@ -374,6 +376,7 @@ export function MakoRunView({
             researchEnabled={chat.researchEnabled}
             onResearchToggle={chat.onResearchToggle}
             tokenCount={chat.tokenCount}
+            onOverlayOpenChange={setBottomControlsOpen}
           />
         </View>
       </View>

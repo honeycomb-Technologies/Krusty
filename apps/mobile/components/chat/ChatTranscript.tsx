@@ -13,7 +13,6 @@ import {
   NativeSyntheticEvent,
   Pressable,
   StyleSheet,
-  Text,
   View,
 } from "react-native";
 import { ArrowDown } from "lucide-react-native";
@@ -22,6 +21,11 @@ import { BlurView } from "../../platform/blur";
 import { useBreakpoint } from "../../hooks/useBreakpoint";
 import { useThemeContext } from "../../hooks/useTheme";
 import { MessageBubble } from "./MessageBubble";
+import {
+  buildTranscriptTurns,
+  findTurnIndexForMessage,
+  type TranscriptTurn,
+} from "./transcriptTurns";
 import { PlanTracker } from "./PlanTracker";
 import type { ChatMessage } from "@krusty/api";
 
@@ -46,13 +50,21 @@ interface ChatTranscriptProps {
   showPlanTracker?: boolean;
   scrollToMessageId?: string | null;
   onScrollTargetHandled?: () => void;
+  hideJumpToLatest?: boolean;
 }
 
-const TOP_EDGE_HEIGHT = 64;
-const BOTTOM_EDGE_HEIGHT = 88;
+const DESKTOP_TOP_EDGE_HEIGHT = 22;
+const DESKTOP_BOTTOM_EDGE_HEIGHT = 116;
+const MOBILE_BOTTOM_SCRIM_MIN_HEIGHT = 148;
+const MOBILE_BOTTOM_SCRIM_MAX_HEIGHT = 228;
 const EDGE_GAP = 12;
 const TRACKER_GAP = 10;
 const SCROLL_FOLLOW_THRESHOLD = 72;
+const BOTTOM_SCROLL_OVERSHOOT = 240;
+const BOTTOM_CONTROL_INSET = 10;
+const BOTTOM_CONTROL_SIZE = 56;
+const BOTTOM_CONTROL_RADIUS = 18;
+const PROGRAMMATIC_SCROLL_SETTLE_MS = 700;
 
 function lastMessageLayoutSignature(messages: ChatMessage[]): string {
   const lastMessage = messages[messages.length - 1];
@@ -60,26 +72,24 @@ function lastMessageLayoutSignature(messages: ChatMessage[]): string {
 
   const toolSignature =
     lastMessage.toolCalls
-      ?.map(
-        (toolCall) =>
-          [
-            toolCall.id,
-            toolCall.status,
-            toolCall.output?.length ?? 0,
-            toolCall.delegated?.thinking?.length ?? 0,
-          ].join(":"),
+      ?.map((toolCall) =>
+        [
+          toolCall.id,
+          toolCall.status,
+          toolCall.output?.length ?? 0,
+          toolCall.delegated?.thinking?.length ?? 0,
+        ].join(":"),
       )
       .join("|") ?? "";
   const attachmentSignature =
     lastMessage.attachments
-      ?.map(
-        (attachment) =>
-          [
-            attachment.type,
-            attachment.name ?? "",
-            attachment.uri?.length ?? 0,
-            attachment.base64?.length ?? 0,
-          ].join(":"),
+      ?.map((attachment) =>
+        [
+          attachment.type,
+          attachment.name ?? "",
+          attachment.uri?.length ?? 0,
+          attachment.base64?.length ?? 0,
+        ].join(":"),
       )
       .join("|") ?? "";
 
@@ -117,6 +127,7 @@ export function ChatTranscript({
   showPlanTracker = true,
   scrollToMessageId,
   onScrollTargetHandled,
+  hideJumpToLatest = false,
 }: ChatTranscriptProps) {
   const { theme } = useThemeContext();
   const { isDesktop } = useBreakpoint();
@@ -127,7 +138,9 @@ export function ChatTranscript({
   const autoFollowRef = useRef(true);
   const pendingAutoScrollRef = useRef(false);
   const pendingAutoScrollAnimatedRef = useRef(false);
+  const bottomAnchorTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const isUserDraggingRef = useRef(false);
+  const programmaticScrollUntilRef = useRef(0);
   const loadedSessionIdRef = useRef<string | null>(null);
   const [planTrackerHeight, setPlanTrackerHeight] = useState(0);
   const [isNearBottom, setIsNearBottom] = useState(true);
@@ -137,33 +150,45 @@ export function ChatTranscript({
       ? "systemChromeMaterialDark"
       : "systemChromeMaterialLight";
   const jumpTint =
-    theme.scheme === "dark"
-      ? "systemMaterialDark"
-      : "systemMaterialLight";
+    theme.scheme === "dark" ? "systemMaterialDark" : "systemMaterialLight";
   const jumpOverlay =
-    theme.scheme === "dark"
-      ? "rgba(11,17,25,0.78)"
-      : "rgba(255,255,255,0.78)";
+    theme.scheme === "dark" ? "rgba(11,17,25,0.6)" : "rgba(255,255,255,0.6)";
 
   const messageCount = messages.length;
+  const turns = useMemo(
+    () => buildTranscriptTurns(messages, isStreaming),
+    [isStreaming, messages],
+  );
   const layoutSignature = useMemo(
     () => lastMessageLayoutSignature(messages),
     [messages],
   );
-  const topFadeHeight = isDesktop ? 22 : TOP_EDGE_HEIGHT;
-  const bottomFadeHeight = Math.max(
-    isDesktop ? 116 : BOTTOM_EDGE_HEIGHT,
-    Math.min(bottomPadding + 40, isDesktop ? 188 : 236),
-  );
+  const topFadeHeight = isDesktop ? DESKTOP_TOP_EDGE_HEIGHT : 0;
+  const topContentGap = topFadeHeight > 0 ? topFadeHeight + EDGE_GAP : EDGE_GAP;
+  const bottomScrimHeight = isDesktop
+    ? Math.max(DESKTOP_BOTTOM_EDGE_HEIGHT, Math.min(bottomPadding + 40, 188))
+    : Math.max(
+        MOBILE_BOTTOM_SCRIM_MIN_HEIGHT,
+        Math.min(bottomPadding + 96, MOBILE_BOTTOM_SCRIM_MAX_HEIGHT),
+      );
+  const bottomScrimOffset = 0;
   const listTopPadding = isDesktop
     ? 8
-    : topFadeHeight +
-      EDGE_GAP +
+    : topContentGap +
       (showPlanTracker && planTrackerHeight > 0
         ? planTrackerHeight + TRACKER_GAP
         : 0);
-  const listBottomPadding = bottomPadding + bottomFadeHeight + EDGE_GAP;
-  const showJumpToLatest = messageCount > 0 && isStreaming && !isNearBottom;
+  const listBottomPadding = bottomPadding + EDGE_GAP;
+  const showJumpToLatest = messageCount > 0 && !isNearBottom && !hideJumpToLatest;
+
+  const clearBottomAnchorTimers = useCallback(() => {
+    bottomAnchorTimersRef.current.forEach((timer) => clearTimeout(timer));
+    bottomAnchorTimersRef.current = [];
+  }, []);
+
+  const markProgrammaticScroll = useCallback((durationMs = PROGRAMMATIC_SCROLL_SETTLE_MS) => {
+    programmaticScrollUntilRef.current = Date.now() + durationMs;
+  }, []);
 
   const scrollToBottom = useCallback((animated: boolean) => {
     const contentHeight = contentHeightRef.current;
@@ -175,43 +200,74 @@ export function ChatTranscript({
     if (!contentHeight || contentHeight <= listHeight) {
       scrollOffsetRef.current = 0;
       setIsNearBottom(true);
+      markProgrammaticScroll(120);
       flatListRef.current?.scrollToOffset({ animated: false, offset: 0 });
       return;
     }
 
-    scrollOffsetRef.current = Math.max(0, contentHeight - listHeight);
+    const targetOffset = Math.max(
+      0,
+      contentHeight - listHeight + BOTTOM_SCROLL_OVERSHOOT,
+    );
+    scrollOffsetRef.current = targetOffset;
     setIsNearBottom(true);
-    flatListRef.current?.scrollToEnd({ animated });
-  }, []);
+    markProgrammaticScroll(animated ? PROGRAMMATIC_SCROLL_SETTLE_MS : 180);
+    flatListRef.current?.scrollToOffset({ animated, offset: targetOffset });
+  }, [markProgrammaticScroll]);
+
+  const scheduleBottomAnchor = useCallback(
+    (animated: boolean) => {
+      clearBottomAnchorTimers();
+
+      const anchor = (useAnimated: boolean) => {
+        if (!autoFollowRef.current || isUserDraggingRef.current) {
+          return;
+        }
+        scrollToBottom(useAnimated);
+      };
+
+      requestAnimationFrame(() => {
+        anchor(animated);
+        requestAnimationFrame(() => {
+          anchor(false);
+        });
+      });
+
+      bottomAnchorTimersRef.current = [80, 180, 360].map((delay) =>
+        setTimeout(() => anchor(false), delay),
+      );
+    },
+    [clearBottomAnchorTimers, scrollToBottom],
+  );
 
   const queueAutoScroll = useCallback((animated: boolean) => {
     pendingAutoScrollRef.current = true;
     pendingAutoScrollAnimatedRef.current = animated;
   }, []);
 
-  const updateNearBottom = useCallback(
-    (offsetY = scrollOffsetRef.current) => {
-      const nextNearBottom =
-        distanceFromBottom(
-          contentHeightRef.current,
-          listHeightRef.current,
-          offsetY,
-        ) <= SCROLL_FOLLOW_THRESHOLD;
+  const updateNearBottom = useCallback((
+    offsetY = scrollOffsetRef.current,
+    options: { allowDisable?: boolean; allowEnable?: boolean } = {},
+  ) => {
+    const nextNearBottom =
+      distanceFromBottom(
+        contentHeightRef.current,
+        listHeightRef.current,
+        offsetY,
+      ) <= SCROLL_FOLLOW_THRESHOLD;
 
-      setIsNearBottom((current) =>
-        current === nextNearBottom ? current : nextNearBottom,
-      );
+    setIsNearBottom((current) =>
+      current === nextNearBottom ? current : nextNearBottom,
+    );
 
-      if (nextNearBottom) {
-        autoFollowRef.current = true;
-      } else if (isUserDraggingRef.current) {
-        autoFollowRef.current = false;
-      }
+    if (nextNearBottom && options.allowEnable !== false) {
+      autoFollowRef.current = true;
+    } else if (!nextNearBottom && options.allowDisable) {
+      autoFollowRef.current = false;
+    }
 
-      return nextNearBottom;
-    },
-    [],
-  );
+    return nextNearBottom;
+  }, []);
 
   const flushAutoScroll = useCallback(() => {
     if (!pendingAutoScrollRef.current || isUserDraggingRef.current) {
@@ -225,15 +281,15 @@ export function ChatTranscript({
 
     pendingAutoScrollRef.current = false;
     const animated = pendingAutoScrollAnimatedRef.current;
-    requestAnimationFrame(() => {
-      scrollToBottom(animated);
-    });
-  }, [scrollToBottom]);
+    scheduleBottomAnchor(animated);
+  }, [scheduleBottomAnchor]);
 
   const handleListScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       scrollOffsetRef.current = event.nativeEvent.contentOffset.y;
-      updateNearBottom(event.nativeEvent.contentOffset.y);
+      updateNearBottom(event.nativeEvent.contentOffset.y, {
+        allowDisable: Date.now() >= programmaticScrollUntilRef.current,
+      });
     },
     [updateNearBottom],
   );
@@ -241,15 +297,18 @@ export function ChatTranscript({
   const handleJumpToLatest = useCallback(() => {
     autoFollowRef.current = true;
     setIsNearBottom(true);
-    queueAutoScroll(false);
     scrollToBottom(false);
-  }, [queueAutoScroll, scrollToBottom]);
+    scheduleBottomAnchor(false);
+  }, [scheduleBottomAnchor, scrollToBottom]);
+
+  useEffect(() => clearBottomAnchorTimers, [clearBottomAnchorTimers]);
 
   useEffect(() => {
     if (!sessionId) {
       loadedSessionIdRef.current = null;
       autoFollowRef.current = true;
       pendingAutoScrollRef.current = false;
+      clearBottomAnchorTimers();
       scrollOffsetRef.current = 0;
       setPlanTrackerHeight(0);
       setIsNearBottom(true);
@@ -263,16 +322,18 @@ export function ChatTranscript({
     loadedSessionIdRef.current = sessionId;
     autoFollowRef.current = true;
     pendingAutoScrollRef.current = false;
+    clearBottomAnchorTimers();
     scrollOffsetRef.current = 0;
     setPlanTrackerHeight(0);
     setIsNearBottom(true);
-    queueAutoScroll(false);
-  }, [queueAutoScroll, sessionId]);
+    scheduleBottomAnchor(false);
+  }, [clearBottomAnchorTimers, scheduleBottomAnchor, sessionId]);
 
   useEffect(() => {
     if (messageCount === 0) {
       pendingAutoScrollRef.current = false;
       autoFollowRef.current = true;
+      clearBottomAnchorTimers();
       scrollOffsetRef.current = 0;
       setIsNearBottom(true);
       return;
@@ -280,21 +341,29 @@ export function ChatTranscript({
 
     if (autoFollowRef.current) {
       queueAutoScroll(!isStreaming);
+      scheduleBottomAnchor(!isStreaming);
     }
-  }, [isStreaming, layoutSignature, messageCount, queueAutoScroll]);
+  }, [
+    clearBottomAnchorTimers,
+    isStreaming,
+    layoutSignature,
+    messageCount,
+    queueAutoScroll,
+    scheduleBottomAnchor,
+  ]);
 
   useEffect(() => {
     if (messageCount === 0 || !autoFollowRef.current) {
       return;
     }
 
-    queueAutoScroll(false);
+    scheduleBottomAnchor(false);
   }, [
     bottomPadding,
     listTopPadding,
     messageCount,
     planTrackerHeight,
-    queueAutoScroll,
+    scheduleBottomAnchor,
   ]);
 
   useEffect(() => {
@@ -302,9 +371,7 @@ export function ChatTranscript({
       return;
     }
 
-    const targetIndex = messages.findIndex(
-      (message) => message.id === scrollToMessageId,
-    );
+    const targetIndex = findTurnIndexForMessage(turns, scrollToMessageId);
     if (targetIndex < 0) {
       onScrollTargetHandled?.();
       return;
@@ -312,6 +379,7 @@ export function ChatTranscript({
 
     autoFollowRef.current = false;
     requestAnimationFrame(() => {
+      markProgrammaticScroll();
       flatListRef.current?.scrollToIndex({
         index: targetIndex,
         animated: true,
@@ -319,7 +387,7 @@ export function ChatTranscript({
       });
       onScrollTargetHandled?.();
     });
-  }, [messages, onScrollTargetHandled, scrollToMessageId]);
+  }, [markProgrammaticScroll, onScrollTargetHandled, scrollToMessageId, turns]);
 
   if (messages.length === 0) {
     return (
@@ -333,10 +401,11 @@ export function ChatTranscript({
     <View style={styles.flex}>
       <FlatList
         ref={flatListRef}
-        data={messages}
-        keyExtractor={(message) => message.id}
+        data={turns}
+        keyExtractor={(turn) => turn.id}
         onScrollBeginDrag={() => {
           isUserDraggingRef.current = true;
+          clearBottomAnchorTimers();
           Keyboard.dismiss();
         }}
         onScrollEndDrag={() => {
@@ -351,12 +420,197 @@ export function ChatTranscript({
         }}
         onScroll={handleListScroll}
         scrollEventThrottle={16}
-        renderItem={({ item, index }) => (
+        renderItem={({ item, index }) => {
+          const isLastTurn = index === turns.length - 1;
+          return (
+            <TranscriptTurnRow
+              turn={item}
+              isLastTurn={isLastTurn}
+              isStreaming={isStreaming && isLastTurn}
+              isThinking={isThinking && isLastTurn}
+              activeToolCallId={activeToolCallId}
+              sessionId={sessionId}
+              onApproveTool={onApproveTool}
+              onDenyTool={onDenyTool}
+              onSubmitToolResult={onSubmitToolResult}
+              onPlanConfirm={onPlanConfirm}
+            />
+          );
+        }}
+        style={styles.flex}
+        contentContainerStyle={[
+          styles.list,
+          isDesktop && styles.listDesktop,
+          {
+            paddingTop: listTopPadding,
+            paddingBottom: listBottomPadding,
+          },
+        ]}
+        onLayout={(event) => {
+          listHeightRef.current = event.nativeEvent.layout.height;
+          const shouldMaintainBottom =
+            autoFollowRef.current && !isUserDraggingRef.current;
+          updateNearBottom();
+          if (shouldMaintainBottom) {
+            scheduleBottomAnchor(false);
+          } else {
+            flushAutoScroll();
+          }
+        }}
+        onContentSizeChange={(_width, height) => {
+          contentHeightRef.current = height;
+          const shouldMaintainBottom =
+            autoFollowRef.current && !isUserDraggingRef.current;
+          updateNearBottom();
+          if (shouldMaintainBottom) {
+            scheduleBottomAnchor(false);
+          } else {
+            flushAutoScroll();
+          }
+        }}
+        onScrollToIndexFailed={({ index }) => {
+          const clampedIndex = Math.max(0, Math.min(index, turns.length - 1));
+          requestAnimationFrame(() => {
+            flatListRef.current?.scrollToIndex({
+              index: clampedIndex,
+              animated: true,
+              viewPosition: 0.35,
+            });
+          });
+        }}
+        keyboardDismissMode="interactive"
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      />
+
+      {topFadeHeight > 0 ? (
+        <View
+          style={[
+            styles.edgeMask,
+            styles.edgeMaskTop,
+            { height: topFadeHeight },
+          ]}
+          pointerEvents="none"
+        >
+          <BlurView
+            intensity={10}
+            tint={blurTint}
+            style={StyleSheet.absoluteFill}
+          />
+          <LinearGradient
+            colors={[`${t.background}88`, `${t.background}00`]}
+            start={{ x: 0.5, y: 0 }}
+            end={{ x: 0.5, y: 1 }}
+            style={StyleSheet.absoluteFill}
+          />
+        </View>
+      ) : null}
+      {!isDesktop && showPlanTracker ? (
+        <PlanTracker onHeightChange={setPlanTrackerHeight} />
+      ) : null}
+      <View
+        style={[
+          styles.edgeMask,
+          styles.edgeMaskBottom,
+          { height: bottomScrimHeight, bottom: bottomScrimOffset },
+        ]}
+        pointerEvents="none"
+      >
+        {isDesktop ? (
+          <BlurView
+            intensity={28}
+            tint={blurTint}
+            style={StyleSheet.absoluteFill}
+          />
+        ) : null}
+        <LinearGradient
+          colors={
+            isDesktop
+              ? [`${t.background}00`, `${t.background}d0`, t.background]
+              : [
+                  `${t.background}00`,
+                  `${t.background}20`,
+                  `${t.background}d8`,
+                  t.background,
+                ]
+          }
+          locations={isDesktop ? undefined : [0, 0.36, 0.7, 1]}
+          start={{ x: 0.5, y: 0 }}
+          end={{ x: 0.5, y: 1 }}
+          style={StyleSheet.absoluteFill}
+        />
+      </View>
+      {showJumpToLatest ? (
+        <View
+          pointerEvents="box-none"
+          style={[styles.jumpToLatestSlot, { bottom: bottomPadding + EDGE_GAP }]}
+        >
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Jump to latest"
+            onPress={handleJumpToLatest}
+            style={styles.jumpToLatest}
+          >
+            <BlurView
+              intensity={20}
+              tint={jumpTint}
+              style={StyleSheet.absoluteFill}
+            />
+            <View
+              style={[StyleSheet.absoluteFill, { backgroundColor: jumpOverlay }]}
+            />
+            <View pointerEvents="none" style={styles.jumpToLatestInner}>
+              <ArrowDown size={24} color={t.foreground} strokeWidth={2.2} />
+            </View>
+          </Pressable>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+interface TranscriptTurnRowProps {
+  turn: TranscriptTurn;
+  isLastTurn: boolean;
+  isStreaming: boolean;
+  isThinking?: boolean;
+  activeToolCallId?: string | null;
+  sessionId?: string | null;
+  onApproveTool?: (sessionId: string, toolCallId: string) => void;
+  onDenyTool?: (sessionId: string, toolCallId: string) => void;
+  onSubmitToolResult?: (
+    toolCallId: string,
+    result: string,
+  ) => void | Promise<void>;
+  onPlanConfirm?: (
+    toolCallId: string,
+    choice: "execute" | "abandon",
+  ) => void | Promise<void>;
+}
+
+function TranscriptTurnRow({
+  turn,
+  isLastTurn,
+  isStreaming,
+  isThinking,
+  activeToolCallId,
+  sessionId,
+  onApproveTool,
+  onDenyTool,
+  onSubmitToolResult,
+  onPlanConfirm,
+}: TranscriptTurnRowProps) {
+  return (
+    <View style={[styles.turn, turn.isLive && styles.turnLive]}>
+      {turn.messages.map((message, messageIndex) => {
+        const isLastMessageInTurn = messageIndex === turn.messages.length - 1;
+        return (
           <MessageBubble
-            message={item}
-            isLast={index === messages.length - 1}
-            isStreaming={isStreaming && index === messages.length - 1}
-            isThinking={isThinking && index === messages.length - 1}
+            key={message.id}
+            message={message}
+            isLast={isLastTurn && isLastMessageInTurn}
+            isStreaming={isStreaming && isLastMessageInTurn}
+            isThinking={isThinking && isLastMessageInTurn}
             activeToolCallId={activeToolCallId}
             onApproveTool={
               sessionId && onApproveTool
@@ -371,98 +625,8 @@ export function ChatTranscript({
             onSubmitToolResult={onSubmitToolResult}
             onPlanConfirm={onPlanConfirm}
           />
-        )}
-        style={styles.flex}
-        contentContainerStyle={[
-          styles.list,
-          isDesktop && styles.listDesktop,
-          {
-            paddingTop: listTopPadding,
-            paddingBottom: listBottomPadding,
-          },
-        ]}
-        onLayout={(event) => {
-          listHeightRef.current = event.nativeEvent.layout.height;
-          updateNearBottom();
-          flushAutoScroll();
-        }}
-        onContentSizeChange={(_width, height) => {
-          contentHeightRef.current = height;
-          updateNearBottom();
-          flushAutoScroll();
-        }}
-        onScrollToIndexFailed={({ index }) => {
-          const clampedIndex = Math.max(0, Math.min(index, messages.length - 1));
-          requestAnimationFrame(() => {
-            flatListRef.current?.scrollToIndex({
-              index: clampedIndex,
-              animated: true,
-              viewPosition: 0.35,
-            });
-          });
-        }}
-        keyboardDismissMode="interactive"
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
-      />
-
-      <View
-        style={[styles.edgeMask, styles.edgeMaskTop, { height: topFadeHeight }]}
-        pointerEvents="none"
-      >
-        <BlurView
-          intensity={10}
-          tint={blurTint}
-          style={StyleSheet.absoluteFill}
-        />
-        <LinearGradient
-          colors={[`${t.background}88`, `${t.background}00`]}
-          style={StyleSheet.absoluteFill}
-        />
-      </View>
-      {!isDesktop && showPlanTracker ? (
-        <PlanTracker onHeightChange={setPlanTrackerHeight} />
-      ) : null}
-      <View
-        style={[
-          styles.edgeMask,
-          styles.edgeMaskBottom,
-          { height: bottomFadeHeight, bottom: 0 },
-        ]}
-        pointerEvents="none"
-      >
-        <BlurView
-          intensity={28}
-          tint={blurTint}
-          style={StyleSheet.absoluteFill}
-        />
-        <LinearGradient
-          colors={[`${t.background}00`, `${t.background}d0`, t.background]}
-          style={StyleSheet.absoluteFill}
-        />
-      </View>
-      {showJumpToLatest ? (
-        <Pressable
-          onPress={handleJumpToLatest}
-          style={[styles.jumpToLatest, { bottom: bottomPadding + EDGE_GAP }]}
-        >
-          <BlurView
-            intensity={28}
-            tint={jumpTint}
-            style={StyleSheet.absoluteFill}
-          />
-          <View
-            style={[
-              StyleSheet.absoluteFill,
-              { backgroundColor: jumpOverlay },
-            ]}
-          />
-          <ArrowDown size={15} color={t.foreground} strokeWidth={2} />
-          <Text style={[styles.jumpToLatestText, { color: t.foreground }]}>
-            Jump to latest
-          </Text>
-        </Pressable>
-      ) : null}
+        );
+      })}
     </View>
   );
 }
@@ -482,6 +646,12 @@ const styles = StyleSheet.create({
     alignSelf: "center",
     width: "100%",
   },
+  turn: {
+    marginBottom: 12,
+  },
+  turnLive: {
+    marginBottom: 14,
+  },
   edgeMask: {
     position: "absolute",
     left: 0,
@@ -494,23 +664,29 @@ const styles = StyleSheet.create({
   edgeMaskBottom: {
     position: "absolute",
   },
-  jumpToLatest: {
+  jumpToLatestSlot: {
     position: "absolute",
-    left: 16,
-    alignSelf: "flex-start",
-    flexDirection: "row",
+    right: BOTTOM_CONTROL_INSET,
+    width: BOTTOM_CONTROL_SIZE,
     alignItems: "center",
-    gap: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 999,
-    overflow: "hidden",
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "rgba(255,255,255,0.12)",
     zIndex: 60,
   },
-  jumpToLatestText: {
-    fontSize: 13,
-    fontWeight: "600",
+  jumpToLatest: {
+    width: BOTTOM_CONTROL_SIZE,
+    height: BOTTOM_CONTROL_SIZE,
+    alignItems: "center",
+    justifyContent: "center",
+    position: "relative",
+    borderRadius: BOTTOM_CONTROL_RADIUS,
+    overflow: "hidden",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(255,255,255,0.08)",
+  },
+  jumpToLatestInner: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    position: "relative",
+    zIndex: 1,
   },
 });

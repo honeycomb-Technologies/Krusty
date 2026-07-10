@@ -2,13 +2,14 @@ import { useState } from "react";
 import { Image, View, Text, Pressable, StyleSheet } from "react-native";
 import { Brain, ChevronDown, ChevronRight, Clock } from "lucide-react-native";
 import { useThemeContext } from "../../hooks/useTheme";
+import { AssistantSegmentedContent } from "./AssistantSegmentedContent";
 import { MarkdownContent } from "./MarkdownContent";
 import { ToolCallCard } from "./ToolCallCard";
 import { ToolApprovalWidget } from "./ToolApprovalWidget";
 import { AskUserQuestionWidget } from "./AskUserQuestionWidget";
 import { PlanConfirmWidget } from "./PlanConfirmWidget";
 import { ImagePreviewModal, imagePreviewUri } from "./ImagePreviewModal";
-import type { ChatMessage, ChatMessageAttachment } from "@krusty/api";
+import type { ChatMessage, ChatMessageAttachment, ToolCall } from "@krusty/api";
 import * as Clipboard from "../../platform/clipboard";
 import * as Haptics from "../../platform/haptics";
 
@@ -19,6 +20,16 @@ const INTERNAL_TOOL_NAMES = new Set([
   "task_complete",
   "add_subtask",
   "set_dependency",
+]);
+
+const EXPLORATION_TOOL_NAMES = new Set([
+  "glob",
+  "grep",
+  "ls",
+  "list",
+  "list_files",
+  "read",
+  "search",
 ]);
 
 interface MessageBubbleProps {
@@ -81,17 +92,12 @@ export function MessageBubble({
       toolCall.name !== "PlanConfirm" &&
       !INTERNAL_TOOL_NAMES.has(toolCall.name),
   );
-  const showStreamingPlaceholder =
-    !isUser &&
-    isLast &&
-    isStreaming &&
-    !message.content.length &&
-    !message.thinking &&
-    delegatedTools.length === 0 &&
-    standardTools.length === 0 &&
-    questionTools.length === 0 &&
-    planConfirmTools.length === 0;
-
+  const explorationTools = standardTools.filter((toolCall) =>
+    EXPLORATION_TOOL_NAMES.has(toolCall.name.toLowerCase()),
+  );
+  const visibleStandardTools = standardTools.filter(
+    (toolCall) => !EXPLORATION_TOOL_NAMES.has(toolCall.name.toLowerCase()),
+  );
   const handleCopy = () => {
     const value = message.content.trim();
     if (!value) {
@@ -106,44 +112,49 @@ export function MessageBubble({
 
   return (
     <View style={[styles.container, isUser && styles.containerUser]}>
-      {isUser && (message.content.length > 0 || (message.attachments?.length ?? 0) > 0) && (
-        <View
-          style={[styles.userWrap, message.isQueued && styles.userQueuedWrap]}
-        >
-          {message.isQueued && (
-            <View style={styles.queuedRow}>
-              <Clock size={12} color={t.warning} strokeWidth={2} />
-              <Text style={[styles.queuedLabel, { color: t.warning }]}>
-                Queued
+      {isUser &&
+        (message.content.length > 0 ||
+          (message.attachments?.length ?? 0) > 0) && (
+          <View
+            style={[styles.userWrap, message.isQueued && styles.userQueuedWrap]}
+          >
+            {message.isQueued && (
+              <View style={styles.queuedRow}>
+                <Clock size={12} color={t.warning} strokeWidth={2} />
+                <Text style={[styles.queuedLabel, { color: t.warning }]}>
+                  Queued
+                </Text>
+              </View>
+            )}
+            {(message.attachments?.length ?? 0) > 0 ? (
+              <MessageAttachments
+                attachments={message.attachments ?? []}
+                isUser
+              />
+            ) : null}
+            {message.content.length > 0 ? (
+              <Pressable
+                onLongPress={handleCopy}
+                delayLongPress={250}
+                style={[
+                  styles.userBubble,
+                  {
+                    backgroundColor: message.isQueued
+                      ? `${t.warning}20`
+                      : t.userMessage,
+                  },
+                ]}
+              >
+                <MarkdownContent content={message.content} isUser />
+              </Pressable>
+            ) : null}
+            {copied ? (
+              <Text style={[styles.copyStatus, { color: t.mutedForeground }]}>
+                Copied
               </Text>
-            </View>
-          )}
-          {(message.attachments?.length ?? 0) > 0 ? (
-            <MessageAttachments attachments={message.attachments ?? []} isUser />
-          ) : null}
-          {message.content.length > 0 ? (
-            <Pressable
-              onLongPress={handleCopy}
-              delayLongPress={250}
-              style={[
-                styles.userBubble,
-                {
-                  backgroundColor: message.isQueued
-                    ? `${t.warning}20`
-                    : t.userMessage,
-                },
-              ]}
-            >
-              <MarkdownContent content={message.content} isUser />
-            </Pressable>
-          ) : null}
-          {copied ? (
-            <Text style={[styles.copyStatus, { color: t.mutedForeground }]}>
-              Copied
-            </Text>
-          ) : null}
-        </View>
-      )}
+            ) : null}
+          </View>
+        )}
 
       {!isUser && (
         <View style={styles.assistantWrap}>
@@ -163,17 +174,28 @@ export function MessageBubble({
                   key={toolCall.id}
                   toolCall={toolCall}
                   isStreaming={isLast && isStreaming}
+                  defaultExpanded={shouldExpandTool(
+                    toolCall,
+                    isLast && isStreaming,
+                  )}
                 />
               ))}
             </View>
           )}
 
-          {standardTools.length > 0 && (
+          {explorationTools.length > 0 ? (
+            <ToolClusterCard
+              tools={explorationTools}
+              isStreaming={isLast && isStreaming}
+            />
+          ) : null}
+
+          {visibleStandardTools.length > 0 && (
             <View style={styles.toolSection}>
               <Text style={[styles.toolLabel, { color: t.mutedForeground }]}>
                 Actions
               </Text>
-              {standardTools.map((toolCall) =>
+              {visibleStandardTools.map((toolCall) =>
                 toolCall.status === "awaiting_approval" &&
                 onApproveTool &&
                 onDenyTool ? (
@@ -189,6 +211,10 @@ export function MessageBubble({
                     key={toolCall.id}
                     toolCall={toolCall}
                     isStreaming={isLast && isStreaming}
+                    defaultExpanded={shouldExpandTool(
+                      toolCall,
+                      isLast && isStreaming,
+                    )}
                   />
                 ),
               )}
@@ -205,26 +231,11 @@ export function MessageBubble({
               delayLongPress={250}
               style={styles.assistantText}
             >
-              <MarkdownContent content={message.content} />
-              {isLast && isStreaming && (
-                <View
-                  style={[styles.cursor, { backgroundColor: t.userMessage }]}
-                />
-              )}
-            </Pressable>
-          )}
-
-          {showStreamingPlaceholder && (
-            <View style={styles.assistantText}>
-              <Text
-                style={[styles.placeholderText, { color: t.mutedForeground }]}
-              >
-                Replying...
-              </Text>
-              <View
-                style={[styles.cursor, { backgroundColor: t.userMessage }]}
+              <AssistantSegmentedContent
+                messageId={message.id}
+                content={message.content}
               />
-            </View>
+            </Pressable>
           )}
 
           {questionTools.length > 0 && onSubmitToolResult && (
@@ -264,6 +275,84 @@ export function MessageBubble({
   );
 }
 
+function shouldExpandTool(toolCall: ToolCall, isStreaming: boolean): boolean {
+  if (toolCall.status === "error" || toolCall.status === "awaiting_approval") {
+    return true;
+  }
+  if (isStreaming && toolCall.status === "running") {
+    return true;
+  }
+  return false;
+}
+
+function ToolClusterCard({
+  tools,
+  isStreaming,
+}: {
+  tools: ToolCall[];
+  isStreaming: boolean;
+}) {
+  const { theme } = useThemeContext();
+  const t = theme.colors;
+  const [expanded, setExpanded] = useState(false);
+  const runningCount = tools.filter((tool) => tool.status === "running").length;
+  const errorCount = tools.filter((tool) => tool.status === "error").length;
+  const label =
+    tools.length === 1
+      ? formatToolName(tools[0]?.name ?? "Tool")
+      : `${tools.length} exploration actions`;
+  const detail = [
+    runningCount > 0 ? `${runningCount} running` : null,
+    errorCount > 0 ? `${errorCount} failed` : null,
+    isStreaming ? "live" : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <View style={[styles.toolCluster, { borderColor: t.border }]}>
+      <Pressable
+        onPress={() => setExpanded((current) => !current)}
+        style={styles.toolClusterHeader}
+      >
+        <Text style={[styles.toolClusterTitle, { color: t.mutedForeground }]}>
+          {label}
+        </Text>
+        {detail ? (
+          <Text
+            style={[styles.toolClusterDetail, { color: t.mutedForeground }]}
+          >
+            {detail}
+          </Text>
+        ) : null}
+        {expanded ? (
+          <ChevronDown size={14} color={t.mutedForeground} />
+        ) : (
+          <ChevronRight size={14} color={t.mutedForeground} />
+        )}
+      </Pressable>
+      {expanded ? (
+        <View style={styles.toolClusterBody}>
+          {tools.map((toolCall) => (
+            <ToolCallCard
+              key={toolCall.id}
+              toolCall={toolCall}
+              isStreaming={isStreaming && toolCall.status === "running"}
+              defaultExpanded={shouldExpandTool(toolCall, isStreaming)}
+            />
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function formatToolName(name: string): string {
+  return name
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
 function MessageAttachments({
   attachments,
   isUser,
@@ -278,7 +367,9 @@ function MessageAttachments({
   const previewUri = imagePreviewUri(previewAttachment);
 
   return (
-    <View style={[styles.attachmentStrip, isUser && styles.attachmentStripUser]}>
+    <View
+      style={[styles.attachmentStrip, isUser && styles.attachmentStripUser]}
+    >
       {attachments.map((attachment, index) => {
         const uri = imagePreviewUri(attachment);
         if (attachment.type === "image" && uri) {
@@ -452,17 +543,6 @@ const styles = StyleSheet.create({
     marginTop: -2,
     marginLeft: 2,
   },
-  placeholderText: {
-    fontSize: 14,
-    fontWeight: "500",
-  },
-  cursor: {
-    width: 2,
-    height: 18,
-    borderRadius: 1,
-    marginTop: 4,
-    opacity: 0.8,
-  },
   toolSection: {
     gap: 6,
   },
@@ -471,6 +551,31 @@ const styles = StyleSheet.create({
     fontWeight: "500",
     marginBottom: 2,
     marginLeft: 4,
+  },
+  toolCluster: {
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    backgroundColor: "rgba(255,255,255,0.02)",
+  },
+  toolClusterHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  toolClusterTitle: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  toolClusterDetail: {
+    fontSize: 11,
+    fontWeight: "500",
+  },
+  toolClusterBody: {
+    marginTop: 6,
+    gap: 4,
   },
   thinkingBlock: {
     borderLeftWidth: 2,

@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { Platform, View, Text, StyleSheet, type StyleProp, type TextStyle } from 'react-native';
 import MaskedView from '@react-native-masked-view/masked-view';
 import { LinearGradient } from '../../platform/linear-gradient';
 import Animated, {
@@ -24,8 +24,50 @@ const GRADIENT_COLORS = [
   '#8b4513', '#cd853f', '#ff6b35', '#ffcc00',
   '#ff6b35', '#cd853f', '#8b4513',
 ] as const;
+const WEB_GRADIENT = `linear-gradient(90deg, ${GRADIENT_COLORS.join(', ')})`;
+const WEB_KEYFRAME_ID = 'krusty-logo-gradient-keyframes';
 
-function WaveLine({ text, index }: { text: string; index: number }) {
+const webGradientTextStyle = {
+  backgroundImage: WEB_GRADIENT,
+  backgroundSize: '220% 100%',
+  backgroundPosition: '0% 50%',
+  backgroundClip: 'text',
+  WebkitBackgroundClip: 'text',
+  color: 'transparent',
+  WebkitTextFillColor: 'transparent',
+  animationName: 'krusty-logo-gradient-shift',
+  animationDuration: '4s',
+  animationTimingFunction: 'ease-in-out',
+  animationIterationCount: 'infinite',
+  animationDirection: 'alternate',
+} as const;
+
+function useWebGradientKeyframes() {
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof document === 'undefined') return;
+    if (document.getElementById(WEB_KEYFRAME_ID)) return;
+
+    const style = document.createElement('style');
+    style.id = WEB_KEYFRAME_ID;
+    style.textContent = `
+      @keyframes krusty-logo-gradient-shift {
+        from { background-position: 0% 50%; }
+        to { background-position: 100% 50%; }
+      }
+    `;
+    document.head.appendChild(style);
+  }, []);
+}
+
+function WaveLine({
+  text,
+  index,
+  textStyle,
+}: {
+  text: string;
+  index: number;
+  textStyle?: StyleProp<TextStyle>;
+}) {
   const wave = useSharedValue(0);
 
   useEffect(() => {
@@ -47,12 +89,37 @@ function WaveLine({ text, index }: { text: string; index: number }) {
 
   return (
     <Animated.View style={animStyle}>
-      <Text style={styles.line}>{text}</Text>
+      <Text style={[styles.line, textStyle]}>{text}</Text>
     </Animated.View>
   );
 }
 
 export function KrustyLogo() {
+  if (Platform.OS === 'web') {
+    return <WebKrustyLogo />;
+  }
+
+  return <NativeKrustyLogo />;
+}
+
+function WebKrustyLogo() {
+  useWebGradientKeyframes();
+
+  return (
+    <View style={styles.webLogo}>
+      {LINES.map((line, i) => (
+        <WaveLine
+          key={line}
+          text={line}
+          index={i}
+          textStyle={[styles.webLine, webGradientTextStyle as unknown as TextStyle]}
+        />
+      ))}
+    </View>
+  );
+}
+
+function NativeKrustyLogo() {
   const shimmer = useSharedValue(0);
 
   useEffect(() => {
@@ -104,6 +171,15 @@ const styles = StyleSheet.create({
     lineHeight: 14,
     letterSpacing: 0,
     color: '#000',
+  },
+  webLogo: {
+    alignItems: 'center',
+  },
+  webLine: {
+    fontFamily: 'Courier',
+    fontSize: 12,
+    lineHeight: 14,
+    letterSpacing: 0,
   },
   gradientWrap: {
     width: 500,
