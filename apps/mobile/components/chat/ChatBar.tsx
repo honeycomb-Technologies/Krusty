@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import {
   View,
   TextInput,
@@ -19,6 +19,7 @@ import { ArrowUp, X, Mic, FlaskConical } from 'lucide-react-native';
 import * as Haptics from '../../platform/haptics';
 import * as ImagePicker from '../../platform/image-picker';
 import * as DocumentPicker from '../../platform/document-picker';
+import * as SecureStore from '../../platform/secure-store';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import Animated, {
@@ -80,12 +81,17 @@ const ROOT_HORIZONTAL_PADDING = 10;
 const COMPOSER_MAX_HEIGHT = 112;
 const INPUT_SIDE_PADDING = 8;
 const INPUT_GROWTH_CHROME = 8;
+const INPUT_LINE_HEIGHT = 22;
+const INPUT_COLLAPSED_MAX_HEIGHT = PILL - 18;
+const INPUT_EXPANDED_VERTICAL_PADDING = 8;
+const CLOSED_COMPOSER_BOTTOM_GAP = 16;
 const GAUGE_SIZE = 28;
-const GAUGE_TOP_GAP = 6;
-const META_ROW_HEIGHT = 26;
+const GAUGE_TOP_GAP = 4;
+const META_ROW_HEIGHT = 24;
 const RUN_LINE_HEIGHT = 3;
 const RUN_LINE_BEAM_WIDTH = 156;
 const MODEL_POPOVER_MAX_HEIGHT = PILL * 5 + GAP * 4;
+const PROVIDER_FILTER_ORDER_KEY = 'krusty-provider-filter-order-v1';
 const WEB_INPUT_STYLE = Platform.OS === 'web'
   ? ({
       outlineStyle: 'none',
@@ -97,6 +103,35 @@ const WEB_INPUT_STYLE = Platform.OS === 'web'
 interface ProviderFilter {
   id: string;
   label: string;
+}
+
+function parseProviderFilterOrder(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const seen = new Set<string>();
+    const order: string[] = [];
+    for (const value of parsed) {
+      if (typeof value !== 'string') continue;
+      const id = value.trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      order.push(id);
+    }
+    return order;
+  } catch {
+    return [];
+  }
+}
+
+function uniqueProviderOrder(ids: string[]): string[] {
+  const seen = new Set<string>();
+  return ids.filter((id) => {
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
 }
 
 interface PickedImageAsset {
@@ -436,6 +471,7 @@ export function ChatBar(props: ChatBarProps) {
   const [modelRailOpen, setModelRailOpen] = useState(false);
   const [sortedModels, setSortedModels] = useState<ModelInfo[]>([]);
   const [selectedProviderFilter, setSelectedProviderFilter] = useState<string | null>(null);
+  const [providerFilterOrder, setProviderFilterOrder] = useState<string[] | null>(null);
   const [attachPickerOpen, setAttachPickerOpen] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
   const [inputContentHeight, setInputContentHeight] = useState(0);
@@ -457,6 +493,21 @@ export function ChatBar(props: ChatBarProps) {
   };
 
   useEffect(() => { accordionOpenRef.current = accordionOpen; }, [accordionOpen]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void SecureStore.getItemAsync(PROVIDER_FILTER_ORDER_KEY)
+      .then((raw) => {
+        if (cancelled) return;
+        setProviderFilterOrder(parseProviderFilterOrder(raw));
+      })
+      .catch(() => {
+        if (!cancelled) setProviderFilterOrder([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => () => {
     clearModelCloseTimer();
@@ -541,8 +592,46 @@ export function ChatBar(props: ChatBarProps) {
     }
     return filters;
   }, [sortedModels]);
+
+  const visualProviderFilters = useMemo<ProviderFilter[]>(() => {
+    const savedOrder = providerFilterOrder ?? [];
+    const byId = new Map(providerFilters.map((provider) => [provider.id, provider]));
+    const seen = new Set<string>();
+    const ordered: ProviderFilter[] = [];
+
+    for (const id of savedOrder) {
+      const provider = byId.get(id);
+      if (!provider || seen.has(id)) continue;
+      seen.add(id);
+      ordered.push(provider);
+    }
+
+    // Preserve the current dock's visual order on first load, then append any
+    // newly discovered providers at the right edge of the user-controlled dock.
+    for (const provider of [...providerFilters].reverse()) {
+      if (seen.has(provider.id)) continue;
+      seen.add(provider.id);
+      ordered.push(provider);
+    }
+
+    return ordered;
+  }, [providerFilterOrder, providerFilters]);
+
+  useEffect(() => {
+    if (providerFilterOrder === null || providerFilterOrder.length > 0 || providerFilters.length === 0) return;
+    const initialOrder = [...providerFilters].reverse().map((provider) => provider.id);
+    setProviderFilterOrder(initialOrder);
+    void SecureStore.setItemAsync(PROVIDER_FILTER_ORDER_KEY, JSON.stringify(initialOrder));
+  }, [providerFilterOrder, providerFilters]);
+
+  const handleProviderFiltersReorder = useCallback((providerIds: string[]) => {
+    const nextOrder = uniqueProviderOrder(providerIds);
+    setProviderFilterOrder(nextOrder);
+    void SecureStore.setItemAsync(PROVIDER_FILTER_ORDER_KEY, JSON.stringify(nextOrder));
+  }, []);
+
   const providerFilterActions = useMemo(
-    () => providerFilters.map(provider => ({
+    () => visualProviderFilters.map(provider => ({
       id: provider.id,
       label: provider.label,
       icon: (
@@ -554,7 +643,7 @@ export function ChatBar(props: ChatBarProps) {
         />
       ),
     })),
-    [providerFilters],
+    [visualProviderFilters],
   );
   const filteredModels = useMemo(
     () => selectedProviderFilter
@@ -792,8 +881,11 @@ export function ChatBar(props: ChatBarProps) {
   const kColor = kActive ? t.thinking : t.mutedForeground;
   const kBorder = kActive ? t.thinking + '40' : borderColor;
 
-  // Bottom offset: keyboard height, or safe area when keyboard closed
-  const bottomOffset = keyboardHeight > 0 ? keyboardHeight : insets.bottom;
+  // Bottom offset: keyboard height, or a compact safe-area gap when keyboard is closed.
+  const closedBottomOffset = Platform.OS === 'web'
+    ? insets.bottom
+    : Math.max(10, Math.min(insets.bottom, CLOSED_COMPOSER_BOTTOM_GAP));
+  const bottomOffset = keyboardHeight > 0 ? keyboardHeight : closedBottomOffset;
   const gaugeTokens = tokenCount ?? 0;
   const gaugePct = Math.min(100, (gaugeTokens / 200000) * 100);
   const gaugeColor = gaugeTokens > 180000 ? t.error : gaugeTokens > 120000 ? t.warning : t.mutedForeground + '60';
@@ -805,6 +897,10 @@ export function ChatBar(props: ChatBarProps) {
   const composerBarHeight = isRecording || !shouldGrowComposer
     ? PILL
     : Math.min(COMPOSER_MAX_HEIGHT, inputContentHeight + INPUT_GROWTH_CHROME);
+  const collapsedInputHeight = Math.max(
+    INPUT_LINE_HEIGHT,
+    Math.min(inputContentHeight || INPUT_LINE_HEIGHT, INPUT_COLLAPSED_MAX_HEIGHT),
+  );
   const metaReserveHeight = META_ROW_HEIGHT + GAUGE_TOP_GAP;
   const overlayBottom = bottomOffset + metaReserveHeight + composerBarHeight + GAP;
   const controlsLayerWidth = Math.max(PILL, viewportWidth - ROOT_HORIZONTAL_PADDING * 2);
@@ -919,7 +1015,14 @@ export function ChatBar(props: ChatBarProps) {
               ? <Waveform active volume={micVolume} />
               : <TextInput
                   ref={inputRef}
-                  style={[styles.input, WEB_INPUT_STYLE, { color: t.foreground }]}
+                  style={[
+                    styles.input,
+                    shouldGrowComposer
+                      ? styles.inputExpanded
+                      : [styles.inputCollapsed, { height: collapsedInputHeight }],
+                    WEB_INPUT_STYLE,
+                    { color: t.foreground },
+                  ]}
                   value={text}
                   onChangeText={handleTextChange}
                   onContentSizeChange={(event) => {
@@ -992,6 +1095,7 @@ export function ChatBar(props: ChatBarProps) {
                 modelPickerOpen={modelRailOpen}
                 providerFilters={providerFilterActions}
                 selectedProviderFilter={selectedProviderFilter}
+                onProviderFiltersReorder={handleProviderFiltersReorder}
                 onProviderFilterToggle={(providerId) => {
                   setSelectedProviderFilter(current =>
                     current === providerId ? null : providerId,
@@ -1111,7 +1215,7 @@ export function ChatBar(props: ChatBarProps) {
         active={isStreaming}
         width={viewportWidth}
         color={t.thinking}
-        style={styles.runLineEdge}
+        style={[styles.runLineEdge, { bottom: bottomOffset }]}
       />
       <ImagePreviewModal
         visible={Boolean(previewAttachment)}
@@ -1187,12 +1291,21 @@ const styles = StyleSheet.create({
   },
   input: {
     flex: 1,
-    height: '100%',
     fontSize: 16,
-    lineHeight: 22,
+    lineHeight: INPUT_LINE_HEIGHT,
     maxHeight: COMPOSER_MAX_HEIGHT,
-    paddingVertical: Platform.OS === 'web' ? 17 : 0,
+    paddingVertical: 0,
     paddingHorizontal: 6,
+  },
+  inputCollapsed: {
+    minHeight: INPUT_LINE_HEIGHT,
+    textAlignVertical: 'center',
+  },
+  inputExpanded: {
+    height: '100%',
+    paddingTop: INPUT_EXPANDED_VERTICAL_PADDING,
+    paddingBottom: INPUT_EXPANDED_VERTICAL_PADDING,
+    textAlignVertical: 'top',
   },
   kCol: {
     width: PILL,
