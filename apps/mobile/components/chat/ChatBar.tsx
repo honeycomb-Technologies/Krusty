@@ -89,6 +89,7 @@ const GAUGE_SIZE = 28;
 const GAUGE_TOP_GAP = 4;
 const META_ROW_HEIGHT = 24;
 const RUN_LINE_HEIGHT = 3;
+const RUN_LINE_META_GAP = 3;
 const RUN_LINE_BEAM_WIDTH = 156;
 const MODEL_POPOVER_MAX_HEIGHT = PILL * 5 + GAP * 4;
 const PROVIDER_FILTER_ORDER_KEY = 'krusty-provider-filter-order-v1';
@@ -903,6 +904,7 @@ export function ChatBar(props: ChatBarProps) {
   );
   const metaReserveHeight = META_ROW_HEIGHT + GAUGE_TOP_GAP;
   const overlayBottom = bottomOffset + metaReserveHeight + composerBarHeight + GAP;
+  const runLineBottom = Math.max(0, bottomOffset - RUN_LINE_HEIGHT - RUN_LINE_META_GAP);
   const controlsLayerWidth = Math.max(PILL, viewportWidth - ROOT_HORIZONTAL_PADDING * 2);
   const modelPopoverTopInset = Math.max(insets.top, 0) + 12;
   const modelPopoverHeight = Math.min(
@@ -1215,7 +1217,7 @@ export function ChatBar(props: ChatBarProps) {
         active={isStreaming}
         width={viewportWidth}
         color={t.thinking}
-        style={[styles.runLineEdge, { bottom: bottomOffset }]}
+        style={[styles.runLineEdge, { bottom: runLineBottom }]}
       />
       <ImagePreviewModal
         visible={Boolean(previewAttachment)}
