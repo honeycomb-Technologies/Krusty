@@ -139,8 +139,10 @@ async fn delete_credential(
                     .models
                     .iter()
                     .map(|m| {
-                        let api_format =
-                            krusty_core::ai::format_detection::detect_api_format(provider.id, &m.id);
+                        let api_format = krusty_core::ai::format_detection::detect_api_format(
+                            provider.id,
+                            &m.id,
+                        );
                         let mut model = krusty_core::ai::models::ModelMetadata::new(
                             &m.id,
                             &m.display_name,
