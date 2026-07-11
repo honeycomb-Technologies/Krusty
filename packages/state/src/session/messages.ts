@@ -10,6 +10,7 @@ import type {
   Attachment,
   ChatMessage,
   ChatMessageAttachment,
+  ChatRenderPart,
   ToolCall,
 } from './types';
 
@@ -76,6 +77,77 @@ function extractTextContent(content: unknown): string {
   return '';
 }
 
+function appendRenderPart(
+  message: ChatMessage,
+  part: ChatRenderPart,
+): void {
+  message.renderParts = [...(message.renderParts || []), part];
+}
+
+/**
+ * Join adjacent text into one render part.
+ *
+ * Must match the live stream path (`streaming.ts`): raw concatenation.
+ * Stored history used to insert `\n` between consecutive text blocks, which
+ * made reloaded messages diverge from the live timeline for the same content.
+ */
+function joinAdjacentText(existing: string, next: string): string {
+  if (!existing) return next;
+  if (!next) return existing;
+  return existing + next;
+}
+
+function appendTextRenderPart(message: ChatMessage, content: string): void {
+  if (!content) return;
+
+  const parts = [...(message.renderParts || [])];
+  const lastPart = parts[parts.length - 1];
+  if (lastPart?.type === 'text') {
+    parts[parts.length - 1] = {
+      ...lastPart,
+      content: joinAdjacentText(lastPart.content, content),
+    };
+  } else {
+    parts.push({
+      type: 'text',
+      id: `text-${parts.length}`,
+      content,
+    });
+  }
+  message.renderParts = parts;
+}
+
+function appendThinkingRenderPart(message: ChatMessage, content: string): void {
+  if (!content) return;
+
+  const parts = [...(message.renderParts || [])];
+  const lastPart = parts[parts.length - 1];
+  if (lastPart?.type === 'thinking') {
+    parts[parts.length - 1] = {
+      ...lastPart,
+      content: lastPart.content ? `${lastPart.content}\n\n${content}` : content,
+    };
+  } else {
+    parts.push({
+      type: 'thinking',
+      id: `thinking-${parts.length}`,
+      content,
+    });
+  }
+  message.renderParts = parts;
+}
+
+function appendAttachmentsRenderPart(message: ChatMessage): void {
+  const parts = message.renderParts || [];
+  if (parts[parts.length - 1]?.type === 'attachments') return;
+  if (parts.some((part) => part.type === 'attachments')) return;
+
+  appendRenderPart(message, {
+    type: 'attachments',
+    id: `attachments-${parts.length}`,
+  });
+}
+
 function parseStoredMessage(
   message: { role: string; content: unknown },
   toolResults?: Map<string, { output: string; isError: boolean }>,
@@ -90,6 +162,7 @@ function parseStoredMessage(
     content: '',
     thinking: '',
     toolCalls: [],
+    renderParts: [],
   };
   const contentArray = Array.isArray(message.content) ? message.content : [];
   let imageIndex = 0;
@@ -98,18 +171,22 @@ function parseStoredMessage(
     if (!block || typeof block !== 'object') continue;
 
     if (block.type === 'text' || ('text' in block && !block.type)) {
+      const text = block.text || '';
       if (parsed.content.length < MAX_MESSAGE_CONTENT_LENGTH) {
-        parsed.content += (parsed.content ? '\n' : '') + (block.text || '');
+        parsed.content += (parsed.content ? '\n' : '') + text;
       }
+      appendTextRenderPart(parsed, text);
     } else if (block.type === 'thinking' || 'thinking' in block) {
       const thinkingContent = block.thinking || '';
       parsed.thinking = parsed.thinking
         ? `${parsed.thinking}\n\n${thinkingContent}`
         : thinkingContent;
+      appendThinkingRenderPart(parsed, thinkingContent);
     } else if (block.type === 'image') {
       const attachment = parseImageAttachment(block, imageIndex);
       if (attachment) {
         parsed.attachments = [...(parsed.attachments || []), attachment];
+        appendAttachmentsRenderPart(parsed);
         imageIndex += 1;
       }
     } else if (
@@ -145,6 +222,11 @@ function parseStoredMessage(
         delegated,
         status,
       });
+      appendRenderPart(parsed, {
+        type: 'tool',
+        id: `tool-${block.id}`,
+        toolCallId: block.id,
+      });
     }
   }
 
@@ -154,6 +236,7 @@ function parseStoredMessage(
     && (!parsed.toolCalls || parsed.toolCalls.length === 0)
   ) {
     parsed.content = extractTextContent(message.content);
+    appendTextRenderPart(parsed, parsed.content);
   }
 
   return parsed;

@@ -44,6 +44,8 @@ pub enum PollAction {
     RefreshAiTools,
     /// Switch to a provider (after OAuth success)
     SwitchProvider(ProviderId),
+    /// Refresh live model catalog for a provider after credentials change
+    RefreshDynamicModels(ProviderId),
 }
 
 impl PollResult {

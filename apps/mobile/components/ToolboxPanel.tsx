@@ -3,39 +3,37 @@ import {
   View,
   Pressable,
   StyleSheet,
-  Dimensions,
   Platform,
+  useWindowDimensions,
 } from 'react-native';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { BlurView } from '../platform/blur';
 import Animated, {
-  type SharedValue,
   useSharedValue,
   useAnimatedStyle,
   withSpring,
   withTiming,
   interpolate,
   Easing,
+  runOnJS,
 } from 'react-native-reanimated';
-import { Pin, PinOff, X } from 'lucide-react-native';
+import { FileText, Search, TerminalSquare } from 'lucide-react-native';
 import * as Haptics from '../platform/haptics';
 import { useThemeContext } from '../hooks/useTheme';
-import { SegmentControl } from './ui/SegmentControl';
 import { ToolboxTerminal } from './toolbox/ToolboxTerminal';
 import { ToolboxBrowser } from './toolbox/ToolboxBrowser';
 import { ReportsContent } from './ReportsViewer';
 
-const SCREEN_HEIGHT = Dimensions.get('window').height;
-const PANEL_HEIGHT = SCREEN_HEIGHT * 0.88;
-const SPLIT_HEIGHT = SCREEN_HEIGHT * 0.42;
 const SPRING = { damping: 22, stiffness: 280, mass: 0.8 };
-const SEGMENTS = ['Terminal', 'Browser', 'Papers'];
+const TOOL_TABS = [
+  { label: 'Terminal', icon: TerminalSquare },
+  { label: 'Browser', icon: Search },
+  { label: 'Papers', icon: FileText },
+];
 
 interface ToolboxPanelProps {
   visible: boolean;
   onClose: () => void;
-  onTogglePin: () => void;
-  isSplit: boolean;
-  splitProgress: SharedValue<number>;
   activeTab: number;
   onTabChange: (tab: number) => void;
 }
@@ -43,59 +41,55 @@ interface ToolboxPanelProps {
 export function ToolboxPanel({
   visible,
   onClose,
-  onTogglePin,
-  isSplit,
-  splitProgress,
   activeTab,
   onTabChange,
 }: ToolboxPanelProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
   const isDark = theme.scheme === 'dark';
+  const { height: windowHeight } = useWindowDimensions();
+  const panelHeight = Math.max(windowHeight, 1);
 
   const progress = useSharedValue(0);
+  const dragY = useSharedValue(0);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
     if (visible) {
       setMounted(true);
+      dragY.value = 0;
       progress.value = withSpring(1, SPRING);
     } else {
       progress.value = withTiming(0, { duration: 200, easing: Easing.out(Easing.cubic) });
-      const timer = setTimeout(() => setMounted(false), 220);
+      const timer = setTimeout(() => {
+        dragY.value = 0;
+        setMounted(false);
+      }, 220);
       return () => clearTimeout(timer);
     }
-  }, [visible, progress]);
+  }, [visible, progress, dragY]);
 
   const panelStyle = useAnimatedStyle(() => {
-    const height = interpolate(splitProgress.value, [0, 1], [PANEL_HEIGHT, SPLIT_HEIGHT]);
-    const radius = interpolate(splitProgress.value, [0, 1], [20, 0]);
+    const upwardDrag = Math.max(-panelHeight, Math.min(dragY.value, 0));
+    const translateY = interpolate(progress.value, [0, 1], [-panelHeight, 0]) + upwardDrag;
     return {
-      height,
-      borderBottomLeftRadius: radius,
-      borderBottomRightRadius: radius,
+      height: panelHeight,
+      borderBottomLeftRadius: 20,
+      borderBottomRightRadius: 20,
       transform: [
-        { translateY: interpolate(progress.value, [0, 1], [-PANEL_HEIGHT, 0]) },
+        { translateY },
       ],
       opacity: progress.value,
     };
   });
 
   const backdropStyle = useAnimatedStyle(() => {
-    const backdropOpacity = interpolate(progress.value, [0, 1], [0, 1])
-      * interpolate(splitProgress.value, [0, 0.3], [1, 0]);
+    const backdropOpacity = interpolate(progress.value, [0, 1], [0, 1]);
     return {
       opacity: backdropOpacity,
       pointerEvents: backdropOpacity > 0.05 ? ('auto' as const) : ('none' as const),
     };
   });
-
-  const showPin = activeTab < 2;
-
-  const handlePin = useCallback(() => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    onTogglePin();
-  }, [onTogglePin]);
 
   const handleClose = useCallback(() => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -106,6 +100,21 @@ export function ToolboxPanel({
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     onTabChange(index);
   }, [onTabChange]);
+
+  const closeHandleGesture = Gesture.Pan()
+    .activeOffsetY([-8, 8])
+    .failOffsetX([-24, 24])
+    .onUpdate((event) => {
+      dragY.value = Math.min(event.translationY, 0);
+    })
+    .onEnd((event) => {
+      if (event.translationY < -44 || event.velocityY < -500) {
+        runOnJS(handleClose)();
+        return;
+      }
+
+      dragY.value = withSpring(0, SPRING);
+    });
 
   if (!mounted) return null;
 
@@ -129,29 +138,39 @@ export function ToolboxPanel({
         />
 
         <View style={[styles.header, { borderBottomColor: t.border }]}>
-          {showPin ? (
-            <Pressable onPress={handlePin} style={styles.headerBtn}>
-              {isSplit ? (
-                <PinOff size={18} color={t.userMessage} strokeWidth={1.8} />
-              ) : (
-                <Pin size={18} color={t.mutedForeground} strokeWidth={1.8} />
-              )}
-            </Pressable>
-          ) : (
-            <View style={styles.headerBtn} />
-          )}
-
-          <View style={styles.segmentWrapper}>
-            <SegmentControl
-              segments={SEGMENTS}
-              selected={activeTab}
-              onSelect={handleTabChange}
-            />
+          <View
+            style={[
+              styles.tabRail,
+              {
+                backgroundColor: t.glass.background,
+                borderColor: t.glass.border,
+              },
+            ]}
+          >
+            {TOOL_TABS.map((tab, index) => {
+              const Icon = tab.icon;
+              const active = index === activeTab;
+              return (
+                <Pressable
+                  key={tab.label}
+                  accessibilityRole="tab"
+                  accessibilityLabel={tab.label}
+                  accessibilityState={{ selected: active }}
+                  onPress={() => handleTabChange(index)}
+                  style={[
+                    styles.tabButton,
+                    active && { backgroundColor: t.glass.backgroundElevated },
+                  ]}
+                >
+                  <Icon
+                    size={18}
+                    color={active ? t.foreground : t.mutedForeground}
+                    strokeWidth={active ? 2.1 : 1.8}
+                  />
+                </Pressable>
+              );
+            })}
           </View>
-
-          <Pressable onPress={handleClose} style={styles.headerBtn}>
-            <X size={20} color={t.mutedForeground} strokeWidth={1.8} />
-          </Pressable>
         </View>
 
         <View style={styles.body}>
@@ -165,6 +184,17 @@ export function ToolboxPanel({
             <ReportsContent visible={activeTab === 2 && visible} />
           </View>
         </View>
+
+        <GestureDetector gesture={closeHandleGesture}>
+          <Animated.View style={styles.handleZone}>
+            <View
+              style={[
+                styles.handle,
+                { backgroundColor: t.mutedForeground },
+              ]}
+            />
+          </Animated.View>
+        </GestureDetector>
       </Animated.View>
     </>
   );
@@ -187,22 +217,44 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    gap: 8,
   },
-  headerBtn: {
-    width: 36,
+  tabRail: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: 2,
+    gap: 2,
+  },
+  tabButton: {
+    width: 44,
+    minHeight: 34,
+    borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 4,
-  },
-  segmentWrapper: {
-    flex: 1,
   },
   body: {
     flex: 1,
+  },
+  handleZone: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 6,
+  },
+  handle: {
+    width: 44,
+    height: 5,
+    borderRadius: 999,
+    opacity: 0.48,
   },
   tabContent: {
     ...StyleSheet.absoluteFillObject,

@@ -6,6 +6,7 @@ import * as Haptics from '../../platform/haptics';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
 import { Terminal } from '../desktop/Terminal';
+import { buildTerminalWebSocketUrl } from '../terminalUrl';
 import { getTerminalHtml } from './terminalHtml';
 
 let WebViewComponent: React.ComponentType<WebViewProps> | null = null;
@@ -36,27 +37,19 @@ interface NativeTerminalTab {
 
 function NativeTerminal({ visible }: { visible: boolean }) {
   const { theme } = useThemeContext();
-  const { client, serverUrl } = useConnection();
+  const { serverUrl, serverToken } = useConnection();
   const t = theme.colors;
 
   const [tabs, setTabs] = useState<NativeTerminalTab[]>([]);
   const [activeTab, setActiveTab] = useState<string | null>(null);
 
-  const createTab = useCallback(async () => {
-    if (!client || !serverUrl) return;
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    try {
-      const response = await fetch(`${serverUrl}/api/terminal`, { method: 'POST' });
-      const data = await response.json();
-      const id = data.id || `term-${Date.now()}`;
-      setTabs(prev => [...prev, { id, label: `Terminal ${prev.length + 1}` }]);
-      setActiveTab(id);
-    } catch {
-      const id = `term-${Date.now()}`;
-      setTabs(prev => [...prev, { id, label: `Terminal ${prev.length + 1}` }]);
-      setActiveTab(id);
-    }
-  }, [client, serverUrl]);
+  const createTab = useCallback(() => {
+    if (!serverUrl) return;
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const id = createTerminalId();
+    setTabs(prev => [...prev, { id, label: `Terminal ${prev.length + 1}` }]);
+    setActiveTab(id);
+  }, [serverUrl]);
 
   const closeTab = useCallback((id: string) => {
     setTabs(prev => {
@@ -67,13 +60,13 @@ function NativeTerminal({ visible }: { visible: boolean }) {
   }, []);
 
   useEffect(() => {
-    if (visible && tabs.length === 0 && client) {
+    if (visible && tabs.length === 0 && serverUrl) {
       createTab();
     }
-  }, [visible, client, createTab, tabs.length]);
+  }, [visible, createTab, serverUrl, tabs.length]);
 
   const wsUrl = serverUrl && activeTab
-    ? serverUrl.replace(/^http/, 'ws') + `/api/terminal/${activeTab}/ws`
+    ? buildTerminalWebSocketUrl(serverUrl, serverToken)
     : '';
 
   const html = activeTab
@@ -87,7 +80,6 @@ function NativeTerminal({ visible }: { visible: boolean }) {
   return (
     <View style={[styles.container, { backgroundColor: t.background }]}>
       <View style={[styles.tabBar, { borderBottomColor: t.border }]}>
-        <TerminalSquare size={16} color={t.mutedForeground} strokeWidth={1.8} />
         {tabs.map(tab => (
           <Pressable
             key={tab.id}
@@ -124,7 +116,13 @@ function NativeTerminal({ visible }: { visible: boolean }) {
           <View style={styles.empty}>
             <TerminalSquare size={32} color={t.mutedForeground} strokeWidth={1.5} />
             <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
-              {!WebViewComponent ? 'WebView not available' : !visible ? '' : 'No terminal open'}
+              {!WebViewComponent
+                ? 'WebView not available'
+                : !serverUrl
+                  ? 'Connect to a server to open a terminal.'
+                  : !visible
+                    ? ''
+                    : 'No terminal open'}
             </Text>
           </View>
         )}
@@ -174,3 +172,11 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
 });
+
+function createTerminalId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+
+  return `term-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}

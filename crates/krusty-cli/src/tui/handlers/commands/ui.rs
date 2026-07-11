@@ -51,11 +51,9 @@ impl App {
 
         self.ui.popup = Popup::ModelSelect;
 
-        if configured.contains(&self.runtime.active_provider)
-            && self.should_refresh_dynamic_models(self.runtime.active_provider)
-        {
-            self.start_dynamic_model_fetch(self.runtime.active_provider);
-        }
+        // Refresh every dynamic provider with credentials so the picker matches
+        // the server model list, not only the currently active provider.
+        self.refresh_stale_dynamic_model_catalogs();
     }
 
     pub(super) fn open_auth_popup(&mut self) {

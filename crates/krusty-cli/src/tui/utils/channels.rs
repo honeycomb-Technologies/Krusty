@@ -85,8 +85,12 @@ pub struct AsyncChannels {
     pub explore_progress: Option<mpsc::Receiver<AgentProgress>>,
     /// Build tool builder agent progress updates (bounded for backpressure)
     pub build_progress: Option<mpsc::Receiver<AgentProgress>>,
-    /// Dynamic provider model fetch result receiver
-    pub dynamic_models: Option<oneshot::Receiver<DynamicModelUpdate>>,
+    /// Dynamic provider model fetch results (supports concurrent provider refreshes).
+    /// Unbounded is intentional: refreshes are rare (startup/OAuth/model popup) and
+    /// coalesced by `dynamic_model_fetches` so only one in-flight fetch per provider.
+    pub dynamic_models: Option<mpsc::UnboundedReceiver<DynamicModelUpdate>>,
+    /// Sender half for concurrent dynamic model fetches
+    pub dynamic_models_tx: Option<mpsc::UnboundedSender<DynamicModelUpdate>>,
     /// /init codebase exploration result receiver
     pub init_exploration: Option<oneshot::Receiver<InitExplorationResult>>,
     /// /init exploration progress updates

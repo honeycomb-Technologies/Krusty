@@ -285,9 +285,10 @@ fn init_model_registry(preferences: &Option<Preferences>) -> SharedModelRegistry
     }
     tracing::info!("Model registry initialized with static models");
 
-    // Load cached models for dynamic providers
+    // Load cached models for all dynamic providers (OpenRouter, OpenAI, Grok, …)
+    // so CLI model select matches server catalogs across restarts.
     if let Some(ref prefs) = preferences {
-        for provider in [ProviderId::OpenRouter, ProviderId::OpenAI] {
+        for provider in krusty_core::ai::catalog::dynamic_model_providers() {
             if let Some(cached_models) = prefs.get_cached_models(provider) {
                 futures::executor::block_on(
                     model_registry.set_models(provider, cached_models.clone()),

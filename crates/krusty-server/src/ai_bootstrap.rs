@@ -320,7 +320,7 @@ pub async fn initialize_models(registry: &SharedModelRegistry, credentials: &Cre
         registry.set_models(provider.id, models).await;
     }
 
-    for provider in [ProviderId::OpenRouter, ProviderId::OpenAI, ProviderId::Grok] {
+    for provider in krusty_core::ai::catalog::dynamic_model_providers() {
         let Some(credential) =
             krusty_core::ai::catalog::credential_for_dynamic_models(provider, credentials)
         else {
