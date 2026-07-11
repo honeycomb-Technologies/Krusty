@@ -11,6 +11,7 @@ interface ConnectionContextValue {
   isConnected: boolean;
   isConfigured: boolean;
   serverUrl: string | null;
+  serverToken: string | null;
   error: string | null;
   connect: (url: string, token: string) => Promise<boolean>;
   disconnect: () => void;
@@ -23,6 +24,7 @@ const ConnectionContext = createContext<ConnectionContextValue>({
   isConnected: false,
   isConfigured: false,
   serverUrl: null,
+  serverToken: null,
   error: null,
   connect: async () => false,
   disconnect: () => {},
@@ -38,6 +40,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
   const [client, setClient] = useState<KrustyClient | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>('disconnected');
   const [serverUrl, setServerUrl] = useState<string | null>(null);
+  const [serverToken, setServerToken] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isConfigured, setIsConfigured] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -77,6 +80,8 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
       // Verify connection with health check
       const healthy = await newClient.checkHealth();
       if (!healthy) {
+        setClient(null);
+        setServerToken(null);
         setStatus('error');
         setError('Server not reachable');
         return false;
@@ -85,6 +90,8 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
       // Bootstrap remote auth
       const authed = await newClient.bootstrapAuth();
       if (!authed) {
+        setClient(null);
+        setServerToken(null);
         setStatus('error');
         setError('Authentication failed — check your token');
         return false;
@@ -92,9 +99,12 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
 
       setClient(newClient);
       setServerUrl(url);
+      setServerToken(token);
       setStatus('connected');
       return true;
     } catch (err) {
+      setClient(null);
+      setServerToken(null);
       setStatus('error');
       setError(err instanceof Error ? err.message : 'Connection failed');
       return false;
@@ -115,6 +125,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
     setClient(null);
     setStatus('disconnected');
     setServerUrl(null);
+    setServerToken(null);
     setError(null);
     SecureStore.deleteItemAsync(STORAGE_KEYS.serverUrl);
     SecureStore.deleteItemAsync(STORAGE_KEYS.serverToken);
@@ -139,6 +150,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
         isConnected: status === 'connected',
         isConfigured,
         serverUrl,
+        serverToken,
         error,
         connect,
         disconnect,

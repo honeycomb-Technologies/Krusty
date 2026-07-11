@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
-import { View, Text, Pressable, StyleSheet, Platform } from 'react-native';
-import { Globe, X, ExternalLink } from 'lucide-react-native';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { ActivityIndicator, View, Text, Pressable, StyleSheet, Platform } from 'react-native';
+import { Plus, X } from 'lucide-react-native';
 import type { WebViewProps } from 'react-native-webview';
+import type { PortEntry, PreviewSettings } from '@krusty/api';
 import * as Haptics from '../../platform/haptics';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
@@ -16,14 +17,9 @@ if (Platform.OS !== 'web') {
   }
 }
 
-interface PortEntry {
-  port: number;
-  type: string;
-  status: string;
-}
-
 interface PreviewTab {
-  port: number;
+  id: string;
+  port: number | null;
   label: string;
 }
 
@@ -41,43 +37,139 @@ export function ToolboxBrowser({ visible }: ToolboxBrowserProps) {
 
 function NativeBrowser({ visible }: { visible: boolean }) {
   const { theme } = useThemeContext();
-  const { serverUrl } = useConnection();
+  const { client, serverUrl, serverToken } = useConnection();
   const t = theme.colors;
 
   const [ports, setPorts] = useState<PortEntry[]>([]);
+  const [settings, setSettings] = useState<PreviewSettings | null>(null);
   const [tabs, setTabs] = useState<PreviewTab[]>([]);
-  const [activePort, setActivePort] = useState<number | null>(null);
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null;
+
+  const previewUrl = useMemo(() => {
+    if (!serverUrl || activeTab?.port === null || activeTab?.port === undefined) {
+      return null;
+    }
+    return `${serverUrl.replace(/\/+$/, '')}/api/ports/${activeTab.port}/proxy`;
+  }, [activeTab?.port, serverUrl]);
+
+  const availablePorts = useMemo(
+    () =>
+      ports.filter(
+        (port) => port.active && port.is_previewable_http,
+      ),
+    [ports],
+  );
+
+  const loadPorts = useCallback(async (background = false) => {
+    if (!client) return;
+
+    if (background) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
+
+    try {
+      const response = await client.getPorts();
+      setPorts(response.ports);
+      setSettings(response.settings);
+      setError(response.discovery_error ?? null);
+      setTabs((current) =>
+        current.map((tab) => {
+          if (tab.port === null) return tab;
+          const match = response.ports.find((port) => port.port === tab.port);
+          return match ? { ...tab, label: match.name } : tab;
+        }),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load preview ports.');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [client]);
 
   useEffect(() => {
-    if (!serverUrl || !visible) return;
-    let mounted = true;
+    if (!client || !visible) return;
 
-    const poll = async () => {
-      try {
-        const res = await fetch(`${serverUrl}/api/workspace/ports`);
-        const data = await res.json();
-        if (mounted && data.ports) setPorts(data.ports);
-      } catch { /* silent */ }
+    void loadPorts();
+    const intervalMs = Math.max(2, settings?.auto_refresh_secs ?? 5) * 1000;
+    const interval = setInterval(() => {
+      void loadPorts(true);
+    }, intervalMs);
+    return () => clearInterval(interval);
+  }, [client, loadPorts, settings?.auto_refresh_secs, visible]);
+
+  const createBlankTab = useCallback(() => {
+    const tab: PreviewTab = {
+      id: `preview-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      port: null,
+      label: 'New Tab',
     };
-
-    poll();
-    const interval = setInterval(poll, 5000);
-    return () => { mounted = false; clearInterval(interval); };
-  }, [serverUrl, visible]);
-
-  const openPort = useCallback((port: number) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setTabs(prev => {
-      if (prev.some(t => t.port === port)) return prev;
-      return [...prev, { port, label: `localhost:${port}` }];
-    });
-    setActivePort(port);
+    setTabs((current) => [...current, tab]);
+    setActiveTabId(tab.id);
+    setError(null);
   }, []);
 
-  const closePort = useCallback((port: number) => {
+  useEffect(() => {
+    if (!visible || tabs.length > 0) return;
+
+    const tab: PreviewTab = {
+      id: `preview-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      port: null,
+      label: 'New Tab',
+    };
+    setTabs([tab]);
+    setActiveTabId(tab.id);
+  }, [tabs.length, visible]);
+
+  const openPort = useCallback((port: PortEntry) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setTabs(prev => {
-      const next = prev.filter(t => t.port !== port);
-      setActivePort(current => current === port ? (next[0]?.port ?? null) : current);
+      if (activeTab?.port === null) {
+        return prev.map((tab) =>
+          tab.id === activeTab.id
+            ? { ...tab, port: port.port, label: port.name || `Port ${port.port}` }
+            : tab,
+        );
+      }
+
+      const tab: PreviewTab = {
+        id: `preview-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+        port: port.port,
+        label: port.name || `Port ${port.port}`,
+      };
+      setActiveTabId(tab.id);
+      return [...prev, tab];
+    });
+    if (activeTab?.port === null) {
+      setActiveTabId(activeTab.id);
+    }
+  }, [activeTab]);
+
+  const closeTab = useCallback((tabId: string) => {
+    setTabs(prev => {
+      const index = prev.findIndex((tab) => tab.id === tabId);
+      const next = prev.filter(t => t.id !== tabId);
+      if (next.length === 0) {
+        const blankTab: PreviewTab = {
+          id: `preview-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+          port: null,
+          label: 'New Tab',
+        };
+        setActiveTabId(blankTab.id);
+        return [blankTab];
+      }
+      setActiveTabId(current =>
+        current === tabId
+          ? (next[Math.max(0, index - 1)]?.id ?? next[0]?.id ?? null)
+          : current,
+      );
       return next;
     });
   }, []);
@@ -85,50 +177,78 @@ function NativeBrowser({ visible }: { visible: boolean }) {
   return (
     <View style={[styles.container, { backgroundColor: t.background }]}>
       <View style={[styles.tabBar, { borderBottomColor: t.border }]}>
-        <Globe size={16} color={t.mutedForeground} strokeWidth={1.8} />
         {tabs.map(tab => (
           <Pressable
-            key={tab.port}
-            onPress={() => setActivePort(tab.port)}
-            style={[styles.tab, activePort === tab.port && { backgroundColor: `${t.userMessage}18` }]}
+            key={tab.id}
+            onPress={() => setActiveTabId(tab.id)}
+            style={[styles.tab, activeTabId === tab.id && { backgroundColor: `${t.userMessage}18` }]}
           >
             <Text
-              style={[styles.tabLabel, { color: activePort === tab.port ? t.foreground : t.mutedForeground }]}
+              style={[styles.tabLabel, { color: activeTabId === tab.id ? t.foreground : t.mutedForeground }]}
               numberOfLines={1}
             >
               {tab.label}
             </Text>
-            <Pressable onPress={() => closePort(tab.port)} hitSlop={8}>
+            <Pressable onPress={() => closeTab(tab.id)} hitSlop={8}>
               <X size={12} color={t.mutedForeground} strokeWidth={2} />
             </Pressable>
           </Pressable>
         ))}
-        {ports
-          .filter(p => p.status === 'ok' && !tabs.some(t => t.port === p.port))
-          .map(p => (
-            <Pressable key={p.port} onPress={() => openPort(p.port)} style={styles.portChip}>
-              <Text style={[styles.portChipText, { color: t.mutedForeground }]}>:{p.port}</Text>
-              <ExternalLink size={10} color={t.mutedForeground} strokeWidth={2} />
-            </Pressable>
-          ))}
+        <Pressable onPress={createBlankTab} style={styles.iconBtn}>
+          <Plus size={16} color={t.mutedForeground} strokeWidth={2} />
+        </Pressable>
+        <View style={styles.grow} />
+        {refreshing ? <ActivityIndicator color={t.userMessage} size="small" /> : null}
       </View>
 
       <View style={styles.previewArea}>
-        {activePort && visible && WebViewComponent ? (
+        {previewUrl && visible && WebViewComponent ? (
           <WebViewComponent
-            key={activePort}
-            source={{ uri: `http://localhost:${activePort}` }}
+            key={activeTab?.id}
+            source={{
+              uri: previewUrl,
+              headers: serverToken ? { Authorization: `Bearer ${serverToken}` } : undefined,
+            }}
             style={{ flex: 1 }}
             originWhitelist={['*']}
             javaScriptEnabled
             domStorageEnabled
           />
         ) : (
-          <View style={styles.empty}>
-            <Globe size={32} color={t.mutedForeground} strokeWidth={1.5} />
-            <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
-              {!visible ? '' : ports.length > 0 ? 'Select a port to preview' : 'No dev servers detected'}
-            </Text>
+          <View style={styles.quickPage}>
+            {loading ? (
+              <>
+                <ActivityIndicator color={t.userMessage} size="small" />
+                <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
+                  Loading preview ports...
+                </Text>
+              </>
+            ) : availablePorts.length > 0 ? (
+              <View style={styles.portStack}>
+                {availablePorts.map((port) => (
+                  <Pressable
+                    key={port.port}
+                    onPress={() => openPort(port)}
+                    style={[
+                      styles.portButton,
+                      { backgroundColor: t.card, borderColor: t.border },
+                    ]}
+                  >
+                    <Text style={[styles.portButtonText, { color: t.foreground }]}>
+                      :{port.port}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            ) : (
+              <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
+                {!visible
+                  ? ''
+                  : error
+                    ? error
+                    : 'No previewable ports are active right now.'}
+              </Text>
+            )}
           </View>
         )}
       </View>
@@ -149,6 +269,9 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     flexWrap: 'wrap',
   },
+  grow: {
+    flex: 1,
+  },
   tab: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -162,30 +285,40 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     maxWidth: 120,
   },
-  portChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 4,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.1)',
-  },
-  portChipText: {
-    fontSize: 11,
-    fontWeight: '500',
+  iconBtn: {
+    padding: 6,
+    borderRadius: 8,
   },
   previewArea: {
     flex: 1,
   },
-  empty: {
+  quickPage: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
     gap: 12,
+    padding: 24,
   },
   emptyText: {
     fontSize: 14,
+  },
+  portStack: {
+    width: '100%',
+    maxWidth: 220,
+    gap: 10,
+  },
+  portButton: {
+    minHeight: 44,
+    paddingHorizontal: 18,
+    paddingVertical: 11,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  portButtonText: {
+    fontSize: 15,
+    fontWeight: '700',
   },
 });

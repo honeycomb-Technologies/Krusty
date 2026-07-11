@@ -7,7 +7,7 @@
 use axum::{
     async_trait,
     extract::{ConnectInfo, FromRequestParts, Request, State},
-    http::{header, request::Parts, HeaderMap, StatusCode},
+    http::{header, request::Parts, HeaderMap, StatusCode, Uri},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -60,7 +60,9 @@ pub async fn auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Response {
-    if let Err(rejection) = authorize_request_surface(&state, addr, request.headers()).await {
+    if let Err(rejection) =
+        authorize_request_surface(&state, addr, request.headers(), request.uri()).await
+    {
         tracing::warn!(
             remote_ip = %addr.ip(),
             "Rejected non-loopback API request"
@@ -95,6 +97,7 @@ async fn authorize_request_surface(
     state: &AppState,
     addr: SocketAddr,
     headers: &HeaderMap,
+    uri: &Uri,
 ) -> Result<(), (StatusCode, &'static str)> {
     let host = headers
         .get(header::HOST)
@@ -104,7 +107,7 @@ async fn authorize_request_surface(
     if addr.ip().is_loopback() && is_local_host(host) {
         authorize_local_browser_origin(headers)
     } else {
-        authorize_remote_request(state, headers).await
+        authorize_remote_request(state, headers, uri).await
     }
 }
 
@@ -129,6 +132,7 @@ fn authorize_local_browser_origin(headers: &HeaderMap) -> Result<(), (StatusCode
 async fn authorize_remote_request(
     state: &AppState,
     headers: &HeaderMap,
+    uri: &Uri,
 ) -> Result<(), (StatusCode, &'static str)> {
     let remote_access = state.remote_access.read().await.clone();
     if !remote_access.enabled {
@@ -138,7 +142,11 @@ async fn authorize_remote_request(
         ));
     }
 
-    let Some(provided_token) = bearer_token(headers) else {
+    let provided_token = bearer_token(headers)
+        .map(str::to_owned)
+        .or_else(|| websocket_query_token(headers, uri));
+
+    let Some(provided_token) = provided_token else {
         return Err((
             StatusCode::UNAUTHORIZED,
             "Remote API access requires a valid bearer token",
@@ -153,6 +161,83 @@ async fn authorize_remote_request(
             "Remote API access requires a valid bearer token",
         ))
     }
+}
+
+/// Extract a remote-access token from the WebSocket upgrade query string.
+///
+/// Browser WebSocket clients cannot set arbitrary Authorization headers, so the
+/// terminal UI passes `?token=` (URL-encoded). Values are percent-decoded before
+/// comparison so tokens containing `+`, `/`, `=`, etc. survive `encodeURIComponent`.
+///
+/// Only honored on WebSocket upgrades — never on ordinary HTTP requests — to
+/// reduce accidental leakage of tokens via shared query-parameter auth.
+fn websocket_query_token(headers: &HeaderMap, uri: &Uri) -> Option<String> {
+    if !is_websocket_upgrade(headers) {
+        return None;
+    }
+
+    uri.query()?.split('&').find_map(|part| {
+        let (key, value) = part.split_once('=')?;
+        if key != "token" {
+            return None;
+        }
+        let decoded = percent_decode_query_component(value)?;
+        let trimmed = decoded.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+/// Percent-decode a single application/x-www-form-urlencoded query component.
+///
+/// Handles `%XX` escapes and `+` as space (common form encoding). Returns `None`
+/// on malformed sequences so we never accept a half-decoded token.
+fn percent_decode_query_component(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' => {
+                if i + 2 >= bytes.len() {
+                    return None;
+                }
+                let hi = (bytes[i + 1] as char).to_digit(16)?;
+                let lo = (bytes[i + 2] as char).to_digit(16)?;
+                out.push(((hi << 4) | lo) as u8);
+                i += 3;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
+    let upgrade = headers
+        .get(header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
+    let connection = headers
+        .get(header::CONNECTION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|part| part.trim().eq_ignore_ascii_case("upgrade"))
+        });
+
+    upgrade && connection
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
@@ -228,7 +313,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{atomic::AtomicUsize, Arc};
 
-    use axum::http::{header, HeaderMap, HeaderValue};
+    use axum::http::{header, HeaderMap, HeaderValue, Uri};
     use tokio::sync::{Mutex, RwLock};
 
     use krusty_core::agent::{AgentCancellation, UserHookManager};
@@ -240,7 +325,8 @@ mod tests {
     use krusty_core::tools::registry::ToolRegistry;
 
     use super::{
-        authorize_request_surface, is_local_host, is_trusted_local_origin, resolve_workspace_dir,
+        authorize_request_surface, is_local_host, is_trusted_local_origin,
+        percent_decode_query_component, resolve_workspace_dir,
     };
     use crate::{remote_access::RemoteAccessConfig, AppState};
 
@@ -333,7 +419,8 @@ mod tests {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 3000);
         let headers = HeaderMap::new();
 
-        let result = authorize_request_surface(&state, addr, &headers).await;
+        let uri = Uri::from_static("/api/sessions");
+        let result = authorize_request_surface(&state, addr, &headers, &uri).await;
         assert!(result.is_err());
     }
 
@@ -347,8 +434,72 @@ mod tests {
             HeaderValue::from_static("Bearer secret"),
         );
 
-        let result = authorize_request_surface(&state, addr, &headers).await;
+        let uri = Uri::from_static("/api/sessions");
+        let result = authorize_request_surface(&state, addr, &headers, &uri).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn authorize_request_surface_accepts_remote_websocket_query_token() {
+        let state = test_state();
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 3000);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+        headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
+        let uri = Uri::from_static("/ws/terminal?token=secret");
+
+        let result = authorize_request_surface(&state, addr, &headers, &uri).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn authorize_request_surface_accepts_url_encoded_websocket_query_token() {
+        // Token "a+b/c=d" encodes as a%2Bb%2Fc%3Dd via encodeURIComponent.
+        let state = {
+            let mut state = test_state();
+            state.remote_access = Arc::new(RwLock::new(RemoteAccessConfig {
+                enabled: true,
+                token: "a+b/c=d".to_string(),
+            }));
+            state
+        };
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 3000);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+        headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
+        let uri = Uri::from_static("/ws/terminal?token=a%2Bb%2Fc%3Dd");
+
+        let result = authorize_request_surface(&state, addr, &headers, &uri).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn percent_decode_query_component_handles_reserved_chars() {
+        assert_eq!(
+            percent_decode_query_component("a%2Bb%2Fc%3Dd").as_deref(),
+            Some("a+b/c=d")
+        );
+        assert_eq!(
+            percent_decode_query_component("hello%20world").as_deref(),
+            Some("hello world")
+        );
+        assert_eq!(
+            percent_decode_query_component("plus+space").as_deref(),
+            Some("plus space")
+        );
+        assert!(percent_decode_query_component("%zz").is_none());
+        assert!(percent_decode_query_component("%2").is_none());
+    }
+
+    #[tokio::test]
+    async fn authorize_request_surface_rejects_remote_query_token_without_websocket_upgrade() {
+        let state = test_state();
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 3000);
+        let headers = HeaderMap::new();
+        let uri = Uri::from_static("/api/sessions?token=secret");
+
+        let result = authorize_request_surface(&state, addr, &headers, &uri).await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -362,7 +513,8 @@ mod tests {
             HeaderValue::from_static("https://evil.example"),
         );
 
-        let result = authorize_request_surface(&state, addr, &headers).await;
+        let uri = Uri::from_static("/api/sessions");
+        let result = authorize_request_surface(&state, addr, &headers, &uri).await;
         assert!(result.is_err());
     }
 
@@ -377,7 +529,8 @@ mod tests {
             HeaderValue::from_static("http://localhost:5173"),
         );
 
-        let result = authorize_request_surface(&state, addr, &headers).await;
+        let uri = Uri::from_static("/api/sessions");
+        let result = authorize_request_surface(&state, addr, &headers, &uri).await;
         assert!(result.is_ok());
     }
 }

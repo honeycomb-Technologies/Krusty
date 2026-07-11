@@ -14,6 +14,18 @@ pub fn supports_dynamic_models(provider: ProviderId) -> bool {
         .unwrap_or(false)
 }
 
+/// Providers that expose a live `/models` (or equivalent) catalog at runtime.
+///
+/// Used by CLI and server so catalog bootstrap, cache restore, and refresh
+/// stay aligned across surfaces.
+pub fn dynamic_model_providers() -> Vec<ProviderId> {
+    ProviderId::all()
+        .iter()
+        .copied()
+        .filter(|provider| supports_dynamic_models(*provider))
+        .collect()
+}
+
 /// Resolve the credential that is valid for runtime model discovery.
 ///
 /// This intentionally differs from chat auth resolution. For example, OpenAI's
@@ -107,5 +119,15 @@ mod tests {
             });
 
         assert!(credential.is_none());
+    }
+
+    #[test]
+    fn dynamic_model_providers_includes_openrouter_openai_and_grok() {
+        let providers = crate::ai::catalog::dynamic_model_providers();
+        assert!(providers.contains(&ProviderId::OpenRouter));
+        assert!(providers.contains(&ProviderId::OpenAI));
+        assert!(providers.contains(&ProviderId::Grok));
+        assert!(!providers.contains(&ProviderId::MiniMax));
+        assert!(!providers.contains(&ProviderId::Anthropic));
     }
 }

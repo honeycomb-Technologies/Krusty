@@ -87,7 +87,14 @@ pub(super) async fn create_session(
     let session_manager = open_session_manager(&state)?;
     let workspace_scope = request_workspace_scope(&state, user.as_ref());
 
-    let title = req.title.as_deref().unwrap_or("New Session");
+    // Prefer an explicit placeholder so list/search UIs never depend on every
+    // client synthesizing titles for empty strings.
+    let title = req
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("New Session");
     let requested_model = trimmed_nonempty(req.model.as_deref());
     let workspace = normalize_resolved_requested_workspace(
         req.working_dir.as_deref(),

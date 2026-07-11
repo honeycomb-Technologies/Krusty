@@ -17,5 +17,6 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_ports))
         .route("/:port/proxy", any(proxy_root))
+        .route("/:port/proxy/", any(proxy_root))
         .route("/:port/proxy/*path", any(proxy_path))
 }

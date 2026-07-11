@@ -115,6 +115,11 @@ impl App {
                 PollAction::SwitchProvider(provider) => {
                     self.switch_provider(provider);
                 }
+                PollAction::RefreshDynamicModels(provider) => {
+                    // Force a refresh after new credentials (ignore cache freshness).
+                    self.runtime.dynamic_model_fetches.remove(&provider);
+                    self.start_dynamic_model_fetch(provider);
+                }
             }
         }
     }

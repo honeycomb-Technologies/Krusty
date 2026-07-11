@@ -11,7 +11,6 @@ import {
   AlertCircle,
   Plus,
   RefreshCw,
-  TerminalSquare,
   X,
 } from "lucide-react-native";
 
@@ -19,6 +18,7 @@ import * as Haptics from "../../platform/haptics";
 import { useConnection } from "../../hooks/useConnection";
 import { useWorkspaceStore } from "../../hooks/useStores";
 import { useThemeContext } from "../../hooks/useTheme";
+import { buildTerminalWebSocketUrl } from "../terminalUrl";
 
 const MAX_RECONNECT_ATTEMPTS = 8;
 const RECONNECT_INITIAL_DELAY_MS = 250;
@@ -79,7 +79,7 @@ function escapeShellPath(path: string): string {
 
 export function Terminal({ visible, style }: TerminalProps) {
   const { theme } = useThemeContext();
-  const { serverUrl } = useConnection();
+  const { serverUrl, serverToken } = useConnection();
   const workspaceDirectory = useWorkspaceStore((state) => state.directory) ?? null;
 
   const [tabs, setTabs] = useState<TerminalTab[]>([]);
@@ -143,8 +143,6 @@ export function Terminal({ visible, style }: TerminalProps) {
   return (
     <View style={[styles.container, { backgroundColor: t.background, borderTopColor: t.border }, style]}>
       <View style={[styles.tabBar, { borderBottomColor: t.border }]}>
-        <TerminalSquare size={16} color={t.mutedForeground} strokeWidth={1.8} />
-
         {tabs.map((tab) => {
           const active = activeTabId === tab.id;
           const statusColor = tab.connected
@@ -226,6 +224,7 @@ export function Terminal({ visible, style }: TerminalProps) {
               key={tab.id}
               active={activeTabId === tab.id}
               serverUrl={serverUrl}
+              serverToken={serverToken}
               tab={tab}
               themeColors={theme.colors}
               workspaceDirectory={workspaceDirectory}
@@ -241,6 +240,7 @@ export function Terminal({ visible, style }: TerminalProps) {
 function TerminalPane({
   active,
   serverUrl,
+  serverToken,
   tab,
   themeColors,
   workspaceDirectory,
@@ -248,6 +248,7 @@ function TerminalPane({
 }: {
   active: boolean;
   serverUrl: string;
+  serverToken: string | null;
   tab: TerminalTab;
   themeColors: ReturnType<typeof useThemeContext>["theme"]["colors"];
   workspaceDirectory: string | null;
@@ -261,6 +262,7 @@ function TerminalPane({
   const fitAddonRef = useRef<any>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const serverUrlRef = useRef(serverUrl);
+  const serverTokenRef = useRef(serverToken);
   const activeRef = useRef(active);
   const workspaceDirectoryRef = useRef(workspaceDirectory);
   const reconnectAttemptsRef = useRef(0);
@@ -401,7 +403,10 @@ function TerminalPane({
         onStatusChange(tab.id, { connected: false, error: null });
       }
 
-      const wsUrl = serverUrlRef.current.replace(/^http/i, "ws") + "/ws/terminal";
+      const wsUrl = buildTerminalWebSocketUrl(
+        serverUrlRef.current,
+        serverTokenRef.current,
+      );
       const ws = new WebSocket(wsUrl);
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
@@ -560,6 +565,10 @@ function TerminalPane({
   useEffect(() => {
     serverUrlRef.current = serverUrl;
   }, [serverUrl]);
+
+  useEffect(() => {
+    serverTokenRef.current = serverToken;
+  }, [serverToken]);
 
   useEffect(() => {
     if (Platform.OS !== "web" || !divRef.current) {

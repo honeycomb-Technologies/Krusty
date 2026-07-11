@@ -100,7 +100,7 @@ async fn set_credential(
             .map_err(|e| AppError::Internal(e.to_string()))?;
     }
 
-    if matches!(provider_id, ProviderId::OpenRouter | ProviderId::OpenAI) {
+    if krusty_core::ai::catalog::supports_dynamic_models(provider_id) {
         spawn_dynamic_model_refresh(state.model_registry.clone(), provider_id, req.api_key);
     }
 
@@ -131,8 +131,33 @@ async fn delete_credential(
             .map_err(|e| AppError::Internal(e.to_string()))?;
     }
 
-    if provider_id == ProviderId::OpenRouter {
-        state.model_registry.set_models(provider_id, vec![]).await;
+    if krusty_core::ai::catalog::supports_dynamic_models(provider_id) {
+        // Fall back to builtin static catalog for this provider when live creds go away.
+        let fallback = krusty_core::ai::providers::get_provider(provider_id)
+            .map(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .map(|m| {
+                        let api_format =
+                            krusty_core::ai::format_detection::detect_api_format(provider.id, &m.id);
+                        let mut model = krusty_core::ai::models::ModelMetadata::new(
+                            &m.id,
+                            &m.display_name,
+                            provider.id,
+                        )
+                        .with_context(m.context_window, m.max_output);
+                        if let Some(reasoning) = m.reasoning {
+                            model = model.with_thinking(reasoning);
+                        }
+                        model.api_format = api_format;
+                        model.supports_tools = provider.supports_tools;
+                        model
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        state.model_registry.set_models(provider_id, fallback).await;
     }
 
     let oauth_store = load_oauth_store_or_default("deleting credential provider");
@@ -207,13 +232,7 @@ fn spawn_dynamic_model_refresh(
     credential: String,
 ) {
     tokio::spawn(async move {
-        let result = match provider_id {
-            ProviderId::OpenRouter => krusty_core::ai::openrouter::fetch_models(&credential).await,
-            ProviderId::OpenAI => krusty_core::ai::openai::fetch_models(&credential).await,
-            _ => return,
-        };
-
-        match result {
+        match krusty_core::ai::catalog::fetch_dynamic_models(provider_id, &credential).await {
             Ok(models) => registry.set_models(provider_id, models).await,
             Err(e) => tracing::warn!("Failed to refresh {} models: {}", provider_id, e),
         }

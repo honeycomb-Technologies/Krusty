@@ -55,6 +55,14 @@ pub fn poll_oauth_status(
                                     result.with_action(PollAction::SwitchProvider(update.provider));
                             }
 
+                            // Reload live model catalogs after OAuth (Grok, OpenAI, …)
+                            // so CLI model select matches the server path.
+                            if crate::ai::catalog::supports_dynamic_models(update.provider) {
+                                result = result.with_action(PollAction::RefreshDynamicModels(
+                                    update.provider,
+                                ));
+                            }
+
                             result = result.with_message(
                                 "system",
                                 format!("{} authenticated via OAuth!", update.provider),

@@ -71,6 +71,14 @@ function normalizeTargetBranch(targetBranch: string | null | undefined): string 
   return trimmed ? trimmed : null;
 }
 
+function normalizeDisplayTitle(title: string | null | undefined): string {
+  const trimmed = title?.trim() ?? "";
+  const placeholder = trimmed.toLowerCase();
+  return placeholder === "new chat" || placeholder === "new session"
+    ? ""
+    : trimmed;
+}
+
 function buildDisplayAttachments(
   attachments: Attachment[],
 ): ChatMessageAttachment[] {
@@ -173,7 +181,7 @@ export function createSessionStore(
     | "cleanup"
   > = {
     sessionId: null,
-    title: "New Chat",
+    title: "",
     mode: "build",
     permissionMode: loadPermissionMode(),
     messages: [],
@@ -348,6 +356,7 @@ export function createSessionStore(
           content: "",
           thinking: "",
           toolCalls: [],
+          renderParts: [],
           kind: "streaming",
         },
       };
@@ -522,7 +531,7 @@ export function createSessionStore(
           return {
             ...s,
             sessionId: data.session.id,
-            title: data.session.title || "Untitled",
+            title: normalizeDisplayTitle(data.session.title),
             mode,
             permissionMode,
             model: sessionModel ?? s.model,
@@ -616,7 +625,7 @@ export function createSessionStore(
         thinkingEnabled: current.thinkingEnabled,
         fastModeEnabled: current.fastModeEnabled,
         sessionId,
-        title,
+        title: normalizeDisplayTitle(title),
       });
       get().startPresenceHeartbeat(sessionId);
     },
@@ -754,6 +763,7 @@ export function createSessionStore(
           content: "",
           thinking: "",
           toolCalls: [],
+          renderParts: [],
           kind: "streaming",
         },
       };

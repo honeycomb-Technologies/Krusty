@@ -9,28 +9,16 @@ import { ToolApprovalWidget } from "./ToolApprovalWidget";
 import { AskUserQuestionWidget } from "./AskUserQuestionWidget";
 import { PlanConfirmWidget } from "./PlanConfirmWidget";
 import { ImagePreviewModal, imagePreviewUri } from "./ImagePreviewModal";
+import {
+  assistantVisualSegments,
+  isDelegatedTool,
+  isPlanConfirmTool,
+  isQuestionTool,
+  type AssistantVisualSegment,
+} from "./assistantRenderPlan";
 import type { ChatMessage, ChatMessageAttachment, ToolCall } from "@krusty/api";
 import * as Clipboard from "../../platform/clipboard";
 import * as Haptics from "../../platform/haptics";
-
-const INTERNAL_TOOL_NAMES = new Set([
-  "enter_plan_mode",
-  "set_work_mode",
-  "task_start",
-  "task_complete",
-  "add_subtask",
-  "set_dependency",
-]);
-
-const EXPLORATION_TOOL_NAMES = new Set([
-  "glob",
-  "grep",
-  "ls",
-  "list",
-  "list_files",
-  "read",
-  "search",
-]);
 
 interface MessageBubbleProps {
   message: ChatMessage;
@@ -66,37 +54,10 @@ export function MessageBubble({
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
 
-  const toolCalls = message.toolCalls ?? [];
-  const delegatedTools = toolCalls.filter(
-    (toolCall) =>
-      toolCall.name === "agent" ||
-      toolCall.name === "explore" ||
-      toolCall.name === "plan" ||
-      toolCall.name === "verify" ||
-      toolCall.name === "build",
-  );
-  const questionTools = toolCalls.filter(
-    (toolCall) => toolCall.name === "AskUserQuestion",
-  );
-  const planConfirmTools = toolCalls.filter(
-    (toolCall) => toolCall.name === "PlanConfirm",
-  );
-  const standardTools = toolCalls.filter(
-    (toolCall) =>
-      toolCall.name !== "explore" &&
-      toolCall.name !== "plan" &&
-      toolCall.name !== "verify" &&
-      toolCall.name !== "build" &&
-      toolCall.name !== "agent" &&
-      toolCall.name !== "AskUserQuestion" &&
-      toolCall.name !== "PlanConfirm" &&
-      !INTERNAL_TOOL_NAMES.has(toolCall.name),
-  );
-  const explorationTools = standardTools.filter((toolCall) =>
-    EXPLORATION_TOOL_NAMES.has(toolCall.name.toLowerCase()),
-  );
-  const visibleStandardTools = standardTools.filter(
-    (toolCall) => !EXPLORATION_TOOL_NAMES.has(toolCall.name.toLowerCase()),
+  const assistantSegments = assistantVisualSegments(
+    message,
+    isLast,
+    isThinking,
   );
   const handleCopy = () => {
     const value = message.content.trim();
@@ -108,6 +69,105 @@ export function MessageBubble({
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setCopied(true);
     setTimeout(() => setCopied(false), 1200);
+  };
+
+  const renderToolSegment = (toolCall: ToolCall) => {
+    const toolIsStreaming =
+      isLast && isStreaming && toolCall.status === "running";
+    if (isQuestionTool(toolCall) && onSubmitToolResult) {
+      return (
+        <AskUserQuestionWidget
+          key={toolCall.id}
+          toolCall={toolCall}
+          isSubmitting={activeToolCallId === toolCall.id}
+          onSubmit={(result) => onSubmitToolResult(toolCall.id, result)}
+        />
+      );
+    }
+
+    if (isPlanConfirmTool(toolCall) && onPlanConfirm) {
+      return (
+        <PlanConfirmWidget
+          key={toolCall.id}
+          toolCall={toolCall}
+          isSubmitting={activeToolCallId === toolCall.id}
+          onConfirm={(choice) => onPlanConfirm(toolCall.id, choice)}
+        />
+      );
+    }
+
+    if (
+      toolCall.status === "awaiting_approval" &&
+      onApproveTool &&
+      onDenyTool
+    ) {
+      return (
+        <ToolApprovalWidget
+          key={toolCall.id}
+          toolCall={toolCall}
+          isSubmitting={activeToolCallId === toolCall.id}
+          onApprove={() => onApproveTool(toolCall.id)}
+          onDeny={() => onDenyTool(toolCall.id)}
+        />
+      );
+    }
+
+    return (
+      <ToolCallCard
+        key={toolCall.id}
+        toolCall={toolCall}
+        isStreaming={
+          toolIsStreaming || (isDelegatedTool(toolCall) && isLast && isStreaming)
+        }
+        defaultExpanded={shouldExpandTool(toolCall, isLast && isStreaming)}
+      />
+    );
+  };
+
+  const renderAssistantSegment = (segment: AssistantVisualSegment) => {
+    switch (segment.type) {
+      case "thinking":
+        return (
+          <ThinkingBlock
+            key={segment.id}
+            content={segment.content}
+            isStreaming={
+              isLast && (isThinking || (isStreaming && !message.content))
+            }
+          />
+        );
+      case "exploration":
+        return (
+          <ToolClusterCard
+            key={segment.id}
+            tools={segment.tools}
+            isStreaming={isLast && isStreaming}
+          />
+        );
+      case "tool":
+        return renderToolSegment(segment.toolCall);
+      case "attachments":
+        return (
+          <MessageAttachments
+            key={segment.id}
+            attachments={message.attachments ?? []}
+          />
+        );
+      case "text":
+        return (
+          <Pressable
+            key={segment.id}
+            onLongPress={handleCopy}
+            delayLongPress={250}
+            style={styles.assistantText}
+          >
+            <AssistantSegmentedContent
+              messageId={`${message.id}-${segment.id}`}
+              content={segment.content}
+            />
+          </Pressable>
+        );
+    }
   };
 
   return (
@@ -158,111 +218,7 @@ export function MessageBubble({
 
       {!isUser && (
         <View style={styles.assistantWrap}>
-          {(message.thinking || (isLast && isThinking)) && (
-            <ThinkingBlock
-              content={message.thinking ?? ""}
-              isStreaming={
-                isLast && (isThinking || (isStreaming && !message.content))
-              }
-            />
-          )}
-
-          {delegatedTools.length > 0 && (
-            <View style={styles.toolSection}>
-              {delegatedTools.map((toolCall) => (
-                <ToolCallCard
-                  key={toolCall.id}
-                  toolCall={toolCall}
-                  isStreaming={isLast && isStreaming}
-                  defaultExpanded={shouldExpandTool(
-                    toolCall,
-                    isLast && isStreaming,
-                  )}
-                />
-              ))}
-            </View>
-          )}
-
-          {explorationTools.length > 0 ? (
-            <ToolClusterCard
-              tools={explorationTools}
-              isStreaming={isLast && isStreaming}
-            />
-          ) : null}
-
-          {visibleStandardTools.length > 0 && (
-            <View style={styles.toolSection}>
-              <Text style={[styles.toolLabel, { color: t.mutedForeground }]}>
-                Actions
-              </Text>
-              {visibleStandardTools.map((toolCall) =>
-                toolCall.status === "awaiting_approval" &&
-                onApproveTool &&
-                onDenyTool ? (
-                  <ToolApprovalWidget
-                    key={toolCall.id}
-                    toolCall={toolCall}
-                    isSubmitting={activeToolCallId === toolCall.id}
-                    onApprove={() => onApproveTool(toolCall.id)}
-                    onDeny={() => onDenyTool(toolCall.id)}
-                  />
-                ) : (
-                  <ToolCallCard
-                    key={toolCall.id}
-                    toolCall={toolCall}
-                    isStreaming={isLast && isStreaming}
-                    defaultExpanded={shouldExpandTool(
-                      toolCall,
-                      isLast && isStreaming,
-                    )}
-                  />
-                ),
-              )}
-            </View>
-          )}
-
-          {(message.attachments?.length ?? 0) > 0 ? (
-            <MessageAttachments attachments={message.attachments ?? []} />
-          ) : null}
-
-          {message.content.length > 0 && (
-            <Pressable
-              onLongPress={handleCopy}
-              delayLongPress={250}
-              style={styles.assistantText}
-            >
-              <AssistantSegmentedContent
-                messageId={message.id}
-                content={message.content}
-              />
-            </Pressable>
-          )}
-
-          {questionTools.length > 0 && onSubmitToolResult && (
-            <View style={styles.toolSection}>
-              {questionTools.map((toolCall) => (
-                <AskUserQuestionWidget
-                  key={toolCall.id}
-                  toolCall={toolCall}
-                  isSubmitting={activeToolCallId === toolCall.id}
-                  onSubmit={(result) => onSubmitToolResult(toolCall.id, result)}
-                />
-              ))}
-            </View>
-          )}
-
-          {planConfirmTools.length > 0 && onPlanConfirm && (
-            <View style={styles.toolSection}>
-              {planConfirmTools.map((toolCall) => (
-                <PlanConfirmWidget
-                  key={toolCall.id}
-                  toolCall={toolCall}
-                  isSubmitting={activeToolCallId === toolCall.id}
-                  onConfirm={(choice) => onPlanConfirm(toolCall.id, choice)}
-                />
-              ))}
-            </View>
-          )}
+          {assistantSegments.map(renderAssistantSegment)}
 
           {copied ? (
             <Text style={[styles.copyStatus, { color: t.mutedForeground }]}>
@@ -542,15 +498,6 @@ const styles = StyleSheet.create({
     fontWeight: "500",
     marginTop: -2,
     marginLeft: 2,
-  },
-  toolSection: {
-    gap: 6,
-  },
-  toolLabel: {
-    fontSize: 12,
-    fontWeight: "500",
-    marginBottom: 2,
-    marginLeft: 4,
   },
   toolCluster: {
     borderRadius: 10,

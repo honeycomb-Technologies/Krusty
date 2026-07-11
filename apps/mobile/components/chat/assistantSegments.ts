@@ -33,6 +33,18 @@ export function assistantMessageRevision(message: ChatMessage): string {
         ].join(":"),
       )
       .join("|") ?? "";
+  const renderPartSignature =
+    message.renderParts
+      ?.map((part) => {
+        if (part.type === "tool") {
+          return `${part.type}:${part.toolCallId}`;
+        }
+        if (part.type === "attachments") {
+          return part.type;
+        }
+        return `${part.type}:${part.content.length}`;
+      })
+      .join("|") ?? "";
 
   return [
     message.id,
@@ -40,6 +52,7 @@ export function assistantMessageRevision(message: ChatMessage): string {
     message.thinking?.length ?? 0,
     message.kind ?? "steady",
     toolSignature,
+    renderPartSignature,
   ].join("::");
 }
 

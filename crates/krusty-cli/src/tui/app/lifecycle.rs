@@ -60,14 +60,10 @@ impl App {
         // Check for updates in background
         self.start_update_check();
 
-        // Start background refresh of OpenRouter models if configured and cache is stale
-        if self.should_refresh_dynamic_models(self.runtime.active_provider) {
-            tracing::info!(
-                "Starting background {:?} model refresh",
-                self.runtime.active_provider
-            );
-            self.start_dynamic_model_fetch(self.runtime.active_provider);
-        }
+        // Refresh all dynamic catalogs (OpenRouter, OpenAI, Grok, …) that have
+        // credentials and a stale/missing cache — same policy as server bootstrap.
+        tracing::info!("Starting background dynamic model catalog refresh");
+        self.refresh_stale_dynamic_model_catalogs();
 
         enable_raw_mode()?;
         let mut stdout = io::stdout();

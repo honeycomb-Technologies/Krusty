@@ -20,6 +20,7 @@ import {
 } from "./transient";
 import type {
 	AssistantMessageRef,
+	ChatRenderPart,
 	SessionMode,
 	SessionStoreState,
 	ToolCall,
@@ -38,6 +39,69 @@ interface StreamCallbackDependencies {
 		getState: () => SessionStoreState,
 		mode: SessionMode,
 	) => Promise<void>;
+}
+
+function appendRenderPart(ref: AssistantMessageRef, part: ChatRenderPart) {
+	ref.current.renderParts = [...(ref.current.renderParts || []), part];
+}
+
+function appendTextRenderPart(ref: AssistantMessageRef, content: string) {
+	if (!content) return;
+
+	const parts = [...(ref.current.renderParts || [])];
+	const lastPart = parts[parts.length - 1];
+	if (lastPart?.type === "text") {
+		parts[parts.length - 1] = {
+			...lastPart,
+			content: lastPart.content + content,
+		};
+	} else {
+		parts.push({
+			type: "text",
+			id: `text-${parts.length}`,
+			content,
+		});
+	}
+	ref.current.renderParts = parts;
+}
+
+function appendThinkingRenderPart(ref: AssistantMessageRef, content: string) {
+	if (!content) return;
+
+	const parts = [...(ref.current.renderParts || [])];
+	const lastPart = parts[parts.length - 1];
+	if (lastPart?.type === "thinking") {
+		parts[parts.length - 1] = {
+			...lastPart,
+			content: lastPart.content + content,
+		};
+	} else {
+		parts.push({
+			type: "thinking",
+			id: `thinking-${parts.length}`,
+			content,
+		});
+	}
+	ref.current.renderParts = parts;
+}
+
+function appendToolRenderPart(ref: AssistantMessageRef, toolCallId: string) {
+	if (!toolCallId) return;
+
+	const parts = ref.current.renderParts || [];
+	if (
+		parts.some(
+			(part) => part.type === "tool" && part.toolCallId === toolCallId,
+		)
+	) {
+		return;
+	}
+
+	appendRenderPart(ref, {
+		type: "tool",
+		id: `tool-${toolCallId}`,
+		toolCallId,
+	});
 }
 
 export function createStreamCallbacks(
@@ -65,6 +129,7 @@ export function createStreamCallbacks(
 	function flushPendingTextDelta() {
 		if (!pendingTextDelta) return;
 		ref.current.content += pendingTextDelta;
+		appendTextRenderPart(ref, pendingTextDelta);
 		pendingTextDelta = "";
 		updateLastAssistantMessage(() => ({
 			isLoading: false,
@@ -107,6 +172,7 @@ export function createStreamCallbacks(
 		onThinkingDelta: (thinking) => {
 			flushPendingTextDelta();
 			ref.current.thinking = (ref.current.thinking || "") + thinking;
+			appendThinkingRenderPart(ref, thinking);
 			const delegatedIndex = (ref.current.toolCalls || []).findIndex(
 				(toolCall) =>
 					resolveDelegatedKind(
@@ -164,6 +230,7 @@ export function createStreamCallbacks(
 					status: "running",
 				},
 			];
+			appendToolRenderPart(ref, id);
 			updateLastAssistantMessage();
 		},
 
@@ -269,6 +336,7 @@ export function createStreamCallbacks(
 				...(ref.current.toolCalls || []),
 				planConfirmCall,
 			];
+			appendToolRenderPart(ref, toolCallId);
 			updateLastAssistantMessage();
 		},
 
@@ -442,6 +510,8 @@ export function createStreamCallbacks(
 		},
 
 		onError: (error) => {
+			// Flush rAF-batched text so the last frame is not dropped on failure.
+			flushPendingTextDelta();
 			set((state) => ({
 				isLoading: false,
 				isStreaming: false,

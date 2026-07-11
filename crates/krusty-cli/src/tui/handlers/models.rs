@@ -1,6 +1,11 @@
 //! Model fetching handlers
 //!
-//! Async model fetching from dynamic providers such as OpenRouter and OpenAI.
+//! Async model fetching from dynamic providers (OpenRouter, OpenAI, Grok, …).
+//! Catalog refresh is aligned with the server: any provider with live models
+//! and valid catalog credentials can be refreshed, including concurrently.
+//!
+//! Registry mutations happen on the async fetch tasks — never `block_on` on the
+//! TUI poll path — so model refresh cannot hitch the terminal event loop.
 
 use crate::ai::client::CallOptions;
 use crate::ai::models::ModelMetadata;
@@ -30,8 +35,11 @@ impl App {
         });
 
         let registry = self.services.model_registry.clone();
+        let metadata_for_registry = metadata.clone();
+        // User-initiated selection can afford a short sync apply; still avoid
+        // holding locks across the whole UI frame by spawning when possible.
         futures::executor::block_on(async {
-            registry.upsert_model(metadata.clone()).await;
+            registry.upsert_model(metadata_for_registry).await;
             registry.mark_recent(&model_id).await;
         });
 
@@ -65,13 +73,29 @@ impl App {
         Some(self.runtime.fast_mode)
     }
 
+    /// Refresh every dynamic provider that has catalog credentials and a stale cache.
+    ///
+    /// Mirrors server `initialize_models` so CLI and server model pickers stay aligned.
+    pub fn refresh_stale_dynamic_model_catalogs(&mut self) {
+        for provider in crate::ai::catalog::dynamic_model_providers() {
+            if !self.should_refresh_dynamic_models(provider) {
+                continue;
+            }
+            if crate::ai::catalog::credential_for_dynamic_models(
+                provider,
+                &self.services.credential_store,
+            )
+            .is_none()
+            {
+                continue;
+            }
+            self.start_dynamic_model_fetch(provider);
+        }
+    }
+
     /// Start async fetch of models for a dynamic provider.
     pub fn start_dynamic_model_fetch(&mut self, provider: ProviderId) {
         if !crate::ai::catalog::supports_dynamic_models(provider) {
-            return;
-        }
-
-        if self.runtime.channels.dynamic_models.is_some() {
             return;
         }
 
@@ -93,21 +117,31 @@ impl App {
             return;
         };
 
+        let custom_models = self
+            .services
+            .preferences
+            .as_ref()
+            .map(|prefs| prefs.get_custom_models(provider))
+            .unwrap_or_default();
+
+        let tx = self.ensure_dynamic_model_tx();
         self.ui.popups.model.set_loading(true);
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.runtime.channels.dynamic_models = Some(rx);
-
         let registry = self.services.model_registry.clone();
-
         tokio::spawn(async move {
             let result = crate::ai::catalog::fetch_dynamic_models(provider, &credential).await;
 
-            if let Ok(models) = &result {
-                registry.set_models(provider, models.clone()).await;
-                tracing::info!("Fetched {} {:?} models", models.len(), provider);
-            } else if let Err(error) = &result {
-                tracing::error!("Failed to fetch {:?} models: {}", provider, error);
+            match &result {
+                Ok(models) => {
+                    registry.set_models(provider, models.clone()).await;
+                    for metadata in custom_models {
+                        registry.upsert_model(metadata).await;
+                    }
+                    tracing::info!("Fetched {} {:?} models", models.len(), provider);
+                }
+                Err(error) => {
+                    tracing::error!("Failed to fetch {:?} models: {}", provider, error);
+                }
             }
 
             let _ = tx.send(DynamicModelUpdate {
@@ -117,32 +151,77 @@ impl App {
         });
     }
 
+    fn ensure_dynamic_model_tx(
+        &mut self,
+    ) -> tokio::sync::mpsc::UnboundedSender<DynamicModelUpdate> {
+        if let Some(tx) = &self.runtime.channels.dynamic_models_tx {
+            return tx.clone();
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.runtime.channels.dynamic_models = Some(rx);
+        self.runtime.channels.dynamic_models_tx = Some(tx.clone());
+        tx
+    }
+
     /// Poll for dynamic model fetch completion.
     pub fn poll_dynamic_model_fetch(&mut self) {
         let Some(rx) = &mut self.runtime.channels.dynamic_models else {
             return;
         };
 
-        match rx.try_recv() {
-            Ok(update) => {
-                self.runtime.dynamic_model_fetches.remove(&update.provider);
-                match update.result {
-                    Ok(models) => {
-                        self.cache_dynamic_models(update.provider, &models);
-                        self.reapply_custom_models(update.provider);
-                        self.refresh_model_popup();
-                    }
-                    Err(error) => {
-                        self.ui.popups.model.set_error(error);
-                    }
+        let mut received = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(update) => received.push(update),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    self.runtime.dynamic_model_fetches.clear();
+                    self.runtime.channels.dynamic_models = None;
+                    self.runtime.channels.dynamic_models_tx = None;
+                    self.ui.popups.model.set_loading(false);
+                    return;
                 }
-                self.runtime.channels.dynamic_models = None;
             }
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
-            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                self.runtime.dynamic_model_fetches.clear();
-                self.runtime.channels.dynamic_models = None;
+        }
+
+        if received.is_empty() {
+            return;
+        }
+
+        let mut any_success = false;
+        let mut last_error: Option<String> = None;
+
+        for update in received {
+            self.runtime.dynamic_model_fetches.remove(&update.provider);
+            match update.result {
+                Ok(models) => {
+                    // Registry already updated on the async task — only cache + UI here.
+                    self.cache_dynamic_models(update.provider, &models);
+                    any_success = true;
+                }
+                Err(error) => {
+                    last_error = Some(format!("{:?}: {error}", update.provider));
+                }
             }
+        }
+
+        if any_success {
+            self.refresh_model_popup();
+        }
+
+        if self.runtime.dynamic_model_fetches.is_empty() {
+            self.ui.popups.model.set_loading(false);
+            if let Some(error) = last_error {
+                if !any_success {
+                    self.ui.popups.model.set_error(error);
+                } else {
+                    tracing::warn!("Partial dynamic model refresh failure: {error}");
+                }
+            }
+            // Drop channel halves when idle so the next refresh recreates cleanly.
+            self.runtime.channels.dynamic_models = None;
+            self.runtime.channels.dynamic_models_tx = None;
         }
     }
 
@@ -154,24 +233,6 @@ impl App {
         if let Err(error) = prefs.cache_models(provider, models) {
             tracing::warn!("Failed to cache {:?} models: {}", provider, error);
         }
-    }
-
-    fn reapply_custom_models(&self, provider: ProviderId) {
-        let Some(ref prefs) = self.services.preferences else {
-            return;
-        };
-
-        let custom_models = prefs.get_custom_models(provider);
-        if custom_models.is_empty() {
-            return;
-        }
-
-        let registry = self.services.model_registry.clone();
-        futures::executor::block_on(async move {
-            for metadata in custom_models {
-                registry.upsert_model(metadata).await;
-            }
-        });
     }
 
     pub fn should_refresh_dynamic_models(&self, provider: ProviderId) -> bool {

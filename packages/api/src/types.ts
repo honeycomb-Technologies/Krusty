@@ -127,9 +127,31 @@ export interface ChatMessage {
 	thinking?: string;
 	attachments?: ChatMessageAttachment[];
 	toolCalls?: ToolCall[];
+	renderParts?: ChatRenderPart[];
 	isQueued?: boolean;
 	kind?: "recovery_notice" | "live_partial" | "streaming";
 }
+
+export type ChatRenderPart =
+	| {
+			type: "text";
+			id: string;
+			content: string;
+	  }
+	| {
+			type: "thinking";
+			id: string;
+			content: string;
+	  }
+	| {
+			type: "tool";
+			id: string;
+			toolCallId: string;
+	  }
+	| {
+			type: "attachments";
+			id: string;
+	  };
 
 export interface ChatMessageAttachment {
 	type: "image" | "file";

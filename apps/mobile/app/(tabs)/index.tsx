@@ -35,14 +35,7 @@ import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
 import { useLiveActivity } from "../../hooks/useLiveActivity";
 import { useWidgetSync } from "../../hooks/useWidgetSync";
 import { useNotifications } from "../../hooks/useNotifications";
-import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
-  interpolate,
-  withSpring,
-  withTiming,
-  runOnJS,
-} from "react-native-reanimated";
+import Animated from "react-native-reanimated";
 
 import type {
   ModelInfo,
@@ -60,7 +53,6 @@ import { ChatBootScreen } from "./chat-screen/BootScreen";
 import {
   CHAT_BAR_ZONE,
   SELECTED_MODEL_KEY,
-  SPLIT_PANEL_HEIGHT,
   flattenToolCalls,
   getActiveToolCall,
   getLastAssistantMessage,
@@ -146,8 +138,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const [makoTopLevel, setMakoTopLevel] = useState<MakoTopLevelView>("mako");
   const [toolboxOpen, setToolboxOpen] = useState(false);
   const [toolboxTab, setToolboxTab] = useState(2);
-  const splitProgress = useSharedValue(0);
-  const [isSplit, setIsSplit] = useState(false);
   const [researchEnabled, setResearchEnabled] = useState(false);
   const [bottomControlsOpen, setBottomControlsOpen] = useState(false);
   const [composerReserveHeight, setComposerReserveHeight] =
@@ -613,34 +603,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     );
   }, [sessionId, sessionStore, sessionTitle]);
 
-  const handleToolboxPin = useCallback(() => {
-    setIsSplit(true);
-    splitProgress.value = withSpring(1, { damping: 22, stiffness: 280, mass: 0.8 });
-  }, [splitProgress]);
-
-  const handleToolboxUnpin = useCallback(() => {
-    splitProgress.value = withTiming(0, { duration: 300 });
-    setIsSplit(false);
-  }, [splitProgress]);
-
-  const closeToolbox = useCallback(() => {
-    setToolboxOpen(false);
-    setIsSplit(false);
-  }, []);
-
   const handleToolboxClose = useCallback(() => {
-    if (splitProgress.value > 0.1) {
-      splitProgress.value = withTiming(0, { duration: 250 }, (finished) => {
-        if (finished) runOnJS(closeToolbox)();
-      });
-    } else {
-      setToolboxOpen(false);
-    }
-  }, [splitProgress, closeToolbox]);
-
-  const chatOffsetStyle = useAnimatedStyle(() => ({
-    marginTop: interpolate(splitProgress.value, [0, 1], [0, SPLIT_PANEL_HEIGHT]),
-  }));
+    setToolboxOpen(false);
+  }, []);
 
   const topBar = (
     <Animated.View style={[styles.topBar, entrance.topBarStyle]}>
@@ -679,7 +644,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         }}
         style={styles.menuBtn}
       >
-        <Toolbox size={20} color={toolboxOpen ? t.userMessage : t.mutedForeground} strokeWidth={1.8} />
+        <Toolbox size={20} color={t.mutedForeground} strokeWidth={1.8} />
       </Pressable>
     </Animated.View>
   );
@@ -689,10 +654,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       style={[styles.container, { backgroundColor: t.background }]}
       edges={isDesktop ? [] : ["top"]}
     >
-      {topBar}
+      {!toolboxOpen ? topBar : null}
 
       <View style={styles.flex}>
-        <Animated.View style={[styles.flex, entrance.contentStyle, chatOffsetStyle]}>
+        <Animated.View style={[styles.flex, entrance.contentStyle]}>
           <ChatTranscript
             messages={messages}
             sessionId={sessionId}
@@ -726,7 +691,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           />
         </Animated.View>
 
-        {(!toolboxOpen || isSplit) && (
+        {!toolboxOpen && (
           <Animated.View style={[entrance.bottomBarStyle, { overflow: "visible", zIndex: 300 }]}>
             <ChatBar
               onSend={handleChatBarSend}
@@ -761,16 +726,14 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           </Animated.View>
         )}
 
-        <ToolboxPanel
-          visible={toolboxOpen}
-          onClose={handleToolboxClose}
-          onTogglePin={isSplit ? handleToolboxUnpin : handleToolboxPin}
-          isSplit={isSplit}
-          splitProgress={splitProgress}
-          activeTab={toolboxTab}
-          onTabChange={setToolboxTab}
-        />
       </View>
+
+      <ToolboxPanel
+        visible={toolboxOpen}
+        onClose={handleToolboxClose}
+        activeTab={toolboxTab}
+        onTabChange={setToolboxTab}
+      />
     </SafeAreaView>
   );
 
