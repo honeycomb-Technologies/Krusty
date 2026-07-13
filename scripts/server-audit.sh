@@ -16,7 +16,14 @@ CODE_SESSION_ID=""
 MAKO_SESSION_ID=""
 HOOK_ID=""
 APNS_DEVICE_TOKEN="audit-device-token"
-PUSH_ENDPOINT="https://example.invalid/krusty-audit"
+# Use an inert path on a real browser push origin. The server intentionally
+# rejects arbitrary hosts to prevent SSRF, and this subscription is removed
+# before the audit exercises push delivery.
+PUSH_ENDPOINT="https://fcm.googleapis.com/fcm/send/krusty-audit"
+# SEC1-encoded NIST P-256 generator point and a 16-byte base64url auth
+# secret. These are public audit fixtures, not credentials.
+PUSH_P256DH="BGsX0fLhLEJH-Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU"
+PUSH_AUTH="YWJjZGVmZ2hpamtsbW5vcA"
 FIRST_MODEL_ID=""
 FIRST_MCP_NAME=""
 
@@ -401,7 +408,9 @@ request GET /api/push/status
 assert_status 200 "push status endpoint"
 request POST /api/push/subscribe "$(jq -nc \
   --arg endpoint "$PUSH_ENDPOINT" \
-  '{endpoint: $endpoint, p256dh: "audit-p256dh", auth: "audit-auth"}')"
+  --arg p256dh "$PUSH_P256DH" \
+  --arg auth "$PUSH_AUTH" \
+  '{endpoint: $endpoint, p256dh: $p256dh, auth: $auth}')"
 assert_status 200 "push subscribe endpoint"
 request DELETE /api/push/subscribe "$(jq -nc --arg endpoint "$PUSH_ENDPOINT" '{endpoint: $endpoint}')"
 assert_status 200 "push unsubscribe endpoint"
