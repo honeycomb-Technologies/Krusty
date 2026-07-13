@@ -148,7 +148,7 @@ Preserve exact indentation and prefer small replacements. Use replace_all:true o
                     let new_content = format!(
                         "{}{}{}",
                         &content[..m.start],
-                        &params.new_string,
+                        params.new_string,
                         &content[m.end..]
                     );
 
