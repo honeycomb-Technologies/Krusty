@@ -327,6 +327,8 @@ function MessageAttachments({
   const t = theme.colors;
   const [previewAttachment, setPreviewAttachment] =
     useState<ChatMessageAttachment | null>(null);
+  const [hoveredAttachmentIndex, setHoveredAttachmentIndex] =
+    useState<number | null>(null);
   const previewUri = imagePreviewUri(previewAttachment);
 
   return (
@@ -344,10 +346,17 @@ function MessageAttachments({
                 void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                 setPreviewAttachment(attachment);
               }}
-              style={({ pressed, hovered }) => [
+              onHoverIn={() => setHoveredAttachmentIndex(index)}
+              onHoverOut={() =>
+                setHoveredAttachmentIndex((current) =>
+                  current === index ? null : current,
+                )
+              }
+              style={({ pressed }) => [
                 styles.messageImageThumb,
                 {
-                  borderColor: hovered ? t.userMessage : t.border,
+                  borderColor:
+                    hoveredAttachmentIndex === index ? t.userMessage : t.border,
                   opacity: pressed ? 0.86 : 1,
                 },
               ]}
