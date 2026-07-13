@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react';
 import { View, Text, Pressable, StyleSheet } from 'react-native';
 import {
   Settings, SquarePlus, FolderPlus, Wifi, WifiOff,
-  PanelLeftClose, PanelLeftOpen, TerminalSquare, Globe,
+  PanelLeftClose, PanelLeftOpen,
 } from 'lucide-react-native';
 import * as Haptics from '../../platform/haptics';
 import { BlurView } from '../../platform/blur';
@@ -12,8 +12,6 @@ import { useConnection } from '../../hooks/useConnection';
 import { SessionList, type SessionListProps } from '../chat/SessionList';
 import { PlanTracker } from '../chat/PlanTracker';
 import { SettingsModal } from '../SettingsModal';
-import { Terminal } from '../desktop/Terminal';
-import { WorkspacePreview } from '../desktop/WorkspacePreview';
 
 const SIDEBAR_WIDTH = 280;
 
@@ -37,11 +35,10 @@ export function DesktopShell({
   const t = theme.colors;
   const isDark = theme.scheme === 'dark';
 
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  // Default closed — open chat canvas first; user expands the menu when needed.
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [pickerVisible, setPickerVisible] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [terminalVisible, setTerminalVisible] = useState(false);
-  const [previewVisible, setPreviewVisible] = useState(false);
 
   // Match the mobile drawer's blur/overlay values
   const blurIntensity = 40;
@@ -114,21 +111,7 @@ export function DesktopShell({
 
               <View style={{ flex: 1 }} />
 
-              {/* Terminal toggle */}
-              <Pressable
-                onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setTerminalVisible(v => !v); }}
-                style={styles.iconBtn}
-              >
-                <TerminalSquare size={18} color={terminalVisible ? t.userMessage : t.mutedForeground} strokeWidth={1.8} />
-              </Pressable>
-
-              {/* Preview toggle */}
-              <Pressable
-                onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setPreviewVisible(v => !v); }}
-                style={styles.iconBtn}
-              >
-                <Globe size={18} color={previewVisible ? t.userMessage : t.mutedForeground} strokeWidth={1.8} />
-              </Pressable>
+              {/* Terminal / browser live in Toolbox — do not duplicate them here. */}
 
               <Pressable onPress={handleNew} style={styles.iconBtn}>
                 {activeTab === 0
@@ -152,14 +135,10 @@ export function DesktopShell({
           </Pressable>
         )}
 
-        {/* Chat content */}
+        {/* Chat content — terminal/browser are Toolbox-only on desktop */}
         <View style={styles.flex}>
           {children}
         </View>
-
-        {/* Bottom panels — terminal and preview */}
-        <Terminal visible={terminalVisible} />
-        <WorkspacePreview visible={previewVisible} />
       </View>
 
       <SettingsModal visible={settingsOpen} onClose={() => setSettingsOpen(false)} />

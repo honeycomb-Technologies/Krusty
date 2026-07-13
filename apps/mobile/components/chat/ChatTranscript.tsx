@@ -642,9 +642,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
   listDesktop: {
-    maxWidth: 800,
-    alignSelf: "center",
+    // Parent desktopChatColumn already caps width; fill the fluid band.
     width: "100%",
+    maxWidth: "100%",
+    // Slightly tighter side pad so messages expand with the window.
+    paddingHorizontal: 12,
   },
   turn: {
     marginBottom: 12,

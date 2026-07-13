@@ -31,6 +31,7 @@ import Animated, {
   Easing,
 } from 'react-native-reanimated';
 import { useThemeContext } from '../../hooks/useTheme';
+import { useBreakpoint } from '../../hooks/useBreakpoint';
 import { AccordionControls } from './AccordionControls';
 import { Waveform } from './Waveform';
 import { CrabIcon } from '../ui/CrabIcon';
@@ -72,19 +73,28 @@ interface ChatBarProps {
   onResearchToggle?: () => void;
   tokenCount?: number;
   onOverlayOpenChange?: (open: boolean) => void;
+  /**
+   * Desktop: shared chat content band width. Composer + FABs size against this
+   * (or measured root width) instead of the full window, so toolbox / resize
+   * never clip controls off-screen.
+   */
+  contentMaxWidth?: number;
 }
 
 const PILL = 56;
+/** Same rounded-square corner as accordion FABs (not a full circle). */
 const RADIUS = 18;
 const GAP = 10;
 const ROOT_HORIZONTAL_PADDING = 10;
 const COMPOSER_MAX_HEIGHT = 112;
-const INPUT_SIDE_PADDING = 8;
+const INPUT_SIDE_PADDING = 10;
 const INPUT_GROWTH_CHROME = 8;
 const INPUT_LINE_HEIGHT = 22;
 const INPUT_COLLAPSED_MAX_HEIGHT = PILL - 18;
 const INPUT_EXPANDED_VERTICAL_PADDING = 8;
 const CLOSED_COMPOSER_BOTTOM_GAP = 16;
+/** Extra lift on desktop so the bar doesn't hug the window chrome. */
+const CLOSED_COMPOSER_BOTTOM_GAP_DESKTOP = 28;
 const GAUGE_SIZE = 28;
 const GAUGE_TOP_GAP = 4;
 const META_ROW_HEIGHT = 24;
@@ -92,6 +102,10 @@ const RUN_LINE_HEIGHT = 3;
 const RUN_LINE_META_GAP = 3;
 const RUN_LINE_BEAM_WIDTH = 156;
 const MODEL_POPOVER_MAX_HEIGHT = PILL * 5 + GAP * 4;
+/** Matches AccordionControls PROVIDER_PILL_STEP (56 + 8 gap). */
+const PROVIDER_PILL_STEP = 64;
+/** Gap between provider dock / model list and the bot+crab FAB column. */
+const DOCK_TO_FAB_GAP = 10;
 const PROVIDER_FILTER_ORDER_KEY = 'krusty-provider-filter-order-v1';
 const WEB_INPUT_STYLE = Platform.OS === 'web'
   ? ({
@@ -455,9 +469,11 @@ export function ChatBar(props: ChatBarProps) {
     fastModeEnabled, fastModeSupported, onFastModeToggle,
     mode, onModeToggle, onModelSelect, model, models,
     sessionType, researchEnabled, onResearchToggle, tokenCount, onOverlayOpenChange,
+    contentMaxWidth,
   } = props;
 
   const { theme } = useThemeContext();
+  const { isDesktop } = useBreakpoint();
   const insets = useSafeAreaInsets();
   const { width: viewportWidth, height: viewportHeight } = useWindowDimensions();
   const [text, setText] = useState('');
@@ -485,6 +501,8 @@ export function ChatBar(props: ChatBarProps) {
   const accordionOpenRef = useRef(false);
   const measuredRootHeightRef = useRef(0);
   const reportedComposerHeightRef = useRef(0);
+  /** Actual laid-out band width (after parent maxWidth / split). */
+  const [measuredRootWidth, setMeasuredRootWidth] = useState(0);
   const modelCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearModelCloseTimer = () => {
@@ -578,10 +596,14 @@ export function ChatBar(props: ChatBarProps) {
   const t = theme.colors;
   const isDark = theme.scheme === 'dark';
   const isMako = sessionType === 'mako';
-  const borderColor = 'rgba(255,255,255,0.08)';
-  const bgOverlay = isDark ? 'rgba(11,17,25,0.6)' : 'rgba(255,255,255,0.6)';
+  // Match FAB glass so the composer isn't a flat grey strip against the shell.
+  const borderColor = t.glass.border;
+  const bgOverlay = isDark
+    ? 'rgba(14, 20, 30, 0.88)'
+    : 'rgba(255, 255, 255, 0.88)';
   const blurTint = isDark ? 'systemChromeMaterialDark' as const : 'systemChromeMaterialLight' as const;
   const pillTint = isDark ? 'systemMaterialDark' as const : 'systemMaterialLight' as const;
+  const composerBlur = Math.max(theme.colors.glassBlur ?? 20, isDesktop ? 48 : 40);
   const providerFilters = useMemo<ProviderFilter[]>(() => {
     const seen = new Set<string>();
     const filters: ProviderFilter[] = [];
@@ -882,10 +904,16 @@ export function ChatBar(props: ChatBarProps) {
   const kColor = kActive ? t.thinking : t.mutedForeground;
   const kBorder = kActive ? t.thinking + '40' : borderColor;
 
-  // Bottom offset: keyboard height, or a compact safe-area gap when keyboard is closed.
-  const closedBottomOffset = Platform.OS === 'web'
-    ? insets.bottom
-    : Math.max(10, Math.min(insets.bottom, CLOSED_COMPOSER_BOTTOM_GAP));
+  // Bottom offset: keyboard height, or a safe-area gap when keyboard is closed.
+  // Desktop gets extra padding so the bar sits above the window edge cleanly.
+  const closedGap = isDesktop
+    ? CLOSED_COMPOSER_BOTTOM_GAP_DESKTOP
+    : CLOSED_COMPOSER_BOTTOM_GAP;
+  const closedBottomOffset = isDesktop
+    ? Math.max(closedGap, insets.bottom + 12)
+    : Platform.OS === 'web'
+      ? Math.max(closedGap, insets.bottom)
+      : Math.max(10, Math.min(insets.bottom, closedGap));
   const bottomOffset = keyboardHeight > 0 ? keyboardHeight : closedBottomOffset;
   const gaugeTokens = tokenCount ?? 0;
   const gaugePct = Math.min(100, (gaugeTokens / 200000) * 100);
@@ -903,14 +931,65 @@ export function ChatBar(props: ChatBarProps) {
     Math.min(inputContentHeight || INPUT_LINE_HEIGHT, INPUT_COLLAPSED_MAX_HEIGHT),
   );
   const metaReserveHeight = META_ROW_HEIGHT + GAUGE_TOP_GAP;
-  const overlayBottom = bottomOffset + metaReserveHeight + composerBarHeight + GAP;
+  // Distance from root bottom to the top of the input/crab row.
+  const inputRowBottom = bottomOffset + metaReserveHeight;
+  // Accordion sits just above the crab FAB.
+  const controlsLayerBottom = inputRowBottom + PILL + GAP;
+  // Space above the input row where the model list may sit.
+  const overlayBottom = inputRowBottom + composerBarHeight + GAP;
   const runLineBottom = Math.max(0, bottomOffset - RUN_LINE_HEIGHT - RUN_LINE_META_GAP);
-  const controlsLayerWidth = Math.max(PILL, viewportWidth - ROOT_HORIZONTAL_PADDING * 2);
-  const modelPopoverTopInset = Math.max(insets.top, 0) + 12;
-  const modelPopoverHeight = Math.min(
-    MODEL_POPOVER_MAX_HEIGHT,
-    Math.max(0, viewportHeight - overlayBottom - modelPopoverTopInset),
+  // Prefer measured column width over viewport so split/toolbox/resize stay in-bounds.
+  const bandWidth =
+    measuredRootWidth > 0
+      ? measuredRootWidth
+      : contentMaxWidth != null && contentMaxWidth > 0
+        ? contentMaxWidth
+        : viewportWidth;
+  const controlsLayerWidth = Math.max(
+    PILL,
+    bandWidth - ROOT_HORIZONTAL_PADDING * 2,
   );
+  const modelPopoverTopInset = Math.max(insets.top, 0) + 12;
+
+  // Accordion stack above the crab: thinking → … → bot+filters (top).
+  const ACCORDION_PILL_COUNT = 6;
+  const pillsBelowBot = ACCORDION_PILL_COUNT - 1;
+  // Bottom edge of the bot/filter row, from the root bottom.
+  const botRowBottom =
+    controlsLayerBottom + pillsBelowBot * (PILL + GAP);
+  // Pin the *top* of the model list snug under the filter row (10px gap),
+  // then grow downward toward the input — no floating mid-gap.
+  const listTopGap = 10;
+  const desktopModelListMaxHeight = Math.max(
+    0,
+    botRowBottom - listTopGap - overlayBottom,
+  );
+  const desktopModelListHeight = Math.min(
+    MODEL_POPOVER_MAX_HEIGHT,
+    Math.max(PILL * 2, desktopModelListMaxHeight),
+  );
+  // top = botRowBottom - listTopGap  ⇒  bottom = top - height
+  const desktopModelListBottom =
+    botRowBottom - listTopGap - desktopModelListHeight;
+
+  const modelPopoverHeight = isDesktop
+    ? desktopModelListHeight
+    : Math.min(
+        MODEL_POPOVER_MAX_HEIGHT,
+        Math.max(0, viewportHeight - overlayBottom - modelPopoverTopInset),
+      );
+  // Match desktop filter row: n×56px pills with 8px gaps (no trailing gap).
+  const providerCount = Math.max(1, visualProviderFilters.length);
+  const providerDockWidth =
+    providerCount * 56 + Math.max(0, providerCount - 1) * 8;
+  const modelPopoverWidth = isDesktop ? providerDockWidth : undefined;
+  // Align under the filter strip (same right edge as filters).
+  // controlsLayer is already right-aligned at ROOT_HORIZONTAL_PADDING; bot is the
+  // rightmost control, filters sit 8px left of bot — do NOT also add crab width.
+  const FILTER_TO_BOT_GAP = 8;
+  const dockRightInset = isDesktop
+    ? ROOT_HORIZONTAL_PADDING + PILL + FILTER_TO_BOT_GAP
+    : ROOT_HORIZONTAL_PADDING + PILL + DOCK_TO_FAB_GAP;
 
   useEffect(() => {
     const measuredRootHeight = measuredRootHeightRef.current;
@@ -927,15 +1006,32 @@ export function ChatBar(props: ChatBarProps) {
   return (
     <View
       pointerEvents="box-none"
-      style={[styles.root, { paddingBottom: bottomOffset }]}
+      style={[
+        styles.root,
+        {
+          paddingBottom: bottomOffset,
+          // Parent desktop column already caps width; fill that band only.
+          // Avoid left+right+maxWidth fights on web that ignore the soft-cap.
+          ...(contentMaxWidth != null
+            ? {
+                width: '100%',
+                maxWidth: contentMaxWidth,
+                alignSelf: 'center' as const,
+                left: 0,
+                right: undefined,
+              }
+            : null),
+        },
+      ]}
       onLayout={(event) => {
-        measuredRootHeightRef.current = event.nativeEvent.layout.height;
+        const { height, width } = event.nativeEvent.layout;
+        measuredRootHeightRef.current = height;
+        const nextWidth = Math.round(width);
+        setMeasuredRootWidth((prev) => (prev === nextWidth ? prev : nextWidth));
         if (!onHeightChange) return;
         const reservedHeight = Math.max(
           PILL,
-          Math.ceil(
-            event.nativeEvent.layout.height - (keyboardHeight > 0 ? keyboardHeight : 0),
-          ),
+          Math.ceil(height - (keyboardHeight > 0 ? keyboardHeight : 0)),
         );
         if (reportedComposerHeightRef.current === reservedHeight) return;
         reportedComposerHeightRef.current = reservedHeight;
@@ -1009,8 +1105,18 @@ export function ChatBar(props: ChatBarProps) {
       {/* L-shape: [input bar] + [K column] */}
       <View style={styles.lRow}>
         {/* Input bar */}
-        <View style={[styles.bar, { borderColor, height: composerBarHeight }]}>
-          <BlurView intensity={40} tint={blurTint} style={StyleSheet.absoluteFill} />
+        <View
+          style={[
+            styles.bar,
+            {
+              borderColor,
+              height: composerBarHeight,
+              // Always rounded-square like FABs — not a full capsule/circle.
+              borderRadius: RADIUS,
+            },
+          ]}
+        >
+          <BlurView intensity={composerBlur} tint={blurTint} style={StyleSheet.absoluteFill} />
           <View style={[StyleSheet.absoluteFill, { backgroundColor: bgOverlay }]} />
           <View style={styles.barInner}>
             {isRecording
@@ -1071,63 +1177,115 @@ export function ChatBar(props: ChatBarProps) {
           </View>
         </View>
 
-        {/* K column */}
+        {/* Crab FAB only — accordion lives at root so filter dock is not clipped */}
         <View style={styles.kCol}>
-          {accordionVisible ? (
-            <View
-              pointerEvents="box-none"
-              style={[styles.controlsLayer, { width: controlsLayerWidth }]}
-            >
-              <AccordionControls
-                thinkingLevel={thinkingLevel}
-                onThinkingChange={onThinkingChange}
-                permissionMode={permissionMode}
-                onPermissionModeToggle={onPermissionModeToggle}
-                fastModeEnabled={fastModeEnabled}
-                fastModeSupported={fastModeSupported}
-                onFastModeToggle={onFastModeToggle}
-                mode={mode}
-                onModeToggle={onModeToggle}
-                onAttach={handleAttach}
-                attachPickerOpen={attachPickerOpen}
-                onPickPhoto={pickPhoto}
-                onPickCamera={pickCamera}
-                onPickFile={pickFile}
-                onModelSelect={() => modelPickerOpen ? closeModelPicker() : openModelPicker()}
-                modelPickerOpen={modelRailOpen}
-                providerFilters={providerFilterActions}
-                selectedProviderFilter={selectedProviderFilter}
-                onProviderFiltersReorder={handleProviderFiltersReorder}
-                onProviderFilterToggle={(providerId) => {
-                  setSelectedProviderFilter(current =>
-                    current === providerId ? null : providerId,
-                  );
-                }}
-                model={model}
-                isOpen={accordionOpen}
-                onToggle={toggleAccordion}
-                sessionType={sessionType}
-                researchEnabled={researchEnabled}
-                onResearchToggle={onResearchToggle}
-              />
-            </View>
-          ) : null}
-          <Pressable onPress={toggleAccordion} style={styles.kWrap}>
-            <BlurView intensity={20} tint={pillTint} style={StyleSheet.absoluteFill} />
+          <Pressable
+            onPress={toggleAccordion}
+            style={[
+              styles.kWrap,
+              {
+                borderColor: kBorder,
+                borderRadius: RADIUS,
+                backgroundColor: kActive ? t.thinking + '14' : undefined,
+              },
+            ]}
+          >
+            <BlurView intensity={composerBlur} tint={pillTint} style={StyleSheet.absoluteFill} />
             <View style={[StyleSheet.absoluteFill, { backgroundColor: bgOverlay }]} />
-            <View style={[styles.kInner, { borderColor: kBorder }]}>
+            <View style={styles.kInner}>
               <CrabIcon size={26} color={kColor} />
             </View>
           </Pressable>
         </View>
       </View>
 
-      {/* Model popover — slides out from behind accordion */}
+      {/* Accordion FABs + provider filters: positioned on the root, NOT inside the
+          56px crab column (WebKit clips overflow from that narrow column). */}
+      {accordionVisible ? (
+        <View
+          pointerEvents="box-none"
+          style={[
+            styles.controlsLayer,
+            {
+              bottom: controlsLayerBottom,
+              width: controlsLayerWidth,
+              right: ROOT_HORIZONTAL_PADDING,
+              zIndex: modelPickerOpen || modelRailOpen ? 40 : 20,
+            },
+          ]}
+        >
+          <AccordionControls
+            thinkingLevel={thinkingLevel}
+            onThinkingChange={onThinkingChange}
+            permissionMode={permissionMode}
+            onPermissionModeToggle={onPermissionModeToggle}
+            fastModeEnabled={fastModeEnabled}
+            fastModeSupported={fastModeSupported}
+            onFastModeToggle={onFastModeToggle}
+            mode={mode}
+            onModeToggle={onModeToggle}
+            onAttach={handleAttach}
+            attachPickerOpen={attachPickerOpen}
+            onPickPhoto={pickPhoto}
+            onPickCamera={pickCamera}
+            onPickFile={pickFile}
+            onModelSelect={() =>
+              modelPickerOpen ? closeModelPicker() : openModelPicker()
+            }
+            modelPickerOpen={modelRailOpen}
+            providerFilters={providerFilterActions}
+            selectedProviderFilter={selectedProviderFilter}
+            onProviderFiltersReorder={handleProviderFiltersReorder}
+            onProviderFilterToggle={(providerId) => {
+              setSelectedProviderFilter((current) =>
+                current === providerId ? null : providerId,
+              );
+            }}
+            model={model}
+            isOpen={accordionOpen}
+            onToggle={toggleAccordion}
+            sessionType={sessionType}
+            researchEnabled={researchEnabled}
+            onResearchToggle={onResearchToggle}
+          />
+        </View>
+      ) : null}
+
+      {/* Model popover — under the filter row, same width + right edge */}
       {modelPickerOpen && modelPopoverHeight > 0 && (
-        <View style={[styles.modelClip, { bottom: overlayBottom, height: modelPopoverHeight }]}>
-          <Animated.View style={[styles.modelPopover, modelPopoverStyle]}>
+        <View
+          style={
+            isDesktop && modelPopoverWidth != null
+              ? {
+                  position: 'absolute' as const,
+                  // Stay below the bot + provider filter row so filters stay visible.
+                  bottom: desktopModelListBottom,
+                  height: modelPopoverHeight,
+                  right: dockRightInset,
+                  width: modelPopoverWidth,
+                  overflow: 'hidden' as const,
+                  // Below the accordion/filter dock (zIndex 40 when open).
+                  zIndex: 25,
+                  elevation: 25,
+                }
+              : [
+                  styles.modelClip,
+                  {
+                    bottom: overlayBottom,
+                    height: modelPopoverHeight,
+                  },
+                ]
+          }
+        >
+          <Animated.View
+            style={[
+              styles.modelPopover,
+              modelPopoverStyle,
+              { borderColor: t.glass.border },
+            ]}
+          >
             <BlurView
-              intensity={theme.colors.glassBlur}
+              intensity={composerBlur}
               tint={pillTint}
               style={StyleSheet.absoluteFill}
             />
@@ -1135,7 +1293,9 @@ export function ChatBar(props: ChatBarProps) {
               style={[
                 StyleSheet.absoluteFill,
                 {
-                  backgroundColor: t.glass.background,
+                  backgroundColor: isDark
+                    ? 'rgba(14, 20, 30, 0.92)'
+                    : 'rgba(255, 255, 255, 0.92)',
                   borderRadius: RADIUS,
                 },
               ]}
@@ -1215,7 +1375,7 @@ export function ChatBar(props: ChatBarProps) {
       </View>
       <RunningGradientLine
         active={isStreaming}
-        width={viewportWidth}
+        width={bandWidth}
         color={t.thinking}
         style={[styles.runLineEdge, { bottom: runLineBottom }]}
       />
@@ -1274,6 +1434,12 @@ const styles = StyleSheet.create({
     borderRadius: RADIUS,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
+    // Subtle depth so the composer reads as a FAB dock, not a grey slab.
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.22,
+    shadowRadius: 18,
+    elevation: 8,
   },
   barInner: {
     flexDirection: 'row',
@@ -1316,18 +1482,31 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
     overflow: 'visible',
     position: 'relative',
+    zIndex: 15,
   },
   controlsLayer: {
     position: 'absolute',
-    right: 0,
-    bottom: PILL + GAP,
+    // bottom/right/width set inline from layout metrics
     alignItems: 'flex-end',
-    zIndex: 20,
+    overflow: 'visible',
   },
-  kWrap: { width: PILL, height: PILL, borderRadius: RADIUS, overflow: 'hidden', borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.08)' },
+  kWrap: {
+    width: PILL,
+    height: PILL,
+    // Rounded square — matches accordion FAB pills (not a circle).
+    borderRadius: RADIUS,
+    overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.2,
+    shadowRadius: 14,
+    elevation: 8,
+  },
   kInner: { flex: 1, justifyContent: 'center', alignItems: 'center' },
 
-  // Clip container — hides the popover as it slides from behind accordion
+  // Clip container — hides the popover as it slides from behind accordion.
+  // Mobile: full width under the bar. Desktop: right-aligned dock width.
   modelClip: {
     position: 'absolute',
     left: ROOT_HORIZONTAL_PADDING,
@@ -1344,7 +1523,11 @@ const styles = StyleSheet.create({
     borderRadius: RADIUS,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.1)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.28,
+    shadowRadius: 20,
+    elevation: 12,
   },
   providerInitials: {
     fontSize: 11,
