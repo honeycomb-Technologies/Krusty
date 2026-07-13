@@ -86,6 +86,16 @@ pub enum SseEvent {
 pub trait SseParser: Send + Sync {
     /// Parse a JSON event into an SSE event
     async fn parse_event(&self, json: &Value) -> anyhow::Result<SseEvent>;
+
+    /// Parse a provider frame that contains multiple logical stream events.
+    ///
+    /// Most SSE formats emit one logical event per frame. Providers such as
+    /// Gemini can combine final content, tool calls, usage, and a finish reason
+    /// in one frame, so they can override this without complicating the common
+    /// stream processor.
+    async fn parse_events(&self, json: &Value) -> anyhow::Result<Vec<SseEvent>> {
+        Ok(vec![self.parse_event(json).await?])
+    }
 }
 
 /// Common helper to parse finish reasons

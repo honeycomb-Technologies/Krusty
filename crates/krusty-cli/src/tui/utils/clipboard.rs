@@ -65,6 +65,7 @@ fn read_clipboard_image_platform() -> Option<ClipboardImage> {
     None
 }
 
+#[cfg(target_os = "linux")]
 fn decode_clipboard_image(bytes: &[u8]) -> Option<ClipboardImage> {
     let image = image::load_from_memory(bytes).ok()?.to_rgba8();
     let (width, height) = image.dimensions();

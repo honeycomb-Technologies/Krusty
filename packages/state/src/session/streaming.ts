@@ -370,9 +370,12 @@ export function createStreamCallbacks(
 			}));
 		},
 
-		onUsage: (promptTokens, completionTokens) => {
+		onUsage: (promptTokens, completionTokens, metrics) => {
 			flushPendingTextDelta();
-			set({ tokenCount: promptTokens + completionTokens });
+			set({
+				tokenCount:
+					metrics?.totalTokens ?? promptTokens + completionTokens,
+			});
 		},
 
 		onSessionPinched: (event: SessionContinuationEvent) => {

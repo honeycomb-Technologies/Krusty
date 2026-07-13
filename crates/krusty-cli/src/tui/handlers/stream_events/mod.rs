@@ -182,6 +182,7 @@ impl App {
             LoopEvent::Usage {
                 prompt_tokens,
                 completion_tokens,
+                ..
             } => self.handle_usage(prompt_tokens, completion_tokens),
             LoopEvent::SessionPinched {
                 reason,

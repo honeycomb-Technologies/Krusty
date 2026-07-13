@@ -761,6 +761,14 @@ export type SessionContinuationEvent =
 	| SessionPinchedEvent
 	| ContextCompactedEvent;
 
+export interface UsageMetrics {
+	promptTokens: number;
+	completionTokens: number;
+	cacheCreationInputTokens: number;
+	cacheReadInputTokens: number;
+	totalTokens: number;
+}
+
 export type StreamEvent =
 	| { type: "text_delta"; delta: string }
 	| { type: "text_delta_with_citations"; delta: string; citations: unknown[] }
@@ -790,7 +798,14 @@ export type StreamEvent =
 			title: string;
 			task_count: number;
 	  }
-	| { type: "usage"; prompt_tokens: number; completion_tokens: number }
+	| {
+			type: "usage";
+			prompt_tokens: number;
+			completion_tokens: number;
+			cache_creation_input_tokens?: number;
+			cache_read_input_tokens?: number;
+			total_tokens?: number;
+	  }
 	| ContextCompactionStartedEvent
 	| SessionPinchedEvent
 	| ContextCompactedEvent
@@ -860,7 +875,11 @@ export interface StreamCallbacks {
 		title: string,
 		taskCount: number,
 	) => void;
-	onUsage: (promptTokens: number, completionTokens: number) => void;
+	onUsage: (
+		promptTokens: number,
+		completionTokens: number,
+		metrics?: UsageMetrics,
+	) => void;
 	onContextCompactionStarted?: (event: ContextCompactionStartedEvent) => void;
 	onSessionPinched?: (event: SessionContinuationEvent) => void;
 	onTitleUpdate: (title: string) => void;

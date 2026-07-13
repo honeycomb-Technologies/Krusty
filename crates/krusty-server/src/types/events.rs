@@ -183,6 +183,9 @@ pub enum AgenticEvent {
     Usage {
         prompt_tokens: usize,
         completion_tokens: usize,
+        cache_creation_input_tokens: usize,
+        cache_read_input_tokens: usize,
+        total_tokens: usize,
     },
     /// Active work was handed off into a linked continuation session.
     SessionPinched {
@@ -466,9 +469,15 @@ impl From<krusty_core::agent::LoopEvent> for AgenticEvent {
             LoopEvent::Usage {
                 prompt_tokens,
                 completion_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                total_tokens,
             } => Self::Usage {
                 prompt_tokens,
                 completion_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                total_tokens,
             },
             LoopEvent::SessionPinched {
                 reason,

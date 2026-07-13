@@ -1,5 +1,11 @@
 # Krusty Platform Unification Audit
 
+> Historical record (superseded). The unified `AgenticOrchestrator`, canonical
+> `LoopEvent` protocol, thin server bridge, shared context injection, durable
+> recovery, MCP/tool registration, and in-place compaction described as targets
+> below are implemented. Use `AGENTS.md` and `docs/operations/` for current
+> architecture and release guidance.
+
 ## Executive Summary
 
 The TUI and Server/PWA have **diverged significantly**. While they share the same `krusty-core` crate for tools, AI client, and storage, the **orchestration layer** (how the agentic loop runs, what context gets injected, what capabilities are available) is duplicated and inconsistent. The server has a 2,328-line monolithic `chat.rs` that reimplements core logic instead of reusing it.

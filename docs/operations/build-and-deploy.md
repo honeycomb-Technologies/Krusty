@@ -4,15 +4,17 @@ This document explains how Krusty is built, tested, and distributed across all o
 
 ## Rust workspace
 
-The Rust side of Krusty is organized as a Cargo workspace with three crates:
+The Rust side of Krusty is organized as a Cargo workspace with eight Krusty crates plus the `grok-auth` support crate. The primary runtime boundaries are:
 
 - **krusty-cli** (`crates/krusty-cli`) -- The terminal application with the TUI. This is the default member of the workspace, so a bare `cargo build` compiles it. It depends on both `krusty-core` and `krusty-server`.
 - **krusty-core** (`crates/krusty-core`) -- The core library containing AI provider integrations, tool implementations, the ACP/MCP protocol layers, WASM extension hosting, and local storage. Everything shared between the CLI and the server lives here.
 - **krusty-server** (`crates/krusty-server`) -- The self-hosted API server built on Axum. It serves the REST/WebSocket APIs used by the mobile and desktop clients, and optionally embeds the web frontend (more on that below).
+- **krusty-client** and **krusty-client-state** -- Typed transport and shared client-state boundaries.
+- **krusty-desktop**, **krusty-mobile**, and **krusty-mobile-ui** -- Native desktop/mobile presentation crates that consume the same core contracts.
 
 The workspace root `Cargo.toml` sets a few important release profile options: link-time optimization (`lto = true`), a single codegen unit (`codegen-units = 1`), and symbol stripping (`strip = true`). These produce smaller, faster release binaries at the cost of longer compile times. The workspace also defines shared lint rules so all three crates enforce the same code quality standards through Clippy.
 
-All three crates share version `0.7.0` and edition 2021.
+The eight Krusty crates and desktop bundle share version `0.7.3` and edition 2021.
 
 ## Build commands
 
@@ -60,7 +62,7 @@ The preflight is safe for validation: it reads repository metadata, remote refs,
 
 ## Release automation
 
-Releases are triggered by pushing a Git tag that matches `v*` (for example, `v0.7.0`). The release workflow (`.github/workflows/release.yml`) has three stages:
+Releases are triggered by pushing a Git tag that matches `v*` (for example, `v0.7.3`). The release workflow (`.github/workflows/release.yml`) has three stages:
 
 **1. Build matrix.** A matrix job compiles release binaries for five targets:
 
@@ -78,7 +80,7 @@ Each job first builds the Expo web frontend from `apps/mobile` (so it can be emb
 
 **3. Create release.** Once both build stages complete, all artifacts are downloaded and a GitHub Release is created with auto-generated release notes. The release includes the CLI binaries for all five platforms plus the desktop Linux packages.
 
-**Governance TODO:** the tag-triggered release path should gain an explicit release/tag environment gate (or equivalent protected tag ruleset) before autonomous agents can request or prepare releases at scale. This card documents the gap only; do not validate releases by pushing `v*` tags or by manually dispatching a release workflow.
+The publish job fails closed unless GitHub reports the release tag as protected (`github.ref_protected == true`). The repository also maintains an active `Protect release tags` ruleset. Do not push a `v*` tag merely to test the workflow; create one only for an approved, fully verified release.
 
 ## Distribution channels
 
@@ -95,7 +97,23 @@ The script (`install.sh`) detects the host OS and architecture, fetches the late
 You can pin a specific version by setting `VERSION` before running the script:
 
 ```bash
-VERSION=v0.7.0 curl -fsSL ... | sh
+VERSION=v0.7.3 curl -fsSL ... | sh
+```
+
+## Self-hosted systemd service
+
+The checked-in user service runs the release binary from the standard
+`~/Work/krusty` checkout on port 3000. Build the embedded Expo web bundle and
+release binary before installing or restarting it:
+
+```bash
+cd apps/mobile && bun install --frozen-lockfile && bun run web:build && cd ../..
+cargo build --release -p krusty
+install -Dm644 deploy/systemd/krusty-serve.service \
+  ~/.config/systemd/user/krusty-serve.service
+systemctl --user daemon-reload
+systemctl --user enable --now krusty-serve.service
+curl --fail http://127.0.0.1:3000/health
 ```
 
 ### Homebrew tap

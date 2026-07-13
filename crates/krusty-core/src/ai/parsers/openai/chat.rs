@@ -4,39 +4,66 @@ use super::OpenAIParser;
 use crate::ai::sse::SseEvent;
 use crate::ai::types::{FinishReason, Usage};
 
+fn parse_chat_usage(json: &Value) -> Option<Usage> {
+    let usage = json.get("usage")?;
+    let prompt_tokens = usage
+        .get("prompt_tokens")
+        .and_then(|tokens| tokens.as_u64())
+        .unwrap_or(0) as usize;
+    let completion_tokens = usage
+        .get("completion_tokens")
+        .and_then(|tokens| tokens.as_u64())
+        .unwrap_or(0) as usize;
+    let cached_tokens = usage
+        .get("prompt_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(|tokens| tokens.as_u64())
+        .or_else(|| {
+            usage
+                .get("cache_read_input_tokens")
+                .and_then(|tokens| tokens.as_u64())
+        })
+        .unwrap_or(0) as usize;
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(|tokens| tokens.as_u64())
+        .unwrap_or((prompt_tokens + completion_tokens) as u64) as usize;
+
+    (prompt_tokens > 0 || completion_tokens > 0 || cached_tokens > 0).then_some(Usage {
+        prompt_tokens: prompt_tokens.saturating_sub(cached_tokens),
+        completion_tokens,
+        total_tokens,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: cached_tokens,
+    })
+}
+
 impl OpenAIParser {
     pub(super) fn parse_chat_completions_event(&self, json: &Value) -> anyhow::Result<SseEvent> {
+        let usage = parse_chat_usage(json);
         let choices = json.get("choices").and_then(|c| c.as_array());
 
         if let Some(choices) = choices {
             if let Some(choice) = choices.first() {
                 if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
-                    if reason == "stop" || reason == "end_turn" {
-                        return Ok(SseEvent::Finish {
-                            reason: FinishReason::Stop,
-                            usage: None,
-                        });
-                    }
                     if reason == "tool_calls" {
                         let tool_calls = self.drain_tool_calls()?;
 
                         if tool_calls.is_empty() {
                             return Ok(SseEvent::Finish {
                                 reason: FinishReason::ToolCalls,
-                                usage: None,
+                                usage,
                             });
                         }
-                        return Ok(SseEvent::FinishWithToolCalls {
-                            tool_calls,
-                            usage: None,
-                        });
+                        return Ok(SseEvent::FinishWithToolCalls { tool_calls, usage });
                     }
-                    if reason == "length" || reason == "max_tokens" {
-                        return Ok(SseEvent::Finish {
-                            reason: FinishReason::Length,
-                            usage: None,
-                        });
-                    }
+                    let reason = match reason {
+                        "stop" | "end_turn" => FinishReason::Stop,
+                        "length" | "max_tokens" => FinishReason::Length,
+                        "content_filter" => FinishReason::ContentFilter,
+                        other => FinishReason::Other(other.to_string()),
+                    };
+                    return Ok(SseEvent::Finish { reason, usage });
                 }
 
                 if let Some(delta) = choice.get("delta") {
@@ -105,24 +132,8 @@ impl OpenAIParser {
             }
         }
 
-        if let Some(usage) = json.get("usage") {
-            let prompt_tokens = usage
-                .get("prompt_tokens")
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0) as usize;
-            let completion_tokens = usage
-                .get("completion_tokens")
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0) as usize;
-            if prompt_tokens > 0 || completion_tokens > 0 {
-                return Ok(SseEvent::Usage(Usage {
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens: prompt_tokens + completion_tokens,
-                    cache_creation_input_tokens: 0,
-                    cache_read_input_tokens: 0,
-                }));
-            }
+        if let Some(usage) = usage {
+            return Ok(SseEvent::Usage(usage));
         }
 
         Ok(SseEvent::Skip)

@@ -90,14 +90,16 @@ fn terminal_agent_state_after_interruption(stop_reason: &LoopStopReason) -> &'st
     }
 }
 
-fn should_retry_empty_stream_idle(
+fn should_retry_empty_stream_interruption(
     stop_reason: Option<&LoopStopReason>,
     text: &str,
     has_pending_or_complete_tool_calls: bool,
     retry_attempted: bool,
 ) -> bool {
-    matches!(stop_reason, Some(LoopStopReason::StreamIdleTimeout))
-        && !retry_attempted
+    matches!(
+        stop_reason,
+        Some(LoopStopReason::StreamIdleTimeout | LoopStopReason::ProviderError)
+    ) && !retry_attempted
         && text.trim().is_empty()
         && !has_pending_or_complete_tool_calls
 }
@@ -341,7 +343,7 @@ impl AgenticOrchestrator {
             model_context_window,
         );
         let mut context_ledger = ContextLedger::from_conversation(&conversation);
-        let mut empty_stream_idle_retry_attempted = false;
+        let mut empty_stream_retry_attempted = false;
         let mut overflow_compact_retry_attempted = false;
         let project_dir_key = project_dir
             .as_ref()
@@ -577,24 +579,24 @@ impl AgenticOrchestrator {
                 messages_at_last_usage = conversation.len();
             }
 
-            if should_retry_empty_stream_idle(
+            if should_retry_empty_stream_interruption(
                 result.stop_reason.as_ref(),
                 &result.recovery_checkpoint.text,
                 !result.tool_calls.is_empty() || !result.recovery_checkpoint.tool_calls.is_empty(),
-                empty_stream_idle_retry_attempted,
+                empty_stream_retry_attempted,
             ) {
-                empty_stream_idle_retry_attempted = true;
+                empty_stream_retry_attempted = true;
                 tracing::warn!(
                     session_id = %session_id,
-                    "Provider stream went idle before text or tool calls; retrying once"
+                    "Provider stream ended before text or tool calls; retrying once"
                 );
                 let _ = event_tx.send(LoopEvent::Error {
-                    error: "Provider stream went idle before producing text or tool calls; retrying once automatically.".to_string(),
+                    error: "Provider stream ended before producing text or tool calls; retrying once automatically.".to_string(),
                 });
                 conversation.push(ModelMessage {
                     role: Role::System,
                     content: vec![Content::Text {
-                        text: "The previous provider stream went idle before producing text or tool calls. Continue from the last completed tool results; either call the next required tool or provide a concise final answer. Do not repeat completed work.".to_string(),
+                        text: "The previous provider stream ended before producing text or tool calls. Continue from the last completed tool results; either call the next required tool or provide a concise final answer. Do not repeat completed work.".to_string(),
                     }],
                 });
                 clear_recovery_state(&db_path, &session_id);
@@ -1119,7 +1121,7 @@ mod tests {
     use super::inject_runtime_context;
     use super::message_builder::finalize_explore_only_turn;
     use super::resolve_project_permission_mode;
-    use super::should_retry_empty_stream_idle;
+    use super::should_retry_empty_stream_interruption;
     use super::terminal_agent_state_after_interruption;
     use crate::agent::loop_events::LoopStopReason;
     use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
@@ -1142,29 +1144,35 @@ mod tests {
 
     #[test]
     fn empty_stream_idle_retries_once_before_recovery() {
-        assert!(should_retry_empty_stream_idle(
+        assert!(should_retry_empty_stream_interruption(
             Some(&LoopStopReason::StreamIdleTimeout),
             "",
             false,
             false
         ));
-        assert!(!should_retry_empty_stream_idle(
+        assert!(!should_retry_empty_stream_interruption(
             Some(&LoopStopReason::StreamIdleTimeout),
             "partial text",
             false,
             false
         ));
-        assert!(!should_retry_empty_stream_idle(
+        assert!(!should_retry_empty_stream_interruption(
             Some(&LoopStopReason::StreamIdleTimeout),
             "",
             true,
             false
         ));
-        assert!(!should_retry_empty_stream_idle(
+        assert!(!should_retry_empty_stream_interruption(
             Some(&LoopStopReason::StreamIdleTimeout),
             "",
             false,
             true
+        ));
+        assert!(should_retry_empty_stream_interruption(
+            Some(&LoopStopReason::ProviderError),
+            "",
+            false,
+            false
         ));
     }
 

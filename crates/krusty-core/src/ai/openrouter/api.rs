@@ -35,7 +35,10 @@ pub async fn fetch_models_with_client(
     let response = client
         .get(OPENROUTER_MODELS_URL)
         .header("Authorization", format!("Bearer {}", api_key))
-        .header("HTTP-Referer", "https://github.com/BurgessTG/Krusty")
+        .header(
+            "HTTP-Referer",
+            "https://github.com/honeycomb-Technologies/Krusty",
+        )
         .send()
         .await?;
 

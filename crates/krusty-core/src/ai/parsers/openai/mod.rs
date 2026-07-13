@@ -258,6 +258,56 @@ mod tests {
     }
 
     #[test]
+    fn chat_usage_keeps_cached_tokens_separate() {
+        let parser = OpenAIParser::new();
+        let event = parser
+            .parse_chat_completions_event(&json!({
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 1000,
+                    "prompt_tokens_details": {"cached_tokens": 700},
+                    "completion_tokens": 50,
+                    "total_tokens": 1050
+                }
+            }))
+            .expect("chat usage should parse");
+
+        let SseEvent::Usage(usage) = event else {
+            panic!("expected usage event");
+        };
+        assert_eq!(usage.prompt_tokens, 300);
+        assert_eq!(usage.cache_read_input_tokens, 700);
+        assert_eq!(usage.input_tokens(), 1_000);
+        assert_eq!(usage.completion_tokens, 50);
+        assert_eq!(usage.total_tokens, 1_050);
+    }
+
+    #[test]
+    fn chat_finish_preserves_usage_and_filter_reason() {
+        let event = OpenAIParser::new()
+            .parse_chat_completions_event(&json!({
+                "choices": [{"finish_reason": "content_filter", "delta": {}}],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 3,
+                    "total_tokens": 23
+                }
+            }))
+            .expect("filtered finish should parse");
+
+        assert!(matches!(
+            event,
+            SseEvent::Finish {
+                reason: crate::ai::types::FinishReason::ContentFilter,
+                usage: Some(crate::ai::types::Usage {
+                    total_tokens: 23,
+                    ..
+                })
+            }
+        ));
+    }
+
+    #[test]
     fn responses_argument_deltas_still_accumulate() {
         let parser = OpenAIParser::new();
 

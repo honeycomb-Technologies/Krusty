@@ -925,7 +925,16 @@ export class KrustyClient {
 				);
 				break;
 			case "usage":
-				callbacks.onUsage(event.prompt_tokens, event.completion_tokens);
+				callbacks.onUsage(event.prompt_tokens, event.completion_tokens, {
+					promptTokens: event.prompt_tokens,
+					completionTokens: event.completion_tokens,
+					cacheCreationInputTokens:
+						event.cache_creation_input_tokens ?? 0,
+					cacheReadInputTokens: event.cache_read_input_tokens ?? 0,
+					totalTokens:
+						event.total_tokens ??
+						event.prompt_tokens + event.completion_tokens,
+				});
 				break;
 			case "context_compaction_started":
 				callbacks.onContextCompactionStarted?.(event);

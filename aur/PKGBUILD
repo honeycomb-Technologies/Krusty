@@ -1,14 +1,14 @@
 # Maintainer: Burgess <burgess@example.com>
 pkgname=krusty
-pkgver=0.3.0
+pkgver=0.7.3
 pkgrel=1
 pkgdesc="The fun coding assistant"
 arch=('x86_64' 'aarch64')
-url="https://github.com/BurgessTG/Krusty"
+url="https://github.com/honeycomb-Technologies/Krusty"
 license=('MIT')
 depends=('gcc-libs' 'openssl')
 makedepends=('cargo')
-source=("$pkgname-$pkgver.tar.gz::https://github.com/BurgessTG/Krusty/archive/refs/tags/v$pkgver.tar.gz")
+source=("$pkgname-$pkgver.tar.gz::https://github.com/honeycomb-Technologies/Krusty/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 prepare() {

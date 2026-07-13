@@ -11,6 +11,7 @@ use crate::ai::format::openai::OpenAIFormat;
 use crate::ai::format::FormatHandler;
 use crate::ai::models::ApiFormat;
 use crate::ai::parsers::OpenAIParser;
+use crate::ai::providers::ProviderId;
 use crate::ai::streaming::StreamPart;
 use crate::ai::transform::apply_request_body_transform;
 use crate::ai::types::ModelMessage;
@@ -54,6 +55,12 @@ fn remove_openai_function_tool_named(tools: &mut Vec<Value>, name: &str) {
             .and_then(Value::as_str);
         !matches!(direct_name.or(nested_name), Some(tool_name) if tool_name == name)
     });
+}
+
+fn append_stream_usage_options(body: &mut Value, provider_id: ProviderId, api_format: ApiFormat) {
+    if provider_id == ProviderId::OpenAI && matches!(api_format, ApiFormat::OpenAI) {
+        body["stream_options"] = serde_json::json!({"include_usage": true});
+    }
 }
 
 impl AiClient {
@@ -159,6 +166,8 @@ impl AiClient {
             body["service_tier"] = serde_json::json!(service_tier);
         }
 
+        append_stream_usage_options(&mut body, self.provider_id(), self.config().api_format);
+
         if matches!(self.config().api_format, ApiFormat::OpenAIResponses) {
             if let Some(cache_key) = options.session_id.as_deref().filter(|key| !key.is_empty()) {
                 body["prompt_cache_key"] = serde_json::json!(cache_key);
@@ -245,5 +254,21 @@ mod tests {
         append_openai_hosted_web_search_tool(&mut body, &options, ApiFormat::OpenAI);
 
         assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn official_chat_completions_requests_usage_frames() {
+        let mut body = json!({"model": "gpt-4.1", "stream": true});
+        append_stream_usage_options(&mut body, ProviderId::OpenAI, ApiFormat::OpenAI);
+
+        assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn compatible_providers_do_not_receive_openai_only_stream_options() {
+        let mut body = json!({"model": "grok", "stream": true});
+        append_stream_usage_options(&mut body, ProviderId::Grok, ApiFormat::OpenAI);
+
+        assert!(body.get("stream_options").is_none());
     }
 }
