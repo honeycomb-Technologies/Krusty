@@ -9,6 +9,7 @@ mod tests;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -33,6 +34,29 @@ pub(super) const READER_JOIN_TIMEOUT_MS: u64 = 2_000;
 pub(super) const TIMEOUT_KILL_GRACE_MS: u64 = 800;
 
 pub struct BashTool;
+
+fn output_spool_path(ctx: &ToolContext) -> PathBuf {
+    let session = ctx
+        .session_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("local")
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    ctx.working_dir
+        .join(".krusty")
+        .join("tool-output")
+        .join(session)
+        .join(format!("tool_{}.log", uuid::Uuid::new_v4()))
+}
 
 #[derive(Deserialize)]
 struct Params {
@@ -211,16 +235,19 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
             _ => return ToolResult::error("Streaming context incomplete for bash tool"),
         };
 
-        execute_foreground(cmd, timeout_duration, stream).await
+        execute_foreground(cmd, timeout_duration, stream, output_spool_path(ctx)).await
     }
 }
 
 /// Apply ANSI stripping and truncation to the final output sent to the AI model.
-fn process_output(combined: String) -> String {
+fn process_output(combined: String, full_output_path: Option<&std::path::Path>) -> String {
     let stripped = strip_ansi(&combined);
     let result = truncation::truncate_tail(&stripped, MAX_OUTPUT_LINES, MAX_OUTPUT_BYTES);
     if let Some(notice) = result.notice() {
-        format!("{}{}", result.text, notice)
+        let recovery = full_output_path
+            .map(|path| format!(" Full output saved to {}.", path.display()))
+            .unwrap_or_default();
+        format!("{}{}{}", result.text, notice, recovery)
     } else {
         result.text
     }

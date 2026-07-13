@@ -5,6 +5,7 @@ import {
   Text,
   Pressable,
   Alert,
+  useWindowDimensions,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
@@ -61,7 +62,12 @@ import {
   sessionTypeForTab,
   tabForSessionType,
 } from "./chat-screen/helpers";
-import { styles } from "./chat-screen/styles";
+import {
+  DESKTOP_CHAT_MAX_WIDTH,
+  TOOLBOX_DOCK_WIDTH,
+  resolveDesktopChatMaxWidth,
+  styles,
+} from "./chat-screen/styles";
 import { useSessionActions } from "./chat-screen/useSessionActions";
 
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
@@ -100,6 +106,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const { theme } = useThemeContext();
   const { client, isConnected } = useConnection();
   const { isDesktop } = useBreakpoint();
+  const { width: windowWidth } = useWindowDimensions();
   const { splashDone } = useSplashState();
   const entrance = useEntranceAnimation(splashDone);
 
@@ -142,6 +149,8 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const [bottomControlsOpen, setBottomControlsOpen] = useState(false);
   const [composerReserveHeight, setComposerReserveHeight] =
     useState(CHAT_BAR_ZONE);
+  /** Measured desktop chat pane width (split host, before soft-cap). */
+  const [desktopPaneWidth, setDesktopPaneWidth] = useState(0);
   const selectedModelInfo = useMemo(
     () => models.find((candidate) => candidate.id === model) ?? null,
     [model, models],
@@ -607,8 +616,50 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     setToolboxOpen(false);
   }, []);
 
+  // Prefer measured host; fall back to window so the band never full-bleeds.
+  const effectivePaneWidth = useMemo(() => {
+    if (desktopPaneWidth > 0) return desktopPaneWidth;
+    if (!isDesktop) return windowWidth;
+    const toolboxSlice = toolboxOpen ? TOOLBOX_DOCK_WIDTH : 0;
+    return Math.max(0, windowWidth - toolboxSlice);
+  }, [desktopPaneWidth, isDesktop, toolboxOpen, windowWidth]);
+
+  const desktopChatMaxWidth = resolveDesktopChatMaxWidth(effectivePaneWidth);
+
+  // Title slot: real title → first user message snippet → "New chat".
+  // Store strips "New Session" placeholders, so empty string is common mid-turn.
+  const displayTitle = useMemo(() => {
+    const real = sessionTitle?.trim();
+    if (real) return { text: real, isPlaceholder: false };
+
+    const firstUser = messages.find(
+      (message) =>
+        message.role === "user" &&
+        typeof message.content === "string" &&
+        message.content.trim().length > 0,
+    );
+    if (firstUser && typeof firstUser.content === "string") {
+      const snippet = firstUser.content.trim().replace(/\s+/g, " ");
+      const text =
+        snippet.length > 56 ? `${snippet.slice(0, 56).trimEnd()}…` : snippet;
+      return { text, isPlaceholder: true };
+    }
+
+    if (sessionId) {
+      return { text: "New chat", isPlaceholder: true };
+    }
+
+    return { text: "", isPlaceholder: true };
+  }, [messages, sessionId, sessionTitle]);
+
   const topBar = (
-    <Animated.View style={[styles.topBar, entrance.topBarStyle]}>
+    <Animated.View
+      style={[
+        styles.topBar,
+        isDesktop && styles.topBarDesktop,
+        entrance.topBarStyle,
+      ]}
+    >
       {!isDesktop && (
         <Pressable
           onPress={() => {
@@ -624,29 +675,159 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       <Pressable
         onPress={handleRenameSession}
         style={styles.titleBtn}
-        disabled={!sessionTitle}
+        disabled={!sessionId}
       >
         <Text
           style={[
             styles.title,
-            { color: sessionTitle ? t.foreground : "transparent" },
+            displayTitle.isPlaceholder && styles.titlePlaceholder,
+            {
+              color: displayTitle.text
+                ? displayTitle.isPlaceholder
+                  ? t.mutedForeground
+                  : t.foreground
+                : "transparent",
+            },
           ]}
           numberOfLines={1}
         >
-          {sessionTitle || " "}
+          {displayTitle.text || " "}
         </Text>
       </Pressable>
 
       <Pressable
         onPress={() => {
           void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-          setToolboxOpen(true);
+          setToolboxOpen((open) => !open);
         }}
-        style={styles.menuBtn}
+        style={[
+          isDesktop ? styles.toolboxCornerBtn : styles.menuBtn,
+          isDesktop && toolboxOpen
+            ? { backgroundColor: `${t.thinking}22` }
+            : null,
+        ]}
+        accessibilityLabel={toolboxOpen ? "Close toolbox" : "Open toolbox"}
       >
-        <Toolbox size={20} color={t.mutedForeground} strokeWidth={1.8} />
+        <Toolbox
+          size={isDesktop ? 20 : 20}
+          color={toolboxOpen ? t.thinking : t.mutedForeground}
+          strokeWidth={1.8}
+        />
       </Pressable>
     </Animated.View>
+  );
+
+  const transcriptAndComposer = (
+    <View style={styles.flex}>
+      <Animated.View style={[styles.flex, entrance.contentStyle]}>
+        <ChatTranscript
+          messages={messages}
+          sessionId={sessionId}
+          isStreaming={isStreaming}
+          isThinking={isThinking}
+          activeToolCallId={activeToolCallId}
+          onApproveTool={(targetSessionId, toolCallId) =>
+            handleSessionToolApproval(targetSessionId, toolCallId, true)
+          }
+          onDenyTool={(targetSessionId, toolCallId) =>
+            handleSessionToolApproval(targetSessionId, toolCallId, false)
+          }
+          onSubmitToolResult={(toolCallId, result) =>
+            void handleInteractiveToolResult(toolCallId, result)
+          }
+          onPlanConfirm={(toolCallId, choice) =>
+            void handlePlanConfirm(toolCallId, choice)
+          }
+          emptyState={
+            <View style={styles.empty}>
+              <KrustyLogo />
+              {error ? (
+                <Text style={[styles.emptyHint, { color: t.error }]}>
+                  {error}
+                </Text>
+              ) : null}
+            </View>
+          }
+          bottomPadding={composerReserveHeight}
+          hideJumpToLatest={bottomControlsOpen}
+        />
+      </Animated.View>
+
+      <Animated.View
+        style={[
+          entrance.bottomBarStyle,
+          { overflow: "visible", zIndex: 300 },
+        ]}
+      >
+        <ChatBar
+          onSend={handleChatBarSend}
+          onStop={handleStop}
+          onHeightChange={setComposerReserveHeight}
+          isStreaming={isStreaming}
+          disabled={!isConnected}
+          thinkingLevel={thinkingLevel as ThinkingLevel}
+          onThinkingChange={(level) =>
+            sessionStore.getState().setThinkingLevel(level)
+          }
+          permissionMode={permissionMode as PermissionMode}
+          onPermissionModeToggle={() =>
+            sessionStore.getState().togglePermissionMode()
+          }
+          fastModeEnabled={fastModeEnabled}
+          fastModeSupported={fastModeSupported}
+          onFastModeToggle={handleFastModeToggle}
+          mode={mode}
+          onModeToggle={() =>
+            sessionStore
+              .getState()
+              .setMode(mode === "build" ? "plan" : "build")
+          }
+          onModelSelect={handleModelSelect}
+          model={model}
+          models={models}
+          sessionType={sessionTypeForTab(activeTab)}
+          researchEnabled={researchEnabled}
+          onResearchToggle={() => setResearchEnabled((current) => !current)}
+          tokenCount={tokenCount}
+          onOverlayOpenChange={setBottomControlsOpen}
+          contentMaxWidth={isDesktop ? desktopChatMaxWidth : undefined}
+        />
+      </Animated.View>
+    </View>
+  );
+
+  const chatMain = (
+    <View style={styles.flex}>
+      {isDesktop ? (
+        <View
+          style={styles.desktopChatColumnHost}
+          onLayout={(event) => {
+            const next = Math.round(event.nativeEvent.layout.width);
+            setDesktopPaneWidth((prev) => (prev === next ? prev : next));
+          }}
+        >
+          {/* Full-pane chrome: title + toolbox button in the true top-right. */}
+          {topBar}
+          {/* Messages + composer share a centered soft-capped band. */}
+          <View
+            style={[
+              styles.desktopChatColumn,
+              {
+                maxWidth: desktopChatMaxWidth || DESKTOP_CHAT_MAX_WIDTH,
+                width: "100%",
+              },
+            ]}
+          >
+            {transcriptAndComposer}
+          </View>
+        </View>
+      ) : (
+        <>
+          {topBar}
+          {transcriptAndComposer}
+        </>
+      )}
+    </View>
   );
 
   const chatContent = (
@@ -654,86 +835,32 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       style={[styles.container, { backgroundColor: t.background }]}
       edges={isDesktop ? [] : ["top"]}
     >
-      {!toolboxOpen ? topBar : null}
-
-      <View style={styles.flex}>
-        <Animated.View style={[styles.flex, entrance.contentStyle]}>
-          <ChatTranscript
-            messages={messages}
-            sessionId={sessionId}
-            isStreaming={isStreaming}
-            isThinking={isThinking}
-            activeToolCallId={activeToolCallId}
-            onApproveTool={(targetSessionId, toolCallId) =>
-              handleSessionToolApproval(targetSessionId, toolCallId, true)
-            }
-            onDenyTool={(targetSessionId, toolCallId) =>
-              handleSessionToolApproval(targetSessionId, toolCallId, false)
-            }
-            onSubmitToolResult={(toolCallId, result) =>
-              void handleInteractiveToolResult(toolCallId, result)
-            }
-            onPlanConfirm={(toolCallId, choice) =>
-              void handlePlanConfirm(toolCallId, choice)
-            }
-            emptyState={
-              <View style={styles.empty}>
-                <KrustyLogo />
-                {error ? (
-                  <Text style={[styles.emptyHint, { color: t.error }]}>
-                    {error}
-                  </Text>
-                ) : null}
-              </View>
-            }
-            bottomPadding={composerReserveHeight}
-            hideJumpToLatest={bottomControlsOpen}
-          />
-        </Animated.View>
-
-        {!toolboxOpen && (
-          <Animated.View style={[entrance.bottomBarStyle, { overflow: "visible", zIndex: 300 }]}>
-            <ChatBar
-              onSend={handleChatBarSend}
-              onStop={handleStop}
-              onHeightChange={setComposerReserveHeight}
-              isStreaming={isStreaming}
-              disabled={!isConnected}
-              thinkingLevel={thinkingLevel as ThinkingLevel}
-              onThinkingChange={(level) =>
-                sessionStore.getState().setThinkingLevel(level)
-              }
-              permissionMode={permissionMode as PermissionMode}
-              onPermissionModeToggle={() =>
-                sessionStore.getState().togglePermissionMode()
-              }
-              fastModeEnabled={fastModeEnabled}
-              fastModeSupported={fastModeSupported}
-              onFastModeToggle={handleFastModeToggle}
-              mode={mode}
-              onModeToggle={() =>
-                sessionStore.getState().setMode(mode === "build" ? "plan" : "build")
-              }
-              onModelSelect={handleModelSelect}
-              model={model}
-              models={models}
-              sessionType={sessionTypeForTab(activeTab)}
-              researchEnabled={researchEnabled}
-              onResearchToggle={() => setResearchEnabled((current) => !current)}
-              tokenCount={tokenCount}
-              onOverlayOpenChange={setBottomControlsOpen}
+      {isDesktop ? (
+        // Desktop: chat fills remaining width; toolbox is a fixed-width rail.
+        <View style={styles.desktopSplit}>
+          <View style={styles.desktopSplitChat}>{chatMain}</View>
+          {toolboxOpen ? (
+            <ToolboxPanel
+              variant="dock"
+              visible={toolboxOpen}
+              onClose={handleToolboxClose}
+              activeTab={toolboxTab}
+              onTabChange={setToolboxTab}
             />
-          </Animated.View>
-        )}
-
-      </View>
-
-      <ToolboxPanel
-        visible={toolboxOpen}
-        onClose={handleToolboxClose}
-        activeTab={toolboxTab}
-        onTabChange={setToolboxTab}
-      />
+          ) : null}
+        </View>
+      ) : (
+        <>
+          {chatMain}
+          <ToolboxPanel
+            variant="overlay"
+            visible={toolboxOpen}
+            onClose={handleToolboxClose}
+            activeTab={toolboxTab}
+            onTabChange={setToolboxTab}
+          />
+        </>
+      )}
     </SafeAreaView>
   );
 

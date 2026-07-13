@@ -28,7 +28,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libudev-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable

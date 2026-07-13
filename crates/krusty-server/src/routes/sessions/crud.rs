@@ -112,13 +112,11 @@ pub(super) async fn create_session(
         trimmed_nonempty(req.project_dir.as_deref())
             .or(trimmed_nonempty(req.working_dir.as_deref())),
     )?;
-    let target_branch = req.target_branch.as_deref().map(str::trim).and_then(|b| {
-        if b.is_empty() {
-            None
-        } else {
-            Some(b)
-        }
-    });
+    let target_branch = req
+        .target_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty());
     let session_id = session_manager.create_session_for_user_with_config_and_permission(
         title,
         requested_model,

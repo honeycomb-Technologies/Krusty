@@ -1,0 +1,16 @@
+[Unit]
+Description=Krusty self-hosted server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Work/krusty
+ExecStart=%h/Work/krusty/target/release/krusty serve --port 3000
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

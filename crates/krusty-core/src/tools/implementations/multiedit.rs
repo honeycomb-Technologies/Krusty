@@ -121,7 +121,7 @@ Edits apply sequentially, so later edits see earlier changes. Prefer this over m
                     content = format!(
                         "{}{}{}",
                         &content[..m.start],
-                        &edit.new_string,
+                        edit.new_string,
                         &content[m.end..],
                     );
                     applied += 1;

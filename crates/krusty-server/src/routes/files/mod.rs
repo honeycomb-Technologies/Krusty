@@ -146,7 +146,8 @@ mod tests {
         .await
         .unwrap_or_else(|_| panic!("browse should succeed"));
 
-        assert_eq!(response.current, repo_dir.to_string_lossy());
+        let canonical_repo = repo_dir.canonicalize().expect("repo should canonicalize");
+        assert_eq!(response.current, canonical_repo.to_string_lossy());
     }
 
     #[tokio::test]

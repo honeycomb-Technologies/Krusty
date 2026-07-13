@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Image, View, Text, Pressable, StyleSheet } from "react-native";
 import { Brain, ChevronDown, ChevronRight, Clock } from "lucide-react-native";
 import { useThemeContext } from "../../hooks/useTheme";
+import { useBreakpoint } from "../../hooks/useBreakpoint";
 import { AssistantSegmentedContent } from "./AssistantSegmentedContent";
 import { MarkdownContent } from "./MarkdownContent";
 import { ToolCallCard } from "./ToolCallCard";
@@ -50,6 +51,7 @@ export function MessageBubble({
   onPlanConfirm,
 }: MessageBubbleProps) {
   const { theme } = useThemeContext();
+  const { isDesktop } = useBreakpoint();
   const t = theme.colors;
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
@@ -217,7 +219,12 @@ export function MessageBubble({
         )}
 
       {!isUser && (
-        <View style={styles.assistantWrap}>
+        <View
+          style={[
+            styles.assistantWrap,
+            isDesktop ? styles.assistantWrapDesktop : null,
+          ]}
+        >
           {assistantSegments.map(renderAssistantSegment)}
 
           {copied ? (
@@ -320,6 +327,8 @@ function MessageAttachments({
   const t = theme.colors;
   const [previewAttachment, setPreviewAttachment] =
     useState<ChatMessageAttachment | null>(null);
+  const [hoveredAttachmentIndex, setHoveredAttachmentIndex] =
+    useState<number | null>(null);
   const previewUri = imagePreviewUri(previewAttachment);
 
   return (
@@ -337,10 +346,17 @@ function MessageAttachments({
                 void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                 setPreviewAttachment(attachment);
               }}
-              style={({ pressed, hovered }) => [
+              onHoverIn={() => setHoveredAttachmentIndex(index)}
+              onHoverOut={() =>
+                setHoveredAttachmentIndex((current) =>
+                  current === index ? null : current,
+                )
+              }
+              style={({ pressed }) => [
                 styles.messageImageThumb,
                 {
-                  borderColor: hovered ? t.userMessage : t.border,
+                  borderColor:
+                    hoveredAttachmentIndex === index ? t.userMessage : t.border,
                   opacity: pressed ? 0.86 : 1,
                 },
               ]}
@@ -433,8 +449,13 @@ const styles = StyleSheet.create({
     maxWidth: "92%",
     gap: 10,
   },
+  assistantWrapDesktop: {
+    // Use the full fluid chat band on desktop.
+    maxWidth: "100%",
+    width: "100%",
+  },
   userWrap: {
-    maxWidth: "84%",
+    maxWidth: "88%",
     gap: 6,
   },
   userQueuedWrap: {

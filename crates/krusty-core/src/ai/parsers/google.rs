@@ -3,8 +3,8 @@
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::ai::sse::{SseEvent, SseParser, ToolCallAccumulator};
-use crate::ai::types::FinishReason;
+use crate::ai::sse::{SseEvent, SseParser};
+use crate::ai::types::{AiToolCall, FinishReason, Usage};
 
 /// Google Gemini SSE parser
 ///
@@ -12,27 +12,11 @@ use crate::ai::types::FinishReason;
 /// ```json
 /// {"candidates": [{"content": {"parts": [{"text": "..."}], "role": "model"}, "finishReason": "STOP"}]}
 /// ```
-pub struct GoogleParser {
-    /// Track tool calls being accumulated
-    tool_accumulators: std::sync::Mutex<std::collections::HashMap<usize, ToolCallAccumulator>>,
-}
+pub struct GoogleParser;
 
 impl GoogleParser {
     pub fn new() -> Self {
-        Self {
-            tool_accumulators: std::sync::Mutex::new(std::collections::HashMap::new()),
-        }
-    }
-
-    /// Lock tool accumulators with proper error handling
-    fn lock_tool_accumulators(
-        &self,
-    ) -> anyhow::Result<
-        std::sync::MutexGuard<'_, std::collections::HashMap<usize, ToolCallAccumulator>>,
-    > {
-        self.tool_accumulators
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Tool accumulators lock poisoned: {}", e))
+        Self
     }
 
     /// Parse Google finish reason to our FinishReason enum
@@ -40,9 +24,118 @@ impl GoogleParser {
         match reason {
             "STOP" => FinishReason::Stop,
             "MAX_TOKENS" => FinishReason::Length,
-            "SAFETY" | "RECITATION" | "OTHER" => FinishReason::Stop,
+            "SAFETY" | "RECITATION" | "PROHIBITED_CONTENT" | "SPII" | "IMAGE_SAFETY" => {
+                FinishReason::ContentFilter
+            }
             _ => FinishReason::Other(reason.to_string()),
         }
+    }
+
+    fn parse_usage(json: &Value) -> Option<Usage> {
+        let usage = json.get("usageMetadata")?;
+        let prompt = usage
+            .get("promptTokenCount")
+            .and_then(|tokens| tokens.as_u64())
+            .unwrap_or(0) as usize;
+        let completion = usage
+            .get("candidatesTokenCount")
+            .and_then(|tokens| tokens.as_u64())
+            .unwrap_or(0) as usize;
+        let total = usage
+            .get("totalTokenCount")
+            .and_then(|tokens| tokens.as_u64())
+            .unwrap_or((prompt + completion) as u64) as usize;
+        // Google includes cached content in promptTokenCount.
+        let cached = usage
+            .get("cachedContentTokenCount")
+            .and_then(|tokens| tokens.as_u64())
+            .unwrap_or(0) as usize;
+
+        (prompt > 0 || completion > 0 || cached > 0).then_some(Usage {
+            prompt_tokens: prompt.saturating_sub(cached),
+            completion_tokens: completion,
+            total_tokens: total,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: cached,
+        })
+    }
+
+    fn parse_frame(&self, json: &Value) -> Vec<SseEvent> {
+        let mut events = Vec::new();
+        let mut usage = Self::parse_usage(json);
+        let mut has_tool_calls = false;
+
+        if let Some(candidate) = json
+            .get("candidates")
+            .and_then(|candidates| candidates.as_array())
+            .and_then(|candidates| candidates.first())
+        {
+            if let Some(parts) = candidate
+                .get("content")
+                .and_then(|content| content.get("parts"))
+                .and_then(|parts| parts.as_array())
+            {
+                for part in parts {
+                    if let Some(text) = part.get("text").and_then(|text| text.as_str()) {
+                        if !text.is_empty() {
+                            events.push(SseEvent::TextDelta(text.to_string()));
+                        }
+                    }
+
+                    if let Some(function_call) = part.get("functionCall") {
+                        let name = function_call
+                            .get("name")
+                            .and_then(|name| name.as_str())
+                            .unwrap_or("");
+                        if name.is_empty() {
+                            continue;
+                        }
+
+                        has_tool_calls = true;
+                        let id = function_call
+                            .get("id")
+                            .and_then(|id| id.as_str())
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| format!("google_{}", uuid::Uuid::new_v4()));
+                        let arguments = function_call
+                            .get("args")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        events.push(SseEvent::ToolCallStart {
+                            id: id.clone(),
+                            name: name.to_string(),
+                        });
+                        events.push(SseEvent::ToolCallComplete(AiToolCall {
+                            id,
+                            name: name.to_string(),
+                            arguments,
+                        }));
+                    }
+                }
+            }
+
+            if let Some(reason) = candidate
+                .get("finishReason")
+                .and_then(|reason| reason.as_str())
+            {
+                let mut reason = Self::parse_finish_reason(reason);
+                if has_tool_calls && reason == FinishReason::Stop {
+                    reason = FinishReason::ToolCalls;
+                }
+                events.push(SseEvent::Finish {
+                    reason,
+                    usage: usage.take(),
+                });
+            }
+        }
+
+        if let Some(usage) = usage {
+            events.push(SseEvent::Usage(usage));
+        }
+        if events.is_empty() {
+            events.push(SseEvent::Skip);
+        }
+        events
     }
 }
 
@@ -55,103 +148,132 @@ impl Default for GoogleParser {
 #[async_trait::async_trait]
 impl SseParser for GoogleParser {
     async fn parse_event(&self, json: &Value) -> Result<SseEvent> {
-        // Google Gemini format: {"candidates": [{...}]}
-        if let Some(candidates) = json.get("candidates").and_then(|c| c.as_array()) {
-            if let Some(candidate) = candidates.first() {
-                // Check for finish reason
-                if let Some(finish_reason) = candidate.get("finishReason").and_then(|f| f.as_str())
-                {
-                    // If there's content with finish, extract it first
-                    if let Some(content) = candidate.get("content") {
-                        if let Some(parts) = content.get("parts").and_then(|p| p.as_array()) {
-                            for part in parts {
-                                // Text content
-                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                    if !text.is_empty() {
-                                        // Return text delta, finish will be next chunk
-                                        return Ok(SseEvent::TextDelta(text.to_string()));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // Return finish event
-                    return Ok(SseEvent::Finish {
-                        reason: Self::parse_finish_reason(finish_reason),
-                        usage: None,
-                    });
+        Ok(self
+            .parse_frame(json)
+            .into_iter()
+            .next()
+            .unwrap_or(SseEvent::Skip))
+    }
+
+    async fn parse_events(&self, json: &Value) -> Result<Vec<SseEvent>> {
+        Ok(self.parse_frame(json))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::types::Usage;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn cached_prompt_tokens_are_not_counted_twice() {
+        let event = GoogleParser::new()
+            .parse_event(&json!({
+                "usageMetadata": {
+                    "promptTokenCount": 1_000,
+                    "cachedContentTokenCount": 700,
+                    "candidatesTokenCount": 50,
+                    "totalTokenCount": 1_070
                 }
+            }))
+            .await
+            .expect("usage event should parse");
 
-                // Extract content parts
-                if let Some(content) = candidate.get("content") {
-                    if let Some(parts) = content.get("parts").and_then(|p| p.as_array()) {
-                        for part in parts {
-                            // Text content
-                            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                if !text.is_empty() {
-                                    return Ok(SseEvent::TextDelta(text.to_string()));
-                                }
-                            }
+        let SseEvent::Usage(usage) = event else {
+            panic!("expected usage event");
+        };
+        assert_eq!(
+            usage,
+            Usage {
+                prompt_tokens: 300,
+                completion_tokens: 50,
+                total_tokens: 1_070,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 700,
+            }
+        );
+        assert_eq!(usage.input_tokens(), 1_000);
+    }
 
-                            // Function call (tool use)
-                            if let Some(function_call) = part.get("functionCall") {
-                                let name = function_call
-                                    .get("name")
-                                    .and_then(|n| n.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                let args = function_call
-                                    .get("args")
-                                    .map(|a| serde_json::to_string(a).unwrap_or_default())
-                                    .unwrap_or_default();
-
-                                if !name.is_empty() {
-                                    // Generate a unique ID for the tool call
-                                    let id = format!("google_{}", uuid::Uuid::new_v4());
-
-                                    // Store accumulator
-                                    let mut accumulators = self.lock_tool_accumulators()?;
-                                    let index = accumulators.len();
-                                    let mut acc =
-                                        ToolCallAccumulator::new(id.clone(), name.clone());
-                                    acc.add_arguments(&args);
-                                    accumulators.insert(index, acc);
-
-                                    return Ok(SseEvent::ToolCallStart { id, name });
-                                }
-                            }
-                        }
-                    }
+    #[tokio::test]
+    async fn final_frame_preserves_text_usage_and_finish() {
+        let events = GoogleParser::new()
+            .parse_events(&json!({
+                "candidates": [{
+                    "content": {"parts": [{"text": "done"}]},
+                    "finishReason": "STOP"
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": 100,
+                    "candidatesTokenCount": 4,
+                    "totalTokenCount": 104
                 }
-            }
-        }
+            }))
+            .await
+            .expect("final frame should parse");
 
-        // Check for usage metadata
-        if let Some(usage) = json.get("usageMetadata") {
-            let prompt = usage
-                .get("promptTokenCount")
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0) as usize;
-            let completion = usage
-                .get("candidatesTokenCount")
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0) as usize;
-            // Gemini 2.5+ reports implicit cache hits via cachedContentTokenCount
-            let cached = usage
-                .get("cachedContentTokenCount")
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0) as usize;
-            if prompt > 0 || completion > 0 {
-                return Ok(SseEvent::Usage(crate::ai::types::Usage {
-                    prompt_tokens: prompt,
-                    completion_tokens: completion,
-                    total_tokens: prompt + completion,
-                    cache_creation_input_tokens: 0,
-                    cache_read_input_tokens: cached,
-                }));
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], SseEvent::TextDelta(text) if text == "done"));
+        assert!(matches!(
+            &events[1],
+            SseEvent::Finish {
+                reason: FinishReason::Stop,
+                usage: Some(Usage {
+                    total_tokens: 104,
+                    ..
+                })
             }
-        }
+        ));
+    }
 
-        Ok(SseEvent::Skip)
+    #[tokio::test]
+    async fn function_call_is_completed_before_tool_finish() {
+        let events = GoogleParser::new()
+            .parse_events(&json!({
+                "candidates": [{
+                    "content": {"parts": [{
+                        "functionCall": {
+                            "name": "read",
+                            "args": {"path": "README.md"}
+                        }
+                    }]},
+                    "finishReason": "STOP"
+                }]
+            }))
+            .await
+            .expect("tool frame should parse");
+
+        assert_eq!(events.len(), 3);
+        let SseEvent::ToolCallStart { id, name } = &events[0] else {
+            panic!("expected tool start");
+        };
+        assert_eq!(name, "read");
+        assert!(matches!(
+            &events[1],
+            SseEvent::ToolCallComplete(call)
+                if call.id == *id
+                    && call.name == "read"
+                    && call.arguments == json!({"path": "README.md"})
+        ));
+        assert!(matches!(
+            &events[2],
+            SseEvent::Finish {
+                reason: FinishReason::ToolCalls,
+                usage: None
+            }
+        ));
+    }
+
+    #[test]
+    fn safety_finishes_are_not_treated_as_success() {
+        assert_eq!(
+            GoogleParser::parse_finish_reason("SAFETY"),
+            FinishReason::ContentFilter
+        );
+        assert!(matches!(
+            GoogleParser::parse_finish_reason("OTHER"),
+            FinishReason::Other(reason) if reason == "OTHER"
+        ));
     }
 }

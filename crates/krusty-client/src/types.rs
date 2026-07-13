@@ -626,6 +626,9 @@ pub enum ChatStreamEvent {
     Usage {
         prompt_tokens: usize,
         completion_tokens: usize,
+        cache_creation_input_tokens: usize,
+        cache_read_input_tokens: usize,
+        total_tokens: usize,
     },
     SessionPinched {
         reason: String,
@@ -801,6 +804,9 @@ impl ChatStreamEvent {
             "usage" => Self::Usage {
                 prompt_tokens: usize_field(&value, "prompt_tokens"),
                 completion_tokens: usize_field(&value, "completion_tokens"),
+                cache_creation_input_tokens: usize_field(&value, "cache_creation_input_tokens"),
+                cache_read_input_tokens: usize_field(&value, "cache_read_input_tokens"),
+                total_tokens: usize_field(&value, "total_tokens"),
             },
             "session_pinched" => Self::SessionPinched {
                 reason: string_field(&value, "reason"),

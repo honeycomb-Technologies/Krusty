@@ -16,6 +16,7 @@ export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
   const [previewImage, setPreviewImage] = useState<{ uri: string; title?: string } | null>(null);
+  const [hoveredImageKey, setHoveredImageKey] = useState<unknown>(null);
 
   const handleLink = useCallback((url: string) => {
     Linking.openURL(url);
@@ -42,10 +43,13 @@ export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
                 Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                 setPreviewImage({ uri, title });
               }}
-              style={({ pressed, hovered }) => [
+              onHoverIn={() => setHoveredImageKey(node.key)}
+              onHoverOut={() => setHoveredImageKey(null)}
+              style={({ pressed }) => [
                 markdownImageStyles.frame,
                 {
-                  borderColor: hovered ? t.userMessage : t.border,
+                  borderColor:
+                    hoveredImageKey === node.key ? t.userMessage : t.border,
                   opacity: pressed ? 0.88 : 1,
                 },
               ]}

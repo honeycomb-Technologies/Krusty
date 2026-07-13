@@ -1,5 +1,10 @@
 # Krusty Platform Unification Plan
 
+> Historical implementation plan (completed). The canonical implementation now
+> lives in `crates/krusty-core/src/agent/`, and server/TUI surfaces consume its
+> shared event protocol. Use `AGENTS.md` for current invariants and verification
+> commands.
+
 ## Vision
 
 One brain, many faces. The agentic loop — streaming, tool execution, context injection,

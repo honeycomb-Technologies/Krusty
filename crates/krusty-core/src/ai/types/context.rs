@@ -2,8 +2,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::ai::reasoning::DEFAULT_THINKING_BUDGET;
 
-/// Usage information with cache metrics
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Usage information with cache metrics.
+///
+/// `prompt_tokens` is the uncached input bucket. Cache reads and writes stay
+/// separate so callers can compute both the real context size and provider
+/// cost without double-counting.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Usage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
@@ -14,6 +18,37 @@ pub struct Usage {
     /// Tokens read from cache (10% cost vs 100%)
     #[serde(default)]
     pub cache_read_input_tokens: usize,
+}
+
+impl Usage {
+    /// Total input represented by this usage snapshot, including cached input.
+    pub fn input_tokens(&self) -> usize {
+        self.prompt_tokens
+            .saturating_add(self.cache_creation_input_tokens)
+            .saturating_add(self.cache_read_input_tokens)
+    }
+
+    /// Merge cumulative provider snapshots from a single streamed response.
+    ///
+    /// Providers such as Anthropic report input at message start and output at
+    /// message delta. Each bucket is cumulative when present, so taking the
+    /// maximum preserves the complete turn without adding repeated snapshots.
+    pub fn merge_snapshot(&mut self, snapshot: &Self) {
+        self.prompt_tokens = self.prompt_tokens.max(snapshot.prompt_tokens);
+        self.completion_tokens = self.completion_tokens.max(snapshot.completion_tokens);
+        self.cache_creation_input_tokens = self
+            .cache_creation_input_tokens
+            .max(snapshot.cache_creation_input_tokens);
+        self.cache_read_input_tokens = self
+            .cache_read_input_tokens
+            .max(snapshot.cache_read_input_tokens);
+
+        let represented_total = self.input_tokens().saturating_add(self.completion_tokens);
+        self.total_tokens = self
+            .total_tokens
+            .max(snapshot.total_tokens)
+            .max(represented_total);
+    }
 }
 
 /// Context management configuration for automatic context editing

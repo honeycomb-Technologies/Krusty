@@ -551,7 +551,19 @@ impl ChatStore {
             ChatStreamEvent::Usage {
                 prompt_tokens,
                 completion_tokens,
-            } => self.state.token_count = Some(prompt_tokens + completion_tokens),
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                total_tokens,
+            } => {
+                self.state.token_count = Some(if total_tokens > 0 {
+                    total_tokens
+                } else {
+                    prompt_tokens
+                        + completion_tokens
+                        + cache_creation_input_tokens
+                        + cache_read_input_tokens
+                });
+            }
             ChatStreamEvent::Lagged { skipped } => {
                 self.push_system(format!("Stream skipped {skipped} non-critical events."));
             }

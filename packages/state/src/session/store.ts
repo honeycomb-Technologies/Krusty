@@ -63,7 +63,7 @@ import {
 } from './thinking';
 
 function hasOwnProperty<T extends object>(value: T, key: PropertyKey): boolean {
-  return  Object.hasOwn(value, key);
+  return Object.hasOwn(value, key);
 }
 
 function normalizeTargetBranch(targetBranch: string | null | undefined): string | null {

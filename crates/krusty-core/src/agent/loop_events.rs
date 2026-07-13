@@ -148,8 +148,15 @@ pub enum LoopEvent {
 
     /// Token usage for this turn.
     Usage {
+        /// Uncached input tokens billed at the normal input rate.
         prompt_tokens: usize,
         completion_tokens: usize,
+        /// Input tokens written to a provider prompt cache.
+        cache_creation_input_tokens: usize,
+        /// Input tokens served from a provider prompt cache.
+        cache_read_input_tokens: usize,
+        /// Total input and output tokens represented by this turn snapshot.
+        total_tokens: usize,
     },
 
     /// Active work was handed off into a linked continuation session.

@@ -40,6 +40,7 @@ import {
   FileText,
 } from 'lucide-react-native';
 import { useThemeContext } from '../../hooks/useTheme';
+import { useBreakpoint } from '../../hooks/useBreakpoint';
 import { cycleThinkingLevel, type ThinkingLevel } from '@krusty/api';
 import type { PermissionMode } from '@krusty/state';
 
@@ -106,6 +107,82 @@ const PROVIDER_AUTO_SCROLL_MAX_STEP = 18;
 const PROVIDER_REORDER_SPRING_CONFIG = { damping: 24, stiffness: 420, mass: 0.55 };
 const PROVIDER_REORDER_LONG_PRESS_MS = 460;
 
+/** Desktop provider filter — keeps staggered spring entrance without scale-to-zero. */
+function DesktopFilterPill({
+  index,
+  active,
+  label,
+  onPress,
+  children,
+}: {
+  index: number;
+  active: boolean;
+  label: string;
+  onPress: () => void;
+  children: React.ReactNode;
+}) {
+  const { theme } = useThemeContext();
+  const progress = useSharedValue(0);
+
+  useEffect(() => {
+    progress.value = withDelay(
+      index * OPEN_STAGGER_MS,
+      withSpring(1, SPRING_CONFIG),
+    );
+  }, [index, progress]);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    opacity: progress.value,
+    transform: [
+      { translateX: interpolate(progress.value, [0, 1], [16, 0]) },
+      { scale: interpolate(progress.value, [0, 1], [0.88, 1]) },
+    ],
+  }));
+
+  const g = theme.colors.glass;
+
+  return (
+    <Animated.View style={[styles.desktopFilterHit, animatedStyle]}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Filter models by ${label}`}
+        onPress={() => {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          onPress();
+        }}
+        style={styles.desktopFilterHit}
+      >
+        <BlurView
+          intensity={theme.colors.glassBlur}
+          tint={
+            theme.scheme === 'dark' ? 'systemMaterialDark' : 'systemMaterialLight'
+          }
+          style={styles.providerDockBlur}
+        >
+          <View
+            style={[
+              styles.providerDockPill,
+              {
+                backgroundColor: active
+                  ? theme.colors.thinking + '18'
+                  : g.background,
+                borderColor: active
+                  ? theme.colors.thinking + '80'
+                  : g.border,
+                borderWidth: StyleSheet.hairlineWidth,
+                alignItems: 'center',
+                justifyContent: 'center',
+              },
+            ]}
+          >
+            {children}
+          </View>
+        </BlurView>
+      </Pressable>
+    </Animated.View>
+  );
+}
+
 function AccordionPill({
   children,
   index,
@@ -114,6 +191,7 @@ function AccordionPill({
   active = false,
   sideContent,
   disabled = false,
+  compact = false,
 }: {
   children: React.ReactNode;
   index: number;
@@ -122,6 +200,8 @@ function AccordionPill({
   active?: boolean;
   sideContent?: React.ReactNode;
   disabled?: boolean;
+  /** When true, only as wide as the pill (no full-width row stretch). */
+  compact?: boolean;
 }) {
   const { theme } = useThemeContext();
   const progress = useSharedValue(0);
@@ -156,7 +236,10 @@ function AccordionPill({
   return (
     <Animated.View
       pointerEvents="box-none"
-      style={[styles.pillOuter, animatedStyle]}
+      style={[
+        compact ? styles.pillOuterCompact : styles.pillOuter,
+        animatedStyle,
+      ]}
     >
       {sideContent}
       <Pressable disabled={!isOpen || disabled} onPress={onPress}>
@@ -584,6 +667,9 @@ export function AccordionControls({
   onResearchToggle,
 }: AccordionControlsProps) {
   const { theme } = useThemeContext();
+  const { isDesktop } = useBreakpoint();
+  // Desktop has room — no edge-fade “scroll chrome” or long-press reorder.
+  const enableProviderReorder = !isDesktop && providerFilters.length > 1;
   const providerScrollRef = useRef<ScrollView>(null);
   const providerDockOpenRef = useRef(false);
   const providerEditExitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -884,11 +970,52 @@ export function AccordionControls({
       }
     });
 
+  const g = theme.colors.glass;
+  const showDesktopFilters = isDesktop && modelPickerOpen && isOpen;
+  const desktopFilterCount = providerFilters.length;
+
   return (
     <View style={styles.container} pointerEvents="box-none">
       {/* Floating accordion pills */}
       <GestureDetector gesture={swipeDown}>
         <Animated.View style={styles.pillColumn}>
+          {/* Desktop: filters + bot as a flex row. Filters keep a light stagger
+              animation but avoid nested sideContent/scale-to-zero (which hid them). */}
+          {isDesktop ? (
+            <View style={styles.desktopModelRow} pointerEvents="box-none">
+              {showDesktopFilters
+                ? providerFilters.map((provider, visualIndex) => {
+                    const active = selectedProviderFilter === provider.id;
+                    // Stagger from the bot outward (right → left).
+                    const staggerIndex = desktopFilterCount - visualIndex - 1;
+                    return (
+                      <DesktopFilterPill
+                        key={provider.id}
+                        index={staggerIndex}
+                        active={active}
+                        label={provider.label}
+                        onPress={() => onProviderFilterToggle(provider.id)}
+                      >
+                        {provider.icon}
+                      </DesktopFilterPill>
+                    );
+                  })
+                : null}
+              <AccordionPill
+                index={5}
+                isOpen={isOpen}
+                onPress={handleModel}
+                active={modelPickerOpen}
+                compact
+              >
+                <Bot
+                  size={24}
+                  color={modelPickerOpen ? fabAccent : t.mutedForeground}
+                  strokeWidth={1.6}
+                />
+              </AccordionPill>
+            </View>
+          ) : (
           <AccordionPill
             index={5}
             isOpen={isOpen}
@@ -925,8 +1052,8 @@ export function AccordionControls({
                       itemCount={providerFilters.length}
                       isOpen={modelPickerOpen && isOpen}
                       active={selectedProviderFilter === provider.id}
-                      editMode={providerEditMode}
-                      canReorder={providerFilters.length > 1}
+                      editMode={enableProviderReorder && providerEditMode}
+                      canReorder={enableProviderReorder}
                       dragIndex={providerDragIndex}
                       dropIndex={providerDropIndex}
                       sharedDragX={providerDragX}
@@ -941,7 +1068,10 @@ export function AccordionControls({
                     </ProviderDockPill>
                   ))}
                 </ScrollView>
-                <Animated.View pointerEvents="none" style={[styles.modelFilterFadeLeft, providerDockFadeAnimatedStyle]}>
+                <Animated.View
+                  pointerEvents="none"
+                  style={[styles.modelFilterFadeLeft, providerDockFadeAnimatedStyle]}
+                >
                   <LinearGradient
                     colors={[dockFadeColor, 'transparent']}
                     start={{ x: 0, y: 0.5 }}
@@ -949,7 +1079,10 @@ export function AccordionControls({
                     style={StyleSheet.absoluteFill}
                   />
                 </Animated.View>
-                <Animated.View pointerEvents="none" style={[styles.modelFilterFadeRight, providerDockFadeAnimatedStyle]}>
+                <Animated.View
+                  pointerEvents="none"
+                  style={[styles.modelFilterFadeRight, providerDockFadeAnimatedStyle]}
+                >
                   <LinearGradient
                     colors={['transparent', dockFadeColor]}
                     start={{ x: 0, y: 0.5 }}
@@ -966,6 +1099,7 @@ export function AccordionControls({
               strokeWidth={1.6}
             />
           </AccordionPill>
+          )}
 
           <AccordionPill
             index={4}
@@ -1083,6 +1217,31 @@ const styles = StyleSheet.create({
     width: '100%',
     overflow: 'visible',
   },
+  pillOuterCompact: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    height: 56,
+    width: PROVIDER_PILL_SIZE,
+    flexShrink: 0,
+    overflow: 'visible',
+  },
+  desktopModelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    width: '100%',
+    height: 56,
+    gap: PROVIDER_PILL_GAP,
+    overflow: 'visible',
+  },
+  desktopFilterHit: {
+    width: PROVIDER_PILL_SIZE,
+    height: PROVIDER_PILL_SIZE,
+    flexShrink: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   modelFilterDock: {
     flex: 1,
     minWidth: 0,
@@ -1091,6 +1250,21 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     position: 'relative',
     justifyContent: 'center',
+  },
+  modelFilterDockDesktop: {
+    flex: 0,
+    flexGrow: 0,
+    flexShrink: 0,
+    overflow: 'visible',
+    // Same gap ChatBar uses between model list and crab FAB column.
+    marginRight: MODEL_BUTTON_GAP,
+  },
+  modelFilterRowDesktop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+    height: PROVIDER_DOCK_HEIGHT,
+    width: '100%',
   },
   modelFilterScroll: {
     flex: 1,

@@ -1,10 +1,12 @@
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{sleep, timeout};
@@ -85,6 +87,7 @@ async fn collect_pipe_output<R>(
     pipe: Option<R>,
     stream: Option<StreamContext>,
     buffer: Arc<Mutex<BoundedOutputBuffer>>,
+    spool: Option<Arc<Mutex<File>>>,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -94,6 +97,13 @@ async fn collect_pipe_output<R>(
 
     let mut reader = BufReader::new(pipe).lines();
     while let Ok(Some(line)) = reader.next_line().await {
+        if let Some(spool) = &spool {
+            let mut file = spool.lock().await;
+            if file.write_all(line.as_bytes()).await.is_ok() {
+                let _ = file.write_all(b"\n").await;
+            }
+        }
+
         if let Some(stream) = &stream {
             let _ = stream.output_tx.send(ToolOutputChunk {
                 tool_use_id: stream.tool_use_id.clone(),
@@ -105,6 +115,63 @@ async fn collect_pipe_output<R>(
 
         buffer.lock().await.push_line(&line);
     }
+}
+
+const TOOL_OUTPUT_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+async fn cleanup_old_outputs(directory: &Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(directory).await else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(TOOL_OUTPUT_RETENTION)
+        .unwrap_or(std::time::UNIX_EPOCH);
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("tool_") && name.ends_with(".log"))
+        {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if metadata.modified().is_ok_and(|modified| modified < cutoff) {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+}
+
+async fn create_output_spool(path: &Path) -> Option<Arc<Mutex<File>>> {
+    let directory = path.parent()?;
+    if let Err(error) = tokio::fs::create_dir_all(directory).await {
+        tracing::warn!(%error, path = %directory.display(), "Could not create tool-output store");
+        return None;
+    }
+    cleanup_old_outputs(directory).await;
+
+    let file = match OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .await
+    {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "Could not create tool-output spool");
+            return None;
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await;
+    }
+
+    Some(Arc::new(Mutex::new(file)))
 }
 
 pub(super) async fn join_reader_with_timeout(mut handle: tokio::task::JoinHandle<()>) {
@@ -194,6 +261,7 @@ pub(super) async fn execute_foreground(
     mut cmd: Command,
     timeout_duration: Duration,
     stream: Option<StreamContext>,
+    output_spool_path: PathBuf,
 ) -> ToolResult {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -207,16 +275,19 @@ pub(super) async fn execute_foreground(
         RAW_CAPTURE_MAX_LINES,
         RAW_CAPTURE_MAX_BYTES,
     )));
+    let spool = create_output_spool(&output_spool_path).await;
 
     let stdout_handle = tokio::spawn(collect_pipe_output(
         stdout,
         stream.clone(),
         Arc::clone(&buffer),
+        spool.clone(),
     ));
     let stderr_handle = tokio::spawn(collect_pipe_output(
         stderr,
         stream.clone(),
         Arc::clone(&buffer),
+        spool.clone(),
     ));
 
     let wait_result = timeout(timeout_duration, child.wait()).await;
@@ -255,6 +326,10 @@ pub(super) async fn execute_foreground(
 
     join_reader_with_timeout(stdout_handle).await;
     join_reader_with_timeout(stderr_handle).await;
+    if let Some(spool) = &spool {
+        let mut file = spool.lock().await;
+        let _ = file.flush().await;
+    }
 
     let combined_output = {
         let mut guard = buffer.lock().await;
@@ -274,7 +349,19 @@ pub(super) async fn execute_foreground(
         });
     }
 
-    let processed = process_output(combined_output);
+    let stripped_output = super::strip_ansi(&combined_output);
+    let truncated = crate::tools::truncation::truncate_tail(
+        &stripped_output,
+        super::MAX_OUTPUT_LINES,
+        super::MAX_OUTPUT_BYTES,
+    )
+    .was_truncated;
+    let retained_path = truncated.then_some(output_spool_path.as_path());
+    let processed = process_output(combined_output, retained_path);
+    drop(spool);
+    if !truncated {
+        let _ = tokio::fs::remove_file(&output_spool_path).await;
+    }
     let metadata = Some(json!({
         "exit_code": exit_code,
         "killed": killed,

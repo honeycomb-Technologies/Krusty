@@ -144,9 +144,15 @@ pub(super) fn summarize_loop_event(event: &LoopEvent) -> Value {
         LoopEvent::Usage {
             prompt_tokens,
             completion_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+            total_tokens,
         } => json!({
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
+            "cache_creation_input_tokens": cache_creation_input_tokens,
+            "cache_read_input_tokens": cache_read_input_tokens,
+            "total_tokens": total_tokens,
         }),
         LoopEvent::SessionPinched {
             reason,
