@@ -59,8 +59,9 @@ impl AiClient {
         // Order (most stable → least stable):
         //   1. CC identity (Anthropic OAuth only) — globally stable, cached
         //   2. Base system prompt (KRUSTY_SYSTEM_PROMPT) — globally stable, cached
-        //   3. Project context (CLAUDE.md / KRAB.md) — stable per project, cached
-        //   4. Session context (plan state, skills) — dynamic, NOT cached
+        //   3. Frozen Mako coordinator/persona/user identity — stable per run, cached
+        //   4. Project context (CLAUDE.md / KRAB.md) — stable per project, cached
+        //   5. Session context (plan state, skills) — dynamic, NOT cached
         //
         // Dynamic session context is appended WITHOUT cache_control so it doesn't
         // invalidate the cached prefix when plan state changes between turns.
@@ -99,7 +100,20 @@ impl AiClient {
                 }));
             }
 
-            // Block 3 (optional): Project context — cached per project, stable within session
+            // Block 3 (optional): frozen identity — cached for the run.
+            if !prompt_sections.identity_context.is_empty() {
+                system_blocks.push(serde_json::json!({
+                    "type": "text",
+                    "text": prompt_sections.identity_context.as_str(),
+                    "cache_control": cache_control.clone()
+                }));
+                debug!(
+                    "Mako identity block added ({} chars, cached)",
+                    prompt_sections.identity_context.len()
+                );
+            }
+
+            // Block 4 (optional): Project context — cached per project, stable within session
             if !prompt_sections.project_context.is_empty() {
                 system_blocks.push(serde_json::json!({
                     "type": "text",
@@ -112,7 +126,7 @@ impl AiClient {
                 );
             }
 
-            // Block 4 (optional): Session context — dynamic, NO cache_control
+            // Block 5 (optional): Session context — dynamic, NO cache_control
             // Plan state and skills change frequently. Placing them last without
             // a cache breakpoint means they don't invalidate the static prefix.
             if !prompt_sections.session_context.is_empty() {

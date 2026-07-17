@@ -5,14 +5,13 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::broadcast;
 
-use krusty_core::agent::autonomy::coordinator_prompt::system_prompt_for_session;
 use krusty_core::agent::{LoopEvent, OrchestratorConfig, OrchestratorServices};
 use krusty_core::ai::client::CallOptions;
 use krusty_core::ai::types::{Role, WebFetchConfig, WebSearchConfig};
 use krusty_core::plan::PlanManager;
 use krusty_core::storage::{
-    Database, MakoRuntimeStateStatus, MakoRuntimeStateStore, ProjectSettings, SessionManager,
-    SessionType,
+    Database, MakoProfileOwner, MakoProfileStore, MakoRuntimeStateStatus, MakoRuntimeStateStore,
+    ProjectSettings, SessionManager, SessionType,
 };
 use krusty_core::tools::registry::PermissionMode;
 
@@ -108,6 +107,13 @@ async fn run_mako_session_inner(
     let mako_settings = ProjectSettings::load_mako_settings(project_dir.as_deref());
     let runtime_state =
         MakoRuntimeStateStore::new(Database::new(&state.db_path)?).get_state(&session_id)?;
+    let profile_owner = MakoProfileOwner::from_user_id(session.user_id.as_deref())?;
+    let profile_store = MakoProfileStore::new(Database::new(&state.db_path)?);
+    if profile_owner.is_local() {
+        profile_store.import_local_legacy_home(&profile_owner, &krusty_core::paths::mako_dir())?;
+    }
+    let mako_profile =
+        std::sync::Arc::new(profile_store.bootstrap_defaults(&profile_owner)?.snapshot);
 
     let options = CallOptions {
         tools: Some(state.tool_registry.get_ai_tools_all().await),
@@ -115,7 +121,9 @@ async fn run_mako_session_inner(
         codex_parallel_tool_calls: true,
         web_search: Some(WebSearchConfig::default()),
         web_fetch: Some(WebFetchConfig::default()),
-        system_prompt: system_prompt_for_session(SessionType::Mako),
+        // Mako's coordinator/persona layers are context sections so the base
+        // Krusty safety/runtime contract and model-family overlay remain intact.
+        system_prompt: None,
         ..Default::default()
     };
 
@@ -131,6 +139,7 @@ async fn run_mako_session_inner(
         working_dir,
         project_dir,
         mako_crew_slug: runtime_state.and_then(|state| state.crew_slug),
+        mako_profile: Some(mako_profile),
         session_type: SessionType::Mako,
         permission_mode: PermissionMode::Autonomous,
         user_id: session.user_id.clone(),

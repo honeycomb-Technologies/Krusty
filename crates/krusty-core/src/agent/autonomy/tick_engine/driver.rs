@@ -184,6 +184,7 @@ fn clone_for_tick(config: &OrchestratorConfig) -> OrchestratorConfig {
         working_dir: config.working_dir.clone(),
         project_dir: config.project_dir.clone(),
         mako_crew_slug: config.mako_crew_slug.clone(),
+        mako_profile: config.mako_profile.clone(),
         session_type: config.session_type,
         permission_mode: config.permission_mode,
         max_iterations: config.max_iterations,

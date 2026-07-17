@@ -9,7 +9,7 @@ use super::create_test_db;
 fn test_database_creation() {
     let (db, _temp) = create_test_db();
     let version = db.get_schema_version();
-    assert_eq!(version, 34, "Expected current schema version to be 34");
+    assert_eq!(version, 39, "Expected current schema version to be 39");
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn test_schema_version_increments() {
     let db = Database::new(&db_path).expect("Failed to create database");
     let version = db.get_schema_version();
 
-    assert_eq!(version, 34, "Expected final schema version");
+    assert_eq!(version, 39, "Expected final schema version");
 }
 
 #[test]
@@ -115,7 +115,7 @@ fn migration_33_removes_legacy_compaction_memory_and_duplicate_history() {
     drop(conn);
 
     let db = Database::new(&db_path).expect("migrate db");
-    assert_eq!(db.get_schema_version(), 34);
+    assert_eq!(db.get_schema_version(), 39);
 
     let flush_count: i64 = db
         .conn()
@@ -184,7 +184,7 @@ fn migration_34_backfills_provider_call_classification() {
     drop(conn);
 
     let db = Database::new(&db_path).expect("migrate db");
-    assert_eq!(db.get_schema_version(), 34);
+    assert_eq!(db.get_schema_version(), 39);
     let (call_kind, operation): (Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -195,4 +195,111 @@ fn migration_34_backfills_provider_call_classification() {
         .expect("classification");
     assert_eq!(call_kind.as_deref(), Some("auxiliary"));
     assert_eq!(operation.as_deref(), Some("compaction_summary"));
+}
+
+#[test]
+fn migrations_35_through_39_create_mako_backend_contracts() {
+    let (db, _temp) = create_test_db();
+    let expected_tables = [
+        "mako_profiles",
+        "mako_profile_documents",
+        "mako_controllers",
+        "mako_schedules",
+        "mako_schedule_occurrences",
+        "mako_runs",
+        "mako_run_attempts",
+        "mako_daemon_leases",
+        "mako_idempotency_keys",
+        "mako_controller_events",
+        "conversation_episodes",
+        "mako_learning_runs",
+        "mako_learning_candidates",
+        "agent_memory_revisions",
+        "knowledge_snapshots",
+    ];
+
+    for table in expected_tables {
+        let exists: i64 = db
+            .conn()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|error| panic!("query table {table}: {error}"));
+        assert_eq!(exists, 1, "missing migrated table {table}");
+    }
+}
+
+#[test]
+fn migration_39_upgrades_legacy_memories_and_separates_generated_snapshot() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("legacy-memory.db");
+    let conn = Connection::open(&db_path).expect("open seed db");
+    conn.execute_batch(
+        r#"CREATE TABLE schema_version (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO schema_version (version) VALUES (38);
+        CREATE TABLE agent_memories (
+            id TEXT PRIMARY KEY,
+            memory_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            project_dir TEXT,
+            user_id TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO agent_memories (id, memory_type, title, content, project_dir)
+            VALUES ('fact', 'project', 'Architecture', 'Use durable leases', '/repo');
+        INSERT INTO agent_memories (id, memory_type, title, content, project_dir)
+            VALUES ('snapshot', 'project', 'Current Snapshot', 'generated', '/repo');"#,
+    )
+    .expect("seed legacy memories");
+    drop(conn);
+
+    let db = Database::new(&db_path).expect("migrate legacy memories");
+    assert_eq!(db.get_schema_version(), 39);
+
+    let fact_metadata: (String, String, f64) = db
+        .conn()
+        .query_row(
+            "SELECT namespace, status, confidence FROM agent_memories WHERE id = 'fact'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("legacy fact metadata");
+    assert_eq!(fact_metadata, ("shared".into(), "active".into(), 1.0));
+
+    let snapshot_count: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM knowledge_snapshots WHERE id = 'snapshot'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("migrated snapshot");
+    assert_eq!(snapshot_count, 1);
+
+    let legacy_snapshot_count: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM agent_memories WHERE id = 'snapshot'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("legacy snapshot removal");
+    assert_eq!(legacy_snapshot_count, 0);
+
+    let revision_count: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM agent_memory_revisions WHERE memory_id = 'fact'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("legacy revision seed");
+    assert_eq!(revision_count, 1);
 }

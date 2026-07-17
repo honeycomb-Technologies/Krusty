@@ -8,6 +8,8 @@ pub(super) const IDENTITY_CANDIDATES: &[&str] = &[
     "IDENTITY.md",
     "identity.md",
 ];
+pub(super) const USER_CANDIDATES: &[&str] =
+    &[paths::MAKO_USER_FILE, "mako_user.md", "USER.md", "user.md"];
 pub(super) const HEARTBEAT_CANDIDATES: &[&str] = &[
     paths::MAKO_HEARTBEAT_FILE,
     "mako_heartbeat.md",
@@ -53,6 +55,7 @@ pub(super) const DEFAULT_CREW_SLUGS: &[&str] = &["builder", "researcher", "revie
 pub enum MakoHomeDocumentKind {
     Soul,
     Identity,
+    User,
     Heartbeat,
     Memory,
     Channels,
@@ -63,6 +66,7 @@ impl MakoHomeDocumentKind {
         match value.trim().to_ascii_lowercase().as_str() {
             "soul" => Some(Self::Soul),
             "identity" => Some(Self::Identity),
+            "user" => Some(Self::User),
             "heartbeat" => Some(Self::Heartbeat),
             "memory" => Some(Self::Memory),
             "channels" => Some(Self::Channels),
@@ -74,19 +78,23 @@ impl MakoHomeDocumentKind {
         match self {
             Self::Soul => paths::MAKO_SOUL_FILE,
             Self::Identity => paths::MAKO_IDENTITY_FILE,
+            Self::User => paths::MAKO_USER_FILE,
             Self::Heartbeat => paths::MAKO_HEARTBEAT_FILE,
             Self::Memory => paths::MAKO_MEMORY_FILE,
             Self::Channels => paths::MAKO_CHANNELS_FILE,
         }
     }
 
-    pub(super) fn default_content(self) -> &'static str {
+    pub(crate) fn default_content(self) -> &'static str {
         match self {
             Self::Soul => {
-                "# Mako Soul\n\nMako is Krusty's always-on companion.\n- concise\n- calm\n- watchful\n- proactive when it matters\n- never noisy"
+                "# Mako Soul\n\nMako is a recognizable, warm, curious, and candid companion. Its continuity comes from confirmed context and durable memory, never performed familiarity.\n\n- speak like a thoughtful collaborator with a real point of view\n- be concise when work is operational, but never emotionally flat\n- take thoughtful initiative when it can genuinely help\n- let humor and voice emerge naturally rather than forcing them\n- name uncertainty, disagreement, and limits honestly\n- never fake familiarity, manipulate, flatter, or invent memory"
             }
             Self::Identity => {
                 "# Mako Identity\n\nname: Mako\ncreature: mako shark\ntagline: Always Swimming.\npresence: awake, sleeping, waiting, blocked, idle"
+            }
+            Self::User => {
+                "# Mako User\n\nThis user-authored profile describes the person Mako works with. Record only confirmed, useful details such as preferred address, communication style, durable expectations, boundaries, and ways of working well together.\n\nDo not store secrets, infer sensitive traits, manufacture familiarity, or present guesses as facts."
             }
             Self::Heartbeat => {
                 "# Mako Heartbeat\n\n- check active runs\n- surface approvals\n- wake on schedule\n- go quiet when nothing needs attention"
@@ -126,7 +134,7 @@ impl MakoCrewDocumentKind {
         }
     }
 
-    pub(super) fn default_content(self, slug: &str) -> String {
+    pub(crate) fn default_content(self, slug: &str) -> String {
         match self {
             Self::Identity => format!(
                 "# Crew Identity\n\nname: {slug}\nrole: {slug}\ncoordinator: Mako"
@@ -211,6 +219,7 @@ pub struct MakoCrewProfile {
 pub struct MakoHomeProfile {
     pub soul: Option<MakoHomeDocument>,
     pub identity: Option<MakoHomeDocument>,
+    pub user: Option<MakoHomeDocument>,
     pub heartbeat: Option<MakoHomeDocument>,
     pub memory: Option<MakoHomeDocument>,
     pub channels: Option<MakoHomeDocument>,

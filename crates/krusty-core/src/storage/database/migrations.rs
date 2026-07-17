@@ -1002,6 +1002,533 @@ impl Database {
             self.set_schema_version_tx(&tx, 34)?;
         }
 
+        // Migration 35: Database-owned, revisioned Mako identity profiles.
+        if current_version < 35 {
+            info!("Running migration 35: Mako identity profiles");
+            tx.execute_batch(
+                r#"
+                CREATE TABLE mako_profiles (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT,
+                    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE UNIQUE INDEX idx_mako_profiles_user
+                    ON mako_profiles(user_id) WHERE user_id IS NOT NULL;
+
+                CREATE TABLE mako_profile_documents (
+                    profile_id TEXT NOT NULL,
+                    kind TEXT NOT NULL
+                        CHECK (kind IN ('soul', 'identity', 'user', 'heartbeat', 'channels')),
+                    content TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (profile_id, kind),
+                    FOREIGN KEY (profile_id) REFERENCES mako_profiles(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE mako_crew_profiles (
+                    profile_id TEXT NOT NULL,
+                    slug TEXT NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (profile_id, slug),
+                    FOREIGN KEY (profile_id) REFERENCES mako_profiles(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE mako_crew_documents (
+                    profile_id TEXT NOT NULL,
+                    slug TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK (kind IN ('identity', 'soul')),
+                    content TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (profile_id, slug, kind),
+                    FOREIGN KEY (profile_id, slug)
+                        REFERENCES mako_crew_profiles(profile_id, slug) ON DELETE CASCADE
+                );
+                "#,
+            )
+            .context("Migration 35: Mako identity profiles")?;
+            self.set_schema_version_tx(&tx, 35)?;
+        }
+
+        // Migration 36: Durable Mako controllers, schedules, runs, leases, and event journal.
+        if current_version < 36 {
+            info!("Running migration 36: Durable Mako scheduler");
+            tx.execute_batch(
+                r#"
+                CREATE TABLE mako_controllers (
+                    id TEXT PRIMARY KEY,
+                    scope_key TEXT NOT NULL UNIQUE,
+                    user_id TEXT,
+                    session_id TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL CHECK (status IN ('active', 'paused', 'disabled')),
+                    timezone TEXT NOT NULL,
+                    max_concurrent_runs INTEGER NOT NULL CHECK (max_concurrent_runs > 0),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                );
+                CREATE INDEX idx_mako_controllers_user ON mako_controllers(user_id);
+                CREATE INDEX idx_mako_controllers_status ON mako_controllers(status);
+
+                CREATE TABLE mako_schedules (
+                    id TEXT PRIMARY KEY,
+                    controller_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    objective TEXT NOT NULL,
+                    recurrence_kind TEXT NOT NULL,
+                    recurrence_json TEXT NOT NULL,
+                    timezone TEXT NOT NULL,
+                    gap_policy TEXT NOT NULL CHECK (gap_policy IN ('shift_forward', 'skip')),
+                    fold_policy TEXT NOT NULL CHECK (fold_policy IN ('first', 'second')),
+                    next_fire_at TEXT,
+                    last_scheduled_for TEXT,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('enabled', 'paused', 'completed', 'cancelled')),
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    project_dir TEXT,
+                    model TEXT,
+                    crew_slug TEXT,
+                    misfire_policy TEXT NOT NULL
+                        CHECK (misfire_policy IN ('fire_once', 'skip', 'catch_up')),
+                    misfire_grace_secs INTEGER NOT NULL CHECK (misfire_grace_secs >= 0),
+                    catch_up_limit INTEGER NOT NULL CHECK (catch_up_limit >= 0),
+                    overlap_policy TEXT NOT NULL CHECK (overlap_policy IN ('skip', 'queue_one', 'allow')),
+                    max_attempts INTEGER NOT NULL CHECK (max_attempts > 0),
+                    retry_base_secs INTEGER NOT NULL CHECK (retry_base_secs >= 0),
+                    retry_max_secs INTEGER NOT NULL CHECK (retry_max_secs >= 0),
+                    retry_jitter TEXT NOT NULL CHECK (retry_jitter IN ('none', 'full')),
+                    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (controller_id) REFERENCES mako_controllers(id) ON DELETE CASCADE
+                );
+                CREATE INDEX idx_mako_schedules_due
+                    ON mako_schedules(status, next_fire_at);
+                CREATE INDEX idx_mako_schedules_controller
+                    ON mako_schedules(controller_id, status);
+
+                CREATE TABLE mako_schedule_occurrences (
+                    id TEXT PRIMARY KEY,
+                    schedule_id TEXT NOT NULL,
+                    scheduled_for TEXT NOT NULL,
+                    run_id TEXT,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('pending', 'queued', 'skipped', 'coalesced', 'running', 'succeeded', 'failed', 'cancelled')),
+                    decision_reason TEXT,
+                    coalesced_count INTEGER NOT NULL DEFAULT 0 CHECK (coalesced_count >= 0),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (schedule_id, scheduled_for),
+                    FOREIGN KEY (schedule_id) REFERENCES mako_schedules(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE mako_runs (
+                    id TEXT PRIMARY KEY,
+                    controller_id TEXT NOT NULL,
+                    session_id TEXT,
+                    schedule_id TEXT,
+                    occurrence_id TEXT,
+                    kind TEXT NOT NULL
+                        CHECK (kind IN ('dispatch', 'scheduled', 'controller_child', 'legacy_resume')),
+                    objective TEXT NOT NULL,
+                    config_json TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('queued', 'leased', 'running', 'sleeping', 'retry_wait', 'awaiting_input', 'recovery_required', 'succeeded', 'failed', 'cancelled', 'dead_letter')),
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    concurrency_key TEXT,
+                    scheduled_for TEXT,
+                    available_at TEXT NOT NULL,
+                    wake_at TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+                    max_attempts INTEGER NOT NULL CHECK (max_attempts > 0),
+                    lease_owner TEXT,
+                    lease_token TEXT,
+                    lease_epoch INTEGER CHECK (lease_epoch IS NULL OR lease_epoch >= 0),
+                    lease_expires_at TEXT,
+                    heartbeat_at TEXT,
+                    last_stop_reason TEXT,
+                    last_error TEXT,
+                    outcome_json TEXT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (controller_id) REFERENCES mako_controllers(id) ON DELETE CASCADE,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL,
+                    FOREIGN KEY (schedule_id) REFERENCES mako_schedules(id) ON DELETE SET NULL,
+                    FOREIGN KEY (occurrence_id) REFERENCES mako_schedule_occurrences(id) ON DELETE SET NULL
+                );
+                CREATE INDEX idx_mako_runs_claim
+                    ON mako_runs(status, available_at, priority DESC, created_at);
+                CREATE INDEX idx_mako_runs_controller_status
+                    ON mako_runs(controller_id, status);
+                CREATE INDEX idx_mako_runs_concurrency
+                    ON mako_runs(concurrency_key, status) WHERE concurrency_key IS NOT NULL;
+                CREATE INDEX idx_mako_runs_lease_expiry
+                    ON mako_runs(lease_expires_at) WHERE lease_expires_at IS NOT NULL;
+                CREATE INDEX idx_mako_runs_session ON mako_runs(session_id);
+
+                CREATE TABLE mako_run_attempts (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    attempt_no INTEGER NOT NULL CHECK (attempt_no > 0),
+                    worker_id TEXT NOT NULL,
+                    lease_token TEXT NOT NULL,
+                    lease_epoch INTEGER NOT NULL CHECK (lease_epoch >= 0),
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    outcome TEXT NOT NULL
+                        CHECK (outcome IN ('leased', 'succeeded', 'failed', 'retry_scheduled', 'sleeping', 'awaiting_input', 'recovery_required', 'cancelled', 'abandoned', 'dead_letter')),
+                    stop_reason TEXT,
+                    error TEXT,
+                    retry_at TEXT,
+                    trace_sequence_start INTEGER,
+                    trace_sequence_end INTEGER,
+                    UNIQUE (run_id, attempt_no),
+                    FOREIGN KEY (run_id) REFERENCES mako_runs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX idx_mako_run_attempts_run
+                    ON mako_run_attempts(run_id, attempt_no);
+
+                CREATE TABLE mako_daemon_leases (
+                    lease_name TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    fencing_token INTEGER NOT NULL CHECK (fencing_token >= 0),
+                    acquired_at TEXT NOT NULL,
+                    heartbeat_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                );
+
+                CREATE TABLE mako_idempotency_keys (
+                    scope_key TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    resource_id TEXT,
+                    response_json TEXT,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    PRIMARY KEY (scope_key, operation, idempotency_key)
+                );
+                CREATE INDEX idx_mako_idempotency_expiry ON mako_idempotency_keys(expires_at);
+
+                CREATE TABLE mako_controller_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    controller_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL CHECK (sequence > 0),
+                    event_type TEXT NOT NULL,
+                    run_id TEXT,
+                    schedule_id TEXT,
+                    dedupe_key TEXT,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE (controller_id, sequence),
+                    FOREIGN KEY (controller_id) REFERENCES mako_controllers(id) ON DELETE CASCADE,
+                    FOREIGN KEY (run_id) REFERENCES mako_runs(id) ON DELETE SET NULL,
+                    FOREIGN KEY (schedule_id) REFERENCES mako_schedules(id) ON DELETE SET NULL
+                );
+                CREATE UNIQUE INDEX idx_mako_controller_events_dedupe
+                    ON mako_controller_events(controller_id, dedupe_key)
+                    WHERE dedupe_key IS NOT NULL;
+                CREATE INDEX idx_mako_controller_events_replay
+                    ON mako_controller_events(controller_id, sequence);
+                "#,
+            )
+            .context("Migration 36: Durable Mako scheduler")?;
+            self.set_schema_version_tx(&tx, 36)?;
+        }
+
+        // Migration 37: Owned cross-session episodic recall with a bounded FTS index.
+        if current_version < 37 {
+            info!("Running migration 37: Mako episodic recall");
+            tx.execute_batch(
+                r#"
+                CREATE TABLE conversation_episodes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    source_message_id INTEGER NOT NULL,
+                    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+                    body TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    UNIQUE (session_id, source_message_id),
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                    FOREIGN KEY (source_message_id) REFERENCES messages(id) ON DELETE CASCADE
+                );
+                CREATE INDEX idx_conversation_episodes_session_time
+                    ON conversation_episodes(session_id, occurred_at DESC);
+                CREATE INDEX idx_conversation_episodes_hash
+                    ON conversation_episodes(content_hash);
+
+                CREATE VIRTUAL TABLE conversation_episodes_fts USING fts5(
+                    body,
+                    content = 'conversation_episodes',
+                    content_rowid = 'id',
+                    tokenize = 'porter unicode61'
+                );
+                CREATE TRIGGER conversation_episodes_ai AFTER INSERT ON conversation_episodes BEGIN
+                    INSERT INTO conversation_episodes_fts(rowid, body) VALUES (new.id, new.body);
+                END;
+                CREATE TRIGGER conversation_episodes_ad AFTER DELETE ON conversation_episodes BEGIN
+                    INSERT INTO conversation_episodes_fts(conversation_episodes_fts, rowid, body)
+                    VALUES ('delete', old.id, old.body);
+                END;
+                CREATE TRIGGER conversation_episodes_au AFTER UPDATE ON conversation_episodes BEGIN
+                    INSERT INTO conversation_episodes_fts(conversation_episodes_fts, rowid, body)
+                    VALUES ('delete', old.id, old.body);
+                    INSERT INTO conversation_episodes_fts(rowid, body) VALUES (new.id, new.body);
+                END;
+                "#,
+            )
+            .context("Migration 37: Mako episodic recall")?;
+            self.set_schema_version_tx(&tx, 37)?;
+        }
+
+        // Migration 38: Governed post-turn learning proposals and reviewer checkpoints.
+        if current_version < 38 {
+            info!("Running migration 38: Governed Mako learning");
+            tx.execute_batch(
+                r#"
+                CREATE TABLE mako_learning_runs (
+                    session_id TEXT NOT NULL,
+                    through_message_id INTEGER NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+                    model TEXT,
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    PRIMARY KEY (session_id, through_message_id),
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                    FOREIGN KEY (through_message_id) REFERENCES messages(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE mako_learning_candidates (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT,
+                    project_dir TEXT,
+                    canonical_key TEXT NOT NULL,
+                    kind TEXT NOT NULL
+                        CHECK (kind IN ('user_preference', 'user_correction', 'project_fact', 'procedure', 'relationship_context', 'forget')),
+                    proposed_content TEXT NOT NULL,
+                    evidence_session_id TEXT NOT NULL,
+                    evidence_message_id INTEGER NOT NULL,
+                    evidence_excerpt TEXT NOT NULL,
+                    explicit INTEGER NOT NULL CHECK (explicit IN (0, 1)),
+                    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+                    sensitivity TEXT NOT NULL CHECK (sensitivity IN ('normal', 'sensitive', 'prohibited')),
+                    status TEXT NOT NULL
+                        CHECK (status IN ('pending', 'accepted', 'auto_accepted', 'rejected', 'tombstoned')),
+                    reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    reviewed_at TEXT,
+                    UNIQUE (evidence_session_id, evidence_message_id, canonical_key),
+                    FOREIGN KEY (evidence_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                    FOREIGN KEY (evidence_message_id) REFERENCES messages(id) ON DELETE CASCADE
+                );
+                CREATE INDEX idx_mako_learning_candidates_owner_status
+                    ON mako_learning_candidates(user_id, status, created_at DESC);
+                CREATE INDEX idx_mako_learning_candidates_project
+                    ON mako_learning_candidates(project_dir, status);
+                "#,
+            )
+            .context("Migration 38: Governed Mako learning")?;
+            self.set_schema_version_tx(&tx, 38)?;
+        }
+
+        // Migration 39: Canonical, provenance-aware memory and derived knowledge snapshots.
+        if current_version < 39 {
+            info!("Running migration 39: Canonical Mako memory");
+
+            // Memory storage historically initialized lazily. Creating the
+            // legacy columns first keeps this migration valid for databases
+            // that have never opened the memory API.
+            tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS agent_memories (
+                    id TEXT PRIMARY KEY,
+                    memory_type TEXT NOT NULL
+                        CHECK (memory_type IN ('user', 'feedback', 'project', 'reference')),
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    project_dir TEXT,
+                    user_id TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    canonical_key TEXT,
+                    namespace TEXT NOT NULL DEFAULT 'shared'
+                        CHECK (namespace IN ('shared', 'mako', 'crew')),
+                    namespace_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'active'
+                        CHECK (status IN ('active', 'superseded', 'deleted')),
+                    source TEXT NOT NULL DEFAULT 'legacy'
+                        CHECK (source IN ('legacy', 'user', 'agent', 'tool', 'import', 'compaction', 'system')),
+                    source_session_id TEXT,
+                    source_message_id TEXT,
+                    confidence REAL NOT NULL DEFAULT 1.0
+                        CHECK (confidence >= 0.0 AND confidence <= 1.0),
+                    sensitivity TEXT NOT NULL DEFAULT 'normal'
+                        CHECK (sensitivity IN ('normal', 'sensitive', 'secret')),
+                    pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+                    supersedes_id TEXT REFERENCES agent_memories(id),
+                    last_accessed_at TEXT,
+                    access_count INTEGER NOT NULL DEFAULT 0 CHECK (access_count >= 0)
+                );
+                "#,
+            )
+            .context("Migration 39: ensure memory base table")?;
+
+            if !Self::column_exists(&tx, "agent_memories", "canonical_key") {
+                tx.execute_batch("ALTER TABLE agent_memories ADD COLUMN canonical_key TEXT;")?;
+            }
+            if !Self::column_exists(&tx, "agent_memories", "namespace") {
+                tx.execute_batch(
+                    "ALTER TABLE agent_memories ADD COLUMN namespace TEXT NOT NULL DEFAULT 'shared' CHECK (namespace IN ('shared', 'mako', 'crew'));",
+                )?;
+            }
+            if !Self::column_exists(&tx, "agent_memories", "namespace_id") {
+                tx.execute_batch("ALTER TABLE agent_memories ADD COLUMN namespace_id TEXT;")?;
+            }
+            if !Self::column_exists(&tx, "agent_memories", "status") {
+                tx.execute_batch(
+                    "ALTER TABLE agent_memories ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'superseded', 'deleted'));",
+                )?;
+            }
+            if !Self::column_exists(&tx, "agent_memories", "source") {
+                tx.execute_batch(
+                    "ALTER TABLE agent_memories ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy' CHECK (source IN ('legacy', 'user', 'agent', 'tool', 'import', 'compaction', 'system'));",
+                )?;
+            }
+            if !Self::column_exists(&tx, "agent_memories", "source_session_id") {
+                tx.execute_batch("ALTER TABLE agent_memories ADD COLUMN source_session_id TEXT;")?;
+            }
+            if !Self::column_exists(&tx, "agent_memories", "source_message_id") {
+                tx.execute_batch("ALTER TABLE agent_memories ADD COLUMN source_message_id TEXT;")?;
+            }
+            if !Self::column_exists(&tx, "agent_memories", "confidence") {
+                tx.execute_batch(
+                    "ALTER TABLE agent_memories ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0 CHECK (confidence >= 0.0 AND confidence <= 1.0);",
+                )?;
+            }
+            if !Self::column_exists(&tx, "agent_memories", "sensitivity") {
+                tx.execute_batch(
+                    "ALTER TABLE agent_memories ADD COLUMN sensitivity TEXT NOT NULL DEFAULT 'normal' CHECK (sensitivity IN ('normal', 'sensitive', 'secret'));",
+                )?;
+            }
+            if !Self::column_exists(&tx, "agent_memories", "pinned") {
+                tx.execute_batch(
+                    "ALTER TABLE agent_memories ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1));",
+                )?;
+            }
+            if !Self::column_exists(&tx, "agent_memories", "supersedes_id") {
+                tx.execute_batch(
+                    "ALTER TABLE agent_memories ADD COLUMN supersedes_id TEXT REFERENCES agent_memories(id);",
+                )?;
+            }
+            if !Self::column_exists(&tx, "agent_memories", "last_accessed_at") {
+                tx.execute_batch("ALTER TABLE agent_memories ADD COLUMN last_accessed_at TEXT;")?;
+            }
+            if !Self::column_exists(&tx, "agent_memories", "access_count") {
+                tx.execute_batch(
+                    "ALTER TABLE agent_memories ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0 CHECK (access_count >= 0);",
+                )?;
+            }
+
+            tx.execute_batch(
+                r#"
+                CREATE INDEX IF NOT EXISTS idx_agent_memories_type
+                    ON agent_memories(memory_type);
+                CREATE INDEX IF NOT EXISTS idx_agent_memories_project
+                    ON agent_memories(project_dir);
+                CREATE INDEX IF NOT EXISTS idx_agent_memories_user
+                    ON agent_memories(user_id);
+                CREATE INDEX idx_agent_memories_active_scope
+                    ON agent_memories(status, user_id, project_dir, namespace, namespace_id);
+                CREATE INDEX idx_agent_memories_canonical_key
+                    ON agent_memories(canonical_key, status);
+                CREATE UNIQUE INDEX idx_agent_memories_active_canonical
+                    ON agent_memories(
+                        COALESCE(user_id, ''), COALESCE(project_dir, ''), namespace,
+                        COALESCE(namespace_id, ''), canonical_key
+                    )
+                    WHERE status = 'active' AND canonical_key IS NOT NULL;
+
+                CREATE TABLE agent_memory_revisions (
+                    id TEXT PRIMARY KEY,
+                    memory_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL CHECK (revision > 0),
+                    event TEXT NOT NULL
+                        CHECK (event IN ('created', 'updated', 'superseded', 'deleted')),
+                    snapshot_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE (memory_id, revision),
+                    FOREIGN KEY (memory_id) REFERENCES agent_memories(id) ON DELETE CASCADE
+                );
+                CREATE INDEX idx_agent_memory_revisions_memory
+                    ON agent_memory_revisions(memory_id, revision);
+
+                INSERT OR IGNORE INTO agent_memory_revisions
+                    (id, memory_id, revision, event, snapshot_json, created_at)
+                SELECT
+                    'migration39:' || id,
+                    id,
+                    1,
+                    'created',
+                    json_object(
+                        'id', id,
+                        'memory_type', memory_type,
+                        'title', title,
+                        'content', content,
+                        'project_dir', project_dir,
+                        'user_id', user_id,
+                        'created_at', created_at,
+                        'updated_at', updated_at,
+                        'canonical_key', canonical_key,
+                        'namespace', namespace,
+                        'namespace_id', namespace_id,
+                        'status', status,
+                        'source', source,
+                        'source_session_id', source_session_id,
+                        'source_message_id', source_message_id,
+                        'confidence', confidence,
+                        'sensitivity', sensitivity,
+                        'pinned', CASE pinned WHEN 0 THEN json('false') ELSE json('true') END,
+                        'supersedes_id', supersedes_id,
+                        'last_accessed_at', last_accessed_at,
+                        'access_count', access_count
+                    ),
+                    created_at
+                FROM agent_memories;
+
+                CREATE TABLE knowledge_snapshots (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    project_dir TEXT,
+                    user_id TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE UNIQUE INDEX idx_knowledge_snapshots_exact_scope
+                    ON knowledge_snapshots(COALESCE(project_dir, ''), COALESCE(user_id, ''));
+
+                INSERT OR IGNORE INTO knowledge_snapshots
+                    (id, title, content, project_dir, user_id, created_at, updated_at)
+                SELECT id, title, content, project_dir, user_id, created_at, updated_at
+                FROM agent_memories
+                WHERE memory_type = 'project' AND title = 'Current Snapshot';
+                DELETE FROM agent_memories
+                WHERE memory_type = 'project' AND title = 'Current Snapshot';
+                "#,
+            )
+            .context("Migration 39: canonical memory and knowledge tables")?;
+
+            self.set_schema_version_tx(&tx, 39)?;
+        }
+
         tx.commit()?;
 
         info!("Migrations complete");

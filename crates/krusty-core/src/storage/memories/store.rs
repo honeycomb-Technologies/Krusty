@@ -1,20 +1,26 @@
-use anyhow::Result;
-use rusqlite::params;
+use anyhow::{bail, Context, Result};
+use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use uuid::Uuid;
 
 use crate::storage::database::Database;
 
-use super::model::{AgentMemory, MemoryType};
-use super::query::{build_list_query, row_to_memory};
+use super::model::{
+    AgentMemory, AgentMemoryRevision, CanonicalMemoryInput, MemoryNamespace, MemoryRevisionEvent,
+    MemoryType,
+};
+use super::query::{build_list_query, row_to_memory, MEMORY_SELECT_COLUMNS};
 
 pub struct MemoryStore {
     db: Database,
 }
 
 impl MemoryStore {
-    /// Open or create a memory store at the given database path.
+    /// Open a memory store.
     ///
-    /// Creates the `agent_memories` table and indexes if they don't exist.
+    /// Production schema upgrades are migration-owned. The `CREATE IF NOT
+    /// EXISTS` statements retain the historical standalone-store behavior for
+    /// a database where these tables have never existed; they deliberately do
+    /// not attempt to alter a legacy table in place.
     pub fn new(db: Database) -> Self {
         let _ = db.conn().execute_batch(
             r#"
@@ -26,18 +32,53 @@ impl MemoryStore {
                 project_dir TEXT,
                 user_id TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                canonical_key TEXT,
+                namespace TEXT NOT NULL DEFAULT 'shared' CHECK(namespace IN ('shared', 'mako', 'crew')),
+                namespace_id TEXT,
+                status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'superseded', 'deleted')),
+                source TEXT NOT NULL DEFAULT 'legacy' CHECK(source IN ('legacy', 'user', 'agent', 'tool', 'import', 'compaction', 'system')),
+                source_session_id TEXT,
+                source_message_id TEXT,
+                confidence REAL NOT NULL DEFAULT 1.0 CHECK(confidence >= 0.0 AND confidence <= 1.0),
+                sensitivity TEXT NOT NULL DEFAULT 'normal' CHECK(sensitivity IN ('normal', 'sensitive', 'secret')),
+                pinned INTEGER NOT NULL DEFAULT 0 CHECK(pinned IN (0, 1)),
+                supersedes_id TEXT,
+                last_accessed_at TEXT,
+                access_count INTEGER NOT NULL DEFAULT 0 CHECK(access_count >= 0),
+                FOREIGN KEY(supersedes_id) REFERENCES agent_memories(id)
             );
 
             CREATE INDEX IF NOT EXISTS idx_agent_memories_type ON agent_memories(memory_type);
             CREATE INDEX IF NOT EXISTS idx_agent_memories_project ON agent_memories(project_dir);
             CREATE INDEX IF NOT EXISTS idx_agent_memories_user ON agent_memories(user_id);
+            CREATE INDEX IF NOT EXISTS idx_agent_memories_active_scope
+                ON agent_memories(status, user_id, project_dir, namespace, namespace_id);
+            CREATE INDEX IF NOT EXISTS idx_agent_memories_canonical_key
+                ON agent_memories(canonical_key, status);
+
+            CREATE TABLE IF NOT EXISTS agent_memory_revisions (
+                id TEXT PRIMARY KEY,
+                memory_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                event TEXT NOT NULL CHECK(event IN ('created', 'updated', 'superseded', 'deleted')),
+                snapshot_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY(memory_id) REFERENCES agent_memories(id) ON DELETE CASCADE,
+                UNIQUE(memory_id, revision)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_agent_memory_revisions_memory
+                ON agent_memory_revisions(memory_id, revision);
             "#,
         );
         Self { db }
     }
 
-    /// Save a new memory. Generates an id if not already set.
+    /// Save a legacy free-form memory.
+    ///
+    /// The original signature remains intact. New callers that have a stable
+    /// fact key and provenance should use [`Self::save_canonical`].
     pub fn save(
         &self,
         memory_type: MemoryType,
@@ -47,9 +88,12 @@ impl MemoryStore {
         user_id: Option<&str>,
     ) -> Result<AgentMemory> {
         let id = Uuid::new_v4().to_string();
-        self.db.conn().execute(
-            "INSERT INTO agent_memories (id, memory_type, title, content, project_dir, user_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO agent_memories
+                (id, memory_type, title, content, project_dir, user_id,
+                 namespace, status, source, confidence, sensitivity, pinned, access_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'shared', 'active', 'legacy', 1.0, 'normal', 0, 0)",
             params![
                 id,
                 memory_type.as_str(),
@@ -60,66 +104,262 @@ impl MemoryStore {
             ],
         )?;
 
-        // Read back the created record to get server-side defaults
-        self.get(&id)?
-            .ok_or_else(|| anyhow::anyhow!("memory not found after insert"))
-    }
-
-    /// Get a single memory by id.
-    pub fn get(&self, id: &str) -> Result<Option<AgentMemory>> {
-        let mut stmt = self.db.conn().prepare(
-            "SELECT id, memory_type, title, content, project_dir, user_id, created_at, updated_at
-             FROM agent_memories WHERE id = ?1",
-        )?;
-        let memory = stmt
-            .query_row(params![id], |row| Ok(row_to_memory(row)))
-            .ok();
+        let memory = load_memory_by_id(&tx, &id, true)?
+            .ok_or_else(|| anyhow::anyhow!("memory not found after insert"))?;
+        write_revision(&tx, &memory, MemoryRevisionEvent::Created)?;
+        tx.commit()?;
         Ok(memory)
     }
 
-    /// Update an existing memory's title and/or content.
-    pub fn update(&self, id: &str, title: Option<&str>, content: Option<&str>) -> Result<()> {
-        match (title, content) {
-            (Some(t), Some(c)) => {
-                self.db.conn().execute(
-                    "UPDATE agent_memories SET title = ?1, content = ?2, updated_at = datetime('now') WHERE id = ?3",
-                    params![t, c, id],
-                )?;
-            }
-            (Some(t), None) => {
-                self.db.conn().execute(
-                    "UPDATE agent_memories SET title = ?1, updated_at = datetime('now') WHERE id = ?2",
-                    params![t, id],
-                )?;
-            }
-            (None, Some(c)) => {
-                self.db.conn().execute(
-                    "UPDATE agent_memories SET content = ?1, updated_at = datetime('now') WHERE id = ?2",
-                    params![c, id],
-                )?;
-            }
-            (None, None) => {}
-        }
-        Ok(())
-    }
-
-    /// Delete a memory by id.
-    pub fn delete(&self, id: &str) -> Result<()> {
-        self.db
-            .conn()
-            .execute("DELETE FROM agent_memories WHERE id = ?1", params![id])?;
-        Ok(())
-    }
-
-    /// List all memories, optionally filtered by project_dir and/or user_id.
+    /// Save one canonical fact and atomically supersede the active fact with
+    /// the same owner, project, namespace, namespace id, and canonical key.
     ///
-    /// When `project_dir` is `Some`, returns both project-scoped and global memories.
+    /// Exact semantic replays are idempotent. A changed fact creates a new row,
+    /// points it at the prior row with `supersedes_id`, marks the prior row
+    /// superseded, and records both lifecycle events in the revision ledger.
+    pub fn save_canonical(&self, input: &CanonicalMemoryInput) -> Result<AgentMemory> {
+        let input = NormalizedCanonicalInput::new(input)?;
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        let existing = find_active_canonical(&tx, &input)?;
+
+        if let Some(existing) = existing.as_ref() {
+            if canonical_matches(existing, &input) {
+                tx.commit()?;
+                return Ok(existing.clone());
+            }
+        }
+
+        let supersedes_id = if let Some(existing) = existing {
+            tx.execute(
+                "UPDATE agent_memories
+                 SET status = 'superseded', updated_at = datetime('now')
+                 WHERE id = ?1 AND status = 'active'",
+                [&existing.id],
+            )?;
+            let superseded = load_memory_by_id(&tx, &existing.id, false)?
+                .ok_or_else(|| anyhow::anyhow!("superseded memory disappeared"))?;
+            write_revision(&tx, &superseded, MemoryRevisionEvent::Superseded)?;
+            Some(existing.id)
+        } else {
+            None
+        };
+
+        let id = Uuid::new_v4().to_string();
+        tx.execute(
+            "INSERT INTO agent_memories
+                (id, memory_type, title, content, project_dir, user_id,
+                 canonical_key, namespace, namespace_id, status, source,
+                 source_session_id, source_message_id, confidence, sensitivity,
+                 pinned, supersedes_id, access_count)
+             VALUES
+                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', ?10,
+                 ?11, ?12, ?13, ?14, ?15, ?16, 0)",
+            params![
+                id,
+                input.memory_type.as_str(),
+                input.title,
+                input.content,
+                input.project_dir,
+                input.user_id,
+                input.canonical_key,
+                input.namespace.as_str(),
+                input.namespace_id,
+                input.source.as_str(),
+                input.source_session_id,
+                input.source_message_id,
+                input.confidence,
+                input.sensitivity.as_str(),
+                input.pinned,
+                supersedes_id,
+            ],
+        )?;
+
+        let memory = load_memory_by_id(&tx, &id, true)?
+            .ok_or_else(|| anyhow::anyhow!("canonical memory not found after insert"))?;
+        write_revision(&tx, &memory, MemoryRevisionEvent::Created)?;
+        tx.commit()?;
+        Ok(memory)
+    }
+
+    /// Get an active memory by id without applying an owner boundary.
+    ///
+    /// Retained for legacy callers. Request-facing code should use
+    /// [`Self::get_for_owner`].
+    pub fn get(&self, id: &str) -> Result<Option<AgentMemory>> {
+        Ok(load_memory_by_id(self.db.conn(), id, true)?)
+    }
+
+    /// Get an active memory only when it belongs to the exact owner.
+    ///
+    /// `None` means the local/global owner and never matches user-owned rows.
+    pub fn get_for_owner(&self, id: &str, user_id: Option<&str>) -> Result<Option<AgentMemory>> {
+        Ok(load_memory_for_owner(self.db.conn(), id, user_id, true)?)
+    }
+
+    /// Update an active memory without applying an owner boundary.
+    ///
+    /// Retained for legacy callers. The mutation is still revisioned and will
+    /// not revive deleted or superseded rows.
+    pub fn update(&self, id: &str, title: Option<&str>, content: Option<&str>) -> Result<()> {
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        let Some(existing) = load_memory_by_id(&tx, id, true)? else {
+            tx.commit()?;
+            return Ok(());
+        };
+        if title.is_none() && content.is_none() {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        update_memory_fields(&tx, id, title, content, None)?;
+        let updated = load_memory_by_id(&tx, id, true)?
+            .ok_or_else(|| anyhow::anyhow!("memory not found after update"))?;
+        if updated != existing {
+            write_revision(&tx, &updated, MemoryRevisionEvent::Updated)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Update an active memory only for the exact owner.
+    ///
+    /// Returns `None` for both missing memories and owner mismatches so callers
+    /// cannot use this API to probe another owner's ids.
+    pub fn update_for_owner(
+        &self,
+        id: &str,
+        user_id: Option<&str>,
+        title: Option<&str>,
+        content: Option<&str>,
+    ) -> Result<Option<AgentMemory>> {
+        validate_optional_content("title", title)?;
+        validate_optional_content("content", content)?;
+
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        let Some(existing) = load_memory_for_owner(&tx, id, user_id, true)? else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        if title.is_none() && content.is_none() {
+            tx.commit()?;
+            return Ok(Some(existing));
+        }
+
+        update_memory_fields(&tx, id, title, content, Some(user_id))?;
+        let updated = load_memory_for_owner(&tx, id, user_id, true)?
+            .ok_or_else(|| anyhow::anyhow!("memory not found after owner-scoped update"))?;
+        if updated != existing {
+            write_revision(&tx, &updated, MemoryRevisionEvent::Updated)?;
+        }
+        tx.commit()?;
+        Ok(Some(updated))
+    }
+
+    /// Soft-delete an active memory without applying an owner boundary.
+    ///
+    /// Active reads no longer return the row, while provenance and revision
+    /// history remain recoverable.
+    pub fn delete(&self, id: &str) -> Result<()> {
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        let Some(_) = load_memory_by_id(&tx, id, true)? else {
+            tx.commit()?;
+            return Ok(());
+        };
+        soft_delete(&tx, id, None)?;
+        let deleted = load_memory_by_id(&tx, id, false)?
+            .ok_or_else(|| anyhow::anyhow!("memory not found after delete"))?;
+        write_revision(&tx, &deleted, MemoryRevisionEvent::Deleted)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Soft-delete an active memory only for the exact owner.
+    pub fn delete_for_owner(&self, id: &str, user_id: Option<&str>) -> Result<bool> {
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        if load_memory_for_owner(&tx, id, user_id, true)?.is_none() {
+            tx.commit()?;
+            return Ok(false);
+        }
+
+        soft_delete(&tx, id, Some(user_id))?;
+        let deleted = load_memory_for_owner(&tx, id, user_id, false)?
+            .ok_or_else(|| anyhow::anyhow!("memory not found after owner-scoped delete"))?;
+        write_revision(&tx, &deleted, MemoryRevisionEvent::Deleted)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Record successful retrieval without coupling access telemetry to every
+    /// low-level read.
+    pub fn record_access_for_owner(
+        &self,
+        id: &str,
+        user_id: Option<&str>,
+    ) -> Result<Option<AgentMemory>> {
+        self.db.conn().execute(
+            "UPDATE agent_memories
+             SET last_accessed_at = datetime('now'), access_count = access_count + 1
+             WHERE id = ?1 AND status = 'active' AND user_id IS ?2",
+            params![id, user_id],
+        )?;
+        self.get_for_owner(id, user_id)
+    }
+
+    /// Return the immutable lifecycle ledger for a memory owned by the exact
+    /// user scope. Deleted and superseded memories remain auditable here.
+    pub fn list_revisions_for_owner(
+        &self,
+        memory_id: &str,
+        user_id: Option<&str>,
+    ) -> Result<Vec<AgentMemoryRevision>> {
+        if load_memory_for_owner(self.db.conn(), memory_id, user_id, false)?.is_none() {
+            return Ok(Vec::new());
+        }
+
+        let mut stmt = self.db.conn().prepare(
+            "SELECT id, memory_id, revision, event, snapshot_json, created_at
+             FROM agent_memory_revisions
+             WHERE memory_id = ?1
+             ORDER BY revision",
+        )?;
+        let rows = stmt.query_map([memory_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+
+        let mut revisions = Vec::new();
+        for row in rows {
+            let (id, memory_id, revision, event, snapshot_json, created_at) = row?;
+            revisions.push(AgentMemoryRevision {
+                id,
+                memory_id,
+                revision,
+                event: event
+                    .parse()
+                    .map_err(|error: String| anyhow::anyhow!(error))?,
+                snapshot: serde_json::from_str(&snapshot_json)
+                    .context("decode agent memory revision snapshot")?,
+                created_at,
+            });
+        }
+        Ok(revisions)
+    }
+
+    /// List active memories, optionally filtered by project and owner-visible
+    /// scope. When `project_dir` is set, project-scoped and global rows are
+    /// returned. When `user_id` is set, user-owned and global rows are returned.
     pub fn list(&self, project_dir: Option<&str>, user_id: Option<&str>) -> Vec<AgentMemory> {
         let (sql, bound) = build_list_query(None, project_dir, user_id);
         self.query_memories(&sql, &bound)
     }
 
-    /// List memories of a specific type, optionally filtered by project_dir and/or user_id.
+    /// List active memories of a specific type.
     pub fn list_by_type(
         &self,
         memory_type: MemoryType,
@@ -130,47 +370,15 @@ impl MemoryStore {
         self.query_memories(&sql, &bound)
     }
 
-    /// Find a memory by exact title within a project scope.
+    /// Find an active memory by exact title within a project scope.
     pub fn find_by_title(&self, title: &str, project_dir: Option<&str>) -> Option<AgentMemory> {
-        if let Some(pd) = project_dir {
-            let mut stmt = self.db.conn().prepare(
-                "SELECT id, memory_type, title, content, project_dir, user_id, created_at, updated_at
-                 FROM agent_memories WHERE title = ?1 AND (project_dir = ?2 OR project_dir IS NULL)
-                 ORDER BY updated_at DESC LIMIT 1",
-            ).ok()?;
-            stmt.query_row(params![title, pd], |row| Ok(row_to_memory(row)))
-                .ok()
-        } else {
-            let mut stmt = self.db.conn().prepare(
-                "SELECT id, memory_type, title, content, project_dir, user_id, created_at, updated_at
-                 FROM agent_memories WHERE title = ?1 AND project_dir IS NULL
-                 ORDER BY updated_at DESC LIMIT 1",
-            ).ok()?;
-            stmt.query_row(params![title], |row| Ok(row_to_memory(row)))
-                .ok()
-        }
-    }
-
-    /// Find a memory by exact title within project/user scope.
-    ///
-    /// When `project_dir` is set, both project-scoped and global memories are
-    /// considered. When `user_id` is set, both user-scoped and global memories
-    /// are considered.
-    pub fn find_by_title_for_user(
-        &self,
-        title: &str,
-        project_dir: Option<&str>,
-        user_id: Option<&str>,
-    ) -> Option<AgentMemory> {
-        let mut sql = String::from(
-            "SELECT id, memory_type, title, content, project_dir, user_id, created_at, updated_at
-             FROM agent_memories
-             WHERE title = ?1",
+        let mut sql = format!(
+            "SELECT {MEMORY_SELECT_COLUMNS} FROM agent_memories
+             WHERE title = ?1 AND status = 'active'"
         );
         let mut bound = vec![title.to_string()];
-
-        if let Some(pd) = project_dir {
-            bound.push(pd.to_string());
+        if let Some(project_dir) = project_dir {
+            bound.push(project_dir.to_string());
             sql.push_str(&format!(
                 " AND (project_dir = ?{} OR project_dir IS NULL)",
                 bound.len()
@@ -178,33 +386,30 @@ impl MemoryStore {
         } else {
             sql.push_str(" AND project_dir IS NULL");
         }
-
-        if let Some(uid) = user_id {
-            bound.push(uid.to_string());
-            sql.push_str(&format!(
-                " AND (user_id = ?{} OR user_id IS NULL)",
-                bound.len()
-            ));
-        } else {
-            sql.push_str(" AND user_id IS NULL");
-        }
-
         sql.push_str(" ORDER BY updated_at DESC LIMIT 1");
-
-        let mut stmt = self.db.conn().prepare(&sql).ok()?;
-        let params: Vec<&dyn rusqlite::types::ToSql> = bound
-            .iter()
-            .map(|s| s as &dyn rusqlite::types::ToSql)
-            .collect();
-
-        stmt.query_row(params.as_slice(), |row| Ok(row_to_memory(row)))
-            .ok()
+        self.query_one(&sql, &bound)
     }
 
-    /// Save a new memory or update an existing exact-title match within the
-    /// same effective scope.
-    ///
-    /// Returns the memory plus a flag indicating whether it was newly created.
+    /// Find an active memory by exact title within project/user-visible scope.
+    pub fn find_by_title_for_user(
+        &self,
+        title: &str,
+        project_dir: Option<&str>,
+        user_id: Option<&str>,
+    ) -> Option<AgentMemory> {
+        let mut sql = format!(
+            "SELECT {MEMORY_SELECT_COLUMNS} FROM agent_memories
+             WHERE title = ?1 AND status = 'active'"
+        );
+        let mut bound = vec![title.to_string()];
+        add_visible_scope(&mut sql, &mut bound, project_dir, "project_dir");
+        add_visible_scope(&mut sql, &mut bound, user_id, "user_id");
+        sql.push_str(" ORDER BY updated_at DESC LIMIT 1");
+        self.query_one(&sql, &bound)
+    }
+
+    /// Save a legacy memory or update an active exact-title match in the same
+    /// exact project/user scope.
     pub fn save_or_update_by_title(
         &self,
         memory_type: MemoryType,
@@ -231,58 +436,304 @@ impl MemoryStore {
         project_dir: Option<&str>,
         user_id: Option<&str>,
     ) -> Option<AgentMemory> {
-        let mut sql = String::from(
-            "SELECT id, memory_type, title, content, project_dir, user_id, created_at, updated_at
-             FROM agent_memories
-             WHERE title = ?1",
+        let mut sql = format!(
+            "SELECT {MEMORY_SELECT_COLUMNS} FROM agent_memories
+             WHERE title = ?1 AND status = 'active'"
         );
         let mut bound = vec![title.to_string()];
-
-        if let Some(pd) = project_dir {
-            bound.push(pd.to_string());
-            sql.push_str(&format!(" AND project_dir = ?{}", bound.len()));
-        } else {
-            sql.push_str(" AND project_dir IS NULL");
-        }
-
-        if let Some(uid) = user_id {
-            bound.push(uid.to_string());
-            sql.push_str(&format!(" AND user_id = ?{}", bound.len()));
-        } else {
-            sql.push_str(" AND user_id IS NULL");
-        }
-
+        add_exact_scope(&mut sql, &mut bound, project_dir, "project_dir");
+        add_exact_scope(&mut sql, &mut bound, user_id, "user_id");
         sql.push_str(" ORDER BY updated_at DESC LIMIT 1");
+        self.query_one(&sql, &bound)
+    }
 
-        let mut stmt = self.db.conn().prepare(&sql).ok()?;
-        let params: Vec<&dyn rusqlite::types::ToSql> = bound
-            .iter()
-            .map(|s| s as &dyn rusqlite::types::ToSql)
-            .collect();
-
+    fn query_one(&self, sql: &str, bound: &[String]) -> Option<AgentMemory> {
+        let mut stmt = self.db.conn().prepare(sql).ok()?;
+        let params = to_sql_params(bound);
         stmt.query_row(params.as_slice(), |row| Ok(row_to_memory(row)))
             .ok()
     }
 
     fn query_memories(&self, sql: &str, bound: &[String]) -> Vec<AgentMemory> {
         let mut stmt = match self.db.conn().prepare(sql) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("Memory query failed (prepare): {}", e);
+            Ok(statement) => statement,
+            Err(error) => {
+                tracing::warn!("Memory query failed (prepare): {}", error);
                 return Vec::new();
             }
         };
-        let params: Vec<&dyn rusqlite::types::ToSql> = bound
-            .iter()
-            .map(|s| s as &dyn rusqlite::types::ToSql)
-            .collect();
+        let params = to_sql_params(bound);
         let rows = match stmt.query_map(params.as_slice(), |row| Ok(row_to_memory(row))) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("Memory query failed (execute): {}", e);
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!("Memory query failed (execute): {}", error);
                 return Vec::new();
             }
         };
-        rows.filter_map(|r| r.ok()).collect()
+        rows.filter_map(|row| row.ok()).collect()
     }
+}
+
+struct NormalizedCanonicalInput<'a> {
+    memory_type: MemoryType,
+    canonical_key: &'a str,
+    title: &'a str,
+    content: &'a str,
+    project_dir: Option<&'a str>,
+    user_id: Option<&'a str>,
+    namespace: MemoryNamespace,
+    namespace_id: Option<&'a str>,
+    source: super::model::MemorySource,
+    source_session_id: Option<&'a str>,
+    source_message_id: Option<&'a str>,
+    confidence: f64,
+    sensitivity: super::model::MemorySensitivity,
+    pinned: bool,
+}
+
+impl<'a> NormalizedCanonicalInput<'a> {
+    fn new(input: &'a CanonicalMemoryInput) -> Result<Self> {
+        let canonical_key = required_trimmed("canonical_key", &input.canonical_key)?;
+        let title = required_trimmed("title", &input.title)?;
+        let content = required_trimmed("content", &input.content)?;
+        let project_dir = optional_trimmed("project_dir", input.project_dir.as_deref())?;
+        let user_id = optional_trimmed("user_id", input.user_id.as_deref())?;
+        let namespace_id = optional_trimmed("namespace_id", input.namespace_id.as_deref())?;
+        let source_session_id =
+            optional_trimmed("source_session_id", input.source_session_id.as_deref())?;
+        let source_message_id =
+            optional_trimmed("source_message_id", input.source_message_id.as_deref())?;
+        if input.namespace == MemoryNamespace::Crew && namespace_id.is_none() {
+            bail!("crew memories require namespace_id");
+        }
+        if !input.confidence.is_finite() || !(0.0..=1.0).contains(&input.confidence) {
+            bail!("memory confidence must be between 0.0 and 1.0");
+        }
+
+        Ok(Self {
+            memory_type: input.memory_type,
+            canonical_key,
+            title,
+            content,
+            project_dir,
+            user_id,
+            namespace: input.namespace,
+            namespace_id,
+            source: input.source,
+            source_session_id,
+            source_message_id,
+            confidence: input.confidence,
+            sensitivity: input.sensitivity,
+            pinned: input.pinned,
+        })
+    }
+}
+
+fn required_trimmed<'a>(field: &str, value: &'a str) -> Result<&'a str> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("memory {field} must not be empty");
+    }
+    Ok(value)
+}
+
+fn optional_trimmed<'a>(field: &str, value: Option<&'a str>) -> Result<Option<&'a str>> {
+    match value {
+        Some(value) => Ok(Some(required_trimmed(field, value)?)),
+        None => Ok(None),
+    }
+}
+
+fn validate_optional_content(field: &str, value: Option<&str>) -> Result<()> {
+    if let Some(value) = value {
+        required_trimmed(field, value)?;
+    }
+    Ok(())
+}
+
+fn canonical_matches(memory: &AgentMemory, input: &NormalizedCanonicalInput<'_>) -> bool {
+    memory.memory_type == input.memory_type
+        && memory.canonical_key.as_deref() == Some(input.canonical_key)
+        && memory.title == input.title
+        && memory.content == input.content
+        && memory.project_dir.as_deref() == input.project_dir
+        && memory.user_id.as_deref() == input.user_id
+        && memory.namespace == input.namespace
+        && memory.namespace_id.as_deref() == input.namespace_id
+        && memory.source == input.source
+        && memory.source_session_id.as_deref() == input.source_session_id
+        && memory.source_message_id.as_deref() == input.source_message_id
+        && memory.confidence == input.confidence
+        && memory.sensitivity == input.sensitivity
+        && memory.pinned == input.pinned
+}
+
+fn find_active_canonical(
+    tx: &Transaction<'_>,
+    input: &NormalizedCanonicalInput<'_>,
+) -> Result<Option<AgentMemory>> {
+    let sql = format!(
+        "SELECT {MEMORY_SELECT_COLUMNS}
+         FROM agent_memories
+         WHERE canonical_key = ?1
+           AND namespace = ?2
+           AND project_dir IS ?3
+           AND user_id IS ?4
+           AND namespace_id IS ?5
+           AND status = 'active'
+         ORDER BY updated_at DESC
+         LIMIT 1"
+    );
+    Ok(tx
+        .query_row(
+            &sql,
+            params![
+                input.canonical_key,
+                input.namespace.as_str(),
+                input.project_dir,
+                input.user_id,
+                input.namespace_id,
+            ],
+            |row| Ok(row_to_memory(row)),
+        )
+        .optional()?)
+}
+
+fn load_memory_by_id(
+    conn: &rusqlite::Connection,
+    id: &str,
+    active_only: bool,
+) -> rusqlite::Result<Option<AgentMemory>> {
+    let status = if active_only {
+        " AND status = 'active'"
+    } else {
+        ""
+    };
+    let sql = format!("SELECT {MEMORY_SELECT_COLUMNS} FROM agent_memories WHERE id = ?1{status}");
+    conn.query_row(&sql, [id], |row| Ok(row_to_memory(row)))
+        .optional()
+}
+
+fn load_memory_for_owner(
+    conn: &rusqlite::Connection,
+    id: &str,
+    user_id: Option<&str>,
+    active_only: bool,
+) -> rusqlite::Result<Option<AgentMemory>> {
+    let status = if active_only {
+        " AND status = 'active'"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT {MEMORY_SELECT_COLUMNS}
+         FROM agent_memories
+         WHERE id = ?1 AND user_id IS ?2{status}"
+    );
+    conn.query_row(&sql, params![id, user_id], |row| Ok(row_to_memory(row)))
+        .optional()
+}
+
+fn update_memory_fields(
+    tx: &Transaction<'_>,
+    id: &str,
+    title: Option<&str>,
+    content: Option<&str>,
+    owner: Option<Option<&str>>,
+) -> Result<()> {
+    if let Some(user_id) = owner {
+        tx.execute(
+            "UPDATE agent_memories
+             SET title = COALESCE(?1, title),
+                 content = COALESCE(?2, content),
+                 updated_at = datetime('now')
+             WHERE id = ?3 AND status = 'active' AND user_id IS ?4",
+            params![title, content, id, user_id],
+        )?;
+    } else {
+        tx.execute(
+            "UPDATE agent_memories
+             SET title = COALESCE(?1, title),
+                 content = COALESCE(?2, content),
+                 updated_at = datetime('now')
+             WHERE id = ?3 AND status = 'active'",
+            params![title, content, id],
+        )?;
+    }
+    Ok(())
+}
+
+fn soft_delete(tx: &Transaction<'_>, id: &str, owner: Option<Option<&str>>) -> Result<()> {
+    if let Some(user_id) = owner {
+        tx.execute(
+            "UPDATE agent_memories
+             SET status = 'deleted', updated_at = datetime('now')
+             WHERE id = ?1 AND status = 'active' AND user_id IS ?2",
+            params![id, user_id],
+        )?;
+    } else {
+        tx.execute(
+            "UPDATE agent_memories
+             SET status = 'deleted', updated_at = datetime('now')
+             WHERE id = ?1 AND status = 'active'",
+            [id],
+        )?;
+    }
+    Ok(())
+}
+
+fn write_revision(
+    tx: &Transaction<'_>,
+    memory: &AgentMemory,
+    event: MemoryRevisionEvent,
+) -> Result<()> {
+    let revision = tx.query_row(
+        "SELECT COALESCE(MAX(revision), 0) + 1
+         FROM agent_memory_revisions
+         WHERE memory_id = ?1",
+        [&memory.id],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let snapshot_json = serde_json::to_string(memory).context("encode agent memory revision")?;
+    tx.execute(
+        "INSERT INTO agent_memory_revisions
+            (id, memory_id, revision, event, snapshot_json)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            Uuid::new_v4().to_string(),
+            memory.id,
+            revision,
+            event.as_str(),
+            snapshot_json,
+        ],
+    )?;
+    Ok(())
+}
+
+fn add_visible_scope(sql: &mut String, bound: &mut Vec<String>, value: Option<&str>, column: &str) {
+    if let Some(value) = value {
+        bound.push(value.to_string());
+        sql.push_str(&format!(
+            " AND ({column} = ?{} OR {column} IS NULL)",
+            bound.len()
+        ));
+    } else {
+        sql.push_str(&format!(" AND {column} IS NULL"));
+    }
+}
+
+fn add_exact_scope(sql: &mut String, bound: &mut Vec<String>, value: Option<&str>, column: &str) {
+    if let Some(value) = value {
+        bound.push(value.to_string());
+        sql.push_str(&format!(" AND {column} = ?{}", bound.len()));
+    } else {
+        sql.push_str(&format!(" AND {column} IS NULL"));
+    }
+}
+
+fn to_sql_params(bound: &[String]) -> Vec<&dyn rusqlite::types::ToSql> {
+    bound
+        .iter()
+        .map(|value| value as &dyn rusqlite::types::ToSql)
+        .collect()
 }

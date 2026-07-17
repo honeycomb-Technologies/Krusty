@@ -1,0 +1,23 @@
+[package]
+name = "krusty-mako"
+version = "0.1.0"
+edition = "2021"
+description = "Independently supervised backend daemon for Mako"
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+dirs = "6.0"
+krusty-mako-protocol = { path = "../krusty-mako-protocol" }
+libc = "0.2"
+serde_json = "1.0"
+tokio = { version = "1.40", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.11", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

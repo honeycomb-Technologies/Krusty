@@ -1,6 +1,9 @@
 use tempfile::TempDir;
 
-use super::{MemoryStore, MemoryType};
+use super::{
+    CanonicalMemoryInput, MemoryNamespace, MemoryRevisionEvent, MemorySensitivity, MemorySource,
+    MemoryStatus, MemoryStore, MemoryType,
+};
 use crate::storage::Database;
 
 fn create_store() -> (MemoryStore, TempDir) {
@@ -32,6 +35,11 @@ fn save_and_list_memories() {
     let users = store.list_by_type(MemoryType::User, None, None);
     assert_eq!(users.len(), 1);
     assert_eq!(users[0].title, "Role");
+    assert_eq!(users[0].namespace, MemoryNamespace::Shared);
+    assert_eq!(users[0].status, MemoryStatus::Active);
+    assert_eq!(users[0].source, MemorySource::Legacy);
+    assert_eq!(users[0].confidence, 1.0);
+    assert_eq!(users[0].access_count, 0);
 }
 
 #[test]
@@ -222,4 +230,235 @@ fn save_or_update_by_title_does_not_overwrite_global_memory_for_project_scope() 
     assert_ne!(global.id, scoped.id);
     assert_eq!(store.list(None, Some("alice")).len(), 1);
     assert_eq!(store.list(Some("/proj-a"), Some("alice")).len(), 2);
+}
+
+#[test]
+fn canonical_memory_preserves_scope_provenance_and_policy_metadata() {
+    let (store, _tmp) = create_store();
+    let mut input = CanonicalMemoryInput::new(
+        MemoryType::Feedback,
+        "communication.concise",
+        "Communication preference",
+        "Be concise during operational work.",
+    );
+    input.project_dir = Some("/repo".to_string());
+    input.user_id = Some("alice".to_string());
+    input.namespace = MemoryNamespace::Mako;
+    input.namespace_id = Some("primary".to_string());
+    input.source = MemorySource::User;
+    input.source_session_id = Some("session-1".to_string());
+    input.source_message_id = Some("message-7".to_string());
+    input.confidence = 0.95;
+    input.sensitivity = MemorySensitivity::Sensitive;
+    input.pinned = true;
+
+    let memory = store.save_canonical(&input).unwrap();
+
+    assert_eq!(
+        memory.canonical_key.as_deref(),
+        Some("communication.concise")
+    );
+    assert_eq!(memory.project_dir.as_deref(), Some("/repo"));
+    assert_eq!(memory.user_id.as_deref(), Some("alice"));
+    assert_eq!(memory.namespace, MemoryNamespace::Mako);
+    assert_eq!(memory.namespace_id.as_deref(), Some("primary"));
+    assert_eq!(memory.source, MemorySource::User);
+    assert_eq!(memory.source_session_id.as_deref(), Some("session-1"));
+    assert_eq!(memory.source_message_id.as_deref(), Some("message-7"));
+    assert_eq!(memory.confidence, 0.95);
+    assert_eq!(memory.sensitivity, MemorySensitivity::Sensitive);
+    assert!(memory.pinned);
+    assert_eq!(memory.status, MemoryStatus::Active);
+
+    let revisions = store
+        .list_revisions_for_owner(&memory.id, Some("alice"))
+        .unwrap();
+    assert_eq!(revisions.len(), 1);
+    assert_eq!(revisions[0].event, MemoryRevisionEvent::Created);
+    assert_eq!(revisions[0].snapshot, memory);
+}
+
+#[test]
+fn canonical_save_supersedes_the_same_active_key_transactionally() {
+    let (store, _tmp) = create_store();
+    let mut first_input = CanonicalMemoryInput::new(
+        MemoryType::Project,
+        "architecture.auth",
+        "Auth boundary",
+        "Use the original boundary.",
+    );
+    first_input.project_dir = Some("/repo".to_string());
+    first_input.user_id = Some("alice".to_string());
+    first_input.source_session_id = Some("session-1".to_string());
+    let first = store.save_canonical(&first_input).unwrap();
+
+    let mut replacement_input = first_input.clone();
+    replacement_input.content = "Use the revised boundary.".to_string();
+    replacement_input.source_session_id = Some("session-2".to_string());
+    let replacement = store.save_canonical(&replacement_input).unwrap();
+
+    assert_ne!(first.id, replacement.id);
+    assert_eq!(
+        replacement.supersedes_id.as_deref(),
+        Some(first.id.as_str())
+    );
+    assert!(store.get(&first.id).unwrap().is_none());
+    assert_eq!(
+        store.get(&replacement.id).unwrap(),
+        Some(replacement.clone())
+    );
+
+    let visible = store.list(Some("/repo"), Some("alice"));
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].content, "Use the revised boundary.");
+
+    let first_revisions = store
+        .list_revisions_for_owner(&first.id, Some("alice"))
+        .unwrap();
+    assert_eq!(first_revisions.len(), 2);
+    assert_eq!(first_revisions[0].event, MemoryRevisionEvent::Created);
+    assert_eq!(first_revisions[1].event, MemoryRevisionEvent::Superseded);
+    assert_eq!(first_revisions[1].snapshot.status, MemoryStatus::Superseded);
+    let replacement_revisions = store
+        .list_revisions_for_owner(&replacement.id, Some("alice"))
+        .unwrap();
+    assert_eq!(replacement_revisions.len(), 1);
+    assert_eq!(replacement_revisions[0].event, MemoryRevisionEvent::Created);
+}
+
+#[test]
+fn exact_canonical_replay_is_idempotent() {
+    let (store, _tmp) = create_store();
+    let input =
+        CanonicalMemoryInput::new(MemoryType::User, "operator.name", "Preferred name", "Alice");
+
+    let first = store.save_canonical(&input).unwrap();
+    let replay = store.save_canonical(&input).unwrap();
+
+    assert_eq!(first.id, replay.id);
+    assert_eq!(store.list(None, None).len(), 1);
+    assert_eq!(
+        store
+            .list_revisions_for_owner(&first.id, None)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn canonical_keys_are_isolated_by_owner_and_crew_namespace() {
+    let (store, _tmp) = create_store();
+    let mut alice = CanonicalMemoryInput::new(
+        MemoryType::Feedback,
+        "review.style",
+        "Review style",
+        "Alice prefers evidence first.",
+    );
+    alice.user_id = Some("alice".to_string());
+    alice.namespace = MemoryNamespace::Crew;
+    alice.namespace_id = Some("reviewer".to_string());
+    let mut builder = alice.clone();
+    builder.namespace_id = Some("builder".to_string());
+    builder.content = "Builder should be implementation first.".to_string();
+    let mut bob = alice.clone();
+    bob.user_id = Some("bob".to_string());
+    bob.content = "Bob prefers compact reviews.".to_string();
+
+    let alice_reviewer = store.save_canonical(&alice).unwrap();
+    let alice_builder = store.save_canonical(&builder).unwrap();
+    let bob_reviewer = store.save_canonical(&bob).unwrap();
+
+    assert_ne!(alice_reviewer.id, alice_builder.id);
+    assert_ne!(alice_reviewer.id, bob_reviewer.id);
+    assert_eq!(store.list(None, Some("alice")).len(), 2);
+    assert_eq!(store.list(None, Some("bob")).len(), 1);
+}
+
+#[test]
+fn owner_scoped_mutations_do_not_reveal_or_modify_other_users() {
+    let (store, _tmp) = create_store();
+    let memory = store
+        .save(
+            MemoryType::User,
+            "Preferred language",
+            "Rust",
+            None,
+            Some("alice"),
+        )
+        .unwrap();
+
+    assert!(store
+        .get_for_owner(&memory.id, Some("bob"))
+        .unwrap()
+        .is_none());
+    assert!(store
+        .update_for_owner(
+            &memory.id,
+            Some("bob"),
+            Some("Wrong owner"),
+            Some("TypeScript")
+        )
+        .unwrap()
+        .is_none());
+    assert!(!store.delete_for_owner(&memory.id, Some("bob")).unwrap());
+
+    let updated = store
+        .update_for_owner(
+            &memory.id,
+            Some("alice"),
+            Some("Preferred systems language"),
+            Some("Rust"),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.title, "Preferred systems language");
+
+    let accessed = store
+        .record_access_for_owner(&memory.id, Some("alice"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(accessed.access_count, 1);
+    assert!(accessed.last_accessed_at.is_some());
+
+    assert!(store.delete_for_owner(&memory.id, Some("alice")).unwrap());
+    assert!(store.get(&memory.id).unwrap().is_none());
+    assert!(store.list(None, Some("alice")).is_empty());
+
+    let revisions = store
+        .list_revisions_for_owner(&memory.id, Some("alice"))
+        .unwrap();
+    assert_eq!(
+        revisions
+            .iter()
+            .map(|revision| revision.event)
+            .collect::<Vec<_>>(),
+        vec![
+            MemoryRevisionEvent::Created,
+            MemoryRevisionEvent::Updated,
+            MemoryRevisionEvent::Deleted,
+        ]
+    );
+    assert_eq!(
+        revisions.last().unwrap().snapshot.status,
+        MemoryStatus::Deleted
+    );
+}
+
+#[test]
+fn canonical_validation_rejects_ambiguous_crew_and_confidence() {
+    let (store, _tmp) = create_store();
+    let mut crew = CanonicalMemoryInput::new(
+        MemoryType::Project,
+        "crew.focus",
+        "Crew focus",
+        "Review persistence.",
+    );
+    crew.namespace = MemoryNamespace::Crew;
+    assert!(store.save_canonical(&crew).is_err());
+
+    crew.namespace_id = Some("reviewer".to_string());
+    crew.confidence = 1.1;
+    assert!(store.save_canonical(&crew).is_err());
+    assert!(store.list(None, None).is_empty());
 }

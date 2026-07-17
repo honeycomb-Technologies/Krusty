@@ -11,7 +11,9 @@ use krusty_core::storage::{
     write_mako_crew_document, write_mako_home_document, ApnsDeviceStore, AutonomousTaskStore,
     Database, DelegatedRunStore, MakoChannelBinding, MakoChannelKind, MakoCrewDocumentKind,
     MakoCrewRuntimeSummary, MakoHomeDocument, MakoHomeDocumentKind, MakoHomeProfile,
-    MakoRuntimeState, SessionInfo, SessionType,
+    MakoCrewProfileDocumentKind, MakoProfileDocument, MakoProfileDocumentKind, MakoProfileOwner,
+    MakoProfileSnapshot, MakoProfileStore, MakoProfileStoreError, MakoRuntimeState, SessionInfo,
+    SessionType,
 };
 
 use super::super::session_access::current_user_id;
@@ -26,6 +28,8 @@ const MAKO_HOME_PREVIEW_CHARS: usize = 160;
 #[derive(Debug, Deserialize)]
 pub(super) struct DocumentWriteRequest {
     pub(super) content: String,
+    #[serde(default)]
+    pub(super) expected_revision: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,8 +67,11 @@ pub(super) struct MakoChannelsResponse {
 
 #[derive(Debug, Serialize)]
 pub(super) struct MakoHomeResponse {
+    pub(super) profile_id: Option<String>,
+    pub(super) revision: Option<i64>,
     pub(super) soul: Option<MakoHomeDocumentSummary>,
     pub(super) identity: Option<MakoHomeDocumentSummary>,
+    pub(super) user: Option<MakoHomeDocumentSummary>,
     pub(super) heartbeat: Option<MakoHomeDocumentSummary>,
     pub(super) memory: Option<MakoHomeDocumentSummary>,
     pub(super) channels: Option<MakoHomeDocumentSummary>,
@@ -103,44 +110,72 @@ pub(super) struct MakoCrewRuntimeMemberSummary {
 }
 
 pub(super) async fn home(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     user: Option<CurrentUser>,
 ) -> Result<Json<MakoHomeResponse>, AppError> {
-    Ok(Json(build_mako_home_response_from_dir(
-        &mako_home_dir_for_user(user.as_ref()),
-    )))
+    let profile = load_or_bootstrap_profile(&state, user.as_ref())?;
+    Ok(Json(build_mako_home_response_from_profile(&profile)))
 }
 
 pub(super) async fn bootstrap_home(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     user: Option<CurrentUser>,
 ) -> Result<Json<MakoBootstrapResponse>, AppError> {
-    Ok(Json(build_mako_bootstrap_response_from_dir(
-        &mako_home_dir_for_user(user.as_ref()),
-    )?))
+    let owner = profile_owner(user.as_ref())?;
+    let store = MakoProfileStore::new(Database::new(&state.db_path)?);
+    if owner.is_local() {
+        store
+            .import_local_legacy_home(&owner, &krusty_core::paths::mako_dir())
+            .map_err(map_profile_error)?;
+    }
+    let merged = store
+        .bootstrap_defaults(&owner)
+        .map_err(map_profile_error)?;
+    let mut created_files = merged
+        .inserted_documents
+        .iter()
+        .map(|kind| kind.preferred_file_name().to_string())
+        .collect::<Vec<_>>();
+    created_files.extend(merged.inserted_crew_documents.iter().map(|(slug, kind)| {
+        format!("crew/{slug}/{}", kind.preferred_file_name())
+    }));
+    Ok(Json(MakoBootstrapResponse {
+        ok: true,
+        created_files,
+        home: build_mako_home_response_from_profile(&merged.snapshot),
+    }))
 }
 
 pub(super) async fn update_home_document(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     user: Option<CurrentUser>,
     Path(kind): Path<String>,
     Json(req): Json<DocumentWriteRequest>,
 ) -> Result<Json<MakoHomeResponse>, AppError> {
-    let kind = MakoHomeDocumentKind::parse(&kind)
-        .ok_or_else(|| AppError::BadRequest("invalid Mako home document kind".to_string()))?;
+    let kind = MakoProfileDocumentKind::parse(&kind).ok_or_else(|| {
+        AppError::BadRequest(
+            "invalid Mako profile document kind; memory is managed by the memory API".to_string(),
+        )
+    })?;
     let content = trimmed_nonempty(Some(req.content.as_str()))
         .ok_or_else(|| AppError::BadRequest("content must not be empty".to_string()))?;
-    let mako_home = mako_home_dir_for_user(user.as_ref());
+    let owner = profile_owner(user.as_ref())?;
+    let store = MakoProfileStore::new(Database::new(&state.db_path)?);
+    let snapshot = bootstrap_profile(&store, &owner)?;
+    let updated = store
+        .update_document(
+            &owner,
+            kind,
+            content,
+            req.expected_revision.unwrap_or(snapshot.revision),
+        )
+        .map_err(map_profile_error)?;
 
-    write_mako_home_document(&mako_home, kind, content).map_err(|error| {
-        AppError::Internal(format!("Failed to update Mako home document: {}", error))
-    })?;
-
-    Ok(Json(build_mako_home_response_from_dir(&mako_home)))
+    Ok(Json(build_mako_home_response_from_profile(&updated)))
 }
 
 pub(super) async fn update_crew_document(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     user: Option<CurrentUser>,
     Path((slug, kind)): Path<(String, String)>,
     Json(req): Json<DocumentWriteRequest>,
@@ -148,17 +183,28 @@ pub(super) async fn update_crew_document(
     if !is_valid_crew_slug(&slug) {
         return Err(AppError::BadRequest("invalid crew slug".to_string()));
     }
-    let kind = MakoCrewDocumentKind::parse(&kind)
-        .ok_or_else(|| AppError::BadRequest("invalid Mako crew document kind".to_string()))?;
+    let kind = MakoCrewProfileDocumentKind::parse(&kind).ok_or_else(|| {
+        AppError::BadRequest(
+            "invalid Mako crew profile kind; crew memory is canonical memory, not identity"
+                .to_string(),
+        )
+    })?;
     let content = trimmed_nonempty(Some(req.content.as_str()))
         .ok_or_else(|| AppError::BadRequest("content must not be empty".to_string()))?;
-    let mako_home = mako_home_dir_for_user(user.as_ref());
+    let owner = profile_owner(user.as_ref())?;
+    let store = MakoProfileStore::new(Database::new(&state.db_path)?);
+    let snapshot = bootstrap_profile(&store, &owner)?;
+    let updated = store
+        .update_crew_document(
+            &owner,
+            &slug,
+            kind,
+            content,
+            req.expected_revision.unwrap_or(snapshot.revision),
+        )
+        .map_err(map_profile_error)?;
 
-    write_mako_crew_document(&mako_home, &slug, kind, content).map_err(|error| {
-        AppError::Internal(format!("Failed to update Mako crew document: {}", error))
-    })?;
-
-    Ok(Json(build_mako_home_response_from_dir(&mako_home)))
+    Ok(Json(build_mako_home_response_from_profile(&updated)))
 }
 
 pub(super) async fn crew(
@@ -183,8 +229,9 @@ pub(super) async fn crew(
     let task_store = AutonomousTaskStore::new(Database::new(&state.db_path)?);
     let delegated_store = DelegatedRunStore::new(Database::new(&state.db_path)?);
 
-    Ok(Json(build_mako_crew_response_from_dir_and_sessions(
-        &mako_home_dir_for_user(user.as_ref()),
+    let profile = load_or_bootstrap_profile(&state, user.as_ref())?;
+    Ok(Json(build_mako_crew_response_from_profile_and_sessions(
+        &profile,
         &sessions,
         &runtime_states,
         &task_store,
@@ -196,16 +243,145 @@ pub(super) async fn channels(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
 ) -> Result<Json<MakoChannelsResponse>, AppError> {
-    let mako_home = mako_home_dir_for_user(user.as_ref());
+    let profile = load_or_bootstrap_profile(&state, user.as_ref())?;
     let db = Database::new(&state.db_path)?;
     let apns_store = ApnsDeviceStore::new(&db);
     let apns_device_count = apns_store.count_for_user(current_user_id(user.as_ref()))?;
 
-    Ok(Json(build_mako_channels_response_from_dir(
+    Ok(Json(build_mako_channels_response_from_profile(
         &state,
-        &mako_home,
+        &profile,
         apns_device_count,
     )))
+}
+
+fn profile_owner(user: Option<&CurrentUser>) -> Result<MakoProfileOwner, AppError> {
+    MakoProfileOwner::from_user_id(current_user_id(user))
+        .map_err(|error| AppError::BadRequest(error.to_string()))
+}
+
+fn bootstrap_profile(
+    store: &MakoProfileStore,
+    owner: &MakoProfileOwner,
+) -> Result<MakoProfileSnapshot, AppError> {
+    if owner.is_local() {
+        store
+            .import_local_legacy_home(owner, &krusty_core::paths::mako_dir())
+            .map_err(map_profile_error)?;
+    }
+    store
+        .bootstrap_defaults(owner)
+        .map(|result| result.snapshot)
+        .map_err(map_profile_error)
+}
+
+fn load_or_bootstrap_profile(
+    state: &AppState,
+    user: Option<&CurrentUser>,
+) -> Result<MakoProfileSnapshot, AppError> {
+    let owner = profile_owner(user)?;
+    let store = MakoProfileStore::new(Database::new(&state.db_path)?);
+    bootstrap_profile(&store, &owner)
+}
+
+fn map_profile_error(error: MakoProfileStoreError) -> AppError {
+    let message = error.to_string();
+    match error {
+        MakoProfileStoreError::RevisionConflict { .. } => AppError::Conflict(message),
+        MakoProfileStoreError::EmptyContent
+        | MakoProfileStoreError::InvalidCrewSlug(_)
+        | MakoProfileStoreError::InvalidOwner(_) => AppError::BadRequest(message),
+        _ => AppError::Internal(message),
+    }
+}
+
+fn summarize_profile_document<K>(
+    document: Option<MakoProfileDocument<K>>,
+    file_name: &str,
+) -> Option<MakoHomeDocumentSummary> {
+    document.map(|document| MakoHomeDocumentSummary {
+        preview: truncate_preview(&document.content, MAKO_HOME_PREVIEW_CHARS),
+        file_name: file_name.to_string(),
+        content: document.content,
+    })
+}
+
+fn build_mako_home_response_from_profile(profile: &MakoProfileSnapshot) -> MakoHomeResponse {
+    MakoHomeResponse {
+        profile_id: Some(profile.profile_id.clone()),
+        revision: Some(profile.revision),
+        soul: summarize_profile_document(
+            profile.soul.clone(),
+            MakoProfileDocumentKind::Soul.preferred_file_name(),
+        ),
+        identity: summarize_profile_document(
+            profile.identity.clone(),
+            MakoProfileDocumentKind::Identity.preferred_file_name(),
+        ),
+        user: summarize_profile_document(
+            profile.user.clone(),
+            MakoProfileDocumentKind::User.preferred_file_name(),
+        ),
+        heartbeat: summarize_profile_document(
+            profile.heartbeat.clone(),
+            MakoProfileDocumentKind::Heartbeat.preferred_file_name(),
+        ),
+        memory: None,
+        channels: summarize_profile_document(
+            profile.channels.clone(),
+            MakoProfileDocumentKind::Channels.preferred_file_name(),
+        ),
+        crew_count: profile.crew.len(),
+        crew: profile
+            .crew
+            .iter()
+            .map(|member| MakoCrewMemberSummary {
+                slug: member.slug.clone(),
+                identity: summarize_profile_document(
+                    member.identity.clone(),
+                    MakoCrewProfileDocumentKind::Identity.preferred_file_name(),
+                ),
+                soul: summarize_profile_document(
+                    member.soul.clone(),
+                    MakoCrewProfileDocumentKind::Soul.preferred_file_name(),
+                ),
+                memory: None,
+            })
+            .collect(),
+    }
+}
+
+fn legacy_profile_from_snapshot(profile: &MakoProfileSnapshot) -> MakoHomeProfile {
+    let document = |value: &Option<MakoProfileDocument<MakoProfileDocumentKind>>, file_name: &str| {
+        value.as_ref().map(|document| MakoHomeDocument {
+            file_name: file_name.to_string(),
+            content: document.content.clone(),
+        })
+    };
+    MakoHomeProfile {
+        soul: document(&profile.soul, krusty_core::paths::MAKO_SOUL_FILE),
+        identity: document(&profile.identity, krusty_core::paths::MAKO_IDENTITY_FILE),
+        user: document(&profile.user, krusty_core::paths::MAKO_USER_FILE),
+        heartbeat: document(&profile.heartbeat, krusty_core::paths::MAKO_HEARTBEAT_FILE),
+        memory: None,
+        channels: document(&profile.channels, krusty_core::paths::MAKO_CHANNELS_FILE),
+        crew: profile
+            .crew
+            .iter()
+            .map(|member| krusty_core::storage::MakoCrewProfile {
+                slug: member.slug.clone(),
+                identity: member.identity.as_ref().map(|document| MakoHomeDocument {
+                    file_name: "IDENTITY.md".to_string(),
+                    content: document.content.clone(),
+                }),
+                soul: member.soul.as_ref().map(|document| MakoHomeDocument {
+                    file_name: "SOUL.md".to_string(),
+                    content: document.content.clone(),
+                }),
+                memory: None,
+            })
+            .collect(),
+    }
 }
 
 pub(super) fn build_mako_bootstrap_response_from_dir(
@@ -224,8 +400,11 @@ pub(super) fn build_mako_home_response_from_dir(mako_home: &std::path::Path) -> 
     let profile = MakoHomeProfile::load_from(mako_home);
 
     MakoHomeResponse {
+        profile_id: None,
+        revision: None,
         soul: summarize_mako_home_document(profile.soul),
         identity: summarize_mako_home_document(profile.identity),
+        user: summarize_mako_home_document(profile.user),
         heartbeat: summarize_mako_home_document(profile.heartbeat),
         memory: summarize_mako_home_document(profile.memory),
         channels: summarize_mako_home_document(profile.channels),
@@ -251,13 +430,45 @@ pub(super) fn build_mako_crew_response_from_dir_and_sessions(
     delegated_store: &DelegatedRunStore,
 ) -> Result<MakoCrewResponse, AppError> {
     let profile = MakoHomeProfile::load_from(mako_home);
+    build_mako_crew_response_from_loaded_profile(
+        &profile,
+        sessions,
+        runtime_states,
+        task_store,
+        delegated_store,
+    )
+}
+
+fn build_mako_crew_response_from_profile_and_sessions(
+    profile: &MakoProfileSnapshot,
+    sessions: &[SessionInfo],
+    runtime_states: &std::collections::HashMap<String, MakoRuntimeState>,
+    task_store: &AutonomousTaskStore,
+    delegated_store: &DelegatedRunStore,
+) -> Result<MakoCrewResponse, AppError> {
+    build_mako_crew_response_from_loaded_profile(
+        &legacy_profile_from_snapshot(profile),
+        sessions,
+        runtime_states,
+        task_store,
+        delegated_store,
+    )
+}
+
+fn build_mako_crew_response_from_loaded_profile(
+    profile: &MakoHomeProfile,
+    sessions: &[SessionInfo],
+    runtime_states: &std::collections::HashMap<String, MakoRuntimeState>,
+    task_store: &AutonomousTaskStore,
+    delegated_store: &DelegatedRunStore,
+) -> Result<MakoCrewResponse, AppError> {
     let profile_map = profile
         .crew
         .iter()
         .map(|member| (member.slug.as_str(), member))
         .collect::<BTreeMap<_, _>>();
     let runtime = summarize_crew_runtime(
-        &profile,
+        profile,
         sessions,
         runtime_states,
         task_store,
@@ -282,10 +493,30 @@ pub(super) fn build_mako_channels_response_from_dir(
     apns_device_count: usize,
 ) -> MakoChannelsResponse {
     let profile = MakoHomeProfile::load_from(mako_home);
+    build_mako_channels_response_from_loaded_profile(state, &profile, apns_device_count)
+}
+
+fn build_mako_channels_response_from_profile(
+    state: &AppState,
+    profile: &MakoProfileSnapshot,
+    apns_device_count: usize,
+) -> MakoChannelsResponse {
+    build_mako_channels_response_from_loaded_profile(
+        state,
+        &legacy_profile_from_snapshot(profile),
+        apns_device_count,
+    )
+}
+
+fn build_mako_channels_response_from_loaded_profile(
+    state: &AppState,
+    profile: &MakoHomeProfile,
+    apns_device_count: usize,
+) -> MakoChannelsResponse {
     let apns_configured = state.apns_service.is_some();
 
     MakoChannelsResponse {
-        items: summarize_channel_bindings(&profile)
+        items: summarize_channel_bindings(profile)
             .into_iter()
             .map(|binding| summarize_mako_channel(binding, apns_configured, apns_device_count))
             .collect(),

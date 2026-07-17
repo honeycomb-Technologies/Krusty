@@ -1,0 +1,318 @@
+use std::fs;
+
+use tempfile::TempDir;
+
+use crate::paths;
+use crate::storage::Database;
+
+use super::{
+    default_profile_seed, MakoCrewProfileDocumentKind, MakoCrewProfileSeed,
+    MakoProfileDocumentKind, MakoProfileOwner, MakoProfileSeed, MakoProfileStore,
+    MakoProfileStoreError,
+};
+
+const PROFILE_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS mako_profiles (
+    id TEXT PRIMARY KEY,
+    user_id TEXT,
+    revision INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mako_profiles_user
+    ON mako_profiles(user_id) WHERE user_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS mako_profile_documents (
+    profile_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('soul', 'identity', 'user', 'heartbeat', 'channels')),
+    content TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY(profile_id, kind),
+    FOREIGN KEY(profile_id) REFERENCES mako_profiles(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS mako_crew_profiles (
+    profile_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY(profile_id, slug),
+    FOREIGN KEY(profile_id) REFERENCES mako_profiles(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS mako_crew_documents (
+    profile_id TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('identity', 'soul')),
+    content TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY(profile_id, slug, kind),
+    FOREIGN KEY(profile_id, slug) REFERENCES mako_crew_profiles(profile_id, slug) ON DELETE CASCADE
+);
+"#;
+
+fn test_store() -> (TempDir, MakoProfileStore) {
+    let temp = TempDir::new().unwrap();
+    let db = Database::new(&temp.path().join("krusty.db")).unwrap();
+    db.conn().execute_batch(PROFILE_SCHEMA).unwrap();
+    (temp, MakoProfileStore::new(db))
+}
+
+#[test]
+fn profile_owner_ids_are_deterministic_and_workspace_independent() {
+    let alice_one = MakoProfileOwner::user("alice").unwrap();
+    let alice_two = MakoProfileOwner::from_user_id(Some("alice")).unwrap();
+    let bob = MakoProfileOwner::user("bob").unwrap();
+
+    assert_eq!(MakoProfileOwner::local().profile_id(), "local");
+    assert_eq!(alice_one.profile_id(), alice_two.profile_id());
+    assert_ne!(alice_one.profile_id(), bob.profile_id());
+    assert!(!alice_one.profile_id().contains("alice"));
+}
+
+#[test]
+fn get_or_create_is_idempotent_and_isolates_users() {
+    let (_temp, store) = test_store();
+    let alice = MakoProfileOwner::user("alice").unwrap();
+    let bob = MakoProfileOwner::user("bob").unwrap();
+
+    let first = store.get_or_create(&alice).unwrap();
+    let second = store.get_or_create(&alice).unwrap();
+    let bob_snapshot = store.get_or_create(&bob).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.revision, 0);
+    assert_eq!(first.user_id.as_deref(), Some("alice"));
+    assert_eq!(bob_snapshot.user_id.as_deref(), Some("bob"));
+    assert_ne!(first.profile_id, bob_snapshot.profile_id);
+}
+
+#[test]
+fn load_rejects_a_stored_owner_mismatch() {
+    let temp = TempDir::new().unwrap();
+    let db = Database::new(&temp.path().join("krusty.db")).unwrap();
+    db.conn().execute_batch(PROFILE_SCHEMA).unwrap();
+    db.conn()
+        .execute(
+            "INSERT INTO mako_profiles (id, user_id) VALUES ('local', 'unexpected-user')",
+            [],
+        )
+        .unwrap();
+    let store = MakoProfileStore::new(db);
+
+    let error = store.load(&MakoProfileOwner::local()).unwrap_err();
+
+    assert!(matches!(
+        error,
+        MakoProfileStoreError::OwnerCollision { profile_id } if profile_id == "local"
+    ));
+}
+
+#[test]
+fn document_updates_use_optimistic_profile_revisions() {
+    let (_temp, store) = test_store();
+    let owner = MakoProfileOwner::user("alice").unwrap();
+    let initial = store.get_or_create(&owner).unwrap();
+
+    let updated = store
+        .update_document(
+            &owner,
+            MakoProfileDocumentKind::Soul,
+            "  Stay curious.  ",
+            initial.revision,
+        )
+        .unwrap();
+    assert_eq!(updated.revision, 1);
+    assert_eq!(updated.soul.unwrap().content, "Stay curious.");
+
+    let error = store
+        .update_document(
+            &owner,
+            MakoProfileDocumentKind::Identity,
+            "Name: stale",
+            initial.revision,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        MakoProfileStoreError::RevisionConflict {
+            expected: 0,
+            actual: 1
+        }
+    ));
+}
+
+#[test]
+fn crew_updates_advance_both_profile_and_member_revision() {
+    let (_temp, store) = test_store();
+    let owner = MakoProfileOwner::local();
+    let initial = store.get_or_create(&owner).unwrap();
+
+    let first = store
+        .update_crew_document(
+            &owner,
+            "reviewer",
+            MakoCrewProfileDocumentKind::Identity,
+            "Name: Reef",
+            initial.revision,
+        )
+        .unwrap();
+    let reviewer = first.crew_member("reviewer").unwrap();
+    assert_eq!(first.revision, 1);
+    assert_eq!(reviewer.revision, 1);
+    assert_eq!(reviewer.identity.as_ref().unwrap().content, "Name: Reef");
+
+    let second = store
+        .update_crew_document(
+            &owner,
+            "reviewer",
+            MakoCrewProfileDocumentKind::Soul,
+            "Evidence first.",
+            first.revision,
+        )
+        .unwrap();
+    assert_eq!(second.revision, 2);
+    assert_eq!(second.crew_member("reviewer").unwrap().revision, 2);
+}
+
+#[test]
+fn merge_missing_never_overwrites_and_replay_is_revision_stable() {
+    let (_temp, store) = test_store();
+    let owner = MakoProfileOwner::local();
+    let seed = MakoProfileSeed {
+        documents: vec![
+            (MakoProfileDocumentKind::Soul, "Original soul".to_string()),
+            (MakoProfileDocumentKind::User, "Original user".to_string()),
+        ],
+        crew: vec![MakoCrewProfileSeed {
+            slug: "builder".to_string(),
+            documents: vec![(
+                MakoCrewProfileDocumentKind::Identity,
+                "Original builder".to_string(),
+            )],
+        }],
+    };
+
+    let first = store.merge_missing(&owner, &seed).unwrap();
+    assert_eq!(first.snapshot.revision, 1);
+    assert_eq!(first.inserted_documents.len(), 2);
+    assert_eq!(first.inserted_crew_documents.len(), 1);
+
+    let replay = store.merge_missing(&owner, &seed).unwrap();
+    assert_eq!(replay.snapshot.revision, 1);
+    assert!(replay.inserted_documents.is_empty());
+    assert!(replay.inserted_crew_documents.is_empty());
+
+    let edited = store
+        .update_document(
+            &owner,
+            MakoProfileDocumentKind::Soul,
+            "User-edited soul",
+            replay.snapshot.revision,
+        )
+        .unwrap();
+    let replay_after_edit = store.merge_missing(&owner, &seed).unwrap();
+    assert_eq!(replay_after_edit.snapshot.revision, edited.revision);
+    assert_eq!(
+        replay_after_edit.snapshot.soul.unwrap().content,
+        "User-edited soul"
+    );
+}
+
+#[test]
+fn defaults_include_user_and_exclude_all_memory_documents() {
+    let (_temp, store) = test_store();
+    let owner = MakoProfileOwner::local();
+
+    let result = store.bootstrap_defaults(&owner).unwrap();
+
+    assert!(result.snapshot.soul.is_some());
+    assert!(result.snapshot.identity.is_some());
+    assert!(result.snapshot.user.is_some());
+    assert!(result.snapshot.heartbeat.is_some());
+    assert!(result.snapshot.channels.is_some());
+    assert_eq!(result.snapshot.crew.len(), 3);
+    assert!(result
+        .snapshot
+        .crew
+        .iter()
+        .all(|member| member.identity.is_some() && member.soul.is_some()));
+}
+
+#[test]
+fn default_seed_keeps_personality_human_without_claiming_false_familiarity() {
+    let seed = default_profile_seed();
+    let soul = seed
+        .documents
+        .iter()
+        .find(|(kind, _)| *kind == MakoProfileDocumentKind::Soul)
+        .map(|(_, content)| content.as_str())
+        .unwrap();
+    let user = seed
+        .documents
+        .iter()
+        .find(|(kind, _)| *kind == MakoProfileDocumentKind::User)
+        .map(|(_, content)| content.as_str())
+        .unwrap();
+
+    assert!(soul.contains("warm, curious, and candid"));
+    assert!(soul.contains("never emotionally flat"));
+    assert!(soul.contains("never fake familiarity"));
+    assert!(soul.contains("never fake familiarity, manipulate, flatter, or invent memory"));
+    assert!(user.contains("user-authored"));
+    assert!(user.contains("Do not store secrets"));
+    assert!(user.contains("present guesses as facts"));
+}
+
+#[test]
+fn local_legacy_import_is_idempotent_and_excludes_memory() {
+    let (temp, store) = test_store();
+    let legacy_home = temp.path().join("legacy-mako");
+    fs::create_dir_all(legacy_home.join("crew").join("researcher")).unwrap();
+    fs::write(legacy_home.join(paths::MAKO_SOUL_FILE), "Legacy soul").unwrap();
+    fs::write(legacy_home.join(paths::MAKO_USER_FILE), "Legacy user").unwrap();
+    fs::write(legacy_home.join(paths::MAKO_MEMORY_FILE), "Do not activate").unwrap();
+    fs::write(
+        legacy_home.join("crew").join("researcher").join("SOUL.md"),
+        "Research deeply",
+    )
+    .unwrap();
+    fs::write(
+        legacy_home
+            .join("crew")
+            .join("researcher")
+            .join("MEMORY.md"),
+        "Do not activate this either",
+    )
+    .unwrap();
+    let owner = MakoProfileOwner::local();
+
+    let first = store
+        .import_local_legacy_home(&owner, &legacy_home)
+        .unwrap();
+    assert!(first.excluded_memory);
+    assert_eq!(first.excluded_crew_memory_count, 1);
+    assert_eq!(first.merge.snapshot.soul.unwrap().content, "Legacy soul");
+    assert_eq!(first.merge.snapshot.user.unwrap().content, "Legacy user");
+    assert_eq!(first.merge.snapshot.revision, 1);
+
+    let replay = store
+        .import_local_legacy_home(&owner, &legacy_home)
+        .unwrap();
+    assert_eq!(replay.merge.snapshot.revision, 1);
+    assert!(replay.merge.inserted_documents.is_empty());
+    assert!(replay.merge.inserted_crew_documents.is_empty());
+}
+
+#[test]
+fn legacy_import_rejects_authenticated_profile_targets() {
+    let (temp, store) = test_store();
+    let owner = MakoProfileOwner::user("alice").unwrap();
+
+    let error = store
+        .import_local_legacy_home(&owner, temp.path())
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        MakoProfileStoreError::LegacyImportRequiresLocalOwner
+    ));
+}
