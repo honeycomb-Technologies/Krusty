@@ -4,12 +4,13 @@ use agent_client_protocol::{
     Agent, InitializeRequest, LoadSessionRequest, NewSessionRequest, ProtocolVersion,
 };
 use tempfile::tempdir;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 
 use super::{negotiate_protocol_version, KrustyAgent};
 use crate::acp::processor::PromptProcessor;
 use crate::acp::session::SessionManager;
 use crate::agent::loop_events::LoopStopReason;
+use crate::ai::providers::ProviderId;
 use crate::storage::{
     Database, PartialAssistantState, RecoveryDecision, RecoveryStatus,
     SessionManager as StorageSessionManager, SessionRecoveryState,
@@ -38,7 +39,9 @@ async fn test_agent_creation() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_new_session() -> anyhow::Result<()> {
-    let agent = KrustyAgent::new();
+    let dir = tempdir()?;
+    let db = Database::new(&dir.path().join("test.db"))?;
+    let agent = agent_with_storage(Arc::new(Mutex::new(StorageSessionManager::new(db))));
 
     let request = NewSessionRequest::new("/tmp");
     let response = agent.new_session(request).await?;
@@ -100,9 +103,79 @@ async fn load_session_restores_recovery_only_storage_session() -> anyhow::Result
     }
 
     let agent = agent_with_storage(storage);
+    let (notification_tx, _notification_rx) = mpsc::channel(8);
+    agent.set_notification_channel(notification_tx).await;
     let request = LoadSessionRequest::new(storage_session_id.clone(), "/tmp");
     agent.load_session(request).await?;
 
     assert_eq!(agent.sessions().session_count(), 1);
+    assert!(agent
+        .sessions()
+        .has_session(&agent_client_protocol::SessionId::from(storage_session_id)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_session_rejects_unknown_id_without_creating_replacement() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let db = Database::new(&dir.path().join("test.db"))?;
+    let storage = Arc::new(Mutex::new(StorageSessionManager::new(db)));
+    let agent = agent_with_storage(storage);
+    let (notification_tx, _notification_rx) = mpsc::channel(8);
+    agent.set_notification_channel(notification_tx).await;
+
+    let result = agent
+        .load_session(LoadSessionRequest::new("does-not-exist", "/tmp"))
+        .await;
+
+    assert!(result.is_err());
+    assert_eq!(agent.sessions().session_count(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn model_selection_is_isolated_per_acp_session() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let db = Database::new(&dir.path().join("test.db"))?;
+    let agent = agent_with_storage(Arc::new(Mutex::new(StorageSessionManager::new(db))));
+    *agent.available_models.write().await = vec![
+        (
+            "minimax:model-a".to_string(),
+            ProviderId::MiniMax,
+            "model-a".to_string(),
+            "test-key-a".to_string(),
+            "Model A".to_string(),
+        ),
+        (
+            "minimax:model-b".to_string(),
+            ProviderId::MiniMax,
+            "model-b".to_string(),
+            "test-key-b".to_string(),
+            "Model B".to_string(),
+        ),
+    ];
+    let first = agent.sessions().create_session(Some("/tmp".into()), None);
+    let second = agent.sessions().create_session(Some("/tmp".into()), None);
+
+    agent
+        .set_model_for_session(&first, "minimax:model-a", false)
+        .await?;
+    agent
+        .set_model_for_session(&second, "minimax:model-b", false)
+        .await?;
+
+    assert_eq!(
+        first.selected_model().await.expect("first model").model_id,
+        "model-a"
+    );
+    assert_eq!(
+        second
+            .selected_model()
+            .await
+            .expect("second model")
+            .model_id,
+        "model-b"
+    );
+    assert!(agent.current_model_id().await.is_none());
     Ok(())
 }

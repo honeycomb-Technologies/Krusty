@@ -9,8 +9,13 @@ permissions:
   contents: read
 
 jobs:
+  client-quality:
+    name: Client Quality Gates
+    uses: ./.github/workflows/client-quality.yml
+
   build:
     name: Build ${{ matrix.target }}
+    needs: client-quality
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -57,7 +62,11 @@ jobs:
           cd target/${{ matrix.target }}/release
           tar czf ../../../krusty-${{ matrix.target }}.tar.gz krusty
           cd ../../..
-          sha256sum krusty-${{ matrix.target }}.tar.gz > krusty-${{ matrix.target }}.tar.gz.sha256
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum krusty-${{ matrix.target }}.tar.gz > krusty-${{ matrix.target }}.tar.gz.sha256
+          else
+            shasum -a 256 krusty-${{ matrix.target }}.tar.gz > krusty-${{ matrix.target }}.tar.gz.sha256
+          fi
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
@@ -76,6 +85,7 @@ jobs:
 
   desktop-linux:
     name: Build Desktop Linux Bundles
+    needs: client-quality
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0

@@ -48,7 +48,7 @@ import type {
   PermissionMode,
   ThinkingLevel,
 } from "@krusty/state";
-import { supportsFastMode } from "@krusty/state";
+import { resolveUsableModel, supportsFastMode } from "@krusty/state";
 
 import { ChatBootScreen } from "./chat-screen/BootScreen";
 import {
@@ -57,7 +57,6 @@ import {
   flattenToolCalls,
   getActiveToolCall,
   getLastAssistantMessage,
-  isModelUsable,
   normalizeProviderId,
   sessionTypeForTab,
   tabForSessionType,
@@ -149,6 +148,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const [bottomControlsOpen, setBottomControlsOpen] = useState(false);
   const [composerReserveHeight, setComposerReserveHeight] =
     useState(CHAT_BAR_ZONE);
+  const [errorBannerHeight, setErrorBannerHeight] = useState(0);
   /** Measured desktop chat pane width (split host, before soft-cap). */
   const [desktopPaneWidth, setDesktopPaneWidth] = useState(0);
   const selectedModelInfo = useMemo(
@@ -193,6 +193,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
 
   const lastAssistantSnippet =
     lastAssistantMessage?.content?.slice(0, 200) ?? "";
+  const showTranscriptError = Boolean(error && messages.length > 0);
 
   const handleToolApprovalAction = useCallback(
     async (targetSessionId: string, toolCallId: string, approved: boolean) => {
@@ -321,25 +322,19 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       allowedProviders = result.configuredProviders;
     }
 
-    const existingModelInfo = catalog.find(
-      (candidate) => candidate.id === existingModel,
+    const selectedModel = resolveUsableModel(
+      existingModel,
+      fallbackDefault,
+      catalog,
+      allowedProviders,
     );
-    if (isModelUsable(existingModel, catalog, allowedProviders)) {
-      sessionStore.getState().setModel(existingModel, existingModelInfo?.provider ?? null);
-      return existingModel;
-    }
-
-    const selectedModel = isModelUsable(fallbackDefault, catalog, allowedProviders)
-      ? fallbackDefault
-      : null;
 
     if (selectedModel) {
-      const selectedModelInfo = catalog.find(
-        (candidate) => candidate.id === selectedModel,
-      );
-      sessionStore.getState().setModel(selectedModel, selectedModelInfo?.provider ?? null);
-      await SecureStore.setItemAsync(SELECTED_MODEL_KEY, selectedModel);
-      return selectedModel;
+      sessionStore
+        .getState()
+        .setModel(selectedModel.id, selectedModel.provider ?? null);
+      await SecureStore.setItemAsync(SELECTED_MODEL_KEY, selectedModel.id);
+      return selectedModel.id;
     }
 
     sessionStore.getState().setModel(null);
@@ -748,9 +743,45 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
               ) : null}
             </View>
           }
-          bottomPadding={composerReserveHeight}
+          bottomPadding={
+            composerReserveHeight
+            + (showTranscriptError ? errorBannerHeight + 10 : 0)
+          }
           hideJumpToLatest={bottomControlsOpen}
         />
+
+        {showTranscriptError ? (
+          <View
+            accessibilityRole="alert"
+            accessibilityLiveRegion="polite"
+            onLayout={(event) => {
+              const nextHeight = Math.ceil(event.nativeEvent.layout.height);
+              setErrorBannerHeight((current) =>
+                current === nextHeight ? current : nextHeight,
+              );
+            }}
+            style={[
+              styles.errorBanner,
+              {
+                position: "absolute",
+                left: 0,
+                right: 0,
+                bottom: composerReserveHeight + 10,
+                marginBottom: 0,
+                zIndex: 30,
+                borderColor: `${t.error}40`,
+                backgroundColor: `${t.error}14`,
+              },
+            ]}
+          >
+            <Text
+              selectable
+              style={[styles.errorBannerText, { color: t.error }]}
+            >
+              {error}
+            </Text>
+          </View>
+        ) : null}
       </Animated.View>
 
       <Animated.View

@@ -10,7 +10,50 @@ use crate::agent::hooks::{HookResult, PostToolHook, PreToolHook};
 use crate::ai::types::AiTool;
 
 use super::policy::DEFAULT_TOOL_TIMEOUT;
-use super::{tool_policy_for_call, DelegationPolicy, ToolContext, ToolResult};
+use super::{tool_policy_for_call, DelegationPolicy, ToolContext, ToolRequestPolicy, ToolResult};
+
+/// Bash performs its own process-group termination and drains bounded stdout/stderr
+/// readers after the requested command timeout. Keep the registry's outer guard
+/// beyond that lifecycle so it cannot drop the Bash future before cleanup finishes.
+// Two pipe-reader joins may each consume 10s, in addition to process-group
+// termination/reaping and the final spool flush.
+const BASH_TIMEOUT_CLEANUP_MARGIN: Duration = Duration::from_secs(25);
+const MAX_BASH_REQUESTED_TIMEOUT_MS: u64 = 600_000;
+
+fn requested_bash_timeout(params: &Value) -> Option<Duration> {
+    let raw = params.get("timeout")?;
+    let timeout_ms = raw.as_u64().or_else(|| {
+        let value = raw.as_f64()?;
+        (value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= u64::MAX as f64)
+            .then_some(value as u64)
+    })?;
+
+    Some(Duration::from_millis(
+        timeout_ms.min(MAX_BASH_REQUESTED_TIMEOUT_MS),
+    ))
+}
+
+pub(super) fn execution_timeout_for_call(
+    name: &str,
+    params: &Value,
+    context_override: Option<Duration>,
+    policy_override: Option<Duration>,
+    default_timeout: Duration,
+) -> Duration {
+    let configured_timeout = context_override
+        .or(policy_override)
+        .unwrap_or(default_timeout);
+
+    if name != "bash" {
+        return configured_timeout;
+    }
+
+    requested_bash_timeout(params)
+        .map(|requested| requested.saturating_add(BASH_TIMEOUT_CLEANUP_MARGIN))
+        .map_or(configured_timeout, |bash_lifecycle_timeout| {
+            configured_timeout.max(bash_lifecycle_timeout)
+        })
+}
 
 /// Trait for tool implementations
 #[async_trait]
@@ -63,6 +106,14 @@ impl ToolRegistry {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn with_default_timeout(default_timeout: Duration) -> Self {
+        Self {
+            default_timeout,
+            ..Self::new()
+        }
+    }
+
     /// Register a tool
     pub async fn register(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
@@ -86,12 +137,23 @@ impl ToolRegistry {
         tools.get(name).cloned()
     }
 
-    /// Get all tools as AI tool definitions, sorted by name.
+    /// Get the compact default coding tool surface, sorted by name.
+    pub async fn get_ai_tools(&self) -> Vec<AiTool> {
+        self.get_ai_tools_for_request(&ToolRequestPolicy::default())
+            .await
+    }
+
+    /// Get the compact coding surface for a concrete runtime policy.
+    pub async fn get_ai_tools_for_request(&self, policy: &ToolRequestPolicy) -> Vec<AiTool> {
+        policy.filter(self.get_ai_tools_all().await)
+    }
+
+    /// Get every registered tool as an AI definition, sorted by name.
     ///
     /// Deterministic ordering is critical for prompt caching — tool definitions
     /// are part of the cached prefix, and non-deterministic order (from HashMap
     /// iteration) silently breaks the cache between API calls.
-    pub async fn get_ai_tools(&self) -> Vec<AiTool> {
+    pub async fn get_ai_tools_all(&self) -> Vec<AiTool> {
         let tools = self.tools.read().await;
         let mut ai_tools: Vec<AiTool> = tools
             .values()
@@ -99,7 +161,7 @@ impl ToolRegistry {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
                 input_schema: t.parameters_schema(),
-                prompt: t.prompt().map(|s| s.to_string()),
+                prompt: None,
             })
             .collect();
         ai_tools.sort_by(|a, b| a.name.cmp(&b.name));
@@ -129,7 +191,7 @@ impl ToolRegistry {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
                 input_schema: t.parameters_schema(),
-                prompt: t.prompt().map(|s| s.to_string()),
+                prompt: None,
             })
             .collect();
         ai_tools.sort_by(|a, b| a.name.cmp(&b.name));
@@ -161,10 +223,13 @@ impl ToolRegistry {
         tracing::info!(tool = name, "ToolRegistry: execute called");
         let tool = self.get(name).await?;
         tracing::info!(tool = name, "ToolRegistry: tool found, executing");
-        let timeout = ctx
-            .timeout
-            .or(tool_policy_for_call(name, &params).timeout_override)
-            .unwrap_or(self.default_timeout);
+        let timeout = execution_timeout_for_call(
+            name,
+            &params,
+            ctx.timeout,
+            tool_policy_for_call(name, &params).timeout_override,
+            self.default_timeout,
+        );
         let start = Instant::now();
 
         for hook in &self.pre_hooks {

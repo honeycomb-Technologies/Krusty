@@ -8,10 +8,14 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::ai::types::{AiToolCall, Content};
-use crate::tools::registry::{authorize_tool_call, tool_policy, PermissionMode, ToolResult};
+use crate::tools::registry::{
+    authorize_tool_call, effective_tool_call, tool_policy_for_call, PermissionMode, ToolResult,
+};
 
 use super::history_policy::build_history_tool_result;
-use super::loop_events::{LoopEvent, LoopInput};
+#[cfg(test)]
+use super::loop_events::LoopInput;
+use super::loop_events::{LoopEvent, LoopInputInbox, ToolApprovalInput};
 
 const MAX_TOOL_OUTPUT_CHARS: usize = 30_000;
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -21,6 +25,7 @@ const READ_ONLY_TIMEOUT_RETRIES: usize = 1;
 pub(crate) enum AuthorizationDecision {
     Execute,
     Deny(ApprovalDenial),
+    Cancel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,19 +93,21 @@ impl ToolControl {
         &self,
         call: &AiToolCall,
         event_tx: &mpsc::UnboundedSender<LoopEvent>,
-        input_rx: &mut mpsc::UnboundedReceiver<LoopInput>,
+        input_inbox: &mut LoopInputInbox,
     ) -> AuthorizationDecision {
         if !self.requires_approval(call) {
             return AuthorizationDecision::Execute;
         }
 
+        let (effective_name, effective_arguments) =
+            effective_tool_call(&call.name, &call.arguments);
         let _ = event_tx.send(LoopEvent::ToolApprovalRequired {
             id: call.id.clone(),
-            name: call.name.clone(),
-            arguments: call.arguments.clone(),
+            name: effective_name.to_string(),
+            arguments: effective_arguments.clone(),
         });
 
-        match self.wait_for_approval(call, input_rx).await {
+        match self.wait_for_approval(call, input_inbox).await {
             ApprovalDecision::Approved => {
                 let _ = event_tx.send(LoopEvent::ToolApproved {
                     id: call.id.clone(),
@@ -111,7 +118,11 @@ impl ToolControl {
                 let _ = event_tx.send(LoopEvent::ToolDenied {
                     id: call.id.clone(),
                 });
-                AuthorizationDecision::Deny(denial)
+                if denial == ApprovalDenial::Cancelled {
+                    AuthorizationDecision::Cancel
+                } else {
+                    AuthorizationDecision::Deny(denial)
+                }
             }
         }
     }
@@ -126,7 +137,7 @@ impl ToolControl {
             return RetryDirective::Stop;
         }
 
-        if !tool_policy(&call.name).retry_timeout_once {
+        if !tool_policy_for_call(&call.name, &call.arguments).retry_timeout_once {
             return RetryDirective::Stop;
         }
 
@@ -149,6 +160,7 @@ impl ToolControl {
         event_tx: &mpsc::UnboundedSender<LoopEvent>,
     ) -> Content {
         let output = truncate_output(&result.output);
+        let (effective_name, _) = effective_tool_call(&call.name, &call.arguments);
         let _ = event_tx.send(LoopEvent::ToolResult {
             id: call.id.clone(),
             output,
@@ -157,7 +169,7 @@ impl ToolControl {
 
         Content::ToolResult {
             tool_use_id: call.id.clone(),
-            output: build_history_tool_result(&call.name, &result.output, result.is_error),
+            output: build_history_tool_result(effective_name, &result.output, result.is_error),
             is_error: result.is_error.then_some(true),
         }
     }
@@ -165,29 +177,20 @@ impl ToolControl {
     async fn wait_for_approval(
         &self,
         call: &AiToolCall,
-        input_rx: &mut mpsc::UnboundedReceiver<LoopInput>,
+        input_inbox: &mut LoopInputInbox,
     ) -> ApprovalDecision {
         let deadline = tokio::time::Instant::now() + self.approval_timeout;
 
-        loop {
-            match tokio::time::timeout_at(deadline, input_rx.recv()).await {
-                Ok(Some(LoopInput::ToolApproval {
-                    tool_call_id,
-                    approved,
-                })) if tool_call_id == call.id => {
-                    return if approved {
-                        ApprovalDecision::Approved
-                    } else {
-                        ApprovalDecision::Denied(ApprovalDenial::UserRejected)
-                    };
-                }
-                Ok(Some(LoopInput::Cancel)) => {
-                    return ApprovalDecision::Denied(ApprovalDenial::Cancelled);
-                }
-                Ok(Some(_)) => continue,
-                Ok(None) => return ApprovalDecision::Denied(ApprovalDenial::ChannelClosed),
-                Err(_) => return ApprovalDecision::Denied(ApprovalDenial::TimedOut),
+        match tokio::time::timeout_at(deadline, input_inbox.recv_tool_approval(&call.id)).await {
+            Ok(ToolApprovalInput::Decision(true)) => ApprovalDecision::Approved,
+            Ok(ToolApprovalInput::Decision(false)) => {
+                ApprovalDecision::Denied(ApprovalDenial::UserRejected)
             }
+            Ok(ToolApprovalInput::Cancelled) => ApprovalDecision::Denied(ApprovalDenial::Cancelled),
+            Ok(ToolApprovalInput::Closed) => {
+                ApprovalDecision::Denied(ApprovalDenial::ChannelClosed)
+            }
+            Err(_) => ApprovalDecision::Denied(ApprovalDenial::TimedOut),
         }
     }
 }
@@ -261,6 +264,18 @@ mod tests {
         }
     }
 
+    fn deferred_call(tool: &str, arguments: serde_json::Value) -> AiToolCall {
+        AiToolCall {
+            id: format!("call_deferred_{tool}"),
+            name: "tool_search".to_string(),
+            arguments: json!({
+                "action": "execute",
+                "tool": tool,
+                "arguments": arguments,
+            }),
+        }
+    }
+
     #[test]
     fn approval_only_required_for_supervised_write_tools() {
         let supervised = ToolControl::new(PermissionMode::Supervised);
@@ -279,7 +294,8 @@ mod tests {
         let control = ToolControl::new(PermissionMode::Supervised);
         let call = agent_call("build");
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-        let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let mut input_inbox = LoopInputInbox::new(input_rx);
         input_tx
             .send(LoopInput::ToolApproval {
                 tool_call_id: call.id.clone(),
@@ -287,7 +303,7 @@ mod tests {
             })
             .unwrap();
 
-        let decision = control.authorize(&call, &event_tx, &mut input_rx).await;
+        let decision = control.authorize(&call, &event_tx, &mut input_inbox).await;
 
         assert_eq!(decision, AuthorizationDecision::Execute);
         assert!(matches!(
@@ -305,7 +321,8 @@ mod tests {
         let control = ToolControl::new(PermissionMode::Supervised);
         let call = edit_call();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-        let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let mut input_inbox = LoopInputInbox::new(input_rx);
         input_tx
             .send(LoopInput::ToolApproval {
                 tool_call_id: call.id.clone(),
@@ -313,7 +330,7 @@ mod tests {
             })
             .unwrap();
 
-        let decision = control.authorize(&call, &event_tx, &mut input_rx).await;
+        let decision = control.authorize(&call, &event_tx, &mut input_inbox).await;
 
         assert_eq!(decision, AuthorizationDecision::Execute);
         assert!(matches!(
@@ -327,19 +344,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authorize_denies_when_cancelled() {
+    async fn deferred_write_approval_names_the_effective_target() {
+        let control = ToolControl::new(PermissionMode::Supervised);
+        let call = deferred_call("edit", json!({"file_path": "src/lib.rs"}));
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let mut input_inbox = LoopInputInbox::new(input_rx);
+        input_tx
+            .send(LoopInput::ToolApproval {
+                tool_call_id: call.id.clone(),
+                approved: true,
+            })
+            .unwrap();
+
+        assert_eq!(
+            control.authorize(&call, &event_tx, &mut input_inbox).await,
+            AuthorizationDecision::Execute
+        );
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(LoopEvent::ToolApprovalRequired { name, arguments, .. })
+                if name == "edit" && arguments["file_path"] == "src/lib.rs"
+        ));
+    }
+
+    #[test]
+    fn deferred_results_use_target_specific_history_retention() {
+        let control = ToolControl::new(PermissionMode::Autonomous);
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let grep = deferred_call("grep", json!({"pattern": "needle"}));
+        let bash = deferred_call("bash", json!({"command": "cargo test"}));
+        let result = ToolResult::success_data(json!({"output": "ok"}));
+
+        let Content::ToolResult { output, .. } = control.publish_result(&grep, &result, &event_tx)
+        else {
+            panic!("expected grep result");
+        };
+        assert_eq!(output["tool"], "grep");
+        assert_eq!(output["retention"], "summarize_after_turn");
+
+        let Content::ToolResult { output, .. } = control.publish_result(&bash, &result, &event_tx)
+        else {
+            panic!("expected bash result");
+        };
+        assert_eq!(output["tool"], "bash");
+        assert_eq!(output["retention"], "drop_after_compaction");
+    }
+
+    #[tokio::test]
+    async fn authorize_stops_the_batch_when_cancelled() {
         let control = ToolControl::new(PermissionMode::Supervised);
         let call = edit_call();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-        let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let mut input_inbox = LoopInputInbox::new(input_rx);
         input_tx.send(LoopInput::Cancel).unwrap();
 
-        let decision = control.authorize(&call, &event_tx, &mut input_rx).await;
+        let decision = control.authorize(&call, &event_tx, &mut input_inbox).await;
 
-        assert_eq!(
-            decision,
-            AuthorizationDecision::Deny(ApprovalDenial::Cancelled)
-        );
+        assert_eq!(decision, AuthorizationDecision::Cancel);
         assert!(matches!(
             event_rx.recv().await,
             Some(LoopEvent::ToolApprovalRequired { .. })
@@ -358,9 +421,10 @@ mod tests {
         );
         let call = edit_call();
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
-        let (_input_tx, mut input_rx) = mpsc::unbounded_channel();
+        let (_input_tx, input_rx) = mpsc::unbounded_channel();
+        let mut input_inbox = LoopInputInbox::new(input_rx);
 
-        let decision = control.authorize(&call, &event_tx, &mut input_rx).await;
+        let decision = control.authorize(&call, &event_tx, &mut input_inbox).await;
 
         assert_eq!(
             decision,

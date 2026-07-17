@@ -11,7 +11,8 @@ use crate::tools::registry::PermissionMode;
 
 use super::build_project_context;
 use super::pinch_context::{PinchContext, PinchContextInput};
-use super::summarizer::{generate_summary, SummarizationResult};
+use super::summarizer::{generate_summary_observed, SummarizationResult};
+use super::ProviderCallTraceContext;
 
 pub const PINCH_RANKED_FILE_LIMIT: usize = 20;
 pub const PINCH_SUMMARY_FILE_CONTENT_LIMIT: usize = 10;
@@ -63,6 +64,11 @@ pub async fn create_pinched_session(
     );
     let project_context = load_project_context(&project_context_dir);
     let active_plan = load_active_plan(request.db_path, request.session_id);
+    let provider_call_trace = ProviderCallTraceContext::standalone(
+        request.db_path.to_path_buf(),
+        request.session_id.to_string(),
+        1,
+    );
     let summary = summarize_pinch(
         request.ai_client,
         request.conversation,
@@ -71,6 +77,7 @@ pub async fn create_pinched_session(
         &file_contents,
         project_context.as_deref(),
         request.model,
+        &provider_call_trace,
     )
     .await;
     let active_plan_markdown = active_plan.as_ref().map(PlanFile::to_markdown);
@@ -153,9 +160,10 @@ async fn summarize_pinch(
     file_contents: &[(String, String)],
     project_context: Option<&str>,
     model: Option<&str>,
+    provider_call_trace: &ProviderCallTraceContext,
 ) -> SummarizationResult {
     if let Some(ai_client) = ai_client {
-        generate_summary(
+        generate_summary_observed(
             ai_client,
             conversation,
             preservation_hints,
@@ -163,6 +171,7 @@ async fn summarize_pinch(
             file_contents,
             project_context,
             model,
+            (provider_call_trace, "pinch_summary"),
         )
         .await
         .unwrap_or_else(|error| {

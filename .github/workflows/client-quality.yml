@@ -1,0 +1,45 @@
+name: Client Quality Gates
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    name: API and State Contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.18
+      - name: Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Test API streaming and error contracts
+        run: bun test packages/api/test
+      - name: Type-check shared client state
+        run: deno task check:state
+      - name: Test shared client state contracts
+        run: deno task test:state
+
+  mobile-web-export:
+    name: Mobile Web Export
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/mobile
+    steps:
+      - uses: actions/checkout@v5
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.18
+      - run: bun install --frozen-lockfile
+      - name: Type-check mobile interactions
+        run: npx tsc --noEmit
+      - run: npx expo export --platform web

@@ -171,6 +171,18 @@ fn summarize_bash(parsed: &Value, is_error: bool) -> String {
         return format!("bash failed (exit {}): {}", exit_code, message);
     }
 
+    let payload = tool_payload(parsed);
+    if let Some(process_id) = payload.get("process_id").and_then(Value::as_str) {
+        let status = payload
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        return format!(
+            "background process {} (id {}); it remains available through processes status/control while the harness is running",
+            status, process_id
+        );
+    }
+
     format!("bash completed successfully (exit {})", exit_code)
 }
 
@@ -407,7 +419,8 @@ fn summarize_list_result(parsed: &Value) -> Value {
 }
 
 fn summarize_bash_result(parsed: &Value) -> Value {
-    let output_preview = tool_payload(parsed)
+    let payload = tool_payload(parsed);
+    let output_preview = payload
         .get("output")
         .and_then(|value| value.as_str())
         .map(|output| truncate_utf8(output, MAX_BASH_OUTPUT_CHARS))
@@ -427,6 +440,11 @@ fn summarize_bash_result(parsed: &Value) -> Value {
             .get("error")
             .and_then(|value| value.get("message"))
             .and_then(|value| value.as_str()),
+        "message": payload.get("message").and_then(Value::as_str),
+        "process_id": payload.get("process_id").and_then(Value::as_str),
+        "status": payload.get("status").and_then(Value::as_str),
+        "next_action": payload.get("next_action").and_then(Value::as_str),
+        "process_error": payload.get("error").and_then(Value::as_str),
         "output_preview": output_preview,
     })
 }

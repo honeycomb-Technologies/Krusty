@@ -21,7 +21,8 @@ The route tree is assembled in `routes/mod.rs`, which nests each API group under
 - `/api/credentials` -- provider API key management
 - `/api/mako` -- autonomous agent dispatch
 - `/api/mcp` -- MCP server management
-- `/api/processes` -- background process tracking
+- `/api/processes` -- user-scoped background process tracking and lifecycle status
+- `/api/processes/:id/output` -- bounded recent stdout/stderr replay for a tracked process
 - `/api/push` -- Web Push subscriptions
 - `/api/apns` -- Apple Push Notification device management
 - `/api/hooks` -- user-defined pre/post tool hooks
@@ -54,6 +55,7 @@ SSE events are JSON objects with a `type` field that tells the client what happe
 - `tool_call_start` / `tool_call_complete` -- the AI wants to use a tool
 - `tool_executing` / `tool_output_delta` / `tool_result` -- tool execution lifecycle
 - `tool_approval_required` -- the tool needs user permission (supervised mode)
+- `steering_injected` -- a durable user steering message was injected at a safe loop boundary
 - `delegated_progress` -- live status from sub-agent runs (explore, plan, verify, build)
 - `awaiting_input` -- the agent is asking the user a question
 - `plan_update` / `plan_complete` -- plan lifecycle events
@@ -67,7 +69,7 @@ SSE events are JSON objects with a `type` field that tells the client what happe
 
 The SSE channel uses a bounded buffer of 256 events. If the client falls behind, non-critical events (like text deltas) are dropped and a `lagged` event is sent to tell the client how many events it missed. Critical events like `awaiting_input`, `tool_approval_required`, and `finish` are always delivered -- these represent state transitions that the client must not miss.
 
-Two companion endpoints complete the chat surface: `POST /api/chat/tool-result` lets the client submit tool results (or plan confirmation choices), and `POST /api/chat/tool-approval` lets the client approve or deny tool calls in supervised mode.
+Three companion endpoints complete the chat surface: `POST /api/chat/tool-result` lets the client submit tool results (or plan confirmation choices), `POST /api/chat/tool-approval` lets the client approve or deny tool calls in supervised mode, and `POST /api/chat/steer` durably queues a user message for an active run. Steering is ownership-checked and becomes canonical conversation history only when the orchestrator reaches a safe boundary; if the run rolls over first, the queued message is recovered by the next run without duplication.
 
 ## Session Management
 
@@ -85,15 +87,18 @@ Key session endpoints:
 - `GET /api/sessions/:id/state` -- get the live agent execution state (idle, streaming, tool_executing, awaiting_input)
 - `GET /api/sessions/:id/trace` -- get the runtime trace summary and recent events
 - `PUT /api/sessions/:id/presence` -- heartbeat for client presence tracking (viewer/controller)
-- `POST /api/sessions/:id/pinch` -- create a child session with AI-summarized context from the parent
+- `POST /api/sessions/:id/cancel` -- idempotently signal cancellation to an active run
+- `POST /api/sessions/:id/pinch` -- compact the current session in place with an AI-generated continuation summary
 
-The pinch operation is noteworthy. When a conversation grows too long or the user wants to branch, pinching creates a new session with a compressed summary of the parent's context, key decisions, and pending tasks. The AI generates this summary, and the child session starts with that context injected as a system message.
+The pinch operation is noteworthy. It runs the same durable compaction pipeline used for automatic context pressure and provider-overflow recovery: old content is summarized, a recent verbatim tail is retained, and the session's messages are replaced atomically. It does not fork a child session, so the session ID, ownership, active plan, and client continuity remain unchanged.
 
 ## Tool Execution
 
 The tool API at `/api/tools` has two endpoints. `GET /api/tools` lists all registered tools with their names and descriptions. `POST /api/tools/execute` runs a tool directly, bypassing the agentic loop.
 
-Direct tool execution creates a `ToolContext` with the caller's working directory, the process registry, MCP manager, and skills manager. Tools run in autonomous permission mode -- the API trusts authenticated callers. Path validation ensures the working directory stays within the user's allowed root.
+Direct tool execution creates a `ToolContext` with the caller's working directory, owning user ID, process registry, MCP manager, and skills manager. Tools run in autonomous permission mode -- the API trusts authenticated callers. Path validation ensures the working directory stays within the user's allowed root, and process operations remain owner-scoped.
+
+The allowed root is not a shell sandbox. A direct Bash call has the authority of the server's OS account, so this endpoint is suitable for trusted private deployments only. A public multi-tenant deployment must disable host execution or place it behind per-tenant OS/container isolation.
 
 During normal chat flows, tools run inside the orchestrator loop rather than through this endpoint. The orchestrator handles the full lifecycle: the AI proposes a tool call, the server executes it (or asks for approval in supervised mode), and the result feeds back into the conversation.
 

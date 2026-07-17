@@ -6,8 +6,10 @@ use crate::paths;
 use crate::storage::MakoHomeProfile;
 
 use super::project::discover_named_file;
+use super::truncate_utf8_bytes;
 
 const MAKO_FILES: &[&str] = &["MAKO.md", "mako.md"];
+const MAX_MAKO_CONTEXT_BYTES: usize = 24 * 1024;
 
 pub(super) fn build_mako_context_sections(
     project_root: &Path,
@@ -64,7 +66,44 @@ pub(super) fn build_mako_context_sections_with_home(
         }
     }
 
-    sections
+    bound_mako_sections(sections, MAX_MAKO_CONTEXT_BYTES)
+}
+
+fn bound_mako_sections(sections: Vec<String>, max_bytes: usize) -> Vec<String> {
+    if max_bytes == 0 {
+        return Vec::new();
+    }
+
+    const MARKER: &str = "\n\n[MAKO CONTEXT TRUNCATED AT REQUEST BUDGET]";
+    let mut bounded = Vec::new();
+    let mut used = 0usize;
+
+    for section in sections {
+        let separator_bytes = usize::from(!bounded.is_empty()) * 2;
+        let remaining = max_bytes
+            .saturating_sub(used)
+            .saturating_sub(separator_bytes);
+        if remaining == 0 {
+            break;
+        }
+        if section.len() <= remaining {
+            used = used.saturating_add(separator_bytes + section.len());
+            bounded.push(section);
+            continue;
+        }
+
+        let truncated = if remaining <= MARKER.len() {
+            truncate_utf8_bytes(MARKER, remaining)
+        } else {
+            let mut value = truncate_utf8_bytes(&section, remaining - MARKER.len());
+            value.push_str(MARKER);
+            value
+        };
+        bounded.push(truncated);
+        break;
+    }
+
+    bounded
 }
 
 fn load_mako_context_file(path: &Path, context: &'static str) -> Option<String> {
@@ -89,4 +128,20 @@ fn display_context_file_name(path: &Path, fallback: &str) -> String {
         .and_then(|value| value.to_str())
         .unwrap_or(fallback)
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bound_mako_sections, MAX_MAKO_CONTEXT_BYTES};
+
+    #[test]
+    fn mako_sections_respect_aggregate_request_budget() {
+        let sections = vec!["a".repeat(20_000), "🦈".repeat(10_000)];
+        let bounded = bound_mako_sections(sections, MAX_MAKO_CONTEXT_BYTES);
+        let request_bytes =
+            bounded.iter().map(String::len).sum::<usize>() + bounded.len().saturating_sub(1) * 2;
+
+        assert!(request_bytes <= MAX_MAKO_CONTEXT_BYTES);
+        assert!(bounded.join("\n\n").contains("TRUNCATED"));
+    }
 }

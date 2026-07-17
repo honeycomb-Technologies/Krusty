@@ -1,6 +1,7 @@
 use reqwest::Client;
 
 use crate::ai::client::config::{AiClientConfig, CallOptions};
+use crate::ai::client::streaming::codex::session::CodexWsPool;
 use crate::ai::model_profile::{build_system_prompt_sections, SystemPromptSections};
 use crate::ai::providers::ProviderId;
 use crate::ai::types::{AiTool, ModelMessage};
@@ -10,6 +11,7 @@ pub struct AiClient {
     pub(super) http: Client,
     pub(super) config: AiClientConfig,
     pub(super) api_key: String,
+    pub(crate) codex_ws_pool: CodexWsPool,
 }
 
 impl AiClient {
@@ -19,6 +21,7 @@ impl AiClient {
             http: Self::create_http_client(),
             config,
             api_key,
+            codex_ws_pool: CodexWsPool::default(),
         }
     }
 
@@ -51,21 +54,15 @@ impl AiClient {
         model: &str,
         messages: &[ModelMessage],
         custom_system_prompt: Option<&str>,
-        tools: Option<&[AiTool]>,
+        _tools: Option<&[AiTool]>,
     ) -> SystemPromptSections {
-        let tool_prompts: Vec<(String, String)> = tools
-            .unwrap_or(&[])
-            .iter()
-            .filter_map(|t| t.prompt.as_ref().map(|p| (t.name.clone(), p.clone())))
-            .collect();
-
         build_system_prompt_sections(
             self.provider_id(),
             self.config().api_format,
             model,
             messages,
             custom_system_prompt,
-            &tool_prompts,
+            &[],
         )
     }
 }

@@ -7,10 +7,9 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use crate::tui::app::App;
-use crate::tui::blocks::{BlockType, StreamBlock};
-use crate::tui::state::BlockIndices;
 use crate::tui::utils::count_wrapped_lines;
 
+use super::display_list::DisplayList;
 use super::messages::SYMBOL_WIDTH;
 
 impl App {
@@ -18,8 +17,6 @@ impl App {
     /// Uses the same wrapping logic as render_messages for accurate counting
     /// NOTE: Takes &mut self to populate markdown cache for consistency with render
     pub fn calculate_message_lines(&mut self, width: u16) -> usize {
-        let mut total = 0;
-        let mut indices = BlockIndices::new();
         // Account for borders (2) + scrollbar padding (4) = 6 total
         // MUST match render_messages() which uses: inner.width.saturating_sub(4)
         // where inner.width = area.width - 2 (from block.inner), so total = width - 6
@@ -31,87 +28,9 @@ impl App {
         // Pre-render markdown to cache (same as render_messages) to ensure consistent line counts
         self.ui.markdown_cache.check_width(wrap_width);
 
+        let mut message_heights = Vec::with_capacity(self.runtime.chat.messages.len());
         for (role, content) in &self.runtime.chat.messages {
-            if let Some((block_type, idx)) = indices.get_and_increment(role) {
-                // Handle block types
-                let height = match block_type {
-                    BlockType::Thinking => self
-                        .runtime
-                        .blocks
-                        .thinking
-                        .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.theme)),
-                    BlockType::Pinch => self
-                        .runtime
-                        .blocks
-                        .pinch
-                        .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.theme)),
-                    BlockType::Bash => self
-                        .runtime
-                        .blocks
-                        .bash
-                        .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.theme)),
-                    BlockType::TerminalPane => {
-                        // Skip pinned terminal - it's rendered at top
-                        if self.runtime.blocks.pinned_terminal == Some(idx) {
-                            None
-                        } else {
-                            self.runtime
-                                .blocks
-                                .terminal
-                                .get(idx)
-                                .map(|b| b.height(content_width, &self.ui.theme))
-                        }
-                    }
-                    BlockType::ToolResult => self
-                        .runtime
-                        .blocks
-                        .tool_result
-                        .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.theme)),
-                    BlockType::Read => self
-                        .runtime
-                        .blocks
-                        .read
-                        .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.theme)),
-                    BlockType::Edit => self
-                        .runtime
-                        .blocks
-                        .edit
-                        .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.theme)),
-                    BlockType::Write => self
-                        .runtime
-                        .blocks
-                        .write
-                        .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.theme)),
-                    BlockType::WebSearch => self
-                        .runtime
-                        .blocks
-                        .web_search
-                        .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.theme)),
-                    BlockType::Explore => self
-                        .runtime
-                        .blocks
-                        .explore
-                        .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.theme)),
-                    BlockType::Build => self
-                        .runtime
-                        .blocks
-                        .build
-                        .get(idx)
-                        .map(|b| b.height(content_width, &self.ui.theme)),
-                };
-                if let Some(h) = height {
-                    total += h as usize + 1; // +1 for blank after
-                }
-            } else if role == "assistant" {
+            let height = if role == "assistant" {
                 // Render markdown to cache and get line count (matches render_messages exactly)
                 let mut hasher = DefaultHasher::new();
                 content.hash(&mut hasher);
@@ -122,20 +41,29 @@ impl App {
                     wrap_width,
                     &self.ui.theme,
                 );
-                total += rendered.lines.len() + 1; // +1 for blank after
+                rendered.lines.len()
             } else {
                 // User/system messages - plain text with wrapping
                 // Must match render_messages exactly: wrap each line, then blank after
-                for line in content.lines() {
-                    if line.is_empty() {
-                        total += 1;
-                    } else {
-                        total += count_wrapped_lines(line, wrap_width);
-                    }
-                }
-                total += 1; // Blank line after
-            }
+                content
+                    .lines()
+                    .map(|line| {
+                        if line.is_empty() {
+                            1
+                        } else {
+                            count_wrapped_lines(line, wrap_width)
+                        }
+                    })
+                    .sum()
+            };
+            message_heights.push(height);
         }
-        total
+
+        DisplayList::build(
+            &self.runtime.chat.messages,
+            |message_index, _, _| message_heights[message_index],
+            |block_type, index| self.stream_block_height(block_type, index, content_width),
+        )
+        .total_lines
     }
 }

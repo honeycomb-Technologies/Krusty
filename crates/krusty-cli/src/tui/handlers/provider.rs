@@ -135,7 +135,7 @@ impl App {
             .await;
 
             // Update cached tools so API knows about the agent tool
-            self.services.cached_ai_tools = self.services.tool_registry.get_ai_tools().await;
+            self.services.cached_ai_tools = self.services.tool_registry.get_ai_tools_all().await;
             tracing::info!(
                 "Registered agent tool, total tools: {}",
                 self.services.cached_ai_tools.len()

@@ -15,6 +15,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{error, info, warn};
 
 use super::agent::KrustyAgent;
+use super::bridge::AcpOutbound;
 use crate::ai::providers::ProviderId;
 use crate::storage::credentials::{ActiveProviderStore, CredentialStore};
 use crate::storage::{Database, Preferences};
@@ -104,7 +105,7 @@ impl AcpServer {
         local
             .run_until(async move {
                 // Create notification channel
-                let (tx, mut rx) = mpsc::channel(1000);
+                let (tx, mut rx) = mpsc::channel::<AcpOutbound>(1000);
 
                 // Give the sender to the agent
                 self.agent.set_notification_channel(tx).await;
@@ -126,9 +127,26 @@ impl AcpServer {
 
                 // Spawn task to forward notifications to the connection
                 tokio::task::spawn_local(async move {
-                    while let Some(notification) = rx.recv().await {
-                        if let Err(e) = connection.session_notification(notification).await {
-                            warn!("Failed to forward notification: {}", e);
+                    while let Some(outbound) = rx.recv().await {
+                        match outbound {
+                            AcpOutbound::Notification(notification) => {
+                                if let Err(e) = connection.session_notification(notification).await
+                                {
+                                    warn!("Failed to forward notification: {}", e);
+                                }
+                            }
+                            AcpOutbound::Permission {
+                                request,
+                                response_tx,
+                            } => {
+                                let response = connection
+                                    .request_permission(request)
+                                    .await
+                                    .map_err(|error| error.to_string());
+                                if response_tx.send(response).is_err() {
+                                    warn!("ACP permission requester dropped before response");
+                                }
+                            }
                         }
                     }
                 });

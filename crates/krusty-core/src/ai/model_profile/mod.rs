@@ -52,7 +52,7 @@ mod tests {
     }
 
     #[test]
-    fn layered_prompt_includes_overlay_for_default_agent_prompt() {
+    fn layered_prompt_keeps_one_compact_model_overlay() {
         let sections = build_system_prompt_sections(
             ProviderId::OpenAI,
             ApiFormat::OpenAIResponses,
@@ -62,10 +62,11 @@ mod tests {
             &[],
         );
 
-        assert!(sections.base_prompt.contains("## Model Guidance"));
-        assert!(sections.base_prompt.contains("## Provider Guidance"));
-        assert!(sections.base_prompt.contains("## Capability Guidance"));
-        assert!(sections.base_prompt.contains("tool-use loops"));
+        assert!(sections.base_prompt.contains("## Model behavior"));
+        assert!(sections.base_prompt.contains("Keep prose compact"));
+        assert!(!sections.base_prompt.contains("## Provider Guidance"));
+        assert!(!sections.base_prompt.contains("## Capability Guidance"));
+        assert!(sections.base_prompt.len() <= 5_000);
     }
 
     #[test]

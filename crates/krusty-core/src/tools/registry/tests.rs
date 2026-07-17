@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use crate::agent::hooks::{HookResult, PreToolHook};
 
 use super::policy::DELEGATED_TOOL_TIMEOUT;
+use super::runtime::execution_timeout_for_call;
 use super::*;
 
 fn create_test_context() -> ToolContext {
@@ -108,6 +109,28 @@ fn test_tool_policy_contracts() {
     assert_eq!(agent_unknown_policy.category, ToolCategory::Write);
     assert!(agent_unknown_policy.requires_supervised_approval);
 
+    let deferred_read_policy = tool_policy_for_call(
+        "tool_search",
+        &json!({
+            "action": "execute",
+            "tool": "web_fetch",
+            "arguments": {"url": "https://example.com"}
+        }),
+    );
+    assert_eq!(deferred_read_policy.category, ToolCategory::ReadOnly);
+    assert!(!deferred_read_policy.requires_supervised_approval);
+
+    let deferred_write_policy = tool_policy_for_call(
+        "tool_search",
+        &json!({
+            "action": "execute",
+            "tool": "edit",
+            "arguments": {"file_path": "src/lib.rs"}
+        }),
+    );
+    assert_eq!(deferred_write_policy.category, ToolCategory::Write);
+    assert!(deferred_write_policy.requires_supervised_approval);
+
     assert_eq!(
         authorize_tool_call(
             "agent",
@@ -146,6 +169,170 @@ fn test_tool_policy_contracts() {
     );
 }
 
+fn ai_tool(name: &str) -> crate::ai::types::AiTool {
+    crate::ai::types::AiTool {
+        name: name.to_string(),
+        description: format!("{name} description"),
+        input_schema: json!({"type": "object"}),
+        prompt: Some("legacy prompt".to_string()),
+    }
+}
+
+#[test]
+fn default_code_request_surface_is_small_and_deterministic() {
+    let names = [
+        "write",
+        "tool_search",
+        "read",
+        "grep",
+        "glob",
+        "bash",
+        "apply_patch",
+        "agent",
+        "AskUserQuestion",
+        "enter_plan_mode",
+        "web_search",
+    ];
+    let tools = names.into_iter().map(ai_tool).collect();
+    let filtered = ToolRequestPolicy::default().filter(tools);
+    let filtered_names = filtered
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(filtered.len() <= DEFAULT_CODE_TOOL_LIMIT);
+    assert_eq!(filtered.len(), 9);
+    assert_eq!(
+        filtered_names,
+        vec![
+            "AskUserQuestion",
+            "agent",
+            "apply_patch",
+            "bash",
+            "enter_plan_mode",
+            "glob",
+            "grep",
+            "read",
+            "tool_search",
+        ]
+    );
+}
+
+#[test]
+fn active_plan_surface_keeps_orchestration_and_lifecycle_tools_reachable() {
+    let tools = [
+        "AskUserQuestion",
+        "add_subtask",
+        "agent",
+        "apply_patch",
+        "bash",
+        "read",
+        "set_dependency",
+        "set_work_mode",
+        "task_complete",
+        "task_start",
+        "tool_search",
+        "write",
+    ]
+    .into_iter()
+    .map(ai_tool)
+    .collect();
+    let policy = ToolRequestPolicy::code(PermissionMode::Autonomous, false, true, true, &[]);
+    let names = policy
+        .filter(tools)
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+
+    assert_eq!(names.len(), 11);
+    for required in [
+        "AskUserQuestion",
+        "agent",
+        "apply_patch",
+        "task_start",
+        "task_complete",
+        "set_work_mode",
+        "tool_search",
+    ] {
+        assert!(
+            names.iter().any(|name| name == required),
+            "missing {required}"
+        );
+    }
+}
+
+#[test]
+fn non_gpt_models_receive_edit_and_write_instead_of_apply_patch() {
+    let tools = [
+        "AskUserQuestion",
+        "agent",
+        "apply_patch",
+        "bash",
+        "edit",
+        "enter_plan_mode",
+        "glob",
+        "grep",
+        "read",
+        "tool_search",
+        "write",
+    ]
+    .into_iter()
+    .map(ai_tool)
+    .collect();
+    let policy = ToolRequestPolicy::default().with_mutation_surface(
+        MutationToolSurface::for_model(crate::ai::providers::ProviderId::Grok, "grok-4.5"),
+    );
+    let names = policy
+        .filter(tools)
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+
+    assert_eq!(names.len(), DEFAULT_CODE_TOOL_LIMIT);
+    assert!(names.iter().any(|name| name == "edit"));
+    assert!(names.iter().any(|name| name == "write"));
+    assert!(!names.iter().any(|name| name == "apply_patch"));
+    assert!(!names.iter().any(|name| name == "glob"));
+}
+
+#[test]
+fn effective_deferred_call_exposes_target_and_arguments() {
+    let wrapper = json!({
+        "action": "execute",
+        "tool": "edit",
+        "arguments": {"file_path": "src/lib.rs"}
+    });
+    let (name, arguments) = effective_tool_call("tool_search", &wrapper);
+
+    assert_eq!(name, "edit");
+    assert_eq!(arguments["file_path"], "src/lib.rs");
+}
+
+#[test]
+fn request_policy_filters_plan_writes_disabled_tools_and_unapprovable_mutations() {
+    let all = vec![
+        ai_tool("read"),
+        ai_tool("bash"),
+        ai_tool("apply_patch"),
+        ai_tool("set_work_mode"),
+        ai_tool("tool_search"),
+    ];
+    let plan_policy = ToolRequestPolicy::code(
+        PermissionMode::Supervised,
+        true,
+        false,
+        false,
+        &["bash".to_string()],
+    );
+    let names = plan_policy
+        .filter(all)
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+
+    assert_eq!(names, vec!["read", "set_work_mode"]);
+}
+
 #[test]
 fn delegated_explore_policy_blocks_write_tools() {
     let policy = DelegationPolicy::for_subagent_explore(PermissionMode::Autonomous, Some(20));
@@ -156,6 +343,17 @@ fn delegated_explore_policy_blocks_write_tools() {
         .is_ok());
     assert!(policy
         .authorize_tool_call("agent", &json!({ "agent_type": "build" }), false)
+        .is_err());
+    assert!(policy
+        .authorize_tool_call(
+            "tool_search",
+            &json!({
+                "action": "execute",
+                "tool": "edit",
+                "arguments": {"file_path": "src/lib.rs"}
+            }),
+            false,
+        )
         .is_err());
 }
 
@@ -171,6 +369,35 @@ fn delegated_build_policy_allows_autonomous_write() {
     let policy = DelegationPolicy::for_subagent_build(PermissionMode::Autonomous, Some(10));
     assert!(policy.authorize_tool("write", false).is_ok());
     assert!(policy.authorize_tool("bash", false).is_ok());
+}
+
+#[test]
+fn delegated_verify_bash_allowance_follows_effective_deferred_target() {
+    let policy = DelegationPolicy::for_subagent_verify(PermissionMode::Autonomous, Some(10));
+
+    assert!(policy.authorize_tool("bash", false).is_ok());
+    assert!(policy
+        .authorize_tool_call(
+            "tool_search",
+            &json!({
+                "action": "execute",
+                "tool": "bash",
+                "arguments": {"command": "cargo test"}
+            }),
+            false,
+        )
+        .is_ok());
+    assert!(policy
+        .authorize_tool_call(
+            "tool_search",
+            &json!({
+                "action": "execute",
+                "tool": "edit",
+                "arguments": {"file_path": "src/lib.rs"}
+            }),
+            false,
+        )
+        .is_err());
 }
 
 #[test]
@@ -341,6 +568,28 @@ fn test_sandboxed_resolve_new_path_no_sandbox() {
 
 struct TestTool;
 
+struct SlowBashLifecycleTool;
+
+#[async_trait]
+impl Tool for SlowBashLifecycleTool {
+    fn name(&self) -> &str {
+        "bash"
+    }
+
+    fn description(&self) -> &str {
+        "test Bash lifecycle"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({"type": "object"})
+    }
+
+    async fn execute(&self, _params: Value, _ctx: &ToolContext) -> ToolResult {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        ToolResult::success("cleanup complete")
+    }
+}
+
 #[async_trait]
 impl Tool for TestTool {
     fn name(&self) -> &str {
@@ -390,4 +639,63 @@ async fn test_pre_hook_block_returns_structured_json_error() {
     let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
     assert_eq!(parsed["error"]["code"], "blocked_by_policy");
     assert_eq!(parsed["error"]["message"], "blocked for test");
+}
+
+#[test]
+fn bash_requested_timeout_extends_registry_guard_through_cleanup() {
+    let timeout = execution_timeout_for_call(
+        "bash",
+        &json!({"command": "cargo test", "timeout": 600_000}),
+        None,
+        None,
+        std::time::Duration::from_secs(120),
+    );
+
+    assert_eq!(timeout, std::time::Duration::from_secs(625));
+}
+
+#[test]
+fn bash_short_timeout_keeps_larger_registry_guard_without_waiting() {
+    let timeout = execution_timeout_for_call(
+        "bash",
+        &json!({"command": "sleep 1", "timeout": 5}),
+        None,
+        None,
+        std::time::Duration::from_secs(120),
+    );
+
+    // Bash still enforces the requested 5ms internally. The registry guard must
+    // stay out of the way so Bash can terminate the process group and drain pipes.
+    assert_eq!(timeout, std::time::Duration::from_secs(120));
+}
+
+#[tokio::test]
+async fn registry_short_bash_timeout_leaves_room_for_inner_cleanup() {
+    let registry = ToolRegistry::with_default_timeout(std::time::Duration::from_millis(1));
+    registry.register(Arc::new(SlowBashLifecycleTool)).await;
+
+    let result = registry
+        .execute(
+            "bash",
+            json!({"command": "test", "timeout": 5}),
+            &create_test_context(),
+        )
+        .await
+        .expect("test Bash tool should be registered");
+
+    assert!(!result.is_error, "{}", result.output);
+    assert_eq!(result.output, "cleanup complete");
+}
+
+#[test]
+fn bash_timeout_resolution_clamps_provider_float_and_preserves_explicit_longer_guard() {
+    let timeout = execution_timeout_for_call(
+        "bash",
+        &json!({"command": "cargo test", "timeout": 900_000.0}),
+        Some(std::time::Duration::from_secs(700)),
+        None,
+        std::time::Duration::from_secs(120),
+    );
+
+    assert_eq!(timeout, std::time::Duration::from_secs(700));
 }

@@ -2,6 +2,14 @@ use std::path::{Path, PathBuf};
 
 use tracing::warn;
 
+use super::truncate_utf8_bytes;
+
+/// Match the documented Codex project-instruction ceiling. The cap applies to
+/// the complete root-to-working-directory instruction bundle, including
+/// section labels, so nested repositories cannot grow the request without
+/// bound.
+const DEFAULT_PROJECT_CONTEXT_MAX_BYTES: usize = 32 * 1024;
+
 /// Instruction files to search for in the working directory (priority order).
 const PROJECT_FILES: &[&str] = &[
     "KRAB.md",
@@ -23,6 +31,14 @@ const PROJECT_FILES: &[&str] = &[
 /// Searches from the project root down to the working directory and
 /// concatenates the closest instruction file from each directory.
 pub fn build_project_context(working_dir: &Path) -> String {
+    build_project_context_with_limit(working_dir, DEFAULT_PROJECT_CONTEXT_MAX_BYTES)
+}
+
+fn build_project_context_with_limit(working_dir: &Path, max_bytes: usize) -> String {
+    if max_bytes == 0 {
+        return String::new();
+    }
+
     let instruction_files = discover_instruction_files(working_dir);
     if instruction_files.is_empty() {
         return String::new();
@@ -54,7 +70,19 @@ pub fn build_project_context(working_dir: &Path) -> String {
         ));
     }
 
-    sections.join("\n\n")
+    let context = sections.join("\n\n");
+    if context.len() <= max_bytes {
+        return context;
+    }
+
+    const TRUNCATION_MARKER: &str = "\n\n[PROJECT INSTRUCTIONS TRUNCATED AT REQUEST BUDGET]";
+    if max_bytes <= TRUNCATION_MARKER.len() {
+        return truncate_utf8_bytes(TRUNCATION_MARKER, max_bytes);
+    }
+
+    let mut truncated = truncate_utf8_bytes(&context, max_bytes - TRUNCATION_MARKER.len());
+    truncated.push_str(TRUNCATION_MARKER);
+    truncated
 }
 
 fn discover_instruction_files(working_dir: &Path) -> Vec<PathBuf> {
@@ -106,4 +134,27 @@ fn discover_project_root(working_dir: &Path) -> &Path {
         }
     }
     working_dir
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::build_project_context_with_limit;
+
+    #[test]
+    fn aggregate_project_context_respects_byte_budget_and_utf8_boundaries() {
+        let temp = TempDir::new().expect("temp dir");
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(".git")).expect("git dir");
+        fs::write(repo.join("AGENTS.md"), "🦀".repeat(20_000)).expect("instructions");
+
+        let context = build_project_context_with_limit(repo, 1_024);
+
+        assert!(context.len() <= 1_024);
+        assert!(context.is_char_boundary(context.len()));
+        assert!(context.contains("TRUNCATED"));
+    }
 }

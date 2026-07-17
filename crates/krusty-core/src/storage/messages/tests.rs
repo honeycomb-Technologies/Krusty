@@ -155,3 +155,152 @@ fn test_replace_session_messages_rewrites_history() {
     assert_eq!(messages[0].0, "system");
     assert_eq!(messages[1].0, "user");
 }
+
+#[test]
+fn pending_steering_is_hidden_survives_replacement_and_promotes_once_at_end() {
+    let (db, _temp) = create_test_db();
+    let store = MessageStore::new(&db);
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    db.conn()
+        .execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![session_id, "Test", now, now],
+        )
+        .expect("Failed to create session");
+
+    store
+        .save_message(&session_id, "user", r#"[{"type":"text","text":"old"}]"#)
+        .expect("initial message should save");
+    store
+        .queue_pending_steering(
+            &session_id,
+            "steer-1",
+            r#"[{"type":"text","text":"redirect"}]"#,
+        )
+        .expect("steering should stage");
+
+    assert_eq!(
+        store
+            .load_session_messages(&session_id)
+            .expect("canonical messages should load")
+            .len(),
+        1,
+        "staged steering must not leak through canonical history"
+    );
+    assert_eq!(
+        store
+            .get_message_count(&session_id)
+            .expect("canonical count should load"),
+        1
+    );
+    assert_eq!(
+        store
+            .load_session_message_records(&session_id)
+            .expect("canonical records should load")
+            .len(),
+        1
+    );
+
+    store
+        .replace_session_messages(
+            &session_id,
+            &[
+                (
+                    "system".to_string(),
+                    r#"[{"type":"text","text":"summary"}]"#.to_string(),
+                ),
+                (
+                    "assistant".to_string(),
+                    r#"[{"type":"text","text":"latest"}]"#.to_string(),
+                ),
+            ],
+        )
+        .expect("replacement should preserve pending steering");
+
+    assert!(store
+        .promote_pending_steering(&session_id, "steer-1")
+        .expect("promotion should succeed")
+        .is_some());
+    assert!(store
+        .promote_pending_steering(&session_id, "steer-1")
+        .expect("duplicate promotion should be harmless")
+        .is_none());
+
+    let messages = store
+        .load_session_messages(&session_id)
+        .expect("promoted history should load");
+    assert_eq!(
+        messages
+            .iter()
+            .map(|(role, _)| role.as_str())
+            .collect::<Vec<_>>(),
+        vec!["system", "assistant", "user"]
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|(_, content)| content.contains("redirect"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn orphaned_steering_recovers_after_the_interrupted_runs_final_assistant() {
+    let (db, _temp) = create_test_db();
+    let store = MessageStore::new(&db);
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    db.conn()
+        .execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![session_id, "Test", now, now],
+        )
+        .expect("Failed to create session");
+
+    store
+        .save_message(&session_id, "user", r#"[{"type":"text","text":"start"}]"#)
+        .expect("initial message should save");
+    store
+        .queue_pending_steering(
+            &session_id,
+            "steer-1",
+            r#"[{"type":"text","text":"redirect"}]"#,
+        )
+        .expect("steering should stage");
+    store
+        .save_message(
+            &session_id,
+            "assistant",
+            r#"[{"type":"text","text":"interrupted run finished"}]"#,
+        )
+        .expect("assistant completion should save");
+
+    assert_eq!(
+        store
+            .promote_orphaned_pending_steering(&session_id)
+            .expect("orphan recovery should succeed"),
+        1
+    );
+    assert_eq!(
+        store
+            .promote_orphaned_pending_steering(&session_id)
+            .expect("orphan recovery should be idempotent"),
+        0
+    );
+
+    let messages = store
+        .load_session_messages(&session_id)
+        .expect("recovered history should load");
+    assert_eq!(
+        messages
+            .iter()
+            .map(|(role, _)| role.as_str())
+            .collect::<Vec<_>>(),
+        vec!["user", "assistant", "user"]
+    );
+    assert!(messages[2].1.contains("redirect"));
+}

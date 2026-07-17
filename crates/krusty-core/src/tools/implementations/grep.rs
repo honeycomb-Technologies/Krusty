@@ -100,7 +100,7 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents with regex (ripgrep). Supports output_mode: content/files_with_matches/count. Use glob or type params to filter files."
+        "Search file contents with ripgrep regex; filter by glob or type."
     }
 
     fn prompt(&self) -> Option<&str> {
@@ -118,37 +118,35 @@ Use multiline:true for multi-line patterns; -C for context; -i for case-insensit
             "type": "object",
             "properties": {
                 "pattern": {
-                    "type": "string",
-                    "description": "The regex pattern to search for"
+                    "type": "string"
                 },
                 "path": {
                     "type": "string",
-                    "description": "Directory or file to search in (default: current directory)"
+                    "description": "File or directory (default: cwd)"
                 },
                 "glob": {
                     "type": "string",
-                    "description": "File glob pattern (e.g., '*.rs', '*.{ts,tsx}')"
+                    "description": "File glob"
                 },
                 "type": {
                     "type": "string",
-                    "description": "File type to search (e.g., 'rust', 'python', 'js')"
+                    "description": "Ripgrep file type"
                 },
                 "output_mode": {
                     "type": "string",
-                    "enum": ["content", "files_with_matches", "count"],
-                    "description": "Output mode: content (default), files_with_matches, or count"
+                    "enum": ["content", "files_with_matches", "count"]
                 },
                 "-i": {
                     "type": "boolean",
-                    "description": "Case insensitive search"
+                    "description": "Ignore case"
                 },
                 "-C": {
                     "type": "integer",
-                    "description": "Lines of context to show before and after each match"
+                    "description": "Context lines"
                 },
                 "head_limit": {
                     "type": "integer",
-                    "description": "Limit output to first N matches"
+                    "description": "Maximum matches"
                 }
             },
             "required": ["pattern"],

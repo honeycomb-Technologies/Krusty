@@ -25,7 +25,7 @@ impl Tool for SkillTool {
     }
 
     fn description(&self) -> &str {
-        "Invoke a skill to get specialized instructions and guidance. Skills are loaded from ~/.config/krusty/skills/ or .krusty/skills/ in the project. Use this when a task matches an available skill's description. Returns error if skill not found - check skill name spelling."
+        "Invoke a skill to get specialized instructions and guidance. Skills are loaded from ~/.krusty/skills/ or .krusty/skills/ in the project. Use this when a task matches an available skill's description. Returns error if skill not found - check skill name spelling."
     }
 
     fn parameters_schema(&self) -> Value {

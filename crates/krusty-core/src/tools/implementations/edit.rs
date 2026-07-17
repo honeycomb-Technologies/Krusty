@@ -11,6 +11,8 @@ use crate::tools::matching;
 use crate::tools::registry::Tool;
 use crate::tools::{parse_params, ToolContext, ToolResult};
 
+use super::mutation_diagnostics::collect_mutation_warnings;
+
 pub struct EditTool;
 
 #[derive(Deserialize)]
@@ -34,7 +36,7 @@ impl Tool for EditTool {
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            r#"Read the file first. old_string must match exactly one location; add surrounding context when needed.
+            r#"Read pre-existing files first; files created or changed by file tools this run need no re-read. old_string must match exactly one location; add surrounding context when needed.
 
 Preserve exact indentation and prefer small replacements. Use replace_all:true only for exact bulk renames."#,
         )
@@ -113,13 +115,17 @@ Preserve exact indentation and prefer small replacements. Use replace_all:true o
 
             match fs::write(&path, &new_content).await {
                 Ok(_) => {
+                    ctx.record_file_observation(path.clone());
+                    let warnings =
+                        collect_mutation_warnings(std::slice::from_ref(&path), &ctx.working_dir)
+                            .await;
                     let data = json!({
                         "message": format!("Replaced {} occurrence(s)", count),
                         "replacements": count,
                         "file_path": path.display().to_string()
                     });
 
-                    ToolResult::success_data_with(data, Vec::new(), Some(diff), None)
+                    ToolResult::success_data_with(data, warnings, Some(diff), None)
                 }
                 Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
             }
@@ -156,8 +162,13 @@ Preserve exact indentation and prefer small replacements. Use replace_all:true o
 
                     match fs::write(&path, &new_content).await {
                         Ok(_) => {
+                            ctx.record_file_observation(path.clone());
                             let mut msg = "Replaced 1 occurrence".to_string();
-                            let mut warnings = Vec::new();
+                            let mut warnings = collect_mutation_warnings(
+                                std::slice::from_ref(&path),
+                                &ctx.working_dir,
+                            )
+                            .await;
                             if m.pass > 1 {
                                 msg.push_str(&format!(" (fuzzy match pass {})", m.pass));
                                 warnings.push(format!("Used fuzzy matching pass {}", m.pass));

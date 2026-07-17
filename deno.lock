@@ -1,0 +1,27 @@
+{
+  "version": "5",
+  "specifiers": {
+    "npm:react@19.2.0": "19.2.0",
+    "npm:zustand@5.0.12": "5.0.12_react@19.2.0"
+  },
+  "npm": {
+    "react@19.2.0": {
+      "integrity": "sha512-tmbWg6W31tQLeB5cdIBOicJDJRR2KzXsV7uSK9iNfLWQ5bIZfxuPEHp7M8wiHyHnn0DD1i7w3Zmin0FtkrwoCQ=="
+    },
+    "zustand@5.0.12_react@19.2.0": {
+      "integrity": "sha512-i77ae3aZq4dhMlRhJVCYgMLKuSiZAaUPAct2AksxQ+gOtimhGMdXljRT21P5BNpeT4kXlLIckvkPM029OljD7g==",
+      "dependencies": [
+        "react"
+      ],
+      "optionalPeers": [
+        "react"
+      ]
+    }
+  },
+  "workspace": {
+    "dependencies": [
+      "npm:react@19.2.0",
+      "npm:zustand@5.0.12"
+    ]
+  }
+}

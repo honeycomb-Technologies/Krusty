@@ -4,11 +4,13 @@ use tracing::debug;
 
 use super::super::core::AiClient;
 use super::shared::trim_or_empty;
+use super::SimpleCallResult;
 use crate::ai::format::openai::OpenAIFormat;
 use crate::ai::format::FormatHandler;
 use crate::ai::models::ApiFormat;
 use crate::ai::transform::apply_request_body_transform;
 use crate::ai::types::ModelMessage;
+use crate::ai::usage::{parse_openai_chat_usage, parse_openai_responses_usage};
 
 impl AiClient {
     /// Simple non-streaming call using OpenAI format
@@ -18,7 +20,7 @@ impl AiClient {
         system_prompt: &str,
         user_message: &str,
         max_tokens: usize,
-    ) -> Result<String> {
+    ) -> Result<SimpleCallResult> {
         let body = openai_simple_body(
             self.config().api_format,
             model,
@@ -37,7 +39,7 @@ impl AiClient {
 
         let json: Value = response.json().await?;
 
-        Ok(trim_or_empty(extract_openai_text(&json)))
+        Ok(simple_openai_result(&json, self.config().api_format))
     }
 
     /// Cache-safe conversation call using OpenAI format.
@@ -51,7 +53,7 @@ impl AiClient {
         conversation: &[ModelMessage],
         appended_user_message: &str,
         max_tokens: usize,
-    ) -> Result<String> {
+    ) -> Result<SimpleCallResult> {
         let format_handler = OpenAIFormat::new(self.config().api_format);
         let prompt_sections =
             self.system_prompt_sections(model, conversation, Some(base_system_prompt), None);
@@ -87,7 +89,19 @@ impl AiClient {
 
         let json: Value = response.json().await?;
 
-        Ok(trim_or_empty(extract_openai_text(&json)))
+        Ok(simple_openai_result(&json, self.config().api_format))
+    }
+}
+
+fn simple_openai_result(json: &Value, api_format: ApiFormat) -> SimpleCallResult {
+    let usage = if matches!(api_format, ApiFormat::OpenAIResponses) {
+        parse_openai_responses_usage(json)
+    } else {
+        parse_openai_chat_usage(json)
+    };
+    SimpleCallResult {
+        text: trim_or_empty(extract_openai_text(json)),
+        usage,
     }
 }
 
@@ -112,7 +126,7 @@ fn openai_simple_body(
     }
 }
 
-fn extract_openai_text(json: &Value) -> Option<&str> {
+pub(super) fn extract_openai_text(json: &Value) -> Option<&str> {
     json.get("choices")
         .and_then(|c| c.as_array())
         .and_then(|arr| arr.first())
@@ -170,5 +184,28 @@ mod tests {
         });
 
         assert_eq!(extract_openai_text(&json), Some("hello"));
+    }
+
+    #[test]
+    fn simple_result_preserves_responses_usage() {
+        let result = simple_openai_result(
+            &json!({
+                "output_text": "hello",
+                "usage": {
+                    "input_tokens": 1000,
+                    "output_tokens": 50,
+                    "input_tokens_details": {"cached_tokens": 700},
+                    "output_tokens_details": {"reasoning_tokens": 40}
+                }
+            }),
+            ApiFormat::OpenAIResponses,
+        );
+
+        assert_eq!(result.text, "hello");
+        let usage = result.usage.expect("usage");
+        assert_eq!(usage.prompt_tokens, 300);
+        assert_eq!(usage.cache_read_input_tokens, 700);
+        assert_eq!(usage.reasoning_tokens, 40);
+        assert_eq!(usage.logical_total_tokens(), 1_050);
     }
 }

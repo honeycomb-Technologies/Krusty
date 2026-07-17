@@ -240,7 +240,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            UserHookResult::Continue { .. } | UserHookResult::Warn { .. }
+            UserHookResult::Continue | UserHookResult::Warn { .. }
         ));
     }
 }

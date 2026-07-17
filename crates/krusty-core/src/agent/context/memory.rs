@@ -1,20 +1,21 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::ai::types::{Content, ModelMessage, Role};
+use crate::agent::context_ledger::ContextLedger;
+use crate::ai::types::ModelMessage;
 use crate::storage::{
     is_compaction_flush_memory, is_current_snapshot, AgentMemory, MemoryStore, MemoryType,
 };
 
-use super::{open_context_database, truncate_utf8};
+use super::{open_context_database, truncate_utf8, truncate_utf8_bytes};
 
-/// Maximum number of memories injected per type (most recent first).
-const MAX_MEMORIES_PER_TYPE: usize = 4;
+/// Maximum number of memories injected per type (highest relevance first,
+/// preserving store recency for equal scores).
+const MAX_MEMORIES_PER_TYPE: usize = 3;
 /// Maximum character length for a single memory preview in the injection.
 pub(super) const MAX_MEMORY_CONTENT_CHARS: usize = 180;
 /// Approximate upper bound on total memory context output size.
-const MAX_MEMORY_CONTEXT_BYTES: usize = 3 * 1024;
-const MAX_QUERY_MESSAGES: usize = 1;
+const MAX_MEMORY_CONTEXT_BYTES: usize = 2 * 1024;
 
 /// Build persistent memory context from the agent memory store.
 ///
@@ -60,12 +61,16 @@ pub(super) fn build_memory_context(
         MemoryType::Project,
         MemoryType::Reference,
     ] {
-        let typed = memories
+        let mut typed = memories
             .iter()
             .filter(|memory| memory.memory_type == *memory_type)
-            .filter(|memory| should_inject_memory(memory, *memory_type, &query_terms))
-            .take(MAX_MEMORIES_PER_TYPE)
+            .filter_map(|memory| {
+                let score = memory_relevance_score(memory, &query_terms);
+                (score > 0).then_some((score, memory))
+            })
             .collect::<Vec<_>>();
+        typed.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+        typed.truncate(MAX_MEMORIES_PER_TYPE);
         if typed.is_empty() {
             continue;
         }
@@ -80,7 +85,7 @@ pub(super) fn build_memory_context(
         total_len += header.len();
         injected_any = true;
 
-        for memory in typed {
+        for (_, memory) in typed {
             let content = memory_preview(&memory.content);
             let line = format!("- **{}**: {}", memory.title, content);
             total_len += line.len() + 1;
@@ -100,45 +105,49 @@ pub(super) fn build_memory_context(
     }
 
     sections.push("[/PERSISTENT MEMORY]".to_string());
-    sections.join("\n")
-}
-
-fn should_inject_memory(
-    memory: &AgentMemory,
-    _memory_type: MemoryType,
-    query_terms: &BTreeSet<String>,
-) -> bool {
-    memory_matches_query(memory, query_terms)
-}
-
-fn memory_matches_query(memory: &AgentMemory, query_terms: &BTreeSet<String>) -> bool {
-    if query_terms.is_empty() {
-        return false;
+    let context = sections.join("\n");
+    if context.len() <= MAX_MEMORY_CONTEXT_BYTES {
+        return context;
     }
 
-    let haystack_terms = tokenize(&format!("{} {}", memory.title, memory.content));
-    query_terms.iter().any(|term| haystack_terms.contains(term))
+    const END_MARKER: &str =
+        "\n[PERSISTENT MEMORY TRUNCATED AT REQUEST BUDGET]\n[/PERSISTENT MEMORY]";
+    let mut bounded = truncate_utf8_bytes(
+        &context,
+        MAX_MEMORY_CONTEXT_BYTES.saturating_sub(END_MARKER.len()),
+    );
+    bounded.push_str(END_MARKER);
+    bounded
+}
+
+fn memory_relevance_score(memory: &AgentMemory, query_terms: &BTreeSet<String>) -> usize {
+    if query_terms.is_empty() {
+        return 0;
+    }
+
+    let title_terms = tokenize(&memory.title);
+    let content_terms = tokenize(&memory.content);
+    let matches = query_terms
+        .iter()
+        .filter(|term| title_terms.contains(*term) || content_terms.contains(*term))
+        .collect::<Vec<_>>();
+    if matches.is_empty() || (matches.len() == 1 && is_generic_relevance_term(matches[0].as_str()))
+    {
+        return 0;
+    }
+
+    matches.iter().fold(0, |score, term| {
+        score
+            + usize::from(content_terms.contains(*term))
+            + 4 * usize::from(title_terms.contains(*term))
+            + usize::from(term.chars().count() >= 8)
+    })
 }
 
 fn relevance_terms(conversation: &[ModelMessage]) -> BTreeSet<String> {
-    let mut terms = BTreeSet::new();
-    for text in conversation
-        .iter()
-        .rev()
-        .filter(|message| message.role == Role::User)
-        .filter_map(first_text)
-        .take(MAX_QUERY_MESSAGES)
-    {
-        terms.extend(tokenize(text));
-    }
-    terms
-}
-
-fn first_text(message: &ModelMessage) -> Option<&str> {
-    message.content.iter().find_map(|content| match content {
-        Content::Text { text } => Some(text.as_str()),
-        _ => None,
-    })
+    ContextLedger::from_conversation(conversation)
+        .latest_user_objective
+        .map_or_else(BTreeSet::new, |objective| tokenize(&objective))
 }
 
 fn tokenize(text: &str) -> BTreeSet<String> {
@@ -153,35 +162,95 @@ fn tokenize(text: &str) -> BTreeSet<String> {
 fn is_stopword(token: &str) -> bool {
     matches!(
         token,
-        "about"
+        "all"
+            | "and"
+            | "are"
+            | "about"
             | "after"
             | "again"
             | "also"
             | "before"
             | "being"
+            | "can"
+            | "change"
+            | "changes"
+            | "code"
+            | "coding"
             | "could"
             | "current"
+            | "did"
+            | "does"
+            | "doing"
+            | "done"
+            | "fix"
+            | "for"
+            | "from"
+            | "has"
+            | "have"
+            | "issue"
+            | "its"
             | "hello"
+            | "how"
+            | "make"
+            | "memory"
             | "more"
             | "need"
+            | "new"
+            | "not"
+            | "now"
+            | "old"
             | "please"
+            | "problem"
+            | "project"
+            | "system"
+            | "test"
+            | "tests"
             | "some"
             | "tell"
             | "that"
+            | "the"
             | "their"
             | "there"
             | "these"
             | "thing"
             | "this"
             | "those"
+            | "then"
+            | "they"
+            | "use"
+            | "using"
+            | "want"
+            | "was"
+            | "were"
             | "what"
             | "when"
             | "where"
             | "which"
             | "while"
+            | "will"
             | "with"
+            | "work"
             | "would"
+            | "you"
             | "your"
+    )
+}
+
+fn is_generic_relevance_term(token: &str) -> bool {
+    matches!(
+        token,
+        "agent"
+            | "context"
+            | "feature"
+            | "file"
+            | "files"
+            | "harness"
+            | "model"
+            | "request"
+            | "server"
+            | "tool"
+            | "tools"
+            | "update"
     )
 }
 

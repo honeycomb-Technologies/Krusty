@@ -19,8 +19,8 @@ pub use implementations::{
     AddSubtaskTool, AgentTool, ApplyPatchTool, AskUserQuestionTool, AutonomousTaskTool, BashTool,
     EditTool, EnterPlanModeTool, GlobTool, GrepTool, ListTool, MemoryTool, MultiEditTool,
     ProcessesTool, ReadTool, ReportTool, SendUserMessageTool, SetDependencyTool, SetWorkModeTool,
-    SetWorkspaceContextTool, SkillTool, SleepTool, TaskCompleteTool, TaskStartTool, WebFetchTool,
-    WebSearchTool, WriteTool,
+    SetWorkspaceContextTool, SkillTool, SleepTool, TaskCompleteTool, TaskStartTool, ToolSearchTool,
+    WebFetchTool, WebSearchTool, WriteTool,
 };
 pub use registry::{
     parse_params, FileObservationTracker, ToolContext, ToolOutputChunk, ToolRegistry, ToolResult,

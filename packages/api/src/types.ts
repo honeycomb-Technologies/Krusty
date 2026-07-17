@@ -129,6 +129,7 @@ export interface ChatMessage {
 	toolCalls?: ToolCall[];
 	renderParts?: ChatRenderPart[];
 	isQueued?: boolean;
+	queuedUntilNextRun?: boolean;
 	kind?: "recovery_notice" | "live_partial" | "streaming";
 }
 
@@ -206,6 +207,17 @@ export interface ChatRequest {
 	fast_mode?: boolean;
 	permission_mode?: PermissionMode;
 	mode?: SessionMode;
+}
+
+export interface SteerRequest {
+	session_id: string;
+	message: string;
+	content?: ContentBlock[];
+}
+
+export interface SteerResponse {
+	status: "accepted" | "queued";
+	pending_id: string;
 }
 
 export type ContentBlock = TextContent | ImageContent;
@@ -762,10 +774,17 @@ export type SessionContinuationEvent =
 	| ContextCompactedEvent;
 
 export interface UsageMetrics {
+	/** Uncached input tokens billed at the provider's normal input rate. */
 	promptTokens: number;
+	/** Logical input: uncached input + cache writes + cache reads. */
+	inputTokens: number;
+	/** Generated output, including reasoning tokens. */
 	completionTokens: number;
+	/** Reasoning tokens contained within completionTokens. */
+	reasoningTokens: number;
 	cacheCreationInputTokens: number;
 	cacheReadInputTokens: number;
+	/** Logical input plus generated output. */
 	totalTokens: number;
 }
 
@@ -801,7 +820,9 @@ export type StreamEvent =
 	| {
 			type: "usage";
 			prompt_tokens: number;
+			input_tokens?: number;
 			completion_tokens: number;
+			reasoning_tokens?: number;
 			cache_creation_input_tokens?: number;
 			cache_read_input_tokens?: number;
 			total_tokens?: number;
@@ -819,6 +840,11 @@ export type StreamEvent =
 	  }
 	| { type: "tool_approved"; id: string }
 	| { type: "tool_denied"; id: string }
+	| {
+			type: "steering_injected";
+			pending_id?: string;
+			message: string;
+	  }
 	| { type: "turn_complete"; turn: number; has_more: boolean }
 	| { type: "finish"; session_id: string; stop_reason: string }
 	| { type: "error"; error: string }
@@ -867,6 +893,7 @@ export interface StreamCallbacks {
 	) => void;
 	onToolApproved?: (id: string) => void;
 	onToolDenied?: (id: string) => void;
+	onSteeringInjected?: (pendingId: string | undefined, message: string) => void;
 	onTurnComplete?: (turn: number, hasMore: boolean) => void;
 	onPlanUpdate: (items: PlanItem[]) => void;
 	onModeChange: (mode: string, reason?: string) => void;
@@ -880,6 +907,7 @@ export interface StreamCallbacks {
 		completionTokens: number,
 		metrics?: UsageMetrics,
 	) => void;
+	onLagged?: (skipped: number) => void;
 	onContextCompactionStarted?: (event: ContextCompactionStartedEvent) => void;
 	onSessionPinched?: (event: SessionContinuationEvent) => void;
 	onTitleUpdate: (title: string) => void;

@@ -32,6 +32,18 @@ export function createChatMessageId(prefix: string): string {
   return generateRuntimeId(prefix);
 }
 
+export function createStreamingAssistantMessage(): ChatMessage {
+  return {
+    id: createChatMessageId('assistant-stream'),
+    role: 'assistant',
+    content: '',
+    thinking: '',
+    toolCalls: [],
+    renderParts: [],
+    kind: 'streaming',
+  };
+}
+
 export function buildStoredMessageId(index: number, message: ChatMessage): string {
   const firstToolId = message.toolCalls?.[0]?.id;
   if (firstToolId) {
@@ -129,9 +141,15 @@ export function applyRecoveryParity(
   recovery: ApiRecoveryState | null | undefined,
   agentState: string,
 ): ChatMessage[] {
-  let nextMessages = messages.filter((message) => message.kind !== 'recovery_notice');
+  const recoveryPartialPrefix = 'recovery-partial-';
+  let nextMessages = messages.filter(
+    (message) =>
+      message.kind !== 'recovery_notice'
+      && !message.id.startsWith(recoveryPartialPrefix),
+  );
+  const isTerminal = ['idle', 'error', 'failed'].includes(agentState);
 
-  if (recovery && agentState === 'idle') {
+  if (recovery && isTerminal) {
     nextMessages = nextMessages.map((message) => ({
       ...message,
       toolCalls: message.toolCalls?.map((toolCall) => {
@@ -149,17 +167,69 @@ export function applyRecoveryParity(
       }),
     }));
 
-    nextMessages.unshift({
-      id: [
-        'recovery-notice',
-        recovery.schema_version,
-        recovery.status,
-        recovery.stop_reason ?? 'unknown',
-      ].join('-'),
-      role: 'assistant',
-      content: `[Recovery Notice] ${buildRecoveryNotice(recovery)}`,
-      kind: 'recovery_notice',
-    });
+    const partial = recovery.partial_assistant;
+    const partialThinking = partial.thinking ?? '';
+    const hasPartialText = partial.text.trim().length > 0;
+    const hasPartialThinking = partialThinking.trim().length > 0;
+    const hasPartialTools = partial.tool_calls.length > 0;
+    const canonicalAlreadyContainsPartial = nextMessages.some(
+      (message) =>
+        message.role === 'assistant'
+        && hasPartialText
+        && message.content.trim() === partial.text.trim(),
+    );
+
+    if (
+      (hasPartialText || hasPartialThinking || hasPartialTools)
+      && !canonicalAlreadyContainsPartial
+    ) {
+      const toolCalls = partial.tool_calls.map((toolCall) => ({
+        id: toolCall.id,
+        name: toolCall.name,
+        arguments: unwrapRecoveryToolArguments(toolCall.arguments),
+        output: '[Turn interrupted before this tool could complete]',
+        status: 'error' as const,
+      }));
+      const renderParts = [
+        ...(hasPartialThinking
+          ? [{ type: 'thinking' as const, id: 'recovery-thinking', content: partialThinking }]
+          : []),
+        ...toolCalls.map((toolCall) => ({
+          type: 'tool' as const,
+          id: `recovery-tool-${toolCall.id}`,
+          toolCallId: toolCall.id,
+        })),
+        ...(hasPartialText
+          ? [{ type: 'text' as const, id: 'recovery-text', content: partial.text }]
+          : []),
+      ];
+
+      nextMessages.push({
+        id: [
+          recoveryPartialPrefix,
+          recovery.schema_version,
+          recovery.status,
+          recovery.stop_reason ?? 'unknown',
+        ].join('-'),
+        role: 'assistant',
+        content: partial.text,
+        thinking: partialThinking || undefined,
+        toolCalls,
+        renderParts,
+      });
+    } else if (agentState === 'idle' && !canonicalAlreadyContainsPartial) {
+      nextMessages.unshift({
+        id: [
+          'recovery-notice',
+          recovery.schema_version,
+          recovery.status,
+          recovery.stop_reason ?? 'unknown',
+        ].join('-'),
+        role: 'assistant',
+        content: `[Recovery Notice] ${buildRecoveryNotice(recovery)}`,
+        kind: 'recovery_notice',
+      });
+    }
   }
 
   return nextMessages;

@@ -87,9 +87,7 @@ impl Tool for AgentTool {
     }
 
     fn description(&self) -> &str {
-        "Launch a specialized sub-agent. Types: 'explore' (read-only codebase investigation), \
-         'plan' (implementation planning), 'verify' (test and validate changes), \
-         'build' (parallel code implementation)."
+        "Delegate multi-step work to an explore, plan, verify, or build sub-agent."
     }
 
     fn prompt(&self) -> Option<&str> {
@@ -115,44 +113,43 @@ For simple file lookups, use Glob/Grep/Read directly — agent is for deeper mul
             "properties": {
                 "agent_type": {
                     "type": "string",
-                    "enum": ["explore", "plan", "verify", "build"],
-                    "description": "Sub-agent type to launch"
+                    "enum": ["explore", "plan", "verify", "build"]
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "The question or task for the sub-agent"
+                    "description": "Task for the sub-agent"
                 },
                 "scope": {
                     "type": "string",
-                    "description": "Optional: path to a directory or file to focus exploration on (explore only)"
+                    "description": "Optional exploration path"
                 },
                 "components": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Components to build in parallel. Each gets its own builder agent. (build only)"
+                    "description": "Parallel build components"
                 },
                 "conventions": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Coding conventions all builders must follow. (build only)"
+                    "description": "Shared build conventions"
                 },
                 "max_concurrency": {
                     "type": "integer",
-                    "description": "Max parallel builders. Default: component count. Use 2-3 for tightly coupled code, 5-10 for independent modules. (build only)",
+                    "description": "Parallel builder limit",
                     "minimum": 1,
                     "maximum": 20
                 },
                 "run_in_background": {
                     "type": "boolean",
-                    "description": "Run agent in background. Returns immediately with delegated_run_id. Check status via delegated run store. You will see results in the delegated context on your next turn."
+                    "description": "Return immediately and run in background"
                 },
                 "name": {
                     "type": "string",
-                    "description": "Optional stable label for a background agent run. Use with run_in_background: true so progress is easier to track."
+                    "description": "Background run label"
                 },
                 "description": {
                     "type": "string",
-                    "description": "Short description of what this agent does (3-5 words, for status display)."
+                    "description": "Short status label"
                 }
             },
             "required": ["agent_type", "prompt"],

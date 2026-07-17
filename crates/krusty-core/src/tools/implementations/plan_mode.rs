@@ -17,7 +17,7 @@ impl Tool for EnterPlanModeTool {
     }
 
     fn description(&self) -> &str {
-        "Switch to Plan mode to create a new implementation plan. Use this when the user asks you to plan something, design an approach, or when you need to create a structured plan before implementing. In Plan mode, you can explore the codebase but cannot make modifications. After creating a plan, the user will review and approve it before implementation begins. Set clear_existing=true to discard any existing plan and start fresh."
+        "Enter read-only Plan mode before implementation; clear_existing starts a fresh plan."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -26,11 +26,11 @@ impl Tool for EnterPlanModeTool {
             "properties": {
                 "reason": {
                     "type": "string",
-                    "description": "Brief explanation of why planning is needed (shown to user)"
+                    "description": "Why planning is needed"
                 },
                 "clear_existing": {
                     "type": "boolean",
-                    "description": "If true, clears any existing active plan. Use when user wants to start fresh."
+                    "description": "Discard the current plan first"
                 }
             },
             "required": ["reason"],

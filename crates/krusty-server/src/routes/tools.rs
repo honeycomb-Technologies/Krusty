@@ -1,6 +1,7 @@
 //! Tool execution endpoint
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use axum::{
     extract::State,
@@ -35,7 +36,7 @@ pub struct ToolResponse {
 
 /// List all available tools
 async fn list_tools(State(state): State<AppState>) -> Json<Vec<ToolResponse>> {
-    let tools = state.tool_registry.get_ai_tools().await;
+    let tools = state.tool_registry.get_ai_tools_all().await;
 
     let response: Vec<ToolResponse> = tools
         .into_iter()
@@ -73,7 +74,17 @@ async fn execute_tool(
     ))
     .with_subagent_max_turns(RuntimeAgentConfig::default().subagent_max_turns)
     .with_mcp_manager(state.mcp_manager.clone())
-    .with_skills_manager(state.skills_manager.clone());
+    .with_skills_manager(state.skills_manager.clone())
+    .with_tool_registry(Arc::clone(&state.tool_registry));
+
+    // Direct execution must inherit the authenticated tenant just like the
+    // orchestrated chat path. Without this, process tools silently fall back
+    // to the shared single-user bucket even for authenticated requests.
+    let ctx = if let Some(user_id) = user_id {
+        ctx.with_user_id(user_id.to_owned())
+    } else {
+        ctx
+    };
 
     let ctx = if let Some(client) = state.resolve_ai_client_for_user(None, user_id).await {
         ctx.with_ai_client(client)
@@ -114,6 +125,9 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use axum::extract::State;
+    use axum::Json;
+    use serde_json::json;
     use tokio::sync::{Mutex, RwLock};
 
     use krusty_core::agent::{AgentCancellation, UserHookManager};
@@ -124,10 +138,12 @@ mod tests {
     use krusty_core::storage::credentials::CredentialStore;
     use krusty_core::storage::Database;
     use krusty_core::tools::registry::ToolRegistry;
+    use krusty_core::tools::ProcessesTool;
 
-    use super::resolve_tool_working_dir;
+    use super::{execute_tool, resolve_tool_working_dir};
     use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::error::AppError;
+    use crate::types::ToolExecuteRequest;
     use crate::AppState;
 
     fn create_test_state() -> (AppState, PathBuf) {
@@ -224,5 +240,73 @@ mod tests {
         let result = resolve_tool_working_dir(&state, None, Some("/etc"));
 
         assert!(matches!(result, Err(AppError::BadRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn direct_process_execution_is_scoped_to_authenticated_user() {
+        let (state, temp_dir) = create_test_state();
+        state.tool_registry.register(Arc::new(ProcessesTool)).await;
+
+        state
+            .process_registry
+            .register_external_for_user(
+                "alice",
+                "alice-process".to_string(),
+                "alice-preview".to_string(),
+                None,
+                None,
+                temp_dir.clone(),
+            )
+            .await;
+        state
+            .process_registry
+            .register_external_for_user(
+                "bob",
+                "bob-process".to_string(),
+                "bob-preview".to_string(),
+                None,
+                None,
+                temp_dir.clone(),
+            )
+            .await;
+
+        let response = match execute_tool(
+            State(state.clone()),
+            Some(current_user("alice", &temp_dir)),
+            Json(ToolExecuteRequest {
+                tool_name: "processes".to_string(),
+                params: json!({"action": "list"}),
+                working_dir: None,
+                mode: None,
+            }),
+        )
+        .await
+        {
+            Ok(response) => response.0,
+            Err(_) => panic!("same-user process list should execute"),
+        };
+
+        assert!(!response.is_error);
+        assert!(response.output.contains("alice-process"));
+        assert!(!response.output.contains("bob-process"));
+
+        let response = match execute_tool(
+            State(state),
+            Some(current_user("alice", &temp_dir)),
+            Json(ToolExecuteRequest {
+                tool_name: "processes".to_string(),
+                params: json!({"action": "status", "process_id": "bob-process"}),
+                working_dir: None,
+                mode: None,
+            }),
+        )
+        .await
+        {
+            Ok(response) => response.0,
+            Err(_) => panic!("foreign-user lookup should return a tool error"),
+        };
+
+        assert!(response.is_error);
+        assert!(response.output.contains("Process not found"));
     }
 }

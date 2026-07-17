@@ -2,45 +2,12 @@ use serde_json::Value;
 
 use super::OpenAIParser;
 use crate::ai::sse::SseEvent;
-use crate::ai::types::{FinishReason, Usage};
-
-fn parse_chat_usage(json: &Value) -> Option<Usage> {
-    let usage = json.get("usage")?;
-    let prompt_tokens = usage
-        .get("prompt_tokens")
-        .and_then(|tokens| tokens.as_u64())
-        .unwrap_or(0) as usize;
-    let completion_tokens = usage
-        .get("completion_tokens")
-        .and_then(|tokens| tokens.as_u64())
-        .unwrap_or(0) as usize;
-    let cached_tokens = usage
-        .get("prompt_tokens_details")
-        .and_then(|details| details.get("cached_tokens"))
-        .and_then(|tokens| tokens.as_u64())
-        .or_else(|| {
-            usage
-                .get("cache_read_input_tokens")
-                .and_then(|tokens| tokens.as_u64())
-        })
-        .unwrap_or(0) as usize;
-    let total_tokens = usage
-        .get("total_tokens")
-        .and_then(|tokens| tokens.as_u64())
-        .unwrap_or((prompt_tokens + completion_tokens) as u64) as usize;
-
-    (prompt_tokens > 0 || completion_tokens > 0 || cached_tokens > 0).then_some(Usage {
-        prompt_tokens: prompt_tokens.saturating_sub(cached_tokens),
-        completion_tokens,
-        total_tokens,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: cached_tokens,
-    })
-}
+use crate::ai::types::FinishReason;
+use crate::ai::usage::parse_openai_chat_usage;
 
 impl OpenAIParser {
     pub(super) fn parse_chat_completions_event(&self, json: &Value) -> anyhow::Result<SseEvent> {
-        let usage = parse_chat_usage(json);
+        let usage = parse_openai_chat_usage(json);
         let choices = json.get("choices").and_then(|c| c.as_array());
 
         if let Some(choices) = choices {

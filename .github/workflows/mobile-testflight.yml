@@ -14,8 +14,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  client-quality:
+    name: Client Quality Gates
+    uses: ./.github/workflows/client-quality.yml
+
   build-and-submit:
     name: Build iOS & Submit to TestFlight
+    needs: client-quality
     runs-on: ubuntu-latest
     environment: testflight
     defaults:

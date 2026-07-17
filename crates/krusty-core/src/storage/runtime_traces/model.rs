@@ -63,6 +63,12 @@ pub struct RuntimeTraceEvent {
     pub sequence: i64,
     pub turn: usize,
     pub event_type: String,
+    /// Queryable provider-call class (for example `agent_loop` or `auxiliary`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_kind: Option<String>,
+    /// Stable semantic operation for provider calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
     pub payload: Value,
     pub failure_category: Option<TraceFailureCategory>,
     pub stop_reason: Option<LoopStopReason>,
@@ -81,6 +87,8 @@ impl RuntimeTraceEvent {
             sequence,
             turn,
             event_type: loop_event_type(event).to_string(),
+            call_kind: None,
+            operation: None,
             payload: summarize_loop_event(event),
             failure_category: failure_category_for_event(event),
             stop_reason: stop_reason_for_event(event),

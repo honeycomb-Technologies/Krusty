@@ -38,7 +38,7 @@ At the top of every loop iteration, the orchestrator calls `context::inject_cont
 
 1. **Workspace context.** The working directory and project directory, telling the AI where it is operating.
 2. **Environment context.** Platform details, the current model ID, git branch, and other environmental facts gathered from the local machine.
-3. **Persistent memory.** User preferences, project decisions, and feedback stored in the memory database. Capped to prevent memory injection from consuming too much context budget (at most 15 memories per type, each truncated to 300 characters, with an 8 KB total ceiling).
+3. **Persistent memory.** User preferences, project decisions, and feedback stored in the memory database. Only memories with meaningful overlap with the latest user objective are previewed; generic terms do not qualify on their own. Previews are capped at three memories per type, 180 characters each, with a 2 KiB total ceiling.
 4. **Project instructions.** Contents of instruction files discovered in the project root: `KRAB.md`, `CLAUDE.md`, `.cursorrules`, `AGENTS.md`, and others. These are read from disk on every iteration so they always reflect the latest version.
 5. **Project settings append.** An optional `system_prompt_append` from `.krusty/settings.json`.
 6. **Plan context.** If a plan exists for this session, its current state (tasks, completion status, dependencies) is serialized and injected so the AI knows what has been done and what remains.

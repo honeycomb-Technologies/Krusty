@@ -7,12 +7,24 @@
 use std::time::Duration;
 
 use agent_client_protocol::{
-    Client, Error as AcpError, PermissionOptionKind, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, Result as AcpResult,
-    SelectedPermissionOutcome, SessionNotification,
+    Client, Error as AcpError, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, Result as AcpResult, SessionNotification,
 };
-use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tokio::sync::{mpsc, oneshot};
+use tracing::warn;
+
+/// Messages that must be delivered over the live ACP connection.
+///
+/// Notifications are fire-and-forget. Permission requests carry a one-shot
+/// response channel so the agent loop can wait for the editor's decision
+/// without owning the non-`Send` ACP connection itself.
+pub enum AcpOutbound {
+    Notification(SessionNotification),
+    Permission {
+        request: RequestPermissionRequest,
+        response_tx: oneshot::Sender<Result<RequestPermissionResponse, String>>,
+    },
+}
 
 /// Bridge that implements Client trait using channels
 ///
@@ -20,12 +32,12 @@ use tracing::{info, warn};
 /// through a channel, which are then forwarded to the real connection
 /// by the server.
 pub struct NotificationBridge {
-    tx: mpsc::Sender<SessionNotification>,
+    tx: mpsc::Sender<AcpOutbound>,
 }
 
 impl NotificationBridge {
     /// Create a new notification bridge
-    pub fn new(tx: mpsc::Sender<SessionNotification>) -> Self {
+    pub fn new(tx: mpsc::Sender<AcpOutbound>) -> Self {
         Self { tx }
     }
 }
@@ -37,63 +49,45 @@ impl NotificationBridge {
 /// - session_notification (required)
 /// - Other methods have default implementations
 ///
-/// # Security Note
-///
-/// In headless bridge mode there is no UI that can safely confirm sensitive tool
-/// requests. The bridge therefore rejects permission requests by default instead
-/// of silently granting write or shell access. Interactive ACP clients can still
-/// approve by implementing `request_permission` on their real connection.
 #[async_trait::async_trait(?Send)]
 impl Client for NotificationBridge {
     async fn request_permission(
         &self,
         request: RequestPermissionRequest,
     ) -> AcpResult<RequestPermissionResponse> {
-        // No UI is available on the notification bridge, so choose the safest
-        // provided option. Prefer an explicit reject choice; if the caller did
-        // not provide one, return Cancelled instead of granting access.
-        let Some(option_id) = request
-            .options
-            .iter()
-            .find(|opt| {
-                matches!(
-                    opt.kind,
-                    PermissionOptionKind::RejectOnce | PermissionOptionKind::RejectAlways
-                )
+        let (response_tx, response_rx) = oneshot::channel();
+        self.tx
+            .send(AcpOutbound::Permission {
+                request,
+                response_tx,
             })
-            .map(|opt| opt.option_id.clone())
-        else {
-            warn!("Permission request cancelled in headless mode: no reject option provided");
-            return Ok(RequestPermissionResponse::new(
-                RequestPermissionOutcome::Cancelled,
-            ));
-        };
+            .await
+            .map_err(|_| AcpError::new(-32603, "ACP connection closed"))?;
 
-        let tool_desc = request
-            .tool_call
-            .fields
-            .title
-            .as_deref()
-            .unwrap_or("unknown operation");
-        info!(
-            "Permission rejected for '{}' (headless mode, option: {})",
-            tool_desc, option_id
-        );
-
-        let outcome = RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id));
-        Ok(RequestPermissionResponse::new(outcome))
+        match tokio::time::timeout(Duration::from_secs(300), response_rx).await {
+            Ok(Ok(Ok(response))) => Ok(response),
+            Ok(Ok(Err(error))) => Err(AcpError::new(-32603, error)),
+            Ok(Err(_)) => Err(AcpError::new(
+                -32603,
+                "ACP permission response channel closed",
+            )),
+            Err(_) => {
+                warn!("ACP permission request timed out after 5 minutes");
+                Ok(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Cancelled,
+                ))
+            }
+        }
     }
 
     async fn session_notification(&self, notification: SessionNotification) -> AcpResult<()> {
         // Try non-blocking send first to avoid stalling the processor
-        match self.tx.try_send(notification) {
+        match self.tx.try_send(AcpOutbound::Notification(notification)) {
             Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(notification)) => {
+            Err(mpsc::error::TrySendError::Full(outbound)) => {
                 // Channel full - wait with timeout rather than blocking forever.
                 // On slow clients (phones), the forwarder may not drain fast enough.
-                match tokio::time::timeout(Duration::from_secs(10), self.tx.send(notification))
-                    .await
-                {
+                match tokio::time::timeout(Duration::from_secs(10), self.tx.send(outbound)).await {
                     Ok(Ok(())) => Ok(()),
                     Ok(Err(e)) => Err(AcpError::new(-32603, format!("Channel closed: {}", e))),
                     Err(_) => {
@@ -117,7 +111,7 @@ impl Client for NotificationBridge {
 /// Returns (bridge, receiver) tuple:
 /// - bridge: implements Client, used by PromptProcessor
 /// - receiver: receives notifications to forward to real connection
-pub fn create_notification_channel() -> (NotificationBridge, mpsc::Receiver<SessionNotification>) {
+pub fn create_notification_channel() -> (NotificationBridge, mpsc::Receiver<AcpOutbound>) {
     const CHANNEL_CAPACITY: usize = 1000;
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
     (NotificationBridge::new(tx), rx)
@@ -127,8 +121,9 @@ pub fn create_notification_channel() -> (NotificationBridge, mpsc::Receiver<Sess
 mod tests {
     use super::*;
     use agent_client_protocol::{
-        ContentBlock, ContentChunk, PermissionOption, PermissionOptionId, RequestPermissionOutcome,
-        SessionId, SessionUpdate, TextContent, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
+        ContentBlock, ContentChunk, PermissionOption, PermissionOptionId, PermissionOptionKind,
+        RequestPermissionOutcome, SelectedPermissionOutcome, SessionId, SessionUpdate, TextContent,
+        ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
     };
 
     #[tokio::test]
@@ -142,53 +137,65 @@ mod tests {
 
         bridge.session_notification(notification).await.unwrap();
 
-        let received = rx.recv().await.unwrap();
+        let AcpOutbound::Notification(received) = rx.recv().await.unwrap() else {
+            panic!("expected notification");
+        };
         assert!(matches!(
             received.update,
             SessionUpdate::AgentMessageChunk(_)
         ));
     }
     #[tokio::test]
-    async fn test_bridge_rejects_permission_requests_in_headless_mode() {
-        let (bridge, _rx) = create_notification_channel();
+    async fn test_bridge_relays_permission_response() {
+        let (bridge, mut rx) = create_notification_channel();
+        let request = RequestPermissionRequest::new(
+            SessionId::from("test-session"),
+            ToolCallUpdate::new(
+                ToolCallId::from("write-001"),
+                ToolCallUpdateFields::new().title("Run write"),
+            ),
+            vec![PermissionOption::new(
+                PermissionOptionId::new("allow-once"),
+                "Allow once",
+                PermissionOptionKind::AllowOnce,
+            )],
+        );
 
-        let response = bridge
-            .request_permission(RequestPermissionRequest::new(
-                SessionId::from("test-session"),
-                ToolCallUpdate::new(
-                    ToolCallId::from("write-001"),
-                    ToolCallUpdateFields::new().title("Run write"),
-                ),
-                vec![
-                    PermissionOption::new(
-                        PermissionOptionId::new("allow-once"),
-                        "Allow once",
-                        PermissionOptionKind::AllowOnce,
-                    ),
-                    PermissionOption::new(
-                        PermissionOptionId::new("reject-once"),
-                        "Reject",
-                        PermissionOptionKind::RejectOnce,
-                    ),
-                ],
-            ))
-            .await
-            .unwrap();
+        let responder = async {
+            let AcpOutbound::Permission {
+                request,
+                response_tx,
+            } = rx.recv().await.expect("permission request")
+            else {
+                panic!("expected permission request");
+            };
+            assert_eq!(request.session_id.to_string(), "test-session");
+            let outcome = RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+                PermissionOptionId::new("allow-once"),
+            ));
+            response_tx
+                .send(Ok(RequestPermissionResponse::new(outcome)))
+                .expect("bridge should await response");
+        };
+
+        let (response, ()) = tokio::join!(bridge.request_permission(request), responder);
+        let response = response.unwrap();
 
         match response.outcome {
             RequestPermissionOutcome::Selected(selected) => {
-                assert_eq!(selected.option_id.0.as_ref(), "reject-once");
+                assert_eq!(selected.option_id.0.as_ref(), "allow-once");
             }
-            RequestPermissionOutcome::Cancelled => panic!("expected explicit rejection"),
+            RequestPermissionOutcome::Cancelled => panic!("expected selected response"),
             _ => panic!("unexpected permission outcome"),
         }
     }
 
     #[tokio::test]
-    async fn test_bridge_cancels_permission_without_reject_option() {
-        let (bridge, _rx) = create_notification_channel();
+    async fn test_bridge_fails_permission_when_connection_is_closed() {
+        let (bridge, rx) = create_notification_channel();
+        drop(rx);
 
-        let response = bridge
+        let error = bridge
             .request_permission(RequestPermissionRequest::new(
                 SessionId::from("test-session"),
                 ToolCallUpdate::new(
@@ -202,11 +209,8 @@ mod tests {
                 )],
             ))
             .await
-            .unwrap();
+            .expect_err("closed connection must not grant permission");
 
-        assert!(matches!(
-            response.outcome,
-            RequestPermissionOutcome::Cancelled
-        ));
+        assert!(error.to_string().contains("closed"));
     }
 }

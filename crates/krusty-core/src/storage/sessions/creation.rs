@@ -17,6 +17,15 @@ struct LinkedSessionContract {
 }
 
 impl SessionManager {
+    fn has_legacy_required_provider_column(&self) -> Result<bool> {
+        let count: i64 = self.db.conn().query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'provider' AND \"notnull\" = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     pub fn create_session(
         &self,
         title: &str,
@@ -95,24 +104,49 @@ impl SessionManager {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
 
-        self.db.conn().execute(
-            "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, project_dir, workspace_mode, session_type, user_id, target_branch, permission_mode)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                id,
-                title,
-                now,
-                now,
-                model,
-                working_dir,
-                project_dir,
-                workspace_mode.to_string(),
-                session_type.to_string(),
-                user_id,
-                target_branch,
-                permission_mode.as_str()
-            ],
-        )?;
+        if self.has_legacy_required_provider_column()? {
+            let legacy_provider = model
+                .and_then(|value| value.split_once(':').map(|(provider, _)| provider))
+                .unwrap_or("krusty");
+            self.db.conn().execute(
+                "INSERT INTO sessions (id, title, created_at, updated_at, provider, model, metadata, working_dir, project_dir, workspace_mode, session_type, user_id, target_branch, permission_mode)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, '{}', ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    id,
+                    title,
+                    now,
+                    now,
+                    legacy_provider,
+                    model.unwrap_or_default(),
+                    working_dir,
+                    project_dir,
+                    workspace_mode.to_string(),
+                    session_type.to_string(),
+                    user_id,
+                    target_branch,
+                    permission_mode.as_str()
+                ],
+            )?;
+        } else {
+            self.db.conn().execute(
+                "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, project_dir, workspace_mode, session_type, user_id, target_branch, permission_mode)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    id,
+                    title,
+                    now,
+                    now,
+                    model,
+                    working_dir,
+                    project_dir,
+                    workspace_mode.to_string(),
+                    session_type.to_string(),
+                    user_id,
+                    target_branch,
+                    permission_mode.as_str()
+                ],
+            )?;
+        }
 
         Ok(id)
     }
@@ -201,26 +235,52 @@ impl SessionManager {
             target_branch: target_branch.map(ToOwned::to_owned),
         });
 
-        // Create new session with parent reference
-        self.db.conn().execute(
-            "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, project_dir, workspace_mode, session_type, user_id, parent_session_id, target_branch, permission_mode)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![
-                id,
-                title,
-                now,
-                now,
-                model,
-                contract.working_dir,
-                contract.project_dir,
-                contract.workspace_mode.to_string(),
-                contract.session_type.to_string(),
-                contract.user_id,
-                parent_session_id,
-                contract.target_branch,
-                permission_mode.as_str()
-            ],
-        )?;
+        // Create new session with parent reference.
+        if self.has_legacy_required_provider_column()? {
+            let legacy_provider = model
+                .and_then(|value| value.split_once(':').map(|(provider, _)| provider))
+                .unwrap_or("krusty");
+            self.db.conn().execute(
+                "INSERT INTO sessions (id, title, created_at, updated_at, provider, model, metadata, working_dir, project_dir, workspace_mode, session_type, user_id, parent_session_id, target_branch, permission_mode)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, '{}', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    id,
+                    title,
+                    now,
+                    now,
+                    legacy_provider,
+                    model.unwrap_or_default(),
+                    contract.working_dir,
+                    contract.project_dir,
+                    contract.workspace_mode.to_string(),
+                    contract.session_type.to_string(),
+                    contract.user_id,
+                    parent_session_id,
+                    contract.target_branch,
+                    permission_mode.as_str()
+                ],
+            )?;
+        } else {
+            self.db.conn().execute(
+                "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, project_dir, workspace_mode, session_type, user_id, parent_session_id, target_branch, permission_mode)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    id,
+                    title,
+                    now,
+                    now,
+                    model,
+                    contract.working_dir,
+                    contract.project_dir,
+                    contract.workspace_mode.to_string(),
+                    contract.session_type.to_string(),
+                    contract.user_id,
+                    parent_session_id,
+                    contract.target_branch,
+                    permission_mode.as_str()
+                ],
+            )?;
+        }
 
         // Store pinch metadata
         let pinch_id = uuid::Uuid::new_v4().to_string();

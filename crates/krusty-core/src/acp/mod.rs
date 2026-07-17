@@ -40,7 +40,7 @@ mod tools;
 mod workspace_context;
 
 pub use agent::KrustyAgent;
-pub use bridge::{create_notification_channel, NotificationBridge};
+pub use bridge::{create_notification_channel, AcpOutbound, NotificationBridge};
 pub use error::AcpError;
 pub use model_manager::{CachedProviderInfo, ModelManager};
 pub use processor::PromptProcessor;

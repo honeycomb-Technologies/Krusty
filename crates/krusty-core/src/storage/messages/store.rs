@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use crate::storage::database::Database;
 
@@ -32,6 +32,105 @@ impl<'a> MessageStore<'a> {
         Ok(())
     }
 
+    /// Durably queue a live steering message without exposing it as canonical
+    /// model history until the active run reaches a safe boundary.
+    pub fn queue_pending_steering(
+        &self,
+        session_id: &str,
+        pending_id: &str,
+        content_json: &str,
+    ) -> Result<()> {
+        self.save_message(
+            session_id,
+            &format!("pending_user:{pending_id}"),
+            content_json,
+        )
+    }
+
+    /// Atomically move a durable steering message to the end of canonical
+    /// user history. Returning `None` makes duplicate delivery idempotent.
+    pub fn promote_pending_steering(
+        &self,
+        session_id: &str,
+        pending_id: &str,
+    ) -> Result<Option<String>> {
+        let role = format!("pending_user:{pending_id}");
+        let now = Utc::now().to_rfc3339();
+        let tx = self.db.conn().unchecked_transaction()?;
+        let content = tx
+            .query_row(
+                "SELECT content FROM messages WHERE session_id = ?1 AND role = ?2 LIMIT 1",
+                params![session_id, role],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+
+        let Some(content) = content else {
+            tx.commit()?;
+            return Ok(None);
+        };
+
+        tx.execute(
+            "DELETE FROM messages WHERE session_id = ?1 AND role = ?2",
+            params![session_id, role],
+        )?;
+        tx.execute(
+            "INSERT INTO messages (session_id, role, content, created_at)
+             VALUES (?1, 'user', ?2, ?3)",
+            params![session_id, content, now],
+        )?;
+        tx.execute(
+            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+            params![now, session_id],
+        )?;
+        tx.commit()?;
+
+        Ok(Some(content))
+    }
+
+    /// Recover steering accepted by a run that exited before it could reach a
+    /// safe boundary. Callers must hold the session run lock. Pending messages
+    /// are moved to the canonical tail because the interrupted run may have
+    /// persisted its final assistant message after the steering was staged.
+    pub fn promote_orphaned_pending_steering(&self, session_id: &str) -> Result<usize> {
+        let now = Utc::now().to_rfc3339();
+        let tx = self.db.conn().unchecked_transaction()?;
+        let pending = {
+            let mut stmt = tx.prepare(
+                "SELECT content FROM messages
+                 WHERE session_id = ?1 AND role LIKE 'pending_user:%'
+                 ORDER BY id",
+            )?;
+            let rows = stmt.query_map([session_id], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        if pending.is_empty() {
+            tx.commit()?;
+            return Ok(0);
+        }
+
+        tx.execute(
+            "DELETE FROM messages
+             WHERE session_id = ?1 AND role LIKE 'pending_user:%'",
+            [session_id],
+        )?;
+        for content in &pending {
+            tx.execute(
+                "INSERT INTO messages (session_id, role, content, created_at)
+                 VALUES (?1, 'user', ?2, ?3)",
+                params![session_id, content, now],
+            )?;
+        }
+        tx.execute(
+            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+            params![now, session_id],
+        )?;
+        tx.commit()?;
+
+        Ok(pending.len())
+    }
+
     pub fn replace_session_messages(
         &self,
         session_id: &str,
@@ -40,6 +139,22 @@ impl<'a> MessageStore<'a> {
         let now = Utc::now().to_rfc3339();
         let tx = self.db.conn().unchecked_transaction()?;
 
+        let pending = {
+            let mut stmt = tx.prepare(
+                "SELECT role, content, created_at FROM messages
+                 WHERE session_id = ?1 AND role LIKE 'pending_user:%'
+                 ORDER BY id",
+            )?;
+            let rows = stmt.query_map([session_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
         tx.execute("DELETE FROM messages WHERE session_id = ?1", [session_id])?;
 
         for (role, content_json) in messages {
@@ -47,6 +162,17 @@ impl<'a> MessageStore<'a> {
                 "INSERT INTO messages (session_id, role, content, created_at)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![session_id, role, content_json, now],
+            )?;
+        }
+
+        // Staged steering remains non-canonical and follows the replaced
+        // history. Its eventual promotion will therefore append at the exact
+        // next safe boundary instead of leaking into compacted history.
+        for (role, content_json, created_at) in pending {
+            tx.execute(
+                "INSERT INTO messages (session_id, role, content, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![session_id, role, content_json, created_at],
             )?;
         }
 
@@ -70,7 +196,7 @@ impl<'a> MessageStore<'a> {
         let mut stmt = self.db.conn().prepare(
             "SELECT id, role, content, created_at
              FROM messages
-             WHERE session_id = ?1
+             WHERE session_id = ?1 AND role NOT LIKE 'pending_user:%'
              ORDER BY id",
         )?;
 
@@ -94,14 +220,14 @@ impl<'a> MessageStore<'a> {
     ) -> Result<Vec<(String, String)>> {
         let sql = match (limit, offset) {
             (Some(limit_value), _) => format!(
-                "SELECT role, content FROM messages WHERE session_id = ?1 ORDER BY id LIMIT {} OFFSET {}",
+                "SELECT role, content FROM messages WHERE session_id = ?1 AND role NOT LIKE 'pending_user:%' ORDER BY id LIMIT {} OFFSET {}",
                 limit_value, offset
             ),
             (None, 0) => {
-                "SELECT role, content FROM messages WHERE session_id = ?1 ORDER BY id".to_string()
+                "SELECT role, content FROM messages WHERE session_id = ?1 AND role NOT LIKE 'pending_user:%' ORDER BY id".to_string()
             }
             (None, _) => format!(
-                "SELECT role, content FROM messages WHERE session_id = ?1 ORDER BY id LIMIT -1 OFFSET {}",
+                "SELECT role, content FROM messages WHERE session_id = ?1 AND role NOT LIKE 'pending_user:%' ORDER BY id LIMIT -1 OFFSET {}",
                 offset
             ),
         };
@@ -116,7 +242,7 @@ impl<'a> MessageStore<'a> {
 
     pub fn get_message_count(&self, session_id: &str) -> Result<usize> {
         let count: i64 = self.db.conn().query_row(
-            "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?1 AND role NOT LIKE 'pending_user:%'",
             [session_id],
             |row| row.get(0),
         )?;

@@ -1,10 +1,14 @@
 //! Manual in-place compaction (`/pinch`).
 
 use crate::agent::{
+    effective_context_window_for_runtime, estimate_rendered_request_tokens, inject_context,
     run_compaction_pipeline, CompactionManager, CompactionRequest, CompactionTrigger,
 };
+use crate::ai::client::CallOptions;
 use crate::ai::models::resolve_context_window;
 use crate::paths;
+use crate::storage::ProjectSettings;
+use crate::tools::registry::ToolRequestPolicy;
 use crate::tui::app::App;
 use crate::tui::blocks::PinchBlock;
 use crate::tui::utils::CompactionUpdate;
@@ -41,6 +45,15 @@ impl App {
 
     /// Start manual in-place compaction for the current session.
     pub fn start_manual_compaction(&mut self, auto_continue: bool) {
+        if self.runtime.chat.is_busy() {
+            self.runtime.chat.messages.push((
+                "system".to_string(),
+                "Wait for the active response and tool execution to finish before compacting."
+                    .to_string(),
+            ));
+            return;
+        }
+
         if self.runtime.chat.conversation.is_empty() {
             self.runtime.chat.messages.push((
                 "system".to_string(),
@@ -70,21 +83,72 @@ impl App {
         let project_dir = Some(self.runtime.working_dir.to_string_lossy().into_owned());
 
         let client = self.create_ai_client();
-        let compaction_manager =
-            client
-                .as_ref()
-                .map_or_else(CompactionManager::default, |ai_client| {
-                    CompactionManager::for_model(
-                        ai_client.provider_id(),
-                        ai_client.config().api_format,
-                        &current_model,
-                        resolve_context_window(
-                            ai_client.provider_id(),
-                            &current_model,
-                            ai_client.config().api_format,
-                        ),
-                    )
-                });
+        let (compaction_manager, request_budget) = client.as_ref().map_or_else(
+            || (CompactionManager::default(), None),
+            |ai_client| {
+                let resolved_window = resolve_context_window(
+                    ai_client.provider_id(),
+                    &current_model,
+                    ai_client.config().api_format,
+                );
+                let effective_window = effective_context_window_for_runtime(
+                    ai_client.config().uses_chatgpt_codex_format(),
+                    resolved_window,
+                );
+                let manager = CompactionManager::for_model(
+                    ai_client.provider_id(),
+                    ai_client.config().api_format,
+                    &current_model,
+                    effective_window,
+                );
+
+                let project_settings = ProjectSettings::load(&working_dir);
+                let has_active_plan = self
+                    .services
+                    .plan_manager
+                    .as_ref()
+                    .and_then(|manager| manager.get_active_plan(&session_id).ok())
+                    .flatten()
+                    .is_some();
+                let tools = ToolRequestPolicy::code(
+                    self.runtime.permission_mode,
+                    self.ui.work_mode == crate::tui::app::WorkMode::Plan,
+                    has_active_plan,
+                    true,
+                    project_settings.disabled_tools.as_deref().unwrap_or(&[]),
+                )
+                .filter(self.services.cached_ai_tools.clone());
+                let options = CallOptions {
+                    tools: (!tools.is_empty()).then_some(tools),
+                    enable_caching: true,
+                    session_id: Some(session_id.clone()),
+                    codex_parallel_tool_calls: true,
+                    ..Default::default()
+                };
+                let with_context = inject_context(
+                    &conversation,
+                    &db_path,
+                    &session_id,
+                    &working_dir,
+                    Some(&working_dir),
+                    self.ui.work_mode.into(),
+                    self.services.skills_manager.as_ref(),
+                    Some(current_model.as_str()),
+                    Some("code"),
+                    None,
+                    None,
+                );
+                let rendered = estimate_rendered_request_tokens(ai_client, &with_context, &options);
+                let pressure = self
+                    .runtime
+                    .last_token_usage
+                    .as_ref()
+                    .map(|usage| usage.input_tokens())
+                    .unwrap_or_default()
+                    .max(rendered.total_tokens);
+                (manager, Some(rendered.compaction_budget(pressure)))
+            },
+        );
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.runtime.channels.compaction = Some(rx);
@@ -104,7 +168,7 @@ impl App {
                         direction: None,
                     },
                     compaction_manager,
-                    triggering_token_estimate: None,
+                    request_budget,
                     last_usage_prompt_tokens: None,
                     messages_after_usage: 0,
                     summary_override: None,
@@ -137,6 +201,7 @@ impl App {
                     Ok(result) => {
                         self.runtime.chat.conversation = result.compacted_conversation;
                         self.runtime.context_tokens_used = result.estimated_tokens_after;
+                        self.runtime.last_token_usage = None;
                         self.finish_pinch_animation(true);
                         if update.auto_continue {
                             self.send_to_ai();

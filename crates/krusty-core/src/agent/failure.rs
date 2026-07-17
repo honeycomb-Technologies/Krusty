@@ -8,12 +8,37 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
-use crate::tools::registry::{tool_policy, ToolCategory};
+use crate::tools::registry::{effective_tool_call, tool_policy_for_call, ToolCategory};
 
 /// Default threshold: stop after this many identical failures.
 pub const REPEATED_FAILURE_THRESHOLD: usize = 2;
 /// Default threshold: stop after this many identical read-only tool sequences.
-pub const REPEATED_READ_ONLY_SEQUENCE_THRESHOLD: usize = 4;
+pub const REPEATED_READ_ONLY_SEQUENCE_THRESHOLD: usize = 3;
+/// Default threshold: stop after this many semantically equivalent successful
+/// validation-only turns.
+pub const REPEATED_VALIDATION_SEQUENCE_THRESHOLD: usize = 3;
+
+fn exploration_signature(call: &AiToolCall) -> String {
+    let (name, arguments) = effective_tool_call(&call.name, &call.arguments);
+    let mut arguments = arguments.clone();
+
+    // Increasing only an output cap is not a new exploration strategy. Treat
+    // these calls as equivalent so agents cannot evade the loop guard by
+    // repeatedly widening the same directory or glob result.
+    if let Some(object) = arguments.as_object_mut() {
+        match name {
+            "list" => {
+                object.remove("limit");
+            }
+            "glob" => {
+                object.remove("max_results");
+            }
+            _ => {}
+        }
+    }
+
+    format!("{}:{}", name, hash_arguments(&arguments))
+}
 
 /// Check tool results for repeated failures. Returns a diagnostic message
 /// if the same tool+error signature has been seen `threshold` or more times.
@@ -98,9 +123,9 @@ pub fn detect_repeated_read_only_sequence(
     tool_calls: &[AiToolCall],
 ) -> Option<String> {
     if tool_calls.is_empty()
-        || !tool_calls
-            .iter()
-            .all(|call| tool_policy(&call.name).category == ToolCategory::ReadOnly)
+        || !tool_calls.iter().all(|call| {
+            tool_policy_for_call(&call.name, &call.arguments).category == ToolCategory::ReadOnly
+        })
     {
         counters.clear();
         return None;
@@ -108,7 +133,7 @@ pub fn detect_repeated_read_only_sequence(
 
     let signature = tool_calls
         .iter()
-        .map(|call| format!("{}:{}", call.name, hash_arguments(&call.arguments)))
+        .map(exploration_signature)
         .collect::<Vec<_>>()
         .join("|");
 
@@ -126,6 +151,120 @@ pub fn detect_repeated_read_only_sequence(
     }
 
     None
+}
+
+/// Detect successful validation-only turns that repeat the same semantic work.
+///
+/// Validation commands frequently contain incidental differences (paths,
+/// output formatting, or an extra assertion), so hashing the full Bash payload
+/// misses the loop we actually care about. This signature records validation
+/// families instead: test, lint, build, syntax, and similar intent.
+pub fn detect_repeated_validation_sequence(
+    counters: &mut HashMap<String, usize>,
+    tool_calls: &[AiToolCall],
+    tool_results: &[Content],
+) -> Option<String> {
+    if tool_calls.is_empty() || !tool_calls.iter().all(is_validation_call) {
+        counters.clear();
+        return None;
+    }
+
+    let successful_ids = tool_results
+        .iter()
+        .filter_map(|result| match result {
+            Content::ToolResult {
+                tool_use_id,
+                is_error,
+                ..
+            } if !is_error.unwrap_or(false) => Some(tool_use_id.as_str()),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    if !tool_calls
+        .iter()
+        .all(|call| successful_ids.contains(call.id.as_str()))
+    {
+        counters.clear();
+        return None;
+    }
+
+    let signature = tool_calls
+        .iter()
+        .map(validation_signature)
+        .collect::<Vec<_>>()
+        .join("|");
+    counters.retain(|key, _| key == &signature);
+    let count = counters
+        .entry(signature)
+        .and_modify(|value| *value += 1)
+        .or_insert(1);
+
+    if *count >= REPEATED_VALIDATION_SEQUENCE_THRESHOLD {
+        return Some(format!(
+            "Stopping validation loop: the same successful validation pattern repeated {} times without new changes. The work is already validated; summarize the result instead of running it again.",
+            *count
+        ));
+    }
+
+    None
+}
+
+pub(crate) fn is_validation_call(call: &AiToolCall) -> bool {
+    let (name, arguments) = effective_tool_call(&call.name, &call.arguments);
+    if name == "agent" {
+        return arguments.get("agent_type").and_then(|value| value.as_str()) == Some("verify");
+    }
+    if !matches!(name, "bash" | "shell" | "execute") {
+        return false;
+    }
+
+    !validation_families(arguments).is_empty()
+}
+
+fn validation_signature(call: &AiToolCall) -> String {
+    let (name, arguments) = effective_tool_call(&call.name, &call.arguments);
+    if name == "agent" {
+        return "agent:verify".to_string();
+    }
+    validation_families(arguments).join("+")
+}
+
+fn validation_families(arguments: &serde_json::Value) -> Vec<&'static str> {
+    let command = arguments
+        .get("command")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mut families = Vec::new();
+    let groups: &[(&str, &[&str])] = &[
+        (
+            "test",
+            &[
+                " test",
+                "test ",
+                "pytest",
+                "go test",
+                "mvn test",
+                "gradle test",
+                "forge test",
+            ],
+        ),
+        ("check", &["cargo check", "git diff --check"]),
+        ("lint", &["cargo clippy", " lint", "eslint"]),
+        ("typecheck", &[" typecheck", "tsc "]),
+        ("build", &[" run build", "cargo build", "npm run build"]),
+        (
+            "syntax",
+            &["node --check", "py_compile", "json.tool", "syntax check"],
+        ),
+        ("integrity", &["integrity", "scaffold check", "assert "]),
+    ];
+    for (family, needles) in groups {
+        if needles.iter().any(|needle| command.contains(needle)) {
+            families.push(*family);
+        }
+    }
+    families
 }
 
 /// Stop immediately when top-level exploration produced no usable evidence.
@@ -630,6 +769,118 @@ mod tests {
         assert!(!counters.is_empty());
 
         assert!(detect_repeated_read_only_sequence(&mut counters, &write).is_none());
+        assert!(counters.is_empty());
+    }
+
+    #[test]
+    fn repeated_semantic_validation_sequence_trips_despite_command_drift() {
+        let validation = |id: &str, command: &str| AiToolCall {
+            id: id.to_string(),
+            name: "bash".to_string(),
+            arguments: json!({"command": command}),
+        };
+        let success = |id: &str| Content::ToolResult {
+            tool_use_id: id.to_string(),
+            output: json!({"ok": true}),
+            is_error: None,
+        };
+        let mut counters = HashMap::new();
+
+        assert!(detect_repeated_validation_sequence(
+            &mut counters,
+            &[validation("v1", "npm test && node --check app.js")],
+            &[success("v1")],
+        )
+        .is_none());
+        assert!(detect_repeated_validation_sequence(
+            &mut counters,
+            &[validation(
+                "v2",
+                "npm test -- --runInBand && node --check src/app.js"
+            )],
+            &[success("v2")],
+        )
+        .is_none());
+        let diagnostic = detect_repeated_validation_sequence(
+            &mut counters,
+            &[validation(
+                "v3",
+                "npm test -- --silent && node --check scripts/deploy.js",
+            )],
+            &[success("v3")],
+        )
+        .expect("third equivalent validation turn should stop");
+
+        assert!(diagnostic.contains("already validated"));
+    }
+
+    #[test]
+    fn failed_or_non_validation_turn_resets_validation_sequence() {
+        let validation = AiToolCall {
+            id: "v1".to_string(),
+            name: "bash".to_string(),
+            arguments: json!({"command": "cargo test --workspace"}),
+        };
+        let failed = Content::ToolResult {
+            tool_use_id: "v1".to_string(),
+            output: json!({"error": "test failed"}),
+            is_error: Some(true),
+        };
+        let mut counters = HashMap::new();
+
+        assert!(detect_repeated_validation_sequence(
+            &mut counters,
+            std::slice::from_ref(&validation),
+            &[failed],
+        )
+        .is_none());
+        assert!(counters.is_empty());
+
+        let edit = AiToolCall {
+            id: "e1".to_string(),
+            name: "edit".to_string(),
+            arguments: json!({"file_path": "src/lib.rs"}),
+        };
+        assert!(detect_repeated_validation_sequence(&mut counters, &[edit], &[]).is_none());
+        assert!(counters.is_empty());
+    }
+
+    #[test]
+    fn repeated_wrapped_list_calls_ignore_only_the_result_limit() {
+        let wrapped = |id: &str, limit: usize| AiToolCall {
+            id: id.to_string(),
+            name: "tool_search".to_string(),
+            arguments: json!({
+                "action": "execute",
+                "tool": "list",
+                "arguments": {
+                    "path": "/home/example",
+                    "depth": 1,
+                    "limit": limit
+                }
+            }),
+        };
+
+        let mut counters = HashMap::new();
+        assert!(detect_repeated_read_only_sequence(&mut counters, &[wrapped("1", 100)]).is_none());
+        assert!(detect_repeated_read_only_sequence(&mut counters, &[wrapped("2", 200)]).is_none());
+        assert!(detect_repeated_read_only_sequence(&mut counters, &[wrapped("3", 300)]).is_some());
+    }
+
+    #[test]
+    fn wrapped_write_tools_are_not_classified_as_read_only() {
+        let wrapped_write = AiToolCall {
+            id: "write-1".to_string(),
+            name: "tool_search".to_string(),
+            arguments: json!({
+                "action": "execute",
+                "tool": "write",
+                "arguments": {"file_path": "src/main.rs", "content": "fn main() {}"}
+            }),
+        };
+
+        let mut counters = HashMap::new();
+        assert!(detect_repeated_read_only_sequence(&mut counters, &[wrapped_write]).is_none());
         assert!(counters.is_empty());
     }
 

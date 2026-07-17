@@ -257,7 +257,10 @@ impl AgentConfig for SingleExplorerConfig {
         params: Value,
         ctx: &ToolContext,
     ) -> Option<ToolResult> {
-        if let Err(reason) = self.policy.authorize_tool(name, ctx.plan_mode) {
+        if let Err(reason) = self
+            .policy
+            .authorize_tool_call(name, &params, ctx.plan_mode)
+        {
             return Some(ToolResult::error(reason));
         }
         self.registry.execute(name, params, ctx).await

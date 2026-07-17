@@ -1,4 +1,5 @@
 use crate::agent::loop_events::LoopStopReason;
+use crate::ai::types::Usage;
 use crate::tui::app::{App, WorkMode};
 
 impl App {
@@ -77,8 +78,29 @@ impl App {
         tracing::info!(tick_number = tick_number, "Injected autonomous tick");
     }
 
-    pub(super) fn handle_usage(&mut self, prompt_tokens: usize, completion_tokens: usize) {
-        self.runtime.context_tokens_used = prompt_tokens + completion_tokens;
+    pub(super) fn handle_usage(
+        &mut self,
+        prompt_tokens: usize,
+        input_tokens: usize,
+        completion_tokens: usize,
+        reasoning_tokens: usize,
+        cache_creation_input_tokens: usize,
+        cache_read_input_tokens: usize,
+        total_tokens: usize,
+    ) {
+        let usage = Usage {
+            prompt_tokens,
+            completion_tokens,
+            reasoning_tokens,
+            total_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        };
+        debug_assert_eq!(usage.input_tokens(), input_tokens);
+        debug_assert!(usage.reasoning_tokens <= usage.completion_tokens);
+        debug_assert_eq!(usage.logical_total_tokens(), total_tokens);
+        self.runtime.context_tokens_used = usage.logical_total_tokens();
+        self.runtime.last_token_usage = Some(usage);
         self.save_session_token_count();
     }
 
@@ -112,6 +134,7 @@ impl App {
     ) {
         self.reload_conversation_from_db();
         self.runtime.context_tokens_used = estimated_tokens_after;
+        self.runtime.last_token_usage = None;
         let _ = (reason, estimated_tokens_before, replaced_messages);
         if self.runtime.active_pinch_block.is_some() {
             self.finish_pinch_animation(true);

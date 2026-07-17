@@ -104,6 +104,8 @@ async fn test_session_load_from_storage() {
         .await
         .unwrap();
 
+    assert_eq!(session2.id.to_string(), storage_id);
+
     let messages = session2.get_messages().await;
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].role, Role::User);

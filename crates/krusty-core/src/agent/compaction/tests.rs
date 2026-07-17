@@ -5,6 +5,7 @@ use super::{
     CompactionManager, CompactionRequest, CompactionTrigger,
 };
 use crate::ai::types::{Content, ModelMessage, Role};
+use crate::plan::PlanManager;
 use crate::storage::{CompactionStore, Database, MessageStore, SessionManager};
 
 fn text_message(role: Role, text: &str) -> ModelMessage {
@@ -95,7 +96,7 @@ async fn run_compaction_pipeline_replaces_history_in_place() {
             crate::constants::ai::DEFAULT_MODEL,
             200_000,
         ),
-        triggering_token_estimate: None,
+        request_budget: None,
         last_usage_prompt_tokens: None,
         messages_after_usage: 0,
         project_dir: None,
@@ -118,6 +119,18 @@ async fn run_compaction_pipeline_replaces_history_in_place() {
         .any(|message| message.content.iter().any(|content| {
             matches!(content, Content::Text { text } if text.contains("Conversation Compacted"))
         })));
+    let summary_text = result.compacted_conversation[1]
+        .content
+        .iter()
+        .find_map(|content| match content {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .expect("summary text");
+    assert!(
+        !summary_text.contains("## Latest User Objective"),
+        "objective retained verbatim in the tail must not be duplicated in the summary"
+    );
 
     let db = Database::new(&db_path).expect("db");
     let records = MessageStore::new(&db)
@@ -138,6 +151,20 @@ async fn run_compaction_pipeline_replaces_history_in_place() {
         )
         .expect("checkpoint history");
     assert_eq!(compacted_history_json, "[]");
+    let segment_json: String = db
+        .conn()
+        .query_row(
+            "SELECT segment_markdown FROM compaction_segments WHERE session_id = ?1",
+            [&session_id],
+            |row| row.get(0),
+        )
+        .expect("segment snapshot");
+    let segment: serde_json::Value =
+        serde_json::from_str(&segment_json).expect("canonical segment json");
+    assert_eq!(segment["schema"], "krusty.compaction_segment.v1");
+    assert!(segment["messages"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
 }
 
 #[tokio::test]
@@ -159,7 +186,10 @@ async fn auto_compaction_uses_caller_trigger_estimate() {
             crate::constants::ai::DEFAULT_MODEL,
             2_000,
         ),
-        triggering_token_estimate: Some(2_000),
+        request_budget: Some(super::CompactionRequestBudget {
+            total_tokens: 200_000,
+            fixed_overhead_tokens: 0,
+        }),
         last_usage_prompt_tokens: None,
         messages_after_usage: 0,
         project_dir: None,
@@ -174,8 +204,44 @@ async fn auto_compaction_uses_caller_trigger_estimate() {
     .await
     .expect("auto compaction should use caller estimate");
 
-    assert_eq!(result.estimated_tokens_before, 2_000);
+    assert_eq!(result.estimated_tokens_before, 200_000);
     assert!(result.replaced_messages > 0);
+}
+
+#[tokio::test]
+async fn compaction_reports_irreducible_fixed_request_overhead() {
+    let temp = TempDir::new().expect("temp dir");
+    let (db_path, session_id, conversation) =
+        create_persisted_conversation(&temp, "irreducible-overhead");
+
+    let result = run_compaction_pipeline(CompactionRequest {
+        db_path: &db_path,
+        session_id: &session_id,
+        conversation: &conversation,
+        working_dir: temp.path(),
+        ai_client: None,
+        model: None,
+        trigger: CompactionTrigger::Auto,
+        compaction_manager: CompactionManager::default(),
+        request_budget: Some(super::CompactionRequestBudget {
+            total_tokens: 500_000,
+            fixed_overhead_tokens: 500_000,
+        }),
+        last_usage_prompt_tokens: None,
+        messages_after_usage: 0,
+        summary_override: None,
+        project_dir: None,
+        user_id: None,
+    })
+    .await;
+    let error = match result {
+        Ok(_) => panic!("fixed overhead must make target irreducible"),
+        Err(error) => error,
+    };
+
+    assert!(error
+        .to_string()
+        .contains("irreducible fixed request overhead"));
 }
 
 #[tokio::test]
@@ -195,7 +261,7 @@ async fn compaction_without_ai_uses_deterministic_summary() {
             direction: None,
         },
         compaction_manager: CompactionManager::default(),
-        triggering_token_estimate: None,
+        request_budget: None,
         last_usage_prompt_tokens: None,
         messages_after_usage: 0,
         project_dir: None,
@@ -210,6 +276,191 @@ async fn compaction_without_ai_uses_deterministic_summary() {
         .work_summary
         .contains("deterministic compaction summary"));
     assert_ne!(result.summary.work_summary, "No summary available.");
+}
+
+#[tokio::test]
+async fn compaction_carries_prior_semantics_without_raw_nesting_or_plan_duplication() {
+    let temp = TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("deduplicated-context.db");
+    let session_manager = SessionManager::new(Database::new(&db_path).expect("db"));
+    let session_id = session_manager
+        .create_session("Compaction deduplication", None, None)
+        .expect("session");
+    let conversation = vec![
+        text_message(
+            Role::User,
+            "# Conversation Compacted\n\n## Work Summary\n\nOLD SUMMARY SENTINEL",
+        ),
+        text_message(Role::Assistant, "continued old work"),
+        text_message(Role::User, "finish the current implementation"),
+        text_message(Role::Assistant, "working on the current implementation"),
+    ];
+    for message in &conversation {
+        let role = match message.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            _ => continue,
+        };
+        session_manager
+            .save_message(
+                &session_id,
+                role,
+                &serde_json::to_string(&message.content).expect("message json"),
+            )
+            .expect("save message");
+    }
+
+    let plan_manager = PlanManager::new(db_path.clone()).expect("plan manager");
+    let mut plan = plan_manager
+        .create_plan("PLAN DUPLICATION SENTINEL", &session_id, None)
+        .expect("plan");
+    plan.add_phase("Implementation")
+        .add_task("Finish the current implementation");
+    plan_manager.save_plan(&plan).expect("save plan");
+
+    let result = run_compaction_pipeline(CompactionRequest {
+        db_path: &db_path,
+        session_id: &session_id,
+        conversation: &conversation,
+        working_dir: temp.path(),
+        ai_client: None,
+        model: None,
+        trigger: CompactionTrigger::Manual {
+            preservation_hints: None,
+            direction: None,
+        },
+        compaction_manager: CompactionManager::default(),
+        request_budget: None,
+        last_usage_prompt_tokens: None,
+        messages_after_usage: 0,
+        project_dir: None,
+        user_id: None,
+        summary_override: Some(crate::agent::SummarizationResult {
+            work_summary: "Fresh bounded summary".to_string(),
+            key_decisions: Vec::new(),
+            pending_tasks: vec!["Finish the current implementation".to_string()],
+            important_files: Vec::new(),
+        }),
+    })
+    .await
+    .expect("compact");
+
+    let compacted_text = result
+        .compacted_conversation
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|content| match content {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(compacted_text.contains("OLD SUMMARY SENTINEL"));
+    assert_eq!(
+        compacted_text.matches("# Conversation Compacted").count(),
+        1
+    );
+    assert!(!compacted_text.contains("PLAN DUPLICATION SENTINEL"));
+    assert!(!compacted_text.contains("Active Plan (post-compaction)"));
+}
+
+#[tokio::test]
+async fn two_compactions_preserve_bounded_structured_prior_semantics() {
+    let temp = TempDir::new().expect("temp dir");
+    let (db_path, session_id, conversation) =
+        create_persisted_conversation(&temp, "two-compactions");
+    let first = run_compaction_pipeline(CompactionRequest {
+        db_path: &db_path,
+        session_id: &session_id,
+        conversation: &conversation,
+        working_dir: temp.path(),
+        ai_client: None,
+        model: None,
+        trigger: CompactionTrigger::Manual {
+            preservation_hints: None,
+            direction: None,
+        },
+        compaction_manager: CompactionManager::default(),
+        request_budget: None,
+        last_usage_prompt_tokens: None,
+        messages_after_usage: 0,
+        summary_override: Some(crate::agent::SummarizationResult {
+            work_summary: "FIRST WORK SEMANTIC SENTINEL".to_string(),
+            key_decisions: vec!["FIRST DECISION SEMANTIC SENTINEL".to_string()],
+            pending_tasks: vec!["FIRST PENDING SEMANTIC SENTINEL".to_string()],
+            important_files: Vec::new(),
+        }),
+        project_dir: None,
+        user_id: None,
+    })
+    .await
+    .expect("first compaction");
+
+    let appended = vec![
+        text_message(Role::User, "new objective after first compaction"),
+        text_message(Role::Assistant, "new work after first compaction"),
+    ];
+    let session_manager = SessionManager::new(Database::new(&db_path).expect("db"));
+    for message in &appended {
+        let role = if message.role == Role::User {
+            "user"
+        } else {
+            "assistant"
+        };
+        session_manager
+            .save_message(
+                &session_id,
+                role,
+                &serde_json::to_string(&message.content).expect("message json"),
+            )
+            .expect("append message");
+    }
+    let mut second_conversation = first.compacted_conversation;
+    second_conversation.extend(appended);
+
+    let second = run_compaction_pipeline(CompactionRequest {
+        db_path: &db_path,
+        session_id: &session_id,
+        conversation: &second_conversation,
+        working_dir: temp.path(),
+        ai_client: None,
+        model: None,
+        trigger: CompactionTrigger::Manual {
+            preservation_hints: None,
+            direction: None,
+        },
+        compaction_manager: CompactionManager::default(),
+        request_budget: None,
+        last_usage_prompt_tokens: None,
+        messages_after_usage: 0,
+        summary_override: Some(crate::agent::SummarizationResult {
+            work_summary: "SECOND WORK SEMANTIC SENTINEL".to_string(),
+            key_decisions: Vec::new(),
+            pending_tasks: Vec::new(),
+            important_files: Vec::new(),
+        }),
+        project_dir: None,
+        user_id: None,
+    })
+    .await
+    .expect("second compaction");
+
+    let text = second
+        .compacted_conversation
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|content| match content {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("FIRST WORK SEMANTIC SENTINEL"));
+    assert!(text.contains("FIRST DECISION SEMANTIC SENTINEL"));
+    assert!(text.contains("FIRST PENDING SEMANTIC SENTINEL"));
+    assert!(text.contains("SECOND WORK SEMANTIC SENTINEL"));
+    assert_eq!(text.matches("# Conversation Compacted").count(), 1);
+    assert!(text.len() < 20_000, "structured carry must remain bounded");
 }
 
 #[test]

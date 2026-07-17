@@ -112,12 +112,12 @@ Before executing tools, the orchestrator checks for repeated read-only explorati
 
 ### 9. Execute tools
 
-Tool calls go through `crates/krusty-core/src/agent/executor.rs`. For each tool call in the batch:
+Tool calls go through `crates/krusty-core/src/agent/executor/mod.rs`. For each tool call in the batch:
 
 1. **Disabled tool check** — if the tool is listed in the project's `disabled_tools`, it's denied immediately
 2. **Authorization** — the `ToolControl` module checks the permission mode. In autonomous mode, tools execute without approval. In supervised mode, write-category tools emit a `ToolApprovalRequired` event and wait for the user to approve or deny. Read-only tools run without approval regardless of mode. There's a five-minute timeout on approval requests.
 3. **Special tool interception** — mode switch tools (`set_work_mode`, `enter_plan_mode`) and plan task tools (`task_start`, `task_complete`, `add_subtask`, `set_dependency`) are handled directly by the orchestrator rather than going through the tool registry, because they mutate the loop's own state.
-4. **Regular execution** — the tool runs through the `ToolRegistry`, which handles argument validation, sandbox enforcement, and output streaming. Tool output gets streamed back via `ToolOutputDelta` events (so bash output, for example, appears in real time).
+4. **Regular execution** — the tool runs through the `ToolRegistry`, which handles argument validation, path and permission policy enforcement, and output streaming. These policies are not an OS sandbox for Bash. Tool output gets streamed back via `ToolOutputDelta` events (so bash output, for example, appears in real time).
 5. **Retry policy** — read-only tools that time out get one automatic retry. Everything else stops on failure.
 6. **Result shaping** — the `ToolControl` module truncates oversized tool outputs (over 30,000 characters), wraps the result with history metadata for later compaction, and publishes the `ToolResult` event.
 
@@ -148,7 +148,7 @@ Every pass through the main loop is a "turn" — one AI call and its resulting t
 
 ## The Hook System
 
-Hooks intercept tool calls before and after execution. They're defined by the `PreToolHook` and `PostToolHook` traits in `crates/krusty-core/src/agent/hooks.rs`.
+Hooks intercept tool calls before and after execution. They're defined by the `PreToolHook` and `PostToolHook` traits in `crates/krusty-core/src/agent/hooks/mod.rs`.
 
 ### Built-in Hooks
 
@@ -171,7 +171,7 @@ The hook is regex-based with proper shell quoting awareness, so `rm '-rf' /` is 
 
 ### User-Configurable Hooks
 
-Users can define their own hooks in `crates/krusty-core/src/agent/user_hooks.rs`. Each hook is a shell command with a regex pattern that matches tool names. The hook receives JSON on stdin containing the tool name, arguments, hook ID, and hook type.
+Users can define their own hooks in `crates/krusty-core/src/agent/user_hooks/mod.rs`. Each hook is a shell command with a regex pattern that matches tool names. The hook receives JSON on stdin containing the tool name, arguments, hook ID, and hook type.
 
 The exit code protocol:
 - `0` — continue (stdout/stderr not shown)
@@ -261,14 +261,14 @@ During build mode with an active plan, the AI uses `task_start` and `task_comple
 |------|---------|
 | `crates/krusty-core/src/agent/orchestrator.rs` | The orchestrator itself — config, services, and the main loop |
 | `crates/krusty-core/src/agent/mod.rs` | Module index and public re-exports |
-| `crates/krusty-core/src/agent/executor.rs` | Tool execution engine with approval workflow and retry policy |
+| `crates/krusty-core/src/agent/executor/mod.rs` | Tool execution engine with approval workflow and retry policy |
 | `crates/krusty-core/src/agent/state.rs` | Turn counting, timing, and per-session configuration |
-| `crates/krusty-core/src/agent/hooks.rs` | SafetyHook, PlanModeHook, LoggingHook, and the hook traits |
-| `crates/krusty-core/src/agent/user_hooks.rs` | User-configurable hooks with shell command execution |
+| `crates/krusty-core/src/agent/hooks/mod.rs` | SafetyHook, PlanModeHook, LoggingHook, and the hook traits |
+| `crates/krusty-core/src/agent/user_hooks/mod.rs` | User-configurable hooks with shell command execution |
 | `crates/krusty-core/src/agent/failure.rs` | Repeated failure detection and exploration loop guards |
 | `crates/krusty-core/src/agent/context.rs` | Context injection — system prompt assembly from all sources |
 | `crates/krusty-core/src/agent/context_ledger.rs` | Context tracking for compaction and continuation decisions |
-| `crates/krusty-core/src/agent/compaction.rs` | Live conversation compaction (same-session context trimming) |
+| `crates/krusty-core/src/agent/compaction/mod.rs` | Live conversation compaction (same-session context trimming) |
 | `crates/krusty-core/src/agent/summarizer.rs` | AI-powered conversation summarization for session handoff |
 | `crates/krusty-core/src/agent/cancellation.rs` | Cancellation token wrapper for async task interruption |
 | `crates/krusty-core/src/agent/plan_handler.rs` | Plan and mode switch tool handlers |

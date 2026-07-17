@@ -27,6 +27,7 @@ impl AiClient {
         tools: Vec<Value>,
         max_tokens: usize,
         thinking_enabled: bool,
+        session_id: Option<&str>,
     ) -> Result<Value> {
         let options = self.canonical_call_options(
             model,
@@ -34,8 +35,9 @@ impl AiClient {
                 max_tokens: Some(max_tokens),
                 system_prompt: Some(system_prompt.to_string()),
                 thinking: thinking_enabled.then(ThinkingConfig::default),
-                codex_reasoning_effort: thinking_enabled.then_some(CodexReasoningEffort::High),
+                codex_reasoning_effort: thinking_enabled.then_some(CodexReasoningEffort::Medium),
                 codex_parallel_tool_calls: true,
+                session_id: session_id.map(ToString::to_string),
                 ..Default::default()
             },
         );

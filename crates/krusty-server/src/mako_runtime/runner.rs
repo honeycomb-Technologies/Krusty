@@ -70,19 +70,10 @@ async fn run_mako_session_inner(
     event_tx: broadcast::Sender<AgenticEvent>,
     manager: Arc<MakoRuntimeManager>,
 ) -> Result<()> {
-    let session_lock = {
-        let mut locks = state.session_locks.write().await;
-        let (lock, _) = locks.entry(session_id.clone()).or_insert_with(|| {
-            (
-                Arc::new(tokio::sync::Mutex::new(())),
-                std::time::Instant::now(),
-            )
-        });
-        lock.clone()
-    };
-    let _guard = Arc::clone(&session_lock)
-        .try_lock_owned()
-        .map_err(|_| anyhow::anyhow!("session is busy"))?;
+    let _guard = state
+        .try_lock_session(&session_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("session is busy"))?;
 
     let db = Database::new(&state.db_path)?;
     let session_manager = SessionManager::new(db);
@@ -119,7 +110,7 @@ async fn run_mako_session_inner(
         MakoRuntimeStateStore::new(Database::new(&state.db_path)?).get_state(&session_id)?;
 
     let options = CallOptions {
-        tools: Some(state.tool_registry.get_ai_tools().await),
+        tools: Some(state.tool_registry.get_ai_tools_all().await),
         session_id: Some(session_id.clone()),
         codex_parallel_tool_calls: true,
         web_search: Some(WebSearchConfig::default()),

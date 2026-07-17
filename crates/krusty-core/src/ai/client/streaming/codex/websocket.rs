@@ -9,19 +9,23 @@ use url::Url;
 
 use super::super::super::config::CallOptions;
 use super::super::super::core::AiClient;
-use super::super::shared::{
-    ensure_success_stream_response, log_system_prompt_layers, start_sse_stream,
-};
+use super::super::shared::{ensure_success_stream_response, log_request_metrics, start_sse_stream};
 use crate::ai::format::openai::OpenAIFormat;
 use crate::ai::model_profile::SystemPromptSections;
 use crate::ai::parsers::OpenAIParser;
-use crate::ai::sse::{create_streaming_channels, spawn_buffer_processor, SseStreamProcessor};
+use crate::ai::sse::{create_streaming_channels, SseStreamProcessor};
 use crate::ai::streaming::StreamPart;
 use crate::ai::types::ModelMessage;
 
+use super::request::{assistant_fingerprint_from_response, prepare_codex_ws_request};
+use super::session::{CodexContinuation, CodexSessionGuard, CodexWebSocket};
+
 enum CodexPayloadState {
     Continue,
-    Complete,
+    Complete {
+        response_id: Option<String>,
+        assistant_fingerprint: Option<String>,
+    },
     Error,
 }
 
@@ -61,7 +65,14 @@ async fn process_codex_ws_payload(
                 });
                 return CodexPayloadState::Error;
             }
-            return CodexPayloadState::Complete;
+            let response = json.get("response").unwrap_or(&json);
+            return CodexPayloadState::Complete {
+                response_id: response
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                assistant_fingerprint: assistant_fingerprint_from_response(response),
+            };
         }
     }
 
@@ -73,6 +84,14 @@ async fn process_codex_ws_payload(
     }
 
     CodexPayloadState::Continue
+}
+
+fn codex_ws_error_code(payload: &str) -> Option<String> {
+    let json = serde_json::from_str::<Value>(payload).ok()?;
+    json.pointer("/error/code")
+        .or_else(|| json.pointer("/response/error/code"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 pub(super) async fn call_streaming_chatgpt_codex_ws(
@@ -87,11 +106,6 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
         &messages,
         options.system_prompt.as_deref(),
         options.tools.as_deref(),
-    );
-    log_system_prompt_layers(
-        "codex_stream",
-        &prompt_sections,
-        options.system_prompt.is_some(),
     );
     let system_prompt = codex_cache_stable_instructions(&prompt_sections);
     let volatile_context = (!prompt_sections.session_context.trim().is_empty())
@@ -108,96 +122,232 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
     );
 
     let ws_url = resolve_codex_ws_url(&client.config().api_url())?;
-    let mut request = client.build_websocket_request(
-        ws_url.as_str(),
-        &[
-            ("OpenAI-Beta", "responses_websockets=2026-02-06"),
-            ("originator", "krusty"),
-        ],
-    )?;
-    if let Some(session_id) = &options.session_id {
-        match session_id.parse::<tokio_tungstenite::tungstenite::http::HeaderValue>() {
-            Ok(value) => {
-                request.headers_mut().insert("session_id", value);
-            }
-            Err(e) => {
-                warn!("Invalid Codex session_id header '{}': {}", session_id, e);
-            }
-        }
+    let session_key = options
+        .session_id
+        .as_deref()
+        .filter(|session_id| !session_id.is_empty())
+        .map(|session_id| {
+            format!(
+                "{}:{}:{}",
+                client.provider_id(),
+                client.config().model,
+                session_id
+            )
+        });
+    let mut state = if let Some(session_key) = session_key.as_deref() {
+        client
+            .codex_ws_pool
+            .session(session_key)
+            .await
+            .lock_owned()
+            .await
+    } else {
+        CodexSessionGuard::ephemeral().await
+    };
+
+    if !state.can_reuse_connection() {
+        state.reset();
     }
 
-    info!("Connecting ChatGPT Codex websocket: {}", ws_url);
-    let (mut ws_stream, _) = match connect_async(request).await {
-        Ok(pair) => pair,
-        Err(e) => {
-            warn!(
-                "ChatGPT Codex websocket connect failed ({}), falling back to HTTP streaming",
-                e
-            );
-            return call_streaming_chatgpt_codex_http(client, body, call_start).await;
-        }
-    };
-    info!(
-        "ChatGPT Codex websocket connected in {:?}",
-        call_start.elapsed()
+    let prepared = prepare_codex_ws_request(
+        body,
+        &messages,
+        volatile_context,
+        state.continuation.as_ref(),
     );
 
-    let create_payload = AiClient::codex_ws_create_payload(body.clone());
-    if let Err(e) = ws_stream
+    if state.connection.is_none() {
+        match connect_codex_websocket(client, &ws_url, options).await {
+            Ok(connection) => {
+                state.connection = Some(connection);
+                state.connected_at = Some(Instant::now());
+                info!(
+                    "ChatGPT Codex websocket connected in {:?}",
+                    call_start.elapsed()
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "ChatGPT Codex websocket connect failed ({}), falling back to HTTP streaming",
+                    e
+                );
+                let full_body = prepared.full_body;
+                drop(state);
+                return call_streaming_chatgpt_codex_http(client, full_body, call_start).await;
+            }
+        }
+    }
+
+    let mut create_payload = AiClient::codex_ws_create_payload(prepared.websocket_body.clone());
+    let mut sent_delta = prepared.used_continuation;
+    let send_result = state
+        .connection
+        .as_mut()
+        .expect("Codex connection initialized")
         .send(Message::Text(create_payload.to_string()))
-        .await
-    {
+        .await;
+
+    if let Err(error) = send_result {
         warn!(
-            "ChatGPT Codex websocket send failed ({}), falling back to HTTP streaming",
-            e
+            "ChatGPT Codex websocket send failed ({}); reconnecting with full context",
+            error
         );
-        return call_streaming_chatgpt_codex_http(client, body, call_start).await;
+        state.reset();
+        match connect_codex_websocket(client, &ws_url, options).await {
+            Ok(mut connection) => {
+                create_payload = AiClient::codex_ws_create_payload(prepared.full_body.clone());
+                if let Err(retry_error) = connection
+                    .send(Message::Text(create_payload.to_string()))
+                    .await
+                {
+                    warn!(
+                        "ChatGPT Codex websocket retry failed ({}), falling back to HTTP streaming",
+                        retry_error
+                    );
+                    let full_body = prepared.full_body;
+                    drop(state);
+                    return call_streaming_chatgpt_codex_http(client, full_body, call_start).await;
+                }
+                state.connection = Some(connection);
+                state.connected_at = Some(Instant::now());
+                sent_delta = false;
+            }
+            Err(reconnect_error) => {
+                warn!(
+                    "ChatGPT Codex websocket reconnect failed ({}), falling back to HTTP streaming",
+                    reconnect_error
+                );
+                let full_body = prepared.full_body;
+                drop(state);
+                return call_streaming_chatgpt_codex_http(client, full_body, call_start).await;
+            }
+        }
     }
 
-    let first_ws_message =
-        (tokio::time::timeout(Duration::from_secs(2), ws_stream.next()).await).unwrap_or_default();
+    info!(
+        transport = "websocket",
+        request_mode = if sent_delta { "delta" } else { "full" },
+        request_fingerprint = %prepared.request_fingerprint,
+        "ChatGPT Codex request sent"
+    );
+    let measured_body = if sent_delta {
+        &prepared.websocket_body
+    } else {
+        &prepared.full_body
+    };
+    log_request_metrics(
+        "codex_stream",
+        &prompt_sections,
+        &messages,
+        options.tools.as_deref(),
+        options.system_prompt.is_some(),
+        if sent_delta {
+            "websocket_delta"
+        } else {
+            "websocket_full"
+        },
+        options
+            .session_id
+            .as_deref()
+            .is_some_and(|session_id| !session_id.is_empty()),
+        serde_json::to_vec(measured_body).map_or(0, |value| value.len()),
+    );
 
-    if matches!(
-        first_ws_message,
-        Some(Ok(Message::Close(_))) | Some(Err(_)) | None
-    ) {
-        warn!("ChatGPT Codex websocket closed before first event, falling back to HTTP streaming");
-        return call_streaming_chatgpt_codex_http(client, body, call_start).await;
-    }
-
-    let (tx, rx, buffer_tx, buffer_rx) = create_streaming_channels();
-    spawn_buffer_processor(buffer_rx, tx.clone());
+    let (tx, rx) = create_streaming_channels();
     let tx_err = tx.clone();
 
-    let mut processor = SseStreamProcessor::new(tx, buffer_tx).with_transform_context(
+    let mut processor = SseStreamProcessor::new(tx).with_transform_context(
         client.provider_id(),
         client.config().api_format,
         client.config().model.clone(),
     );
     let parser = OpenAIParser::new();
+    let ws_idle_timeout =
+        Duration::from_secs(prompt_sections.profile.stream_idle_timeout_secs.max(30));
 
     tokio::spawn(async move {
-        let (_write, mut read) = ws_stream.split();
-
-        let mut pending_first = first_ws_message;
+        let mut retried_full = !sent_delta;
+        let mut completed = false;
 
         loop {
-            let msg = if let Some(msg) = pending_first.take() {
-                msg
-            } else {
-                match read.next().await {
-                    Some(msg) => msg,
-                    None => break,
+            let next = tokio::select! {
+                _ = tx_err.closed() => break,
+                next = tokio::time::timeout(
+                    ws_idle_timeout,
+                    state
+                        .connection
+                        .as_mut()
+                        .expect("Codex connection initialized")
+                        .next(),
+                ) => next,
+            };
+            let msg = match next {
+                Ok(Some(message)) => message,
+                Ok(None) => {
+                    let _ = tx_err.send(StreamPart::Error {
+                        error: "Codex websocket ended before response completion".to_string(),
+                    });
+                    break;
+                }
+                Err(_) => {
+                    let _ = tx_err.send(StreamPart::Error {
+                        error: format!(
+                            "Codex websocket produced no events for {} seconds",
+                            ws_idle_timeout.as_secs()
+                        ),
+                    });
+                    break;
                 }
             };
 
             match msg {
                 Ok(Message::Text(text)) => {
                     let payload = text.to_string();
+                    if sent_delta
+                        && !retried_full
+                        && codex_ws_error_code(&payload).as_deref()
+                            == Some("previous_response_not_found")
+                    {
+                        retried_full = true;
+                        state.continuation = None;
+                        let full_payload =
+                            AiClient::codex_ws_create_payload(prepared.full_body.clone());
+                        let retry = state
+                            .connection
+                            .as_mut()
+                            .expect("Codex connection initialized")
+                            .send(Message::Text(full_payload.to_string()))
+                            .await;
+                        if let Err(error) = retry {
+                            let _ = tx_err.send(StreamPart::Error {
+                                error: format!(
+                                    "Codex websocket full-context retry failed: {}",
+                                    error
+                                ),
+                            });
+                            break;
+                        }
+                        continue;
+                    }
                     match process_codex_ws_payload(&payload, &parser, &mut processor, &tx_err).await
                     {
                         CodexPayloadState::Continue => {}
-                        CodexPayloadState::Complete => break,
+                        CodexPayloadState::Complete {
+                            response_id,
+                            assistant_fingerprint,
+                        } => {
+                            completed = true;
+                            state.continuation = response_id.map(|response_id| CodexContinuation {
+                                response_id,
+                                request_fingerprint: prepared.request_fingerprint.clone(),
+                                message_fingerprints: prepared.message_fingerprints.clone(),
+                                assistant_fingerprint,
+                                volatile_context_fingerprint: prepared
+                                    .volatile_context_fingerprint
+                                    .clone(),
+                            });
+                            break;
+                        }
                         CodexPayloadState::Error => break,
                     }
                 }
@@ -212,7 +362,22 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
                     .await
                     {
                         CodexPayloadState::Continue => {}
-                        CodexPayloadState::Complete => break,
+                        CodexPayloadState::Complete {
+                            response_id,
+                            assistant_fingerprint,
+                        } => {
+                            completed = true;
+                            state.continuation = response_id.map(|response_id| CodexContinuation {
+                                response_id,
+                                request_fingerprint: prepared.request_fingerprint.clone(),
+                                message_fingerprints: prepared.message_fingerprints.clone(),
+                                assistant_fingerprint,
+                                volatile_context_fingerprint: prepared
+                                    .volatile_context_fingerprint
+                                    .clone(),
+                            });
+                            break;
+                        }
                         CodexPayloadState::Error => break,
                     }
                 }
@@ -242,10 +407,44 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
             }
         }
 
+        if !completed {
+            state.reset();
+        }
         processor.finish().await;
     });
 
     Ok(rx)
+}
+
+async fn connect_codex_websocket(
+    client: &AiClient,
+    ws_url: &Url,
+    options: &CallOptions,
+) -> Result<CodexWebSocket> {
+    let mut request = client.build_websocket_request(
+        ws_url.as_str(),
+        &[
+            ("OpenAI-Beta", "responses_websockets=2026-02-06"),
+            ("originator", "krusty"),
+        ],
+    )?;
+    if let Some(session_id) = &options.session_id {
+        match session_id.parse::<tokio_tungstenite::tungstenite::http::HeaderValue>() {
+            Ok(value) => {
+                request.headers_mut().insert("session_id", value);
+            }
+            Err(error) => {
+                warn!(
+                    "Invalid Codex session_id header '{}': {}",
+                    session_id, error
+                );
+            }
+        }
+    }
+
+    info!("Connecting ChatGPT Codex websocket: {}", ws_url);
+    let (connection, _) = connect_async(request).await?;
+    Ok(connection)
 }
 
 async fn call_streaming_chatgpt_codex_http(

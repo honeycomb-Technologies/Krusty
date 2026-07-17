@@ -17,13 +17,88 @@ use krusty_core::tools::registry::PermissionMode;
 use krusty_core::SessionManager;
 
 use super::super::session_access::ensure_owned_session;
+use super::content::{build_user_content, validate_content_blocks};
 use super::session::{setup_chat_session, RequestedModel};
 use super::stream::start_orchestrator_sse;
 use super::tools::apply_thinking_config;
 use crate::auth::CurrentUser;
 use crate::error::AppError;
-use crate::types::{ThinkingLevel, ToolApprovalRequest, ToolResultRequest};
+use crate::types::{SteerRequest, ThinkingLevel, ToolApprovalRequest, ToolResultRequest};
 use crate::AppState;
+
+pub(super) async fn steer(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Json(req): Json<SteerRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    validate_content_blocks(&req.content)?;
+    if req.message.trim().is_empty() && req.content.is_empty() {
+        return Err(AppError::BadRequest(
+            "A live steering message cannot be empty".to_string(),
+        ));
+    }
+
+    let session_manager = SessionManager::new(Database::new(&state.db_path)?);
+    ensure_owned_session(&session_manager, &req.session_id, user.as_ref())?;
+
+    let sender = state
+        .session_inputs
+        .read()
+        .await
+        .get(&req.session_id)
+        .cloned()
+        .ok_or_else(|| {
+            AppError::Conflict(format!(
+                "Session {} has no active run to steer",
+                req.session_id
+            ))
+        })?;
+
+    let content = build_user_content(&req.message, &req.content)?;
+    let content_json = serde_json::to_string(&content)?;
+    let pending_id = uuid::Uuid::new_v4().to_string();
+    session_manager.queue_pending_steering(&req.session_id, &pending_id, &content_json)?;
+
+    let input = LoopInput::Steer {
+        pending_id: Some(pending_id.clone()),
+        content,
+    };
+    let status = if deliver_steering_with_rollover(&state, &req.session_id, sender, input).await {
+        "accepted"
+    } else {
+        // The message is already durable. A subsequent session start promotes
+        // it in chronological order even if no replacement run was available.
+        "queued"
+    };
+
+    Ok(Json(json!({
+        "status": status,
+        "pending_id": pending_id,
+    })))
+}
+
+pub(super) async fn deliver_steering_with_rollover(
+    state: &AppState,
+    session_id: &str,
+    initial_sender: tokio::sync::mpsc::UnboundedSender<LoopInput>,
+    input: LoopInput,
+) -> bool {
+    if initial_sender.send(input.clone()).is_ok() {
+        return true;
+    }
+
+    // A run can roll over between cloning its sender and delivery. Retry a
+    // replacement sender once with the same durable ID; never create another
+    // staging row or duplicate canonical history.
+    let replacement = state
+        .session_inputs
+        .read()
+        .await
+        .get(session_id)
+        .cloned()
+        .filter(|candidate| !candidate.same_channel(&initial_sender));
+    replacement.is_some_and(|replacement| replacement.send(input).is_ok())
+}
 
 pub(super) async fn tool_result(
     State(state): State<AppState>,

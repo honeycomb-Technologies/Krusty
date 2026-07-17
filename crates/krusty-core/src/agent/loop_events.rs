@@ -7,9 +7,12 @@
 //! `LoopInput` represents external inputs that the platform provides back to
 //! the running orchestrator (tool approvals, user responses, cancellation).
 
-use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
-use crate::ai::types::{Citation, WebFetchContent, WebSearchResult};
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+
+use crate::ai::types::{Citation, Content, WebFetchContent, WebSearchResult};
 
 /// Structured terminal reason for an agentic loop.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,6 +97,14 @@ pub enum LoopEvent {
     /// Tool was denied by user.
     ToolDenied { id: String },
 
+    /// A live user follow-up was durably inserted at a safe model boundary.
+    /// This is distinct from `UserMessage`, which is output produced by the
+    /// autonomous SendUserMessage tool.
+    SteeringInjected {
+        pending_id: Option<String>,
+        message: String,
+    },
+
     // ── Server-side tools (web search/fetch) ──────────────────────────
     /// Server-side tool started (web_search, web_fetch).
     ServerToolStart { id: String, name: String },
@@ -150,12 +161,18 @@ pub enum LoopEvent {
     Usage {
         /// Uncached input tokens billed at the normal input rate.
         prompt_tokens: usize,
+        /// Logical input tokens: uncached + cache write + cache read.
+        input_tokens: usize,
+        /// Generated output, including reasoning tokens.
         completion_tokens: usize,
+        /// Reasoning tokens contained within `completion_tokens`.
+        reasoning_tokens: usize,
         /// Input tokens written to a provider prompt cache.
         cache_creation_input_tokens: usize,
         /// Input tokens served from a provider prompt cache.
         cache_read_input_tokens: usize,
-        /// Total input and output tokens represented by this turn snapshot.
+        /// Total input and output tokens represented by this turn snapshot;
+        /// reasoning is not added again.
         total_tokens: usize,
     },
 
@@ -267,6 +284,316 @@ pub enum LoopInput {
         response: String,
     },
 
+    /// A follow-up from the user while the current run is active. The
+    /// orchestrator queues this until the next model boundary so an in-flight
+    /// provider stream or tool lifecycle is never spliced mid-operation.
+    Steer {
+        /// Durable pending-message identifier when the transport persisted the
+        /// input before enqueueing it. `None` is reserved for in-process
+        /// surfaces whose lifecycle is already owned by the caller.
+        pending_id: Option<String>,
+        content: Vec<Content>,
+    },
+
     /// User requested cancellation.
     Cancel,
+}
+
+/// Canonical input inbox for a running agent loop.
+///
+/// Steering is captured out-of-band while control inputs retain their FIFO
+/// order. Consumers can therefore continue waiting for cancellation or an
+/// approval without accidentally discarding a concurrent user follow-up.
+pub(crate) struct LoopInputInbox {
+    receiver: mpsc::UnboundedReceiver<LoopInput>,
+    controls: VecDeque<LoopInput>,
+    steering: VecDeque<PendingSteering>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PendingSteering {
+    pub(crate) pending_id: Option<String>,
+    pub(crate) content: Vec<Content>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolApprovalInput {
+    Decision(bool),
+    Cancelled,
+    Closed,
+}
+
+impl LoopInputInbox {
+    pub(crate) fn new(receiver: mpsc::UnboundedReceiver<LoopInput>) -> Self {
+        Self {
+            receiver,
+            controls: VecDeque::new(),
+            steering: VecDeque::new(),
+        }
+    }
+
+    /// Receive the next control input, retaining any steering encountered
+    /// while waiting for the caller to inject at a safe model boundary.
+    #[cfg(test)]
+    pub(crate) async fn recv_control(&mut self) -> Option<LoopInput> {
+        loop {
+            if let Some(input) = self.controls.pop_front() {
+                return Some(input);
+            }
+
+            match self.receiver.recv().await {
+                Some(LoopInput::Steer {
+                    pending_id,
+                    content,
+                }) => self.steering.push_back(PendingSteering {
+                    pending_id,
+                    content,
+                }),
+                input => return input,
+            }
+        }
+    }
+
+    /// Wait for cancellation while retaining every out-of-phase control for
+    /// its actual lifecycle owner. This is used around provider streams and
+    /// already-authorized tool execution, where an approval must not be eaten.
+    pub(crate) async fn recv_cancel(&mut self) -> Option<()> {
+        if self.take_cancel() {
+            return Some(());
+        }
+
+        loop {
+            match self.receiver.recv().await {
+                Some(LoopInput::Cancel) => return Some(()),
+                Some(LoopInput::Steer {
+                    pending_id,
+                    content,
+                }) => self.steering.push_back(PendingSteering {
+                    pending_id,
+                    content,
+                }),
+                Some(input) => self.controls.push_back(input),
+                None => return None,
+            }
+        }
+    }
+
+    /// Wait for one tool's decision without consuming approvals or responses
+    /// owned by another interaction.
+    pub(crate) async fn recv_tool_approval(
+        &mut self,
+        expected_tool_call_id: &str,
+    ) -> ToolApprovalInput {
+        loop {
+            if let Some(position) = self.controls.iter().position(|input| {
+                matches!(input, LoopInput::Cancel)
+                    || matches!(
+                        input,
+                        LoopInput::ToolApproval { tool_call_id, .. }
+                            if tool_call_id == expected_tool_call_id
+                    )
+            }) {
+                match self.controls.remove(position) {
+                    Some(LoopInput::Cancel) => return ToolApprovalInput::Cancelled,
+                    Some(LoopInput::ToolApproval { approved, .. }) => {
+                        return ToolApprovalInput::Decision(approved);
+                    }
+                    _ => unreachable!("selective approval predicate returned another input"),
+                }
+            }
+
+            match self.receiver.recv().await {
+                Some(LoopInput::Cancel) => return ToolApprovalInput::Cancelled,
+                Some(LoopInput::ToolApproval {
+                    tool_call_id,
+                    approved,
+                }) if tool_call_id == expected_tool_call_id => {
+                    return ToolApprovalInput::Decision(approved);
+                }
+                Some(LoopInput::Steer {
+                    pending_id,
+                    content,
+                }) => self.steering.push_back(PendingSteering {
+                    pending_id,
+                    content,
+                }),
+                Some(input) => self.controls.push_back(input),
+                None => return ToolApprovalInput::Closed,
+            }
+        }
+    }
+
+    /// Capture all inputs already queued without blocking. Non-steering
+    /// controls are preserved for the lifecycle component that owns them.
+    pub(crate) fn collect_ready(&mut self) {
+        loop {
+            match self.receiver.try_recv() {
+                Ok(LoopInput::Steer {
+                    pending_id,
+                    content,
+                }) => self.steering.push_back(PendingSteering {
+                    pending_id,
+                    content,
+                }),
+                Ok(input) => self.controls.push_back(input),
+                Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Cancellation has priority at model boundaries, but does not reorder or
+    /// consume any other control input.
+    pub(crate) fn take_cancel(&mut self) -> bool {
+        let Some(position) = self
+            .controls
+            .iter()
+            .position(|input| matches!(input, LoopInput::Cancel))
+        else {
+            return false;
+        };
+        self.controls.remove(position);
+        true
+    }
+
+    pub(crate) fn take_steering(&mut self) -> Vec<PendingSteering> {
+        self.steering.drain(..).collect()
+    }
+
+    #[cfg(test)]
+    fn pending_control_count(&self) -> usize {
+        self.controls.len()
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    fn text(value: &str) -> Vec<Content> {
+        vec![Content::Text {
+            text: value.to_string(),
+        }]
+    }
+
+    #[tokio::test]
+    async fn inbox_queues_concurrent_steering_without_hiding_cancellation() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(LoopInput::Steer {
+            pending_id: None,
+            content: text("first"),
+        })
+        .expect("first steering should enqueue");
+        tx.send(LoopInput::Cancel)
+            .expect("cancellation should enqueue");
+        tx.send(LoopInput::Steer {
+            pending_id: None,
+            content: text("second"),
+        })
+        .expect("second steering should enqueue");
+
+        let mut inbox = LoopInputInbox::new(rx);
+        inbox.collect_ready();
+
+        assert!(inbox.take_cancel());
+        assert_eq!(inbox.pending_control_count(), 0);
+        let steering = inbox.take_steering();
+        assert_eq!(steering.len(), 2);
+        assert!(matches!(
+            &steering[0].content[0],
+            Content::Text { text } if text == "first"
+        ));
+        assert!(matches!(
+            &steering[1].content[0],
+            Content::Text { text } if text == "second"
+        ));
+    }
+
+    #[tokio::test]
+    async fn recv_control_retains_steering_while_waiting_for_approval() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(LoopInput::Steer {
+            pending_id: None,
+            content: text("change direction"),
+        })
+        .expect("steering should enqueue");
+        tx.send(LoopInput::ToolApproval {
+            tool_call_id: "tool-1".into(),
+            approved: true,
+        })
+        .expect("approval should enqueue");
+
+        let mut inbox = LoopInputInbox::new(rx);
+        assert!(matches!(
+            inbox.recv_control().await,
+            Some(LoopInput::ToolApproval {
+                tool_call_id,
+                approved: true,
+            }) if tool_call_id == "tool-1"
+        ));
+        assert_eq!(inbox.take_steering().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_wait_preserves_late_approval_for_its_owner() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(LoopInput::ToolApproval {
+            tool_call_id: "tool-late".into(),
+            approved: true,
+        })
+        .expect("approval should enqueue");
+        tx.send(LoopInput::Cancel)
+            .expect("cancellation should enqueue");
+
+        let mut inbox = LoopInputInbox::new(rx);
+        assert_eq!(inbox.recv_cancel().await, Some(()));
+        assert!(matches!(
+            inbox.recv_control().await,
+            Some(LoopInput::ToolApproval {
+                tool_call_id,
+                approved: true,
+            }) if tool_call_id == "tool-late"
+        ));
+    }
+
+    #[tokio::test]
+    async fn selective_approval_wait_preserves_unrelated_controls() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(LoopInput::ToolApproval {
+            tool_call_id: "other-tool".into(),
+            approved: false,
+        })
+        .expect("unrelated approval should enqueue");
+        tx.send(LoopInput::UserResponse {
+            tool_call_id: "question-1".into(),
+            response: "answer".into(),
+        })
+        .expect("unrelated response should enqueue");
+        tx.send(LoopInput::ToolApproval {
+            tool_call_id: "expected-tool".into(),
+            approved: true,
+        })
+        .expect("matching approval should enqueue");
+
+        let mut inbox = LoopInputInbox::new(rx);
+        assert_eq!(
+            inbox.recv_tool_approval("expected-tool").await,
+            ToolApprovalInput::Decision(true)
+        );
+        assert!(matches!(
+            inbox.recv_control().await,
+            Some(LoopInput::ToolApproval {
+                tool_call_id,
+                approved: false,
+            }) if tool_call_id == "other-tool"
+        ));
+        assert!(matches!(
+            inbox.recv_control().await,
+            Some(LoopInput::UserResponse {
+                tool_call_id,
+                response,
+            }) if tool_call_id == "question-1" && response == "answer"
+        ));
+    }
 }

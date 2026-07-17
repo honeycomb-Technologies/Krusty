@@ -3,7 +3,10 @@ use serde_json::Value;
 use std::time::Instant;
 use tracing::{error, info};
 
-use super::super::config::{CallOptions, CodexReasoningEffort};
+use super::super::config::{
+    normalized_prompt_cache_key, openai_prompt_cache_options, openai_prompt_cache_retention,
+    CallOptions, CodexReasoningEffort, OpenAiPromptCacheMode,
+};
 use super::super::core::AiClient;
 use crate::ai::format::openai::responses_input::convert_openai_tool_message_for_request;
 use crate::ai::format::response::{extract_text_from_content, normalize_openai_response};
@@ -19,7 +22,7 @@ fn build_openai_tool_request_body(
     tools: Vec<Value>,
     reasoning_effort: Option<&str>,
     service_tier: Option<&str>,
-    prompt_cache_key: Option<&str>,
+    call_options: Option<&CallOptions>,
 ) -> Value {
     let responses_format = matches!(api_format, ApiFormat::OpenAIResponses);
     let messages_key = if responses_format {
@@ -73,8 +76,18 @@ fn build_openai_tool_request_body(
     }
 
     if responses_format {
-        if let Some(cache_key) = prompt_cache_key.filter(|key| !key.is_empty()) {
-            body["prompt_cache_key"] = serde_json::json!(cache_key);
+        if let Some(options) = call_options {
+            if let Some(cache_key) = normalized_prompt_cache_key(options) {
+                body["prompt_cache_key"] = serde_json::json!(cache_key);
+            }
+            if let Some(cache_options) =
+                openai_prompt_cache_options(options, model, OpenAiPromptCacheMode::Implicit)
+            {
+                body["prompt_cache_options"] = cache_options;
+            }
+            if let Some(retention) = openai_prompt_cache_retention(options, model) {
+                body["prompt_cache_retention"] = retention;
+            }
         }
     }
 
@@ -276,7 +289,7 @@ impl AiClient {
             tools,
             effort.as_deref(),
             options.service_tier_for_provider(self.provider_id()),
-            options.session_id.as_deref(),
+            Some(options),
         );
 
         let body =
@@ -312,10 +325,15 @@ mod tests {
     use serde_json::json;
 
     use super::build_openai_tool_request_body;
+    use crate::ai::client::CallOptions;
     use crate::ai::models::ApiFormat;
 
     #[test]
     fn responses_tool_request_uses_responses_shape() {
+        let options = CallOptions {
+            session_id: Some("session-123".into()),
+            ..Default::default()
+        };
         let body = build_openai_tool_request_body(
             "gpt-5.5",
             ApiFormat::OpenAIResponses,
@@ -327,7 +345,7 @@ mod tests {
             ],
             Some("xhigh"),
             Some("priority"),
-            Some("session-123"),
+            Some(&options),
         );
 
         assert!(body.get("messages").is_none());

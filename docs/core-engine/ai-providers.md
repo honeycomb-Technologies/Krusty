@@ -12,7 +12,7 @@ Krusty solves this with a layered architecture: a unified type system at the bot
 
 ## The Type System
 
-Everything starts with the types defined in `crates/krusty-core/src/ai/types.rs`. These are Krusty's internal representation of conversations, completely independent of any provider's wire format.
+Everything starts with the types defined under `crates/krusty-core/src/ai/types/`. These are Krusty's internal representation of conversations, completely independent of any provider's wire format.
 
 The core types are:
 
@@ -27,15 +27,15 @@ Supporting types like `Usage` (with cache hit metrics), `ThinkingConfig`, `Conte
 
 ## AiClient: The Central Abstraction
 
-`AiClient` (in `crates/krusty-core/src/ai/client/core.rs`) is the single struct that all AI communication flows through. It holds three things: an HTTP client configured for SSE streaming (long timeouts, proper user-agent), an `AiClientConfig` describing which provider and format to use, and an API key.
+`AiClient` (in `crates/krusty-core/src/ai/client/core/client.rs`) is the single struct that all AI communication flows through. It holds three things: an HTTP client configured for SSE streaming (long timeouts, proper user-agent), an `AiClientConfig` describing which provider and format to use, and an API key.
 
-The client exposes a small surface area. Simple non-streaming calls go through `call_simple()`. Streaming calls go through the streaming module. Extended thinking uses `call_with_thinking()`. Cache-aware conversation calls use `call_with_conversation()`. Each method internally routes to the correct format handler and parser based on the client's configured `ApiFormat`.
+The client exposes a small surface area. Legacy text-only non-streaming calls go through `call_simple()` and `call_with_conversation()`; their usage-bearing counterparts return `SimpleCallResult`, whose optional normalized usage distinguishes an omitted provider field from a real zero. Streaming calls go through the streaming module. Extended thinking uses `call_with_thinking()`. Each method internally routes to the correct format handler and parser based on the client's configured `ApiFormat`, and streaming/non-streaming paths share the same usage normalizers.
 
 Authentication is handled at the request-building level. The `build_request()` method checks whether the provider expects `x-api-key` (Anthropic-style) or `Authorization: Bearer` (OpenAI-style) headers, adds Anthropic API version headers when appropriate, injects OAuth beta headers for Anthropic's Bearer token flow, and appends any custom headers the provider configuration specifies. The same logic extends to WebSocket connections via `build_websocket_request()`.
 
 ## AiClientConfig and CallOptions
 
-`AiClientConfig` (in `crates/krusty-core/src/ai/client/config.rs`) captures everything needed to configure a client: the model ID, max tokens, optional base URL override, authentication style, provider ID, API format, and custom headers. Helper constructors like `for_anthropic_with_auth_detection()` and `for_openai_with_auth_detection()` handle the complexity of OAuth vs. API key routing, including choosing the correct endpoint (ChatGPT's Responses API vs. OpenAI's standard API) based on credential type.
+`AiClientConfig` (in `crates/krusty-core/src/ai/client/config/ai_client.rs`) captures everything needed to configure a client: the model ID, max tokens, optional base URL override, authentication style, provider ID, API format, and custom headers. Helper constructors like `for_anthropic_with_auth_detection()` and `for_openai_with_auth_detection()` handle the complexity of OAuth vs. API key routing, including choosing the correct endpoint (ChatGPT's Responses API vs. OpenAI's standard API) based on credential type.
 
 `CallOptions` is the per-request configuration: max tokens, temperature, tools, system prompt, thinking config, reasoning format, caching, context management, web search/fetch, and provider-specific knobs like Codex reasoning effort and Anthropic adaptive thinking effort.
 
@@ -53,7 +53,7 @@ Three implementations exist:
 
 **AnthropicFormat** handles the Anthropic Messages API. This is the most complex handler because Anthropic requires strict user/assistant message alternation and has detailed rules around thinking blocks. The handler inserts filler messages when consecutive same-role messages would violate alternation, manages thinking block preservation (MiniMax wants all thinking blocks preserved; Anthropic only wants the last one with a valid signature), strips images for providers without vision support, and runs a post-processing sanitization pass that repairs orphaned tool results and injects stub results for interrupted tool calls.
 
-**OpenAIFormat** handles both the Chat Completions API and the newer Responses API, selected by the `ApiFormat` variant. It translates tool calls into OpenAI's `function` wrapper format, converts thinking blocks into `[Thinking]` text markers, detects orphaned tool calls from interrupted sessions and adds placeholder results, and handles the structural differences between Chat Completions (messages with `content`) and Responses (input with `input_text`/`input_image`).
+**OpenAIFormat** handles both the Chat Completions API and the newer Responses API, selected by the `ApiFormat` variant. It translates tool calls into OpenAI's `function` wrapper format, omits durable thinking blocks instead of replaying them as assistant plaintext, detects orphaned tool calls from interrupted sessions and adds placeholder results, and handles the structural differences between Chat Completions (messages with `content`) and Responses (input with `input_text`/`input_image`).
 
 **GoogleFormat** converts to Google's `contents`/`parts` structure, mapping tool calls to `functionCall` and tool results to `functionResponse`, and routing images through either `inline_data` (base64) or `file_data` (URL).
 
@@ -61,7 +61,7 @@ The factory function `get_format_handler()` selects the right implementation bas
 
 ## Provider Registry
 
-The provider registry (in `crates/krusty-core/src/ai/providers.rs`) is a lazily initialized, statically cached list of `ProviderConfig` entries. Each entry specifies the provider's ID, display name, base URL, authentication style, available models, and capabilities.
+The provider registry (under `crates/krusty-core/src/ai/providers/registry/`) is a lazily initialized, statically cached list of `ProviderConfig` entries. Each entry specifies the provider's ID, display name, base URL, authentication style, available models, and capabilities.
 
 Five providers are built in:
 
@@ -77,9 +77,9 @@ Adding a new provider means adding a `ProviderConfig` entry to the `BUILTIN_PROV
 
 ## Model Profiles and Capabilities
 
-The model system has two layers. `ModelMetadata` (in `crates/krusty-core/src/ai/models.rs`) stores factual data about a model: context window, max output, reasoning format, pricing, vision support. The `ModelRegistry` is a thread-safe store (`Arc<RwLock>`) that holds models from all providers, supports O(1) lookup by ID via an index, and tracks recently used models.
+The model system has two layers. `ModelMetadata` (in `crates/krusty-core/src/ai/models/metadata.rs`) stores factual data about a model: context window, max output, reasoning format, pricing, vision support. The `ModelRegistry` is a thread-safe store (`Arc<RwLock>`) that holds models from all providers, supports O(1) lookup by ID via an index, and tracks recently used models.
 
-`ModelProfile` (in `crates/krusty-core/src/ai/model_profile.rs`) captures behavioral characteristics tied to a model family. It determines the prompt family (AnthropicClaude, OpenAiCodex, OpenAiReasoning, GoogleGemini, or GenericCoding), context utilization ratios for compaction, stream drain policies, and whether the model supports reasoning summaries. Profiles are resolved from the provider, API format, and model ID using pattern matching on the model name.
+`ModelProfile` (in `crates/krusty-core/src/ai/model_profile/profile/mod.rs`) captures behavioral characteristics tied to a model family. It determines the prompt family (AnthropicClaude, OpenAiCodex, OpenAiReasoning, GoogleGemini, or GenericCoding), context utilization ratios for compaction, stream drain policies, and whether the model supports reasoning summaries. Profiles are resolved from the provider, API format, and model ID using pattern matching on the model name.
 
 Each profile also controls the layered system prompt: a base prompt (Krusty's operating contract), a provider guidance overlay (Anthropic gets "keep tool and plan state explicit"; OpenAI gets "preserve exact task continuity"), a model family overlay (Codex gets "continue through tool-use loops"; Gemini gets "ground decisions in explicit file evidence"), and a capability overlay based on context window size and API format. When a custom system prompt is provided, it replaces the entire layered stack.
 
@@ -88,7 +88,7 @@ Each profile also controls the layered system prompt: a base prompt (Krusty's op
 Streaming is where most of the complexity lives. The pipeline works like this:
 
 1. The client sends an HTTP POST with `stream: true` and gets back a byte stream.
-2. `SseStreamProcessor` (in `crates/krusty-core/src/ai/sse.rs`) receives byte chunks and handles SSE framing -- splitting on newlines, accumulating partial lines across chunk boundaries, stripping SSE comments and empty lines, and extracting `data:` payloads. It caps partial line buffers at 1MB to prevent unbounded memory growth.
+2. `SseStreamProcessor` (in `crates/krusty-core/src/ai/sse/processor/mod.rs`) receives byte chunks and handles SSE framing -- splitting on newlines, accumulating partial lines across chunk boundaries, stripping SSE comments and empty lines, and extracting `data:` payloads. It caps partial line buffers at 1MB to prevent unbounded memory growth.
 3. Each SSE data payload is parsed as JSON and handed to a provider-specific `SseParser` implementation. Three parsers exist in `crates/krusty-core/src/ai/parsers/`: `AnthropicParser`, `OpenAIParser`, and `GoogleParser`. Each knows how to interpret its provider's event types and convert them into `SseEvent` values.
 4. `SseEvent` values are mapped to `StreamPart` values (text deltas, tool call starts/deltas/completions, thinking events, usage, finish) and sent through an unbounded channel to the orchestrator.
 5. Text deltas pass through a `StreamBuffer` (in `crates/krusty-core/src/ai/stream_buffer.rs`) that breaks text into 64-character chunks and flushes every 16ms, targeting 60fps rendering in the TUI. Non-text events bypass the buffer and go directly to the channel.

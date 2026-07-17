@@ -1,12 +1,214 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::time::Duration;
+
+use crate::ai::providers::ProviderId;
+use crate::ai::types::AiTool;
 
 /// Default tool execution timeout (2 minutes)
 pub(crate) const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
 /// Delegated audit/build tools can legitimately run much longer than generic reads.
 pub(crate) const DELEGATED_TOOL_TIMEOUT: Duration = Duration::from_secs(900);
+
+/// Maximum number of function tools in the default coding-agent request.
+pub const DEFAULT_CODE_TOOL_LIMIT: usize = 9;
+
+const STANDARD_CODE_TOOLS: &[&str] = &[
+    "AskUserQuestion",
+    "agent",
+    "apply_patch",
+    "bash",
+    "enter_plan_mode",
+    "glob",
+    "grep",
+    "read",
+    "tool_search",
+];
+
+const STANDARD_EDIT_WRITE_TOOLS: &[&str] = &[
+    "AskUserQuestion",
+    "agent",
+    "bash",
+    "edit",
+    "enter_plan_mode",
+    "grep",
+    "read",
+    "tool_search",
+    "write",
+];
+
+const PLAN_MODE_TOOLS: &[&str] = &[
+    "AskUserQuestion",
+    "agent",
+    "bash",
+    "glob",
+    "grep",
+    "read",
+    "set_work_mode",
+    "tool_search",
+];
+
+const ACTIVE_PLAN_TOOLS: &[&str] = &[
+    "AskUserQuestion",
+    "add_subtask",
+    "agent",
+    "apply_patch",
+    "bash",
+    "read",
+    "set_dependency",
+    "set_work_mode",
+    "task_complete",
+    "task_start",
+    "tool_search",
+];
+
+const ACTIVE_PLAN_EDIT_WRITE_TOOLS: &[&str] = &[
+    "AskUserQuestion",
+    "add_subtask",
+    "agent",
+    "bash",
+    "edit",
+    "read",
+    "set_dependency",
+    "set_work_mode",
+    "task_complete",
+    "task_start",
+    "tool_search",
+    "write",
+];
+
+/// Active implementation plans add canonical lifecycle tools to the normal
+/// coding surface. Keeping these direct is intentional: lifecycle and user
+/// interaction tools are intercepted by the orchestrator and cannot be safely
+/// emulated by nested registry dispatch.
+const ACTIVE_PLAN_TOOL_LIMIT: usize = 11;
+const ACTIVE_PLAN_EDIT_WRITE_TOOL_LIMIT: usize = 12;
+
+/// Mutation grammar exposed directly to a model family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MutationToolSurface {
+    /// GPT/Codex models reliably produce the structured multi-file patch grammar.
+    #[default]
+    ApplyPatch,
+    /// Grok, Claude, Gemini, Kimi, and generic models are more reliable with
+    /// exact replacement plus whole-file creation tools.
+    EditWrite,
+}
+
+impl MutationToolSurface {
+    pub fn for_model(provider: ProviderId, model_id: &str) -> Self {
+        if provider == ProviderId::Grok {
+            return Self::EditWrite;
+        }
+
+        let model = model_id.trim().to_ascii_lowercase();
+        if provider == ProviderId::OpenAI
+            || model.contains("codex")
+            || model.starts_with("gpt-")
+            || model.contains("/gpt-")
+            || model.starts_with("o1")
+            || model.starts_with("o3")
+            || model.starts_with("o4")
+        {
+            Self::ApplyPatch
+        } else {
+            Self::EditWrite
+        }
+    }
+}
+
+/// Request-time exposure policy for the primary coding surface.
+///
+/// The registry may contain dozens of built-in, MCP, extension, and plugin
+/// tools. Keeping only the high-frequency surface on the wire improves prompt
+/// caching and tool choice. `tool_search` preserves governed access to regular
+/// specialist tools without serializing every schema on every request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolRequestPolicy {
+    pub permission_mode: PermissionMode,
+    pub plan_mode: bool,
+    pub active_plan: bool,
+    pub supervised_approval_available: bool,
+    pub mutation_surface: MutationToolSurface,
+    disabled_tools: HashSet<String>,
+}
+
+impl Default for ToolRequestPolicy {
+    fn default() -> Self {
+        Self::code(PermissionMode::Autonomous, false, false, true, &[])
+    }
+}
+
+impl ToolRequestPolicy {
+    pub fn code(
+        permission_mode: PermissionMode,
+        plan_mode: bool,
+        active_plan: bool,
+        supervised_approval_available: bool,
+        disabled_tools: &[String],
+    ) -> Self {
+        Self {
+            permission_mode,
+            plan_mode,
+            active_plan,
+            supervised_approval_available,
+            mutation_surface: MutationToolSurface::ApplyPatch,
+            disabled_tools: disabled_tools.iter().cloned().collect(),
+        }
+    }
+
+    pub fn with_mutation_surface(mut self, mutation_surface: MutationToolSurface) -> Self {
+        self.mutation_surface = mutation_surface;
+        self
+    }
+
+    pub fn filter(&self, tools: Vec<AiTool>) -> Vec<AiTool> {
+        let (selected, limit): (&[&str], usize) = if self.plan_mode {
+            (PLAN_MODE_TOOLS, DEFAULT_CODE_TOOL_LIMIT)
+        } else if self.active_plan {
+            match self.mutation_surface {
+                MutationToolSurface::ApplyPatch => (ACTIVE_PLAN_TOOLS, ACTIVE_PLAN_TOOL_LIMIT),
+                MutationToolSurface::EditWrite => (
+                    ACTIVE_PLAN_EDIT_WRITE_TOOLS,
+                    ACTIVE_PLAN_EDIT_WRITE_TOOL_LIMIT,
+                ),
+            }
+        } else {
+            match self.mutation_surface {
+                MutationToolSurface::ApplyPatch => (STANDARD_CODE_TOOLS, DEFAULT_CODE_TOOL_LIMIT),
+                MutationToolSurface::EditWrite => {
+                    (STANDARD_EDIT_WRITE_TOOLS, DEFAULT_CODE_TOOL_LIMIT)
+                }
+            }
+        };
+
+        let mut filtered = tools
+            .into_iter()
+            .filter(|tool| selected.contains(&tool.name.as_str()))
+            .filter(|tool| !self.disabled_tools.contains(&tool.name))
+            .filter(|tool| {
+                let policy = tool_policy(&tool.name);
+                !self.plan_mode || policy.allowed_in_plan_mode
+            })
+            .filter(|tool| {
+                self.permission_mode != PermissionMode::Supervised
+                    || self.supervised_approval_available
+                    || (!tool_policy(&tool.name).requires_supervised_approval
+                        && !matches!(tool.name.as_str(), "agent" | "tool_search"))
+            })
+            .collect::<Vec<_>>();
+
+        filtered.sort_by(|left, right| left.name.cmp(&right.name));
+        filtered.truncate(limit);
+        filtered
+    }
+
+    pub fn is_disabled(&self, tool_name: &str) -> bool {
+        self.disabled_tools.contains(tool_name)
+    }
+}
 
 /// Tool category for permission checking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,9 +430,10 @@ impl DelegationPolicy {
         params: &Value,
         plan_mode: bool,
     ) -> Result<(), String> {
+        let (effective_name, effective_params) = effective_tool_call(tool_name, params);
         self.authorize_tool_policy(
-            tool_name,
-            tool_policy_for_call(tool_name, params),
+            effective_name,
+            tool_policy_for_call(effective_name, effective_params),
             plan_mode,
         )
     }
@@ -323,8 +526,41 @@ pub fn tool_category(name: &str) -> ToolCategory {
 pub fn tool_policy_for_call(name: &str, params: &Value) -> ToolPolicy {
     match name {
         "agent" => agent_tool_policy(params),
+        "tool_search" => tool_search_policy(params),
         _ => tool_policy(name),
     }
+}
+
+/// Resolve the user-visible operation represented by a wrapper call.
+///
+/// Approval UIs retain the wrapper call ID for protocol continuity, but must
+/// show the effective target and target arguments so consent is informed.
+pub fn effective_tool_call<'a>(name: &'a str, params: &'a Value) -> (&'a str, &'a Value) {
+    if name == "tool_search" && params.get("action").and_then(Value::as_str) == Some("execute") {
+        if let Some(target) = params.get("tool").and_then(Value::as_str) {
+            if target != "tool_search" {
+                return (target, params.get("arguments").unwrap_or(&Value::Null));
+            }
+        }
+    }
+
+    (name, params)
+}
+
+fn tool_search_policy(params: &Value) -> ToolPolicy {
+    if params.get("action").and_then(Value::as_str) != Some("execute") {
+        return ToolPolicy::read_only();
+    }
+
+    let Some(target) = params.get("tool").and_then(Value::as_str) else {
+        return ToolPolicy::read_only();
+    };
+    if target == "tool_search" {
+        return ToolPolicy::read_only();
+    }
+
+    let arguments = params.get("arguments").unwrap_or(&Value::Null);
+    tool_policy_for_call(target, arguments)
 }
 
 fn agent_tool_policy(params: &Value) -> ToolPolicy {
@@ -341,9 +577,8 @@ fn agent_tool_policy(params: &Value) -> ToolPolicy {
 pub fn tool_policy(name: &str) -> ToolPolicy {
     match name {
         "agent" => ToolPolicy::read_only_with_timeout(DELEGATED_TOOL_TIMEOUT),
-        "read" | "glob" | "grep" | "list" | "web_search" | "web_fetch" | "skill" => {
-            ToolPolicy::read_only()
-        }
+        "read" | "glob" | "grep" | "list" | "web_search" | "web_fetch" | "skill"
+        | "tool_search" => ToolPolicy::read_only(),
         "AskUserQuestion" | "PlanConfirm" | "enter_plan_mode" | "memory" | "set_work_mode"
         | "task_start" | "task_complete" | "add_subtask" | "set_dependency"
         | "send_user_message" | "sleep" | "autonomous_task" | "report" => ToolPolicy::interactive(),

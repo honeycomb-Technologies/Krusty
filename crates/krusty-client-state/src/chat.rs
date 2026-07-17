@@ -191,6 +191,9 @@ pub struct ChatState {
     pub plan_items: Vec<PlanItem>,
     pub pending_approval: Option<PendingToolApproval>,
     pub token_count: Option<usize>,
+    /// Reasoning tokens from the latest usage snapshot. This is already a
+    /// subset of completion tokens and must not be added to `token_count`.
+    pub last_reasoning_tokens: Option<usize>,
     pub is_streaming: bool,
     pub last_error: Option<String>,
 }
@@ -208,6 +211,7 @@ impl Default for ChatState {
             plan_items: Vec::new(),
             pending_approval: None,
             token_count: None,
+            last_reasoning_tokens: None,
             is_streaming: false,
             last_error: None,
         }
@@ -286,6 +290,7 @@ impl ChatStore {
         self.state.workspace.project_dir = snapshot.session.project_dir.clone();
         self.state.workspace.workspace_mode = snapshot.session.workspace_mode;
         self.state.token_count = snapshot.session.token_count;
+        self.state.last_reasoning_tokens = None;
         self.state.transcript = transcript_from_session(snapshot);
         self.state.pending_approval = None;
         self.state.is_streaming = false;
@@ -545,24 +550,33 @@ impl ChatStore {
                     Some("Denied".to_owned()),
                 );
             }
+            ChatStreamEvent::SteeringInjected {
+                pending_id,
+                message,
+            } => self.push_live_steering(pending_id, message),
             ChatStreamEvent::TitleUpdate { title } => {
                 self.push_system(format!("Session title: {title}"));
             }
             ChatStreamEvent::Usage {
                 prompt_tokens,
+                input_tokens,
                 completion_tokens,
+                reasoning_tokens,
                 cache_creation_input_tokens,
                 cache_read_input_tokens,
                 total_tokens,
             } => {
                 self.state.token_count = Some(if total_tokens > 0 {
                     total_tokens
+                } else if input_tokens > 0 {
+                    input_tokens + completion_tokens
                 } else {
                     prompt_tokens
                         + completion_tokens
                         + cache_creation_input_tokens
                         + cache_read_input_tokens
                 });
+                self.state.last_reasoning_tokens = Some(reasoning_tokens);
             }
             ChatStreamEvent::Lagged { skipped } => {
                 self.push_system(format!("Stream skipped {skipped} non-critical events."));
@@ -651,6 +665,38 @@ impl ChatStore {
             .push(TranscriptNode::System(SystemNotice {
                 id,
                 content: content.into(),
+            }));
+    }
+
+    fn push_live_steering(&mut self, pending_id: Option<String>, message: String) {
+        self.finish_thinking();
+        if let Some(active_id) = self.active_assistant_id.take() {
+            let remove_empty = self
+                .find_message_mut(&active_id)
+                .map(|active| {
+                    active.streaming = false;
+                    active.content.trim().is_empty() && active.attachments.is_empty()
+                })
+                .unwrap_or(false);
+            if remove_empty {
+                self.state.transcript.retain(|node| node.id() != active_id);
+            }
+        }
+
+        let id = pending_id
+            .map(|id| format!("user-steering-{id}"))
+            .unwrap_or_else(|| self.next_node_id("user-steering"));
+        if self.state.transcript.iter().any(|node| node.id() == id) {
+            return;
+        }
+        self.state
+            .transcript
+            .push(TranscriptNode::Message(ChatMessage {
+                id,
+                role: MessageRole::User,
+                content: message,
+                streaming: false,
+                attachments: Vec::new(),
             }));
     }
 
@@ -836,6 +882,23 @@ mod tests {
             text_messages(&store).last().map(String::as_str),
             Some("hi there")
         );
+    }
+
+    #[test]
+    fn usage_keeps_reasoning_observable_without_double_counting() {
+        let mut store = ChatStore::default();
+        store.apply_stream_event(ChatStreamEvent::Usage {
+            prompt_tokens: 1_000,
+            input_tokens: 1_000,
+            completion_tokens: 550,
+            reasoning_tokens: 500,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            total_tokens: 1_550,
+        });
+
+        assert_eq!(store.state.token_count, Some(1_550));
+        assert_eq!(store.state.last_reasoning_tokens, Some(500));
     }
 
     #[test]

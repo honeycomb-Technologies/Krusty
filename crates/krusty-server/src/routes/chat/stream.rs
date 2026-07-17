@@ -29,11 +29,13 @@ fn loop_event_requires_delivery(event: &LoopEvent) -> bool {
     matches!(
         event,
         LoopEvent::AwaitingInput { .. }
+            | LoopEvent::SteeringInjected { .. }
             | LoopEvent::ToolApprovalRequired { .. }
             | LoopEvent::PlanComplete { .. }
             | LoopEvent::AgentSleeping { .. }
             | LoopEvent::UserMessage { .. }
             | LoopEvent::ClassifierDecision { .. }
+            | LoopEvent::Usage { .. }
             | LoopEvent::Finished { .. }
             | LoopEvent::Error { .. }
     )
@@ -136,6 +138,9 @@ pub(super) async fn start_orchestrator_sse(
         initial_work_mode: work_mode,
         stream_idle_timeout,
         generate_title,
+        max_iterations: (ctx.session_type != SessionType::Mako)
+            .then(|| krusty_core::agent::AgentConfig::default().primary_max_turns())
+            .flatten(),
         ..Default::default()
     };
 

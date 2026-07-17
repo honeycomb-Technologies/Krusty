@@ -6,6 +6,10 @@ impl AiClient {
     pub(crate) fn codex_ws_create_payload(body: Value) -> Value {
         match body {
             Value::Object(mut object) => {
+                // WebSocket `response.create` mirrors the Responses body, but
+                // transport-specific HTTP fields are not valid on the socket.
+                object.remove("stream");
+                object.remove("background");
                 object.insert(
                     "type".to_string(),
                     Value::String("response.create".to_string()),
@@ -77,5 +81,24 @@ impl AiClient {
             (None, Some(error_code)) if !error_code.is_empty() => Some(error_code.to_string()),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AiClient;
+
+    #[test]
+    fn websocket_payload_removes_http_transport_fields() {
+        let payload = AiClient::codex_ws_create_payload(serde_json::json!({
+            "model": "gpt-5.6",
+            "stream": true,
+            "background": false,
+            "input": []
+        }));
+
+        assert_eq!(payload["type"], "response.create");
+        assert!(payload.get("stream").is_none());
+        assert!(payload.get("background").is_none());
     }
 }

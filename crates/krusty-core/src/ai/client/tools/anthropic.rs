@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::time::Instant;
 use tracing::{error, info};
 
-use super::super::config::CallOptions;
+use super::super::config::{anthropic_prompt_cache_control, CallOptions};
 use super::super::core::AiClient;
 use crate::ai::transform::apply_request_body_transform;
 
@@ -31,15 +31,13 @@ impl AiClient {
         // Only apply cache_control for providers that support prompt caching.
         // MiniMax, Z.ai, etc. use Anthropic format but don't support caching —
         // sending cache_control or array-format system prompts may cause errors.
-        let capabilities =
-            crate::ai::providers::ProviderCapabilities::for_provider(self.provider_id());
-        let enable_caching = capabilities.prompt_caching;
+        let cache_control = anthropic_prompt_cache_control(options, self.provider_id());
 
-        let system_value: Value = if enable_caching {
+        let system_value: Value = if let Some(cache_control) = cache_control.as_ref() {
             serde_json::json!([{
                 "type": "text",
                 "text": system_prompt,
-                "cache_control": {"type": "ephemeral"}
+                "cache_control": cache_control
             }])
         } else {
             Value::String(system_prompt.to_string())
@@ -56,8 +54,8 @@ impl AiClient {
         // Enable auto-caching at the request level. The API automatically places
         // the cache breakpoint on the last cacheable block, replacing the need for
         // manual breakpoints on the last tool and last message.
-        if enable_caching {
-            body["cache_control"] = serde_json::json!({"type": "ephemeral"});
+        if let Some(cache_control) = cache_control {
+            body["cache_control"] = cache_control;
         }
 
         // Add thinking configuration when enabled

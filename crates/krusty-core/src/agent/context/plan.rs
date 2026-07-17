@@ -5,6 +5,12 @@ use tracing::warn;
 use crate::plan::PlanManager;
 use crate::storage::WorkMode;
 
+use super::truncate_utf8;
+
+const MAX_VISIBLE_READY_TASKS: usize = 12;
+const MAX_VISIBLE_BLOCKED_TASKS: usize = 6;
+const MAX_PLAN_TASK_DESCRIPTION_CHARS: usize = 300;
+
 /// Build plan context from the active plan for this session.
 pub fn build_plan_context(db_path: &Path, session_id: &str, work_mode: WorkMode) -> String {
     let plan_manager = match PlanManager::new(db_path.to_path_buf()) {
@@ -39,15 +45,15 @@ pub fn build_plan_context(db_path: &Path, session_id: &str, work_mode: WorkMode)
     };
 
     let (completed, total) = plan.progress();
-    let markdown = plan.to_context();
 
     if work_mode == WorkMode::Plan {
+        let markdown = plan.to_context();
         let title = plan.title.replace(['`', '"'], "'");
         format!(
             "[PLAN MODE ACTIVE - Plan: \"{}\"]\n\n\
              Progress: {}/{} tasks completed\n\n\
-             ## Current Plan\n\n{}\n\n---\n\n\
-             In plan mode you can READ but CANNOT write/edit files.",
+             {}\n\n\
+             Plan mode is read-only: inspect and refine the plan, but do not modify project files.",
             title, completed, total, markdown
         )
     } else {
@@ -59,7 +65,14 @@ pub fn build_plan_context(db_path: &Path, session_id: &str, work_mode: WorkMode)
         } else {
             ready_tasks
                 .iter()
-                .map(|t| format!("  - Task {}: {}", t.id, t.description))
+                .take(MAX_VISIBLE_READY_TASKS)
+                .map(|t| {
+                    format!(
+                        "  - Task {}: {}",
+                        t.id,
+                        truncate_utf8(&t.description, MAX_PLAN_TASK_DESCRIPTION_CHARS)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         };
@@ -69,11 +82,12 @@ pub fn build_plan_context(db_path: &Path, session_id: &str, work_mode: WorkMode)
         } else {
             blocked_tasks
                 .iter()
+                .take(MAX_VISIBLE_BLOCKED_TASKS)
                 .map(|t| {
                     format!(
                         "  - Task {}: {} (waiting on: {})",
                         t.id,
-                        t.description,
+                        truncate_utf8(&t.description, MAX_PLAN_TASK_DESCRIPTION_CHARS),
                         t.blocked_by.join(", ")
                     )
                 })
@@ -81,22 +95,25 @@ pub fn build_plan_context(db_path: &Path, session_id: &str, work_mode: WorkMode)
                 .join("\n")
         };
 
+        let ready_omitted = ready_tasks.len().saturating_sub(MAX_VISIBLE_READY_TASKS);
+        let blocked_omitted = blocked_tasks
+            .len()
+            .saturating_sub(MAX_VISIBLE_BLOCKED_TASKS);
+        let omitted = match (ready_omitted, blocked_omitted) {
+            (0, 0) => String::new(),
+            (ready, blocked) => format!(
+                "\n\nAdditional tasks omitted from prompt: {ready} ready/active, {blocked} blocked.",
+            ),
+        };
+
         let title = plan.title.replace(['`', '"'], "'");
         format!(
             "[ACTIVE PLAN - \"{}\"]\n\n\
              Progress: {}/{} tasks completed\n\n\
-             ## Ready to Work\n{}\n\n\
-             ## Blocked Tasks\n{}\n\n\
-             ## Current Plan\n\n{}\n\n---\n\n\
-             ## Task Workflow Protocol\n\n\
-             1. PICK ONE ready task\n\
-             2. `task_start(task_id)` - marks as in-progress\n\
-             3. DO THE WORK\n\
-             4. `task_complete(task_id, result)` - with specific result\n\
-             5. Move to next task\n\n\
-             Rules: One task at a time. Always start before completing. \
-             Use `add_subtask` for complex tasks. Check Ready list for unblocked tasks.",
-            title, completed, total, ready_list, blocked_list, markdown
+             Ready or active:\n{}\n\n\
+             Blocked:\n{}{}\n\n\
+             Work one ready task at a time. Call `task_start` before work and `task_complete` with a concrete result afterward.",
+            title, completed, total, ready_list, blocked_list, omitted
         )
     }
 }

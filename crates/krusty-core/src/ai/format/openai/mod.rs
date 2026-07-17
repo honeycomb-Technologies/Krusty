@@ -1,8 +1,8 @@
 //! OpenAI API format handler
 //!
 //! Handles conversion to OpenAI chat/completions and responses API formats.
-//! Includes message alternation validation and thinking block preservation
-//! for parity with Anthropic format handling.
+//! Includes message alternation validation and model-facing separation of
+//! durable thinking blocks from OpenAI-compatible assistant text.
 
 mod messages;
 mod request;
@@ -129,5 +129,86 @@ mod tests {
         assert_eq!(content[0]["type"], "input_image");
         assert_eq!(content[0]["image_url"], "https://example.com/cat.png");
         assert_eq!(content[0]["detail"], "low");
+    }
+
+    #[test]
+    fn convert_messages_openai_omits_thinking_from_ordinary_assistant_text() {
+        for api_format in [ApiFormat::OpenAI, ApiFormat::OpenAIResponses] {
+            let format = OpenAIFormat::new(api_format);
+            let messages = vec![ModelMessage {
+                role: Role::Assistant,
+                content: vec![
+                    Content::Thinking {
+                        thinking: "private ordinary reasoning".to_string(),
+                        signature: "opaque-signature".to_string(),
+                    },
+                    Content::Text {
+                        text: "Visible answer".to_string(),
+                    },
+                ],
+            }];
+
+            let converted = format.convert_messages(&messages, None);
+
+            assert_eq!(converted.len(), 1);
+            assert_eq!(converted[0]["role"], "assistant");
+            assert_eq!(converted[0]["content"], "Visible answer");
+            let serialized = converted[0].to_string();
+            assert!(!serialized.contains("private ordinary reasoning"));
+            assert!(!serialized.contains("[Thinking]"));
+            assert!(matches!(messages[0].content[0], Content::Thinking { .. }));
+        }
+    }
+
+    #[test]
+    fn convert_messages_openai_omits_thinking_but_preserves_assistant_tool_call() {
+        for api_format in [ApiFormat::OpenAI, ApiFormat::OpenAIResponses] {
+            let format = OpenAIFormat::new(api_format);
+            let messages = vec![
+                ModelMessage {
+                    role: Role::Assistant,
+                    content: vec![
+                        Content::Thinking {
+                            thinking: "private tool reasoning".to_string(),
+                            signature: "opaque-signature".to_string(),
+                        },
+                        Content::Text {
+                            text: "I will inspect that file.".to_string(),
+                        },
+                        Content::ToolUse {
+                            id: "call_read".to_string(),
+                            name: "read".to_string(),
+                            input: serde_json::json!({ "path": "README.md" }),
+                        },
+                    ],
+                },
+                ModelMessage {
+                    role: Role::Tool,
+                    content: vec![Content::ToolResult {
+                        tool_use_id: "call_read".to_string(),
+                        output: Value::String("contents".to_string()),
+                        is_error: Some(false),
+                    }],
+                },
+            ];
+
+            let converted = format.convert_messages(&messages, None);
+
+            assert_eq!(converted.len(), 2);
+            assert_eq!(converted[0]["role"], "assistant");
+            assert_eq!(converted[0]["content"], "I will inspect that file.");
+            assert_eq!(converted[0]["tool_calls"][0]["id"], "call_read");
+            assert_eq!(converted[0]["tool_calls"][0]["function"]["name"], "read");
+            assert_eq!(
+                converted[0]["tool_calls"][0]["function"]["arguments"],
+                r#"{"path":"README.md"}"#
+            );
+            assert_eq!(converted[1]["role"], "tool");
+            assert_eq!(converted[1]["tool_call_id"], "call_read");
+            let serialized = converted[0].to_string();
+            assert!(!serialized.contains("private tool reasoning"));
+            assert!(!serialized.contains("[Thinking]"));
+            assert!(matches!(messages[0].content[0], Content::Thinking { .. }));
+        }
     }
 }

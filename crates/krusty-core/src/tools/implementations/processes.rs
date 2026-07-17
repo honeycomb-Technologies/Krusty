@@ -4,10 +4,41 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::process::{ProcessInfo, ProcessStatus};
 use crate::tools::registry::Tool;
 use crate::tools::{parse_params, ToolContext, ToolResult};
 
 pub struct ProcessesTool;
+
+const MODEL_OUTPUT_TAIL_CHARS: usize = 8_000;
+
+fn bounded_output_for_model(output: String, already_truncated: bool) -> (String, bool) {
+    if output.chars().count() <= MODEL_OUTPUT_TAIL_CHARS {
+        return (output, already_truncated);
+    }
+
+    let mut recent = output
+        .chars()
+        .rev()
+        .take(MODEL_OUTPUT_TAIL_CHARS)
+        .collect::<Vec<_>>();
+    recent.reverse();
+    (recent.into_iter().collect(), true)
+}
+
+fn process_error(process: &ProcessInfo) -> Option<&str> {
+    match &process.status {
+        ProcessStatus::Failed { error, .. } => Some(error.as_str()),
+        _ => None,
+    }
+}
+
+fn process_exit_code(process: &ProcessInfo) -> Option<i32> {
+    match process.status {
+        ProcessStatus::Completed { exit_code, .. } => Some(exit_code),
+        _ => None,
+    }
+}
 
 #[derive(Deserialize)]
 struct Params {
@@ -23,7 +54,7 @@ impl Tool for ProcessesTool {
     }
 
     fn description(&self) -> &str {
-        "Manage background processes. Actions: list (show all), kill (stop by ID), status (check by ID)."
+        "Manage background processes. Actions: list (show all), kill (stop by ID), status (check by ID and read its recent output)."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -74,6 +105,8 @@ impl Tool for ProcessesTool {
                             "status": p.display_status(),
                             "duration_seconds": p.duration().as_secs(),
                             "pid": p.pid,
+                            "error": process_error(p),
+                            "exit_code": process_exit_code(p),
                         })
                     })
                     .collect();
@@ -113,16 +146,44 @@ impl Tool for ProcessesTool {
                 };
 
                 match process {
-                    Some(p) => ToolResult::success_data(json!({
-                        "id": p.id,
-                        "status": p.display_status(),
-                        "command": p.command,
-                        "duration_seconds": p.duration().as_secs(),
-                    })),
+                    Some(p) => {
+                        let output = match user_id {
+                            Some(uid) => registry.output_for_user(uid, &id).await,
+                            None => registry.output(&id).await,
+                        }
+                        .unwrap_or_default();
+                        let (output_tail, output_truncated) =
+                            bounded_output_for_model(output.0, output.1);
+                        ToolResult::success_data(json!({
+                            "id": p.id,
+                            "status": p.display_status(),
+                            "command": p.command,
+                            "duration_seconds": p.duration().as_secs(),
+                            "error": process_error(&p),
+                            "exit_code": process_exit_code(&p),
+                            "output_tail": output_tail,
+                            "output_truncated": output_truncated,
+                        }))
+                    }
                     None => ToolResult::error("Process not found"),
                 }
             }
             _ => ToolResult::invalid_parameters("Unknown action. Use 'list', 'kill', or 'status'"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bounded_output_for_model, MODEL_OUTPUT_TAIL_CHARS};
+
+    #[test]
+    fn model_output_tail_is_bounded_without_splitting_unicode() {
+        let output = format!("old:{}recent", "🦀".repeat(MODEL_OUTPUT_TAIL_CHARS));
+        let (tail, truncated) = bounded_output_for_model(output, false);
+
+        assert!(truncated);
+        assert_eq!(tail.chars().count(), MODEL_OUTPUT_TAIL_CHARS);
+        assert!(tail.ends_with("recent"));
     }
 }

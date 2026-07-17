@@ -18,6 +18,7 @@ pub(super) fn loop_event_type(event: &LoopEvent) -> &'static str {
         LoopEvent::ToolApprovalRequired { .. } => "tool_approval_required",
         LoopEvent::ToolApproved { .. } => "tool_approved",
         LoopEvent::ToolDenied { .. } => "tool_denied",
+        LoopEvent::SteeringInjected { .. } => "steering_injected",
         LoopEvent::ServerToolStart { .. } => "server_tool_start",
         LoopEvent::ServerToolComplete { .. } => "server_tool_complete",
         LoopEvent::WebSearchResults { .. } => "web_search_results",
@@ -143,13 +144,17 @@ pub(super) fn summarize_loop_event(event: &LoopEvent) -> Value {
         LoopEvent::TickInjected { tick_number } => json!({ "tick_number": tick_number }),
         LoopEvent::Usage {
             prompt_tokens,
+            input_tokens,
             completion_tokens,
+            reasoning_tokens,
             cache_creation_input_tokens,
             cache_read_input_tokens,
             total_tokens,
         } => json!({
             "prompt_tokens": prompt_tokens,
+            "input_tokens": input_tokens,
             "completion_tokens": completion_tokens,
+            "reasoning_tokens": reasoning_tokens,
             "cache_creation_input_tokens": cache_creation_input_tokens,
             "cache_read_input_tokens": cache_read_input_tokens,
             "total_tokens": total_tokens,
@@ -212,6 +217,10 @@ pub(super) fn summarize_loop_event(event: &LoopEvent) -> Value {
             message,
             level,
         } => json!({ "title": title, "message": message, "level": level }),
+        LoopEvent::SteeringInjected {
+            pending_id,
+            message,
+        } => json!({ "pending_id": pending_id, "chars": message.chars().count() }),
         LoopEvent::ClassifierDecision {
             tool_name,
             decision,
