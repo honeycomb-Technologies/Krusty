@@ -35,6 +35,10 @@ impl ProcessInfo {
         matches!(self.status, ProcessStatus::Suspended)
     }
 
+    pub fn is_active(&self) -> bool {
+        self.is_running() || self.is_suspended()
+    }
+
     pub fn duration(&self) -> std::time::Duration {
         match &self.status {
             ProcessStatus::Running | ProcessStatus::Suspended => self.started_at.elapsed(),

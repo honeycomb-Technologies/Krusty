@@ -12,6 +12,9 @@ pub(super) fn build_assistant_message(
     );
 
     for block in thinking_blocks {
+        if block.thinking.is_empty() && block.signature.is_empty() {
+            continue;
+        }
         content.push(Content::Thinking {
             thinking: block.thinking.clone(),
             signature: block.signature.clone(),
@@ -98,4 +101,45 @@ pub(super) fn finalize_explore_only_turn(
                 .filter(|message| !message.trim().is_empty())
                 .map(ToString::to_string)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_assistant_message;
+    use crate::agent::stream::ThinkingBlock;
+    use crate::ai::types::Content;
+
+    #[test]
+    fn assistant_message_skips_only_empty_unsigned_thinking() {
+        let message = build_assistant_message(
+            "",
+            &[
+                ThinkingBlock {
+                    thinking: String::new(),
+                    signature: String::new(),
+                },
+                ThinkingBlock {
+                    thinking: "visible reasoning".to_string(),
+                    signature: String::new(),
+                },
+                ThinkingBlock {
+                    thinking: String::new(),
+                    signature: "opaque-signature".to_string(),
+                },
+            ],
+            &[],
+        );
+
+        assert_eq!(message.content.len(), 2);
+        assert!(matches!(
+            &message.content[0],
+            Content::Thinking { thinking, signature }
+                if thinking == "visible reasoning" && signature.is_empty()
+        ));
+        assert!(matches!(
+            &message.content[1],
+            Content::Thinking { thinking, signature }
+                if thinking.is_empty() && signature == "opaque-signature"
+        ));
+    }
 }

@@ -2,9 +2,13 @@
 //!
 //! Provides exponential backoff with jitter for handling API rate limits and transient errors.
 //!
-//! Used by subagent API calls to handle transient errors like rate limiting (429)
-//! and server errors (500, 502, 503, 504).
+//! Used by primary streaming setup and subagent API calls to handle transient
+//! rate limits and provider server errors before caller-visible work begins.
 
 mod backoff;
 
-pub use backoff::{is_retryable_status, with_retry, IsRetryable, RetryConfig};
+pub use backoff::{
+    extract_http_status, is_retryable_error_message, is_retryable_status, with_retry, IsRetryable,
+    RetryConfig,
+};
+pub(crate) use backoff::{parse_retry_after, ProviderHttpError};

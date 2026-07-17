@@ -36,7 +36,7 @@ fn session_ctx() -> (ToolContext, TempDir) {
                 Some(std::path::PathBuf::from("/repo")),
                 crate::storage::WorkspaceMode::Selected,
             )
-            .with_session_metadata("sess-1".to_string(), db_path.clone()),
+            .with_session_metadata("sess-1".to_string(), db_path),
         temp,
     )
 }

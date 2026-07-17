@@ -1,14 +1,18 @@
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{sleep, timeout};
 
+#[cfg(unix)]
+use crate::process::signals::{process_group_exists, signal_process_group};
 use crate::tools::registry::ToolOutputChunk;
 use crate::tools::ToolResult;
 
@@ -85,6 +89,7 @@ async fn collect_pipe_output<R>(
     pipe: Option<R>,
     stream: Option<StreamContext>,
     buffer: Arc<Mutex<BoundedOutputBuffer>>,
+    spool: Option<Arc<Mutex<File>>>,
 ) where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -93,7 +98,24 @@ async fn collect_pipe_output<R>(
     };
 
     let mut reader = BufReader::new(pipe).lines();
+    // Avoid one filesystem task and mutex handoff per output line. Besides
+    // being expensive for compiler/test output, that could leave the reader
+    // draining after the child had exited long enough for the bounded join to
+    // abort it, losing the final lines from both the preview and recovery log.
+    let mut spool_buffer = Vec::with_capacity(64 * 1024);
     while let Ok(Some(line)) = reader.next_line().await {
+        if spool.is_some() {
+            spool_buffer.extend_from_slice(line.as_bytes());
+            spool_buffer.push(b'\n');
+            if spool_buffer.len() >= 64 * 1024 {
+                if let Some(spool) = &spool {
+                    let mut file = spool.lock().await;
+                    let _ = file.write_all(&spool_buffer).await;
+                }
+                spool_buffer.clear();
+            }
+        }
+
         if let Some(stream) = &stream {
             let _ = stream.output_tx.send(ToolOutputChunk {
                 tool_use_id: stream.tool_use_id.clone(),
@@ -105,6 +127,70 @@ async fn collect_pipe_output<R>(
 
         buffer.lock().await.push_line(&line);
     }
+
+    if !spool_buffer.is_empty() {
+        if let Some(spool) = &spool {
+            let mut file = spool.lock().await;
+            let _ = file.write_all(&spool_buffer).await;
+        }
+    }
+}
+
+const TOOL_OUTPUT_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+async fn cleanup_old_outputs(directory: &Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(directory).await else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(TOOL_OUTPUT_RETENTION)
+        .unwrap_or(std::time::UNIX_EPOCH);
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("tool_") && name.ends_with(".log"))
+        {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if metadata.modified().is_ok_and(|modified| modified < cutoff) {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+}
+
+async fn create_output_spool(path: &Path) -> Option<Arc<Mutex<File>>> {
+    let directory = path.parent()?;
+    if let Err(error) = tokio::fs::create_dir_all(directory).await {
+        tracing::warn!(%error, path = %directory.display(), "Could not create tool-output store");
+        return None;
+    }
+    cleanup_old_outputs(directory).await;
+
+    let file = match OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .await
+    {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "Could not create tool-output spool");
+            return None;
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await;
+    }
+
+    Some(Arc::new(Mutex::new(file)))
 }
 
 pub(super) async fn join_reader_with_timeout(mut handle: tokio::task::JoinHandle<()>) {
@@ -124,41 +210,107 @@ pub(super) async fn join_reader_with_timeout(mut handle: tokio::task::JoinHandle
 }
 
 #[cfg(unix)]
-async fn terminate_unix_process_tree(pid: u32) {
-    let pgid = format!("-{}", pid);
+const PROCESS_GROUP_TERM_GRACE_MS: u64 = 200;
 
-    let group_term_ok = std::process::Command::new("kill")
-        .arg("-TERM")
-        .arg(&pgid)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+/// Last-resort cleanup for a foreground command's process group.
+///
+/// The agent executor cancels an in-flight tool by dropping its future. Tokio's
+/// `kill_on_drop` only targets the direct child, so descendants would otherwise
+/// survive. This guard deliberately uses a synchronous group-wide SIGKILL on
+/// drop; the normal timeout/completion path below still gets a graceful SIGTERM
+/// window and reaps the direct child asynchronously.
+#[cfg(unix)]
+struct ProcessGroupDropGuard {
+    leader_pid: u32,
+    armed: bool,
+}
 
-    if !group_term_ok {
-        let _ = std::process::Command::new("kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .status();
+#[cfg(unix)]
+impl ProcessGroupDropGuard {
+    fn new(leader_pid: u32) -> Self {
+        Self {
+            leader_pid,
+            armed: true,
+        }
     }
 
-    sleep(Duration::from_millis(200)).await;
+    fn leader_pid(&self) -> u32 {
+        self.leader_pid
+    }
 
-    let still_running = std::process::Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    fn disarm_if_gone(&mut self) {
+        match process_group_exists(self.leader_pid) {
+            Ok(false) => self.armed = false,
+            Ok(true) => {}
+            Err(error) => {
+                tracing::debug!(
+                    pid = self.leader_pid,
+                    %error,
+                    "Could not verify foreground process-group cleanup"
+                );
+            }
+        }
+    }
+}
 
-    if still_running {
-        let _ = std::process::Command::new("kill")
-            .arg("-KILL")
-            .arg(&pgid)
-            .status();
-        let _ = std::process::Command::new("kill")
-            .arg("-KILL")
-            .arg(pid.to_string())
-            .status();
+#[cfg(unix)]
+impl Drop for ProcessGroupDropGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+
+        match process_group_exists(self.leader_pid) {
+            Ok(false) => return,
+            Ok(true) => {}
+            Err(error) => {
+                tracing::debug!(
+                    pid = self.leader_pid,
+                    %error,
+                    "Could not inspect foreground process group during drop cleanup"
+                );
+            }
+        }
+
+        if let Err(error) = signal_process_group(self.leader_pid, libc::SIGKILL, "SIGKILL") {
+            // Exiting between the liveness probe and signal is harmless. Keep
+            // this at debug level because Drop must remain best-effort.
+            tracing::debug!(
+                pid = self.leader_pid,
+                %error,
+                "Could not kill foreground process group during drop cleanup"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn terminate_unix_process_group(pid: u32) {
+    match process_group_exists(pid) {
+        Ok(false) => return,
+        Ok(true) => {}
+        Err(error) => {
+            tracing::warn!(pid, %error, "Could not inspect foreground process group");
+        }
+    }
+
+    if let Err(error) = signal_process_group(pid, libc::SIGTERM, "SIGTERM") {
+        tracing::debug!(pid, %error, "Could not gracefully terminate process group");
+    }
+
+    sleep(Duration::from_millis(PROCESS_GROUP_TERM_GRACE_MS)).await;
+
+    match process_group_exists(pid) {
+        Ok(false) => {}
+        Ok(true) => {
+            if let Err(error) = signal_process_group(pid, libc::SIGKILL, "SIGKILL") {
+                tracing::warn!(pid, %error, "Could not force-kill foreground process group");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(pid, %error, "Could not verify foreground process-group termination");
+            let _ = signal_process_group(pid, libc::SIGKILL, "SIGKILL");
+        }
     }
 }
 
@@ -176,7 +328,7 @@ async fn terminate_process_tree(child: &mut Child) {
     };
 
     #[cfg(unix)]
-    terminate_unix_process_tree(pid).await;
+    terminate_unix_process_group(pid).await;
 
     #[cfg(windows)]
     terminate_windows_process_tree(pid).await;
@@ -194,11 +346,15 @@ pub(super) async fn execute_foreground(
     mut cmd: Command,
     timeout_duration: Duration,
     stream: Option<StreamContext>,
+    output_spool_path: PathBuf,
 ) -> ToolResult {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return ToolResult::error(format!("Failed to spawn command: {}", e)),
     };
+
+    #[cfg(unix)]
+    let mut process_group_guard = child.id().map(ProcessGroupDropGuard::new);
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -207,16 +363,19 @@ pub(super) async fn execute_foreground(
         RAW_CAPTURE_MAX_LINES,
         RAW_CAPTURE_MAX_BYTES,
     )));
+    let spool = create_output_spool(&output_spool_path).await;
 
     let stdout_handle = tokio::spawn(collect_pipe_output(
         stdout,
         stream.clone(),
         Arc::clone(&buffer),
+        spool.clone(),
     ));
     let stderr_handle = tokio::spawn(collect_pipe_output(
         stderr,
         stream.clone(),
         Arc::clone(&buffer),
+        spool.clone(),
     ));
 
     let wait_result = timeout(timeout_duration, child.wait()).await;
@@ -253,8 +412,26 @@ pub(super) async fn execute_foreground(
         }
     };
 
+    // A foreground command can exit while leaving descendants behind. Clean
+    // the configured process group before joining pipe readers so inherited
+    // stdout/stderr handles cannot keep detached reader tasks alive. On an
+    // ordinary command the group no longer exists and this is a cheap probe.
+    #[cfg(unix)]
+    if let Some(guard) = process_group_guard.as_ref() {
+        terminate_unix_process_group(guard.leader_pid()).await;
+    }
+
     join_reader_with_timeout(stdout_handle).await;
     join_reader_with_timeout(stderr_handle).await;
+
+    #[cfg(unix)]
+    if let Some(guard) = process_group_guard.as_mut() {
+        guard.disarm_if_gone();
+    }
+    if let Some(spool) = &spool {
+        let mut file = spool.lock().await;
+        let _ = file.flush().await;
+    }
 
     let combined_output = {
         let mut guard = buffer.lock().await;
@@ -274,7 +451,19 @@ pub(super) async fn execute_foreground(
         });
     }
 
-    let processed = process_output(combined_output);
+    let stripped_output = super::strip_ansi(&combined_output);
+    let truncated = crate::tools::truncation::truncate_tail(
+        &stripped_output,
+        super::MAX_OUTPUT_LINES,
+        super::MAX_OUTPUT_BYTES,
+    )
+    .was_truncated;
+    let retained_path = truncated.then_some(output_spool_path.as_path());
+    let processed = process_output(combined_output, retained_path);
+    drop(spool);
+    if !truncated {
+        let _ = tokio::fs::remove_file(&output_spool_path).await;
+    }
     let metadata = Some(json!({
         "exit_code": exit_code,
         "killed": killed,

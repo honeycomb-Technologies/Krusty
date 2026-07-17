@@ -10,6 +10,8 @@ use crate::tools::matching;
 use crate::tools::registry::Tool;
 use crate::tools::{parse_params, ToolContext, ToolResult};
 
+use super::mutation_diagnostics::collect_mutation_warnings;
+
 pub struct MultiEditTool;
 
 #[derive(Deserialize)]
@@ -36,7 +38,7 @@ impl Tool for MultiEditTool {
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            r#"Use for 3+ edits to the same file. Read the file first; each edit still needs a unique old_string match.
+            r#"Use for 3+ edits to the same file. Read pre-existing files first; files created or changed by file tools this run need no re-read. Each edit still needs a unique old_string match.
 
 Edits apply sequentially, so later edits see earlier changes. Prefer this over multiple separate edit calls for one file."#,
         )
@@ -121,7 +123,7 @@ Edits apply sequentially, so later edits see earlier changes. Prefer this over m
                     content = format!(
                         "{}{}{}",
                         &content[..m.start],
-                        &edit.new_string,
+                        edit.new_string,
                         &content[m.end..],
                     );
                     applied += 1;
@@ -156,6 +158,7 @@ Edits apply sequentially, so later edits see earlier changes. Prefer this over m
 
         match fs::write(&path, &content).await {
             Ok(_) => {
+                ctx.record_file_observation(path.clone());
                 let mut msg = format!("Applied {}/{} edits", applied, total);
                 if !errors.is_empty() {
                     msg.push_str(&format!(" ({} failed)", errors.len()));
@@ -169,6 +172,9 @@ Edits apply sequentially, so later edits see earlier changes. Prefer this over m
                     "partial": !errors.is_empty()
                 });
 
+                errors.extend(
+                    collect_mutation_warnings(std::slice::from_ref(&path), &ctx.working_dir).await,
+                );
                 // Partial success still writes the file, so keep success with warnings.
                 ToolResult::success_data_with(data, errors, Some(diff), None)
             }

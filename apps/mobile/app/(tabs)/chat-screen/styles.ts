@@ -1,5 +1,39 @@
 import { StyleSheet } from "react-native";
 
+/**
+ * Desktop chat band: fills available pane width with light side breathing
+ * room, soft-capped only on ultra-wide monitors so messages + composer stay
+ * one aligned column (no full-bleed ultrawide void).
+ */
+export const DESKTOP_CHAT_MIN_WIDTH = 360;
+export const DESKTOP_CHAT_MAX_WIDTH = 960;
+/** Side inset as a fraction of available pane width (clamped). */
+export const DESKTOP_CHAT_SIDE_PAD_MIN = 16;
+export const DESKTOP_CHAT_SIDE_PAD_MAX = 48;
+/** Fixed toolbox side rail — never flex-share with chat. */
+export const TOOLBOX_DOCK_WIDTH = 360;
+
+/** Side pad for a measured pane width. */
+export function resolveDesktopChatSidePad(paneWidth: number): number {
+  if (paneWidth <= 0) return DESKTOP_CHAT_SIDE_PAD_MIN;
+  return Math.min(
+    DESKTOP_CHAT_SIDE_PAD_MAX,
+    Math.max(DESKTOP_CHAT_SIDE_PAD_MIN, Math.round(paneWidth * 0.03)),
+  );
+}
+
+/**
+ * Resolve column max width for a pane width.
+ * Always returns a positive width so the band never full-bleeds while waiting
+ * on layout measure (pass window width as fallback).
+ */
+export function resolveDesktopChatMaxWidth(paneWidth: number): number {
+  if (paneWidth <= 0) return DESKTOP_CHAT_MAX_WIDTH;
+  const pad = resolveDesktopChatSidePad(paneWidth);
+  const usable = Math.max(DESKTOP_CHAT_MIN_WIDTH, paneWidth - pad * 2);
+  return Math.min(DESKTOP_CHAT_MAX_WIDTH, usable);
+}
+
 export const styles = StyleSheet.create({
   bootScreen: { flex: 1 },
   bootInner: {
@@ -51,6 +85,41 @@ export const styles = StyleSheet.create({
   },
   container: { flex: 1 },
   flex: { flex: 1 },
+  /** Desktop: chat column + toolbox column side by side. */
+  desktopSplit: {
+    flex: 1,
+    flexDirection: "row",
+    minWidth: 0,
+    overflow: "hidden",
+  },
+  /** Flex child that holds the chat band; must shrink when toolbox docks. */
+  desktopSplitChat: {
+    flex: 1,
+    minWidth: 0,
+    overflow: "hidden",
+  },
+  /**
+   * Fluid band for messages + composer only. maxWidth set inline from pane.
+   * Title chrome stays full-pane so the toolbox button can sit in the corner.
+   */
+  desktopChatColumn: {
+    flex: 1,
+    width: "100%",
+    maxWidth: DESKTOP_CHAT_MAX_WIDTH,
+    alignSelf: "center",
+    minWidth: 0,
+    // Anchor absolute ChatBar/FABs inside this band (not the full window).
+    position: "relative",
+    overflow: "visible",
+  },
+  /** Outer measure host — full split-pane width; chrome + centered band stack. */
+  desktopChatColumnHost: {
+    flex: 1,
+    width: "100%",
+    minWidth: 0,
+    flexDirection: "column",
+    alignItems: "stretch",
+  },
   topBar: {
     flexDirection: "row",
     alignItems: "center",
@@ -58,16 +127,37 @@ export const styles = StyleSheet.create({
     paddingVertical: 10,
     gap: 12,
   },
+  /** Desktop chrome: full pane width so corner controls stay on the window edge. */
+  topBarDesktop: {
+    width: "100%",
+    paddingLeft: 56, // room for shell sidebar-open control
+    paddingRight: 12,
+    paddingVertical: 10,
+    zIndex: 20,
+  },
   menuBtn: {
     padding: 4,
   },
+  /** Flush top-right toolbox control (true corner hit target). */
+  toolboxCornerBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+  },
   titleBtn: {
     flex: 1,
+    minWidth: 0,
   },
   title: {
     fontSize: 17,
     fontWeight: "600",
     textAlign: "center",
+  },
+  titlePlaceholder: {
+    fontWeight: "500",
   },
   statusDot: {
     width: 8,
@@ -79,7 +169,7 @@ export const styles = StyleSheet.create({
     paddingTop: 8,
   },
   listDesktop: {
-    maxWidth: 800,
+    maxWidth: DESKTOP_CHAT_MAX_WIDTH,
     alignSelf: "center",
     width: "100%",
   },

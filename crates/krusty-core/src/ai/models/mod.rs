@@ -93,4 +93,19 @@ mod tests {
         assert!(metadata.supports_thinking);
         assert_eq!(metadata.context_window, 512_000);
     }
+
+    #[test]
+    fn resolves_grok_4_5_fallback_when_dynamic_catalog_is_unavailable() {
+        let metadata =
+            resolve_model_metadata(ProviderId::Grok, "grok-4.5", ApiFormat::OpenAIResponses);
+
+        assert_eq!(metadata.display_name, "Grok 4.5");
+        assert_eq!(metadata.api_format, ApiFormat::OpenAIResponses);
+        assert_eq!(metadata.reasoning_format, Some(ReasoningFormat::OpenAI));
+        assert!(metadata.supports_thinking);
+        assert!(metadata.supports_tools);
+        assert!(metadata.supports_vision);
+        assert_eq!(metadata.context_window, 500_000);
+        assert_eq!(metadata.max_output, 32_768);
+    }
 }

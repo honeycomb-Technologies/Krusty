@@ -115,10 +115,10 @@ mod tests {
 
         assert_eq!(states.len(), 2);
         assert_eq!(states[0].block_id, "block-1");
-        assert_eq!(states[0].collapsed, true);
+        assert!(states[0].collapsed);
         assert_eq!(states[0].scroll_offset, 42);
         assert_eq!(states[1].block_id, "block-2");
-        assert_eq!(states[1].collapsed, false);
+        assert!(!states[1].collapsed);
     }
 
     #[test]

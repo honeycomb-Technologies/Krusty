@@ -1,4 +1,5 @@
 use anyhow::Result;
+use reqwest::header::RETRY_AFTER;
 use reqwest::Client;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tracing::{error, info};
@@ -145,8 +146,20 @@ impl AiClient {
             return Ok(response);
         }
 
+        let retry_after = response
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(crate::ai::retry::parse_retry_after);
         let error_text = response.text().await.unwrap_or_default();
         error!("API error response: {} - {}", status, error_text);
-        Err(anyhow::anyhow!("API error: {} - {}", status, error_text))
+        Err(crate::ai::retry::ProviderHttpError::new(
+            "API error",
+            status.as_u16(),
+            status.to_string(),
+            error_text,
+            retry_after,
+        )
+        .into())
     }
 }

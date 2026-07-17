@@ -10,6 +10,8 @@ use tracing::info;
 use crate::tools::registry::Tool;
 use crate::tools::{parse_params, ToolContext, ToolResult};
 
+use super::mutation_diagnostics::collect_mutation_warnings;
+
 /// Maximum content size to write (10 MB)
 const MAX_WRITE_SIZE: usize = 10 * 1024 * 1024;
 
@@ -35,7 +37,7 @@ impl Tool for WriteTool {
         Some(
             r#"Use Write for new files; prefer Edit for existing files because Write replaces the whole file.
 
-Existing files must be read first. Parent directories are created automatically. Max content size is 10MB.
+Read pre-existing files before overwriting; files created or changed by file tools this run need no re-read. Parent directories are created automatically. Max content size is 10MB.
 
 Don't create documentation files unless explicitly requested."#,
         )
@@ -110,6 +112,13 @@ Don't create documentation files unless explicitly requested."#,
 
         match fs::write(&path, &params.content).await {
             Ok(_) => {
+                let mut warnings =
+                    collect_mutation_warnings(std::slice::from_ref(&path), &ctx.working_dir).await;
+                if let Err(error) = ctx.record_file_mutation(&path) {
+                    warnings.push(format!(
+                        "File was written but its observation could not be recorded: {error}"
+                    ));
+                }
                 let line_count = params.content.lines().count();
 
                 let data = match &old_content {
@@ -138,7 +147,7 @@ Don't create documentation files unless explicitly requested."#,
                     None
                 };
 
-                ToolResult::success_data_with(data, Vec::new(), diff, None)
+                ToolResult::success_data_with(data, warnings, diff, None)
             }
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
         }
@@ -160,6 +169,7 @@ fn generate_compact_diff(old: &str, new: &str, path: &std::path::Path) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::implementations::EditTool;
 
     #[tokio::test]
     async fn write_creates_new_file_without_prior_observation() {
@@ -189,6 +199,99 @@ mod tests {
             .await
             .expect("created file should read");
         assert_eq!(content, "created\n");
+        let canonical = file_path
+            .canonicalize()
+            .expect("created file should canonicalize");
+        assert!(ctx.has_file_observation(&canonical));
+    }
+
+    #[tokio::test]
+    async fn write_can_overwrite_a_file_it_created_without_redundant_read() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should create");
+        let file_path = temp_dir.path().join("new.txt");
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+
+        let created = WriteTool
+            .execute(
+                json!({
+                    "file_path": file_path.display().to_string(),
+                    "content": "first\n",
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(
+            !created.is_error,
+            "unexpected create error: {}",
+            created.output
+        );
+
+        let overwritten = WriteTool
+            .execute(
+                json!({
+                    "file_path": file_path.display().to_string(),
+                    "content": "second\n",
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(
+            !overwritten.is_error,
+            "unexpected overwrite error: {}",
+            overwritten.output
+        );
+        let content = fs::read_to_string(&file_path)
+            .await
+            .expect("overwritten file should read");
+        assert_eq!(content, "second\n");
+    }
+
+    #[tokio::test]
+    async fn edit_can_change_a_file_created_by_write_without_redundant_read() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should create");
+        let file_path = temp_dir.path().join("new.txt");
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+
+        let created = WriteTool
+            .execute(
+                json!({
+                    "file_path": file_path.display().to_string(),
+                    "content": "before\n",
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(
+            !created.is_error,
+            "unexpected create error: {}",
+            created.output
+        );
+
+        let edited = EditTool
+            .execute(
+                json!({
+                    "file_path": file_path.display().to_string(),
+                    "old_string": "before",
+                    "new_string": "after",
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(!edited.is_error, "unexpected edit error: {}", edited.output);
+        assert_eq!(
+            fs::read_to_string(&file_path)
+                .await
+                .expect("edited file should read"),
+            "after\n"
+        );
     }
 
     #[tokio::test]

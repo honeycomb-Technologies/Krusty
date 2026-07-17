@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 
 use crate::agent::subagent::{AgentProgress, AgentProgressStatus};
 use crate::agent::AgentConfig as RuntimeAgentConfig;
@@ -10,6 +10,7 @@ use crate::agent::{DelegatedProgressEvent, DelegatedRunStage, DelegatedToolKind}
 use crate::ai::client::AiClient;
 use crate::ai::types::AiToolCall;
 use crate::process::ProcessRegistry;
+use crate::skills::SkillsManager;
 use crate::storage::{WorkMode, WorkspaceMode};
 use crate::tools::registry::{
     FileObservationTracker, PermissionMode, ToolContext, ToolRegistry, ToolResult,
@@ -26,6 +27,7 @@ pub(super) async fn execute_regular_tool(
     working_dir: &Path,
     project_dir: Option<&Path>,
     process_registry: &Arc<ProcessRegistry>,
+    skills_manager: &Arc<RwLock<SkillsManager>>,
     session_id: &str,
     db_path: &Path,
     user_id: Option<&str>,
@@ -95,6 +97,7 @@ pub(super) async fn execute_regular_tool(
         subagent_max_turns_override.or(RuntimeAgentConfig::default().subagent_max_turns),
     )
     .with_ai_client(ai_client.clone())
+    .with_skills_manager(Arc::clone(skills_manager))
     .with_tool_registry(Arc::clone(tool_registry))
     .with_loop_event_tx(event_tx.clone())
     .with_file_observation_tracker(file_observations)
@@ -157,33 +160,6 @@ fn delegated_kind_from_agent_call(arguments: &serde_json::Value) -> DelegatedToo
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::delegated_kind_from_agent_call;
-    use crate::agent::DelegatedToolKind;
-    use serde_json::json;
-
-    #[test]
-    fn delegated_kind_tracks_agent_type() {
-        assert_eq!(
-            delegated_kind_from_agent_call(&json!({"agent_type":"plan"})),
-            DelegatedToolKind::Plan
-        );
-        assert_eq!(
-            delegated_kind_from_agent_call(&json!({"agent_type":"verify"})),
-            DelegatedToolKind::Verify
-        );
-        assert_eq!(
-            delegated_kind_from_agent_call(&json!({"agent_type":"build"})),
-            DelegatedToolKind::Build
-        );
-        assert_eq!(
-            delegated_kind_from_agent_call(&json!({"agent_type":"explore"})),
-            DelegatedToolKind::Explore
-        );
-    }
-}
-
 fn delegated_stage_from_progress(progress: &AgentProgress) -> DelegatedRunStage {
     match progress.status {
         AgentProgressStatus::Running => {
@@ -215,5 +191,32 @@ fn delegated_stage_from_progress(progress: &AgentProgress) -> DelegatedRunStage 
                 DelegatedRunStage::Failed
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::delegated_kind_from_agent_call;
+    use crate::agent::DelegatedToolKind;
+    use serde_json::json;
+
+    #[test]
+    fn delegated_kind_tracks_agent_type() {
+        assert_eq!(
+            delegated_kind_from_agent_call(&json!({"agent_type":"plan"})),
+            DelegatedToolKind::Plan
+        );
+        assert_eq!(
+            delegated_kind_from_agent_call(&json!({"agent_type":"verify"})),
+            DelegatedToolKind::Verify
+        );
+        assert_eq!(
+            delegated_kind_from_agent_call(&json!({"agent_type":"build"})),
+            DelegatedToolKind::Build
+        );
+        assert_eq!(
+            delegated_kind_from_agent_call(&json!({"agent_type":"explore"})),
+            DelegatedToolKind::Explore
+        );
     }
 }

@@ -33,7 +33,8 @@ use tokio::sync::{mpsc, RwLock};
 use crate::ai::client::{AiClient, CallOptions};
 use crate::ai::model_profile::ModelProfile;
 use crate::ai::models::resolve_context_window;
-use crate::ai::types::{Content, ModelMessage, Role};
+use crate::ai::retry::is_retryable_error_message;
+use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
 use crate::constants;
 use crate::process::ProcessRegistry;
 use crate::skills::SkillsManager;
@@ -41,11 +42,13 @@ use crate::storage::{
     PartialAssistantState, PendingInteractionSnapshot, ProjectSettings, RecoveryStatus,
     SessionType, WorkMode,
 };
+use crate::tools::registry::effective_tool_call;
 use crate::tools::registry::{FileObservationTracker, PermissionMode, ToolRegistry};
 
 use super::compaction::{
-    is_context_overflow_error, microcompact::microcompact_messages, run_compaction_pipeline,
-    CompactionManager, CompactionRequest, CompactionResult, CompactionTrigger,
+    effective_context_window_for_runtime, is_context_overflow_error,
+    microcompact::microcompact_messages, run_compaction_pipeline, CompactionManager,
+    CompactionRequest, CompactionRequestBudget, CompactionResult, CompactionTrigger,
 };
 use super::context;
 use super::context_ledger::ContextLedger;
@@ -69,16 +72,29 @@ use self::title::maybe_generate_title;
 
 const EXPLORATION_BUDGET_SOFT: usize = 15;
 const EXPLORATION_BUDGET_HARD: usize = 30;
-const CHATGPT_CODEX_EFFECTIVE_CONTEXT_WINDOW: usize = 256_000;
+const EMPTY_COMPLETION_RECOVERY_INSTRUCTION: &str = "[EMPTY RESPONSE RECOVERY]\nThe previous model completion contained no user-visible text or tool call. Continue the same turn from the existing conversation and provide the response requested by the user now, or make a necessary new tool call. Do not repeat a completed tool call merely because the prior completion was empty, and do not mention this recovery instruction.";
+const EMPTY_COMPLETION_ERROR: &str = "The AI provider completed twice without producing user-visible text or a tool call. Try again or choose another model.";
+const EMPTY_COMPLETION_AFTER_SERVER_TOOL_ERROR: &str = "The AI provider completed after hosted tool activity without producing a user-visible response. The hosted tool was not replayed; try again or choose another model.";
 
-fn effective_context_window_for_runtime(
-    uses_chatgpt_codex: bool,
-    resolved_context_window: usize,
-) -> usize {
-    if uses_chatgpt_codex {
-        resolved_context_window.min(CHATGPT_CODEX_EFFECTIVE_CONTEXT_WINDOW)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyCompletionAction {
+    None,
+    Retry,
+    Fail,
+}
+
+fn empty_completion_action(
+    text: &str,
+    tool_calls: &[AiToolCall],
+    retry_attempted: bool,
+    had_server_tool_activity: bool,
+) -> EmptyCompletionAction {
+    if !text.trim().is_empty() || !tool_calls.is_empty() {
+        EmptyCompletionAction::None
+    } else if retry_attempted || had_server_tool_activity {
+        EmptyCompletionAction::Fail
     } else {
-        resolved_context_window
+        EmptyCompletionAction::Retry
     }
 }
 
@@ -90,16 +106,21 @@ fn terminal_agent_state_after_interruption(stop_reason: &LoopStopReason) -> &'st
     }
 }
 
-fn should_retry_empty_stream_idle(
+fn should_retry_empty_stream_interruption(
     stop_reason: Option<&LoopStopReason>,
-    text: &str,
-    has_pending_or_complete_tool_calls: bool,
+    last_error: Option<&str>,
+    produced_output: bool,
     retry_attempted: bool,
 ) -> bool {
-    matches!(stop_reason, Some(LoopStopReason::StreamIdleTimeout))
-        && !retry_attempted
-        && text.trim().is_empty()
-        && !has_pending_or_complete_tool_calls
+    if retry_attempted || produced_output {
+        return false;
+    }
+
+    match stop_reason {
+        Some(LoopStopReason::StreamIdleTimeout) => true,
+        Some(LoopStopReason::ProviderError) => last_error.is_some_and(is_retryable_error_message),
+        _ => false,
+    }
 }
 
 /// Configuration for an orchestrator run.
@@ -324,6 +345,7 @@ impl AgenticOrchestrator {
         let mut exploration_budget_count = 0usize;
         let mut tool_failure_signatures: HashMap<String, usize> = HashMap::new();
         let mut tool_pattern_signatures: HashMap<String, usize> = HashMap::new();
+        let mut validation_pattern_signatures: HashMap<String, usize> = HashMap::new();
         let mut title_generated = !generate_title;
         let mut iteration = 0usize;
         let model_context_window = effective_context_window_for_runtime(
@@ -341,8 +363,12 @@ impl AgenticOrchestrator {
             model_context_window,
         );
         let mut context_ledger = ContextLedger::from_conversation(&conversation);
-        let mut empty_stream_idle_retry_attempted = false;
+        let mut empty_stream_retry_attempted = false;
+        let mut empty_completion_retry_attempted = false;
+        let mut empty_completion_recovery_pending = false;
+        let mut provider_tool_activity_seen = false;
         let mut overflow_compact_retry_attempted = false;
+        let mut mutation_needs_validation = false;
         let project_dir_key = project_dir
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned());
@@ -389,7 +415,7 @@ impl AgenticOrchestrator {
                 persist_context_state(&db_path, &session_id, &context_ledger);
             }
 
-            let conversation_with_context = inject_runtime_context(
+            let mut conversation_with_context = inject_runtime_context(
                 &conversation,
                 &db_path,
                 &session_id,
@@ -402,12 +428,39 @@ impl AgenticOrchestrator {
                 session_type,
                 user_id.as_deref(),
             );
-            let estimated_tokens_before = super::estimate_conversation_tokens_with_usage(
+            if empty_completion_recovery_pending {
+                conversation_with_context.push(ModelMessage {
+                    role: Role::System,
+                    content: vec![Content::Text {
+                        text: EMPTY_COMPLETION_RECOVERY_INSTRUCTION.to_string(),
+                    }],
+                });
+            }
+            let request_estimate = super::estimate_rendered_request_tokens(
+                ai_client.as_ref(),
                 &conversation_with_context,
+                &options,
+            );
+            let usage_calibrated_estimate = super::estimate_tokens_with_usage(
+                &conversation,
                 last_usage_prompt_tokens,
-                conversation_with_context
-                    .len()
-                    .saturating_sub(messages_at_last_usage),
+                conversation.len().saturating_sub(messages_at_last_usage),
+            );
+            let estimated_tokens_before =
+                request_estimate.total_tokens.max(usage_calibrated_estimate);
+            let compaction_request_budget =
+                request_estimate.compaction_budget(estimated_tokens_before);
+            tracing::debug!(
+                session_id = %session_id,
+                base_prompt_tokens = request_estimate.base_prompt_tokens,
+                project_context_tokens = request_estimate.project_context_tokens,
+                session_context_tokens = request_estimate.session_context_tokens,
+                message_tokens = request_estimate.message_tokens,
+                tool_tokens = request_estimate.tool_tokens,
+                usage_calibrated_tokens = usage_calibrated_estimate,
+                total_tokens = request_estimate.total_tokens,
+                compaction_pressure_tokens = estimated_tokens_before,
+                "Preflight rendered-request token estimate"
             );
 
             if compaction_manager.should_compact(estimated_tokens_before) {
@@ -426,7 +479,7 @@ impl AgenticOrchestrator {
                     CompactionTrigger::Auto,
                     last_usage_prompt_tokens,
                     messages_after_usage,
-                    Some(estimated_tokens_before),
+                    Some(compaction_request_budget),
                     &event_tx,
                 )
                 .await
@@ -470,10 +523,33 @@ impl AgenticOrchestrator {
                     PartialAssistantState::default(),
                 ),
             );
-            let api_rx = match ai_client
-                .call_streaming(conversation_with_context, &options)
-                .await
-            {
+            let streaming_setup = ai_client.call_streaming(conversation_with_context, &options);
+            tokio::pin!(streaming_setup);
+            let mut setup_input_closed = false;
+            let setup_result = loop {
+                tokio::select! {
+                    result = &mut streaming_setup => break Some(result),
+                    input = input_rx.recv(), if !setup_input_closed => {
+                        match input {
+                            Some(LoopInput::Cancel) => break None,
+                            Some(_) => continue,
+                            None => setup_input_closed = true,
+                        }
+                    }
+                }
+            };
+
+            let Some(setup_result) = setup_result else {
+                clear_recovery_state(&db_path, &session_id);
+                set_agent_state(&db_path, &session_id, "idle");
+                let _ = event_tx.send(LoopEvent::Finished {
+                    session_id: session_id.clone(),
+                    stop_reason: LoopStopReason::UserAbort,
+                });
+                return;
+            };
+
+            let api_rx = match setup_result {
                 Ok(rx) => rx,
                 Err(e) => {
                     let error = format!("AI error: {}", e);
@@ -498,7 +574,7 @@ impl AgenticOrchestrator {
                             CompactionTrigger::Overflow,
                             last_usage_prompt_tokens,
                             messages_after_usage,
-                            None,
+                            Some(compaction_request_budget),
                             &event_tx,
                         )
                         .await
@@ -549,25 +625,50 @@ impl AgenticOrchestrator {
                 }
             };
 
-            let result = stream::process_stream(
-                api_rx,
-                &event_tx,
-                effective_stream_idle_timeout,
-                |checkpoint| {
-                    persist_recovery_state(
-                        &db_path,
-                        &session_id,
-                        &build_recovery_state(
-                            &context_ledger,
-                            RecoveryStatus::Streaming,
-                            None,
-                            None,
-                            build_partial_assistant_state(checkpoint),
-                        ),
-                    );
-                },
-            )
-            .await;
+            let result = {
+                let stream_processing = stream::process_stream(
+                    api_rx,
+                    &event_tx,
+                    effective_stream_idle_timeout,
+                    |checkpoint| {
+                        persist_recovery_state(
+                            &db_path,
+                            &session_id,
+                            &build_recovery_state(
+                                &context_ledger,
+                                RecoveryStatus::Streaming,
+                                None,
+                                None,
+                                build_partial_assistant_state(checkpoint),
+                            ),
+                        );
+                    },
+                );
+                tokio::pin!(stream_processing);
+                let mut input_closed = false;
+                loop {
+                    tokio::select! {
+                        result = &mut stream_processing => break Some(result),
+                        input = input_rx.recv(), if !input_closed => {
+                            match input {
+                                Some(LoopInput::Cancel) => break None,
+                                Some(_) => continue,
+                                None => input_closed = true,
+                            }
+                        }
+                    }
+                }
+            };
+
+            let Some(result) = result else {
+                clear_recovery_state(&db_path, &session_id);
+                set_agent_state(&db_path, &session_id, "idle");
+                let _ = event_tx.send(LoopEvent::Finished {
+                    session_id: session_id.clone(),
+                    stop_reason: LoopStopReason::UserAbort,
+                });
+                return;
+            };
 
             if result.total_tokens > 0 {
                 last_token_count = result.total_tokens;
@@ -576,27 +677,19 @@ impl AgenticOrchestrator {
                 last_usage_prompt_tokens = Some(result.prompt_tokens);
                 messages_at_last_usage = conversation.len();
             }
+            provider_tool_activity_seen |= result.had_server_tool_activity;
 
-            if should_retry_empty_stream_idle(
+            if should_retry_empty_stream_interruption(
                 result.stop_reason.as_ref(),
-                &result.recovery_checkpoint.text,
-                !result.tool_calls.is_empty() || !result.recovery_checkpoint.tool_calls.is_empty(),
-                empty_stream_idle_retry_attempted,
+                result.last_error.as_deref(),
+                result.produced_output,
+                empty_stream_retry_attempted,
             ) {
-                empty_stream_idle_retry_attempted = true;
+                empty_stream_retry_attempted = true;
                 tracing::warn!(
                     session_id = %session_id,
-                    "Provider stream went idle before text or tool calls; retrying once"
+                    "Provider stream ended before text or tool calls; retrying once"
                 );
-                let _ = event_tx.send(LoopEvent::Error {
-                    error: "Provider stream went idle before producing text or tool calls; retrying once automatically.".to_string(),
-                });
-                conversation.push(ModelMessage {
-                    role: Role::System,
-                    content: vec![Content::Text {
-                        text: "The previous provider stream went idle before producing text or tool calls. Continue from the last completed tool results; either call the next required tool or provide a concise final answer. Do not repeat completed work.".to_string(),
-                    }],
-                });
                 clear_recovery_state(&db_path, &session_id);
                 set_agent_state(&db_path, &session_id, "streaming");
                 continue;
@@ -630,7 +723,7 @@ impl AgenticOrchestrator {
                         CompactionTrigger::Overflow,
                         last_usage_prompt_tokens,
                         messages_after_usage,
-                        None,
+                        Some(compaction_request_budget),
                         &event_tx,
                     )
                     .await
@@ -669,8 +762,12 @@ impl AgenticOrchestrator {
                     ),
                 );
                 persist_context_state(&db_path, &session_id, &context_ledger);
+                let terminal_error = result
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| continuation_recovery_message(&context_ledger));
                 let _ = event_tx.send(LoopEvent::Error {
-                    error: continuation_recovery_message(&context_ledger),
+                    error: terminal_error,
                 });
                 if last_token_count > 0 {
                     update_token_count(&db_path, &session_id, last_token_count);
@@ -685,6 +782,72 @@ impl AgenticOrchestrator {
                     stop_reason,
                 });
                 return;
+            }
+
+            // A provider can successfully finish after emitting only internal
+            // reasoning. That is a valid transport response but not a usable
+            // assistant turn. Recover semantically once without replaying any
+            // completed tool call or polluting canonical conversation history.
+            empty_completion_recovery_pending = false;
+            let empty_completion = if session_type == SessionType::Mako {
+                EmptyCompletionAction::None
+            } else {
+                empty_completion_action(
+                    &result.text,
+                    &result.tool_calls,
+                    empty_completion_retry_attempted,
+                    provider_tool_activity_seen,
+                )
+            };
+            match empty_completion {
+                EmptyCompletionAction::Retry => {
+                    empty_completion_retry_attempted = true;
+                    empty_completion_recovery_pending = true;
+                    tracing::warn!(
+                        session_id = %session_id,
+                        "Provider completed without user-visible text or a tool call; requesting one semantic continuation"
+                    );
+                    clear_recovery_state(&db_path, &session_id);
+                    set_agent_state(&db_path, &session_id, "streaming");
+                    continue;
+                }
+                EmptyCompletionAction::Fail => {
+                    let error = if provider_tool_activity_seen {
+                        EMPTY_COMPLETION_AFTER_SERVER_TOOL_ERROR
+                    } else {
+                        EMPTY_COMPLETION_ERROR
+                    };
+                    tracing::error!(
+                        session_id = %session_id,
+                        had_server_tool_activity = provider_tool_activity_seen,
+                        "Provider produced an unrecoverable empty semantic completion"
+                    );
+                    persist_recovery_state(
+                        &db_path,
+                        &session_id,
+                        &build_recovery_state(
+                            &context_ledger,
+                            RecoveryStatus::Interrupted,
+                            Some(LoopStopReason::ProviderError),
+                            Some(error.to_string()),
+                            build_partial_assistant_state(&result.recovery_checkpoint),
+                        ),
+                    );
+                    persist_context_state(&db_path, &session_id, &context_ledger);
+                    let _ = event_tx.send(LoopEvent::Error {
+                        error: error.to_string(),
+                    });
+                    if last_token_count > 0 {
+                        update_token_count(&db_path, &session_id, last_token_count);
+                    }
+                    set_agent_state(&db_path, &session_id, "error");
+                    let _ = event_tx.send(LoopEvent::Finished {
+                        session_id: session_id.clone(),
+                        stop_reason: LoopStopReason::ProviderError,
+                    });
+                    return;
+                }
+                EmptyCompletionAction::None => {}
             }
 
             // Build and save assistant message
@@ -774,13 +937,14 @@ impl AgenticOrchestrator {
                 if !non_ask_user_calls.is_empty() {
                     let other_calls: Vec<_> = non_ask_user_calls.into_iter().cloned().collect();
                     set_agent_state(&db_path, &session_id, "tool_executing");
-                    let (other_results, _) = executor::execute_tools(
+                    let other_batch = executor::execute_tools(
                         &other_calls,
                         &tool_registry,
                         &ai_client,
                         &working_dir,
                         project_dir.as_deref(),
                         &process_registry,
+                        &skills_manager,
                         &session_id,
                         &db_path,
                         user_id.as_deref(),
@@ -795,7 +959,16 @@ impl AgenticOrchestrator {
                         Arc::clone(&file_observations),
                     )
                     .await;
-                    all_results.extend(other_results);
+                    all_results.extend(other_batch.results);
+                    if other_batch.cancelled {
+                        clear_recovery_state(&db_path, &session_id);
+                        set_agent_state(&db_path, &session_id, "idle");
+                        let _ = event_tx.send(LoopEvent::Finished {
+                            session_id: session_id.clone(),
+                            stop_reason: LoopStopReason::UserAbort,
+                        });
+                        return;
+                    }
                 }
 
                 // Add placeholder results for AskUser calls
@@ -911,13 +1084,14 @@ impl AgenticOrchestrator {
                 ),
             );
             set_agent_state(&db_path, &session_id, "tool_executing");
-            let (tool_results, next_work_mode) = executor::execute_tools(
+            let tool_batch = executor::execute_tools(
                 &result.tool_calls,
                 &tool_registry,
                 &ai_client,
                 &working_dir,
                 project_dir.as_deref(),
                 &process_registry,
+                &skills_manager,
                 &session_id,
                 &db_path,
                 user_id.as_deref(),
@@ -932,7 +1106,23 @@ impl AgenticOrchestrator {
                 Arc::clone(&file_observations),
             )
             .await;
-            work_mode = next_work_mode;
+            work_mode = tool_batch.next_work_mode;
+            let tool_results = tool_batch.results;
+
+            if tool_batch.cancelled {
+                let tool_msg = ModelMessage {
+                    role: Role::User,
+                    content: tool_results,
+                };
+                save_message(&db_path, &session_id, &tool_msg);
+                clear_recovery_state(&db_path, &session_id);
+                set_agent_state(&db_path, &session_id, "idle");
+                let _ = event_tx.send(LoopEvent::Finished {
+                    session_id: session_id.clone(),
+                    stop_reason: LoopStopReason::UserAbort,
+                });
+                return;
+            }
 
             // Failure detection
             let fail_diagnostic = failure::detect_repeated_failures(
@@ -942,6 +1132,11 @@ impl AgenticOrchestrator {
             );
             let explore_diagnostic =
                 failure::detect_terminal_explore_failure(&result.tool_calls, &tool_results);
+            let validation_diagnostic = failure::detect_repeated_validation_sequence(
+                &mut validation_pattern_signatures,
+                &result.tool_calls,
+                &tool_results,
+            );
 
             // Exploration budget warnings
             if exploration_budget_count >= EXPLORATION_BUDGET_HARD {
@@ -961,14 +1156,33 @@ impl AgenticOrchestrator {
                 role: Role::User,
                 content: tool_results,
             };
+            let validation_reminder_needed = update_validation_state(
+                &mut mutation_needs_validation,
+                &result.tool_calls,
+                &tool_msg.content,
+            );
             conversation.push(tool_msg.clone());
+            if !mutation_needs_validation {
+                remove_validation_reminders(&mut conversation);
+            }
+            if validation_reminder_needed && session_type == SessionType::Code {
+                conversation.push(ModelMessage {
+                    role: Role::System,
+                    content: vec![Content::Text {
+                        text: VALIDATION_REMINDER.to_string(),
+                    }],
+                });
+            }
             context_ledger.update_from_conversation(&conversation);
             persist_context_state(&db_path, &session_id, &context_ledger);
             save_message(&db_path, &session_id, &tool_msg);
             clear_recovery_state(&db_path, &session_id);
 
             // Check fail-fast
-            if let Some(diagnostic) = fail_diagnostic.or(explore_diagnostic) {
+            if let Some(diagnostic) = fail_diagnostic
+                .or(explore_diagnostic)
+                .or(validation_diagnostic)
+            {
                 tracing::warn!(
                     iteration,
                     session_id = %session_id,
@@ -1042,6 +1256,65 @@ impl AgenticOrchestrator {
     }
 }
 
+fn update_validation_state(
+    mutation_needs_validation: &mut bool,
+    tool_calls: &[crate::ai::types::AiToolCall],
+    tool_results: &[Content],
+) -> bool {
+    let successful_ids = tool_results
+        .iter()
+        .filter_map(|result| match result {
+            Content::ToolResult {
+                tool_use_id,
+                is_error,
+                ..
+            } if !is_error.unwrap_or(false) => Some(tool_use_id.as_str()),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let was_pending = *mutation_needs_validation;
+
+    for call in tool_calls
+        .iter()
+        .filter(|call| successful_ids.contains(call.id.as_str()))
+    {
+        if failure::is_validation_call(call) {
+            *mutation_needs_validation = false;
+        } else if is_mutation_call(call) {
+            *mutation_needs_validation = true;
+        }
+    }
+
+    !was_pending && *mutation_needs_validation
+}
+
+const VALIDATION_REMINDER: &str = "Files changed successfully. Before finishing, run the narrowest relevant test, build, lint, typecheck, or `git diff --check`. If no executable validation applies, say why explicitly instead of implying it ran.";
+
+fn remove_validation_reminders(conversation: &mut Vec<ModelMessage>) {
+    conversation.retain(|message| {
+        !(message.role == Role::System
+            && message.content.iter().any(
+                |content| matches!(content, Content::Text { text } if text == VALIDATION_REMINDER),
+            ))
+    });
+}
+
+fn is_mutation_call(call: &crate::ai::types::AiToolCall) -> bool {
+    let (name, arguments) = effective_tool_call(&call.name, &call.arguments);
+    match name {
+        "edit" | "write" | "multiedit" | "apply_patch" => true,
+        "agent" => arguments.get("agent_type").and_then(|value| value.as_str()) == Some("build"),
+        "bash" | "shell" | "execute" => arguments
+            .get("command")
+            .and_then(|value| value.as_str())
+            .is_some_and(|command| {
+                super::hooks::shell_policy::classify_bash_command(command)
+                    .modifies_filesystem_or_process
+            }),
+        _ => false,
+    }
+}
+
 async fn apply_in_place_compaction(
     db_path: &Path,
     session_id: &str,
@@ -1055,7 +1328,7 @@ async fn apply_in_place_compaction(
     trigger: CompactionTrigger,
     last_usage_prompt_tokens: Option<usize>,
     messages_after_usage: usize,
-    triggering_token_estimate: Option<usize>,
+    request_budget: Option<CompactionRequestBudget>,
     event_tx: &mpsc::UnboundedSender<LoopEvent>,
 ) -> Result<CompactionResult, anyhow::Error> {
     let reason = match &trigger {
@@ -1079,7 +1352,7 @@ async fn apply_in_place_compaction(
         model: Some(ai_client.config().model.as_str()),
         trigger,
         compaction_manager: *compaction_manager,
-        triggering_token_estimate,
+        request_budget,
         last_usage_prompt_tokens,
         messages_after_usage,
         summary_override: None,
@@ -1116,11 +1389,16 @@ mod tests {
     use std::fs;
 
     use super::effective_context_window_for_runtime;
+    use super::empty_completion_action;
     use super::inject_runtime_context;
     use super::message_builder::finalize_explore_only_turn;
+    use super::remove_validation_reminders;
     use super::resolve_project_permission_mode;
-    use super::should_retry_empty_stream_idle;
+    use super::should_retry_empty_stream_interruption;
     use super::terminal_agent_state_after_interruption;
+    use super::update_validation_state;
+    use super::EmptyCompletionAction;
+    use super::VALIDATION_REMINDER;
     use crate::agent::loop_events::LoopStopReason;
     use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
     use crate::skills::SkillsManager;
@@ -1129,6 +1407,87 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
+
+    #[test]
+    fn successful_mutation_requires_validation_and_successful_check_clears_it() {
+        let mutation = AiToolCall {
+            id: "edit-1".into(),
+            name: "edit".into(),
+            arguments: json!({"file_path": "src/lib.rs"}),
+        };
+        let validation = AiToolCall {
+            id: "check-1".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "cargo test -p krusty-core"}),
+        };
+        let success = |id: &str| Content::ToolResult {
+            tool_use_id: id.into(),
+            output: json!({"ok": true}),
+            is_error: None,
+        };
+        let mut pending = false;
+
+        assert!(update_validation_state(
+            &mut pending,
+            std::slice::from_ref(&mutation),
+            &[success("edit-1")],
+        ));
+        assert!(pending);
+        assert!(!update_validation_state(
+            &mut pending,
+            std::slice::from_ref(&validation),
+            &[success("check-1")],
+        ));
+        assert!(!pending);
+    }
+
+    #[test]
+    fn failed_validation_does_not_clear_pending_mutation() {
+        let validation = AiToolCall {
+            id: "check-1".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "cargo check --workspace"}),
+        };
+        let mut pending = true;
+        let failed = Content::ToolResult {
+            tool_use_id: "check-1".into(),
+            output: json!({"error": true}),
+            is_error: Some(true),
+        };
+
+        assert!(!update_validation_state(
+            &mut pending,
+            &[validation],
+            &[failed],
+        ));
+        assert!(pending);
+    }
+
+    #[test]
+    fn successful_validation_removes_only_transient_validation_reminders() {
+        let mut conversation = vec![
+            ModelMessage {
+                role: Role::System,
+                content: vec![Content::Text {
+                    text: "durable instruction".into(),
+                }],
+            },
+            ModelMessage {
+                role: Role::System,
+                content: vec![Content::Text {
+                    text: VALIDATION_REMINDER.into(),
+                }],
+            },
+        ];
+
+        remove_validation_reminders(&mut conversation);
+
+        assert_eq!(conversation.len(), 1);
+        assert!(matches!(
+            &conversation[0].content[0],
+            Content::Text { text } if text == "durable instruction"
+        ));
+    }
 
     #[test]
     fn chatgpt_codex_runtime_uses_conservative_context_window() {
@@ -1142,30 +1501,82 @@ mod tests {
 
     #[test]
     fn empty_stream_idle_retries_once_before_recovery() {
-        assert!(should_retry_empty_stream_idle(
+        assert!(should_retry_empty_stream_interruption(
             Some(&LoopStopReason::StreamIdleTimeout),
-            "",
+            None,
             false,
             false
         ));
-        assert!(!should_retry_empty_stream_idle(
+        assert!(!should_retry_empty_stream_interruption(
             Some(&LoopStopReason::StreamIdleTimeout),
-            "partial text",
-            false,
-            false
-        ));
-        assert!(!should_retry_empty_stream_idle(
-            Some(&LoopStopReason::StreamIdleTimeout),
-            "",
+            None,
             true,
             false
         ));
-        assert!(!should_retry_empty_stream_idle(
+        assert!(!should_retry_empty_stream_interruption(
             Some(&LoopStopReason::StreamIdleTimeout),
-            "",
+            None,
             false,
             true
         ));
+        assert!(should_retry_empty_stream_interruption(
+            Some(&LoopStopReason::ProviderError),
+            Some("API error: 429 Too Many Requests - capacity"),
+            false,
+            false
+        ));
+        assert!(should_retry_empty_stream_interruption(
+            Some(&LoopStopReason::ProviderError),
+            Some("AI stream ended without a finish signal"),
+            false,
+            false
+        ));
+        assert!(!should_retry_empty_stream_interruption(
+            Some(&LoopStopReason::ProviderError),
+            Some("API error: 402 Payment Required - limit reached"),
+            false,
+            false
+        ));
+        assert!(!should_retry_empty_stream_interruption(
+            Some(&LoopStopReason::ProviderError),
+            Some("API error: 503 Service Unavailable"),
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn semantic_empty_completion_retries_once_then_fails_visibly() {
+        assert_eq!(
+            empty_completion_action("", &[], false, false),
+            EmptyCompletionAction::Retry
+        );
+        assert_eq!(
+            empty_completion_action("  \n", &[], true, false),
+            EmptyCompletionAction::Fail
+        );
+        assert_eq!(
+            empty_completion_action("", &[], false, true),
+            EmptyCompletionAction::Fail
+        );
+    }
+
+    #[test]
+    fn semantic_completion_with_visible_text_or_tool_call_needs_no_recovery() {
+        let tool_call = AiToolCall {
+            id: "call-1".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "true"}),
+        };
+
+        assert_eq!(
+            empty_completion_action("done", &[], false, false),
+            EmptyCompletionAction::None
+        );
+        assert_eq!(
+            empty_completion_action("", &[tool_call], false, false),
+            EmptyCompletionAction::None
+        );
     }
 
     #[test]
