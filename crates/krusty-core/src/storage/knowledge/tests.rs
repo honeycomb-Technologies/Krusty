@@ -5,7 +5,10 @@ use super::activity::{SnapshotRunSummary, SnapshotTaskOutcome};
 use super::render::build_current_snapshot_content;
 use super::*;
 use crate::agent::loop_events::LoopStopReason;
-use crate::storage::{AgentMemory, Database, MemoryStore, MemoryType, ReportStore, TaskStatus};
+use crate::storage::{
+    AgentMemory, Database, MemoryNamespace, MemorySensitivity, MemorySource, MemoryStatus,
+    MemoryStore, MemoryType, ReportStore, TaskStatus,
+};
 
 fn create_db() -> (std::path::PathBuf, TempDir) {
     let temp = TempDir::new().expect("temp dir");
@@ -21,38 +24,52 @@ fn create_db() -> (std::path::PathBuf, TempDir) {
     (db_path, temp)
 }
 
-#[test]
-fn build_current_snapshot_content_excludes_existing_snapshot_memory() {
-    let snapshot = AgentMemory {
-        id: "snapshot".to_string(),
-        memory_type: MemoryType::Project,
-        title: CURRENT_SNAPSHOT_TITLE.to_string(),
-        content: "old".to_string(),
+fn test_memory(id: &str, memory_type: MemoryType, title: &str, content: &str) -> AgentMemory {
+    AgentMemory {
+        id: id.to_string(),
+        memory_type,
+        title: title.to_string(),
+        content: content.to_string(),
         project_dir: Some("/repo".to_string()),
         user_id: None,
         created_at: "2026-01-01T00:00:00Z".to_string(),
         updated_at: "2026-01-01T00:00:00Z".to_string(),
-    };
-    let durable = AgentMemory {
-        id: "durable".to_string(),
-        memory_type: MemoryType::Feedback,
-        title: "Wake cadence".to_string(),
-        content: "Favor faster cadence while the queue is active.".to_string(),
-        project_dir: Some("/repo".to_string()),
-        user_id: None,
-        created_at: "2026-01-01T00:00:00Z".to_string(),
-        updated_at: "2026-01-02T00:00:00Z".to_string(),
-    };
-    let compaction_flush = AgentMemory {
-        id: "flush".to_string(),
-        memory_type: MemoryType::Project,
-        title: format!("{}1", crate::storage::COMPACTION_FLUSH_TITLE_PREFIX),
-        content: "Full old transcript should not enter snapshots.".to_string(),
-        project_dir: Some("/repo".to_string()),
-        user_id: None,
-        created_at: "2026-01-01T00:00:00Z".to_string(),
-        updated_at: "2026-01-03T00:00:00Z".to_string(),
-    };
+        canonical_key: None,
+        namespace: MemoryNamespace::Shared,
+        namespace_id: None,
+        status: MemoryStatus::Active,
+        source: MemorySource::Legacy,
+        source_session_id: None,
+        source_message_id: None,
+        confidence: 1.0,
+        sensitivity: MemorySensitivity::Normal,
+        pinned: false,
+        supersedes_id: None,
+        last_accessed_at: None,
+        access_count: 0,
+    }
+}
+
+#[test]
+fn build_current_snapshot_content_excludes_existing_snapshot_memory() {
+    let snapshot = test_memory(
+        "snapshot",
+        MemoryType::Project,
+        CURRENT_SNAPSHOT_TITLE,
+        "old",
+    );
+    let durable = test_memory(
+        "durable",
+        MemoryType::Feedback,
+        "Wake cadence",
+        "Favor faster cadence while the queue is active.",
+    );
+    let compaction_flush = test_memory(
+        "flush",
+        MemoryType::Project,
+        &format!("{}1", crate::storage::COMPACTION_FLUSH_TITLE_PREFIX),
+        "Full old transcript should not enter snapshots.",
+    );
 
     let content = build_current_snapshot_content(
         &[snapshot, durable, compaction_flush],
@@ -69,7 +86,7 @@ fn build_current_snapshot_content_excludes_existing_snapshot_memory() {
 }
 
 #[test]
-fn refresh_current_snapshot_creates_and_updates_snapshot_memory() {
+fn refresh_current_snapshot_uses_separate_knowledge_storage() {
     let (db_path, _temp) = create_db();
     let memory_store = MemoryStore::new(Database::new(&db_path).expect("db"));
     let report_store = ReportStore::new(Database::new(&db_path).expect("db"));
@@ -102,15 +119,93 @@ fn refresh_current_snapshot_creates_and_updates_snapshot_memory() {
     assert_eq!(snapshot.title, CURRENT_SNAPSHOT_TITLE);
     assert!(snapshot.content.contains("Auth decision"));
     assert!(snapshot.content.contains("Wake audit"));
+    assert_eq!(snapshot.project_dir.as_deref(), Some("/repo"));
+    assert_eq!(snapshot.user_id, None);
 
     let all_memories = memory_store.list(Some("/repo"), None);
+    assert!(all_memories
+        .iter()
+        .all(|memory| !is_current_snapshot(memory)));
+
+    let loaded = get_current_snapshot(&db_path, Some("/repo"), None)
+        .expect("load snapshot")
+        .expect("stored snapshot");
+    assert_eq!(loaded, snapshot);
+
+    let replay = refresh_current_snapshot(&db_path, Some("/repo"), None)
+        .expect("refresh replay")
+        .expect("snapshot replay");
+    assert_eq!(replay, snapshot, "unchanged materialization is stable");
+}
+
+#[test]
+fn refresh_current_snapshot_isolated_by_exact_owner_and_project() {
+    let (db_path, _temp) = create_db();
+    let memory_store = MemoryStore::new(Database::new(&db_path).expect("db"));
+    memory_store
+        .save(
+            MemoryType::Project,
+            "Alice project",
+            "Alice-only context.",
+            Some("/repo-a"),
+            Some("alice"),
+        )
+        .expect("alice memory");
+    memory_store
+        .save(
+            MemoryType::Project,
+            "Bob project",
+            "Bob-only context.",
+            Some("/repo-b"),
+            Some("bob"),
+        )
+        .expect("bob memory");
+
+    let alice = refresh_current_snapshot(&db_path, Some("/repo-a"), Some("alice"))
+        .expect("alice refresh")
+        .expect("alice snapshot");
+    let bob = refresh_current_snapshot(&db_path, Some("/repo-b"), Some("bob"))
+        .expect("bob refresh")
+        .expect("bob snapshot");
+
+    assert_ne!(alice.id, bob.id);
+    assert!(alice.content.contains("Alice project"));
+    assert!(!alice.content.contains("Bob project"));
+    assert!(bob.content.contains("Bob project"));
+    assert!(!bob.content.contains("Alice project"));
     assert_eq!(
-        all_memories
-            .iter()
-            .filter(|memory| is_current_snapshot(memory))
-            .count(),
-        1
+        get_current_snapshot(&db_path, Some("/repo-a"), Some("bob")).unwrap(),
+        None
     );
+}
+
+#[test]
+fn refresh_removes_empty_materialization_without_creating_memory() {
+    let (db_path, _temp) = create_db();
+    let memory_store = MemoryStore::new(Database::new(&db_path).expect("db"));
+    let memory = memory_store
+        .save(
+            MemoryType::Project,
+            "Temporary",
+            "This will be removed.",
+            Some("/repo"),
+            None,
+        )
+        .expect("memory");
+    assert!(refresh_current_snapshot(&db_path, Some("/repo"), None)
+        .unwrap()
+        .is_some());
+
+    memory_store.delete(&memory.id).expect("delete memory");
+    assert_eq!(
+        refresh_current_snapshot(&db_path, Some("/repo"), None).unwrap(),
+        None
+    );
+    assert_eq!(
+        get_current_snapshot(&db_path, Some("/repo"), None).unwrap(),
+        None
+    );
+    assert!(memory_store.list(Some("/repo"), None).is_empty());
 }
 
 #[test]

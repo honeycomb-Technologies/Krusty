@@ -8,6 +8,7 @@ use crate::constants::ui;
 
 pub const MAKO_SOUL_FILE: &str = "MAKO_SOUL.md";
 pub const MAKO_IDENTITY_FILE: &str = "MAKO_IDENTITY.md";
+pub const MAKO_USER_FILE: &str = "MAKO_USER.md";
 pub const MAKO_HEARTBEAT_FILE: &str = "MAKO_HEARTBEAT.md";
 pub const MAKO_MEMORY_FILE: &str = "MAKO_MEMORY.md";
 pub const MAKO_CHANNELS_FILE: &str = "MAKO_CHANNELS.md";
@@ -70,6 +71,10 @@ pub fn mako_soul_path() -> PathBuf {
 
 pub fn mako_identity_path() -> PathBuf {
     mako_file_path(MAKO_IDENTITY_FILE)
+}
+
+pub fn mako_user_path() -> PathBuf {
+    mako_file_path(MAKO_USER_FILE)
 }
 
 pub fn mako_heartbeat_path() -> PathBuf {
@@ -164,8 +169,8 @@ mod tests {
         mako_crew_member_dir, mako_crew_member_dir_for_home, mako_crew_member_file_path,
         mako_crew_member_file_path_for_home, mako_dir, mako_dir_for_home, mako_file_path,
         mako_file_path_for_home, mako_heartbeat_path, mako_identity_path, mako_memory_path,
-        mako_soul_path, MAKO_CHANNELS_FILE, MAKO_HEARTBEAT_FILE, MAKO_IDENTITY_FILE,
-        MAKO_MEMORY_FILE, MAKO_SOUL_FILE,
+        mako_soul_path, mako_user_path, MAKO_CHANNELS_FILE, MAKO_HEARTBEAT_FILE,
+        MAKO_IDENTITY_FILE, MAKO_MEMORY_FILE, MAKO_SOUL_FILE, MAKO_USER_FILE,
     };
     use std::path::Path;
 
@@ -179,6 +184,7 @@ mod tests {
             mako_identity_path(),
             config.join("mako").join(MAKO_IDENTITY_FILE)
         );
+        assert_eq!(mako_user_path(), config.join("mako").join(MAKO_USER_FILE));
         assert_eq!(
             mako_heartbeat_path(),
             config.join("mako").join(MAKO_HEARTBEAT_FILE)

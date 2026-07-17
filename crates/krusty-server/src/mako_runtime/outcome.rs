@@ -23,6 +23,10 @@ pub(super) struct MakoRunOutcome {
 }
 
 impl MakoRunOutcome {
+    pub(super) fn allows_learning_review(&self) -> bool {
+        !self.had_error && !self.awaiting_input
+    }
+
     pub(super) async fn record_event(
         &mut self,
         state: &AppState,

@@ -40,8 +40,8 @@ use crate::constants;
 use crate::process::ProcessRegistry;
 use crate::skills::SkillsManager;
 use crate::storage::{
-    Database, PartialAssistantState, PendingInteractionSnapshot, ProjectSettings, RecoveryStatus,
-    SessionManager, SessionType, WorkMode,
+    Database, MakoProfileSnapshot, PartialAssistantState, PendingInteractionSnapshot,
+    ProjectSettings, RecoveryStatus, SessionManager, SessionType, WorkMode,
 };
 use crate::tools::registry::effective_tool_call;
 use crate::tools::registry::{FileObservationTracker, PermissionMode, ToolRegistry};
@@ -130,6 +130,8 @@ pub struct OrchestratorConfig {
     pub working_dir: PathBuf,
     pub project_dir: Option<PathBuf>,
     pub mako_crew_slug: Option<String>,
+    /// Database-owned Mako identity frozen once at run start.
+    pub mako_profile: Option<Arc<MakoProfileSnapshot>>,
     pub session_type: SessionType,
     pub permission_mode: PermissionMode,
     pub max_iterations: Option<usize>,
@@ -150,6 +152,7 @@ impl Default for OrchestratorConfig {
             working_dir: PathBuf::new(),
             project_dir: None,
             mako_crew_slug: None,
+            mako_profile: None,
             session_type: SessionType::Code,
             permission_mode: PermissionMode::default(),
             max_iterations: None,
@@ -226,13 +229,14 @@ fn inject_runtime_context(
     working_dir: &Path,
     project_dir: Option<&Path>,
     mako_crew_slug: Option<&str>,
+    mako_profile: Option<&MakoProfileSnapshot>,
     work_mode: WorkMode,
     skills_manager: &RwLock<SkillsManager>,
     model: Option<&str>,
     session_type: SessionType,
     user_id: Option<&str>,
 ) -> Vec<ModelMessage> {
-    context::inject_context(
+    context::inject_context_with_mako_profile(
         conversation,
         db_path,
         session_id,
@@ -244,6 +248,7 @@ fn inject_runtime_context(
         Some(session_type_name(session_type)),
         mako_crew_slug,
         user_id,
+        mako_profile,
     )
 }
 
@@ -316,6 +321,7 @@ impl AgenticOrchestrator {
             working_dir,
             project_dir,
             mako_crew_slug,
+            mako_profile,
             session_type,
             permission_mode,
             max_iterations,
@@ -461,6 +467,7 @@ impl AgenticOrchestrator {
                 &working_dir,
                 project_dir.as_deref(),
                 mako_crew_slug.as_deref(),
+                mako_profile.as_deref(),
                 work_mode,
                 &skills_manager,
                 Some(ai_client.config().model.as_str()),
@@ -2089,6 +2096,7 @@ mod tests {
             repo,
             Some(repo),
             None,
+            None,
             WorkMode::Build,
             &skills,
             None,
@@ -2101,6 +2109,7 @@ mod tests {
             "session-id",
             repo,
             Some(repo),
+            None,
             None,
             WorkMode::Build,
             &skills,

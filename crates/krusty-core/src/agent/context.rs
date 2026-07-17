@@ -7,6 +7,7 @@
 
 mod mako;
 mod memory;
+mod episodes;
 mod plan;
 mod project;
 mod reports;
@@ -24,7 +25,7 @@ use tracing::warn;
 
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::skills::SkillsManager;
-use crate::storage::{Database, ProjectSettings, WorkMode};
+use crate::storage::{Database, MakoProfileSnapshot, ProjectSettings, WorkMode};
 
 pub use plan::build_plan_context;
 pub use project::build_project_context;
@@ -53,6 +54,37 @@ pub fn inject_context(
     session_type: Option<&str>,
     mako_crew_slug: Option<&str>,
     user_id: Option<&str>,
+) -> Vec<ModelMessage> {
+    inject_context_with_mako_profile(
+        conversation,
+        db_path,
+        session_id,
+        working_dir,
+        project_dir,
+        work_mode,
+        skills_manager,
+        model_id,
+        session_type,
+        mako_crew_slug,
+        user_id,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn inject_context_with_mako_profile(
+    conversation: &[ModelMessage],
+    db_path: &Path,
+    session_id: &str,
+    working_dir: &Path,
+    project_dir: Option<&Path>,
+    work_mode: WorkMode,
+    skills_manager: &RwLock<SkillsManager>,
+    model_id: Option<&str>,
+    session_type: Option<&str>,
+    mako_crew_slug: Option<&str>,
+    user_id: Option<&str>,
+    mako_profile: Option<&MakoProfileSnapshot>,
 ) -> Vec<ModelMessage> {
     let is_chat = session_type == Some("chat");
 
@@ -106,13 +138,38 @@ pub fn inject_context(
     } else {
         String::new()
     };
+    let mako_episode_ctx = if is_mako {
+        episodes::build_episode_context(
+            db_path,
+            context_project_dir.as_deref(),
+            user_id,
+            session_id,
+            conversation,
+        )
+    } else {
+        String::new()
+    };
     let skills_ctx = build_skills_context(skills_manager, project_dir.is_some());
     let project_ctx = project_dir.map(build_project_context).unwrap_or_default();
-    let mako_ctx_sections = if is_mako {
-        mako::build_mako_context_sections(project_dir.unwrap_or(working_dir), mako_crew_slug)
+    let mut mako_ctx_sections = if is_mako {
+        if let Some(profile) = mako_profile {
+            mako::build_mako_context_sections_with_profile(
+                project_dir.unwrap_or(working_dir),
+                profile,
+                mako_crew_slug,
+            )
+        } else {
+            mako::build_mako_context_sections(project_dir.unwrap_or(working_dir), mako_crew_slug)
+        }
     } else {
         Vec::new()
     };
+    if is_mako {
+        mako_ctx_sections.insert(
+            0,
+            crate::agent::autonomy::coordinator_prompt::mako_coordinator_system_prompt(),
+        );
+    }
     let project_settings = project_dir.map(ProjectSettings::load).unwrap_or_default();
 
     let mut injected = Vec::with_capacity(conversation.len() + 7);
@@ -142,6 +199,14 @@ pub fn inject_context(
             role: Role::System,
             content: vec![Content::Text {
                 text: mako_knowledge_ctx,
+            }],
+        });
+    }
+    if !mako_episode_ctx.is_empty() {
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text {
+                text: mako_episode_ctx,
             }],
         });
     }

@@ -35,6 +35,9 @@ fn codex_cache_stable_instructions(prompt_sections: &SystemPromptSections) -> St
     if !prompt_sections.base_prompt.is_empty() {
         sections.push(prompt_sections.base_prompt.as_str());
     }
+    if !prompt_sections.identity_context.is_empty() {
+        sections.push(prompt_sections.identity_context.as_str());
+    }
     if !prompt_sections.project_context.is_empty() {
         sections.push(prompt_sections.project_context.as_str());
     }

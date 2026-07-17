@@ -14,6 +14,7 @@ pub fn bootstrap_mako_home(mako_home: &Path) -> std::io::Result<MakoBootstrapRes
     for kind in [
         MakoHomeDocumentKind::Soul,
         MakoHomeDocumentKind::Identity,
+        MakoHomeDocumentKind::User,
         MakoHomeDocumentKind::Heartbeat,
         MakoHomeDocumentKind::Memory,
         MakoHomeDocumentKind::Channels,

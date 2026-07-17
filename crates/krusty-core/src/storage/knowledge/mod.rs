@@ -7,4 +7,7 @@ mod snapshot;
 mod tests;
 
 pub use super::reports::promote_report_content;
-pub use snapshot::{is_current_snapshot, is_current_snapshot_title, refresh_current_snapshot};
+pub use snapshot::{
+    get_current_snapshot, is_current_snapshot, is_current_snapshot_title, refresh_current_snapshot,
+    KnowledgeSnapshot,
+};
