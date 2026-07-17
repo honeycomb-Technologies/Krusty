@@ -141,10 +141,7 @@ fn test_recovery_state_round_trip() {
         PartialAssistantState {
             text: "partial answer".to_string(),
             thinking: String::new(),
-            tool_calls: vec![RecoveryToolCall {
-                id: "call-1".to_string(),
-                name: "read".to_string(),
-            }],
+            tool_calls: vec![RecoveryToolCall::summary("call-1", "read")],
         },
         RecoveryDecision::NonResumable {
             reason: crate::storage::RecoveryNonResumableReason::PendingToolCall,
@@ -172,4 +169,71 @@ fn test_recovery_state_round_trip() {
             .is_none(),
         "Expected recovery state to be cleared"
     );
+}
+
+#[test]
+fn test_clear_stale_transient_recovery_states_preserves_pending_interactions() {
+    use crate::agent::loop_events::LoopStopReason;
+    use crate::storage::{
+        PartialAssistantState, PendingInteractionSnapshot, RecoveryDecision,
+        RecoveryNonResumableReason, RecoveryStatus, SessionRecoveryState,
+    };
+    use serde_json::json;
+
+    let (db, _temp) = create_test_db();
+    let manager = SessionManager::new(db);
+    let stale_session = manager
+        .create_session("Stale", Some("gpt-5"), Some("/tmp"))
+        .expect("Failed to create stale session");
+    let pending_session = manager
+        .create_session("Pending", Some("gpt-5"), Some("/tmp"))
+        .expect("Failed to create pending session");
+
+    manager
+        .update_recovery_state(
+            &stale_session,
+            &SessionRecoveryState::new(
+                RecoveryStatus::Interrupted,
+                Some(LoopStopReason::ProviderError),
+                None,
+                PartialAssistantState::default(),
+                RecoveryDecision::NonResumable {
+                    reason: RecoveryNonResumableReason::EmptyConversation,
+                },
+            ),
+        )
+        .expect("Failed to persist stale recovery");
+    manager
+        .update_recovery_state(
+            &pending_session,
+            &SessionRecoveryState::new_with_pending_interactions(
+                RecoveryStatus::AwaitingInput,
+                Some(LoopStopReason::AwaitingInput),
+                None,
+                PartialAssistantState::default(),
+                vec![PendingInteractionSnapshot::tool_approval_from_call(
+                    "call-edit",
+                    "edit",
+                    &json!({"file_path": "src/lib.rs"}),
+                )],
+                RecoveryDecision::NonResumable {
+                    reason: RecoveryNonResumableReason::AwaitingHumanInput,
+                },
+            ),
+        )
+        .expect("Failed to persist pending recovery");
+
+    let cleared = manager
+        .clear_stale_transient_recovery_states()
+        .expect("Failed to clear stale recovery states");
+
+    assert_eq!(cleared, 1);
+    assert!(manager
+        .load_recovery_state(&stale_session)
+        .expect("Failed to load stale session")
+        .is_none());
+    assert!(manager
+        .load_recovery_state(&pending_session)
+        .expect("Failed to load pending session")
+        .is_some());
 }

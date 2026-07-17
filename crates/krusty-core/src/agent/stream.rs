@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::ai::streaming::StreamPart;
 use crate::ai::types::AiToolCall;
+use serde_json::Value;
 
 use super::loop_events::{LoopEvent, LoopStopReason};
 
@@ -26,6 +27,7 @@ pub(crate) struct ThinkingBlock {
 pub(crate) struct StreamToolCallSummary {
     pub id: String,
     pub name: String,
+    pub arguments: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +138,7 @@ pub(crate) async fn process_stream(
                     recovery_tool_calls.push(StreamToolCallSummary {
                         id: id.clone(),
                         name: name.clone(),
+                        arguments: Value::Null,
                     });
                 }
                 let _ = event_tx.send(LoopEvent::ToolCallStart {
@@ -153,13 +156,17 @@ pub(crate) async fn process_stream(
             }
             StreamPart::ToolCallComplete { tool_call } => {
                 tool_calls.push(tool_call.clone());
-                if !recovery_tool_calls
-                    .iter()
-                    .any(|call| call.id == tool_call.id)
+                if let Some(existing) = recovery_tool_calls
+                    .iter_mut()
+                    .find(|call| call.id == tool_call.id)
                 {
+                    existing.name = tool_call.name.clone();
+                    existing.arguments = tool_call.arguments.clone();
+                } else {
                     recovery_tool_calls.push(StreamToolCallSummary {
                         id: tool_call.id.clone(),
                         name: tool_call.name.clone(),
+                        arguments: tool_call.arguments.clone(),
                     });
                 }
                 let _ = event_tx.send(LoopEvent::ToolCallComplete {

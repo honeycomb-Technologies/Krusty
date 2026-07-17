@@ -3,6 +3,7 @@ use std::path::Path;
 use tokio::sync::mpsc;
 
 use crate::plan::PlanManager;
+use crate::storage::{PendingInteractionSnapshot, PendingPlanTaskSnapshot};
 
 use super::super::loop_events::{LoopEvent, PlanTaskInfo};
 use super::super::plan_handler;
@@ -13,10 +14,8 @@ pub(super) fn handle_plan_detection(
     working_dir: &Path,
     db_path: &Path,
     event_tx: &mpsc::UnboundedSender<LoopEvent>,
-) -> bool {
-    let Some(mut plan) = plan_handler::try_detect_plan(text) else {
-        return false;
-    };
+) -> Option<PendingInteractionSnapshot> {
+    let mut plan = plan_handler::try_detect_plan(text)?;
     plan.plan_file.session_id = Some(session_id.to_string());
     plan.plan_file.working_dir = Some(working_dir.to_string_lossy().to_string());
 
@@ -51,16 +50,30 @@ pub(super) fn handle_plan_detection(
     });
 
     let tool_call_id = format!("plan-confirm-{}", uuid::Uuid::new_v4());
+    let title = plan.title.clone();
     let _ = event_tx.send(LoopEvent::PlanComplete {
         tool_call_id: tool_call_id.clone(),
-        title: plan.title,
+        title: title.clone(),
         task_count: tasks.len(),
     });
 
     let _ = event_tx.send(LoopEvent::AwaitingInput {
-        tool_call_id,
+        tool_call_id: tool_call_id.clone(),
         tool_name: "PlanConfirm".to_string(),
     });
 
-    true
+    let pending_tasks = tasks
+        .into_iter()
+        .map(|task| PendingPlanTaskSnapshot {
+            description: task.description,
+            completed: task.completed,
+        })
+        .collect();
+
+    Some(PendingInteractionSnapshot::plan_confirm(
+        tool_call_id,
+        title,
+        plan.tasks.len(),
+        pending_tasks,
+    ))
 }

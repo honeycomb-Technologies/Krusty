@@ -18,7 +18,10 @@ use tokio::sync::mpsc;
 use crate::ai::client::AiClient;
 use crate::ai::types::{AiToolCall, Content};
 use crate::process::ProcessRegistry;
-use crate::storage::WorkMode;
+use crate::storage::{
+    Database, PartialAssistantState, PendingInteractionSnapshot, RecoveryDecision,
+    RecoveryNonResumableReason, RecoveryStatus, SessionManager, SessionRecoveryState, WorkMode,
+};
 use crate::tools::registry::{PermissionMode, ToolRegistry, ToolResult};
 
 use super::loop_events::{LoopEvent, LoopInput};
@@ -45,6 +48,7 @@ pub(crate) async fn execute_tools(
     user_id: Option<&str>,
     permission_mode: PermissionMode,
     current_mode: WorkMode,
+    recovery_partial_assistant: Option<&PartialAssistantState>,
     delegated_progress_tx: Option<&mpsc::UnboundedSender<crate::agent::DelegatedProgressEvent>>,
     event_tx: &mpsc::UnboundedSender<LoopEvent>,
     input_rx: &mut mpsc::UnboundedReceiver<LoopInput>,
@@ -67,8 +71,27 @@ pub(crate) async fn execute_tools(
             }
         }
 
+        let requires_approval = tool_control.requires_approval(call);
+        if requires_approval {
+            persist_pending_tool_approval_recovery(
+                db_path,
+                session_id,
+                recovery_partial_assistant,
+                call,
+            );
+        }
+
         match tool_control.authorize(call, event_tx, input_rx).await {
-            AuthorizationDecision::Execute => {}
+            AuthorizationDecision::Execute => {
+                if requires_approval {
+                    persist_tool_executing_recovery_after_approval(
+                        db_path,
+                        session_id,
+                        recovery_partial_assistant,
+                        call,
+                    );
+                }
+            }
             AuthorizationDecision::Deny(denial) => {
                 let denied = denial.tool_result();
                 results.push(tool_control.publish_result(call, &denied, event_tx));
@@ -162,4 +185,150 @@ pub(crate) async fn execute_tools(
     }
 
     (results, work_mode)
+}
+
+fn persist_pending_tool_approval_recovery(
+    db_path: &Path,
+    session_id: &str,
+    partial_assistant: Option<&PartialAssistantState>,
+    call: &AiToolCall,
+) {
+    let Some(partial_assistant) = partial_assistant else {
+        return;
+    };
+
+    let recovery = SessionRecoveryState::new_with_pending_interactions(
+        RecoveryStatus::AwaitingInput,
+        Some(super::loop_events::LoopStopReason::AwaitingInput),
+        None,
+        partial_assistant.clone(),
+        vec![PendingInteractionSnapshot::tool_approval_from_call(
+            &call.id,
+            &call.name,
+            &call.arguments,
+        )],
+        RecoveryDecision::NonResumable {
+            reason: RecoveryNonResumableReason::AwaitingHumanInput,
+        },
+    );
+
+    let result = Database::new(db_path).and_then(|db| {
+        let manager = SessionManager::new(db);
+        manager.update_recovery_state(session_id, &recovery)
+    });
+
+    if let Err(error) = result {
+        tracing::warn!(
+            session_id = %session_id,
+            tool_call_id = %call.id,
+            tool_name = %call.name,
+            "Failed to persist pending tool approval recovery snapshot: {error}"
+        );
+    }
+}
+
+fn persist_tool_executing_recovery_after_approval(
+    db_path: &Path,
+    session_id: &str,
+    partial_assistant: Option<&PartialAssistantState>,
+    call: &AiToolCall,
+) {
+    let Some(partial_assistant) = partial_assistant else {
+        return;
+    };
+
+    let recovery = SessionRecoveryState::new(
+        RecoveryStatus::ToolExecuting,
+        None,
+        None,
+        partial_assistant.clone(),
+        RecoveryDecision::NonResumable {
+            reason: RecoveryNonResumableReason::ToolExecutionInProgress,
+        },
+    );
+
+    let result = Database::new(db_path).and_then(|db| {
+        let manager = SessionManager::new(db);
+        manager.update_recovery_state(session_id, &recovery)
+    });
+
+    if let Err(error) = result {
+        tracing::warn!(
+            session_id = %session_id,
+            tool_call_id = %call.id,
+            tool_name = %call.name,
+            "Failed to persist tool-executing recovery snapshot after approval: {error}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::RecoveryToolCall;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    fn create_session_db() -> (TempDir, std::path::PathBuf, String) {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let db_path = temp_dir.path().join("krusty.db");
+        let db = Database::new(&db_path).expect("database should initialize");
+        let manager = SessionManager::new(db);
+        let session_id = manager
+            .create_session("approval recovery", Some("gpt-5"), Some("/tmp"))
+            .expect("session should be created");
+        (temp_dir, db_path, session_id)
+    }
+
+    #[test]
+    fn approved_tool_recovery_transition_marks_tool_executing_without_pending_prompt() {
+        let (_temp_dir, db_path, session_id) = create_session_db();
+        let call = AiToolCall {
+            id: "call-edit".to_string(),
+            name: "edit".to_string(),
+            arguments: json!({"file_path": "src/lib.rs"}),
+        };
+        let partial_assistant = PartialAssistantState {
+            text: "I will edit the file.".to_string(),
+            thinking: String::new(),
+            tool_calls: vec![RecoveryToolCall::from_call_parts(
+                &call.id,
+                &call.name,
+                &call.arguments,
+            )],
+        };
+
+        persist_pending_tool_approval_recovery(
+            &db_path,
+            &session_id,
+            Some(&partial_assistant),
+            &call,
+        );
+        persist_tool_executing_recovery_after_approval(
+            &db_path,
+            &session_id,
+            Some(&partial_assistant),
+            &call,
+        );
+
+        let db = Database::new(&db_path).expect("database should reopen");
+        let manager = SessionManager::new(db);
+        let loaded = manager
+            .load_recovery_state(&session_id)
+            .expect("recovery load should succeed")
+            .expect("recovery state should be present");
+
+        assert_eq!(loaded.status, RecoveryStatus::ToolExecuting);
+        assert!(loaded.pending_interactions.is_empty());
+        assert_eq!(
+            loaded.decision,
+            RecoveryDecision::NonResumable {
+                reason: RecoveryNonResumableReason::ToolExecutionInProgress
+            }
+        );
+        assert_eq!(
+            loaded.partial_assistant.tool_calls[0].arguments.value["file_path"],
+            "src/lib.rs"
+        );
+    }
 }
