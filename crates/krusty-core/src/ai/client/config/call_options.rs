@@ -1,5 +1,5 @@
 use crate::ai::models::{resolve_model_metadata, ApiFormat};
-use crate::ai::providers::{ProviderCapabilities, ProviderId, ReasoningFormat};
+use crate::ai::providers::{FastMode, ProviderCapabilities, ProviderId, ReasoningFormat};
 use crate::ai::types::{
     AiTool, ContextManagement, ThinkingConfig, WebFetchConfig, WebSearchConfig,
 };
@@ -86,6 +86,10 @@ pub struct CallOptions {
     pub anthropic_adaptive_effort: Option<AnthropicAdaptiveEffort>,
     /// Request provider priority/fast service tier without changing the selected model.
     pub fast_mode: bool,
+    /// Resolved model-specific fast strategy. Callers with dynamic catalog
+    /// metadata may set this directly; canonicalization otherwise uses the
+    /// curated capability overlay.
+    pub fast_mode_format: Option<FastMode>,
 }
 
 impl Default for CallOptions {
@@ -107,6 +111,7 @@ impl Default for CallOptions {
             codex_parallel_tool_calls: false,
             anthropic_adaptive_effort: None,
             fast_mode: false,
+            fast_mode_format: None,
         }
     }
 }
@@ -125,6 +130,15 @@ impl CallOptions {
         let caps = ProviderCapabilities::for_provider(provider);
         let inferred = resolve_model_metadata(provider, model, api_format);
         let mut options = self.clone();
+
+        if options.fast_mode {
+            options.fast_mode_format = options.fast_mode_format.or(inferred.fast_mode);
+            if options.fast_mode_format.is_none() {
+                options.fast_mode = false;
+            }
+        } else {
+            options.fast_mode_format = None;
+        }
 
         if provider == ProviderId::Grok {
             // Krusty's Grok provider targets the Grok CLI proxy, which can emit
@@ -150,7 +164,9 @@ impl CallOptions {
                     options.anthropic_adaptive_effort = None;
                 }
                 Some(ReasoningFormat::Anthropic) => {
-                    options.codex_reasoning_effort = None;
+                    if provider != ProviderId::OpenRouter {
+                        options.codex_reasoning_effort = None;
+                    }
                 }
                 _ => {
                     options.codex_reasoning_effort = None;
@@ -199,12 +215,19 @@ impl CallOptions {
     /// This intentionally does not mutate the model ID: `gpt-5.5` and
     /// `gpt-5.5-mini` can both run in standard or fast service tiers.
     pub fn service_tier_for_provider(&self, provider: ProviderId) -> Option<&'static str> {
-        match (provider, self.fast_mode) {
-            (ProviderId::OpenAI | ProviderId::OpenRouter, true) => Some("priority"),
-            (ProviderId::Anthropic, true) => Some("auto"),
-            (ProviderId::Anthropic, false) => Some("standard_only"),
+        match (provider, self.fast_mode, self.fast_mode_format) {
+            (ProviderId::OpenAI | ProviderId::OpenRouter, true, Some(FastMode::Priority)) => {
+                Some("priority")
+            }
             _ => None,
         }
+    }
+
+    /// Whether this request must use Anthropic's Fast Mode body/header pair.
+    pub fn uses_anthropic_fast_mode(&self, provider: ProviderId) -> bool {
+        provider == ProviderId::Anthropic
+            && self.fast_mode
+            && self.fast_mode_format == Some(FastMode::AnthropicFast)
     }
 }
 

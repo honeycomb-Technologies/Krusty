@@ -52,16 +52,10 @@ async fn list_models(
     let mut models: Vec<ModelResponse> = Vec::new();
 
     for m in recent_models {
-        models.push(ModelResponse {
-            id: m.id.clone(),
-            display_name: m.display_name.clone(),
-            provider: crate::utils::providers::provider_display_name(m.provider).to_string(),
-            context_window: m.context_window,
-            max_output: m.max_output,
-            supports_thinking: m.supports_thinking,
-            supports_tools: m.supports_tools,
-            supports_vision: m.supports_vision,
-        });
+        models.push(ModelResponse::from_metadata(
+            &m,
+            crate::utils::providers::provider_display_name(m.provider).to_string(),
+        ));
     }
 
     for provider_id in ProviderId::all() {
@@ -70,17 +64,10 @@ async fn list_models(
                 if models.iter().any(|existing| existing.id == m.id) {
                     continue;
                 }
-                models.push(ModelResponse {
-                    id: m.id.clone(),
-                    display_name: m.display_name.clone(),
-                    provider: crate::utils::providers::provider_display_name(m.provider)
-                        .to_string(),
-                    context_window: m.context_window,
-                    max_output: m.max_output,
-                    supports_thinking: m.supports_thinking,
-                    supports_tools: m.supports_tools,
-                    supports_vision: m.supports_vision,
-                });
+                models.push(ModelResponse::from_metadata(
+                    m,
+                    crate::utils::providers::provider_display_name(m.provider).to_string(),
+                ));
             }
         }
     }
@@ -139,16 +126,8 @@ async fn get_model(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<ModelResponse>, AppError> {
     if let Some(model) = state.model_registry.get_model(&id).await {
-        return Ok(Json(ModelResponse {
-            id: model.id.clone(),
-            display_name: model.display_name.clone(),
-            provider: crate::utils::providers::provider_display_name(model.provider).to_string(),
-            context_window: model.context_window,
-            max_output: model.max_output,
-            supports_thinking: model.supports_thinking,
-            supports_tools: model.supports_tools,
-            supports_vision: model.supports_vision,
-        }));
+        let provider = crate::utils::providers::provider_display_name(model.provider).to_string();
+        return Ok(Json(ModelResponse::from_metadata(&model, provider)));
     }
 
     Err(AppError::NotFound(format!("Model {} not found", id)))
@@ -157,6 +136,11 @@ async fn get_model(
 #[cfg(test)]
 mod tests {
     use super::resolve_default_model;
+    use crate::types::ModelResponse;
+    use krusty_core::ai::models::ModelMetadata;
+    use krusty_core::ai::providers::{
+        FastMode, ProviderId, ReasoningControl, ReasoningEffort, ReasoningFormat,
+    };
 
     #[test]
     fn resolve_default_model_prefers_active_model() {
@@ -167,5 +151,37 @@ mod tests {
     #[test]
     fn resolve_default_model_returns_none_when_no_model_is_selected() {
         assert_eq!(resolve_default_model(None), None);
+    }
+
+    #[test]
+    fn model_response_preserves_reasoning_and_fast_capabilities() {
+        let model = ModelMetadata::new("gpt-test", "GPT Test", ProviderId::OpenAI)
+            .with_thinking(ReasoningFormat::OpenAI)
+            .with_reasoning_levels(
+                vec![
+                    ReasoningEffort::None,
+                    ReasoningEffort::Low,
+                    ReasoningEffort::Ultra,
+                ],
+                Some(ReasoningEffort::Low),
+                false,
+            )
+            .with_reasoning_control(ReasoningControl::OpenAiEffort)
+            .with_fast_mode(FastMode::Priority);
+
+        let response = ModelResponse::from_metadata(&model, "OpenAI".to_string());
+        assert!(response.supports_thinking);
+        assert_eq!(
+            response.supported_reasoning_levels,
+            vec![
+                ReasoningEffort::None,
+                ReasoningEffort::Low,
+                ReasoningEffort::Ultra,
+            ]
+        );
+        assert_eq!(response.default_reasoning_level, Some(ReasoningEffort::Low));
+        assert!(!response.reasoning_is_mandatory);
+        assert!(response.supports_fast_mode);
+        assert_eq!(response.fast_mode, Some(FastMode::Priority));
     }
 }

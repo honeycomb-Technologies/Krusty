@@ -249,32 +249,51 @@ pub(super) fn apply_thinking_config(
     let cfg = ai_client.config();
     options.thinking = Some(ThinkingConfig::default());
 
-    if supports_openai_reasoning_effort(cfg.provider_id, cfg.api_format, &cfg.model) {
-        options.codex_reasoning_effort = Some(
-            match thinking_level {
-                ThinkingLevel::Off => return,
-                ThinkingLevel::Low => CodexReasoningEffort::Low,
-                ThinkingLevel::Medium => CodexReasoningEffort::Medium,
-                ThinkingLevel::High => CodexReasoningEffort::High,
-                ThinkingLevel::XHigh => {
-                    if supports_openai_xhigh_reasoning(&cfg.model) {
-                        CodexReasoningEffort::XHigh
-                    } else {
-                        CodexReasoningEffort::High
-                    }
-                }
-            }
-            .normalized_for_model(&cfg.model),
-        );
+    if cfg.provider_id == ProviderId::OpenRouter {
+        options.codex_reasoning_effort = raw_codex_effort_for_level(thinking_level);
+    } else if supports_openai_reasoning_effort(cfg.provider_id, cfg.api_format, &cfg.model) {
+        options.codex_reasoning_effort = codex_effort_for_level(thinking_level, &cfg.model);
     } else if supports_anthropic_adaptive_effort(cfg.provider_id, &cfg.model) {
-        options.anthropic_adaptive_effort = Some(match thinking_level {
-            ThinkingLevel::Off => return,
-            ThinkingLevel::Low => AnthropicAdaptiveEffort::Low,
-            ThinkingLevel::Medium => AnthropicAdaptiveEffort::Medium,
-            ThinkingLevel::High => AnthropicAdaptiveEffort::High,
-            ThinkingLevel::XHigh => AnthropicAdaptiveEffort::Max,
-        });
+        options.anthropic_adaptive_effort = anthropic_effort_for_level(thinking_level);
     }
+}
+
+fn codex_effort_for_level(
+    thinking_level: ThinkingLevel,
+    model: &str,
+) -> Option<CodexReasoningEffort> {
+    raw_codex_effort_for_level(thinking_level).map(|effort| effort.normalized_for_model(model))
+}
+
+fn raw_codex_effort_for_level(
+    thinking_level: ThinkingLevel,
+) -> Option<CodexReasoningEffort> {
+    Some(match thinking_level {
+        ThinkingLevel::Off => return None,
+        ThinkingLevel::Minimal => CodexReasoningEffort::Minimal,
+        ThinkingLevel::Low => CodexReasoningEffort::Low,
+        ThinkingLevel::Medium => CodexReasoningEffort::Medium,
+        ThinkingLevel::High => CodexReasoningEffort::High,
+        ThinkingLevel::XHigh => {
+            if supports_openai_xhigh_reasoning(model) {
+                CodexReasoningEffort::XHigh
+            } else {
+                CodexReasoningEffort::High
+            }
+        }
+        ThinkingLevel::Max | ThinkingLevel::Ultra => CodexReasoningEffort::Max,
+    })
+}
+
+fn anthropic_effort_for_level(thinking_level: ThinkingLevel) -> Option<AnthropicAdaptiveEffort> {
+    Some(match thinking_level {
+        ThinkingLevel::Off => return None,
+        ThinkingLevel::Minimal | ThinkingLevel::Low => AnthropicAdaptiveEffort::Low,
+        ThinkingLevel::Medium => AnthropicAdaptiveEffort::Medium,
+        ThinkingLevel::High => AnthropicAdaptiveEffort::High,
+        ThinkingLevel::XHigh => AnthropicAdaptiveEffort::XHigh,
+        ThinkingLevel::Max | ThinkingLevel::Ultra => AnthropicAdaptiveEffort::Max,
+    })
 }
 
 fn supports_openai_reasoning_effort(
@@ -289,14 +308,18 @@ fn supports_openai_reasoning_effort(
 }
 
 fn supports_anthropic_adaptive_effort(provider_id: ProviderId, model_id: &str) -> bool {
-    provider_id == ProviderId::Anthropic && is_claude_opus_4_6_family(model_id)
+    provider_id == ProviderId::Anthropic && is_claude_adaptive_family(model_id)
 }
 
-fn is_claude_opus_4_6_family(model_id: &str) -> bool {
+fn is_claude_adaptive_family(model_id: &str) -> bool {
     let normalized = normalize_model_id(model_id);
     get_model_family(normalized.as_str()) == Some(ModelFamily::ClaudeOpus4_6)
         || normalized.contains("claude-opus-4-6")
         || normalized.starts_with("opus-4-6")
+        || normalized.contains("claude-opus-4-8")
+        || normalized.starts_with("opus-4-8")
+        || normalized.contains("claude-sonnet-5")
+        || normalized.contains("claude-fable-5")
 }
 
 fn normalize_model_id(model_id: &str) -> String {
@@ -494,6 +517,30 @@ mod tests {
         assert!(supports_openai_xhigh_reasoning("gpt-5.4"));
         assert!(supports_openai_xhigh_reasoning("gpt-5.5"));
         assert!(!supports_openai_xhigh_reasoning("gpt-5.2"));
+    }
+
+    #[test]
+    fn extended_levels_map_to_provider_efforts() {
+        assert_eq!(
+            codex_effort_for_level(ThinkingLevel::Minimal, "gpt-5.6"),
+            Some(CodexReasoningEffort::Minimal)
+        );
+        assert_eq!(
+            codex_effort_for_level(ThinkingLevel::Max, "gpt-5.6"),
+            Some(CodexReasoningEffort::Max)
+        );
+        assert_eq!(
+            codex_effort_for_level(ThinkingLevel::Ultra, "gpt-5.6"),
+            Some(CodexReasoningEffort::Max)
+        );
+        assert_eq!(
+            anthropic_effort_for_level(ThinkingLevel::XHigh),
+            Some(AnthropicAdaptiveEffort::XHigh)
+        );
+        assert_eq!(
+            anthropic_effort_for_level(ThinkingLevel::Ultra),
+            Some(AnthropicAdaptiveEffort::Max)
+        );
     }
 
     #[test]

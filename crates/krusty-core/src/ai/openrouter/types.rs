@@ -21,6 +21,20 @@ pub(super) struct OpenRouterModel {
     pub(super) supported_parameters: Vec<String>,
     #[serde(default)]
     pub(super) architecture: Option<Architecture>,
+    #[serde(default)]
+    pub(super) reasoning: Option<ReasoningCapabilities>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ReasoningCapabilities {
+    #[serde(default)]
+    pub(super) supported_efforts: Vec<String>,
+    #[serde(default)]
+    pub(super) default_effort: Option<String>,
+    #[serde(default)]
+    pub(super) default_enabled: Option<bool>,
+    #[serde(default)]
+    pub(super) mandatory: bool,
 }
 
 #[derive(Debug, Deserialize)]

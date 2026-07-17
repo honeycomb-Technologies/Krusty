@@ -26,15 +26,34 @@ pub enum ImageSource {
 pub enum ThinkingLevel {
     #[default]
     Off,
+    Minimal,
     Low,
     Medium,
     High,
     XHigh,
+    Max,
+    Ultra,
 }
 
 impl ThinkingLevel {
     pub fn is_enabled(self) -> bool {
         !matches!(self, Self::Off)
+    }
+
+    pub fn from_reasoning_effort(
+        effort: krusty_core::ai::providers::ReasoningEffort,
+    ) -> Self {
+        use krusty_core::ai::providers::ReasoningEffort;
+        match effort {
+            ReasoningEffort::None => Self::Off,
+            ReasoningEffort::Minimal => Self::Minimal,
+            ReasoningEffort::Low => Self::Low,
+            ReasoningEffort::Medium => Self::Medium,
+            ReasoningEffort::High => Self::High,
+            ReasoningEffort::XHigh => Self::XHigh,
+            ReasoningEffort::Max => Self::Max,
+            ReasoningEffort::Ultra => Self::Ultra,
+        }
     }
 }
 
@@ -62,12 +81,15 @@ where
             match value.as_str() {
                 "" | "off" | "false" | "disabled" | "none" => Ok(ThinkingLevel::Off),
                 "on" | "true" | "enabled" => Ok(ThinkingLevel::High),
+                "minimal" => Ok(ThinkingLevel::Minimal),
                 "low" => Ok(ThinkingLevel::Low),
                 "medium" => Ok(ThinkingLevel::Medium),
                 "high" => Ok(ThinkingLevel::High),
                 "xhigh" | "x-high" | "extra-high" => Ok(ThinkingLevel::XHigh),
+                "max" => Ok(ThinkingLevel::Max),
+                "ultra" => Ok(ThinkingLevel::Ultra),
                 _ => Err(de::Error::custom(format!(
-                    "invalid thinking_enabled value '{}'; expected bool or one of off/low/medium/high/xhigh",
+                    "invalid thinking_enabled value '{}'; expected bool or one of off/minimal/low/medium/high/xhigh/max/ultra",
                     raw
                 ))),
             }
@@ -149,6 +171,22 @@ mod tests {
         }))
         .expect("request should deserialize");
         assert_eq!(req.thinking_enabled, ThinkingLevel::Medium);
+    }
+
+    #[test]
+    fn chat_request_accepts_extended_reasoning_levels() {
+        for (raw, expected) in [
+            ("minimal", ThinkingLevel::Minimal),
+            ("max", ThinkingLevel::Max),
+            ("ultra", ThinkingLevel::Ultra),
+        ] {
+            let req: ChatRequest = serde_json::from_value(json!({
+                "message": "hello",
+                "thinking_enabled": raw
+            }))
+            .expect("request should deserialize");
+            assert_eq!(req.thinking_enabled, expected);
+        }
     }
 
     #[test]

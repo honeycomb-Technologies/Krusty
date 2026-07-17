@@ -41,7 +41,12 @@ import {
 } from 'lucide-react-native';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useBreakpoint } from '../../hooks/useBreakpoint';
-import { cycleThinkingLevel, type ThinkingLevel } from '@krusty/api';
+import {
+  cycleThinkingLevel,
+  supportsThinking,
+  type ModelInfo,
+  type ThinkingLevel,
+} from '@krusty/api';
 import type { PermissionMode } from '@krusty/state';
 
 interface AccordionControlsProps {
@@ -66,6 +71,7 @@ interface AccordionControlsProps {
   onProviderFilterToggle: (providerId: string) => void;
   onProviderFiltersReorder?: (providerIds: string[]) => void;
   model: string | null;
+  modelInfo?: ModelInfo | null;
   isOpen: boolean;
   onToggle: () => void;
   sessionType?: 'chat' | 'code' | 'mako';
@@ -81,10 +87,13 @@ interface ProviderFilterAction {
 
 const THINKING_ICON_ALPHA: Record<ThinkingLevel, string> = {
   off: '66',
+  minimal: '55',
   low: '66',
   medium: 'A6',
   high: 'D9',
-  xhigh: '',
+  xhigh: 'E8',
+  max: '',
+  ultra: '',
 };
 
 const SPRING_CONFIG = { damping: 18, stiffness: 350, mass: 0.6 };
@@ -660,6 +669,7 @@ export function AccordionControls({
   onProviderFilterToggle,
   onProviderFiltersReorder,
   model,
+  modelInfo = null,
   isOpen,
   onToggle,
   sessionType = 'code',
@@ -808,8 +818,9 @@ export function AccordionControls({
   }, [providerDragIndex, providerDragScrollDelta, providerDropIndex, providerDragX, stopProviderAutoScroll]);
 
   const handleThinking = () => {
+    if (!supportsThinking(modelInfo ?? model)) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    const next = cycleThinkingLevel(thinkingLevel, model);
+    const next = cycleThinkingLevel(thinkingLevel, modelInfo ?? model);
     onThinkingChange(next);
   };
 
@@ -1190,7 +1201,12 @@ export function AccordionControls({
             />
           </AccordionPill>
 
-          <AccordionPill index={0} isOpen={isOpen} onPress={handleThinking}>
+          <AccordionPill
+            index={0}
+            isOpen={isOpen}
+            onPress={handleThinking}
+            disabled={!supportsThinking(modelInfo ?? model)}
+          >
             <Brain size={24} color={thinkingColor} strokeWidth={1.6} />
           </AccordionPill>
         </Animated.View>

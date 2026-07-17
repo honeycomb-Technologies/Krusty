@@ -349,28 +349,37 @@ fn device_code_response(code: &OpenAIDeviceCodeResponse) -> OAuthDeviceCodeRespo
 }
 
 pub(super) async fn refresh_openai_models(registry: krusty_core::ai::models::SharedModelRegistry) {
+    refresh_provider_models(registry, ProviderId::OpenAI).await;
+}
+
+pub(super) async fn refresh_provider_models(
+    registry: krusty_core::ai::models::SharedModelRegistry,
+    provider: ProviderId,
+) {
     let credentials = match krusty_core::storage::CredentialStore::load() {
         Ok(credentials) => credentials,
         Err(error) => {
             tracing::warn!(
-                "Failed to load credentials for OpenAI model refresh: {}",
+                "Failed to load credentials for {} model refresh: {}",
+                provider,
                 error
             );
             return;
         }
     };
 
-    let Some(credential) =
-        krusty_core::ai::catalog::credential_for_dynamic_models(ProviderId::OpenAI, &credentials)
-    else {
+    if krusty_core::ai::catalog::credentials_for_dynamic_models(provider, &credentials)
+        .is_empty()
+    {
         tracing::debug!(
-            "Skipping OpenAI model refresh after OAuth: OpenAI API key is required for /v1/models"
+            "Skipping {} model refresh after OAuth: no catalog credential is available",
+            provider
         );
         return;
-    };
+    }
 
-    match krusty_core::ai::catalog::fetch_dynamic_models(ProviderId::OpenAI, &credential).await {
-        Ok(models) => registry.set_models(ProviderId::OpenAI, models).await,
-        Err(error) => tracing::warn!("Failed to refresh OpenAI models after OAuth: {}", error),
+    match krusty_core::ai::catalog::fetch_dynamic_models_for_store(provider, &credentials).await {
+        Ok(models) => registry.set_models(provider, models).await,
+        Err(error) => tracing::warn!("Failed to refresh {} models after OAuth: {}", provider, error),
     }
 }

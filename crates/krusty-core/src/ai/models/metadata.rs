@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 
-use super::super::providers::{ProviderId, ReasoningFormat};
+use super::super::providers::{
+    FastMode, ProviderId, ReasoningControl, ReasoningEffort, ReasoningFormat,
+};
 
 /// Metadata describing a cached dynamic model catalog.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,6 +50,21 @@ pub struct ModelMetadata {
     pub supports_thinking: bool,
     /// Reasoning/thinking format (None = not supported, Some = supported with specific format)
     pub reasoning_format: Option<ReasoningFormat>,
+    /// Exact user-selectable levels, ordered for presentation.
+    #[serde(default)]
+    pub supported_reasoning_levels: Vec<ReasoningEffort>,
+    /// Catalog default when no explicit level is selected.
+    #[serde(default)]
+    pub default_reasoning_level: Option<ReasoningEffort>,
+    /// Some reasoning models do not permit an off/none choice.
+    #[serde(default)]
+    pub reasoning_is_mandatory: bool,
+    /// Wire control used by the configured transport.
+    #[serde(default)]
+    pub reasoning_control: Option<ReasoningControl>,
+    /// Per-model implementation of Standard/Fast.
+    #[serde(default)]
+    pub fast_mode: Option<FastMode>,
     /// Supports function/tool calling
     pub supports_tools: bool,
     /// Supports image input (vision)
@@ -82,6 +99,11 @@ impl ModelMetadata {
             max_output: 4096,
             supports_thinking: false,
             reasoning_format: None,
+            supported_reasoning_levels: Vec::new(),
+            default_reasoning_level: None,
+            reasoning_is_mandatory: false,
+            reasoning_control: None,
+            fast_mode: None,
             supports_tools: true,
             supports_vision: false,
             input_price: None,
@@ -103,6 +125,35 @@ impl ModelMetadata {
     pub fn with_thinking(mut self, format: ReasoningFormat) -> Self {
         self.supports_thinking = true;
         self.reasoning_format = Some(format);
+        self.reasoning_control = Some(match format {
+            ReasoningFormat::OpenAI => ReasoningControl::OpenAiEffort,
+            ReasoningFormat::Anthropic => ReasoningControl::AnthropicBudget,
+            ReasoningFormat::DeepSeek => ReasoningControl::Boolean,
+        });
+        self
+    }
+
+    /// Builder: advertise exact reasoning controls from a provider catalog.
+    pub fn with_reasoning_levels(
+        mut self,
+        levels: Vec<ReasoningEffort>,
+        default: Option<ReasoningEffort>,
+        mandatory: bool,
+    ) -> Self {
+        self.supports_thinking = true;
+        self.supported_reasoning_levels = levels;
+        self.default_reasoning_level = default;
+        self.reasoning_is_mandatory = mandatory;
+        self
+    }
+
+    pub fn with_reasoning_control(mut self, control: ReasoningControl) -> Self {
+        self.reasoning_control = Some(control);
+        self
+    }
+
+    pub fn with_fast_mode(mut self, fast_mode: FastMode) -> Self {
+        self.fast_mode = Some(fast_mode);
         self
     }
 
@@ -132,7 +183,10 @@ impl ModelMetadata {
 /// Provider-specific TTL for dynamic model catalog refresh.
 pub fn dynamic_model_cache_ttl(provider: ProviderId) -> u64 {
     match provider {
-        ProviderId::OpenAI => 6 * 60 * 60,
+        // Match the official Codex catalog manager's five-minute freshness
+        // window so newly entitled ChatGPT models appear promptly.
+        ProviderId::OpenAI => 5 * 60,
+        ProviderId::Anthropic | ProviderId::MiniMax => 6 * 60 * 60,
         ProviderId::OpenRouter => 12 * 60 * 60,
         _ => 24 * 60 * 60,
     }
@@ -144,13 +198,23 @@ pub fn model_catalog_fingerprint(models: &[ModelMetadata]) -> u64 {
         .iter()
         .map(|model| {
             format!(
-                "{}|{}|{}|{}|{:?}|{:?}",
+                "{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{:?}|{:?}|{}|{}|{:?}|{:?}",
                 model.id,
                 model.display_name,
                 model.context_window,
                 model.max_output,
                 model.provider,
-                model.api_format
+                model.api_format,
+                model.reasoning_format,
+                model.supported_reasoning_levels,
+                model.default_reasoning_level,
+                model.reasoning_is_mandatory,
+                model.reasoning_control,
+                model.fast_mode,
+                model.supports_tools,
+                model.supports_vision,
+                model.input_price,
+                model.output_price,
             )
         })
         .collect::<Vec<_>>();

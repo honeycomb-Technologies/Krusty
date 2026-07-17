@@ -7,10 +7,10 @@
 //! Registry mutations happen on the async fetch tasks — never `block_on` on the
 //! TUI poll path — so model refresh cannot hitch the terminal event loop.
 
-use crate::ai::client::CallOptions;
 use crate::ai::models::ModelMetadata;
 use crate::ai::providers::ProviderId;
 use crate::tui::app::App;
+use crate::tui::app::ThinkingLevel;
 use crate::tui::utils::DynamicModelUpdate;
 
 impl App {
@@ -26,6 +26,32 @@ impl App {
         }
 
         self.runtime.current_model = model_id.clone();
+        if metadata.fast_mode.is_none() {
+            self.runtime.fast_mode = false;
+        }
+
+        let mut thinking_levels = metadata
+            .supported_reasoning_levels
+            .iter()
+            .copied()
+            .map(ThinkingLevel::from_reasoning_effort)
+            .collect::<Vec<_>>();
+        if metadata.reasoning_is_mandatory {
+            thinking_levels.retain(|level| *level != ThinkingLevel::Off);
+        } else if metadata.supports_thinking && !thinking_levels.contains(&ThinkingLevel::Off) {
+            thinking_levels.insert(0, ThinkingLevel::Off);
+        }
+        if !metadata.supports_thinking {
+            self.runtime.thinking_level = ThinkingLevel::Off;
+        } else if !thinking_levels.is_empty()
+            && !thinking_levels.contains(&self.runtime.thinking_level)
+        {
+            self.runtime.thinking_level = metadata
+                .default_reasoning_level
+                .map(ThinkingLevel::from_reasoning_effort)
+                .filter(|level| thinking_levels.contains(level))
+                .unwrap_or(thinking_levels[0]);
+        }
 
         let auth = self.resolve_auth_for_active_provider();
         self.runtime.api_key = auth.clone();
@@ -59,12 +85,12 @@ impl App {
     }
 
     pub fn toggle_fast_mode(&mut self) -> Option<bool> {
-        let supports_fast_mode = CallOptions {
-            fast_mode: true,
-            ..Default::default()
-        }
-        .service_tier_for_provider(self.runtime.active_provider)
-        .is_some();
+        let supports_fast_mode = self
+            .services
+            .model_registry
+            .try_get_model(&self.runtime.current_model)
+            .and_then(|model| model.fast_mode)
+            .is_some();
         if !supports_fast_mode {
             return None;
         }
@@ -103,19 +129,15 @@ impl App {
             return;
         }
 
-        let credential = crate::ai::catalog::credential_for_dynamic_models(
-            provider,
-            &self.services.credential_store,
-        );
-
-        let Some(credential) = credential else {
+        let credentials = self.services.credential_store.clone();
+        if crate::ai::catalog::credentials_for_dynamic_models(provider, &credentials).is_empty() {
             tracing::warn!(
                 "Cannot fetch {:?} models: no credential configured",
                 provider
             );
             self.runtime.dynamic_model_fetches.remove(&provider);
             return;
-        };
+        }
 
         let custom_models = self
             .services
@@ -129,7 +151,8 @@ impl App {
 
         let registry = self.services.model_registry.clone();
         tokio::spawn(async move {
-            let result = crate::ai::catalog::fetch_dynamic_models(provider, &credential).await;
+            let result =
+                crate::ai::catalog::fetch_dynamic_models_for_store(provider, &credentials).await;
 
             match &result {
                 Ok(models) => {

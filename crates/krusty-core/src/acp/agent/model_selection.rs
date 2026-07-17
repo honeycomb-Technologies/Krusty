@@ -76,27 +76,30 @@ impl KrustyAgent {
                 continue;
             }
 
-            let Some(catalog_credential) =
-                crate::ai::catalog::credential_for_dynamic_models(provider, &store)
-            else {
+            if crate::ai::catalog::credentials_for_dynamic_models(provider, &store).is_empty() {
                 tracing::debug!(
-                    "Skipping dynamic {:?} model fetch: no catalog API key configured",
+                    "Skipping dynamic {:?} model fetch: no catalog credential configured",
                     provider
                 );
                 push_static_provider_models(&mut models, &store, provider);
                 continue;
-            };
+            }
 
-            match crate::ai::catalog::fetch_dynamic_models(provider, &catalog_credential).await {
+            match crate::ai::catalog::fetch_dynamic_models_for_store(provider, &store).await {
                 Ok(fetched) => {
                     let fetched_count = fetched.len();
                     for model in fetched {
+                        let Some(model_credential) =
+                            credential_for_model(&store, provider, &model.id)
+                        else {
+                            continue;
+                        };
                         let model_id = format!("{}:{}", provider.storage_key(), model.id);
                         models.push((
                             model_id,
                             provider,
                             model.id.clone(),
-                            catalog_credential.clone(),
+                            model_credential,
                             model.display_name.clone(),
                         ));
                     }

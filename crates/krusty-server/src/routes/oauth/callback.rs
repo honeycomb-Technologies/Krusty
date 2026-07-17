@@ -10,7 +10,7 @@ use krusty_core::auth::{
     openai_oauth_config, HostedBrowserOAuthFlow, OAuthTokenStore, PkceVerifier,
 };
 
-use super::start::refresh_openai_models;
+use super::start::refresh_provider_models;
 use super::{
     parse_provider, OAuthFlowKind, FLOW_TTL_SECS, OAUTH_RESULT_CHANNEL, OAUTH_RESULT_STORAGE_KEY,
 };
@@ -155,7 +155,7 @@ pub(super) async fn oauth_callback(
 
             let registry = state.model_registry.clone();
             tokio::spawn(async move {
-                refresh_openai_models(registry).await;
+                refresh_provider_models(registry, provider_id).await;
             });
 
             callback_success_page(provider_id.storage_key().to_string())

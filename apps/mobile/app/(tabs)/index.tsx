@@ -156,7 +156,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     [model, models],
   );
   const fastModeSupported = supportsFastMode(
-    model,
+    selectedModelInfo ?? model,
     selectedModelInfo?.provider ?? null,
   );
   const fastModeEnabled = fastModeSupported && fastModeStoreEnabled;
@@ -165,7 +165,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     if (!model || !selectedModelInfo) {
       return;
     }
-    sessionStore.getState().setModel(model, selectedModelInfo.provider);
+    sessionStore.getState().setModel(model, selectedModelInfo.provider, selectedModelInfo);
   }, [model, selectedModelInfo, sessionStore]);
 
   const previousStreamingRef = useRef(false);
@@ -332,7 +332,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     if (selectedModel) {
       sessionStore
         .getState()
-        .setModel(selectedModel.id, selectedModel.provider ?? null);
+        .setModel(selectedModel.id, selectedModel.provider ?? null, selectedModel);
       await SecureStore.setItemAsync(SELECTED_MODEL_KEY, selectedModel.id);
       return selectedModel.id;
     }

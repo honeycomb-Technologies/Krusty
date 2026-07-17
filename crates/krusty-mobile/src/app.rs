@@ -850,9 +850,13 @@ impl Render for KrustyMobile {
 fn thinking_border_color(level: krusty_client::ThinkingLevel) -> gpui::Hsla {
     match level {
         krusty_client::ThinkingLevel::Off => theme::hairline(),
+        krusty_client::ThinkingLevel::Minimal => theme::complement().opacity(0.25),
         krusty_client::ThinkingLevel::Low => theme::complement().opacity(0.35),
         krusty_client::ThinkingLevel::Medium => theme::complement().opacity(0.55),
         krusty_client::ThinkingLevel::High => theme::complement().opacity(0.75),
         krusty_client::ThinkingLevel::XHigh => theme::complement(),
+        krusty_client::ThinkingLevel::Max | krusty_client::ThinkingLevel::Ultra => {
+            theme::complement()
+        }
     }
 }

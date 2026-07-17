@@ -1,5 +1,7 @@
 use crate::ai::models::{ApiFormat, ModelMetadata};
-use crate::ai::providers::{ProviderId, ReasoningFormat};
+use crate::ai::providers::{
+    FastMode, ProviderId, ReasoningControl, ReasoningEffort, ReasoningFormat,
+};
 
 use super::types::OpenRouterModel;
 
@@ -20,7 +22,7 @@ pub(super) fn is_useful_model(id: &str) -> bool {
         "databricks/",
     ];
 
-    let bad_patterns = [":beta", "-preview", "-experimental", "-base"];
+    let bad_patterns = [":beta", "-experimental", "-base"];
 
     let id_lower = id.to_lowercase();
 
@@ -39,7 +41,8 @@ pub(super) fn parse_model(raw: OpenRouterModel) -> ModelMetadata {
         .and_then(|t| t.max_completion_tokens)
         .unwrap_or(4096);
 
-    let supports_thinking = raw
+    let supports_thinking = raw.reasoning.is_some()
+        || raw
         .supported_parameters
         .iter()
         .any(|p| p == "reasoning" || p == "include_reasoning" || p == "reasoning_effort");
@@ -78,6 +81,39 @@ pub(super) fn parse_model(raw: OpenRouterModel) -> ModelMetadata {
     let sub_provider = raw.id.split('/').next().map(|s| s.to_string());
     let is_free = raw.id.ends_with(":free");
 
+    let (supported_reasoning_levels, default_reasoning_level, reasoning_is_mandatory) = raw
+        .reasoning
+        .as_ref()
+        .map(|reasoning| {
+            let mut levels = reasoning
+                .supported_efforts
+                .iter()
+                .filter_map(|effort| parse_reasoning_effort(effort))
+                .collect::<Vec<_>>();
+            levels.dedup();
+            if !reasoning.mandatory && !levels.contains(&ReasoningEffort::None) {
+                levels.insert(0, ReasoningEffort::None);
+            }
+            let default = if reasoning.default_enabled == Some(false) {
+                levels
+                    .contains(&ReasoningEffort::None)
+                    .then_some(ReasoningEffort::None)
+            } else {
+                reasoning
+                    .default_effort
+                    .as_deref()
+                    .and_then(parse_reasoning_effort)
+            };
+            (levels, default, reasoning.mandatory)
+        })
+        .unwrap_or_default();
+
+    let fast_mode = raw
+        .supported_parameters
+        .iter()
+        .any(|parameter| parameter == "service_tier")
+        .then_some(FastMode::Priority);
+
     ModelMetadata {
         id: raw.id,
         display_name,
@@ -86,6 +122,13 @@ pub(super) fn parse_model(raw: OpenRouterModel) -> ModelMetadata {
         max_output,
         supports_thinking,
         reasoning_format,
+        supported_reasoning_levels,
+        default_reasoning_level,
+        reasoning_is_mandatory,
+        // OpenRouter's Messages surface owns the request shape. The streaming
+        // adapter maps this metadata to `thinking` + `output_config.effort`.
+        reasoning_control: supports_thinking.then_some(ReasoningControl::OpenAiEffort),
+        fast_mode,
         supports_tools,
         supports_vision,
         input_price,
@@ -93,6 +136,19 @@ pub(super) fn parse_model(raw: OpenRouterModel) -> ModelMetadata {
         sub_provider,
         is_free,
         api_format: ApiFormat::Anthropic,
+    }
+}
+
+fn parse_reasoning_effort(raw: &str) -> Option<ReasoningEffort> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "none" | "off" => Some(ReasoningEffort::None),
+        "minimal" => Some(ReasoningEffort::Minimal),
+        "low" => Some(ReasoningEffort::Low),
+        "medium" => Some(ReasoningEffort::Medium),
+        "high" => Some(ReasoningEffort::High),
+        "xhigh" | "x-high" => Some(ReasoningEffort::XHigh),
+        "max" => Some(ReasoningEffort::Max),
+        _ => None,
     }
 }
 
@@ -137,7 +193,9 @@ mod tests {
         assert!(is_useful_model("meta-llama/llama-3.2-3b-instruct:free"));
         assert!(is_useful_model("mistralai/mistral-7b-instruct"));
 
-        assert!(!is_useful_model("openai/gpt-4-preview"));
+        // Preview is a valid lifecycle marker on OpenRouter; the live catalog
+        // should decide availability rather than a blanket suffix filter.
+        assert!(is_useful_model("openai/gpt-4-preview"));
         assert!(!is_useful_model("some-random/model"));
         assert!(!is_useful_model("meta-llama/llama-2-7b-base"));
     }

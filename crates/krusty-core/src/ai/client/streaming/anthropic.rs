@@ -193,6 +193,9 @@ impl AiClient {
         if let Some(service_tier) = options.service_tier_for_provider(self.provider_id()) {
             body["service_tier"] = serde_json::json!(service_tier);
         }
+        if options.uses_anthropic_fast_mode(self.provider_id()) {
+            body["speed"] = serde_json::json!("fast");
+        }
         let body = apply_request_body_transform(
             body,
             self.provider_id(),

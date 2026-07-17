@@ -489,6 +489,12 @@ pub(super) async fn setup_chat_session(
             .collect()
     };
     let hosted_web_tools = session.session_type != SessionType::Code;
+    let model_metadata = state.model_registry.get_model(&resolved_model).await;
+    let effective_thinking_level = normalize_thinking_level_for_model(
+        thinking_level,
+        model_metadata.as_ref(),
+    );
+    let fast_mode_format = model_metadata.as_ref().and_then(|model| model.fast_mode);
     let mut options = CallOptions {
         tools: if ai_tools.is_empty() {
             None
@@ -499,7 +505,8 @@ pub(super) async fn setup_chat_session(
         codex_parallel_tool_calls: true,
         web_search: hosted_web_tools.then(WebSearchConfig::default),
         web_fetch: hosted_web_tools.then(WebFetchConfig::default),
-        fast_mode,
+        fast_mode: fast_mode && fast_mode_format.is_some(),
+        fast_mode_format,
         system_prompt: match session.session_type {
             SessionType::Chat => Some(chat_system_prompt(research_enabled)),
             SessionType::Mako => system_prompt_for_session(SessionType::Mako),
@@ -507,8 +514,8 @@ pub(super) async fn setup_chat_session(
         },
         ..Default::default()
     };
-    if thinking_level.is_enabled() {
-        apply_thinking_config(&ai_client, thinking_level, &mut options);
+    if effective_thinking_level.is_enabled() {
+        apply_thinking_config(&ai_client, effective_thinking_level, &mut options);
     }
 
     let mako_runtime = if session.session_type == SessionType::Mako {
@@ -532,4 +539,42 @@ pub(super) async fn setup_chat_session(
         user_id,
         guard,
     })
+}
+
+fn normalize_thinking_level_for_model(
+    requested: ThinkingLevel,
+    metadata: Option<&krusty_core::ai::models::ModelMetadata>,
+) -> ThinkingLevel {
+    let Some(metadata) = metadata else {
+        return requested;
+    };
+    if !metadata.supports_thinking
+        || metadata.reasoning_control
+            == Some(krusty_core::ai::providers::ReasoningControl::OutputOnly)
+    {
+        return ThinkingLevel::Off;
+    }
+
+    let mut levels = metadata
+        .supported_reasoning_levels
+        .iter()
+        .copied()
+        .map(ThinkingLevel::from_reasoning_effort)
+        .collect::<Vec<_>>();
+    if levels.is_empty() {
+        return requested;
+    }
+    if metadata.reasoning_is_mandatory {
+        levels.retain(|level| *level != ThinkingLevel::Off);
+    } else if !levels.contains(&ThinkingLevel::Off) {
+        levels.insert(0, ThinkingLevel::Off);
+    }
+    if levels.contains(&requested) {
+        return requested;
+    }
+    metadata
+        .default_reasoning_level
+        .map(ThinkingLevel::from_reasoning_effort)
+        .filter(|level| levels.contains(level))
+        .unwrap_or(levels[0])
 }

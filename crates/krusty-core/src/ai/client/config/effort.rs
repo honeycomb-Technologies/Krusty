@@ -4,6 +4,7 @@ pub enum AnthropicAdaptiveEffort {
     Low,
     Medium,
     High,
+    XHigh,
     Max,
 }
 
@@ -13,6 +14,7 @@ impl AnthropicAdaptiveEffort {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::XHigh => "xhigh",
             Self::Max => "max",
         }
     }
@@ -26,6 +28,7 @@ pub enum CodexReasoningEffort {
     Medium,
     High,
     XHigh,
+    Max,
 }
 
 impl CodexReasoningEffort {
@@ -36,16 +39,29 @@ impl CodexReasoningEffort {
             Self::Medium => "medium",
             Self::High => "high",
             Self::XHigh => "xhigh",
+            Self::Max => "max",
         }
     }
 
     pub fn normalized_for_model(self, model_id: &str) -> Self {
-        if matches!(self, Self::XHigh) && !supports_openai_xhigh_reasoning(model_id) {
-            Self::High
-        } else {
-            self
+        match self {
+            Self::Max if !supports_openai_max_reasoning(model_id) => {
+                if supports_openai_xhigh_reasoning(model_id) {
+                    Self::XHigh
+                } else {
+                    Self::High
+                }
+            }
+            Self::XHigh if !supports_openai_xhigh_reasoning(model_id) => Self::High,
+            _ => self,
         }
     }
+}
+
+pub fn supports_openai_max_reasoning(model_id: &str) -> bool {
+    let lower = model_id.trim().to_ascii_lowercase();
+    let normalized = lower.strip_prefix("openai/").unwrap_or(&lower);
+    normalized.starts_with("gpt-5.6")
 }
 
 pub fn supports_openai_xhigh_reasoning(model_id: &str) -> bool {

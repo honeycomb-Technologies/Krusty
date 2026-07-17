@@ -277,6 +277,16 @@ pub struct ModelResponse {
     pub display_name: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
+    #[serde(default)]
+    pub supports_thinking: bool,
+    #[serde(default)]
+    pub supported_reasoning_levels: Vec<String>,
+    #[serde(default)]
+    pub default_reasoning_level: Option<String>,
+    #[serde(default)]
+    pub reasoning_is_mandatory: bool,
+    #[serde(default)]
+    pub supports_fast_mode: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

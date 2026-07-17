@@ -118,24 +118,56 @@ impl AiClient {
     }
 
     /// Add reasoning/thinking config to the request body
-    pub(super) fn add_reasoning_config(
+    pub(crate) fn add_reasoning_config(
         &self,
         body: &mut Value,
         options: &CallOptions,
         reasoning_enabled: bool,
     ) {
-        // Anthropic Opus 4.6 adaptive thinking path
-        if self.is_anthropic_opus_4_6() && reasoning_enabled {
+        if !reasoning_enabled {
+            return;
+        }
+
+        // Z.ai's Anthropic-compatible endpoint uses chat_template_args rather
+        // than an Anthropic `thinking` object. add_provider_params applies it.
+        if self.provider_id() == ProviderId::ZAi {
+            return;
+        }
+
+        // MiniMax exposes an adaptive thinking toggle but does not accept
+        // Anthropic budget_tokens on its compatibility transport.
+        if self.provider_id() == ProviderId::MiniMax {
+            body["thinking"] = serde_json::json!({ "type": "enabled" });
+            return;
+        }
+
+        // OpenRouter's Messages surface owns the wire shape regardless of the
+        // routed upstream provider. Preserve the selected effort through its
+        // `thinking` + `output_config.effort` contract.
+        if self.provider_id() == ProviderId::OpenRouter {
+            let effort = options
+                .codex_reasoning_effort
+                .map(|value| value.as_str())
+                .or_else(|| {
+                    options
+                        .anthropic_adaptive_effort
+                        .map(|value| value.as_str())
+                })
+                .unwrap_or("high");
+            body["thinking"] = serde_json::json!({ "type": "enabled" });
+            body["output_config"] = serde_json::json!({ "effort": effort });
+            return;
+        }
+
+        // Current Claude adaptive-thinking families.
+        if self.uses_anthropic_adaptive_thinking() {
             let effort = options
                 .anthropic_adaptive_effort
                 .map(|e| e.as_str())
                 .unwrap_or("high");
             body["thinking"] = serde_json::json!({ "type": "adaptive" });
             body["output_config"] = serde_json::json!({ "effort": effort });
-            debug!(
-                "Anthropic Opus 4.6 adaptive thinking enabled (effort={})",
-                effort
-            );
+            debug!("Anthropic adaptive thinking enabled (effort={})", effort);
             return;
         }
 
@@ -200,11 +232,18 @@ impl AiClient {
         }
     }
 
-    /// Check if current model is Anthropic Opus 4.6
-    fn is_anthropic_opus_4_6(&self) -> bool {
-        self.provider_id() == ProviderId::Anthropic
-            && (self.config().model.contains("opus-4-6")
-                || self.config().model.contains("opus-4.6"))
+    /// Check current Anthropic families that use adaptive thinking + effort.
+    fn uses_anthropic_adaptive_thinking(&self) -> bool {
+        if self.provider_id() != ProviderId::Anthropic {
+            return false;
+        }
+        let model = self.config().model.to_ascii_lowercase();
+        model.contains("opus-4-6")
+            || model.contains("opus-4.6")
+            || model.contains("opus-4-8")
+            || model.contains("opus-4.8")
+            || model.contains("sonnet-5")
+            || model.contains("fable-5")
     }
 
     /// Add context management to the request body
@@ -225,7 +264,7 @@ impl AiClient {
     }
 
     /// Add provider-specific parameters to the request body
-    pub(super) fn add_provider_params(&self, body: &mut Value, thinking_enabled: bool) {
+    pub(crate) fn add_provider_params(&self, body: &mut Value, thinking_enabled: bool) {
         let provider_params =
             build_provider_params(&self.config().model, self.provider_id(), thinking_enabled);
 
@@ -263,7 +302,7 @@ impl AiClient {
     }
 
     /// Build beta headers based on options
-    pub(super) fn build_beta_headers(&self, options: &CallOptions) -> Vec<&'static str> {
+    pub(crate) fn build_beta_headers(&self, options: &CallOptions) -> Vec<&'static str> {
         let mut beta_headers: Vec<&str> = Vec::new();
 
         let is_anthropic_provider = self.provider_id() == ProviderId::Anthropic;
@@ -289,12 +328,16 @@ impl AiClient {
             }
         }
 
-        // Anthropic Opus 4.6: adaptive thinking needs interleaved-thinking beta
-        if self.is_anthropic_opus_4_6()
+        // Anthropic adaptive thinking needs interleaved-thinking beta.
+        if self.uses_anthropic_adaptive_thinking()
             && options.anthropic_adaptive_effort.is_some()
             && !beta_headers.contains(&"interleaved-thinking-2025-05-14")
         {
             beta_headers.push("interleaved-thinking-2025-05-14");
+        }
+
+        if options.uses_anthropic_fast_mode(self.provider_id()) {
+            beta_headers.push("fast-mode-2026-02-01");
         }
 
         // Context management beta

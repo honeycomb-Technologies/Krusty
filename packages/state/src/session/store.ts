@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { KrustyApiError } from '@krusty/api';
 import type {
   KrustyClient,
+  ModelInfo,
   SessionStateResponse as ApiSessionStateResponse,
   StreamCallbacks,
 } from '@krusty/api';
@@ -66,6 +67,7 @@ import type {
 import {
   cycleThinkingLevel,
   isThinkingEnabled,
+  normalizeThinkingLevel,
   supportsFastMode,
   thinkingLevelToApiValue,
 } from './thinking';
@@ -208,6 +210,7 @@ export function createSessionStore(
     error: null,
     model: null,
     modelProvider: null,
+    modelInfo: null,
   };
 
 
@@ -648,6 +651,16 @@ export function createSessionStore(
               ? s.modelProvider
               : null
             : s.modelProvider;
+          const nextModelInfo = sessionModel
+            ? sessionModel === s.model
+              ? s.modelInfo
+              : null
+            : s.modelInfo;
+          const capabilityInput = nextModelInfo ?? sessionModel ?? s.model;
+          const nextThinkingLevel = normalizeThinkingLevel(
+            s.thinkingLevel,
+            capabilityInput,
+          );
           return {
             ...s,
             sessionId: data.session.id,
@@ -656,10 +669,12 @@ export function createSessionStore(
             permissionMode,
             model: sessionModel ?? s.model,
             modelProvider: nextModelProvider,
+            modelInfo: nextModelInfo,
+            thinkingLevel: nextThinkingLevel,
+            thinkingEnabled: isThinkingEnabled(nextThinkingLevel),
             fastModeEnabled: sessionModel
-              ? nextModelProvider
-                ? s.fastModeEnabled && supportsFastMode(sessionModel, nextModelProvider)
-                : s.fastModeEnabled
+              ? s.fastModeEnabled
+                && supportsFastMode(capabilityInput, nextModelProvider)
               : s.fastModeEnabled,
             tokenCount: data.session.token_count ?? 0,
             tokenUsage: null,
@@ -719,6 +734,7 @@ export function createSessionStore(
             permissionMode: current.permissionMode,
             model: current.model,
             modelProvider: current.modelProvider,
+            modelInfo: current.modelInfo,
             thinkingLevel: current.thinkingLevel,
             thinkingEnabled: current.thinkingEnabled,
             fastModeEnabled: current.fastModeEnabled,
@@ -745,6 +761,7 @@ export function createSessionStore(
         permissionMode: current.permissionMode,
         model: current.model,
         modelProvider: current.modelProvider,
+        modelInfo: current.modelInfo,
         thinkingLevel: current.thinkingLevel,
         thinkingEnabled: current.thinkingEnabled,
         fastModeEnabled: current.fastModeEnabled,
@@ -768,6 +785,7 @@ export function createSessionStore(
         permissionMode: nextPermissionMode,
         model: current.model,
         modelProvider: current.modelProvider,
+        modelInfo: current.modelInfo,
         thinkingLevel: current.thinkingLevel,
         thinkingEnabled: current.thinkingEnabled,
         fastModeEnabled: current.fastModeEnabled,
@@ -805,20 +823,44 @@ export function createSessionStore(
 
     // -- setModel -----------------------------------------------------------
 
-    setModel(model: string | null, provider?: string | null) {
+    setModel(
+      model: string | null,
+      provider?: string | null,
+      modelInfo?: ModelInfo | null,
+    ) {
       const current = get();
-      const nextProvider = provider ?? (model === current.model ? current.modelProvider : null);
-      if (current.model === model && current.modelProvider === nextProvider) {
+      const nextModelInfo = model
+        ? modelInfo !== undefined
+          ? modelInfo
+          : model === current.model
+            ? current.modelInfo
+            : null
+        : null;
+      const nextProvider = nextModelInfo?.provider
+        ?? provider
+        ?? (model === current.model ? current.modelProvider : null);
+      if (
+        current.model === model
+        && current.modelProvider === nextProvider
+        && current.modelInfo === nextModelInfo
+      ) {
         return;
       }
 
-      set((s) => ({
-        model,
-        modelProvider: nextProvider,
-        fastModeEnabled: model
-          ? s.fastModeEnabled && supportsFastMode(model, nextProvider)
-          : false,
-      }));
+      set((s) => {
+        const capabilityInput = nextModelInfo ?? model;
+        const thinkingLevel = normalizeThinkingLevel(s.thinkingLevel, capabilityInput);
+        return {
+          model,
+          modelProvider: nextProvider,
+          modelInfo: nextModelInfo,
+          thinkingLevel,
+          thinkingEnabled: isThinkingEnabled(thinkingLevel),
+          fastModeEnabled: model
+            ? s.fastModeEnabled && supportsFastMode(capabilityInput, nextProvider)
+            : false,
+        };
+      });
       void persistCurrentSelectedModel(model);
       void persistModel(get, model);
     },
@@ -826,9 +868,15 @@ export function createSessionStore(
     // -- setThinkingLevel ---------------------------------------------------
 
     setThinkingLevel(level: ThinkingLevel) {
-      set({
-        thinkingLevel: level,
-        thinkingEnabled: isThinkingEnabled(level),
+      set((state) => {
+        const normalized = normalizeThinkingLevel(
+          level,
+          state.modelInfo ?? state.model,
+        );
+        return {
+          thinkingLevel: normalized,
+          thinkingEnabled: isThinkingEnabled(normalized),
+        };
       });
     },
 
@@ -836,7 +884,10 @@ export function createSessionStore(
 
     toggleThinking() {
       set((s) => {
-        const newLevel = cycleThinkingLevel(s.thinkingLevel, s.model);
+        const newLevel = cycleThinkingLevel(
+          s.thinkingLevel,
+          s.modelInfo ?? s.model,
+        );
         return {
           thinkingEnabled: isThinkingEnabled(newLevel),
           thinkingLevel: newLevel,
@@ -848,7 +899,8 @@ export function createSessionStore(
 
     setFastModeEnabled(enabled: boolean) {
       set((s) => ({
-        fastModeEnabled: enabled && supportsFastMode(s.model, s.modelProvider),
+        fastModeEnabled:
+          enabled && supportsFastMode(s.modelInfo ?? s.model, s.modelProvider),
       }));
     },
 
@@ -856,7 +908,7 @@ export function createSessionStore(
 
     toggleFastMode() {
       set((s) => {
-        if (!supportsFastMode(s.model, s.modelProvider)) {
+        if (!supportsFastMode(s.modelInfo ?? s.model, s.modelProvider)) {
           return { fastModeEnabled: false };
         }
         return { fastModeEnabled: !s.fastModeEnabled };

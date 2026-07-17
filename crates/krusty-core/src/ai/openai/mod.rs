@@ -6,4 +6,6 @@ mod api;
 mod mapping;
 mod types;
 
-pub use api::{fetch_models, fetch_models_with_client};
+pub use api::{
+    fetch_chatgpt_models, fetch_chatgpt_models_with_client, fetch_models, fetch_models_with_client,
+};

@@ -106,9 +106,11 @@ pub fn chat_composer(
 fn thinking_border_color(level: ThinkingLevel) -> gpui::Hsla {
     match level {
         ThinkingLevel::Off => theme::hairline(),
+        ThinkingLevel::Minimal => theme::complement().opacity(0.25),
         ThinkingLevel::Low => theme::complement().opacity(0.35),
         ThinkingLevel::Medium => theme::complement().opacity(0.55),
         ThinkingLevel::High => theme::complement().opacity(0.75),
         ThinkingLevel::XHigh => theme::complement(),
+        ThinkingLevel::Max | ThinkingLevel::Ultra => theme::complement(),
     }
 }

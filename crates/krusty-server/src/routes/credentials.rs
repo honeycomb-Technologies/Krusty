@@ -101,7 +101,8 @@ async fn set_credential(
     }
 
     if krusty_core::ai::catalog::supports_dynamic_models(provider_id) {
-        spawn_dynamic_model_refresh(state.model_registry.clone(), provider_id, req.api_key);
+        let credentials = state.credential_store.read().await.clone();
+        spawn_dynamic_model_refresh(state.model_registry.clone(), provider_id, credentials);
     }
 
     let oauth_store = load_oauth_store_or_default("setting credential provider");
@@ -152,6 +153,11 @@ async fn delete_credential(
                         if let Some(reasoning) = m.reasoning {
                             model = model.with_thinking(reasoning);
                         }
+                        model.supported_reasoning_levels = m.supported_reasoning_levels.clone();
+                        model.default_reasoning_level = m.default_reasoning_level;
+                        model.reasoning_is_mandatory = m.reasoning_is_mandatory;
+                        model.reasoning_control = m.reasoning_control;
+                        model.fast_mode = m.fast_mode;
                         model.api_format = api_format;
                         model.supports_tools = provider.supports_tools;
                         model
@@ -231,10 +237,12 @@ fn load_oauth_store_or_else(
 fn spawn_dynamic_model_refresh(
     registry: krusty_core::ai::models::SharedModelRegistry,
     provider_id: ProviderId,
-    credential: String,
+    credentials: krusty_core::storage::CredentialStore,
 ) {
     tokio::spawn(async move {
-        match krusty_core::ai::catalog::fetch_dynamic_models(provider_id, &credential).await {
+        match krusty_core::ai::catalog::fetch_dynamic_models_for_store(provider_id, &credentials)
+            .await
+        {
             Ok(models) => registry.set_models(provider_id, models).await,
             Err(e) => tracing::warn!("Failed to refresh {} models: {}", provider_id, e),
         }

@@ -1070,10 +1070,28 @@ export interface ModelInfo {
 	provider: string;
 	context_window: number;
 	max_output: number;
+	/** Legacy flag retained for compatibility; prefer supported_reasoning_levels. */
 	supports_thinking: boolean;
+	supported_reasoning_levels?: ReasoningEffort[];
+	default_reasoning_level?: ReasoningEffort | null;
+	reasoning_is_mandatory?: boolean;
+	supports_fast_mode?: boolean;
+	fast_mode?: FastMode | null;
 	supports_tools: boolean;
 	supports_vision: boolean;
 }
+
+export type ReasoningEffort =
+	| "none"
+	| "minimal"
+	| "low"
+	| "medium"
+	| "high"
+	| "xhigh"
+	| "max"
+	| "ultra";
+
+export type FastMode = "priority" | "anthropic_fast";
 
 export interface ModelsResponse {
 	models: ModelInfo[];
@@ -1180,7 +1198,15 @@ export type SessionMode = "build" | "plan";
 export type SessionType = "chat" | "code" | "mako";
 export type PermissionMode = "supervised" | "autonomous";
 export type WorkspaceMode = "neutral" | "selected" | "created";
-export type ThinkingLevel = "off" | "low" | "medium" | "high" | "xhigh";
+export type ThinkingLevel =
+	| "off"
+	| "minimal"
+	| "low"
+	| "medium"
+	| "high"
+	| "xhigh"
+	| "max"
+	| "ultra";
 
 // ============================================================================
 // Report Types

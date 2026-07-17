@@ -128,12 +128,33 @@ impl ChatPanel {
             return;
         }
         self.model_index = (self.model_index + 1) % self.models.len();
-        self.session.model = self.models.get(self.model_index).map(|m| m.id.clone());
+        if let Some(model) = self.models.get(self.model_index) {
+            self.session.model = Some(model.id.clone());
+            self.session.fast_mode &= model.supports_fast_mode;
+            let levels = selectable_thinking_levels(model);
+            if !levels.contains(&self.session.thinking_level) {
+                self.session.thinking_level = model
+                    .default_reasoning_level
+                    .as_deref()
+                    .and_then(ThinkingLevel::from_api_value)
+                    .filter(|level| levels.contains(level))
+                    .unwrap_or(levels[0]);
+            }
+        }
         cx.notify();
     }
 
     pub fn cycle_thinking(&mut self, cx: &mut Context<Self>) {
-        self.session.thinking_level = self.session.thinking_level.cycle();
+        if let Some(model) = self.models.get(self.model_index) {
+            let levels = selectable_thinking_levels(model);
+            let next = levels
+                .iter()
+                .position(|level| *level == self.session.thinking_level)
+                .map_or(0, |index| (index + 1) % levels.len());
+            self.session.thinking_level = levels[next];
+        } else {
+            self.session.thinking_level = self.session.thinking_level.cycle();
+        }
         cx.notify();
     }
 
@@ -143,7 +164,15 @@ impl ChatPanel {
     }
 
     pub fn toggle_fast_mode(&mut self, cx: &mut Context<Self>) {
-        self.session.fast_mode = !self.session.fast_mode;
+        if self
+            .models
+            .get(self.model_index)
+            .is_some_and(|model| model.supports_fast_mode)
+        {
+            self.session.fast_mode = !self.session.fast_mode;
+        } else {
+            self.session.fast_mode = false;
+        }
         cx.notify();
     }
 
@@ -463,6 +492,32 @@ impl ChatPanel {
             })
             .unwrap_or_else(|| "default".to_owned())
     }
+}
+
+fn selectable_thinking_levels(model: &ModelResponse) -> Vec<ThinkingLevel> {
+    let mut levels = model
+        .supported_reasoning_levels
+        .iter()
+        .filter_map(|level| ThinkingLevel::from_api_value(level))
+        .collect::<Vec<_>>();
+    levels.dedup();
+    if levels.is_empty() {
+        return if model.supports_thinking {
+            if model.reasoning_is_mandatory {
+                vec![ThinkingLevel::Medium]
+            } else {
+                vec![ThinkingLevel::Off, ThinkingLevel::Medium]
+            }
+        } else {
+            vec![ThinkingLevel::Off]
+        };
+    }
+    if model.reasoning_is_mandatory {
+        levels.retain(|level| *level != ThinkingLevel::Off);
+    } else if !levels.contains(&ThinkingLevel::Off) {
+        levels.insert(0, ThinkingLevel::Off);
+    }
+    levels
 }
 
 impl Render for ChatPanel {

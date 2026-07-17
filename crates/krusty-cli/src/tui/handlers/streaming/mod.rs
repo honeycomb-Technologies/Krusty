@@ -306,10 +306,14 @@ impl App {
             if self.is_openai_xhigh_thinking_mode() || self.is_grok_thinking_mode() {
                 match self.runtime.thinking_level {
                     ThinkingLevel::Off => None,
+                    ThinkingLevel::Minimal => Some(CodexReasoningEffort::Minimal),
                     ThinkingLevel::Low => Some(CodexReasoningEffort::Low),
                     ThinkingLevel::Medium => Some(CodexReasoningEffort::Medium),
                     ThinkingLevel::High => Some(CodexReasoningEffort::High),
                     ThinkingLevel::XHigh => Some(CodexReasoningEffort::XHigh),
+                    ThinkingLevel::Max | ThinkingLevel::Ultra => {
+                        Some(CodexReasoningEffort::Max)
+                    }
                 }
             } else {
                 None
@@ -317,10 +321,15 @@ impl App {
         let anthropic_adaptive_effort = if self.is_anthropic_opus_thinking_mode() {
             match self.runtime.thinking_level {
                 ThinkingLevel::Off => None,
-                ThinkingLevel::Low => Some(AnthropicAdaptiveEffort::Low),
+                ThinkingLevel::Minimal | ThinkingLevel::Low => {
+                    Some(AnthropicAdaptiveEffort::Low)
+                }
                 ThinkingLevel::Medium => Some(AnthropicAdaptiveEffort::Medium),
                 ThinkingLevel::High => Some(AnthropicAdaptiveEffort::High),
-                ThinkingLevel::XHigh => Some(AnthropicAdaptiveEffort::Max),
+                ThinkingLevel::XHigh => Some(AnthropicAdaptiveEffort::XHigh),
+                ThinkingLevel::Max | ThinkingLevel::Ultra => {
+                    Some(AnthropicAdaptiveEffort::Max)
+                }
             }
         } else {
             None
@@ -346,6 +355,11 @@ impl App {
             codex_parallel_tool_calls: true,
             anthropic_adaptive_effort,
             fast_mode: self.runtime.fast_mode,
+            fast_mode_format: self
+                .services
+                .model_registry
+                .try_get_model(&self.runtime.current_model)
+                .and_then(|model| model.fast_mode),
             ..Default::default()
         };
 

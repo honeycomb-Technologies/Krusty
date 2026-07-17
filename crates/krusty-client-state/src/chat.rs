@@ -267,10 +267,12 @@ impl ChatStore {
             self.state.controls.selected_model =
                 default_model.or_else(|| self.state.models.first().map(|model| model.id.clone()));
         }
+        self.normalize_model_controls();
     }
 
     pub fn select_model(&mut self, model_id: impl Into<String>) {
         self.state.controls.selected_model = Some(model_id.into());
+        self.normalize_model_controls();
     }
 
     pub fn set_project_dir(&mut self, project_dir: Option<String>) {
@@ -344,7 +346,15 @@ impl ChatStore {
     }
 
     pub fn cycle_thinking(&mut self) {
-        self.state.controls.thinking_level = self.state.controls.thinking_level.cycle();
+        self.state.controls.thinking_level = self
+            .selected_model_info()
+            .map(|model| {
+                self.state
+                    .controls
+                    .thinking_level
+                    .cycle_for_model(model)
+            })
+            .unwrap_or_else(|| self.state.controls.thinking_level.cycle());
     }
 
     pub fn toggle_permission_mode(&mut self) {
@@ -352,7 +362,14 @@ impl ChatStore {
     }
 
     pub fn toggle_fast_mode(&mut self) {
-        self.state.controls.fast_mode = !self.state.controls.fast_mode;
+        if self
+            .selected_model_info()
+            .is_some_and(|model| model.supports_fast_mode)
+        {
+            self.state.controls.fast_mode = !self.state.controls.fast_mode;
+        } else {
+            self.state.controls.fast_mode = false;
+        }
     }
 
     pub fn toggle_work_mode(&mut self) {
@@ -361,6 +378,21 @@ impl ChatStore {
 
     pub fn toggle_research(&mut self) {
         self.state.controls.research_enabled = !self.state.controls.research_enabled;
+    }
+
+    fn selected_model_info(&self) -> Option<&ModelInfo> {
+        let selected = self.state.controls.selected_model.as_deref()?;
+        self.state.models.iter().find(|model| model.id == selected)
+    }
+
+    fn normalize_model_controls(&mut self) {
+        let Some(model) = self.selected_model_info().cloned() else {
+            self.state.controls.fast_mode = false;
+            return;
+        };
+        self.state.controls.thinking_level =
+            model.normalize_thinking_level(self.state.controls.thinking_level);
+        self.state.controls.fast_mode &= model.supports_fast_mode;
     }
 
     pub fn queue_attachment_picker(&mut self) {

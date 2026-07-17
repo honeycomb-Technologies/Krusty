@@ -295,7 +295,11 @@ fn create_ai_client_for_provider(
 }
 
 /// Initialize models in the shared registry.
-pub async fn initialize_models(registry: &SharedModelRegistry, credentials: &CredentialStore) {
+pub async fn initialize_models(
+    registry: &SharedModelRegistry,
+    credentials: &CredentialStore,
+    db_path: &Path,
+) {
     for provider in builtin_providers() {
         let models: Vec<ModelMetadata> = provider
             .models
@@ -310,6 +314,12 @@ pub async fn initialize_models(registry: &SharedModelRegistry, credentials: &Cre
                     model = model.with_thinking(reasoning);
                 }
 
+                model.supported_reasoning_levels = m.supported_reasoning_levels.clone();
+                model.default_reasoning_level = m.default_reasoning_level;
+                model.reasoning_is_mandatory = m.reasoning_is_mandatory;
+                model.reasoning_control = m.reasoning_control;
+                model.fast_mode = m.fast_mode;
+
                 model.supports_tools = provider.supports_tools;
                 model.supports_vision = inferred.supports_vision;
                 model.api_format = inferred.api_format;
@@ -320,23 +330,100 @@ pub async fn initialize_models(registry: &SharedModelRegistry, credentials: &Cre
         registry.set_models(provider.id, models).await;
     }
 
+    // Restore the last-known-good snapshot immediately; network discovery then
+    // refreshes it in the background-safe shared path below.
+    if let Ok(db) = Database::new(db_path) {
+        let preferences = Preferences::new(db);
+        for provider in krusty_core::ai::catalog::dynamic_model_providers() {
+            if let Some(models) = preferences.get_cached_models(provider) {
+                registry.set_models(provider, models).await;
+            }
+            for custom in preferences.get_custom_models(provider) {
+                registry.upsert_model(custom).await;
+            }
+        }
+    }
+
+    refresh_dynamic_model_catalogs(registry, credentials, db_path, false).await;
+}
+
+async fn refresh_dynamic_model_catalogs(
+    registry: &SharedModelRegistry,
+    credentials: &CredentialStore,
+    db_path: &Path,
+    stale_only: bool,
+) {
+    let mut refreshes = tokio::task::JoinSet::new();
+
     for provider in krusty_core::ai::catalog::dynamic_model_providers() {
-        let Some(credential) =
-            krusty_core::ai::catalog::credential_for_dynamic_models(provider, credentials)
-        else {
+        if stale_only {
+            let is_stale = Database::new(db_path)
+                .ok()
+                .map(Preferences::new)
+                .is_none_or(|preferences| preferences.is_model_cache_stale(provider));
+            if !is_stale {
+                continue;
+            }
+        }
+
+        if krusty_core::ai::catalog::credentials_for_dynamic_models(provider, credentials).is_empty()
+        {
             tracing::debug!(
-                "Skipping {:?} dynamic model refresh: no catalog API key configured",
+                "Skipping {:?} dynamic model refresh: no catalog credential configured",
                 provider
             );
             continue;
-        };
+        }
 
-        match krusty_core::ai::catalog::fetch_dynamic_models(provider, &credential).await {
+        let credentials = credentials.clone();
+        refreshes.spawn(async move {
+            (
+                provider,
+                krusty_core::ai::catalog::fetch_dynamic_models_for_store(provider, &credentials)
+                    .await,
+            )
+        });
+    }
+
+    while let Some(result) = refreshes.join_next().await {
+        let Ok((provider, result)) = result else {
+            tracing::warn!("Dynamic model refresh task failed to join");
+            continue;
+        };
+        match result {
             Ok(models) => {
                 tracing::info!("Fetched {} {:?} models", models.len(), provider);
-                registry.set_models(provider, models).await;
+                registry.set_models(provider, models.clone()).await;
+                if let Ok(db) = Database::new(db_path) {
+                    let preferences = Preferences::new(db);
+                    if let Err(error) = preferences.cache_models(provider, &models) {
+                        tracing::warn!("Failed to cache {:?} models: {}", provider, error);
+                    }
+                    for custom in preferences.get_custom_models(provider) {
+                        registry.upsert_model(custom).await;
+                    }
+                }
             }
-            Err(e) => tracing::warn!("Failed to fetch {:?} models: {}", provider, e),
+            Err(error) => tracing::warn!("Failed to fetch {:?} models: {}", provider, error),
         }
     }
+}
+
+/// Keep server-owned catalogs current without delaying request startup. The
+/// provider TTL still controls actual network work; the scheduler only checks
+/// for stale snapshots periodically.
+pub fn spawn_model_catalog_refresh(
+    registry: SharedModelRegistry,
+    credentials: std::sync::Arc<tokio::sync::RwLock<CredentialStore>>,
+    db_path: std::sync::Arc<std::path::PathBuf>,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let snapshot = credentials.read().await.clone();
+            refresh_dynamic_model_catalogs(&registry, &snapshot, db_path.as_path(), true).await;
+        }
+    });
 }

@@ -1,7 +1,9 @@
 import type {
   DelegatedRunStage,
   DelegatedToolKind,
+  ModelInfo,
   SessionType,
+  ThinkingLevel as ApiThinkingLevel,
   UsageMetrics,
   WorkspaceMode,
 } from '@krusty/api';
@@ -117,7 +119,7 @@ export type ChatRenderPart =
 
 export type SessionMode = 'build' | 'plan';
 export type PermissionMode = 'supervised' | 'autonomous';
-export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high' | 'xhigh';
+export type ThinkingLevel = ApiThinkingLevel;
 
 export interface Attachment {
   name: string;
@@ -164,6 +166,7 @@ export interface SessionStoreState {
   error: string | null;
   model: string | null;
   modelProvider: string | null;
+  modelInfo: ModelInfo | null;
 
   sendMessage: (
     content: string,
@@ -177,7 +180,11 @@ export interface SessionStoreState {
   setTitle: (title: string) => void;
   updateTitle: (sessionId: string, title: string) => Promise<void>;
   setMode: (mode: SessionMode) => void;
-  setModel: (model: string | null, provider?: string | null) => void;
+  setModel: (
+    model: string | null,
+    provider?: string | null,
+    modelInfo?: ModelInfo | null,
+  ) => void;
   setThinkingLevel: (level: ThinkingLevel) => void;
   toggleThinking: () => void;
   setFastModeEnabled: (enabled: boolean) => void;

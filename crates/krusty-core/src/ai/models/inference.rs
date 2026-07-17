@@ -49,6 +49,19 @@ pub fn infer_model_metadata(
             None
         };
     metadata.supports_thinking = metadata.reasoning_format.is_some();
+    metadata.reasoning_control = match metadata.reasoning_format {
+        Some(ReasoningFormat::OpenAI) => {
+            Some(super::super::providers::ReasoningControl::OpenAiEffort)
+        }
+        Some(ReasoningFormat::Anthropic) => {
+            Some(super::super::providers::ReasoningControl::AnthropicBudget)
+        }
+        Some(ReasoningFormat::DeepSeek) => Some(super::super::providers::ReasoningControl::Boolean),
+        None => None,
+    };
+    if provider == ProviderId::Grok && metadata.supports_thinking {
+        metadata.reasoning_control = Some(super::super::providers::ReasoningControl::OutputOnly);
+    }
     metadata.supports_tools = true;
     metadata.supports_vision = normalized.contains("gpt-4o")
         || normalized.contains("gpt-4.1")
@@ -79,6 +92,11 @@ pub fn resolve_model_metadata(
             metadata.supports_tools = true;
             metadata.reasoning_format = model.reasoning;
             metadata.supports_thinking = model.reasoning.is_some();
+            metadata.supported_reasoning_levels = model.supported_reasoning_levels.clone();
+            metadata.default_reasoning_level = model.default_reasoning_level;
+            metadata.reasoning_is_mandatory = model.reasoning_is_mandatory;
+            metadata.reasoning_control = model.reasoning_control;
+            metadata.fast_mode = model.fast_mode;
             metadata.supports_vision =
                 infer_model_metadata(provider, model_id, api_format).supports_vision;
             metadata.api_format = if provider == ProviderId::Grok

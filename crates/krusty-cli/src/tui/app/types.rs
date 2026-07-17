@@ -60,36 +60,18 @@ impl From<krusty_core::storage::WorkMode> for WorkMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThinkingLevel {
     Off,
+    Minimal,
     Low,
     Medium,
     High,
     XHigh,
+    Max,
+    Ultra,
 }
 
 impl ThinkingLevel {
     pub fn is_enabled(self) -> bool {
         !matches!(self, Self::Off)
-    }
-
-    pub fn cycle_codex(self) -> Self {
-        match self {
-            Self::Off => Self::Low,
-            Self::Low => Self::Medium,
-            Self::Medium => Self::High,
-            Self::High => Self::XHigh,
-            Self::XHigh => Self::Off,
-        }
-    }
-
-    /// Cycle for Anthropic Opus: Off -> Low -> Medium -> High -> XHigh -> Off
-    pub fn cycle_anthropic(self) -> Self {
-        match self {
-            Self::Off => Self::Low,
-            Self::Low => Self::Medium,
-            Self::Medium => Self::High,
-            Self::High => Self::XHigh,
-            Self::XHigh => Self::Off,
-        }
     }
 
     pub fn toggle_basic(self) -> Self {
@@ -103,10 +85,29 @@ impl ThinkingLevel {
     pub fn label(self) -> &'static str {
         match self {
             Self::Off => "off",
+            Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
             Self::XHigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
+        }
+    }
+
+    pub fn from_reasoning_effort(
+        effort: krusty_core::ai::providers::ReasoningEffort,
+    ) -> Self {
+        use krusty_core::ai::providers::ReasoningEffort;
+        match effort {
+            ReasoningEffort::None => Self::Off,
+            ReasoningEffort::Minimal => Self::Minimal,
+            ReasoningEffort::Low => Self::Low,
+            ReasoningEffort::Medium => Self::Medium,
+            ReasoningEffort::High => Self::High,
+            ReasoningEffort::XHigh => Self::XHigh,
+            ReasoningEffort::Max => Self::Max,
+            ReasoningEffort::Ultra => Self::Ultra,
         }
     }
 }
