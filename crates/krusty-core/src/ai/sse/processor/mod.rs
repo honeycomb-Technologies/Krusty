@@ -30,14 +30,11 @@ pub struct SseStreamProcessor {
 
 impl SseStreamProcessor {
     /// Create a new SSE stream processor.
-    pub fn new(
-        tx: mpsc::UnboundedSender<StreamPart>,
-        buffer_tx: mpsc::UnboundedSender<String>,
-    ) -> Self {
+    pub fn new(tx: mpsc::UnboundedSender<StreamPart>) -> Self {
         info!("SSE stream processor created");
         Self {
             partial_line: String::new(),
-            stream_buffer: StreamBuffer::new(buffer_tx),
+            stream_buffer: StreamBuffer::new(tx.clone()),
             tx,
             stream_start: Instant::now(),
             event_count: 0,
@@ -59,31 +56,26 @@ impl SseStreamProcessor {
     }
 
     fn emit_usage(&self, usage: Usage, source: &str) {
-        let total_input =
-            usage.prompt_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens;
+        let total_input = usage.input_tokens();
         let cache_hit_rate = if total_input > 0 {
             (usage.cache_read_input_tokens as f64 / total_input as f64) * 100.0
         } else {
             0.0
         };
 
-        if usage.cache_read_input_tokens > 0 || usage.cache_creation_input_tokens > 0 {
-            info!(
-                "SSE Usage ({}): prompt={}, completion={}, total={}, cache_read={}, cache_created={}, cache_hit_rate={:.1}%",
-                source,
-                usage.prompt_tokens,
-                usage.completion_tokens,
-                usage.total_tokens,
-                usage.cache_read_input_tokens,
-                usage.cache_creation_input_tokens,
-                cache_hit_rate
-            );
-        } else {
-            info!(
-                "SSE Usage ({}): prompt={}, completion={}, total={}",
-                source, usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
-            );
-        }
+        info!(
+            usage_source = source,
+            uncached_input_tokens = usage.prompt_tokens,
+            input_tokens = total_input,
+            output_tokens = usage.completion_tokens,
+            reasoning_tokens = usage.reasoning_tokens,
+            cache_read_input_tokens = usage.cache_read_input_tokens,
+            cache_creation_input_tokens = usage.cache_creation_input_tokens,
+            logical_total_tokens = usage.logical_total_tokens(),
+            provider_reported_total_tokens = usage.total_tokens,
+            cache_hit_rate_percent = cache_hit_rate,
+            "AI stream usage"
+        );
         self.dispatch_part(StreamPart::Usage { usage });
     }
 

@@ -70,7 +70,9 @@ pub async fn init_services(
 
     // Tool registry with hooks
     let tool_registry = init_tool_registry(&user_hook_manager).await;
-    let cached_ai_tools = tool_registry.get_ai_tools().await;
+    // Cache the complete catalog locally; request-time policy selects the
+    // compact wire surface for each turn.
+    let cached_ai_tools = tool_registry.get_ai_tools_all().await;
 
     // Preferences and theme
     let (preferences, theme_name) = init_preferences(&db_path);

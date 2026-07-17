@@ -10,6 +10,10 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  client-quality:
+    name: Client Quality Gates
+    uses: ./.github/workflows/client-quality.yml
+
   rust-check:
     name: Rust Check
     runs-on: ubuntu-latest
@@ -63,21 +67,6 @@ jobs:
           toolchain: stable
           components: rustfmt
       - run: cargo fmt --all -- --check
-
-  mobile-web-export:
-    name: Mobile Web Export
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/mobile
-    steps:
-      - uses: actions/checkout@v5
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - run: bun install --frozen-lockfile
-      - run: npx expo export --platform web
 
   desktop-linux-bundle:
     name: Desktop Linux Bundle

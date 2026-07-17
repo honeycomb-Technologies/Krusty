@@ -14,7 +14,17 @@ use anyhow::Result;
 
 use super::config::CallOptions;
 use super::core::AiClient;
-use crate::ai::types::ModelMessage;
+use crate::ai::types::{ModelMessage, Usage};
+
+/// Text and normalized provider usage from one non-streaming request.
+///
+/// Usage remains optional because some OpenAI/Anthropic-compatible gateways do
+/// not return it. The legacy text-only methods are retained as wrappers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SimpleCallResult {
+    pub text: String,
+    pub usage: Option<Usage>,
+}
 
 impl AiClient {
     /// Make a simple non-streaming API call
@@ -28,6 +38,19 @@ impl AiClient {
         user_message: &str,
         max_tokens: usize,
     ) -> Result<String> {
+        self.call_simple_with_usage(model, system_prompt, user_message, max_tokens)
+            .await
+            .map(|result| result.text)
+    }
+
+    /// Make a non-streaming API call while preserving provider usage.
+    pub async fn call_simple_with_usage(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_message: &str,
+        max_tokens: usize,
+    ) -> Result<SimpleCallResult> {
         let options = self.canonical_call_options(
             model,
             &CallOptions {
@@ -43,7 +66,13 @@ impl AiClient {
 
         if self.config().uses_chatgpt_codex_format() {
             return self
-                .call_simple_chatgpt_codex(model, &system_prompt, user_message)
+                .call_simple_chatgpt_codex(
+                    model,
+                    &system_prompt,
+                    user_message,
+                    max_tokens,
+                    &options,
+                )
                 .await;
         }
 
@@ -59,7 +88,7 @@ impl AiClient {
                 .await;
         }
 
-        self.call_simple_anthropic(model, &system_prompt, user_message, max_tokens)
+        self.call_simple_anthropic(model, &system_prompt, user_message, max_tokens, &options)
             .await
     }
 
@@ -81,6 +110,26 @@ impl AiClient {
         appended_user_message: &str,
         max_tokens: usize,
     ) -> Result<String> {
+        self.call_with_conversation_with_usage(
+            model,
+            base_system_prompt,
+            conversation,
+            appended_user_message,
+            max_tokens,
+        )
+        .await
+        .map(|result| result.text)
+    }
+
+    /// Cache-safe conversation call that also preserves provider usage.
+    pub async fn call_with_conversation_with_usage(
+        &self,
+        model: &str,
+        base_system_prompt: &str,
+        conversation: &[ModelMessage],
+        appended_user_message: &str,
+        max_tokens: usize,
+    ) -> Result<SimpleCallResult> {
         let options = self.canonical_call_options(
             model,
             &CallOptions {
@@ -93,13 +142,16 @@ impl AiClient {
 
         if self.config().uses_chatgpt_codex_format() {
             return self
-                .call_simple_chatgpt_codex(
+                .call_conversation_chatgpt_codex(
                     model,
                     options
                         .system_prompt
                         .as_deref()
                         .unwrap_or(base_system_prompt),
+                    conversation,
                     appended_user_message,
+                    max_tokens,
+                    &options,
                 )
                 .await;
         }
@@ -143,6 +195,7 @@ impl AiClient {
             conversation,
             appended_user_message,
             max_tokens,
+            &options,
         )
         .await
     }

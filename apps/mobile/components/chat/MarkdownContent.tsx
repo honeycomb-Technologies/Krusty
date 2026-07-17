@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import { Image, StyleSheet, Text, View, Pressable, Linking } from 'react-native';
+import { Image, StyleSheet, Text, View, Pressable, Linking, ScrollView } from 'react-native';
 import Markdown from '@ronradtke/react-native-markdown-display';
 import * as Clipboard from '../../platform/clipboard';
 import * as Haptics from '../../platform/haptics';
@@ -17,6 +17,7 @@ export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
   const t = theme.colors;
   const [previewImage, setPreviewImage] = useState<{ uri: string; title?: string } | null>(null);
   const [hoveredImageKey, setHoveredImageKey] = useState<unknown>(null);
+  const [copiedCodeKey, setCopiedCodeKey] = useState<unknown>(null);
 
   const handleLink = useCallback((url: string) => {
     Linking.openURL(url);
@@ -24,6 +25,71 @@ export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
   }, []);
 
   const styles = getStyles(t, isUser);
+  const isDark = theme.scheme === 'dark';
+
+  const renderCodeBlock = (node: any, language = '') => {
+    const code = stripTrailingCodeNewline(node?.content);
+    const copied = copiedCodeKey === node.key;
+
+    return (
+      <View
+        key={node.key}
+        style={[
+          codeBlockStyles.container,
+          {
+            backgroundColor: isDark ? '#090d12' : '#f3f5f7',
+            borderColor: t.border,
+          },
+        ]}
+      >
+        <View
+          style={[
+            codeBlockStyles.header,
+            {
+              backgroundColor: isDark ? 'rgba(255,255,255,0.035)' : 'rgba(0,0,0,0.025)',
+              borderBottomColor: t.border,
+            },
+          ]}
+        >
+          <Text style={[codeBlockStyles.lang, { color: t.mutedForeground }]}>
+            {language || 'code'}
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={copied ? 'Code copied' : 'Copy code'}
+            onPress={() => {
+              Clipboard.setStringAsync(code);
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              setCopiedCodeKey(node.key);
+              setTimeout(() => setCopiedCodeKey(null), 1200);
+            }}
+            hitSlop={8}
+            style={({ pressed }) => [
+              codeBlockStyles.copyButton,
+              pressed && codeBlockStyles.copyButtonPressed,
+            ]}
+          >
+            <Copy size={13} color={t.mutedForeground} strokeWidth={1.5} />
+            <Text style={[codeBlockStyles.copyLabel, { color: t.mutedForeground }]}>
+              {copied ? 'Copied' : 'Copy'}
+            </Text>
+          </Pressable>
+        </View>
+        <ScrollView
+          horizontal
+          directionalLockEnabled
+          nestedScrollEnabled
+          showsHorizontalScrollIndicator
+          contentContainerStyle={codeBlockStyles.scrollContent}
+          accessibilityLabel={`${language || 'Code'} block`}
+        >
+          <Text style={[codeBlockStyles.code, { color: t.foreground }]} selectable>
+            {code}
+          </Text>
+        </ScrollView>
+      </View>
+    );
+  };
 
   return (
     <>
@@ -63,29 +129,8 @@ export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
             </Pressable>
           );
         },
-        fence: (node, _children, _parent, markdownStyles) => {
-          const lang = node.sourceInfo || '';
-          const code = node.content || '';
-          return (
-            <View key={node.key} style={codeBlockStyles.container}>
-              <View style={codeBlockStyles.header}>
-                <Text style={[codeBlockStyles.lang, { color: t.mutedForeground }]}>{lang || 'code'}</Text>
-                <Pressable
-                  onPress={() => {
-                    Clipboard.setStringAsync(code);
-                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  }}
-                  hitSlop={8}
-                >
-                  <Copy size={14} color={t.mutedForeground} strokeWidth={1.5} />
-                </Pressable>
-              </View>
-              <Text style={[codeBlockStyles.code, { color: t.foreground }]} selectable>
-                {code}
-              </Text>
-            </View>
-          );
-        },
+        fence: (node) => renderCodeBlock(node, node.sourceInfo || ''),
+        code_block: (node) => renderCodeBlock(node),
         code_inline: (node, _children, _parent, _styles) => (
           <Text
             key={node.key}
@@ -128,6 +173,11 @@ function getMarkdownImageTitle(node: any): string | undefined {
   return typeof title === 'string' && title.trim() ? title.trim() : undefined;
 }
 
+function stripTrailingCodeNewline(content: unknown): string {
+  if (typeof content !== 'string') return '';
+  return content.endsWith('\n') ? content.slice(0, -1) : content;
+}
+
 function getStyles(t: any, isUser?: boolean) {
   const textColor = isUser ? '#fff' : t.foreground;
   const mutedColor = isUser ? 'rgba(255,255,255,0.7)' : t.mutedForeground;
@@ -144,11 +194,29 @@ function getStyles(t: any, isUser?: boolean) {
     s: { textDecorationLine: 'line-through' },
     link: { color: t.userMessage, textDecorationLine: 'underline' },
     blockquote: {
+      backgroundColor: 'transparent',
+      borderColor: 'transparent',
       borderLeftWidth: 3,
       borderLeftColor: t.userMessage + '60',
       paddingLeft: 12,
+      paddingHorizontal: 0,
+      marginLeft: 0,
       marginVertical: 6,
       opacity: 0.85,
+    },
+    code_block: {
+      color: textColor,
+      backgroundColor: 'transparent',
+      borderColor: 'transparent',
+      borderWidth: 0,
+      padding: 0,
+    },
+    fence: {
+      color: textColor,
+      backgroundColor: 'transparent',
+      borderColor: 'transparent',
+      borderWidth: 0,
+      padding: 0,
     },
     bullet_list: { marginVertical: 2 },
     ordered_list: { marginVertical: 2 },
@@ -166,12 +234,10 @@ function getStyles(t: any, isUser?: boolean) {
 
 const codeBlockStyles = StyleSheet.create({
   container: {
-    backgroundColor: 'rgba(0,0,0,0.3)',
     borderRadius: 10,
     marginVertical: 6,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(255,255,255,0.08)',
   },
   header: {
     flexDirection: 'row',
@@ -180,7 +246,6 @@ const codeBlockStyles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: 'rgba(255,255,255,0.06)',
   },
   lang: {
     fontSize: 11,
@@ -188,11 +253,30 @@ const codeBlockStyles = StyleSheet.create({
     fontWeight: '500',
     textTransform: 'uppercase',
   },
+  copyButton: {
+    minHeight: 28,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 6,
+    marginVertical: -4,
+    borderRadius: 6,
+  },
+  copyButtonPressed: {
+    opacity: 0.62,
+  },
+  copyLabel: {
+    fontSize: 11,
+    fontWeight: '500',
+  },
+  scrollContent: {
+    minWidth: '100%',
+    padding: 12,
+  },
   code: {
     fontFamily: 'Courier',
     fontSize: 13,
     lineHeight: 19,
-    padding: 12,
   },
 });
 

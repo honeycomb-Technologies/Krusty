@@ -74,6 +74,7 @@ fn test_grok_config() {
     );
     assert_eq!(provider.auth_header, AuthHeader::Bearer);
     assert_eq!(provider.default_model(), "grok-build");
+    assert!(provider.has_model("grok-4.5"));
     assert!(provider.has_model("grok-composer-2.5-fast"));
     assert!(provider
         .models

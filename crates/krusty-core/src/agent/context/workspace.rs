@@ -38,6 +38,15 @@ pub(super) fn build_workspace_context(working_dir: &Path, project_dir: Option<&P
     let execution_dir = working_dir.display();
 
     if let Some(project_dir) = project_dir {
+        let broad_root_guidance = dirs::home_dir()
+            .filter(|home| home == project_dir)
+            .map(|_| {
+                "\n- This selected directory is the user's broad home directory, not a detected repository\n\
+                 - Do not recursively scan it or search generated/cache directories\n\
+                 - If the user refers ambiguously to 'this project', do not call any discovery tool: explain that no specific project is selected and ask which folder they mean\n\
+                 - Only inspect immediate children with the list tool when the user explicitly asks you to enumerate or locate projects; never list the same directory twice in one turn"
+            })
+            .unwrap_or_default();
         return format!(
             "[WORKSPACE MODE: PROJECT]\n\n\
              Execution directory: {}\n\
@@ -45,9 +54,10 @@ pub(super) fn build_workspace_context(working_dir: &Path, project_dir: Option<&P
              - Treat the project directory above as the canonical repository root for this session\n\
              - Use the workspace for orientation, not as an assumed filesystem security boundary\n\
              - Prefer absolute paths rooted in that project directory when referring to files\n\
-             - Do not invent alternate workspace roots or mirror paths if tools already revealed the real filesystem layout",
+             - Do not invent alternate workspace roots or mirror paths if tools already revealed the real filesystem layout{}",
             execution_dir,
-            project_dir.display()
+            project_dir.display(),
+            broad_root_guidance
         );
     }
 
@@ -216,4 +226,21 @@ pub(super) fn build_environment_context(working_dir: &Path, model_id: Option<&st
     }
 
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod workspace_context_tests {
+    use super::build_workspace_context;
+
+    #[test]
+    fn selected_home_directory_warns_against_recursive_scans() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let context = build_workspace_context(&home, Some(&home));
+        assert!(context.contains("broad home directory"));
+        assert!(context.contains("Do not recursively scan it"));
+        assert!(context.contains("do not call any discovery tool"));
+        assert!(context.contains("never list the same directory twice"));
+    }
 }

@@ -5,7 +5,7 @@ use tracing::{debug, info};
 
 use super::super::config::CallOptions;
 use super::super::core::AiClient;
-use super::shared::{ensure_success_stream_response, log_system_prompt_layers, start_sse_stream};
+use super::shared::{ensure_success_stream_response, log_request_metrics, start_sse_stream};
 use crate::ai::format::google::GoogleFormat;
 use crate::ai::format::FormatHandler;
 use crate::ai::parsers::GoogleParser;
@@ -30,11 +30,6 @@ impl AiClient {
             &messages,
             options.system_prompt.as_deref(),
             options.tools.as_deref(),
-        );
-        log_system_prompt_layers(
-            "google_stream",
-            &prompt_sections,
-            options.system_prompt.is_some(),
         );
         let system_instruction = prompt_sections.combined();
 
@@ -71,6 +66,16 @@ impl AiClient {
             self.provider_id(),
             self.config().api_format,
             &self.config().model,
+        );
+        log_request_metrics(
+            "google_stream",
+            &prompt_sections,
+            &messages,
+            options.tools.as_deref(),
+            options.system_prompt.is_some(),
+            "implicit",
+            false,
+            serde_json::to_vec(&body).map_or(0, |value| value.len()),
         );
 
         debug!("Google request to: {}", self.config().api_url());

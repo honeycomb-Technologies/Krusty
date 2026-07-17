@@ -74,9 +74,9 @@ The classifier works in two stages:
 
 First, it checks an allowlist of inherently safe tools -- read, grep, glob, list, memory, and others that cannot modify the system. If the tool is on the list, it passes immediately without any AI call.
 
-For everything else, the classifier makes a fast AI call (stage 1) with a small token budget (64 tokens) asking a safety-focused model whether the tool call should be ALLOWED or BLOCKED. The prompt includes specific rules: file edits within the project are fine, test runs are fine, git operations are fine, but system modifications, privilege escalation, unknown network requests, and force-pushes are blocked. If stage 1 returns ALLOW, the tool proceeds. If stage 1 returns BLOCK or is ambiguous, the classifier escalates to stage 2.
+Deterministic local policy handles ordinary reads, in-workspace edit tools, common project build/test commands, and delegated calls that inherit the parent's governance contract. Obvious unsafe payloads are blocked locally. Only an operation that remains ambiguous after those checks invokes the fast AI classifier (stage 1) with a 64-token budget.
 
-Stage 2 uses a larger token budget (4096 tokens) to give the model room to reason about edge cases. If stage 2 says ALLOW, it proceeds. If BLOCK, the tool call is rejected with a reason. If the response is ambiguous or the call fails, it defaults to deny -- the safe default in autonomous operation.
+Stage 2 uses a larger token budget (4096 tokens) only after an ambiguous or blocking stage-1 verdict. If stage 2 says ALLOW, the operation proceeds. If it says BLOCK, remains ambiguous, or fails, the operation defaults to deny.
 
 Every decision is emitted as a `ClassifierDecision` event with the tool name, the verdict, the reason, and which stage made the call. This provides a full audit trail.
 

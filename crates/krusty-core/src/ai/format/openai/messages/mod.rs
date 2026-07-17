@@ -119,14 +119,9 @@ impl OpenAIFormat {
                                 }
                             }));
                         }
-                        Content::Thinking { thinking, .. } if !thinking.is_empty() => {
-                            if !text_content.is_empty() {
-                                text_content.push_str("\n\n");
-                            }
-                            text_content.push_str("[Thinking]\n");
-                            text_content.push_str(thinking);
-                            text_content.push_str("\n[/Thinking]\n\n");
-                        }
+                        // Persisted reasoning is not portable OpenAI assistant text. Keep it in
+                        // canonical history, but do not replay it as visible model-facing content.
+                        Content::Thinking { .. } | Content::RedactedThinking { .. } => {}
                         _ => {}
                     }
                 }
@@ -168,13 +163,9 @@ impl OpenAIFormat {
                             user_parts.push(parts::user_text_part(self, text));
                         }
                     }
-                    Content::Thinking { thinking, .. } if !thinking.is_empty() => {
-                        let formatted = format!("[Thinking]\n{}\n[/Thinking]", thinking);
-                        text_parts.push(formatted.clone());
-                        if role == "user" {
-                            user_parts.push(parts::user_text_part(self, &formatted));
-                        }
-                    }
+                    // OpenAI-compatible APIs do not accept our durable thinking blocks. In
+                    // particular, never flatten them into assistant plaintext for later turns.
+                    Content::Thinking { .. } | Content::RedactedThinking { .. } => {}
                     Content::Image { image, detail } if role == "user" => {
                         if let Some(part) = parts::user_image_part(self, image, detail.as_deref()) {
                             user_parts.push(part);

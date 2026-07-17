@@ -25,6 +25,8 @@ use crate::tools::matching;
 use crate::tools::registry::Tool;
 use crate::tools::{parse_params, ToolContext, ToolResult};
 
+use super::mutation_diagnostics::collect_mutation_warnings;
+
 pub struct ApplyPatchTool;
 
 #[derive(Deserialize)]
@@ -58,14 +60,14 @@ impl Tool for ApplyPatchTool {
     }
 
     fn description(&self) -> &str {
-        "Apply a multi-file patch. Supports Update/Add/Delete operations with fuzzy line matching. Use the standard patch format with '*** Begin Patch' and '*** End Patch' markers."
+        "Apply a multi-file patch. Supports Update/Add/Delete operations with fuzzy line matching. Standard '*** Begin Patch' and '*** End Patch' envelopes are preferred; duplicated trailing delimiter stars are normalized for provider compatibility. Empty or no-op updates are rejected."
     }
 
     fn prompt(&self) -> Option<&str> {
         Some(
             r#"Use for coordinated multi-file changes when you have a complete patch.
 
-Wrap content in *** Begin Patch / *** End Patch. Operations: *** Update File, *** Add File, *** Delete File. Use -, +, and space-prefixed lines for removals, additions, and context.
+Wrap content in exact *** Begin Patch / *** End Patch lines with no trailing characters. Operations: *** Update File, *** Add File, *** Delete File. Read pre-existing Update/Delete targets first; files created or changed by file tools this run need no re-read. Use -, +, and space-prefixed lines for removals, additions, and context. Every Update File operation must add or remove at least one line.
 
 Prefer edit/multiedit for targeted 1-2 file changes."#,
         )
@@ -91,15 +93,10 @@ Prefer edit/multiedit for targeted 1-2 file changes."#,
             Err(e) => return e,
         };
 
-        let ops = parse_patch(&params.patch);
-
-        if ops.is_empty() {
-            return ToolResult::error_with_code(
-                "invalid_patch",
-                "No operations found in patch. Ensure it uses '*** Begin Patch' / '*** End Patch' format."
-                    .to_string(),
-            );
-        }
+        let ops = match parse_patch(&params.patch) {
+            Ok(ops) => ops,
+            Err(error) => return ToolResult::error_with_code("invalid_patch", error),
+        };
 
         let mut files_modified = Vec::new();
         let mut files_created = Vec::new();
@@ -144,33 +141,44 @@ Prefer edit/multiedit for targeted 1-2 file changes."#,
             files_deleted.len()
         );
 
-        ToolResult::success_data(json!({
-            "message": msg,
-            "files_modified": files_modified,
-            "files_created": files_created,
-            "files_deleted": files_deleted,
-        }))
+        let diagnostic_paths = files_modified
+            .iter()
+            .chain(files_created.iter())
+            .filter_map(|path| ctx.sandboxed_resolve(path).ok())
+            .collect::<Vec<_>>();
+        let warnings = collect_mutation_warnings(&diagnostic_paths, &ctx.working_dir).await;
+
+        ToolResult::success_data_with(
+            json!({
+                "message": msg,
+                "files_modified": files_modified,
+                "files_created": files_created,
+                "files_deleted": files_deleted,
+            }),
+            warnings,
+            None,
+            None,
+        )
     }
 }
 
-fn parse_patch(patch: &str) -> Vec<PatchOp> {
-    let lines: Vec<&str> = patch.lines().collect();
+fn parse_patch(patch: &str) -> Result<Vec<PatchOp>, String> {
+    let lines: Vec<&str> = patch.trim().lines().collect();
+    if !lines
+        .first()
+        .is_some_and(|line| is_patch_envelope(line, "*** Begin Patch"))
+        || !lines
+            .last()
+            .is_some_and(|line| is_patch_envelope(line, "*** End Patch"))
+    {
+        return Err(
+            "Patch must start with exactly '*** Begin Patch' and end with exactly '*** End Patch'"
+                .to_string(),
+        );
+    }
+
     let mut ops = Vec::new();
-    let mut i = 0;
-
-    // Skip to "*** Begin Patch" if present
-    while i < lines.len() {
-        if lines[i].trim() == "*** Begin Patch" {
-            i += 1;
-            break;
-        }
-        i += 1;
-    }
-
-    // If no "Begin Patch" marker, start from beginning
-    if i >= lines.len() {
-        i = 0;
-    }
+    let mut i = 1;
 
     while i < lines.len() {
         let line = lines[i].trim();
@@ -226,6 +234,17 @@ fn parse_patch(patch: &str) -> Vec<PatchOp> {
                 });
             }
 
+            let has_change = chunks.iter().any(|chunk| {
+                chunk
+                    .context
+                    .iter()
+                    .any(|line| matches!(line, ChunkLine::Remove(_) | ChunkLine::Add(_)))
+            });
+            if !has_change {
+                return Err(format!(
+                    "Update File operation for '{path}' contains no added or removed lines"
+                ));
+            }
             ops.push(PatchOp::Update { path, chunks });
         } else if let Some(path) = line.strip_prefix("*** Add File: ") {
             let path = path.trim().to_string();
@@ -258,7 +277,19 @@ fn parse_patch(patch: &str) -> Vec<PatchOp> {
         }
     }
 
-    ops
+    if ops.is_empty() {
+        return Err("No Add, Update, or Delete operations found in patch".to_string());
+    }
+
+    Ok(ops)
+}
+
+fn is_patch_envelope(line: &str, expected: &str) -> bool {
+    let line = line.trim();
+    line == expected
+        || line
+            .strip_suffix(" ***")
+            .is_some_and(|line| line == expected)
 }
 
 async fn apply_update(path: &str, chunks: &[Chunk], ctx: &ToolContext) -> Result<(), String> {
@@ -337,9 +368,62 @@ async fn apply_update(path: &str, chunks: &[Chunk], ctx: &ToolContext) -> Result
         new_content
     };
 
+    if final_content == content {
+        return Err("Patch produced no file changes".to_string());
+    }
+
     fs::write(&resolved, &final_content)
         .await
         .map_err(|e| format!("Failed to write: {}", e))?;
+    ctx.record_file_observation(resolved);
+
+    Ok(())
+}
+
+async fn apply_add(path: &str, content: &str, ctx: &ToolContext) -> Result<(), String> {
+    let resolved = ctx
+        .sandboxed_resolve_new_path(path)
+        .map_err(|e| format!("Path error: {}", e))?;
+
+    if resolved.exists() {
+        return Err(
+            "Add File target already exists; read it and use Update File to modify it".to_string(),
+        );
+    }
+
+    // Create parent directories
+    if let Some(parent) = resolved.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("Failed to create directories: {}", e))?;
+    }
+
+    fs::write(&resolved, content)
+        .await
+        .map_err(|e| format!("Failed to write new file: {}", e))?;
+    if let Err(error) = ctx.record_file_mutation(&resolved) {
+        tracing::warn!(
+            path = %resolved.display(),
+            error,
+            "Added file but could not record its observation"
+        );
+    }
+
+    Ok(())
+}
+
+async fn apply_delete(path: &str, ctx: &ToolContext) -> Result<(), String> {
+    let resolved = ctx
+        .sandboxed_resolve(path)
+        .map_err(|e| format!("Path error: {}", e))?;
+    let resolved = ctx
+        .require_file_observation(&resolved)
+        .map_err(|e| format!("Read-before-patch error: {}", e))?;
+
+    fs::remove_file(&resolved)
+        .await
+        .map_err(|e| format!("Failed to delete: {}", e))?;
+    ctx.forget_file_observation(&resolved);
 
     Ok(())
 }
@@ -425,6 +509,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_then_update_needs_no_redundant_read() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should create");
+        let file_path = temp_dir.path().join("sample.txt");
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+
+        let added = ApplyPatchTool
+            .execute(json!({ "patch": add_patch(&file_path) }), &ctx)
+            .await;
+        assert!(!added.is_error, "unexpected add error: {}", added.output);
+
+        let updated = ApplyPatchTool
+            .execute(
+                json!({
+                    "patch": format!(
+                        "*** Begin Patch\n*** Update File: {}\n-created\n+updated\n*** End Patch",
+                        file_path.display()
+                    )
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(
+            !updated.is_error,
+            "unexpected update error: {}",
+            updated.output
+        );
+        assert_eq!(
+            fs::read_to_string(&file_path)
+                .await
+                .expect("updated file should read"),
+            "updated"
+        );
+    }
+
+    #[tokio::test]
     async fn delete_file_requires_prior_observation() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir should create");
         let file_path = temp_dir.path().join("delete.txt");
@@ -442,6 +565,43 @@ mod tests {
 
         assert!(result.is_error);
         assert!(file_path.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_invalidates_observation_for_a_recreated_path() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should create");
+        let file_path = temp_dir.path().join("delete.txt");
+        fs::write(&file_path, "old\n")
+            .await
+            .expect("test file should write");
+        let canonical = file_path
+            .canonicalize()
+            .expect("test file should canonicalize");
+        let ctx = ToolContext {
+            working_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        ctx.record_file_observation(canonical.clone());
+
+        let deleted = ApplyPatchTool
+            .execute(json!({ "patch": delete_patch(&file_path) }), &ctx)
+            .await;
+        assert!(
+            !deleted.is_error,
+            "unexpected delete error: {}",
+            deleted.output
+        );
+        assert!(!ctx.has_file_observation(&canonical));
+
+        fs::write(&file_path, "old\n")
+            .await
+            .expect("external recreation should write");
+        let update = ApplyPatchTool
+            .execute(json!({ "patch": update_patch(&file_path) }), &ctx)
+            .await;
+
+        assert!(update.is_error);
+        assert!(update.output.contains("Read-before-patch error"));
     }
 
     #[tokio::test]
@@ -471,44 +631,34 @@ mod tests {
             .expect("existing file should read");
         assert_eq!(content, "existing\n");
     }
-}
 
-async fn apply_add(path: &str, content: &str, ctx: &ToolContext) -> Result<(), String> {
-    let resolved = ctx
-        .sandboxed_resolve_new_path(path)
-        .map_err(|e| format!("Path error: {}", e))?;
-
-    if resolved.exists() {
-        return Err(
-            "Add File target already exists; read it and use Update File to modify it".to_string(),
-        );
+    #[test]
+    fn parser_normalizes_duplicated_envelope_markers() {
+        let provider_variant =
+            "*** Begin Patch ***\n*** Add File: sample.txt\n+hello\n*** End Patch ***";
+        assert!(parse_patch(provider_variant).is_ok());
     }
 
-    // Create parent directories
-    if let Some(parent) = resolved.parent() {
-        fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("Failed to create directories: {}", e))?;
+    #[test]
+    fn parser_rejects_unrelated_envelope_text() {
+        let malformed = "BEGIN PATCH\n*** Add File: sample.txt\n+hello\nEND PATCH";
+        assert!(parse_patch(malformed).is_err());
     }
 
-    fs::write(&resolved, content)
-        .await
-        .map_err(|e| format!("Failed to write new file: {}", e))?;
+    #[test]
+    fn parser_rejects_context_only_update_as_a_false_success() {
+        let no_op = "*** Begin Patch\n*** Update File: sample.txt\n unchanged\n*** End Patch";
+        assert!(parse_patch(no_op).is_err());
+    }
 
-    Ok(())
-}
-
-async fn apply_delete(path: &str, ctx: &ToolContext) -> Result<(), String> {
-    let resolved = ctx
-        .sandboxed_resolve(path)
-        .map_err(|e| format!("Path error: {}", e))?;
-    let resolved = ctx
-        .require_file_observation(&resolved)
-        .map_err(|e| format!("Read-before-patch error: {}", e))?;
-
-    fs::remove_file(&resolved)
-        .await
-        .map_err(|e| format!("Failed to delete: {}", e))?;
-
-    Ok(())
+    #[test]
+    fn parser_preserves_every_line_in_a_multiline_update() {
+        let patch = "*** Begin Patch\n*** Update File: sample.txt\n-old one\n-old two\n+new one\n+new two\n*** End Patch";
+        let ops = parse_patch(patch).expect("valid patch should parse");
+        let PatchOp::Update { chunks, .. } = &ops[0] else {
+            panic!("expected update operation");
+        };
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].context.len(), 4);
+    }
 }

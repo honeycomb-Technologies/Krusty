@@ -22,6 +22,7 @@ mod types;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Semaphore};
+use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 use tracing::{info, warn};
 
@@ -128,7 +129,10 @@ impl SubAgentPool {
         );
 
         let semaphore = Arc::new(Semaphore::new(self.max_concurrency));
-        let mut handles = Vec::with_capacity(task_count);
+        // JoinSet aborts every still-running child when this foreground pool
+        // future is dropped (for example by LoopInput::Cancel). Plain detached
+        // JoinHandles would allow delegated work to keep mutating afterward.
+        let mut task_set = JoinSet::new();
 
         for (idx, task) in tasks.into_iter().enumerate() {
             if idx > 0 && !stagger.is_zero() {
@@ -144,12 +148,12 @@ impl SubAgentPool {
             let task_id = task.id.clone();
             let progress_tx = progress_tx.clone();
 
-            let handle = tokio::spawn(async move {
+            task_set.spawn(async move {
                 let _permit = match timeout(SEMAPHORE_TIMEOUT, sem.acquire()).await {
                     Ok(Ok(p)) => p,
                     Ok(Err(e)) => {
                         warn!(task_id = %task_id, error = %e, "Explorer: Failed to acquire semaphore");
-                        return SubAgentResult {
+                        return (idx, SubAgentResult {
                             task_id,
                             agent_name: task.name.clone(),
                             delegated_run_id: task.delegated_run_id.clone(),
@@ -160,11 +164,11 @@ impl SubAgentPool {
                             turns_used: 0,
                             error: Some(format!("Semaphore error: {}", e)),
                             policy_violations: vec![],
-                        };
+                        });
                     }
                     Err(_) => {
                         warn!(task_id = %task_id, "Explorer: Semaphore acquire timed out");
-                        return SubAgentResult {
+                        return (idx, SubAgentResult {
                             task_id,
                             agent_name: task.name.clone(),
                             delegated_run_id: task.delegated_run_id.clone(),
@@ -178,12 +182,12 @@ impl SubAgentPool {
                                 SEMAPHORE_TIMEOUT
                             )),
                             policy_violations: vec![],
-                        };
+                        });
                     }
                 };
 
                 if cancel.is_cancelled() {
-                    return SubAgentResult {
+                    return (idx, SubAgentResult {
                         task_id,
                         agent_name: task.name.clone(),
                         delegated_run_id: task.delegated_run_id.clone(),
@@ -194,10 +198,10 @@ impl SubAgentPool {
                         turns_used: 0,
                         error: Some("Cancelled".to_string()),
                         policy_violations: vec![],
-                    };
+                    });
                 }
 
-                execute_single_explorer(
+                let result = execute_single_explorer(
                     client,
                     task,
                     registry,
@@ -207,19 +211,19 @@ impl SubAgentPool {
                     cancel,
                     Some(progress_tx),
                 )
-                .await
+                .await;
+                (idx, result)
             });
-
-            handles.push(handle);
         }
 
-        let mut results = Vec::with_capacity(handles.len());
-        for handle in handles {
-            match handle.await {
-                Ok(result) => results.push(result),
+        let mut indexed_results = Vec::with_capacity(task_count);
+        let mut join_failures = Vec::new();
+        while let Some(joined) = task_set.join_next().await {
+            match joined {
+                Ok(result) => indexed_results.push(result),
                 Err(e) => {
                     warn!("Explorer task panicked: {}", e);
-                    results.push(SubAgentResult {
+                    join_failures.push(SubAgentResult {
                         task_id: "unknown".to_string(),
                         agent_name: "unknown".to_string(),
                         delegated_run_id: None,
@@ -234,6 +238,12 @@ impl SubAgentPool {
                 }
             }
         }
+        indexed_results.sort_by_key(|(index, _)| *index);
+        let mut results = indexed_results
+            .into_iter()
+            .map(|(_, result)| result)
+            .collect::<Vec<_>>();
+        results.extend(join_failures);
 
         info!(
             "SubAgentPool: All explorers complete, {} results",
@@ -262,8 +272,10 @@ impl SubAgentPool {
             "SubAgentPool: Spawning builder agents with stagger"
         );
 
-        // Spawn tasks with staggered delays
-        let mut handles = Vec::with_capacity(task_count);
+        // Per-invocation ownership is the cancellation boundary: dropping this
+        // foreground pool aborts its builders without touching another session's
+        // independently-owned JoinSet. Background pools keep owning their set.
+        let mut task_set = JoinSet::new();
 
         for (idx, task) in tasks.into_iter().enumerate() {
             // Stagger delay between spawns (skip first)
@@ -279,12 +291,12 @@ impl SubAgentPool {
             let progress_tx = progress_tx.clone();
             let resolved_model = self.resolve_model();
 
-            let handle = tokio::spawn(async move {
+            task_set.spawn(async move {
                 let _permit = match timeout(SEMAPHORE_TIMEOUT, sem.acquire()).await {
                     Ok(Ok(p)) => p,
                     Ok(Err(e)) => {
                         warn!(task_id = %task_id, error = %e, "Builder: Failed to acquire semaphore");
-                        return SubAgentResult {
+                        return (idx, SubAgentResult {
                             task_id,
                             agent_name: task.name.clone(),
                             delegated_run_id: task.delegated_run_id.clone(),
@@ -295,11 +307,11 @@ impl SubAgentPool {
                             turns_used: 0,
                             error: Some(format!("Semaphore error: {}", e)),
                             policy_violations: vec![],
-                        };
+                        });
                     }
                     Err(_) => {
                         warn!(task_id = %task_id, "Builder: Semaphore acquire timed out after {:?}", SEMAPHORE_TIMEOUT);
-                        return SubAgentResult {
+                        return (idx, SubAgentResult {
                             task_id,
                             agent_name: task.name.clone(),
                             delegated_run_id: task.delegated_run_id.clone(),
@@ -313,12 +325,12 @@ impl SubAgentPool {
                                 SEMAPHORE_TIMEOUT
                             )),
                             policy_violations: vec![],
-                        };
+                        });
                     }
                 };
 
                 if cancel.is_cancelled() {
-                    return SubAgentResult {
+                    return (idx, SubAgentResult {
                         task_id,
                         agent_name: task.name.clone(),
                         delegated_run_id: task.delegated_run_id.clone(),
@@ -329,10 +341,10 @@ impl SubAgentPool {
                         turns_used: 0,
                         error: Some("Cancelled".to_string()),
                         policy_violations: vec![],
-                    };
+                    });
                 }
 
-                execute_builder_with_progress(
+                let result = execute_builder_with_progress(
                     &client,
                     task,
                     &resolved_model,
@@ -340,20 +352,21 @@ impl SubAgentPool {
                     context,
                     progress_tx,
                 )
-                .await
+                .await;
+                (idx, result)
             });
-
-            handles.push(handle);
         }
 
-        // Collect results
-        let mut results = Vec::with_capacity(handles.len());
-        for handle in handles {
-            match handle.await {
-                Ok(result) => results.push(result),
+        // Collect results in input order even though JoinSet completes them in
+        // readiness order, preserving the existing public result contract.
+        let mut indexed_results = Vec::with_capacity(task_count);
+        let mut join_failures = Vec::new();
+        while let Some(joined) = task_set.join_next().await {
+            match joined {
+                Ok(result) => indexed_results.push(result),
                 Err(e) => {
                     warn!("Builder task panicked: {}", e);
-                    results.push(SubAgentResult {
+                    join_failures.push(SubAgentResult {
                         task_id: "unknown".to_string(),
                         agent_name: "unknown".to_string(),
                         delegated_run_id: None,
@@ -368,9 +381,68 @@ impl SubAgentPool {
                 }
             }
         }
+        indexed_results.sort_by_key(|(index, _)| *index);
+        let mut results = indexed_results
+            .into_iter()
+            .map(|(_, result)| result)
+            .collect::<Vec<_>>();
+        results.extend(join_failures);
 
         let stats = context.stats();
         info!("SubAgentPool: Builders complete | {}", stats);
         results
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use std::time::Duration;
+
+    use tokio::task::JoinSet;
+
+    #[tokio::test]
+    async fn dropping_foreground_task_set_stops_delayed_write_without_affecting_other_run() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let cancelled_write = temp_dir.path().join("cancelled-session.txt");
+        let unaffected_write = temp_dir.path().join("other-session.txt");
+
+        let mut cancelled_session = JoinSet::new();
+        cancelled_session.spawn({
+            let path = cancelled_write.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                tokio::fs::write(path, "late mutation")
+                    .await
+                    .expect("delayed write");
+            }
+        });
+
+        let mut other_session = JoinSet::new();
+        other_session.spawn({
+            let path = unaffected_write.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                tokio::fs::write(path, "completed")
+                    .await
+                    .expect("unaffected write");
+            }
+        });
+
+        // This is the ownership transition performed when the foreground agent
+        // tool future is dropped after LoopInput::Cancel.
+        drop(cancelled_session);
+
+        tokio::time::timeout(Duration::from_secs(1), other_session.join_next())
+            .await
+            .expect("other session should not be cancelled")
+            .expect("other session task should complete")
+            .expect("other session task should succeed");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert!(!cancelled_write.exists());
+        assert_eq!(
+            std::fs::read_to_string(unaffected_write).expect("other session output"),
+            "completed"
+        );
     }
 }

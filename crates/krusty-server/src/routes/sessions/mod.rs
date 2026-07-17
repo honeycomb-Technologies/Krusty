@@ -1,6 +1,7 @@
 //! Session management endpoints
 
 mod approvals;
+mod cancellation;
 mod crud;
 mod pinch;
 mod presence;
@@ -15,6 +16,7 @@ use krusty_core::storage::Database;
 use krusty_core::SessionManager;
 
 use self::approvals::tool_approval_for_session;
+use self::cancellation::cancel_session;
 use self::crud::{
     create_session, delete_session, get_session, list_directories, list_sessions, update_session,
 };
@@ -42,6 +44,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/:id/state", get(get_session_state))
         .route("/:id/trace", get(get_session_trace))
+        .route("/:id/cancel", post(cancel_session))
         .route(
             "/:id/presence",
             get(get_session_presence).put(heartbeat_session_presence),

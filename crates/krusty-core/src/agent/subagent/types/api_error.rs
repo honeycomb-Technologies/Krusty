@@ -1,7 +1,6 @@
 use std::time::Duration;
 
-use crate::ai::retry::is_retryable_status;
-use crate::ai::retry::IsRetryable;
+use crate::ai::retry::{extract_http_status, is_retryable_status, IsRetryable, ProviderHttpError};
 
 /// Error type for subagent API calls that supports retry logic.
 #[derive(Debug)]
@@ -42,29 +41,53 @@ impl IsRetryable for SubAgentApiError {
 
 impl From<anyhow::Error> for SubAgentApiError {
     fn from(err: anyhow::Error) -> Self {
+        let typed_http = err.downcast_ref::<ProviderHttpError>();
         let message = err.to_string();
-        let status = extract_status_from_error(&message);
+        let status = typed_http
+            .map(ProviderHttpError::status)
+            .or_else(|| extract_status_from_error(&message));
         Self {
             message,
             status,
-            retry_after: None,
+            retry_after: typed_http.and_then(ProviderHttpError::retry_after_value),
         }
     }
 }
 
 /// Try to extract an HTTP status code from a provider error message.
 pub fn extract_status_from_error(message: &str) -> Option<u16> {
-    for pattern in &["HTTP ", "status: ", "status code: "] {
-        if let Some(pos) = message.find(pattern) {
-            let start = pos + pattern.len();
-            let code_str: String = message[start..]
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
-            if let Ok(code) = code_str.parse() {
-                return Some(code);
-            }
-        }
+    extract_http_status(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_standard_provider_error_status() {
+        assert_eq!(
+            extract_status_from_error("API error: 429 Too Many Requests - capacity"),
+            Some(429)
+        );
+        assert_eq!(
+            extract_status_from_error("API error: 402 Payment Required - limit"),
+            Some(402)
+        );
     }
-    None
+
+    #[test]
+    fn typed_provider_error_preserves_retry_after() {
+        let error = anyhow::Error::new(ProviderHttpError::new(
+            "API error",
+            429,
+            "429 Too Many Requests",
+            "capacity",
+            Some(Duration::from_secs(2)),
+        ));
+
+        let error = SubAgentApiError::from(error);
+        assert_eq!(error.status, Some(429));
+        assert_eq!(error.retry_after, Some(Duration::from_secs(2)));
+        assert!(error.is_retryable());
+    }
 }

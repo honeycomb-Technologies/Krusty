@@ -146,7 +146,7 @@ fn thinking_content(
     include_thinking: bool,
     include_signature: bool,
 ) -> Option<Value> {
-    if !include_thinking {
+    if !include_thinking || (include_signature && signature.is_empty()) {
         return None;
     }
 
@@ -161,5 +161,27 @@ fn thinking_content(
             "type": "thinking",
             "thinking": thinking
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::thinking_content;
+
+    #[test]
+    fn signed_anthropic_thinking_rejects_unsigned_cross_provider_history() {
+        assert!(thinking_content("reasoning", "", true, true).is_none());
+
+        let signed = thinking_content("reasoning", "signature", true, true)
+            .expect("signed Anthropic thinking should be retained");
+        assert_eq!(signed["signature"], "signature");
+    }
+
+    #[test]
+    fn signature_free_provider_thinking_remains_supported() {
+        let thinking = thinking_content("reasoning", "", true, false)
+            .expect("signature-free provider thinking should be retained");
+        assert_eq!(thinking["thinking"], "reasoning");
+        assert!(thinking.get("signature").is_none());
     }
 }

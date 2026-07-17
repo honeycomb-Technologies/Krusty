@@ -68,7 +68,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             max_turns: None,
-            primary_max_turns: None,
+            primary_max_turns: Some(50),
             subagent_max_turns: Some(200),
             acp_max_turns: None,
             stream_idle_timeout_secs: constants::http::STREAM_TIMEOUT.as_secs(),
@@ -116,10 +116,10 @@ mod tests {
     }
 
     #[test]
-    fn default_config_is_unlimited_for_primary_and_acp() {
+    fn default_config_bounds_primary_but_leaves_acp_unlimited() {
         let config = AgentConfig::default();
 
-        assert_eq!(config.primary_max_turns(), None);
+        assert_eq!(config.primary_max_turns(), Some(50));
         assert_eq!(config.acp_max_turns(), None);
         assert_eq!(config.subagent_max_turns, Some(200));
         assert!(config.stream_idle_timeout().as_secs() >= 600);

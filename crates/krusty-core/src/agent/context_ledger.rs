@@ -181,16 +181,50 @@ fn extract_latest_user_objective(conversation: &[ModelMessage]) -> Option<String
         message.content.iter().find_map(|content| {
             if let Content::Text { text } = content {
                 let trimmed = text.trim();
-                if trimmed.is_empty() {
+                if trimmed.is_empty()
+                    || trimmed.starts_with(super::compaction::COMPACTION_BOUNDARY_PREFIX)
+                {
                     None
+                } else if trimmed.starts_with(super::compaction::COMPACTION_SUMMARY_PREFIX.trim()) {
+                    extract_objective_from_compaction_summary(trimmed)
+                        .and_then(|objective| normalize_objective(&objective))
                 } else {
-                    Some(trimmed.to_string())
+                    normalize_objective(trimmed)
                 }
             } else {
                 None
             }
         })
     })
+}
+
+fn normalize_objective(objective: &str) -> Option<String> {
+    const MAX_OBJECTIVE_CHARS: usize = 2_000;
+
+    let normalized = objective.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    if normalized.chars().count() <= MAX_OBJECTIVE_CHARS {
+        return Some(normalized);
+    }
+
+    let mut bounded = normalized
+        .chars()
+        .take(MAX_OBJECTIVE_CHARS.saturating_sub(1))
+        .collect::<String>();
+    bounded.push('…');
+    Some(bounded)
+}
+
+fn extract_objective_from_compaction_summary(summary: &str) -> Option<String> {
+    const HEADING: &str = "## Latest User Objective\n\n";
+    let objective = summary.split_once(HEADING)?.1;
+    let objective = objective
+        .split_once("\n\n## ")
+        .map_or(objective, |(value, _)| value)
+        .trim();
+    (!objective.is_empty()).then(|| objective.to_string())
 }
 
 #[cfg(test)]
@@ -222,6 +256,52 @@ mod tests {
                 latest_user_objective: "final request".to_string()
             }
         );
+    }
+
+    #[test]
+    fn ledger_uses_objective_embedded_in_compaction_summary() {
+        let conversation = vec![
+            text_message(
+                Role::User,
+                "[COMPACTION_BOUNDARY]\n{\"type\":\"compact_boundary\"}",
+            ),
+            text_message(
+                Role::User,
+                "# Conversation Compacted\n\n## Latest User Objective\n\nFinish the cache benchmark\n\n## Work Summary\n\nPrior work.",
+            ),
+            text_message(Role::Assistant, "continuing"),
+        ];
+
+        let ledger = ContextLedger::from_conversation(&conversation);
+
+        assert_eq!(
+            ledger.latest_user_objective.as_deref(),
+            Some("Finish the cache benchmark")
+        );
+    }
+
+    #[test]
+    fn ledger_normalizes_and_bounds_latest_objective() {
+        let objective = format!("  finish\n\t the   task {}", "x".repeat(2_500));
+        let ledger = ContextLedger::from_conversation(&[text_message(Role::User, &objective)]);
+        let objective = ledger.latest_user_objective.expect("objective");
+
+        assert!(objective.starts_with("finish the task "));
+        assert!(!objective.contains('\n'));
+        assert_eq!(objective.chars().count(), 2_000);
+        assert!(objective.ends_with('…'));
+    }
+
+    #[test]
+    fn ledger_never_uses_compaction_boundary_as_objective() {
+        let conversation = vec![text_message(
+            Role::User,
+            "[COMPACTION_BOUNDARY]\n{\"type\":\"compact_boundary\"}",
+        )];
+
+        let ledger = ContextLedger::from_conversation(&conversation);
+
+        assert!(ledger.latest_user_objective.is_none());
     }
 
     #[test]

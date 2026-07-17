@@ -2,6 +2,7 @@ import type {
   DelegatedRunStage,
   DelegatedToolKind,
   SessionType,
+  UsageMetrics,
   WorkspaceMode,
 } from '@krusty/api';
 
@@ -156,6 +157,8 @@ export interface SessionStoreState {
   thinkingLevel: ThinkingLevel;
   fastModeEnabled: boolean;
   tokenCount: number;
+  /** Last live usage snapshot, retaining uncached/cache/output buckets. */
+  tokenUsage: UsageMetrics | null;
   lastEventSequence: number | null;
   error: string | null;
   model: string | null;

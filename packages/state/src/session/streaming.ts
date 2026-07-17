@@ -14,6 +14,7 @@ import {
 	resolveDelegatedKind,
 } from "./delegated";
 import {
+	createStreamingAssistantMessage,
 	finalizeTransientAssistantMessages,
 	pruneEmptyAssistantMessages,
 	upsertTransientAssistantMessage,
@@ -112,6 +113,7 @@ export function createStreamCallbacks(
 ): StreamCallbacks {
 	let pinchedSessionId: string | null = null;
 	let compactedInPlace = false;
+	let streamLagged = false;
 	let pendingTextDelta = "";
 	let textFlushScheduled = false;
 
@@ -140,10 +142,13 @@ export function createStreamCallbacks(
 	function scheduleTextFlush() {
 		if (textFlushScheduled) return;
 		textFlushScheduled = true;
-		const schedule =
-			typeof globalThis.requestAnimationFrame === "function"
-				? globalThis.requestAnimationFrame
-				: (callback: FrameRequestCallback) => setTimeout(callback, 16);
+		type FrameScheduler = (callback: (timestamp: number) => void) => unknown;
+		const runtime = globalThis as typeof globalThis & {
+			requestAnimationFrame?: FrameScheduler;
+		};
+		const schedule: FrameScheduler = runtime.requestAnimationFrame
+			? runtime.requestAnimationFrame.bind(runtime)
+			: (callback) => setTimeout(() => callback(Date.now()), 16);
 		schedule(() => {
 			textFlushScheduled = false;
 			flushPendingTextDelta();
@@ -218,6 +223,10 @@ export function createStreamCallbacks(
 
 		onToolCallStart: (id, name) => {
 			flushPendingTextDelta();
+			if ((ref.current.toolCalls || []).some((toolCall) => toolCall.id === id)) {
+				appendToolRenderPart(ref, id);
+				return;
+			}
 			const delegatedKind = resolveDelegatedKind(name);
 			ref.current.toolCalls = [
 				...(ref.current.toolCalls || []),
@@ -343,7 +352,18 @@ export function createStreamCallbacks(
 		onTurnComplete: (_turn, hasMore) => {
 			flushPendingTextDelta();
 			if (hasMore) {
-				updateLastAssistantMessage();
+				const completed = ref.current;
+				const hasRenderableContent = Boolean(
+					completed.content.trim()
+						|| completed.thinking?.trim()
+						|| (completed.toolCalls?.length ?? 0) > 0,
+				);
+				if (!hasRenderableContent) return;
+
+				set((state) => ({
+					messages: finalizeTransientAssistantMessages(state.messages),
+				}));
+				ref.current = createStreamingAssistantMessage();
 			}
 		},
 
@@ -370,12 +390,43 @@ export function createStreamCallbacks(
 			}));
 		},
 
+		onSteeringInjected: (pendingId, message) => {
+			flushPendingTextDelta();
+			const id = pendingId
+				? `user-steering-${pendingId}`
+				: createChatMessageId("user-steering");
+			set((state) => {
+				if (state.messages.some((candidate) => candidate.id === id)) {
+					return {
+						messages: state.messages.map((candidate) =>
+							candidate.id === id
+								? { ...candidate, isQueued: false }
+								: candidate,
+						),
+					};
+				}
+				return {
+					messages: [
+						...pruneEmptyAssistantMessages(
+							finalizeTransientAssistantMessages(state.messages),
+						),
+						{ id, role: "user" as const, content: message },
+					],
+				};
+			});
+		},
+
 		onUsage: (promptTokens, completionTokens, metrics) => {
 			flushPendingTextDelta();
 			set({
 				tokenCount:
 					metrics?.totalTokens ?? promptTokens + completionTokens,
+				tokenUsage: metrics ?? null,
 			});
+		},
+
+		onLagged: () => {
+			streamLagged = true;
 		},
 
 		onSessionPinched: (event: SessionContinuationEvent) => {
@@ -389,6 +440,7 @@ export function createStreamCallbacks(
 				compactedInPlace = true;
 				set({
 					tokenCount: event.estimated_tokens_after,
+					tokenUsage: null,
 				});
 			}
 		},
@@ -406,8 +458,8 @@ export function createStreamCallbacks(
 			const activeSessionId = pinchedSessionId ?? sessionId;
 			const shouldLoadPinchedSession =
 				pinchedSessionId !== null && pinchedSessionId !== sessionId;
-			const shouldReloadCompactedSession =
-				compactedInPlace && !shouldLoadPinchedSession;
+			const shouldReloadCurrentSession =
+				(compactedInPlace || streamLagged) && !shouldLoadPinchedSession;
 
 			const messages = finalizeTransientAssistantMessages(
 				currentState.messages.map((message) =>
@@ -459,8 +511,9 @@ export function createStreamCallbacks(
 
 			pinchedSessionId = null;
 
-			if (shouldReloadCompactedSession) {
+			if (shouldReloadCurrentSession) {
 				compactedInPlace = false;
+				streamLagged = false;
 				void (async () => {
 					try {
 						await get().loadSession(sessionId, true);
@@ -489,6 +542,7 @@ export function createStreamCallbacks(
 			}
 
 			compactedInPlace = false;
+			streamLagged = false;
 
 			if (queued.length > 0) {
 				const combinedContent = queued

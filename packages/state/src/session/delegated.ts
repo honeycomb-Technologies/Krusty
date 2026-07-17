@@ -34,6 +34,47 @@ export function formatToolOutputForDisplay(
     return conciseDelegatedOutput(delegatedKind, output, args);
   }
 
+  return conciseStructuredToolOutput(output);
+}
+
+function conciseStructuredToolOutput(output?: string): string | undefined {
+  if (!output) return output;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    return output;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return typeof parsed === 'string' ? parsed : output;
+  }
+
+  const envelope = parsed as Record<string, unknown>;
+  const summary = typeof envelope.summary === 'string' ? envelope.summary.trim() : '';
+  const result = envelope.result;
+  if (result && typeof result === 'object' && !Array.isArray(result)) {
+    const resultRecord = result as Record<string, unknown>;
+    const preview = typeof resultRecord.output_preview === 'string'
+      ? resultRecord.output_preview.trim()
+      : '';
+    const error = typeof resultRecord.error === 'string'
+      ? resultRecord.error.trim()
+      : '';
+    if (preview) return preview;
+    if (error) return error;
+    if (summary) return summary;
+  }
+  if (typeof result === 'string' && result.trim()) return result.trim();
+
+  const error = envelope.error;
+  if (typeof error === 'string' && error.trim()) return error.trim();
+  if (error && typeof error === 'object' && !Array.isArray(error)) {
+    const message = (error as Record<string, unknown>).message;
+    if (typeof message === 'string' && message.trim()) return message.trim();
+  }
+  if (summary) return summary;
+
   return output;
 }
 

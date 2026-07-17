@@ -172,6 +172,10 @@ fn grok_provider() -> ProviderConfig {
         models: vec![
             ModelInfo::new("grok-build", "Grok Build", 512_000, 32_768)
                 .with_reasoning(ReasoningFormat::OpenAI),
+            // Keep user-selectable direct Grok models available when the live
+            // catalog endpoint is temporarily unavailable during startup.
+            ModelInfo::new("grok-4.5", "Grok 4.5", 500_000, 32_768)
+                .with_reasoning(ReasoningFormat::OpenAI),
             ModelInfo::new("grok-composer-2.5-fast", "Composer 2.5", 200_000, 32_768)
                 .with_reasoning(ReasoningFormat::OpenAI),
         ],

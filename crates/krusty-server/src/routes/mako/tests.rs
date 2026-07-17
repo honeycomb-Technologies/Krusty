@@ -1446,6 +1446,8 @@ fn map_runtime_trace_event_skips_malformed_payload() {
         sequence: 7,
         turn: 0,
         event_type: "user_message".to_string(),
+        call_kind: None,
+        operation: None,
         payload: serde_json::json!({ "level": "info" }),
         failure_category: None,
         stop_reason: None,

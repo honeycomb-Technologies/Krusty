@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { KrustyApiError } from '@krusty/api';
 import type {
   KrustyClient,
   SessionStateResponse as ApiSessionStateResponse,
@@ -12,8 +13,12 @@ import type { createWorkspaceStore } from '../workspace';
 import {
   MAX_QUEUED_MESSAGES,
   PRESENCE_CLIENT_STORAGE_KEY,
+  STATE_POLL_DEGRADED_AFTER,
+  STATE_POLL_DEGRADED_MESSAGE,
   PRESENCE_HEARTBEAT_INTERVAL,
   STATE_POLL_INTERVAL,
+  STATE_POLL_MAX_BACKOFF,
+  STATE_POLL_MAX_FAILURES,
 } from './constants';
 import {
   buildContentBlocks,
@@ -32,7 +37,9 @@ import {
   applySessionSnapshot,
   isActionableSessionAgentState,
   isActiveSessionAgentState,
+  isTerminalSessionAgentState,
   pendingInteractionsFromSnapshot,
+  sessionAgentErrorMessage,
   shouldStopSessionStatePolling,
 } from './serverState';
 import { createStreamCallbacks } from './streaming';
@@ -40,6 +47,7 @@ import {
   applyLivePartialAssistant,
   applyRecoveryParity,
   createChatMessageId,
+  createStreamingAssistantMessage,
   finalizeTransientAssistantMessages,
   pruneEmptyAssistantMessages,
   toErrorMessage,
@@ -102,7 +110,8 @@ export function createSessionStore(
   sessionsStore: ReturnType<typeof createSessionsStore>,
   planStore: ReturnType<typeof createPlanStore>,
 ) {
-  let statePollingInterval: ReturnType<typeof setInterval> | null = null;
+  let statePollingTimer: ReturnType<typeof setTimeout> | null = null;
+  let statePollingGeneration = 0;
   let presenceHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
   let abortController: AbortController | null = null;
   let presenceClientId: string | null = null;
@@ -194,6 +203,7 @@ export function createSessionStore(
     thinkingLevel: "medium",
     fastModeEnabled: false,
     tokenCount: 0,
+    tokenUsage: null,
     lastEventSequence: null,
     error: null,
     model: null,
@@ -246,8 +256,38 @@ export function createSessionStore(
           await get().loadSession(sessionId, true);
           return true;
         }
+
+        if (isTerminalSessionAgentState(serverState.agent_state)) {
+          const terminalError = sessionAgentErrorMessage(serverState);
+          get().stopStatePolling();
+          set({
+            isLoading: false,
+            isStreaming: false,
+            isThinking: false,
+            thinkingContent: "",
+            error: terminalError,
+          });
+          await get().loadSession(sessionId, true);
+          if (terminalError) {
+            set({ error: terminalError });
+          }
+          // An idle snapshot with no canonical error does not prove that a
+          // response completed. Let the original stream error surface after
+          // refreshing the transcript instead of silently swallowing a clean
+          // EOF that arrived before `finish`.
+          return terminalError !== null;
+        }
       } catch {
-        // Fall through to regular stream error handling.
+        // The stream and snapshot endpoints can fail independently during a
+        // reconnect. Keep the session protected from duplicate sends and let
+        // the bounded polling policy recover canonical state.
+        set({
+          isLoading: false,
+          isStreaming: true,
+          error: STATE_POLL_DEGRADED_MESSAGE,
+        });
+        get().startStatePolling(sessionId);
+        return true;
       }
 
       return false;
@@ -321,44 +361,117 @@ export function createSessionStore(
       const displayAttachments = buildDisplayAttachments(attachments);
 
       if (state.isStreaming) {
-        set((s) => {
-          if (s.queuedMessages.length >= MAX_QUEUED_MESSAGES) {
+        const queueLocally = (messageId = createChatMessageId("user-queued")) => {
+          set((s) => {
+            if (s.queuedMessages.length >= MAX_QUEUED_MESSAGES) {
+              return {
+                error:
+                  "Message queue is full. Please wait for the current response to finish.",
+              };
+            }
+            const alreadyDisplayed = s.messages.some(
+              (message) => message.id === messageId,
+            );
             return {
-              error:
-                "Message queue is full. Please wait for the current response to finish.",
+              queuedMessages: [
+                ...s.queuedMessages,
+                { content, attachments, researchEnabled, sendOptions },
+              ],
+              messages: alreadyDisplayed
+                ? s.messages
+                : [
+                    ...s.messages,
+                    {
+                      id: messageId,
+                      role: "user" as const,
+                      content: displayContent,
+                      attachments:
+                        displayAttachments.length > 0
+                          ? displayAttachments
+                          : undefined,
+                      isQueued: true,
+                    },
+                  ],
             };
+          });
+        };
+
+        // Rich/research follow-ups can change the tool or model contract, so
+        // they remain a separate turn. Plain text can steer the active core
+        // loop without waiting for it to finish first.
+        if (!state.sessionId || attachments.length > 0 || researchEnabled) {
+          queueLocally();
+          return;
+        }
+
+        const optimisticId = createChatMessageId("user-steering-pending");
+        set((s) => ({
+          messages: [
+            ...s.messages,
+            {
+              id: optimisticId,
+              role: "user" as const,
+              content: displayContent,
+              isQueued: true,
+            },
+          ],
+          error: null,
+        }));
+
+        try {
+          const response = await client.steerSession({
+            session_id: state.sessionId,
+            message: requestMessage,
+          });
+          const durableId = `user-steering-${response.pending_id}`;
+          set((s) => {
+            const eventAlreadyRendered = s.messages.some(
+              (message) => message.id === durableId,
+            );
+            return {
+              messages: eventAlreadyRendered
+                ? s.messages.filter((message) => message.id !== optimisticId)
+                : s.messages.map((message) =>
+                    message.id === optimisticId
+                      ? { ...message, id: durableId, isQueued: true }
+                      : message,
+                  ),
+            };
+          });
+        } catch (error) {
+          const recoverableRace =
+            error instanceof KrustyApiError
+            && (error.status === 404 || error.status === 409);
+          if (recoverableRace && get().isStreaming) {
+            queueLocally(optimisticId);
+            return;
           }
-          return {
-            queuedMessages: [
-              ...s.queuedMessages,
-              { content, attachments, researchEnabled, sendOptions },
-            ],
-            messages: [
-              ...s.messages,
-              {
-                id: createChatMessageId("user-queued"),
-                role: "user",
-                content: displayContent,
-                attachments:
-                  displayAttachments.length > 0 ? displayAttachments : undefined,
-                isQueued: true,
-              },
-            ],
-          };
-        });
+          if (recoverableRace) {
+            set((s) => ({
+              messages: s.messages.filter(
+                (message) => message.id !== optimisticId,
+              ),
+            }));
+            await get().sendMessage(
+              content,
+              attachments,
+              researchEnabled,
+              sendOptions,
+            );
+            return;
+          }
+          set((s) => ({
+            messages: s.messages.filter(
+              (message) => message.id !== optimisticId,
+            ),
+            error: toErrorMessage(error),
+          }));
+        }
         return;
       }
 
       const ref: AssistantMessageRef = {
-        current: {
-          id: createChatMessageId("assistant-stream"),
-          role: "assistant",
-          content: "",
-          thinking: "",
-          toolCalls: [],
-          renderParts: [],
-          kind: "streaming",
-        },
+        current: createStreamingAssistantMessage(),
       };
 
       set((s) => ({
@@ -504,6 +617,7 @@ export function createSessionStore(
     // -- loadSession --------------------------------------------------------
 
     async loadSession(sessionId: string, isRefresh = false) {
+      const previousSessionId = get().sessionId;
       set({ isLoading: true });
 
       try {
@@ -542,6 +656,13 @@ export function createSessionStore(
                 : s.fastModeEnabled
               : s.fastModeEnabled,
             tokenCount: data.session.token_count ?? 0,
+            tokenUsage: null,
+            error:
+              serverState !== null
+                ? sessionAgentErrorMessage(serverState)
+                : previousSessionId === sessionId
+                  ? s.error
+                  : null,
             messages: applyLivePartialAssistant(
               applyRecoveryParity(
                 processedMessages,
@@ -581,6 +702,26 @@ export function createSessionStore(
           void persistCurrentSelectedModel(sessionModel);
         }
       } catch (err) {
+        if (err instanceof KrustyApiError && err.status === 404) {
+          const current = get();
+          current.stopPresenceHeartbeat(previousSessionId);
+          if (workspace.getState().sessionId === sessionId) {
+            workspace.getState().setSession(null);
+          }
+          set({
+            ...initialState,
+            permissionMode: current.permissionMode,
+            model: current.model,
+            modelProvider: current.modelProvider,
+            thinkingLevel: current.thinkingLevel,
+            thinkingEnabled: current.thinkingEnabled,
+            fastModeEnabled: current.fastModeEnabled,
+            isLoading: false,
+            error: null,
+          });
+          sessionsStore.getState().loadSessions();
+          return;
+        }
         set({
           isLoading: false,
           error: toErrorMessage(err, "Failed to load session"),
@@ -757,15 +898,7 @@ export function createSessionStore(
       get().startStatePolling(state.sessionId);
 
       const ref: AssistantMessageRef = {
-        current: {
-          id: createChatMessageId("assistant-stream"),
-          role: "assistant",
-          content: "",
-          thinking: "",
-          toolCalls: [],
-          renderParts: [],
-          kind: "streaming",
-        },
+        current: createStreamingAssistantMessage(),
       };
 
       set((s) => ({
@@ -844,6 +977,10 @@ export function createSessionStore(
     // -- stopStreaming ------------------------------------------------------
 
     stopStreaming() {
+      const activeSessionId = get().sessionId;
+      if (activeSessionId && get().isStreaming) {
+        void client.cancelSession(activeSessionId).catch(() => undefined);
+      }
       abortController?.abort();
       get().stopStatePolling();
       set((s) => ({
@@ -861,32 +998,78 @@ export function createSessionStore(
 
     startStatePolling(sessionId: string) {
       get().stopStatePolling();
+      const generation = statePollingGeneration;
+      let consecutiveFailures = 0;
 
-      statePollingInterval = setInterval(async () => {
+      const schedule = (delay: number) => {
+        if (generation !== statePollingGeneration) return;
+        statePollingTimer = setTimeout(poll, delay);
+      };
+
+      const poll = async () => {
+        if (generation !== statePollingGeneration) return;
         try {
           const serverState = await client.getSessionState(sessionId);
+          if (generation !== statePollingGeneration) return;
+          consecutiveFailures = 0;
           applySessionSnapshot(sessionId, serverState, true, set, get, planStore);
 
+          if (get().error === STATE_POLL_DEGRADED_MESSAGE) {
+            set({ error: null });
+          }
+
           if (shouldStopSessionStatePolling(serverState.agent_state)) {
+            const terminalError = sessionAgentErrorMessage(serverState);
             get().stopStatePolling();
             set({
               isStreaming: false,
               isThinking: false,
               thinkingContent: "",
-              error: null,
+              error: terminalError,
             });
             await get().loadSession(sessionId, true);
+            if (terminalError) {
+              set({ error: terminalError });
+            }
+            return;
           }
+
+          schedule(STATE_POLL_INTERVAL);
         } catch {
-          get().stopStatePolling();
+          if (generation !== statePollingGeneration) return;
+          consecutiveFailures += 1;
+
+          if (consecutiveFailures >= STATE_POLL_MAX_FAILURES) {
+            get().stopStatePolling();
+            set({
+              isLoading: false,
+              error:
+                `Unable to refresh session status after ${STATE_POLL_MAX_FAILURES} attempts. `
+                + 'The run may still be active; reconnect or refresh before sending another message.',
+            });
+            return;
+          }
+
+          if (consecutiveFailures >= STATE_POLL_DEGRADED_AFTER) {
+            set({ error: STATE_POLL_DEGRADED_MESSAGE });
+          }
+
+          const backoff = Math.min(
+            STATE_POLL_INTERVAL * 2 ** (consecutiveFailures - 1),
+            STATE_POLL_MAX_BACKOFF,
+          );
+          schedule(backoff);
         }
-      }, STATE_POLL_INTERVAL);
+      };
+
+      schedule(STATE_POLL_INTERVAL);
     },
 
     stopStatePolling() {
-      if (statePollingInterval) {
-        clearInterval(statePollingInterval);
-        statePollingInterval = null;
+      statePollingGeneration += 1;
+      if (statePollingTimer) {
+        clearTimeout(statePollingTimer);
+        statePollingTimer = null;
       }
     },
 

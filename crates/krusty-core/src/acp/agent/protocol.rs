@@ -1,15 +1,21 @@
 use agent_client_protocol::{
-    Agent, AuthenticateRequest, AuthenticateResponse, ContentBlock, Error as AcpSchemaError,
-    ExtRequest, ExtResponse, InitializeRequest, InitializeResponse, LoadSessionRequest,
-    LoadSessionResponse, ModelId, ModelInfo as AcpModelInfo, NewSessionRequest, NewSessionResponse,
-    PromptRequest, PromptResponse, SessionMode, SessionModeState, SessionModelState,
-    SetSessionModeRequest, SetSessionModeResponse, SetSessionModelRequest, SetSessionModelResponse,
+    Agent, AuthenticateRequest, AuthenticateResponse, Client as AcpClient, ContentBlock,
+    ContentChunk, Error as AcpSchemaError, ExtRequest, ExtResponse, InitializeRequest,
+    InitializeResponse, LoadSessionRequest, LoadSessionResponse, ModelId,
+    ModelInfo as AcpModelInfo, NewSessionRequest, NewSessionResponse, PromptRequest,
+    PromptResponse, SessionMode, SessionModeState, SessionModelState, SessionNotification,
+    SessionUpdate, SetSessionModeRequest, SetSessionModeResponse, SetSessionModelRequest,
+    SetSessionModelResponse, TextContent, ToolCall, ToolCallId, ToolCallStatus,
 };
 
-use super::{negotiate_protocol_version, KrustyAgent};
+use super::{negotiate_protocol_version, AvailableModelRecord, KrustyAgent};
 use crate::acp::bridge::NotificationBridge;
 use crate::acp::error::AcpError;
-use crate::acp::workspace_context::build_workspace_context;
+use crate::acp::session::{SessionModelSelection, SessionState};
+use crate::acp::tools::{
+    create_tool_call_complete, create_tool_call_failed, text_to_tool_content, tool_name_to_kind,
+};
+use crate::ai::types::{Content, Role};
 
 #[async_trait::async_trait(?Send)]
 impl Agent for KrustyAgent {
@@ -69,18 +75,22 @@ impl Agent for KrustyAgent {
             mcp_servers.len()
         );
 
-        let workspace_context = build_workspace_context(&cwd);
-        let session = self.sessions.create_session(
-            Some(cwd),
-            if mcp_servers.is_empty() {
-                None
-            } else {
-                Some(mcp_servers)
-            },
-        );
-
-        session.add_system_context(workspace_context).await;
-        tracing::info!("Injected workspace context for session cwd");
+        let session = self
+            .sessions
+            .create_persisted_session(
+                Some(cwd),
+                if mcp_servers.is_empty() {
+                    None
+                } else {
+                    Some(mcp_servers)
+                },
+            )
+            .await
+            .map_err(|error| {
+                tracing::error!("Failed to create ACP session: {}", error);
+                AcpSchemaError::internal_error()
+            })?;
+        session.set_mode(Some("code".to_string())).await;
 
         let detected_models = self.detect_available_models().await;
         let mut response = NewSessionResponse::new(session.id.clone());
@@ -107,8 +117,8 @@ impl Agent for KrustyAgent {
                 )
                 .collect();
 
-            let current_model = self.current_model.read().await.clone();
-            let current_model_id = current_model.as_ref().and_then(|selected| {
+            let default_model = self.current_model.read().await.clone();
+            let current_model_id = default_model.as_ref().and_then(|selected| {
                 detected_models
                     .iter()
                     .find(|(_, provider, actual_model, _, _)| {
@@ -117,26 +127,44 @@ impl Agent for KrustyAgent {
                     .map(|(model_id, _, _, _, _)| model_id.clone())
             });
 
-            if let Some(current_model_id) = current_model_id {
+            let selected_model_id =
+                current_model_id.or_else(|| detected_models.first().map(|record| record.0.clone()));
+            if let Some(current_model_id) = selected_model_id {
+                self.set_model_for_session(&session, &current_model_id, true)
+                    .await
+                    .map_err(|error| {
+                        tracing::error!("Failed to initialize ACP session model: {}", error);
+                        AcpSchemaError::internal_error()
+                    })?;
                 response = response.models(SessionModelState::new(
-                    ModelId::new(current_model_id),
+                    ModelId::new(current_model_id.clone()),
                     model_infos,
                 ));
                 tracing::info!(
-                    "Session created with {} available models and shared current model",
-                    detected_models.len()
-                );
-            } else {
-                if current_model.is_some() {
-                    *self.current_model.write().await = None;
-                }
-                tracing::info!(
-                    "Session created with {} available models and no current model selected",
-                    detected_models.len()
+                    "Session created with {} available models; selected {}",
+                    detected_models.len(),
+                    current_model_id
                 );
             }
         } else {
-            tracing::warn!("No models detected - configure API keys to enable AI features");
+            let default_model = self.current_model.read().await.clone();
+            let default_client = self.processor.read().await.default_ai_client();
+            if let (Some(model), Some(client)) = (default_model, default_client) {
+                let acp_model_id = format!("{}:{}", model.provider.storage_key(), model.model_id);
+                session
+                    .set_model_client(
+                        SessionModelSelection {
+                            provider: model.provider,
+                            model_id: model.model_id,
+                            acp_model_id: acp_model_id.clone(),
+                        },
+                        client,
+                    )
+                    .await;
+                session.persist_model(&acp_model_id).await;
+            } else {
+                tracing::warn!("No models detected - configure API keys to enable AI features");
+            }
         }
 
         self.send_available_commands(&session.id).await;
@@ -149,56 +177,113 @@ impl Agent for KrustyAgent {
     ) -> agent_client_protocol::Result<LoadSessionResponse> {
         tracing::info!("ACP load_session: id={}", request.session_id);
 
-        if self.sessions.has_session(&request.session_id) {
+        let session = if self.sessions.has_session(&request.session_id) {
             tracing::info!("Session {} found in memory", request.session_id);
-            return Ok(LoadSessionResponse::new());
-        }
-
-        let session_id_str = request.session_id.to_string();
-        let has_stored_state = if let Some(storage) = self.sessions.storage() {
-            let storage_lock = storage.lock().await;
-            let has_messages = storage_lock
-                .load_session_messages(&session_id_str)
-                .map(|messages| !messages.is_empty())
-                .unwrap_or(false);
-            let has_recovery = storage_lock
-                .load_recovery_state(&session_id_str)
-                .map(|recovery| recovery.is_some())
-                .unwrap_or(false);
-            let has_session = storage_lock
-                .get_session(&session_id_str)
-                .map(|session| session.is_some())
-                .unwrap_or(false);
-            has_messages || has_recovery || has_session
+            self.sessions
+                .get_session(&request.session_id)
+                .map_err(|_| AcpSchemaError::invalid_params())?
         } else {
-            false
+            let session_id_str = request.session_id.to_string();
+            tracing::info!("Loading session {} from storage", session_id_str);
+            self.sessions
+                .create_session_from_storage(
+                    &session_id_str,
+                    Some(request.cwd),
+                    if request.mcp_servers.is_empty() {
+                        None
+                    } else {
+                        Some(request.mcp_servers)
+                    },
+                )
+                .await
+                .map_err(|error| {
+                    tracing::warn!("Failed to restore ACP session: {}", error);
+                    AcpSchemaError::invalid_params()
+                })?
         };
 
-        if has_stored_state {
-            tracing::info!("Loading session {} from storage", session_id_str);
-            match self
-                .sessions
-                .create_session_from_storage(&session_id_str, None, None)
+        let detected_models = self.detect_available_models().await;
+        if !detected_models.is_empty() {
+            *self.available_models.write().await = detected_models.clone();
+        }
+
+        let persisted_model = session.persisted_model_id().await;
+        let default_model = self.current_model.read().await.clone();
+        let default_model_id = default_model.and_then(|selected| {
+            detected_models
+                .iter()
+                .find(|(_, provider, actual_model, _, _)| {
+                    *provider == selected.provider && *actual_model == selected.model_id
+                })
+                .map(|(id, _, _, _, _)| id.clone())
+        });
+        let selected_model_id = if let Some(persisted) = persisted_model.as_deref() {
+            self.resolve_persisted_model_id(persisted).await
+        } else {
+            None
+        }
+        .or(default_model_id)
+        .or_else(|| detected_models.first().map(|record| record.0.clone()));
+
+        if let Some(model_id) = selected_model_id.as_deref() {
+            self.set_model_for_session(&session, model_id, false)
                 .await
-            {
-                Ok(session) => {
-                    tracing::info!(
-                        "Session {} restored from storage with {} messages",
-                        session.id,
-                        session.get_messages().await.len()
-                    );
-                    return Ok(LoadSessionResponse::new());
-                }
-                Err(e) => tracing::warn!("Failed to restore session from storage: {}", e),
+                .map_err(|error| {
+                    tracing::error!("Failed to restore ACP session model: {}", error);
+                    AcpSchemaError::internal_error()
+                })?;
+        } else if session.ai_client().await.is_none() {
+            let default_model = self.current_model.read().await.clone();
+            let default_client = self.processor.read().await.default_ai_client();
+            if let (Some(model), Some(client)) = (default_model, default_client) {
+                session
+                    .set_model_client(
+                        SessionModelSelection {
+                            provider: model.provider,
+                            model_id: model.model_id.clone(),
+                            acp_model_id: format!(
+                                "{}:{}",
+                                model.provider.storage_key(),
+                                model.model_id
+                            ),
+                        },
+                        client,
+                    )
+                    .await;
             }
         }
 
-        tracing::warn!(
-            "Session {} not found in memory or storage, creating new session",
-            request.session_id
+        self.replay_session_history(&session)
+            .await
+            .map_err(|error| {
+                tracing::error!("Failed to replay ACP session history: {}", error);
+                AcpSchemaError::internal_error()
+            })?;
+
+        let current_mode = session
+            .get_mode()
+            .await
+            .unwrap_or_else(|| "code".to_string());
+        let mut response = LoadSessionResponse::new().modes(SessionModeState::new(
+            current_mode,
+            available_session_modes(),
+        ));
+        if let Some(selection) = session.selected_model().await {
+            let model_infos = acp_model_infos(&detected_models);
+            if !model_infos.is_empty() {
+                response = response.models(SessionModelState::new(
+                    ModelId::new(selection.acp_model_id),
+                    model_infos,
+                ));
+            }
+        }
+
+        tracing::info!(
+            "Session {} restored with {} messages",
+            session.id,
+            session.get_messages().await.len()
         );
-        let _session = self.sessions.create_session(None, None);
-        Ok(LoadSessionResponse::new())
+        Ok(response)
     }
 
     async fn prompt(
@@ -216,10 +301,14 @@ impl Agent for KrustyAgent {
             .get_session(&request.session_id)
             .map_err(|_e| AcpSchemaError::invalid_params())?;
 
+        let _prompt_guard = session.try_begin_prompt().map_err(|error| {
+            tracing::warn!("Rejected overlapping ACP prompt: {}", error);
+            AcpSchemaError::invalid_params()
+        })?;
+
         session.reset_cancellation();
 
-        let prompt_text = extract_prompt_text(&request.prompt);
-        if prompt_text.is_empty() {
+        if request.prompt.is_empty() {
             return Err(AcpSchemaError::invalid_params());
         }
 
@@ -270,7 +359,11 @@ impl Agent for KrustyAgent {
             .sessions
             .get_session(&request.session_id)
             .map_err(|_e| AcpSchemaError::invalid_params())?;
-        session.set_mode(Some(request.mode_id.to_string())).await;
+        let mode = request.mode_id.to_string();
+        if !matches!(mode.as_str(), "code" | "plan") {
+            return Err(AcpSchemaError::invalid_params());
+        }
+        session.set_mode(Some(mode)).await;
 
         Ok(SetSessionModeResponse::new())
     }
@@ -298,31 +391,122 @@ impl Agent for KrustyAgent {
             request.model_id
         );
 
-        let _session = self
+        let session = self
             .sessions
             .get_session(&request.session_id)
             .map_err(|_e| AcpSchemaError::invalid_params())?;
 
         let model_id_str = request.model_id.to_string();
-        self.set_model(&model_id_str).await.map_err(|e| {
-            tracing::error!("Failed to set model: {}", e);
-            AcpSchemaError::invalid_params()
-        })?;
+        self.set_model_for_session(&session, &model_id_str, true)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to set model: {}", e);
+                AcpSchemaError::invalid_params()
+            })?;
 
         tracing::info!("Model switched to: {}", model_id_str);
         Ok(SetSessionModelResponse::new())
     }
 }
 
-fn extract_prompt_text(content: &[ContentBlock]) -> String {
-    let mut prompt_text = String::new();
-    for block in content {
-        if let ContentBlock::Text(text) = block {
-            if !prompt_text.is_empty() {
-                prompt_text.push('\n');
+impl KrustyAgent {
+    async fn replay_session_history(&self, session: &SessionState) -> Result<(), AcpError> {
+        let notification_tx = self.notification_tx.read().await;
+        let tx = notification_tx.as_ref().ok_or_else(|| {
+            AcpError::ProtocolError("ACP notification channel is not connected".to_string())
+        })?;
+        let bridge = NotificationBridge::new(tx.clone());
+
+        for message in session.get_messages().await {
+            if message.role == Role::System {
+                continue;
             }
-            prompt_text.push_str(&text.text);
+
+            for content in message.content {
+                let update = match content {
+                    Content::Text { text } => {
+                        let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+                        match message.role {
+                            Role::User => SessionUpdate::UserMessageChunk(chunk),
+                            Role::Assistant | Role::Tool => SessionUpdate::AgentMessageChunk(chunk),
+                            Role::System => continue,
+                        }
+                    }
+                    Content::Thinking { thinking, .. } => {
+                        let chunk =
+                            ContentChunk::new(ContentBlock::Text(TextContent::new(thinking)));
+                        SessionUpdate::AgentThoughtChunk(chunk)
+                    }
+                    Content::RedactedThinking { .. } => continue,
+                    Content::ToolUse { id, name, input } => {
+                        let call = ToolCall::new(ToolCallId::from(id), format!("Running {}", name))
+                            .kind(tool_name_to_kind(&name))
+                            .status(ToolCallStatus::InProgress)
+                            .raw_input(input);
+                        SessionUpdate::ToolCall(call)
+                    }
+                    Content::ToolResult {
+                        tool_use_id,
+                        output,
+                        is_error,
+                    } => {
+                        let output_text = output
+                            .as_str()
+                            .map(ToOwned::to_owned)
+                            .unwrap_or_else(|| output.to_string());
+                        let update = if is_error.unwrap_or(false) {
+                            create_tool_call_failed(&tool_use_id, &output_text)
+                        } else {
+                            create_tool_call_complete(
+                                &tool_use_id,
+                                vec![text_to_tool_content(&output_text)],
+                            )
+                        };
+                        SessionUpdate::ToolCallUpdate(update)
+                    }
+                    Content::Image { .. } => {
+                        replay_placeholder_update(message.role.clone(), "[image attachment]")
+                    }
+                    Content::Document { .. } => {
+                        replay_placeholder_update(message.role.clone(), "[document attachment]")
+                    }
+                };
+
+                bridge
+                    .session_notification(SessionNotification::new(session.id.clone(), update))
+                    .await
+                    .map_err(|error| AcpError::ProtocolError(error.to_string()))?;
+            }
         }
+
+        Ok(())
     }
-    prompt_text
+}
+
+fn replay_placeholder_update(role: Role, text: &str) -> SessionUpdate {
+    let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+    if role == Role::User {
+        SessionUpdate::UserMessageChunk(chunk)
+    } else {
+        SessionUpdate::AgentMessageChunk(chunk)
+    }
+}
+
+fn available_session_modes() -> Vec<SessionMode> {
+    vec![
+        SessionMode::new("code", "Code").description("Write and edit code directly"),
+        SessionMode::new("plan", "Plan").description("Plan changes before implementing"),
+    ]
+}
+
+fn acp_model_infos(models: &[AvailableModelRecord]) -> Vec<AcpModelInfo> {
+    models
+        .iter()
+        .map(
+            |(model_id, provider, _actual_model, _api_key, display_name)| {
+                let name = format!("[{}] {}", provider, display_name);
+                AcpModelInfo::new(ModelId::new(model_id.clone()), name)
+            },
+        )
+        .collect()
 }

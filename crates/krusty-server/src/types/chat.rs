@@ -115,6 +115,14 @@ pub struct ChatRequest {
     pub research_enabled: Option<bool>,
 }
 
+#[derive(Deserialize)]
+pub struct SteerRequest {
+    pub session_id: String,
+    pub message: String,
+    #[serde(default)]
+    pub content: Vec<ContentBlock>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ChatRequest, ThinkingLevel};
@@ -321,6 +329,8 @@ mod tests {
             sequence: 7,
             turn: 1,
             event_type: "user_message".to_string(),
+            call_kind: None,
+            operation: None,
             payload: json!({
                 "title": "Milestone",
                 "message": "Indexing finished",
@@ -352,6 +362,8 @@ mod tests {
             sequence: 8,
             turn: 1,
             event_type: "plan_update".to_string(),
+            call_kind: None,
+            operation: None,
             payload: json!({ "task_count": 3 }),
             failure_category: None,
             stop_reason: None,

@@ -17,9 +17,9 @@ use crate::tui::components::scrollbars::render_scrollbar;
 use crate::tui::themes::Theme;
 use crate::tui::utils::wrap_text;
 
-/// Spinner frames for streaming state
-const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-const SPINNER_INTERVAL: Duration = Duration::from_millis(80);
+/// Center-outward echo frames shared with the mobile activity language.
+const SPINNER_FRAMES: &[&str] = &["··•··", "·•●•·", "•●•●•", "●•·•●", "•···•", "·····"];
+const SPINNER_INTERVAL: Duration = Duration::from_millis(130);
 
 /// Max visible content lines when expanded (before scrolling kicks in)
 const MAX_VISIBLE_LINES: u16 = 15;
@@ -110,7 +110,7 @@ impl ThinkingBlock {
     }
 
     /// Get current spinner frame (uses cached index updated by tick())
-    fn spinner_frame(&self) -> char {
+    fn spinner_frame(&self) -> &'static str {
         SPINNER_FRAMES[self.spinner_idx % SPINNER_FRAMES.len()]
     }
 
@@ -382,7 +382,7 @@ impl ThinkingBlock {
             .add_modifier(Modifier::ITALIC);
 
         let text = if self.streaming {
-            format!("▶ Thinking... {}", self.spinner_frame())
+            format!("▶ Thinking… {}", self.spinner_frame())
         } else {
             "▶ Thinking".to_string()
         };
@@ -392,8 +392,10 @@ impl ThinkingBlock {
             if x < area.x + area.width {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_char(ch);
-                    if i == 0 || (self.streaming && i == text.chars().count() - 1) {
+                    if i == 0 {
                         cell.set_fg(theme.accent_color);
+                    } else if self.streaming && i >= text.chars().count().saturating_sub(5) {
+                        cell.set_fg(theme.animation_color);
                     } else {
                         cell.set_style(text_style);
                     }
@@ -485,8 +487,9 @@ impl ThinkingBlock {
                 }
             }
 
+            let spinner_width = self.spinner_frame().width() as u16;
             let border_end = if self.streaming && !needs_scrollbar {
-                right_x - 3
+                right_x.saturating_sub(spinner_width + 2)
             } else {
                 content_end_x
             };
@@ -499,13 +502,16 @@ impl ThinkingBlock {
 
             if self.streaming && !needs_scrollbar {
                 let spinner = self.spinner_frame();
-                if let Some(cell) = buf.cell_mut((right_x - 3, render_y)) {
+                let spinner_start = right_x.saturating_sub(spinner_width + 1);
+                if let Some(cell) = buf.cell_mut((spinner_start.saturating_sub(1), render_y)) {
                     cell.set_char('─');
                     cell.set_fg(border_color);
                 }
-                if let Some(cell) = buf.cell_mut((right_x - 2, render_y)) {
-                    cell.set_char(spinner);
-                    cell.set_fg(theme.accent_color);
+                for (offset, character) in spinner.chars().enumerate() {
+                    if let Some(cell) = buf.cell_mut((spinner_start + offset as u16, render_y)) {
+                        cell.set_char(character);
+                        cell.set_fg(theme.animation_color);
+                    }
                 }
                 if let Some(cell) = buf.cell_mut((right_x - 1, render_y)) {
                     cell.set_char('─');
@@ -643,5 +649,20 @@ impl ThinkingBlock {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SPINNER_FRAMES;
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn dot_echo_frames_keep_a_stable_width() {
+        let expected_width = UnicodeWidthStr::width(SPINNER_FRAMES[0]);
+
+        assert!(SPINNER_FRAMES
+            .iter()
+            .all(|frame| UnicodeWidthStr::width(*frame) == expected_width));
     }
 }

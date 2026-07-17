@@ -6,13 +6,19 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, trace};
 
+use crate::ai::streaming::StreamPart;
+
 /// A buffer that smoothly streams text by breaking it into smaller chunks
 /// and sending them at regular intervals for smoother UI rendering
 pub struct StreamBuffer {
     /// Internal buffer for accumulating text
     buffer: String,
-    /// Channel to send buffered chunks
-    tx: mpsc::UnboundedSender<String>,
+    /// Ordered stream channel shared with finish/tool/usage events.
+    ///
+    /// Text used to pass through a second forwarding task. That allowed a
+    /// finish event to overtake the final buffered text chunk and made a valid
+    /// response look like provider content emitted after finish.
+    tx: mpsc::UnboundedSender<StreamPart>,
     /// Target size for each chunk (in characters)
     chunk_size: usize,
     /// Maximum time to wait before flushing buffer
@@ -25,7 +31,7 @@ pub struct StreamBuffer {
 
 impl StreamBuffer {
     /// Create a new StreamBuffer with default settings
-    pub fn new(tx: mpsc::UnboundedSender<String>) -> Self {
+    pub fn new(tx: mpsc::UnboundedSender<StreamPart>) -> Self {
         Self {
             // Pre-allocate 256 bytes to reduce reallocations during streaming
             buffer: String::with_capacity(256),
@@ -55,7 +61,7 @@ impl StreamBuffer {
                 .map(|(i, _)| i)
                 .unwrap_or(self.buffer.len());
             let to_send: String = self.buffer.drain(..drain_to).collect();
-            let _ = self.tx.send(to_send);
+            let _ = self.tx.send(StreamPart::TextDelta { delta: to_send });
             self.last_flush = Instant::now();
         }
 
@@ -70,7 +76,7 @@ impl StreamBuffer {
         if !self.buffer.is_empty() {
             trace!("StreamBuffer: Flushing {} bytes", self.buffer.len());
             let content = std::mem::take(&mut self.buffer);
-            let _ = self.tx.send(content);
+            let _ = self.tx.send(StreamPart::TextDelta { delta: content });
             self.last_flush = Instant::now();
         }
     }

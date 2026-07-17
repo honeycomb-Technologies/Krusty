@@ -181,9 +181,21 @@ impl App {
             LoopEvent::TickInjected { tick_number } => self.handle_tick_injected(tick_number),
             LoopEvent::Usage {
                 prompt_tokens,
+                input_tokens,
                 completion_tokens,
-                ..
-            } => self.handle_usage(prompt_tokens, completion_tokens),
+                reasoning_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                total_tokens,
+            } => self.handle_usage(
+                prompt_tokens,
+                input_tokens,
+                completion_tokens,
+                reasoning_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                total_tokens,
+            ),
             LoopEvent::SessionPinched {
                 reason,
                 source_session_id: _,

@@ -8,7 +8,6 @@ mod stream_notify;
 mod tools;
 
 use std::convert::Infallible;
-use std::time::Duration;
 
 use axum::{
     extract::State,
@@ -23,7 +22,7 @@ use krusty_core::tools::registry::PermissionMode;
 
 use self::content::{build_user_content, content_blocks_include_images, validate_content_blocks};
 pub(crate) use self::interactions::submit_tool_approval;
-use self::interactions::{tool_approval, tool_result};
+use self::interactions::{steer, tool_approval, tool_result};
 #[cfg(test)]
 use self::session::{prepare_chat_contract_for_test, select_model_for_chat_request};
 use self::session::{
@@ -32,6 +31,7 @@ use self::session::{
 use self::stream::start_orchestrator_sse;
 #[cfg(test)]
 use self::stream::{forward_loop_event, run_orchestrator_event_bridge};
+use self::tools::should_suppress_code_tools;
 use super::session_access::current_user_id;
 use crate::ai_bootstrap::persist_current_model_selection;
 use crate::auth::CurrentUser;
@@ -40,12 +40,10 @@ use crate::types::ChatRequest;
 use crate::AppState;
 
 const SSE_CHANNEL_BUFFER: usize = 256;
-const SESSION_LOCK_MAX_ENTRIES: usize = 1000;
-const SESSION_LOCK_MAX_AGE: Duration = Duration::from_secs(3600);
-
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", post(chat))
+        .route("/steer", post(steer))
         .route("/tool-result", post(tool_result))
         .route("/tool-approval", post(tool_approval))
 }
@@ -108,6 +106,17 @@ async fn chat(
                 .update_session_work_mode(&session_id, requested_mode)?;
             work_mode = requested_mode;
         }
+    }
+
+    if ctx.session_type == SessionType::Code
+        && should_suppress_code_tools(&req.message, !req.content.is_empty())
+    {
+        tracing::info!(
+            session_id = %session_id,
+            "Suppressing coding tools for a deterministic non-tool turn"
+        );
+        ctx.options.tools = None;
+        ctx.options.codex_parallel_tool_calls = false;
     }
 
     let user_content = build_user_content(&req.message, &req.content)?;

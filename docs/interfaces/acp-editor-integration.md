@@ -1,6 +1,6 @@
 # Editor Integration (ACP)
 
-Krusty can run inside your code editor. Instead of switching to a terminal or browser, you stay in your editor and talk to the same AI agent with the same tools, the same providers, and the same capabilities. The feature that makes this work is called ACP -- the Agent Client Protocol.
+Krusty can run inside your code editor. Instead of switching to a terminal or browser, you stay in your editor and talk to the same canonical agent loop and providers through a deliberately bounded editor-safe tool surface. The feature that makes this work is called ACP -- the Agent Client Protocol.
 
 This document explains what ACP is, how Krusty implements it, and what happens under the hood when your editor spawns a Krusty process and starts sending it prompts.
 
@@ -24,7 +24,7 @@ Once running, Krusty takes over stdin and stdout for ACP communication. All diag
 
 When the ACP server starts, it goes through a short initialization sequence:
 
-1. **Tool registration.** Krusty registers its ACP-compatible tool set. This is a subset of the full tool catalog -- tools that require TUI interaction (like AskUserQuestion) are excluded since there's no terminal to prompt. The ACP set includes Read, Write, Edit, MultiEdit, Bash, Grep, Glob, List, ApplyPatch, and Processes.
+1. **Tool registration.** Krusty registers its ACP-compatible tool set. This is a subset of the full tool catalog: path-scoped file operations, search, read-only web access, patching, and bounded deferred-tool discovery. Arbitrary host command execution and long-lived process management are excluded because an editor approval prompt is not an OS sandbox.
 
 2. **Credential detection.** The server looks for API credentials in three places, checked in order: explicit environment variables (`KRUSTY_PROVIDER` + `KRUSTY_API_KEY`), provider-specific environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.), and finally Krusty's stored credential file at `~/.krusty/tokens/credentials.json`. The first match wins.
 
@@ -42,9 +42,9 @@ When the editor sends a JSON-RPC request, the ACP connection dispatches it to th
 
 - **`new_session`** -- The editor asks for a new conversation. It provides a working directory and optionally a list of MCP servers. Krusty creates the session, scans the workspace to build context for the AI, detects all available models from configured providers, and returns the session ID along with available modes and models.
 
-- **`prompt`** -- The editor sends a user message. This is where the real work happens -- Krusty converts the ACP content blocks to its internal format, calls the AI provider with streaming, and pushes response chunks back through session notifications.
+- **`prompt`** -- The editor sends a user message. Krusty converts ACP content blocks to its internal format, runs the same `AgenticOrchestrator` used by the other interactive surfaces, and maps canonical loop events back to ACP notifications.
 
-- **`cancel`** -- The editor wants to stop an in-progress prompt. Krusty sets a cancellation flag that the streaming loop checks on each iteration.
+- **`cancel`** -- The editor wants to stop an in-progress prompt. Krusty sends cancellation through the active canonical loop input channel so provider streaming, tool work, and the turn lifecycle stop together.
 
 - **`set_session_mode`** -- Switch between "code" mode (the AI writes and edits code directly) and "plan" mode (the AI designs changes before implementing them).
 
@@ -58,7 +58,7 @@ The agent also registers slash commands (`/compact`, `/clear`, `/help`, `/model`
 
 Each editor conversation maps to a Krusty session. The `SessionManager` holds all active sessions in a concurrent `DashMap`, indexed by session ID.
 
-A session (`SessionState`) tracks the working directory (all tool operations run relative to it), conversation history (the full message log sent to the AI on each turn), cancellation state, session mode, MCP server configurations, and an optional SQLite storage link.
+A session (`SessionState`) tracks the working directory, conversation history, active loop input, selected model/client, work mode, MCP server configurations, and its SQLite storage identity. Prompt execution is serialized per session, while model and mode changes remain isolated from other editor sessions.
 
 When storage is configured, every message is persisted to SQLite. If Krusty crashes or the editor restarts, `load_session` reconstructs the conversation from storage. The system also tracks recovery state for interrupted turns -- if the AI was mid-response when the connection dropped, a recovery notice is injected into the next prompt so the AI can pick up where it left off.
 
@@ -68,7 +68,7 @@ ACP is a streaming protocol. When the AI generates a response, the editor doesn'
 
 The bridge implements the ACP `Client` trait using a bounded tokio channel (capacity 1000) to decouple the prompt processor from the transport layer. The processor pushes notifications into the channel, and a forwarding task sends them over the stdio connection.
 
-For permissions, the bridge auto-approves all tool operations. In ACP mode there's no terminal to prompt the user, so the agent operates autonomously. The editor is responsible for user consent before spawning the agent.
+Permission requests travel over the same bridge. A request carries a one-shot response channel, the server forwards it to the live editor connection, and the canonical loop waits for the editor's allow, reject, or cancel decision. A closed connection or timed-out permission request fails closed; it never becomes an implicit approval.
 
 The bridge handles backpressure too. If the channel fills up, it waits up to 10 seconds before dropping the notification rather than blocking the processor.
 
@@ -84,11 +84,11 @@ Each tool call goes through several steps:
 
 3. **Title generation.** Each tool call gets a human-readable title like "Reading server.rs" or "Searching for: authenticate".
 
-4. **Execution.** The tool runs locally with the session's working directory as context, in autonomous permission mode.
+4. **Approval and execution.** The canonical orchestrator applies the persisted supervised permission mode, relays any required decision to the editor, and executes an allowed tool with the session workspace as its path-policy root.
 
 5. **Result streaming.** The bridge sends a start notification when the tool begins and a completion or failure notification with output when it finishes.
 
-The protocol also defines client-side operations -- reading files through the editor's buffer, writing through the editor's save mechanism, running commands in the editor's terminal. These are implemented but not currently delegated; Krusty executes everything locally.
+The protocol also defines client-side operations such as editor-buffer reads and terminal commands. Krusty does not currently delegate tool execution to those operations. Its ACP catalog therefore omits arbitrary Bash and process control instead of treating local path validation as host isolation.
 
 ## Workspace Context
 
@@ -151,9 +151,9 @@ The TUI owns the terminal. The web server owns an HTTP port. ACP owns nothing --
 
 This has a few practical consequences:
 
-- **Tools are a subset.** ACP registers 10 tools instead of the full 50+. Tools that require user interaction (asking questions, entering plan mode) are excluded.
-- **Permissions are automatic.** Without a UI to prompt, all tool operations are auto-approved. The editor is trusted to have obtained user consent before spawning the agent.
+- **Tools are a subset.** ACP exposes a bounded file/search/web catalog and deferred discovery. Interactive terminal-only tools, arbitrary Bash, and process management are excluded.
+- **Permissions are editor-mediated.** Supervised tool decisions are relayed to the editor. Disconnects, rejection, cancellation, and timeouts fail closed.
 - **Streaming goes through notifications.** Instead of rendering text directly, Krusty pushes content chunks, tool call updates, and thought fragments as ACP session notifications. The editor decides how to display them.
 - **Workspace context comes from the editor.** The editor tells Krusty what directory to work in and which MCP servers to connect to. In the TUI, you choose these yourself.
 
-The core agent loop is the same. The AI calls the same tools, maintains the same conversation format, and produces the same quality of output. ACP is just a different way to drive it.
+The core agent loop, conversation semantics, persistence, compaction, provider normalization, and work-mode lifecycle are the same. ACP intentionally changes only the transport and the tools that are safe to expose without an OS-isolated command runner.

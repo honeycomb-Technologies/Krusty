@@ -21,7 +21,8 @@ The route tree is assembled in `routes/mod.rs`, which nests each API group under
 - `/api/credentials` -- provider API key management
 - `/api/mako` -- autonomous agent dispatch
 - `/api/mcp` -- MCP server management
-- `/api/processes` -- background process tracking
+- `/api/processes` -- user-scoped background process tracking and lifecycle status
+- `/api/processes/:id/output` -- bounded recent stdout/stderr replay for a tracked process
 - `/api/push` -- Web Push subscriptions
 - `/api/apns` -- Apple Push Notification device management
 - `/api/hooks` -- user-defined pre/post tool hooks
@@ -93,7 +94,9 @@ The pinch operation is noteworthy. When a conversation grows too long or the use
 
 The tool API at `/api/tools` has two endpoints. `GET /api/tools` lists all registered tools with their names and descriptions. `POST /api/tools/execute` runs a tool directly, bypassing the agentic loop.
 
-Direct tool execution creates a `ToolContext` with the caller's working directory, the process registry, MCP manager, and skills manager. Tools run in autonomous permission mode -- the API trusts authenticated callers. Path validation ensures the working directory stays within the user's allowed root.
+Direct tool execution creates a `ToolContext` with the caller's working directory, owning user ID, process registry, MCP manager, and skills manager. Tools run in autonomous permission mode -- the API trusts authenticated callers. Path validation ensures the working directory stays within the user's allowed root, and process operations remain owner-scoped.
+
+The allowed root is not a shell sandbox. A direct Bash call has the authority of the server's OS account, so this endpoint is suitable for trusted private deployments only. A public multi-tenant deployment must disable host execution or place it behind per-tenant OS/container isolation.
 
 During normal chat flows, tools run inside the orchestrator loop rather than through this endpoint. The orchestrator handles the full lifecycle: the AI proposes a tool call, the server executes it (or asks for approval in supervised mode), and the result feeds back into the conversation.
 

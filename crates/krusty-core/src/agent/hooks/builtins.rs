@@ -3,7 +3,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::tools::registry::{authorize_tool_call, PermissionMode, ToolContext, ToolResult};
+use crate::tools::registry::{authorize_tool_call, ToolContext, ToolResult};
 
 use super::shell_policy::{
     classify_bash_command, BashCommandClassification, BashFileOperationKind,
@@ -35,7 +35,7 @@ impl SafetyHook {
         &self,
         command: &str,
         classification: BashCommandClassification,
-        ctx: &ToolContext,
+        _ctx: &ToolContext,
     ) -> HookResult {
         let Some(operation) = classification.file_operation else {
             return HookResult::Continue;
@@ -49,9 +49,7 @@ impl SafetyHook {
             operation.segment
         );
 
-        if operation.kind == BashFileOperationKind::Edit
-            || ctx.permission_mode == PermissionMode::Autonomous
-        {
+        if operation.kind == BashFileOperationKind::Edit {
             tracing::warn!(
                 command = command,
                 file_operation = operation.kind.as_str(),
@@ -69,7 +67,7 @@ impl SafetyHook {
             detected_command = operation.command,
             recommended_tool = operation.recommended_tool,
             segment = operation.segment,
-            "Bash file-operation misuse detected; allowing in supervised mode"
+            "Bash file-operation misuse detected; allowing read-only compatibility fallback"
         );
         HookResult::Continue
     }
@@ -215,6 +213,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::tools::registry::PermissionMode;
 
     fn default_context() -> ToolContext {
         ToolContext {
@@ -393,7 +392,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn safety_hook_blocks_autonomous_bash_file_read_and_search() {
+    async fn safety_hook_warns_but_allows_autonomous_bash_file_read_and_search() {
         let hook = SafetyHook::new();
         let ctx = autonomous_context();
 
@@ -402,8 +401,8 @@ mod tests {
                 .before_execute("bash", &json!({ "command": command }), &ctx)
                 .await;
             assert!(
-                matches!(result, HookResult::Block { .. }),
-                "expected autonomous command {command:?} to be blocked"
+                matches!(result, HookResult::Continue),
+                "expected autonomous command {command:?} to be allowed with warning"
             );
         }
     }

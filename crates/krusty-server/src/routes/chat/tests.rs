@@ -928,6 +928,62 @@ async fn sse_critical_tool_approval_survives_full_buffer_with_lag_signal() {
 }
 
 #[tokio::test]
+async fn sse_usage_survives_full_buffer_before_terminal_delivery() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let mut skipped_events = 0usize;
+
+    assert!(
+        forward_loop_event(
+            &tx,
+            "session-usage",
+            LoopEvent::TextDelta {
+                delta: "first".to_string(),
+            },
+            &mut skipped_events,
+        )
+        .await
+    );
+    assert!(
+        forward_loop_event(
+            &tx,
+            "session-usage",
+            LoopEvent::TextDelta {
+                delta: "dropped".to_string(),
+            },
+            &mut skipped_events,
+        )
+        .await
+    );
+
+    let usage_tx = tx.clone();
+    let usage_handle = tokio::spawn(async move {
+        forward_loop_event(
+            &usage_tx,
+            "session-usage",
+            LoopEvent::Usage {
+                prompt_tokens: 100,
+                input_tokens: 1_000,
+                completion_tokens: 50,
+                reasoning_tokens: 40,
+                cache_creation_input_tokens: 200,
+                cache_read_input_tokens: 700,
+                total_tokens: 1_050,
+            },
+            &mut skipped_events,
+        )
+        .await
+    });
+
+    assert!(format!("{:?}", rx.recv().await.unwrap().unwrap()).contains("text_delta"));
+    assert!(format!("{:?}", rx.recv().await.unwrap().unwrap()).contains("lagged"));
+    let usage = format!("{:?}", rx.recv().await.unwrap().unwrap());
+    assert!(usage.contains("usage"));
+    assert!(usage.contains("input_tokens"));
+    assert!(usage.contains("reasoning_tokens"));
+    assert!(usage_handle.await.expect("usage task should join"));
+}
+
+#[tokio::test]
 async fn forward_loop_event_surfaces_lag_before_terminal_event() {
     let (tx, mut rx) = mpsc::channel(1);
     let mut skipped_events = 0usize;

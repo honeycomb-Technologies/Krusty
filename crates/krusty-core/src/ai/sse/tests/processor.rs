@@ -7,8 +7,7 @@ use tokio::sync::mpsc;
 #[tokio::test]
 async fn test_sse_processor_done_marker() {
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamPart>();
-    let (buffer_tx, _buffer_rx) = mpsc::unbounded_channel::<String>();
-    let mut processor = SseStreamProcessor::new(tx, buffer_tx);
+    let mut processor = SseStreamProcessor::new(tx);
 
     struct MockParser;
     #[async_trait::async_trait]
@@ -32,10 +31,43 @@ async fn test_sse_processor_done_marker() {
 }
 
 #[tokio::test]
+async fn final_buffered_text_is_ordered_before_finish() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<StreamPart>();
+    let mut processor = SseStreamProcessor::new(tx);
+
+    struct TextDeltaParser;
+    #[async_trait::async_trait]
+    impl SseParser for TextDeltaParser {
+        async fn parse_event(&self, _json: &Value) -> anyhow::Result<SseEvent> {
+            Ok(SseEvent::TextDelta("final buffered tail".to_string()))
+        }
+    }
+
+    processor
+        .process_sse_data("{}", &TextDeltaParser)
+        .await
+        .unwrap();
+    processor
+        .process_sse_data("[DONE]", &TextDeltaParser)
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        rx.recv().await,
+        Some(StreamPart::TextDelta { delta }) if delta == "final buffered tail"
+    ));
+    assert!(matches!(
+        rx.recv().await,
+        Some(StreamPart::Finish {
+            reason: FinishReason::Stop
+        })
+    ));
+}
+
+#[tokio::test]
 async fn test_sse_processor_text_delta() {
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamPart>();
-    let (buffer_tx, mut buffer_rx) = mpsc::unbounded_channel::<String>();
-    let mut processor = SseStreamProcessor::new(tx, buffer_tx);
+    let mut processor = SseStreamProcessor::new(tx);
 
     struct TextDeltaParser;
     #[async_trait::async_trait]
@@ -51,18 +83,16 @@ async fn test_sse_processor_text_delta() {
         .process_sse_data("{}", &TextDeltaParser)
         .await
         .unwrap();
-    let text = buffer_rx.recv().await.unwrap();
-    assert!(!text.is_empty());
+    let part = rx.recv().await.unwrap();
+    assert!(matches!(part, StreamPart::TextDelta { delta } if !delta.is_empty()));
     processor.finish().await;
     drop(processor);
-    assert!(rx.try_recv().is_err());
 }
 
 #[tokio::test]
 async fn test_sse_processor_tool_call_start() {
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamPart>();
-    let (buffer_tx, _buffer_rx) = mpsc::unbounded_channel::<String>();
-    let mut processor = SseStreamProcessor::new(tx, buffer_tx);
+    let mut processor = SseStreamProcessor::new(tx);
 
     struct ToolStartParser;
     #[async_trait::async_trait]
@@ -92,8 +122,7 @@ async fn test_sse_processor_tool_call_start() {
 #[tokio::test]
 async fn test_sse_processor_skip_empty_json() {
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamPart>();
-    let (buffer_tx, _buffer_rx) = mpsc::unbounded_channel::<String>();
-    let mut processor = SseStreamProcessor::new(tx, buffer_tx);
+    let mut processor = SseStreamProcessor::new(tx);
 
     struct SkipParser;
     #[async_trait::async_trait]
@@ -114,8 +143,7 @@ async fn test_sse_processor_skip_empty_json() {
 #[tokio::test]
 async fn test_sse_processor_thinking_events() {
     let (tx, mut rx) = mpsc::unbounded_channel::<StreamPart>();
-    let (buffer_tx, _buffer_rx) = mpsc::unbounded_channel::<String>();
-    let mut processor = SseStreamProcessor::new(tx, buffer_tx);
+    let mut processor = SseStreamProcessor::new(tx);
 
     struct ThinkingStartParser;
     #[async_trait::async_trait]

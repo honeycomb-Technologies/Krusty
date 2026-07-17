@@ -376,9 +376,9 @@ mod tests {
     #[test]
     fn test_plugin_frame_from_arc() {
         let pixels = Arc::new(vec![0u8; 100 * 100 * 4]);
-        let frame = PluginFrame::from_arc(pixels.clone(), 100, 100);
+        let frame = PluginFrame::from_arc(pixels, 100, 100);
         assert_eq!(frame.width, 100);
-        assert_eq!(Arc::strong_count(&frame.pixels), 2); // Original + frame
+        assert_eq!(Arc::strong_count(&frame.pixels), 1);
     }
 
     #[test]

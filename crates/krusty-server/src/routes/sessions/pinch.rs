@@ -4,8 +4,10 @@ use axum::{
 };
 
 use krusty_core::agent::{
+    effective_context_window_for_runtime, estimate_rendered_request_tokens, inject_context,
     run_compaction_pipeline, CompactionManager, CompactionRequest, CompactionTrigger,
 };
+use krusty_core::ai::client::CallOptions;
 use krusty_core::ai::models::resolve_context_window;
 use krusty_core::storage::WorkspaceMode;
 use std::path::Path as StdPath;
@@ -27,6 +29,10 @@ pub(super) async fn pinch_session(
 ) -> Result<Json<PinchResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
     let source_session = load_owned_session(&session_manager, &id, user.as_ref())?;
+    let _session_guard = state
+        .try_lock_session(&id)
+        .await
+        .ok_or_else(|| AppError::Conflict(format!("Session {id} is busy")))?;
     let workspace_scope = request_workspace_scope(&state, user.as_ref());
 
     let raw_messages = session_manager.load_session_messages(&id)?;
@@ -66,20 +72,62 @@ pub(super) async fn pinch_session(
         .resolve_ai_client_for_user(summary_model, source_session.user_id.as_deref())
         .await;
 
-    let compaction_manager = if let Some(client) = summary_client.as_ref() {
+    let (compaction_manager, request_budget) = if let Some(client) = summary_client.as_ref() {
         let model = summary_model.unwrap_or(client.config().model.as_str());
-        CompactionManager::for_model(
+        let resolved_window =
+            resolve_context_window(client.provider_id(), model, client.config().api_format);
+        let effective_window = effective_context_window_for_runtime(
+            client.config().uses_chatgpt_codex_format(),
+            resolved_window,
+        );
+        let manager = CompactionManager::for_model(
             client.provider_id(),
             client.config().api_format,
             model,
-            resolve_context_window(client.provider_id(), model, client.config().api_format),
+            effective_window,
+        );
+        let session_type = match source_session.session_type {
+            krusty_core::storage::SessionType::Chat => "chat",
+            krusty_core::storage::SessionType::Code => "code",
+            krusty_core::storage::SessionType::Mako => "mako",
+        };
+        let context_project_dir = (source_session.workspace_mode != WorkspaceMode::Neutral)
+            .then_some(working_dir.as_path());
+        let with_context = inject_context(
+            &messages,
+            &state.db_path,
+            &id,
+            &working_dir,
+            context_project_dir,
+            source_session.work_mode,
+            state.skills_manager.as_ref(),
+            Some(model),
+            Some(session_type),
+            None,
+            source_session.user_id.as_deref(),
+        );
+        let tools = state.tool_registry.get_ai_tools_all().await;
+        let options = CallOptions {
+            tools: (!tools.is_empty()).then_some(tools),
+            enable_caching: true,
+            session_id: Some(id.clone()),
+            codex_parallel_tool_calls: true,
+            ..Default::default()
+        };
+        let rendered = estimate_rendered_request_tokens(client, &with_context, &options);
+        (
+            manager,
+            Some(rendered.compaction_budget(rendered.total_tokens)),
         )
     } else {
-        CompactionManager::for_model(
-            krusty_core::ai::providers::ProviderId::MiniMax,
-            krusty_core::ai::models::ApiFormat::Anthropic,
-            krusty_core::constants::ai::DEFAULT_MODEL,
-            krusty_core::constants::ai::CONTEXT_WINDOW_TOKENS,
+        (
+            CompactionManager::for_model(
+                krusty_core::ai::providers::ProviderId::MiniMax,
+                krusty_core::ai::models::ApiFormat::Anthropic,
+                krusty_core::constants::ai::DEFAULT_MODEL,
+                krusty_core::constants::ai::CONTEXT_WINDOW_TOKENS,
+            ),
+            None,
         )
     };
 
@@ -95,7 +143,7 @@ pub(super) async fn pinch_session(
             direction: req.direction,
         },
         compaction_manager,
-        triggering_token_estimate: None,
+        request_budget,
         last_usage_prompt_tokens: None,
         messages_after_usage: 0,
         summary_override: None,
@@ -103,7 +151,14 @@ pub(super) async fn pinch_session(
         user_id: source_session.user_id.as_deref(),
     })
     .await
-    .map_err(|error| AppError::Internal(format!("Compaction failed: {}", error)))?;
+    .map_err(|error| {
+        let message = format!("Compaction failed: {error}");
+        if message.contains("stale") || message.contains("changed while compaction") {
+            AppError::Conflict(message)
+        } else {
+            AppError::Internal(message)
+        }
+    })?;
 
     if legacy_relative_workspace {
         let (working_dir, project_dir) = match source_session.workspace_mode {

@@ -392,7 +392,7 @@ mod tests {
         assert!(result1.is_ok());
 
         // Second acquisition by same agent should succeed
-        let result2 = ctx.acquire_lock(path.clone(), agent_id.clone(), "second".to_string());
+        let result2 = ctx.acquire_lock(path, agent_id, "second".to_string());
         assert!(
             result2.is_ok(),
             "Re-acquisition by same agent should succeed"
@@ -411,7 +411,7 @@ mod tests {
         assert!(result1.is_ok());
 
         // Agent 2 should fail to acquire
-        let result2 = ctx.acquire_lock(path.clone(), agent2.clone(), "contention".to_string());
+        let result2 = ctx.acquire_lock(path, agent2, "contention".to_string());
         assert!(
             result2.is_err(),
             "Agent 2 should fail to acquire lock held by agent 1"
@@ -511,8 +511,7 @@ mod tests {
         let path = PathBuf::from("/test/file.rs");
         let agent = "agent-1".to_string();
 
-        ctx.acquire_lock(path.clone(), agent.clone(), "test".to_string())
-            .unwrap();
+        ctx.acquire_lock(path, agent, "test".to_string()).unwrap();
 
         assert_eq!(ctx.locks_acquired.load(Ordering::Relaxed), 1);
         assert_eq!(ctx.lock_contentions.load(Ordering::Relaxed), 0);
@@ -578,7 +577,7 @@ mod tests {
             description: "Test interface".to_string(),
         };
 
-        ctx.register_interface(interface.clone());
+        ctx.register_interface(interface);
 
         // Get all interfaces
         let all = ctx.get_interfaces();
@@ -614,7 +613,7 @@ mod tests {
         );
 
         // Add more waits to exceed threshold
-        ctx.record_lock_wait(path.clone(), Duration::from_millis(500));
+        ctx.record_lock_wait(path, Duration::from_millis(500));
         let high = ctx.high_contention_files();
         assert_eq!(high.len(), 1, "Total wait 1100ms should be high contention");
         assert_eq!(high[0].1, Duration::from_millis(1100));
@@ -629,7 +628,7 @@ mod tests {
 
         // Acquire a lock
         let path = PathBuf::from("/test/file.rs");
-        ctx.acquire_lock(path.clone(), "agent-1".to_string(), "test".to_string())
+        ctx.acquire_lock(path, "agent-1".to_string(), "test".to_string())
             .unwrap();
 
         // Register interface

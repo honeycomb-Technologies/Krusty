@@ -28,8 +28,11 @@ pub mod streaming;
 pub mod title;
 pub mod transform;
 pub mod types;
+mod usage;
 
 // Re-export main types from new module
-pub use client::{AiClient, AiClientConfig, CallOptions, KRUSTY_SYSTEM_PROMPT};
+pub use client::{
+    AiClient, AiClientConfig, CallOptions, PromptCacheRetention, KRUSTY_SYSTEM_PROMPT,
+};
 
-pub use title::{generate_pinch_title, generate_title};
+pub use title::{derive_pinch_title, derive_title, generate_pinch_title, generate_title};

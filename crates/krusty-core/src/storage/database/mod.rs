@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 33;
+const SCHEMA_VERSION: i32 = 34;
 
 /// Shared database handle for connection reuse
 ///

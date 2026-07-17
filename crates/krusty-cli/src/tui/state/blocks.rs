@@ -53,21 +53,6 @@ impl BlockManager {
         }
     }
 
-    /// Get total count of all blocks (for capacity estimation)
-    pub fn total_count(&self) -> usize {
-        self.thinking.len()
-            + self.pinch.len()
-            + self.bash.len()
-            + self.terminal.len()
-            + self.tool_result.len()
-            + self.read.len()
-            + self.edit.len()
-            + self.write.len()
-            + self.web_search.len()
-            + self.explore.len()
-            + self.build.len()
-    }
-
     /// Tick all animation blocks. Returns true if any block is still animating.
     pub fn tick_all(&mut self) -> bool {
         let mut animating = false;

@@ -310,7 +310,6 @@ fn resolve_workspace_dir(
 mod tests {
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::path::PathBuf;
     use std::sync::{atomic::AtomicUsize, Arc};
 
     use axum::http::{header, HeaderMap, HeaderValue, Uri};
@@ -372,7 +371,7 @@ mod tests {
 
         let result = resolve_workspace_dir(&server_root, Some("project"))
             .expect("relative project dir should resolve");
-        assert_eq!(result, PathBuf::from(project_dir));
+        assert_eq!(result, project_dir);
     }
 
     fn test_state() -> AppState {

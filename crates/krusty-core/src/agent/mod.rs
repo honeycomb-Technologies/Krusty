@@ -65,10 +65,11 @@ pub use autonomy::auto_classifier;
 pub use autonomy::auto_classifier::AutoClassifierHook;
 pub use autonomy::{coordinator_prompt, team, tick_engine};
 pub use cancellation::AgentCancellation;
-pub(crate) use compaction::estimate_with_usage as estimate_conversation_tokens_with_usage;
+pub(crate) use compaction::estimate_with_usage as estimate_tokens_with_usage;
 pub use compaction::{
-    run_compaction_pipeline, CompactionManager, CompactionRequest, CompactionResult,
-    CompactionTrigger,
+    effective_context_window_for_runtime, estimate_rendered_request_tokens,
+    run_compaction_pipeline, CompactionManager, CompactionRequest, CompactionRequestBudget,
+    CompactionResult, CompactionTrigger, RenderedRequestTokenEstimate,
 };
 pub use context::{
     build_plan_context, build_project_context, build_skills_context, inject_context,
@@ -77,6 +78,7 @@ pub use event_bus::AgentEventBus;
 pub use events::{AgentEvent, InterruptReason};
 pub use hooks::{LoggingHook, PlanModeHook, SafetyHook};
 pub use loop_events::{LoopEvent, LoopInput, PlanTaskInfo};
+pub use observability::ProviderCallTraceContext;
 pub use orchestrator::{AgenticOrchestrator, OrchestratorConfig, OrchestratorServices};
 pub use pinch_context::{PinchContext, PinchContextInput};
 pub use pinch_session::{

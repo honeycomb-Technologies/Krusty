@@ -1,11 +1,17 @@
 import { useState } from "react";
 import { Image, View, Text, Pressable, StyleSheet } from "react-native";
-import { Brain, ChevronDown, ChevronRight, Clock } from "lucide-react-native";
+import {
+  Brain,
+  ChevronDown,
+  ChevronRight,
+  Clock,
+  Search,
+} from "lucide-react-native";
 import { useThemeContext } from "../../hooks/useTheme";
-import { useBreakpoint } from "../../hooks/useBreakpoint";
 import { AssistantSegmentedContent } from "./AssistantSegmentedContent";
 import { MarkdownContent } from "./MarkdownContent";
 import { ToolCallCard } from "./ToolCallCard";
+import { DotEchoIndicator } from "./DotEchoIndicator";
 import { ToolApprovalWidget } from "./ToolApprovalWidget";
 import { AskUserQuestionWidget } from "./AskUserQuestionWidget";
 import { PlanConfirmWidget } from "./PlanConfirmWidget";
@@ -51,7 +57,6 @@ export function MessageBubble({
   onPlanConfirm,
 }: MessageBubbleProps) {
   const { theme } = useThemeContext();
-  const { isDesktop } = useBreakpoint();
   const t = theme.colors;
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
@@ -173,7 +178,12 @@ export function MessageBubble({
   };
 
   return (
-    <View style={[styles.container, isUser && styles.containerUser]}>
+    <View
+      style={[
+        styles.container,
+        isUser ? styles.containerUser : styles.containerAssistant,
+      ]}
+    >
       {isUser &&
         (message.content.length > 0 ||
           (message.attachments?.length ?? 0) > 0) && (
@@ -219,12 +229,7 @@ export function MessageBubble({
         )}
 
       {!isUser && (
-        <View
-          style={[
-            styles.assistantWrap,
-            isDesktop ? styles.assistantWrapDesktop : null,
-          ]}
-        >
+        <View style={styles.assistantWrap}>
           {assistantSegments.map(renderAssistantSegment)}
 
           {copied ? (
@@ -239,7 +244,7 @@ export function MessageBubble({
 }
 
 function shouldExpandTool(toolCall: ToolCall, isStreaming: boolean): boolean {
-  if (toolCall.status === "error" || toolCall.status === "awaiting_approval") {
+  if (toolCall.status === "awaiting_approval") {
     return true;
   }
   if (isStreaming && toolCall.status === "running") {
@@ -278,6 +283,7 @@ function ToolClusterCard({
         onPress={() => setExpanded((current) => !current)}
         style={styles.toolClusterHeader}
       >
+        <Search size={14} color={t.mutedForeground} strokeWidth={1.6} />
         <Text style={[styles.toolClusterTitle, { color: t.mutedForeground }]}>
           {label}
         </Text>
@@ -408,22 +414,35 @@ function ThinkingBlock({
   const { theme } = useThemeContext();
   const t = theme.colors;
   const [expanded, setExpanded] = useState(false);
+  const canExpand = content.trim().length > 0;
 
   return (
     <Pressable
-      onPress={() => setExpanded(!expanded)}
-      style={[styles.thinkingBlock, { borderColor: `${t.thinking}30` }]}
+      onPress={() => canExpand && setExpanded(!expanded)}
+      disabled={!canExpand}
+      style={styles.thinkingBlock}
     >
       <View style={styles.thinkingHeader}>
-        <Brain size={14} color={t.thinking} strokeWidth={2} />
-        <Text style={[styles.thinkingLabel, { color: t.thinking }]}>
-          {isStreaming ? "Thinking..." : "Thinking"}
-        </Text>
-        {expanded ? (
-          <ChevronDown size={14} color={t.thinking} />
+        {isStreaming ? (
+          <DotEchoIndicator color={t.thinking} />
         ) : (
-          <ChevronRight size={14} color={t.thinking} />
+          <Brain size={14} color={t.mutedForeground} strokeWidth={1.8} />
         )}
+        <Text
+          style={[
+            styles.thinkingLabel,
+            { color: isStreaming ? t.foreground : t.mutedForeground },
+          ]}
+        >
+          {isStreaming ? "Thinking…" : "Thought"}
+        </Text>
+        {canExpand ? (
+          expanded ? (
+            <ChevronDown size={14} color={t.mutedForeground} />
+          ) : (
+            <ChevronRight size={14} color={t.mutedForeground} />
+          )
+        ) : null}
       </View>
       {expanded && (
         <Text
@@ -445,14 +464,13 @@ const styles = StyleSheet.create({
   containerUser: {
     alignItems: "flex-end",
   },
-  assistantWrap: {
-    maxWidth: "92%",
-    gap: 10,
-  },
-  assistantWrapDesktop: {
-    // Use the full fluid chat band on desktop.
-    maxWidth: "100%",
+  containerAssistant: {
     width: "100%",
+  },
+  assistantWrap: {
+    width: "100%",
+    maxWidth: "100%",
+    gap: 10,
   },
   userWrap: {
     maxWidth: "88%",
@@ -521,11 +539,7 @@ const styles = StyleSheet.create({
     marginLeft: 2,
   },
   toolCluster: {
-    borderRadius: 10,
-    borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    backgroundColor: "rgba(255,255,255,0.02)",
+    paddingVertical: 2,
   },
   toolClusterHeader: {
     flexDirection: "row",
@@ -546,8 +560,6 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   thinkingBlock: {
-    borderLeftWidth: 2,
-    paddingLeft: 12,
     paddingVertical: 3,
   },
   thinkingHeader: {

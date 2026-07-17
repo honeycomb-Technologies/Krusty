@@ -106,7 +106,7 @@ impl App {
                 }
                 PollAction::RefreshAiTools => {
                     self.services.cached_ai_tools =
-                        futures::executor::block_on(self.services.tool_registry.get_ai_tools());
+                        futures::executor::block_on(self.services.tool_registry.get_ai_tools_all());
                     tracing::info!(
                         "Refreshed AI tools after MCP update, total: {}",
                         self.services.cached_ai_tools.len()

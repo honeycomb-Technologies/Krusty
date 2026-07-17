@@ -28,7 +28,9 @@ pub mod tools;
 pub mod updater;
 
 // Re-exports for convenience
-pub use ai::client::{AiClient, AiClientConfig, CallOptions, KRUSTY_SYSTEM_PROMPT};
+pub use ai::client::{
+    AiClient, AiClientConfig, CallOptions, PromptCacheRetention, KRUSTY_SYSTEM_PROMPT,
+};
 pub use ai::streaming::StreamPart;
 pub use ai::types::{AiTool, AiToolCall, Content, ModelMessage, Role};
 pub use mcp::McpManager;

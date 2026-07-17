@@ -274,6 +274,42 @@ mod tests {
     }
 
     #[test]
+    fn background_bash_history_keeps_process_handle_and_status_guidance() {
+        let output = json!({
+            "ok": true,
+            "data": {
+                "message": "Process started in background",
+                "process_id": "process-123",
+                "status": "running",
+                "next_action": "Use processes status/control when needed."
+            }
+        })
+        .to_string();
+
+        let history = build_history_tool_result("bash", &output, false);
+
+        assert!(history
+            .get("summary")
+            .and_then(|value| value.as_str())
+            .is_some_and(|summary| summary.contains("process-123")
+                && summary.contains("processes status/control")));
+        assert_eq!(
+            history
+                .get("result")
+                .and_then(|value| value.get("process_id"))
+                .and_then(|value| value.as_str()),
+            Some("process-123")
+        );
+        assert_eq!(
+            history
+                .get("result")
+                .and_then(|value| value.get("status"))
+                .and_then(|value| value.as_str()),
+            Some("running")
+        );
+    }
+
+    #[test]
     fn retains_bounded_read_content_in_history() {
         let content = "x".repeat(20_000);
         let output = json!({

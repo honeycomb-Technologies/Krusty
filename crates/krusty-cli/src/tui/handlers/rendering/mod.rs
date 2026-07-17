@@ -2,6 +2,7 @@
 //!
 //! Main entry point that dispatches to specialized render modules.
 
+mod display_list;
 mod messages;
 mod scroll_calc;
 mod views;

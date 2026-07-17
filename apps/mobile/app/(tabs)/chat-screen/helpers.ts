@@ -2,10 +2,10 @@ import { Dimensions } from "react-native";
 
 import type {
   ChatMessage,
-  ModelInfo,
   SessionType,
 } from "@krusty/api";
 import type { ToolCall } from "@krusty/state";
+export { isModelUsable, normalizeProviderId } from "@krusty/state";
 
 const SCREEN_HEIGHT = Dimensions.get("window").height;
 
@@ -15,31 +15,6 @@ export const SELECTED_MODEL_KEY = "krusty_selected_model";
 export const TAB_TYPES: SessionType[] = ["chat", "code", "mako"];
 
 export type WorkspaceMode = "neutral" | "selected" | "created";
-
-export function normalizeProviderId(provider: string | null | undefined): string {
-  return (provider ?? "").trim().toLowerCase();
-}
-
-export function isModelUsable(
-  modelId: string | null | undefined,
-  catalog: ModelInfo[],
-  configuredProviders: string[],
-): boolean {
-  if (!modelId) {
-    return false;
-  }
-
-  const match = catalog.find((candidate) => candidate.id === modelId);
-  if (!match) {
-    return false;
-  }
-
-  if (configuredProviders.length === 0) {
-    return true;
-  }
-
-  return configuredProviders.includes(normalizeProviderId(match.provider));
-}
 
 export function sessionTypeForTab(index: number): SessionType {
   return TAB_TYPES[index] ?? "code";

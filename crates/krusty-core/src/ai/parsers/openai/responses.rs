@@ -2,48 +2,76 @@ use serde_json::Value;
 
 use super::OpenAIParser;
 use crate::ai::sse::SseEvent;
-use crate::ai::types::{FinishReason, Usage};
+use crate::ai::types::FinishReason;
+use crate::ai::usage::parse_openai_responses_usage;
 
 impl OpenAIParser {
-    fn parse_responses_usage(usage_obj: &Value) -> Option<Usage> {
-        let input = usage_obj
-            .get("input_tokens")
-            .or_else(|| usage_obj.get("input"))
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0) as usize;
+    fn reasoning_completion_key(json: &Value) -> String {
+        let item_id = json
+            .get("item_id")
+            .and_then(Value::as_str)
+            .unwrap_or("default-item");
+        let output_index = json
+            .get("output_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let summary_index = json
+            .get("summary_index")
+            .or_else(|| json.get("content_index"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        format!("{item_id}:{output_index}:{summary_index}")
+    }
 
-        let output = usage_obj
-            .get("output_tokens")
-            .or_else(|| usage_obj.get("output"))
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0) as usize;
-
-        let cached = usage_obj
-            .get("cached_input")
-            .or_else(|| usage_obj.get("cache_read_input_tokens"))
-            .or_else(|| {
-                usage_obj
-                    .get("input_tokens_details")
-                    .and_then(|d| d.get("cached_tokens"))
-            })
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0) as usize;
-
-        if input == 0 && output == 0 && cached == 0 {
-            return None;
+    fn responses_snapshot_text(json: &Value) -> String {
+        let response = json.get("response").unwrap_or(json);
+        if let Some(text) = response
+            .get("output_text")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+        {
+            return text.to_string();
         }
 
-        Some(Usage {
-            // OpenAI/Grok Responses `input_tokens` already includes cached tokens.
-            // Krusty's Usage shape keeps cache reads separate, matching the
-            // provider runtime schema's `inputTokens` + `cachedInputTokens`
-            // accounting without double-counting in cache-hit-rate math.
-            prompt_tokens: input.saturating_sub(cached),
-            completion_tokens: output,
-            total_tokens: input + output,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: cached,
-        })
+        let mut text = String::new();
+        let Some(output) = response.get("output").and_then(Value::as_array) else {
+            return text;
+        };
+
+        for item in output {
+            match item.get("type").and_then(Value::as_str) {
+                Some("message") => {
+                    let Some(parts) = item.get("content").and_then(Value::as_array) else {
+                        continue;
+                    };
+                    for part in parts {
+                        if matches!(
+                            part.get("type").and_then(Value::as_str),
+                            Some("output_text" | "text")
+                        ) {
+                            if let Some(part_text) = part.get("text").and_then(Value::as_str) {
+                                text.push_str(part_text);
+                            }
+                        }
+                    }
+                }
+                Some("output_text" | "text") => {
+                    if let Some(item_text) = item.get("text").and_then(Value::as_str) {
+                        text.push_str(item_text);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        text
+    }
+
+    pub(super) fn final_response_snapshot_delta(
+        &self,
+        json: &Value,
+    ) -> anyhow::Result<Option<String>> {
+        self.reconcile_response_text_snapshot(&Self::responses_snapshot_text(json))
     }
 
     fn responses_finish_reason(response: Option<&Value>) -> FinishReason {
@@ -88,7 +116,15 @@ impl OpenAIParser {
             "response.output_text.delta" => {
                 if let Some(delta) = json.get("delta").and_then(|d| d.as_str()) {
                     if !delta.is_empty() {
+                        self.record_response_text_delta(delta)?;
                         return Ok(SseEvent::TextDelta(delta.to_string()));
+                    }
+                }
+            }
+            "response.output_text.done" => {
+                if let Some(text) = json.get("text").and_then(Value::as_str) {
+                    if let Some(delta) = self.reconcile_response_text_snapshot(text)? {
+                        return Ok(SseEvent::TextDelta(delta));
                     }
                 }
             }
@@ -113,6 +149,10 @@ impl OpenAIParser {
             "response.reasoning_summary_text.done"
             | "response.reasoning_text.done"
             | "response.reasoning_summary_part.done" => {
+                if !self.mark_reasoning_complete(Self::reasoning_completion_key(json))? {
+                    tracing::debug!("Skipping duplicate reasoning completion event");
+                    return Ok(SseEvent::Skip);
+                }
                 tracing::info!("Reasoning block complete");
                 return Ok(SseEvent::ThinkingComplete {
                     index: 0,
@@ -124,7 +164,7 @@ impl OpenAIParser {
                 let usage = json
                     .get("response")
                     .and_then(|r| r.get("usage"))
-                    .and_then(Self::parse_responses_usage);
+                    .and_then(parse_openai_responses_usage);
 
                 if let Some(usage) = &usage {
                     tracing::info!(
@@ -247,7 +287,7 @@ impl OpenAIParser {
             "response.usage" => {
                 let usage_obj = json.get("usage").unwrap_or(json);
 
-                if let Some(usage) = Self::parse_responses_usage(usage_obj) {
+                if let Some(usage) = parse_openai_responses_usage(usage_obj) {
                     tracing::info!(
                         "Responses API usage: input={}, output={}, cached={}",
                         usage.prompt_tokens,

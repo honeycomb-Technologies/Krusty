@@ -20,6 +20,53 @@ fn empty_pinch_context(parent_session_id: &str) -> PinchContext {
 }
 
 #[test]
+fn session_creation_supports_legacy_required_provider_columns() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let db_path = temp.path().join("legacy.db");
+    let conn = rusqlite::Connection::open(&db_path).expect("legacy db");
+    conn.execute_batch(
+        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT);
+         INSERT INTO schema_version (version, applied_at) VALUES (33, CURRENT_TIMESTAMP);
+         CREATE TABLE sessions (
+             id TEXT PRIMARY KEY,
+             title TEXT NOT NULL,
+             created_at INTEGER NOT NULL,
+             updated_at INTEGER NOT NULL,
+             provider TEXT NOT NULL,
+             model TEXT NOT NULL,
+             metadata TEXT,
+             working_dir TEXT,
+             project_dir TEXT,
+             workspace_mode TEXT NOT NULL DEFAULT 'neutral',
+             session_type TEXT NOT NULL DEFAULT 'code',
+             user_id TEXT,
+             target_branch TEXT,
+             permission_mode TEXT NOT NULL DEFAULT 'autonomous'
+         );",
+    )
+    .expect("legacy schema");
+    drop(conn);
+
+    let manager =
+        SessionManager::new(crate::storage::Database::new(&db_path).expect("open legacy database"));
+    let session_id = manager
+        .create_session("Legacy Session", None, Some("/tmp"))
+        .expect("legacy-compatible session insert");
+    let (provider, model): (String, String) = manager
+        .db()
+        .conn()
+        .query_row(
+            "SELECT provider, model FROM sessions WHERE id = ?1",
+            [&session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("legacy row");
+
+    assert_eq!(provider, "krusty");
+    assert!(model.is_empty());
+}
+
+#[test]
 fn create_linked_session_preserves_workspace_contract() {
     let (db, _temp) = create_test_db();
     let user_id = "workspace-user";

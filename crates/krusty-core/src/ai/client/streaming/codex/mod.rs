@@ -8,6 +8,7 @@ use crate::ai::streaming::StreamPart;
 use crate::ai::types::ModelMessage;
 
 mod request;
+pub(crate) mod session;
 mod websocket;
 
 impl AiClient {

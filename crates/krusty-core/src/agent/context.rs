@@ -31,6 +31,12 @@ pub use project::build_project_context;
 pub use skills::build_skills_context;
 pub use workspace::build_subagent_project_context;
 
+const MAX_PROJECT_SETTINGS_APPEND_BYTES: usize = 8 * 1024;
+/// Aggregate ceiling for request-time system context assembled by this module.
+/// Individual sources also have smaller limits, but the aggregate guard keeps
+/// several simultaneously-large sources from bypassing those local budgets.
+pub(super) const MAX_DYNAMIC_CONTEXT_BYTES: usize = 64 * 1024;
+
 /// Build a conversation clone with context system messages prepended.
 ///
 /// Injects plan, skills, and project context in the same order as the TUI:
@@ -51,13 +57,11 @@ pub fn inject_context(
     let is_chat = session_type == Some("chat");
 
     if is_chat {
-        let mut injected = Vec::with_capacity(conversation.len() + 2);
-        injected.push(ModelMessage {
-            role: Role::System,
-            content: vec![Content::Text {
-                text: "You are Krusty, a helpful conversational assistant. This is a chat session — you are having a natural conversation with the user.\n\nIMPORTANT: You do NOT have access to any tools in this session. Do not mention, list, or describe any tools. You cannot read files, run commands, or edit code. If the user asks about tools, explain that this is a chat-only session and suggest they switch to Code mode for coding tasks.\n\nBe friendly, helpful, and conversational.".to_string(),
-            }],
-        });
+        // The caller owns the Chat capability prompt because it also owns the
+        // request-time tool filter (for example, research mode). Injecting a
+        // second capability policy here can contradict the tools that are
+        // actually present on the request or an explicit custom prompt.
+        let mut injected = Vec::with_capacity(conversation.len() + 1);
         let memory_ctx = memory::build_memory_context(db_path, None, user_id, conversation);
         if !memory_ctx.is_empty() {
             injected.push(ModelMessage {
@@ -158,7 +162,10 @@ pub fn inject_context(
             injected.push(ModelMessage {
                 role: Role::System,
                 content: vec![Content::Text {
-                    text: format!("[PROJECT SETTINGS]\n{}", append),
+                    text: format!(
+                        "[PROJECT SETTINGS]\n{}",
+                        truncate_utf8_bytes(append, MAX_PROJECT_SETTINGS_APPEND_BYTES)
+                    ),
                 }],
             });
         }
@@ -196,8 +203,120 @@ pub fn inject_context(
         });
     }
 
+    bound_dynamic_context_messages(&mut injected);
     injected.extend_from_slice(conversation);
     injected
+}
+
+fn bound_dynamic_context_messages(messages: &mut Vec<ModelMessage>) {
+    let total_bytes = messages
+        .iter()
+        .filter_map(context_message_text)
+        .map(str::len)
+        .sum::<usize>();
+    if total_bytes <= MAX_DYNAMIC_CONTEXT_BYTES {
+        return;
+    }
+
+    let mut allocation_order = (0..messages.len()).collect::<Vec<_>>();
+    allocation_order.sort_by(|left, right| {
+        let left_text = context_message_text(&messages[*left]).unwrap_or_default();
+        let right_text = context_message_text(&messages[*right]).unwrap_or_default();
+        dynamic_context_priority(right_text)
+            .cmp(&dynamic_context_priority(left_text))
+            .then_with(|| left.cmp(right))
+    });
+
+    let mut remaining = MAX_DYNAMIC_CONTEXT_BYTES;
+    let mut retained = vec![None; messages.len()];
+    let mut omitted = Vec::new();
+    let mut truncated = Vec::new();
+    for index in allocation_order {
+        let Some(text) = context_message_text(&messages[index]) else {
+            continue;
+        };
+        let label = context_section_label(text);
+        if text.len() <= remaining {
+            retained[index] = Some(text.to_string());
+            remaining -= text.len();
+            continue;
+        }
+
+        let marker = format!("\n[{} TRUNCATED AT AGGREGATE CONTEXT BUDGET]", label);
+        if remaining > marker.len() + 256 {
+            let mut bounded = truncate_utf8_bytes(text, remaining - marker.len());
+            bounded.push_str(&marker);
+            retained[index] = Some(bounded);
+            truncated.push(label);
+            remaining = 0;
+        } else {
+            omitted.push(label);
+        }
+    }
+
+    let mut bounded_messages = Vec::with_capacity(messages.len());
+    for (index, mut message) in std::mem::take(messages).into_iter().enumerate() {
+        if context_message_text(&message).is_none() {
+            bounded_messages.push(message);
+            continue;
+        }
+        let Some(text) = retained[index].take() else {
+            continue;
+        };
+        message.content = vec![Content::Text { text }];
+        bounded_messages.push(message);
+    }
+    *messages = bounded_messages;
+
+    warn!(
+        total_bytes,
+        retained_bytes = MAX_DYNAMIC_CONTEXT_BYTES - remaining,
+        max_bytes = MAX_DYNAMIC_CONTEXT_BYTES,
+        truncated_sections = ?truncated,
+        omitted_sections = ?omitted,
+        "Dynamic request context exceeded its aggregate budget"
+    );
+}
+
+fn context_message_text(message: &ModelMessage) -> Option<&str> {
+    if message.role != Role::System || message.content.len() != 1 {
+        return None;
+    }
+    match &message.content[0] {
+        Content::Text { text } => Some(text),
+        _ => None,
+    }
+}
+
+fn dynamic_context_priority(text: &str) -> u8 {
+    if text.starts_with("[PLAN MODE ACTIVE")
+        || text.starts_with("[ACTIVE PLAN")
+        || text.starts_with("[AUTONOMOUS TASKS]")
+        || text.starts_with("[WORKSPACE MODE:")
+        || text.starts_with("[ENVIRONMENT]")
+    {
+        120
+    } else if text.starts_with("[PROJECT INSTRUCTIONS")
+        || text.starts_with("[PROJECT SETTINGS]")
+        || text.starts_with("[MAKO ")
+    {
+        100
+    } else if text.starts_with("[AVAILABLE SKILLS]") || text.starts_with("[RECENT DELEGATED RUNS]")
+    {
+        80
+    } else {
+        60
+    }
+}
+
+fn context_section_label(text: &str) -> String {
+    text.lines()
+        .next()
+        .unwrap_or("CONTEXT SECTION")
+        .trim_matches(['[', ']'])
+        .chars()
+        .take(80)
+        .collect()
 }
 
 /// Truncate a string to at most `max_chars` characters on a valid UTF-8
@@ -208,6 +327,21 @@ pub(super) fn truncate_utf8(s: &str, max_chars: usize) -> String {
     }
     let truncated: String = s.chars().take(max_chars).collect();
     format!("{}...", truncated)
+}
+
+/// Truncate a string to at most `max_bytes` without splitting a UTF-8 code
+/// point. This is used for request-context budgets, which are byte based so a
+/// multi-byte document cannot silently exceed the configured cap.
+pub(super) fn truncate_utf8_bytes(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
 }
 
 pub(super) fn open_context_database(db_path: &Path, context: &'static str) -> Option<Database> {

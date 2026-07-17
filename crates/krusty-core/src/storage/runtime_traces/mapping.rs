@@ -143,13 +143,17 @@ pub(super) fn summarize_loop_event(event: &LoopEvent) -> Value {
         LoopEvent::TickInjected { tick_number } => json!({ "tick_number": tick_number }),
         LoopEvent::Usage {
             prompt_tokens,
+            input_tokens,
             completion_tokens,
+            reasoning_tokens,
             cache_creation_input_tokens,
             cache_read_input_tokens,
             total_tokens,
         } => json!({
             "prompt_tokens": prompt_tokens,
+            "input_tokens": input_tokens,
             "completion_tokens": completion_tokens,
+            "reasoning_tokens": reasoning_tokens,
             "cache_creation_input_tokens": cache_creation_input_tokens,
             "cache_read_input_tokens": cache_read_input_tokens,
             "total_tokens": total_tokens,

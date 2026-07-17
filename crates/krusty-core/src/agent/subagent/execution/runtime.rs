@@ -39,6 +39,11 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     let task_id = task.id.clone();
     let task_name = task.name.clone();
     let plan_task_id = task.plan_task_id.clone();
+    let cache_session_id = task
+        .delegated_run_id
+        .as_deref()
+        .map(|run_id| format!("{run_id}:{task_id}"))
+        .unwrap_or_else(|| task_id.clone());
 
     let ai_tools = config.get_ai_tools();
     let ctx = build_subagent_tool_context(task, config.timeout_secs());
@@ -191,6 +196,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             &ai_tools,
             config.max_tokens(),
             task.thinking_enabled,
+            &cache_session_id,
         );
 
         let response = match tokio::time::timeout(config.api_call_timeout(), api_future).await {
@@ -494,7 +500,8 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
         for tc in &tool_calls {
             total_tool_calls += 1;
             if let Some(policy) = task.delegation_policy.as_ref() {
-                if let Err(reason) = policy.authorize_tool(&tc.name, ctx.plan_mode) {
+                if let Err(reason) = policy.authorize_tool_call(&tc.name, &tc.input, ctx.plan_mode)
+                {
                     let violation = format!("{}: {}", tc.name, reason);
                     policy_violations.push(violation.clone());
                     tool_results.push(Content::ToolResult {

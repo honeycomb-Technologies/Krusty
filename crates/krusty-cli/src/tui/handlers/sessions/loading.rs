@@ -163,6 +163,7 @@ impl App {
         // Use stored token count if available, otherwise estimate
         self.runtime.context_tokens_used = stored_token_count
             .unwrap_or_else(|| Self::estimate_conversation_tokens(&self.runtime.chat.conversation));
+        self.runtime.last_token_usage = None;
 
         tracing::info!(
             "Loaded session {} with {} messages, {} blocks, ~{} tokens",

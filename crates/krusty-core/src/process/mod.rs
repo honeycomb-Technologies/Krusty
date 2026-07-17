@@ -4,7 +4,7 @@
 
 mod model;
 mod registry;
-mod signals;
+pub(crate) mod signals;
 
 pub use model::{ProcessId, ProcessInfo, ProcessStatus};
 pub use registry::ProcessRegistry;

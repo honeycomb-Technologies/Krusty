@@ -76,6 +76,70 @@ fn runtime_trace_store_limit_returns_most_recent_events_in_order() {
 }
 
 #[test]
+fn runtime_trace_batch_allocates_monotonic_sequences_and_prunes_old_rows() {
+    let (db, _temp_dir, session_id) = create_test_db();
+    let store = RuntimeTraceStore::new(&db);
+    let events = (0..5)
+        .map(|index| {
+            RuntimeTraceEvent::from_loop_event(
+                "run-batch",
+                0,
+                1,
+                &LoopEvent::TextDelta {
+                    delta: format!("chunk-{index}"),
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let sequences = store
+        .append_events_with_next_sequences(&session_id, &events)
+        .expect("batch append should succeed");
+    assert_eq!(sequences, vec![1, 2, 3, 4, 5]);
+
+    let deleted = store
+        .prune_session_to_latest(&session_id, 2)
+        .expect("prune should succeed");
+    assert_eq!(deleted, 3);
+    let retained = store
+        .list_events(&session_id, None)
+        .expect("retained traces should load");
+    assert_eq!(
+        retained
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![4, 5]
+    );
+}
+
+#[test]
+fn runtime_trace_usage_keeps_logical_and_cache_buckets() {
+    let event = RuntimeTraceEvent::from_loop_event(
+        "run-usage",
+        1,
+        1,
+        &LoopEvent::Usage {
+            prompt_tokens: 100,
+            input_tokens: 1_000,
+            completion_tokens: 50,
+            reasoning_tokens: 40,
+            cache_creation_input_tokens: 200,
+            cache_read_input_tokens: 700,
+            total_tokens: 1_050,
+        },
+    );
+
+    assert_eq!(event.payload["prompt_tokens"], 100);
+    assert_eq!(event.payload["input_tokens"], 1_000);
+    assert_eq!(event.payload["cache_creation_input_tokens"], 200);
+    assert_eq!(event.payload["cache_read_input_tokens"], 700);
+    assert_eq!(event.payload["completion_tokens"], 50);
+    assert_eq!(event.payload["reasoning_tokens"], 40);
+    assert_eq!(event.payload["total_tokens"], 1_050);
+}
+
+#[test]
 fn runtime_trace_summary_classifies_failures_and_pinches() {
     let (db, _temp_dir, session_id) = create_test_db();
     let store = RuntimeTraceStore::new(&db);
@@ -551,4 +615,54 @@ fn latest_sequence_and_after_filter_follow_monotonic_trace_order() {
     assert_eq!(filtered.len(), 2);
     assert_eq!(filtered[0].sequence, 2);
     assert_eq!(filtered[1].sequence, 3);
+}
+
+#[test]
+fn concurrent_trace_writers_allocate_unique_monotonic_sequences() {
+    use std::sync::{Arc, Barrier};
+
+    let (db, temp_dir, session_id) = create_test_db();
+    drop(db);
+    let db_path = temp_dir.path().join("test.db");
+    let barrier = Arc::new(Barrier::new(3));
+    let mut writers = Vec::new();
+
+    for writer_index in 0..2 {
+        let db_path = db_path.clone();
+        let session_id = session_id.clone();
+        let barrier = Arc::clone(&barrier);
+        writers.push(std::thread::spawn(move || {
+            let db = Database::new(&db_path).expect("writer database should open");
+            let store = RuntimeTraceStore::new(&db);
+            barrier.wait();
+            for event_index in 0..50 {
+                let event = RuntimeTraceEvent::from_loop_event(
+                    format!("run-{writer_index}"),
+                    0,
+                    1,
+                    &LoopEvent::TextDelta {
+                        delta: format!("writer {writer_index} event {event_index}"),
+                    },
+                );
+                store
+                    .append_event_with_next_sequence(&session_id, &event)
+                    .expect("concurrent event should persist");
+            }
+        }));
+    }
+
+    barrier.wait();
+    for writer in writers {
+        writer.join().expect("writer should not panic");
+    }
+
+    let db = Database::new(&db_path).expect("verification database should open");
+    let events = RuntimeTraceStore::new(&db)
+        .list_events(&session_id, None)
+        .expect("events should load");
+    assert_eq!(events.len(), 100);
+    assert!(events
+        .iter()
+        .enumerate()
+        .all(|(index, event)| event.sequence == index as i64 + 1));
 }

@@ -8,7 +8,7 @@ use chrono::Utc;
 use tokio::sync::{Mutex, RwLock};
 
 use krusty_core::agent::loop_events::{LoopEvent, LoopStopReason};
-use krusty_core::agent::{AgentCancellation, UserHookManager};
+use krusty_core::agent::{AgentCancellation, LoopInput, UserHookManager};
 use krusty_core::ai::models::create_model_registry;
 use krusty_core::mcp::McpManager;
 use krusty_core::plan::{PlanFile, PlanManager};
@@ -335,6 +335,86 @@ async fn get_session_rejects_foreign_owner() {
     .await;
 
     assert!(matches!(result, Err(AppError::NotFound(_))));
+}
+
+#[tokio::test]
+async fn session_cancel_signals_the_owned_active_run() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user("Active Session", None, None, Some("alice"))
+        .expect("session creation should succeed");
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .session_inputs
+        .write()
+        .await
+        .insert(session_id.clone(), input_tx);
+
+    let Json(response) = cancel_session(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("owned cancellation should succeed"));
+
+    assert!(response.ok);
+    assert!(matches!(input_rx.recv().await, Some(LoopInput::Cancel)));
+}
+
+#[tokio::test]
+async fn session_cancel_rejects_a_foreign_owner_without_signalling() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    create_test_user(&state, "bob");
+
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user("Alice Session", None, None, Some("alice"))
+        .expect("session creation should succeed");
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .session_inputs
+        .write()
+        .await
+        .insert(session_id.clone(), input_tx);
+
+    let result = cancel_session(
+        State(state.clone()),
+        Some(current_user("bob", state.working_dir.as_ref())),
+        Path(session_id),
+    )
+    .await;
+
+    assert!(matches!(result, Err(AppError::NotFound(_))));
+    assert!(input_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn session_cancel_is_idempotent_when_the_run_is_inactive() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user("Idle Session", None, None, Some("alice"))
+        .expect("session creation should succeed");
+
+    let Json(response) = cancel_session(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("idle cancellation should be idempotent"));
+
+    assert!(response.ok);
 }
 
 #[tokio::test]
@@ -705,7 +785,50 @@ Status: in_progress
     assert!(combined.contains("Conversation Compacted"));
     assert!(combined.contains("Continue the server audit."));
     assert!(combined.contains("src/lib.rs"));
-    assert!(combined.contains("Task 1.1: Keep session continuity"));
+    assert!(
+        !combined.contains("Task 1.1: Keep session continuity"),
+        "canonical active plan state must be reinjected at request time, not duplicated in history"
+    );
+    assert!(plan_manager
+        .get_active_plan(&session_id)
+        .expect("active plan lookup")
+        .is_some());
+}
+
+#[tokio::test]
+async fn pinch_session_rejects_an_active_session_writer() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let workspace = state.working_dir.as_ref();
+    let session_manager = match open_session_manager(&state) {
+        Ok(manager) => manager,
+        Err(_) => panic!("session manager"),
+    };
+    let session_id = session_manager
+        .create_session_for_user(
+            "Busy Pinch",
+            None,
+            Some(workspace.to_string_lossy().as_ref()),
+            Some("alice"),
+        )
+        .expect("session");
+    let _guard = state
+        .try_lock_session(&session_id)
+        .await
+        .expect("first session writer lock");
+
+    let result = pinch_session(
+        State(state.clone()),
+        Some(current_user("alice", workspace)),
+        Path(session_id.clone()),
+        Json(PinchRequest {
+            preservation_hints: None,
+            direction: None,
+        }),
+    )
+    .await;
+
+    assert!(matches!(result, Err(AppError::Conflict(message)) if message.contains("busy")));
 }
 
 #[tokio::test]

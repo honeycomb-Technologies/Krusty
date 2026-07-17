@@ -16,6 +16,7 @@ import type {
 	ToolResultRequest,
 	StreamCallbacks,
 	StreamEvent,
+	UsageMetrics,
 	DelegatedProgressEvent,
 	SessionType,
 	TreeEntry,
@@ -48,16 +49,70 @@ import type {
 	MakoSessionStatus,
 	ApnsRegisterResponse,
 	ApnsStatusResponse,
-	SimpleOkResponse,
-} from "./types";
+		SimpleOkResponse,
+		SteerRequest,
+		SteerResponse,
+	} from "./types";
+
+type UsageStreamEvent = Extract<StreamEvent, { type: "usage" }>;
+
+export function normalizeUsageMetrics(event: UsageStreamEvent): UsageMetrics {
+	const cacheCreationInputTokens = event.cache_creation_input_tokens ?? 0;
+	const cacheReadInputTokens = event.cache_read_input_tokens ?? 0;
+	const reasoningTokens = Math.max(
+		0,
+		Math.min(event.reasoning_tokens ?? 0, Math.max(0, event.completion_tokens)),
+	);
+	const inputTokens =
+		event.input_tokens ??
+		event.prompt_tokens + cacheCreationInputTokens + cacheReadInputTokens;
+	const representedTotal = inputTokens + event.completion_tokens;
+
+	return {
+		promptTokens: event.prompt_tokens,
+		inputTokens,
+		completionTokens: event.completion_tokens,
+		reasoningTokens,
+		cacheCreationInputTokens,
+		cacheReadInputTokens,
+		totalTokens: Math.max(event.total_tokens ?? 0, representedTotal),
+	};
+}
 
 const STREAM_ACTIVITY_TIMEOUT = 240_000;
+
+function apiErrorMessage(body: string, fallback: string): string {
+	if (!body) return fallback;
+	try {
+		const parsed = JSON.parse(body) as { error?: unknown; message?: unknown };
+		if (typeof parsed.error === "string" && parsed.error.trim()) {
+			return parsed.error;
+		}
+		if (typeof parsed.message === "string" && parsed.message.trim()) {
+			return parsed.message;
+		}
+	} catch {
+		// Plain-text provider and proxy errors are already human-readable.
+	}
+	return body;
+}
 
 export interface KrustyClientConfig {
 	baseUrl: string;
 	token?: string;
 	/** Custom fetch implementation for environments without streaming support (e.g. React Native). */
 	fetchImpl?: typeof fetch;
+}
+
+export class KrustyApiError extends Error {
+	constructor(
+		public readonly status: number,
+		message: string,
+		public readonly responseBody: string,
+	) {
+		super(`API ${status}: ${message}`);
+		this.name = "KrustyApiError";
+	}
 }
 
 export class KrustyClient {
@@ -94,14 +149,8 @@ export class KrustyClient {
 
 		if (!response.ok) {
 			const text = await response.text().catch(() => "Request failed");
-			let message = text;
-			try {
-				const parsed = JSON.parse(text);
-				message = parsed.error || parsed.message || text;
-			} catch {
-				/* use raw text */
-			}
-			throw new Error(`API ${response.status}: ${message}`);
+			const message = apiErrorMessage(text, "Request failed");
+			throw new KrustyApiError(response.status, message, text);
 		}
 
 		return response.json() as Promise<T>;
@@ -406,6 +455,13 @@ export class KrustyClient {
 	}
 
 	// Tools
+	async steerSession(request: SteerRequest): Promise<SteerResponse> {
+		return this.request("/chat/steer", {
+			method: "POST",
+			body: JSON.stringify(request),
+		});
+	}
+
 	async submitToolApproval(
 		sessionId: string,
 		toolCallId: string,
@@ -418,6 +474,12 @@ export class KrustyClient {
 				tool_call_id: toolCallId,
 				approved,
 			}),
+		});
+	}
+
+	async cancelSession(sessionId: string): Promise<SimpleOkResponse> {
+		return this.request(`/sessions/${encodeURIComponent(sessionId)}/cancel`, {
+			method: "POST",
 		});
 	}
 
@@ -780,30 +842,63 @@ export class KrustyClient {
 		signal?: AbortSignal,
 	): Promise<void> {
 		const url = `${this.baseUrl}/api${path}`;
-		const response = await this.fetchFn(url, {
-			method,
-			headers: {
-				...this.headers(),
-				Accept: "text/event-stream",
-			},
-			body: body ? JSON.stringify(body) : undefined,
-			signal,
-		});
+		let response: Response;
+		try {
+			response = await this.fetchFn(url, {
+				method,
+				headers: {
+					...this.headers(),
+					Accept: "text/event-stream",
+				},
+				body: body ? JSON.stringify(body) : undefined,
+				signal,
+			});
+		} catch (error) {
+			if (signal?.aborted) return;
+			callbacks.onError(error instanceof Error ? error.message : "Stream error");
+			return;
+		}
 
 		if (!response.ok) {
 			const text = await response.text().catch(() => "Stream failed");
-			callbacks.onError(text);
+			callbacks.onError(
+				`API ${response.status}: ${apiErrorMessage(text, "Stream failed")}`,
+			);
 			return;
 		}
+
+		let terminalEventSeen = false;
+		let errorReported = false;
+		const trackedCallbacks: StreamCallbacks = {
+			...callbacks,
+			onFinish: (sessionId) => {
+				terminalEventSeen = true;
+				callbacks.onFinish(sessionId);
+			},
+			onError: (error) => {
+				terminalEventSeen = true;
+				if (errorReported) return;
+				errorReported = true;
+				callbacks.onError(error);
+			},
+		};
+		const reportPrematureEnd = () => {
+			if (!signal?.aborted && !terminalEventSeen) {
+				trackedCallbacks.onError(
+					"Stream ended before the server reported completion. Recovering the session state.",
+				);
+			}
+		};
 
 		const reader = response.body?.getReader?.();
 		if (!reader) {
 			const fallbackText = await response.text().catch(() => "");
 			if (!fallbackText) {
-				callbacks.onError("No response body");
+				trackedCallbacks.onError("No response body");
 				return;
 			}
-			this.processSSEChunk(fallbackText, callbacks, true);
+			this.processSSEChunk(fallbackText, trackedCallbacks, true);
+			reportPrematureEnd();
 			return;
 		}
 
@@ -813,7 +908,7 @@ export class KrustyClient {
 
 		const activityCheck = setInterval(() => {
 			if (Date.now() - lastActivity > STREAM_ACTIVITY_TIMEOUT) {
-				callbacks.onError(
+				trackedCallbacks.onError(
 					`Stream timeout — no activity for ${Math.round(STREAM_ACTIVITY_TIMEOUT / 1000)}s`,
 				);
 				reader.cancel();
@@ -829,14 +924,20 @@ export class KrustyClient {
 				lastActivity = Date.now();
 				buffer = this.processSSEChunk(
 					buffer + decoder.decode(value, { stream: true }),
-					callbacks,
+					trackedCallbacks,
 				);
 			}
 
-			this.processSSEChunk(buffer, callbacks, true);
+			buffer += decoder.decode();
+			this.processSSEChunk(buffer, trackedCallbacks, true);
+			reportPrematureEnd();
 		} catch (err) {
 			if (signal?.aborted) return;
-			callbacks.onError(err instanceof Error ? err.message : "Stream error");
+			if (!terminalEventSeen) {
+				trackedCallbacks.onError(
+					err instanceof Error ? err.message : "Stream error",
+				);
+			}
 		} finally {
 			clearInterval(activityCheck);
 		}
@@ -847,28 +948,47 @@ export class KrustyClient {
 		callbacks: StreamCallbacks,
 		flush = false,
 	): string {
-		const lines = chunk.split("\n");
-		let remainder = lines.pop() ?? "";
+		let remainder = chunk;
+		const eventBoundary = /\r?\n\r?\n/;
 
-		if (flush && remainder) {
-			lines.push(remainder);
-			remainder = "";
+		while (true) {
+			const match = eventBoundary.exec(remainder);
+			if (!match) break;
+			this.processSSEEvent(remainder.slice(0, match.index), callbacks);
+			remainder = remainder.slice(match.index + match[0].length);
 		}
 
-		for (const line of lines) {
-			const trimmed = line.trim();
-			if (!trimmed || trimmed.startsWith(":")) continue;
-			if (!trimmed.startsWith("data: ")) continue;
-
-			try {
-				const event = JSON.parse(trimmed.slice(6)) as StreamEvent;
-				this.handleEvent(event, callbacks);
-			} catch {
-				// Skip malformed events
-			}
+		if (flush && remainder) {
+			this.processSSEEvent(remainder, callbacks);
+			return "";
 		}
 
 		return remainder;
+	}
+
+	private processSSEEvent(block: string, callbacks: StreamCallbacks): void {
+		const data: string[] = [];
+		for (const rawLine of block.split(/\r?\n/)) {
+			if (!rawLine || rawLine.startsWith(":")) continue;
+			const colon = rawLine.indexOf(":");
+			const field = colon === -1 ? rawLine : rawLine.slice(0, colon);
+			if (field !== "data") continue;
+			let value = colon === -1 ? "" : rawLine.slice(colon + 1);
+			if (value.startsWith(" ")) value = value.slice(1);
+			data.push(value);
+		}
+
+		if (data.length === 0) return;
+		const payload = data.join("\n");
+		if (!payload) return;
+
+		try {
+			const event = JSON.parse(payload) as StreamEvent;
+			this.handleEvent(event, callbacks);
+		} catch {
+			// A malformed event is isolated to its own SSE record. The next
+			// record remains parseable and can still complete the stream.
+		}
 	}
 
 	private handleEvent(event: StreamEvent, callbacks: StreamCallbacks): void {
@@ -908,6 +1028,9 @@ export class KrustyClient {
 			case "tool_denied":
 				callbacks.onToolDenied?.(event.id);
 				break;
+			case "steering_injected":
+				callbacks.onSteeringInjected?.(event.pending_id, event.message);
+				break;
 			case "turn_complete":
 				callbacks.onTurnComplete?.(event.turn, event.has_more);
 				break;
@@ -925,16 +1048,14 @@ export class KrustyClient {
 				);
 				break;
 			case "usage":
-				callbacks.onUsage(event.prompt_tokens, event.completion_tokens, {
-					promptTokens: event.prompt_tokens,
-					completionTokens: event.completion_tokens,
-					cacheCreationInputTokens:
-						event.cache_creation_input_tokens ?? 0,
-					cacheReadInputTokens: event.cache_read_input_tokens ?? 0,
-					totalTokens:
-						event.total_tokens ??
-						event.prompt_tokens + event.completion_tokens,
-				});
+				callbacks.onUsage(
+					event.prompt_tokens,
+					event.completion_tokens,
+					normalizeUsageMetrics(event),
+				);
+				break;
+			case "lagged":
+				callbacks.onLagged?.(event.skipped);
 				break;
 			case "context_compaction_started":
 				callbacks.onContextCompactionStarted?.(event);

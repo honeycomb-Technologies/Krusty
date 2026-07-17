@@ -2,13 +2,15 @@ use anyhow::Result;
 use serde_json::Value;
 use tracing::debug;
 
+use super::super::config::{anthropic_prompt_cache_control, CallOptions};
 use super::super::core::AiClient;
 use super::shared::{collect_anthropic_text, trim_or_empty};
+use super::SimpleCallResult;
 use crate::ai::format::anthropic::AnthropicFormat;
 use crate::ai::format::FormatHandler;
-use crate::ai::providers::ProviderCapabilities;
 use crate::ai::transform::apply_request_body_transform;
 use crate::ai::types::ModelMessage;
+use crate::ai::usage::parse_anthropic_usage;
 
 impl AiClient {
     /// Simple non-streaming call using Anthropic format
@@ -21,17 +23,17 @@ impl AiClient {
         system_prompt: &str,
         user_message: &str,
         max_tokens: usize,
-    ) -> Result<String> {
+        options: &CallOptions,
+    ) -> Result<SimpleCallResult> {
         // Only apply cache_control for providers that support prompt caching.
         // MiniMax, Z.ai, etc. use Anthropic format but may reject cache_control blocks.
-        let capabilities =
-            crate::ai::providers::ProviderCapabilities::for_provider(self.provider_id());
+        let cache_control = anthropic_prompt_cache_control(options, self.provider_id());
 
-        let system_value: serde_json::Value = if capabilities.prompt_caching {
+        let system_value: serde_json::Value = if let Some(cache_control) = &cache_control {
             serde_json::json!([{
                 "type": "text",
                 "text": system_prompt,
-                "cache_control": {"type": "ephemeral"}
+                "cache_control": cache_control
             }])
         } else {
             serde_json::Value::String(system_prompt.to_string())
@@ -48,8 +50,8 @@ impl AiClient {
         });
 
         // Auto-caching: API places breakpoint on the last cacheable block
-        if capabilities.prompt_caching {
-            body["cache_control"] = serde_json::json!({"type": "ephemeral"});
+        if let Some(cache_control) = cache_control {
+            body["cache_control"] = cache_control;
         }
 
         let body =
@@ -66,7 +68,10 @@ impl AiClient {
             .map(|arr| collect_anthropic_text(arr))
             .unwrap_or_default();
 
-        Ok(trim_or_empty(Some(&text)))
+        Ok(SimpleCallResult {
+            text: trim_or_empty(Some(&text)),
+            usage: parse_anthropic_usage(&json),
+        })
     }
 
     /// Cache-safe conversation call using Anthropic format.
@@ -82,8 +87,9 @@ impl AiClient {
         conversation: &[ModelMessage],
         appended_user_message: &str,
         max_tokens: usize,
-    ) -> Result<String> {
-        let capabilities = ProviderCapabilities::for_provider(self.provider_id());
+        options: &CallOptions,
+    ) -> Result<SimpleCallResult> {
+        let cache_control = anthropic_prompt_cache_control(options, self.provider_id());
         let format_handler = AnthropicFormat::new();
         let prompt_sections =
             self.system_prompt_sections(model, conversation, Some(base_system_prompt), None);
@@ -100,7 +106,7 @@ impl AiClient {
 
         // Build system prompt with the same multi-block structure as streaming.
         // This ensures the cached prefix from the parent conversation is reused.
-        let system_value: Value = if capabilities.prompt_caching {
+        let system_value: Value = if let Some(cache_control) = cache_control.as_ref() {
             let mut blocks: Vec<Value> = Vec::new();
 
             // Block 1: Base system prompt — cached
@@ -108,7 +114,7 @@ impl AiClient {
                 blocks.push(serde_json::json!({
                     "type": "text",
                     "text": prompt_sections.base_prompt.as_str(),
-                    "cache_control": {"type": "ephemeral"}
+                    "cache_control": cache_control
                 }));
             }
 
@@ -117,7 +123,7 @@ impl AiClient {
                 blocks.push(serde_json::json!({
                     "type": "text",
                     "text": prompt_sections.project_context.as_str(),
-                    "cache_control": {"type": "ephemeral"}
+                    "cache_control": cache_control
                 }));
             }
 
@@ -144,8 +150,8 @@ impl AiClient {
         // Auto-caching: API places breakpoint on the last cacheable block.
         // Combined with block-level caching on system prompt blocks, this
         // ensures both the static prefix and conversation are cached.
-        if capabilities.prompt_caching {
-            body["cache_control"] = serde_json::json!({"type": "ephemeral"});
+        if let Some(cache_control) = cache_control {
+            body["cache_control"] = cache_control;
         }
 
         debug!(
@@ -167,6 +173,32 @@ impl AiClient {
             .map(|arr| collect_anthropic_text(arr))
             .unwrap_or_default();
 
-        Ok(trim_or_empty(Some(&text)))
+        Ok(SimpleCallResult {
+            text: trim_or_empty(Some(&text)),
+            usage: parse_anthropic_usage(&json),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::ai::usage::parse_anthropic_usage;
+
+    #[test]
+    fn response_usage_preserves_anthropic_cache_buckets() {
+        let usage = parse_anthropic_usage(&json!({
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_creation_input_tokens": 200,
+                "cache_read_input_tokens": 700
+            }
+        }))
+        .expect("usage");
+
+        assert_eq!(usage.input_tokens(), 1_000);
+        assert_eq!(usage.logical_total_tokens(), 1_050);
     }
 }
