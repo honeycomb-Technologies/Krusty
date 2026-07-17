@@ -8,7 +8,6 @@ import {
   Search,
 } from "lucide-react-native";
 import { useThemeContext } from "../../hooks/useTheme";
-import { useBreakpoint } from "../../hooks/useBreakpoint";
 import { AssistantSegmentedContent } from "./AssistantSegmentedContent";
 import { MarkdownContent } from "./MarkdownContent";
 import { ToolCallCard } from "./ToolCallCard";
@@ -58,7 +57,6 @@ export function MessageBubble({
   onPlanConfirm,
 }: MessageBubbleProps) {
   const { theme } = useThemeContext();
-  const { isDesktop } = useBreakpoint();
   const t = theme.colors;
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
@@ -231,12 +229,7 @@ export function MessageBubble({
         )}
 
       {!isUser && (
-        <View
-          style={[
-            styles.assistantWrap,
-            isDesktop ? styles.assistantWrapDesktop : null,
-          ]}
-        >
+        <View style={styles.assistantWrap}>
           {assistantSegments.map(renderAssistantSegment)}
 
           {copied ? (
@@ -478,11 +471,6 @@ const styles = StyleSheet.create({
     width: "100%",
     maxWidth: "100%",
     gap: 10,
-  },
-  assistantWrapDesktop: {
-    // Use the full fluid chat band on desktop.
-    maxWidth: "100%",
-    width: "100%",
   },
   userWrap: {
     maxWidth: "88%",
