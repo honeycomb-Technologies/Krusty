@@ -13,11 +13,10 @@ use std::sync::Arc;
 use crate::agent::{AgentEvent, InterruptReason, OrchestratorConfig, OrchestratorServices};
 use crate::ai::client::config::AnthropicAdaptiveEffort;
 use crate::ai::client::{CallOptions, CodexReasoningEffort};
-use crate::ai::types::{
-    Content, ContextManagement, ModelMessage, Role, ThinkingConfig, WebFetchConfig, WebSearchConfig,
-};
+use crate::ai::types::{Content, ContextManagement, ModelMessage, Role, ThinkingConfig};
 use crate::paths;
-use crate::storage::SessionType;
+use crate::storage::{ProjectSettings, SessionType};
+use crate::tools::registry::ToolRequestPolicy;
 use crate::tools::{load_from_clipboard_rgba, load_from_path, load_from_url};
 use crate::tui::app::{App, ThinkingLevel, View};
 use crate::tui::input::{has_image_references, parse_input, InputSegment};
@@ -285,7 +284,22 @@ impl App {
         });
 
         // Build CallOptions (thinking, web tools, etc.)
-        let tools = self.services.cached_ai_tools.clone();
+        let project_settings = ProjectSettings::load(&self.runtime.working_dir);
+        let has_active_plan = self
+            .services
+            .plan_manager
+            .as_ref()
+            .and_then(|manager| manager.get_active_plan(&session_id).ok())
+            .flatten()
+            .is_some();
+        let tools = ToolRequestPolicy::code(
+            self.runtime.permission_mode,
+            self.ui.work_mode == crate::tui::app::WorkMode::Plan,
+            has_active_plan,
+            true,
+            project_settings.disabled_tools.as_deref().unwrap_or(&[]),
+        )
+        .filter(self.services.cached_ai_tools.clone());
         let can_use_thinking = self.runtime.thinking_level.is_enabled();
         let thinking = can_use_thinking.then(ThinkingConfig::default);
         let codex_reasoning_effort =
@@ -322,8 +336,11 @@ impl App {
             thinking,
             enable_caching: true,
             context_management,
-            web_search: Some(WebSearchConfig::default()),
-            web_fetch: Some(WebFetchConfig::default()),
+            // Web tools remain available through deferred dispatch. Keeping
+            // hosted web off the default Code request preserves the <=8 tool
+            // cache-stable surface.
+            web_search: None,
+            web_fetch: None,
             session_id: Some(session_id.clone()),
             codex_reasoning_effort,
             codex_parallel_tool_calls: true,

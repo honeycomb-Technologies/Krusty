@@ -10,6 +10,8 @@ use crate::ai::client::AiClient;
 use crate::tools::registry::{PermissionMode, ToolContext};
 
 const SAFE_TOOLS: &[&str] = &[
+    "AskUserQuestion",
+    "add_subtask",
     "read",
     "grep",
     "glob",
@@ -24,6 +26,10 @@ const SAFE_TOOLS: &[&str] = &[
     "set_work_mode",
     "enter_plan_mode",
     "set_workspace_context",
+    "set_dependency",
+    "task_complete",
+    "task_start",
+    "tool_search",
 ];
 
 const CLASSIFIER_PROMPT: &str = r#"You are a safety classifier for an AI coding agent operating in autonomous mode. Your job is to decide whether a tool call should be ALLOWED or BLOCKED.
@@ -31,6 +37,8 @@ const CLASSIFIER_PROMPT: &str = r#"You are a safety classifier for an AI coding 
 ## ALLOW when:
 - Editing, creating, or deleting files within the project directory
 - Running tests, builds, linters, formatters, or type checkers
+- Starting a project preview server only when it explicitly binds to 127.0.0.1 or localhost and is tracked as a background process
+- Exposing a loopback service to the user's private tailnet with `tailscale serve`; this is allowed only for `serve`, never public `tailscale funnel`
 - Git read operations: status, diff, log, show, rev-parse, ls-files
 - Git write operations: add, commit, branch, checkout, merge, rebase, stash
 - Reading environment variables or config files within the project
@@ -43,7 +51,7 @@ const CLASSIFIER_PROMPT: &str = r#"You are a safety classifier for an AI coding 
 - Privilege escalation (sudo, doas, su, chmod 777)
 - Accessing credentials, secrets, or tokens outside the project (.ssh, .aws, .gnupg, /etc/shadow)
 - Git force push, branch -D on main/master, or reset --hard to remote
-- Spawning background daemons, opening network listeners, or modifying system services
+- Spawning untracked background daemons, opening direct non-loopback network listeners, using public Tailscale Funnel, or modifying system services
 
 Respond with exactly one line: ALLOW or BLOCK followed by a one-sentence reason.
 Example: ALLOW Editing a source file within the project.
@@ -115,16 +123,248 @@ impl AutoClassifierHook {
             if Self::contains_system_package_install(&command) {
                 return Some("system package installation".to_string());
             }
+            if Self::contains_credential_or_system_path(&command) {
+                return Some("credential or system path".to_string());
+            }
+            if command.contains("tailscale funnel") {
+                return Some("public Tailscale Funnel exposure".to_string());
+            }
+            if Self::is_python_preview_listener(&command)
+                && !Self::is_loopback_python_preview(&command)
+            {
+                return Some(
+                    "preview servers must bind explicitly to 127.0.0.1 or localhost".to_string(),
+                );
+            }
         }
 
         if matches!(name, "write" | "edit" | "multiedit" | "apply_patch") {
-            let sanitized = Self::sanitize_args(params).to_ascii_lowercase();
-            if Self::contains_credential_or_system_path(&sanitized) {
+            let mutation_targets = Self::mutation_target_paths(name, params);
+            if mutation_targets
+                .iter()
+                .any(|target| Self::contains_credential_or_system_path(target))
+            {
                 return Some("credential or system path".to_string());
             }
         }
 
         None
+    }
+
+    /// Extract only filesystem targets from mutation arguments.
+    ///
+    /// Scanning the serialized argument object also scans source code. That
+    /// caused harmless content such as `#!/usr/bin/env python3` to be treated
+    /// as an attempt to write under `/usr`, blocking the dedicated write tool
+    /// and pushing agents toward unsafe shell-writing fallbacks. Runtime path
+    /// containment remains owned by `ToolContext`; this early safety check is
+    /// intentionally limited to explicit mutation destinations.
+    fn mutation_target_paths(name: &str, params: &Value) -> Vec<String> {
+        let mut targets = ["file_path", "path"]
+            .iter()
+            .filter_map(|key| params.get(key).and_then(Value::as_str))
+            .map(|path| path.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+
+        if name == "apply_patch" {
+            let patch = params
+                .get("patch")
+                .or_else(|| params.get("patch_text"))
+                .or_else(|| params.get("input"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            for line in patch.lines().map(str::trim) {
+                for prefix in ["*** Add File:", "*** Update File:", "*** Delete File:"] {
+                    if let Some(path) = line.strip_prefix(prefix) {
+                        targets.push(path.trim().to_ascii_lowercase());
+                    }
+                }
+            }
+        }
+
+        targets
+    }
+
+    fn deterministic_allow_reason(name: &str, params: &Value) -> Option<String> {
+        if matches!(name, "write" | "edit" | "multiedit" | "apply_patch") {
+            return Some(format!(
+                "Workspace mutation '{name}' is governed by ToolContext path policy"
+            ));
+        }
+
+        if name == "agent" {
+            return Some(
+                "Delegated agent execution inherits the parent governance contract".into(),
+            );
+        }
+
+        if !matches!(name, "bash" | "shell" | "execute") {
+            return None;
+        }
+
+        let command = params.get("command").and_then(Value::as_str)?.trim();
+        if command.is_empty() {
+            return None;
+        }
+
+        let normalized = command.to_ascii_lowercase();
+        if Self::is_tailnet_loopback_serve(command) {
+            return Some("Tailnet-only Tailscale Serve proxy targets a loopback service".into());
+        }
+        let run_in_background = params
+            .get("run_in_background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if run_in_background {
+            if Self::has_explicit_loopback_listener_binding(command) {
+                return Some(
+                    "Loopback-only background process is tracked by the process registry".into(),
+                );
+            }
+
+            // Starting a process is never read-only. Ambiguous background
+            // commands must be evaluated by the classifier instead of falling
+            // through to the generic read-only command shortcut.
+            return None;
+        }
+        if normalized.contains("http://")
+            || normalized.contains("https://")
+            || ["curl ", "wget ", "ssh ", "scp ", "nc ", "netcat "]
+                .iter()
+                .any(|prefix| normalized.starts_with(prefix))
+        {
+            return None;
+        }
+
+        let classification = classify_bash_command(command);
+        if !classification.modifies_filesystem_or_process {
+            return Some("Read-only shell command passed deterministic safety policy".into());
+        }
+
+        if Self::is_common_workspace_command(command) {
+            return Some(
+                "Common workspace build or mutation command passed deterministic safety policy"
+                    .into(),
+            );
+        }
+
+        None
+    }
+
+    fn has_explicit_loopback_listener_binding(command: &str) -> bool {
+        let normalized = command.trim().to_ascii_lowercase();
+        if normalized.contains(['\n', ';', '|', '&'])
+            || normalized.contains("0.0.0.0")
+            || normalized.contains("[::]")
+            || normalized.contains("--host ::")
+            || normalized.contains("--bind ::")
+        {
+            return false;
+        }
+
+        let Ok(tokens) = shell_words::split(&normalized) else {
+            return false;
+        };
+        tokens.iter().enumerate().any(|(index, token)| {
+            if ["--host", "--bind", "--hostname"].contains(&token.as_str()) {
+                return tokens
+                    .get(index + 1)
+                    .is_some_and(|value| matches!(value.as_str(), "127.0.0.1" | "localhost"));
+            }
+
+            [
+                "--host=127.0.0.1",
+                "--bind=127.0.0.1",
+                "--hostname=127.0.0.1",
+                "--host=localhost",
+                "--bind=localhost",
+                "--hostname=localhost",
+            ]
+            .contains(&token.as_str())
+        })
+    }
+
+    fn is_tailnet_loopback_serve(command: &str) -> bool {
+        // Keep the deterministic path intentionally narrow: one `tailscale
+        // serve` operation, no shell composition, no Funnel, and a loopback
+        // HTTP upstream. More complex commands still go through the classifier.
+        let normalized = command.trim().to_ascii_lowercase();
+        if normalized.contains(['\n', ';', '|', '&']) || normalized.contains("tailscale funnel") {
+            return false;
+        }
+
+        let Ok(tokens) = shell_words::split(&normalized) else {
+            return false;
+        };
+        let Some(tailscale_index) = tokens.iter().position(|token| {
+            std::path::Path::new(token)
+                .file_name()
+                .and_then(|name| name.to_str())
+                == Some("tailscale")
+        }) else {
+            return false;
+        };
+        if tokens.get(tailscale_index + 1).map(String::as_str) != Some("serve") {
+            return false;
+        }
+
+        tokens.iter().skip(tailscale_index + 2).any(|token| {
+            [
+                "http://127.0.0.1",
+                "https://127.0.0.1",
+                "http://localhost",
+                "https://localhost",
+            ]
+            .iter()
+            .any(|prefix| token.starts_with(prefix))
+        })
+    }
+
+    fn is_common_workspace_command(command: &str) -> bool {
+        let normalized = command.to_ascii_lowercase();
+        if normalized.contains("http://")
+            || normalized.contains("https://")
+            || normalized.contains("../")
+            || normalized.contains(" -c /")
+            || normalized.contains("--git-dir")
+            || normalized.contains("--work-tree")
+        {
+            return false;
+        }
+
+        let segments = normalized
+            .split([';', '|', '&', '\n'])
+            .map(str::trim)
+            .filter(|segment| !segment.is_empty());
+
+        segments.into_iter().all(|segment| {
+            let Ok(tokens) = shell_words::split(segment) else {
+                return false;
+            };
+            let command_index = tokens
+                .iter()
+                .position(|token| !token.contains('=') || token.starts_with(['/', '.']))
+                .unwrap_or(0);
+            let executable = tokens
+                .get(command_index)
+                .and_then(|token| std::path::Path::new(token).file_name())
+                .and_then(|token| token.to_str())
+                .unwrap_or_default();
+
+            match executable {
+                "cargo" | "npm" | "npx" | "pnpm" | "yarn" | "bun" | "deno" | "make" | "cmake"
+                | "ninja" | "git" => true,
+                "mkdir" | "touch" => tokens.iter().skip(command_index + 1).all(|token| {
+                    token.starts_with('-')
+                        || (!token.starts_with('/')
+                            && token != ".."
+                            && !token.starts_with("../")
+                            && !token.starts_with('~')
+                            && !token.contains("$HOME"))
+                }),
+                _ => false,
+            }
+        })
     }
 
     fn contains_system_package_install(command: &str) -> bool {
@@ -138,6 +378,30 @@ impl AutoClassifierHook {
         ]
         .iter()
         .any(|needle| command.contains(needle))
+    }
+
+    fn is_python_preview_listener(command: &str) -> bool {
+        let normalized = command.to_ascii_lowercase();
+        normalized.contains("python3 -m http.server")
+            || normalized.contains("python -m http.server")
+    }
+
+    fn is_loopback_python_preview(command: &str) -> bool {
+        if !Self::is_python_preview_listener(command) {
+            return false;
+        }
+        let normalized = command.to_ascii_lowercase();
+        !normalized.contains("--bind 0.0.0.0")
+            && !normalized.contains("--bind=0.0.0.0")
+            && !normalized.contains("--bind ::")
+            && [
+                "--bind 127.0.0.1",
+                "--bind=127.0.0.1",
+                "--bind localhost",
+                "--bind=localhost",
+            ]
+            .iter()
+            .any(|binding| normalized.contains(binding))
     }
 
     fn contains_credential_or_system_path(payload: &str) -> bool {
@@ -186,14 +450,26 @@ impl AutoClassifierHook {
         let model = &client.config().model;
 
         // Stage 1: fast classification
-        match client
+        let stage_one_started = std::time::Instant::now();
+        let stage_one = client
             .as_ref()
-            .call_simple(model, CLASSIFIER_PROMPT, &user_prompt, FAST_MAX_TOKENS)
-            .await
-        {
-            Ok(response) => match Self::parse_verdict(&response) {
+            .call_simple_with_usage(model, CLASSIFIER_PROMPT, &user_prompt, FAST_MAX_TOKENS)
+            .await;
+        if let Some(trace) = ctx.provider_call_trace.as_ref() {
+            trace
+                .record_simple_call(
+                    "autonomy_classifier_fast",
+                    client.provider_id(),
+                    model,
+                    stage_one_started,
+                    &stage_one,
+                )
+                .await;
+        }
+        match stage_one {
+            Ok(response) => match Self::parse_verdict(&response.text) {
                 Some(true) => {
-                    let reason = response.trim().to_string();
+                    let reason = response.text.trim().to_string();
                     info!(
                         tool = name,
                         verdict = "ALLOW",
@@ -213,7 +489,7 @@ impl AutoClassifierHook {
                     );
                 }
                 None => {
-                    info!(tool = name, response = %response, "Stage 1 ambiguous, escalating to stage 2");
+                    info!(tool = name, response = %response.text, "Stage 1 ambiguous, escalating to stage 2");
                 }
             },
             Err(e) => {
@@ -222,14 +498,26 @@ impl AutoClassifierHook {
         }
 
         // Stage 2: thinking classification (more tokens to reason about edge cases)
-        match client
+        let stage_two_started = std::time::Instant::now();
+        let stage_two = client
             .as_ref()
-            .call_simple(model, CLASSIFIER_PROMPT, &user_prompt, THINKING_MAX_TOKENS)
-            .await
-        {
-            Ok(response) => match Self::parse_verdict(&response) {
+            .call_simple_with_usage(model, CLASSIFIER_PROMPT, &user_prompt, THINKING_MAX_TOKENS)
+            .await;
+        if let Some(trace) = ctx.provider_call_trace.as_ref() {
+            trace
+                .record_simple_call(
+                    "autonomy_classifier_escalation",
+                    client.provider_id(),
+                    model,
+                    stage_two_started,
+                    &stage_two,
+                )
+                .await;
+        }
+        match stage_two {
+            Ok(response) => match Self::parse_verdict(&response.text) {
                 Some(true) => {
-                    let reason = response.trim().to_string();
+                    let reason = response.text.trim().to_string();
                     info!(
                         tool = name,
                         verdict = "ALLOW",
@@ -241,7 +529,7 @@ impl AutoClassifierHook {
                     HookResult::Continue
                 }
                 Some(false) => {
-                    let reason = response.trim().to_string();
+                    let reason = response.text.trim().to_string();
                     info!(tool = name, verdict = "BLOCK", stage = 2, reason = %reason, "Classifier blocked tool call");
                     Self::emit_decision(ctx, name, "block", reason.clone(), 2);
                     HookResult::Block {
@@ -251,7 +539,7 @@ impl AutoClassifierHook {
                 None => {
                     let reason =
                         "Auto-classifier: ambiguous verdict, defaulting to deny".to_string();
-                    info!(tool = name, response = %response, reason = %reason, "Stage 2 ambiguous, denying");
+                    info!(tool = name, response = %response.text, reason = %reason, "Stage 2 ambiguous, denying");
                     Self::emit_decision(ctx, name, "block", reason.clone(), 2);
                     HookResult::Block { reason }
                 }
@@ -287,6 +575,12 @@ impl PreToolHook for AutoClassifierHook {
             return HookResult::Block { reason };
         }
 
+        if let Some(reason) = Self::deterministic_allow_reason(name, params) {
+            info!(tool = name, reason = %reason, "Classifier bypass: deterministic local policy");
+            Self::emit_decision(ctx, name, "allow", reason, 0);
+            return HookResult::Continue;
+        }
+
         let Some(client) = self.classifier_client(ctx) else {
             let reason = format!(
                 "Auto-classifier unavailable for unsafe autonomous tool call '{name}'; fail closed by denying execution"
@@ -317,6 +611,8 @@ mod tests {
         assert_eq!(
             SAFE_TOOLS,
             &[
+                "AskUserQuestion",
+                "add_subtask",
                 "read",
                 "grep",
                 "glob",
@@ -331,6 +627,10 @@ mod tests {
                 "set_work_mode",
                 "enter_plan_mode",
                 "set_workspace_context",
+                "set_dependency",
+                "task_complete",
+                "task_start",
+                "tool_search",
             ]
         );
 
@@ -379,7 +679,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_bootstrap_autonomous_unsafe_tool_fails_closed_without_per_user_client() {
+    async fn no_bootstrap_autonomous_workspace_mutation_uses_deterministic_policy() {
         let hook = AutoClassifierHook::without_bootstrap_client();
         let ctx = autonomous_context();
 
@@ -391,12 +691,151 @@ mod tests {
             )
             .await;
 
+        assert!(matches!(result, HookResult::Continue));
+    }
+
+    #[tokio::test]
+    async fn routine_workspace_commands_bypass_ai_classification() {
+        let hook = AutoClassifierHook::without_bootstrap_client();
+        let ctx = autonomous_context();
+
+        for command in [
+            "ls -la",
+            "cargo test -p krusty-core",
+            "git status --short",
+            "mkdir -p test/site",
+        ] {
+            let result = hook
+                .before_execute("bash", &json!({"command": command}), &ctx)
+                .await;
+            assert!(
+                matches!(result, HookResult::Continue),
+                "expected deterministic allow for {command:?}; got {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tracked_loopback_preview_is_allowed_but_wildcard_listener_is_blocked() {
+        let hook = AutoClassifierHook::without_bootstrap_client();
+        let ctx = autonomous_context();
+
+        let allowed = hook
+            .before_execute(
+                "bash",
+                &json!({
+                    "command": "python3 -m http.server 18765 --bind 127.0.0.1 --directory dist",
+                    "run_in_background": true
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(matches!(allowed, HookResult::Continue));
+
+        for command in [
+            "python3 -m http.server 8080 --directory dist",
+            "python3 -m http.server 8080 --bind 0.0.0.0 --directory dist",
+        ] {
+            let blocked = hook
+                .before_execute(
+                    "bash",
+                    &json!({"command": command, "run_in_background": true}),
+                    &ctx,
+                )
+                .await;
+            assert!(matches!(
+                blocked,
+                HookResult::Block { reason }
+                    if reason.contains("bind explicitly to 127.0.0.1 or localhost")
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_background_process_requires_explicit_loopback_binding() {
+        let hook = AutoClassifierHook::without_bootstrap_client();
+        let ctx = autonomous_context();
+
+        for command in [
+            "python3 server.py --host 127.0.0.1 --port 8080",
+            "npm run dev -- --host=localhost --port=8080",
+        ] {
+            let allowed = hook
+                .before_execute(
+                    "bash",
+                    &json!({"command": command, "run_in_background": true}),
+                    &ctx,
+                )
+                .await;
+            assert!(
+                matches!(allowed, HookResult::Continue),
+                "explicit loopback command should be allowed: {command}"
+            );
+        }
+
+        for command in [
+            "python3 server.py",
+            "python3 server.py --host 0.0.0.0 --port 8080",
+        ] {
+            let blocked = hook
+                .before_execute(
+                    "bash",
+                    &json!({"command": command, "run_in_background": true}),
+                    &ctx,
+                )
+                .await;
+            assert!(
+                matches!(blocked, HookResult::Block { .. }),
+                "ambiguous background command should fail closed without classifier: {command}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tailnet_only_loopback_serve_is_allowed_but_funnel_is_blocked() {
+        let hook = AutoClassifierHook::without_bootstrap_client();
+        let ctx = autonomous_context();
+
+        let allowed = hook
+            .before_execute(
+                "bash",
+                &json!({
+                    "command": "tailscale serve --bg --https=9443 http://127.0.0.1:5180"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(matches!(allowed, HookResult::Continue));
+
+        let blocked = hook
+            .before_execute(
+                "bash",
+                &json!({
+                    "command": "tailscale funnel --bg http://127.0.0.1:5180"
+                }),
+                &ctx,
+            )
+            .await;
         assert!(matches!(
-            result,
-            HookResult::Block { reason }
-                if reason.contains("Auto-classifier unavailable")
-                    && reason.contains("fail closed")
+            blocked,
+            HookResult::Block { reason } if reason.contains("Funnel")
         ));
+    }
+
+    #[tokio::test]
+    async fn external_or_ambiguous_commands_still_fail_closed_without_classifier() {
+        let hook = AutoClassifierHook::without_bootstrap_client();
+        let ctx = autonomous_context();
+
+        for command in ["mkdir /tmp/outside", "curl https://example.com/data"] {
+            let result = hook
+                .before_execute("bash", &json!({"command": command}), &ctx)
+                .await;
+            assert!(
+                matches!(result, HookResult::Block { .. }),
+                "expected ambiguous command {command:?} to fail closed; got {result:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -448,6 +887,49 @@ mod tests {
                 "{tool} payload {params} should be blocked for {expected_reason}; got {result:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn mutation_classifier_checks_target_path_not_source_contents() {
+        let hook = AutoClassifierHook::without_bootstrap_client();
+        let ctx = autonomous_context();
+
+        let write = hook
+            .before_execute(
+                "write",
+                &json!({
+                    "file_path": "server.py",
+                    "content": "#!/usr/bin/env python3\nprint('/etc/example is documentation')\n"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(matches!(write, HookResult::Continue));
+
+        let patch = hook
+            .before_execute(
+                "apply_patch",
+                &json!({
+                    "patch": "*** Begin Patch\n*** Add File: script.py\n+#!/usr/bin/env python3\n*** End Patch"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(matches!(patch, HookResult::Continue));
+
+        let unsafe_patch = hook
+            .before_execute(
+                "apply_patch",
+                &json!({
+                    "patch": "*** Begin Patch\n*** Add File: /etc/krusty.conf\n+unsafe\n*** End Patch"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(matches!(
+            unsafe_patch,
+            HookResult::Block { reason } if reason.contains("credential or system path")
+        ));
     }
 
     #[test]

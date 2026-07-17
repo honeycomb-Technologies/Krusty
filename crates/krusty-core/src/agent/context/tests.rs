@@ -6,11 +6,15 @@ use tokio::sync::RwLock;
 
 use super::mako::{build_mako_context_sections, build_mako_context_sections_with_home};
 use super::workspace::{build_environment_context, summarize_git_status};
-use super::{build_plan_context, build_project_context, build_skills_context, inject_context};
+use super::{
+    bound_dynamic_context_messages, build_plan_context, build_project_context,
+    build_skills_context, inject_context, MAX_DYNAMIC_CONTEXT_BYTES,
+};
 
 use crate::agent::DelegatedRunStage;
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::paths;
+use crate::plan::PlanManager;
 use crate::skills::SkillsManager;
 use crate::storage::reports::CreateReportInput;
 use crate::storage::{
@@ -172,6 +176,31 @@ fn build_plan_context_returns_empty_when_store_unavailable_in_build_mode() {
 }
 
 #[test]
+fn build_plan_context_uses_compact_active_task_view_in_build_mode() {
+    let temp = TempDir::new().unwrap();
+    let db_path = temp.path().join("plans.db");
+    let session_id = SessionManager::new(Database::new(&db_path).unwrap())
+        .create_session("plan context test", None, None)
+        .unwrap();
+    let manager = PlanManager::new(db_path.clone()).unwrap();
+    let mut plan = manager
+        .create_plan("Token efficient plan", &session_id, None)
+        .unwrap();
+    let phase = plan.add_phase("Implementation");
+    for index in 0..18 {
+        phase.add_task(format!("Implement bounded item {index}"));
+    }
+    manager.save_plan(&plan).unwrap();
+
+    let context = build_plan_context(&db_path, &session_id, WorkMode::Build);
+
+    assert!(context.contains("[ACTIVE PLAN"));
+    assert!(context.contains("Additional tasks omitted from prompt"));
+    assert!(!context.contains("## Current Plan"));
+    assert!(!context.contains("Task Workflow Protocol"));
+}
+
+#[test]
 fn build_skills_context_returns_empty_when_manager_is_busy() {
     let temp = TempDir::new().unwrap();
     let repo = temp.path();
@@ -283,6 +312,75 @@ fn inject_context_skips_project_instructions_without_explicit_project_dir() {
         Content::Text { text } if text.contains("[ENVIRONMENT]")
     ));
     assert_eq!(injected[2].role, Role::User);
+}
+
+#[test]
+fn chat_context_does_not_inject_a_conflicting_tool_policy() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path();
+    let skills = RwLock::new(SkillsManager::with_defaults(repo));
+    let conversation = vec![ModelMessage {
+        role: Role::User,
+        content: vec![Content::Text {
+            text: "research the current release".to_string(),
+        }],
+    }];
+
+    let injected = inject_context(
+        &conversation,
+        repo.join("krusty.db").as_path(),
+        "chat-session",
+        repo,
+        None,
+        WorkMode::Build,
+        &skills,
+        None,
+        Some("chat"),
+        None,
+        None,
+    );
+
+    assert!(injected.iter().all(|message| {
+        message.content.iter().all(|content| match content {
+            Content::Text { text } => !text.contains("do NOT have access to any tools"),
+            _ => true,
+        })
+    }));
+    assert_eq!(injected.last().unwrap().role, Role::User);
+}
+
+#[test]
+fn aggregate_dynamic_context_budget_preserves_high_priority_sections() {
+    let system_message = |text: String| ModelMessage {
+        role: Role::System,
+        content: vec![Content::Text { text }],
+    };
+    let mut messages = vec![
+        system_message(format!("[PERSISTENT MEMORY]\n{}", "memory ".repeat(8_000))),
+        system_message(format!(
+            "[PROJECT INSTRUCTIONS - AGENTS.md]\n{}",
+            "instructions ".repeat(4_000)
+        )),
+        system_message("[ACTIVE PLAN - audit]\nFinish the selected task.".to_string()),
+    ];
+
+    bound_dynamic_context_messages(&mut messages);
+
+    let retained_bytes = messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|content| match content {
+            Content::Text { text } => Some(text.len()),
+            _ => None,
+        })
+        .sum::<usize>();
+    assert!(retained_bytes <= MAX_DYNAMIC_CONTEXT_BYTES);
+    assert!(messages.iter().any(|message| {
+        matches!(&message.content[0], Content::Text { text } if text.starts_with("[ACTIVE PLAN"))
+    }));
+    assert!(messages.iter().any(|message| {
+        matches!(&message.content[0], Content::Text { text } if text.starts_with("[PROJECT INSTRUCTIONS"))
+    }));
 }
 
 #[test]
@@ -432,6 +530,52 @@ fn inject_context_uses_latest_user_memory_relevance_and_hides_compaction_flushes
     assert!(context.contains("Space notes"));
     assert!(!context.contains("Compaction archive"));
     assert!(!context.contains("Full old conversation transcript"));
+}
+
+#[test]
+fn generic_project_words_do_not_trigger_persistent_memory_injection() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    let db_path = repo.join("krusty.db");
+    let project_dir = repo.to_string_lossy();
+    let memory_store = MemoryStore::new(Database::new(&db_path).unwrap());
+    for index in 0..12 {
+        memory_store
+            .save(
+                MemoryType::Project,
+                &format!("Project note {index}"),
+                "Generic project system context and coding work notes.",
+                Some(project_dir.as_ref()),
+                None,
+            )
+            .unwrap();
+    }
+
+    let skills = RwLock::new(SkillsManager::with_defaults(repo));
+    let conversation = vec![ModelMessage {
+        role: Role::User,
+        content: vec![Content::Text {
+            text: "Tell me about this project and its code.".to_string(),
+        }],
+    }];
+    let injected = inject_context(
+        &conversation,
+        &db_path,
+        "session-id",
+        repo,
+        Some(repo),
+        WorkMode::Build,
+        &skills,
+        None,
+        Some("code"),
+        None,
+        None,
+    );
+
+    assert!(injected.iter().all(|message| {
+        !matches!(&message.content[0], Content::Text { text } if text.contains("[PERSISTENT MEMORY]"))
+    }));
 }
 
 #[test]
@@ -642,7 +786,7 @@ fn inject_context_includes_mako_knowledge_from_memory_and_reports() {
     let conversation = vec![ModelMessage {
         role: Role::User,
         content: vec![Content::Text {
-            text: "hello".to_string(),
+            text: "Check the wake pipeline health.".to_string(),
         }],
     }];
 
@@ -672,7 +816,7 @@ fn inject_context_includes_mako_knowledge_from_memory_and_reports() {
     assert!(context.contains("[MAKO KNOWLEDGE]"));
     assert!(context.contains("## Carry Forward"));
     assert!(context.contains("Auth decision"));
-    assert!(context.contains("## Recent Reports"));
+    assert!(context.contains("## Relevant Reports"));
     assert!(context.contains("Wake pipeline check"));
     assert!(!context.contains("Full compacted transcript"));
 }
@@ -746,6 +890,68 @@ fn inject_context_prioritizes_relevant_reports_over_recent_reports() {
                 if text.contains("[RELEVANT REPORTS]")
                     && text.contains("Queue Scheduling Audit")
         )
+    }));
+
+    let joined = injected
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|content| match content {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!joined.contains("Unrelated report"));
+}
+
+#[test]
+fn inject_context_omits_reports_when_none_are_relevant() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    let db_path = repo.join("krusty.db");
+    let session_manager = SessionManager::new(Database::new(&db_path).unwrap());
+    let session_id = session_manager
+        .create_session("test", None, Some(repo.to_string_lossy().as_ref()))
+        .unwrap();
+    ReportStore::new(Database::new(&db_path).unwrap())
+        .create_report(CreateReportInput {
+            title: "Database migration retrospective",
+            session_id: &session_id,
+            project_dir: Some(repo.to_string_lossy().as_ref()),
+            report_root: Some(repo),
+            content: "Postgres migration notes.",
+            summary: "Schema rollout findings.",
+            tags: &["database".into()],
+            sources: &[],
+        })
+        .unwrap();
+
+    let skills = RwLock::new(SkillsManager::with_defaults(repo));
+    let conversation = vec![ModelMessage {
+        role: Role::User,
+        content: vec![Content::Text {
+            text: "Tune the mobile animation easing.".to_string(),
+        }],
+    }];
+    let injected = inject_context(
+        &conversation,
+        &db_path,
+        &session_id,
+        repo,
+        Some(repo),
+        WorkMode::Build,
+        &skills,
+        None,
+        Some("code"),
+        None,
+        None,
+    );
+
+    assert!(injected.iter().all(|message| {
+        message.content.iter().all(|content| {
+            !matches!(content, Content::Text { text } if text.contains("[RELEVANT REPORTS]"))
+        })
     }));
 }
 

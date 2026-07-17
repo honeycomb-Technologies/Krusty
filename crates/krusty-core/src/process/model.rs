@@ -1,5 +1,8 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
+
+use tokio::sync::Mutex;
 
 pub type ProcessId = String;
 
@@ -35,6 +38,10 @@ impl ProcessInfo {
         matches!(self.status, ProcessStatus::Suspended)
     }
 
+    pub fn is_active(&self) -> bool {
+        self.is_running() || self.is_suspended()
+    }
+
     pub fn duration(&self) -> std::time::Duration {
         match &self.status {
             ProcessStatus::Running | ProcessStatus::Suspended => self.started_at.elapsed(),
@@ -65,6 +72,13 @@ pub(super) fn elapsed_millis_u64(started_at: Instant) -> u64 {
 
 pub(super) struct ProcessEntry {
     pub(super) info: ProcessInfo,
+    pub(super) output: Arc<Mutex<ProcessOutputBuffer>>,
     /// Keep handle alive to prevent task cancellation
     pub(super) _handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct ProcessOutputBuffer {
+    pub(super) bytes: Vec<u8>,
+    pub(super) truncated: bool,
 }

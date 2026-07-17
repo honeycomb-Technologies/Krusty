@@ -4,7 +4,8 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::ai::sse::{SseEvent, SseParser};
-use crate::ai::types::{AiToolCall, FinishReason, Usage};
+use crate::ai::types::{AiToolCall, FinishReason};
+use crate::ai::usage::parse_google_usage;
 
 /// Google Gemini SSE parser
 ///
@@ -31,38 +32,9 @@ impl GoogleParser {
         }
     }
 
-    fn parse_usage(json: &Value) -> Option<Usage> {
-        let usage = json.get("usageMetadata")?;
-        let prompt = usage
-            .get("promptTokenCount")
-            .and_then(|tokens| tokens.as_u64())
-            .unwrap_or(0) as usize;
-        let completion = usage
-            .get("candidatesTokenCount")
-            .and_then(|tokens| tokens.as_u64())
-            .unwrap_or(0) as usize;
-        let total = usage
-            .get("totalTokenCount")
-            .and_then(|tokens| tokens.as_u64())
-            .unwrap_or((prompt + completion) as u64) as usize;
-        // Google includes cached content in promptTokenCount.
-        let cached = usage
-            .get("cachedContentTokenCount")
-            .and_then(|tokens| tokens.as_u64())
-            .unwrap_or(0) as usize;
-
-        (prompt > 0 || completion > 0 || cached > 0).then_some(Usage {
-            prompt_tokens: prompt.saturating_sub(cached),
-            completion_tokens: completion,
-            total_tokens: total,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: cached,
-        })
-    }
-
     fn parse_frame(&self, json: &Value) -> Vec<SseEvent> {
         let mut events = Vec::new();
-        let mut usage = Self::parse_usage(json);
+        let mut usage = parse_google_usage(json);
         let mut has_tool_calls = false;
 
         if let Some(candidate) = json
@@ -188,6 +160,7 @@ mod tests {
             Usage {
                 prompt_tokens: 300,
                 completion_tokens: 50,
+                reasoning_tokens: 0,
                 total_tokens: 1_070,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 700,
@@ -225,6 +198,30 @@ mod tests {
                 })
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn thought_tokens_are_preserved_in_completion_and_total_usage() {
+        let event = GoogleParser::new()
+            .parse_event(&json!({
+                "usageMetadata": {
+                    "promptTokenCount": 1_000,
+                    "candidatesTokenCount": 50,
+                    "thoughtsTokenCount": 500,
+                    "totalTokenCount": 1_550
+                }
+            }))
+            .await
+            .expect("usage event should parse");
+
+        let SseEvent::Usage(usage) = event else {
+            panic!("expected usage event");
+        };
+        assert_eq!(usage.prompt_tokens, 1_000);
+        assert_eq!(usage.completion_tokens, 550);
+        assert_eq!(usage.reasoning_tokens, 500);
+        assert_eq!(usage.total_tokens, 1_550);
+        assert_eq!(usage.logical_total_tokens(), 1_550);
     }
 
     #[tokio::test]

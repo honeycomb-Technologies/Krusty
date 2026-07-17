@@ -19,7 +19,23 @@ export function isActionableSessionAgentState(agentState: string | null | undefi
 }
 
 export function isTerminalSessionAgentState(agentState: string | null | undefined) {
-  return agentState === 'idle' || agentState === 'failed';
+  return agentState === 'idle' || agentState === 'failed' || agentState === 'error';
+}
+
+export function sessionAgentErrorMessage(
+  serverState: ApiSessionStateResponse | null | undefined,
+): string | null {
+  if (
+    serverState?.agent_state !== 'error'
+    && serverState?.agent_state !== 'failed'
+  ) {
+    return null;
+  }
+
+  return (
+    serverState.recovery?.last_error?.trim()
+    || 'The assistant could not complete this response.'
+  );
 }
 
 export function shouldStopSessionStatePolling(

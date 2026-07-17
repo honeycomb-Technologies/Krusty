@@ -34,18 +34,12 @@ pub fn build_system_prompt_sections(
     model_id: &str,
     messages: &[ModelMessage],
     custom_system_prompt: Option<&str>,
-    tool_prompts: &[(String, String)],
+    _tool_prompts: &[(String, String)],
 ) -> SystemPromptSections {
     let profile = ModelProfile::resolve(provider, api_format, model_id);
     let (project_context, session_context) = partition_system_messages(messages);
 
-    let mut base =
-        profile.layered_system_prompt(provider, api_format, model_id, custom_system_prompt);
-    let tool_guidance = build_tool_guidance_section(tool_prompts);
-    if !tool_guidance.is_empty() {
-        base.push_str("\n\n");
-        base.push_str(&tool_guidance);
-    }
+    let base = profile.layered_system_prompt(provider, api_format, model_id, custom_system_prompt);
 
     SystemPromptSections {
         profile,
@@ -53,23 +47,6 @@ pub fn build_system_prompt_sections(
         project_context,
         session_context,
     }
-}
-
-fn build_tool_guidance_section(tool_prompts: &[(String, String)]) -> String {
-    let prompts: Vec<_> = tool_prompts
-        .iter()
-        .filter(|(_, prompt)| !prompt.is_empty())
-        .collect();
-
-    if prompts.is_empty() {
-        return String::new();
-    }
-
-    let mut section = String::from("# Tool Guidance\n\n");
-    for (name, prompt) in &prompts {
-        section.push_str(&format!("## {}\n{}\n\n", name, prompt));
-    }
-    section
 }
 
 pub fn partition_system_messages(messages: &[ModelMessage]) -> (String, String) {
@@ -100,4 +77,29 @@ fn first_text_block(content: &[Content]) -> Option<&str> {
         Content::Text { text } => Some(text.as_str()),
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_system_prompt_sections;
+    use crate::ai::models::ApiFormat;
+    use crate::ai::providers::ProviderId;
+
+    #[test]
+    fn tool_schema_is_the_only_tool_contract_in_the_system_prompt() {
+        let sections = build_system_prompt_sections(
+            ProviderId::OpenAI,
+            ApiFormat::OpenAIResponses,
+            "gpt-5.5-codex",
+            &[],
+            None,
+            &[(
+                "bash".to_string(),
+                "LEGACY EXTENDED TOOL MANUAL MUST NOT BE INJECTED".to_string(),
+            )],
+        );
+
+        assert!(!sections.base_prompt.contains("LEGACY EXTENDED TOOL MANUAL"));
+        assert!(sections.base_prompt.len() <= 5_000);
+    }
 }

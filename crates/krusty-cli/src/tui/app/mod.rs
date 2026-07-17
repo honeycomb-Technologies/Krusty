@@ -31,7 +31,7 @@ use crate::ai::model_profile::ModelProfile;
 use crate::ai::models::resolve_context_window;
 use crate::ai::models::SharedModelRegistry;
 use crate::ai::providers::ProviderId;
-use crate::ai::types::{AiTool, AiToolCall};
+use crate::ai::types::{AiTool, AiToolCall, Usage};
 use crate::extensions::WasmHost;
 use crate::plan::{PlanFile, PlanManager};
 use crate::plugins::PluginManager;

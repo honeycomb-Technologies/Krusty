@@ -4,9 +4,12 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-use super::super::config::{CallOptions, CodexReasoningEffort};
+use super::super::config::{
+    normalized_prompt_cache_key, openai_prompt_cache_options, openai_prompt_cache_retention,
+    CallOptions, CodexReasoningEffort, OpenAiPromptCacheMode,
+};
 use super::super::core::AiClient;
-use super::shared::{ensure_success_stream_response, log_system_prompt_layers, start_sse_stream};
+use super::shared::{ensure_success_stream_response, log_request_metrics, start_sse_stream};
 use crate::ai::format::openai::OpenAIFormat;
 use crate::ai::format::FormatHandler;
 use crate::ai::models::ApiFormat;
@@ -63,6 +66,51 @@ fn append_stream_usage_options(body: &mut Value, provider_id: ProviderId, api_fo
     }
 }
 
+fn stable_system_prompt(sections: &crate::ai::model_profile::SystemPromptSections) -> String {
+    [sections.base_prompt.trim(), sections.project_context.trim()]
+        .into_iter()
+        .filter(|section| !section.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n")
+}
+
+fn responses_instructions(system_prompt: String, explicit_breakpoint: bool) -> Value {
+    if !explicit_breakpoint {
+        return Value::String(system_prompt);
+    }
+
+    let mut text = serde_json::json!({
+        "type": "input_text",
+        "text": system_prompt,
+    });
+    if explicit_breakpoint {
+        text["prompt_cache_breakpoint"] = serde_json::json!({"mode": "explicit"});
+    }
+    serde_json::json!([{
+        "type": "message",
+        "role": "developer",
+        "content": [text],
+    }])
+}
+
+fn append_runtime_instructions(messages: &mut Vec<Value>, session_context: &str) {
+    let context = session_context.trim();
+    if context.is_empty() {
+        return;
+    }
+    messages.push(serde_json::json!({
+        "type": "message",
+        "role": "developer",
+        "content": [{
+            "type": "input_text",
+            "text": format!(
+                "[CURRENT RUNTIME CONTEXT]\nThis snapshot supersedes any earlier runtime-context snapshot.\n\n{}",
+                context
+            )
+        }]
+    }));
+}
+
 impl AiClient {
     /// Streaming call using OpenAI format
     pub(super) async fn call_streaming_openai(
@@ -102,12 +150,27 @@ impl AiClient {
             options.system_prompt.as_deref(),
             options.tools.as_deref(),
         );
-        log_system_prompt_layers(
-            "openai_stream",
-            &prompt_sections,
-            options.system_prompt.is_some(),
-        );
-        let system_prompt = prompt_sections.combined();
+        let responses_format = matches!(self.config().api_format, ApiFormat::OpenAIResponses);
+        let prompt_cache_key = if responses_format {
+            normalized_prompt_cache_key(options)
+        } else {
+            None
+        };
+        let prompt_cache_options = if responses_format {
+            openai_prompt_cache_options(
+                options,
+                &self.config().model,
+                OpenAiPromptCacheMode::Explicit,
+            )
+        } else {
+            None
+        };
+        let supports_cache_options = prompt_cache_options.is_some();
+        let system_prompt = if responses_format {
+            stable_system_prompt(&prompt_sections)
+        } else {
+            prompt_sections.combined()
+        };
 
         let max_tokens = options.max_tokens.unwrap_or(self.config().max_tokens);
 
@@ -131,15 +194,25 @@ impl AiClient {
         body[max_tokens_key] = serde_json::json!(max_tokens);
         body[messages_key] = serde_json::json!(openai_messages);
 
-        // Add system message at the start
+        // Keep reusable instructions first. Volatile runtime directives remain
+        // developer-authority input at the tail so they cannot be overridden
+        // as user content while exact-prefix caching still reuses the stable
+        // prefix.
         if let Some(msgs) = body.get_mut(messages_key).and_then(|m| m.as_array_mut()) {
-            msgs.insert(
-                0,
-                serde_json::json!({
-                    "role": "system",
-                    "content": system_prompt
-                }),
-            );
+            if responses_format {
+                append_runtime_instructions(msgs, &prompt_sections.session_context);
+            } else {
+                msgs.insert(
+                    0,
+                    serde_json::json!({
+                        "role": "system",
+                        "content": system_prompt
+                    }),
+                );
+            }
+        }
+        if responses_format {
+            body["instructions"] = responses_instructions(system_prompt, supports_cache_options);
         }
 
         // Add temperature
@@ -154,7 +227,7 @@ impl AiClient {
         {
             let effort = options
                 .codex_reasoning_effort
-                .unwrap_or(CodexReasoningEffort::High)
+                .unwrap_or(CodexReasoningEffort::Medium)
                 .normalized_for_model(&self.config().model)
                 .as_str();
             body["reasoning"] = serde_json::json!({
@@ -168,10 +241,19 @@ impl AiClient {
 
         append_stream_usage_options(&mut body, self.provider_id(), self.config().api_format);
 
-        if matches!(self.config().api_format, ApiFormat::OpenAIResponses) {
-            if let Some(cache_key) = options.session_id.as_deref().filter(|key| !key.is_empty()) {
-                body["prompt_cache_key"] = serde_json::json!(cache_key);
+        if let Some(cache_key) = prompt_cache_key.as_deref() {
+            body["prompt_cache_key"] = serde_json::json!(cache_key);
+        }
+        if let Some(cache_options) = prompt_cache_options {
+            body["prompt_cache_options"] = cache_options;
+        }
+        if responses_format {
+            if let Some(retention) = openai_prompt_cache_retention(options, &self.config().model) {
+                body["prompt_cache_retention"] = retention;
             }
+        }
+        if responses_format {
+            body["text"] = serde_json::json!({"verbosity": "low"});
         }
 
         // Add tools — sorted deterministically for stable prefix ordering.
@@ -190,6 +272,24 @@ impl AiClient {
             self.provider_id(),
             self.config().api_format,
             &self.config().model,
+        );
+        log_request_metrics(
+            "openai_stream",
+            &prompt_sections,
+            &messages,
+            options.tools.as_deref(),
+            options.system_prompt.is_some(),
+            if supports_cache_options {
+                "explicit_prefix_plus_implicit_tail"
+            } else if responses_format && options.enable_caching {
+                "automatic"
+            } else if responses_format {
+                "disabled"
+            } else {
+                "provider_default"
+            },
+            prompt_cache_key.is_some(),
+            serde_json::to_vec(&body).map_or(0, |value| value.len()),
         );
 
         debug!("OpenAI request to: {}", self.config().api_url());
@@ -270,5 +370,61 @@ mod tests {
         append_stream_usage_options(&mut body, ProviderId::Grok, ApiFormat::OpenAI);
 
         assert!(body.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn responses_instructions_mark_the_stable_prefix_without_transform_loss() {
+        let options = CallOptions {
+            session_id: Some("session".into()),
+            ..Default::default()
+        };
+        let instructions = responses_instructions("stable instructions".into(), true);
+        let cache_options =
+            openai_prompt_cache_options(&options, "gpt-5.6", OpenAiPromptCacheMode::Explicit)
+                .unwrap();
+        let body = apply_request_body_transform(
+            json!({
+                "model": "gpt-5.6",
+                "instructions": instructions,
+                "input": [{"role": "user", "content": "task"}],
+                "prompt_cache_options": cache_options
+            }),
+            ProviderId::OpenAI,
+            ApiFormat::OpenAIResponses,
+            "gpt-5.6",
+        );
+
+        assert_eq!(body["instructions"][0]["role"], "developer");
+        assert_eq!(body["instructions"][0]["content"][0]["type"], "input_text");
+        assert_eq!(
+            body["instructions"][0]["content"][0]["prompt_cache_breakpoint"]["mode"],
+            "explicit"
+        );
+        assert_eq!(body["prompt_cache_options"]["mode"], "explicit");
+        assert_eq!(body["prompt_cache_options"]["ttl"], "30m");
+    }
+
+    #[test]
+    fn volatile_runtime_directives_keep_developer_authority_at_the_tail() {
+        let mut messages = vec![json!({"role": "user", "content": "task"})];
+        append_runtime_instructions(
+            &mut messages,
+            "[ACTIVE PLAN]\nplan changed\n\n[MAKO COORDINATOR]\nkeep delegating",
+        );
+        let body = apply_request_body_transform(
+            json!({"model": "gpt-5.6", "input": messages}),
+            ProviderId::OpenAI,
+            ApiFormat::OpenAIResponses,
+            "gpt-5.6",
+        );
+        let messages = body["input"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "developer");
+        assert!(messages[1]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("supersedes")
+                && text.contains("[ACTIVE PLAN]")
+                && text.contains("[MAKO COORDINATOR]")));
     }
 }

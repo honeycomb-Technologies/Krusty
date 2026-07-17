@@ -18,8 +18,9 @@ pub mod tools;
 // Re-export main types
 pub use config::{
     supports_openai_xhigh_reasoning, AiClientConfig, AnthropicAdaptiveEffort, CallOptions,
-    CodexReasoningEffort,
+    CodexReasoningEffort, PromptCacheRetention,
 };
 pub use core::AiClient;
 pub use core::KRUSTY_SYSTEM_PROMPT;
 pub use request_builder::{BuildOptions, RequestBuilder};
+pub use simple::SimpleCallResult;

@@ -3,19 +3,25 @@ use std::path::Path;
 
 use tracing::warn;
 
-use crate::ai::types::{Content, ModelMessage, Role};
+use crate::agent::context_ledger::ContextLedger;
+use crate::ai::types::ModelMessage;
 use crate::storage::{
     is_compaction_flush_memory, is_current_snapshot, refresh_current_snapshot, AutonomousTaskStore,
     MemoryStore, Report, ReportStore, TaskStatus,
 };
 
 use super::memory::{format_memory_kind, MAX_MEMORY_CONTENT_CHARS};
-use super::{open_context_database, truncate_utf8};
+use super::{open_context_database, truncate_utf8, truncate_utf8_bytes};
 
 /// Maximum number of memories included in the Mako-specific knowledge block.
 const MAX_MAKO_MEMORY_ITEMS: usize = 8;
 /// Maximum number of reports included in the Mako-specific knowledge block.
 const MAX_MAKO_REPORT_ITEMS: usize = 5;
+/// Snapshot and aggregate limits keep long-lived Mako state from becoming an
+/// unbounded system-prompt layer.
+const MAX_MAKO_SNAPSHOT_BYTES: usize = 8 * 1024;
+const MAX_MAKO_KNOWLEDGE_BYTES: usize = 16 * 1024;
+const MAX_KNOWLEDGE_TITLE_CHARS: usize = 160;
 /// Maximum number of query terms used when ranking relevant reports.
 const MAX_REPORT_QUERY_TERMS: usize = 10;
 /// Maximum number of keywords extracted from one text signal.
@@ -54,20 +60,25 @@ pub(super) fn build_report_context(
         &build_report_relevance_terms(conversation, db_path, None),
         5,
     );
+    if selection.reports.is_empty() {
+        return String::new();
+    }
 
-    let mut lines = vec![if selection.has_relevant_matches {
-        "[RELEVANT REPORTS]".to_string()
-    } else {
-        "[RECENT REPORTS]".to_string()
-    }];
+    let mut lines = vec!["[RELEVANT REPORTS]".to_string()];
     for report in selection.reports {
         let summary = truncate_utf8(&report.summary, 200);
         lines.push(format!(
-            "- \"{}\" ({}): {}",
-            report.title, report.created_at, summary
+            "- id={} | \"{}\" ({}): {}",
+            report.id,
+            truncate_utf8(&report.title, MAX_KNOWLEDGE_TITLE_CHARS),
+            report.created_at,
+            summary
         ));
     }
-    lines.push("Use `ReadReport` tool to access full content.".to_string());
+    lines.push(
+        "Read full content with `tool_search(action: \"execute\", tool: \"report\", arguments: {\"action\": \"read\", \"report_id\": \"...\"})`."
+            .to_string(),
+    );
 
     lines.join("\n")
 }
@@ -134,12 +145,15 @@ pub(super) fn build_mako_knowledge_context(
         .collect::<Vec<_>>();
     let mut sections = vec![
         "[MAKO KNOWLEDGE]".to_string(),
-        "Carry forward durable facts from memory and recent outcomes from reports. Prefer promoted memory for stable decisions, and use `ReadReport` when full report detail matters.".to_string(),
+        "Carry forward durable facts from memory and recent outcomes from reports. Prefer promoted memory for stable decisions; use deferred `report` execution through `tool_search` when full detail matters.".to_string(),
     ];
 
     if let Some(snapshot) = current_snapshot {
         sections.push("## Current Snapshot".to_string());
-        sections.push(snapshot.content.clone());
+        sections.push(truncate_utf8_bytes(
+            &snapshot.content,
+            MAX_MAKO_SNAPSHOT_BYTES,
+        ));
     }
 
     if !carry_forward_memories.is_empty() {
@@ -155,34 +169,43 @@ pub(super) fn build_mako_knowledge_context(
                 "- [{} | {}] {}: {}",
                 format_memory_kind(memory.memory_type),
                 scope,
-                memory.title,
+                truncate_utf8(&memory.title, MAX_KNOWLEDGE_TITLE_CHARS),
                 content
             ));
         }
     }
 
     if !report_selection.reports.is_empty() {
-        sections.push(if report_selection.has_relevant_matches {
-            "## Relevant Reports".to_string()
-        } else {
-            "## Recent Reports".to_string()
-        });
+        sections.push("## Relevant Reports".to_string());
         for report in report_selection.reports {
             let summary = truncate_utf8(&report.summary, 200);
             sections.push(format!(
-                "- \"{}\" ({}): {}",
-                report.title, report.created_at, summary
+                "- id={} | \"{}\" ({}): {}",
+                report.id,
+                truncate_utf8(&report.title, MAX_KNOWLEDGE_TITLE_CHARS),
+                report.created_at,
+                summary
             ));
         }
     }
 
     sections.push("[/MAKO KNOWLEDGE]".to_string());
-    sections.join("\n")
+    let context = sections.join("\n");
+    if context.len() <= MAX_MAKO_KNOWLEDGE_BYTES {
+        return context;
+    }
+
+    const END_MARKER: &str = "\n[MAKO KNOWLEDGE TRUNCATED AT REQUEST BUDGET]\n[/MAKO KNOWLEDGE]";
+    let mut bounded = truncate_utf8_bytes(
+        &context,
+        MAX_MAKO_KNOWLEDGE_BYTES.saturating_sub(END_MARKER.len()),
+    );
+    bounded.push_str(END_MARKER);
+    bounded
 }
 
 struct ReportContextSelection<'a> {
     reports: Vec<&'a Report>,
-    has_relevant_matches: bool,
 }
 
 fn select_reports_for_context<'a>(
@@ -193,7 +216,6 @@ fn select_reports_for_context<'a>(
     if reports.is_empty() || limit == 0 {
         return ReportContextSelection {
             reports: Vec::new(),
-            has_relevant_matches: false,
         };
     }
 
@@ -203,42 +225,23 @@ fn select_reports_for_context<'a>(
         .map(|(index, report)| (index, score_report_for_context(report, query_terms), report))
         .collect::<Vec<_>>();
 
-    let has_relevant_matches = scored.iter().any(|(_, score, _)| *score > 0);
-    if !has_relevant_matches {
+    if !scored.iter().any(|(_, score, _)| *score > 0) {
         return ReportContextSelection {
-            reports: reports.iter().take(limit).collect(),
-            has_relevant_matches: false,
+            reports: Vec::new(),
         };
     }
 
     scored.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
 
     let mut selected = Vec::new();
-    let mut selected_ids = HashSet::new();
     for (_, _, report) in scored.iter().filter(|(_, score, _)| *score > 0) {
         if selected.len() >= limit {
             break;
         }
-        if selected_ids.insert(report.id.as_str()) {
-            selected.push(*report);
-        }
+        selected.push(*report);
     }
 
-    if selected.len() < limit {
-        for report in reports {
-            if selected.len() >= limit {
-                break;
-            }
-            if selected_ids.insert(report.id.as_str()) {
-                selected.push(report);
-            }
-        }
-    }
-
-    ReportContextSelection {
-        reports: selected,
-        has_relevant_matches: true,
-    }
+    ReportContextSelection { reports: selected }
 }
 
 fn score_report_for_context(report: &Report, query_terms: &[String]) -> usize {
@@ -309,25 +312,7 @@ fn build_report_relevance_terms(
 }
 
 fn latest_user_objective(conversation: &[ModelMessage]) -> Option<String> {
-    conversation.iter().rev().find_map(|message| {
-        if message.role != Role::User {
-            return None;
-        }
-        first_text_content(&message.content)
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(ToOwned::to_owned)
-    })
-}
-
-fn first_text_content(content: &[Content]) -> Option<&str> {
-    content.iter().find_map(|item| {
-        if let Content::Text { text } = item {
-            Some(text.as_str())
-        } else {
-            None
-        }
-    })
+    ContextLedger::from_conversation(conversation).latest_user_objective
 }
 
 fn extract_report_keywords(text: &str) -> Vec<String> {

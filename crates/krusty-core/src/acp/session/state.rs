@@ -1,13 +1,17 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 
 use agent_client_protocol::{McpServer, SessionId};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
+use crate::agent::LoopInput;
+use crate::ai::client::AiClient;
+use crate::ai::providers::ProviderId;
 use crate::ai::types::{ModelMessage, Role};
-use crate::storage::{SessionManager as StorageSessionManager, SessionRecoveryState};
+use crate::storage::{SessionManager as StorageSessionManager, SessionRecoveryState, WorkMode};
 use crate::tools::registry::PermissionMode;
 use crate::tools::{FileObservationTracker, ToolContext};
 
@@ -15,6 +19,14 @@ use super::super::error::AcpError;
 
 /// Thread-safe wrapper for storage session manager.
 pub type StorageHandle = Arc<Mutex<StorageSessionManager>>;
+
+/// Model selection and client owned by one ACP session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionModelSelection {
+    pub provider: ProviderId,
+    pub model_id: String,
+    pub acp_model_id: String,
+}
 
 /// Session state for a single ACP session.
 pub struct SessionState {
@@ -30,6 +42,14 @@ pub struct SessionState {
     pub messages: RwLock<Vec<ModelMessage>>,
     /// Whether this session has been cancelled.
     cancelled: AtomicBool,
+    /// Serializes prompt turns within one session.
+    prompt_lock: Mutex<()>,
+    /// Input channel for the currently running canonical orchestrator.
+    active_input: StdMutex<Option<tokio::sync::mpsc::UnboundedSender<LoopInput>>>,
+    /// Session-local AI client. Model changes must not affect other sessions.
+    ai_client: RwLock<Option<Arc<AiClient>>>,
+    /// Session-local selected model metadata.
+    selected_model: RwLock<Option<SessionModelSelection>>,
     /// Tool context for this session.
     pub tool_context: RwLock<Option<ToolContext>>,
     /// File observations shared across tool calls in this ACP session.
@@ -67,6 +87,10 @@ impl SessionState {
             mode: RwLock::new(None),
             messages: RwLock::new(Vec::new()),
             cancelled: AtomicBool::new(false),
+            prompt_lock: Mutex::new(()),
+            active_input: StdMutex::new(None),
+            ai_client: RwLock::new(None),
+            selected_model: RwLock::new(None),
             tool_context: RwLock::new(None),
             file_observations: Arc::new(FileObservationTracker::default()),
             storage_session_id: RwLock::new(None),
@@ -79,6 +103,11 @@ impl SessionState {
     pub fn cancel(&self) {
         debug!("Cancelling session {}", self.id);
         self.cancelled.store(true, Ordering::SeqCst);
+        if let Ok(active_input) = self.active_input.lock() {
+            if let Some(input_tx) = active_input.as_ref() {
+                let _ = input_tx.send(LoopInput::Cancel);
+            }
+        }
     }
 
     /// Check if session is cancelled.
@@ -91,14 +120,80 @@ impl SessionState {
         self.cancelled.store(false, Ordering::SeqCst);
     }
 
+    /// Acquire the prompt-turn guard, rejecting overlapping turns for this session.
+    pub fn try_begin_prompt(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, AcpError> {
+        self.prompt_lock.try_lock().map_err(|_| {
+            AcpError::InvalidRequest(format!("session {} already has an active prompt", self.id))
+        })
+    }
+
+    /// Attach the canonical loop input channel for approval and cancellation delivery.
+    pub fn set_active_input(&self, input_tx: tokio::sync::mpsc::UnboundedSender<LoopInput>) {
+        if let Ok(mut active_input) = self.active_input.lock() {
+            *active_input = Some(input_tx);
+        }
+    }
+
+    /// Clear the input channel after a prompt turn ends.
+    pub fn clear_active_input(&self) {
+        if let Ok(mut active_input) = self.active_input.lock() {
+            *active_input = None;
+        }
+    }
+
+    /// Install a model/client pair for only this ACP session.
+    pub async fn set_model_client(&self, selection: SessionModelSelection, client: Arc<AiClient>) {
+        *self.selected_model.write().await = Some(selection);
+        *self.ai_client.write().await = Some(client);
+    }
+
+    pub async fn selected_model(&self) -> Option<SessionModelSelection> {
+        self.selected_model.read().await.clone()
+    }
+
+    pub async fn ai_client(&self) -> Option<Arc<AiClient>> {
+        self.ai_client.read().await.clone()
+    }
+
     /// Set the session mode.
     pub async fn set_mode(&self, mode: Option<String>) {
-        *self.mode.write().await = mode;
+        *self.mode.write().await = mode.clone();
+        let work_mode = match mode.as_deref() {
+            Some("plan") => WorkMode::Plan,
+            _ => WorkMode::Build,
+        };
+        if let (Some(storage), Some(session_id)) =
+            (self.storage.as_ref(), self.get_storage_session_id().await)
+        {
+            let storage = storage.lock().await;
+            if let Err(error) = storage.update_session_work_mode(&session_id, work_mode) {
+                warn!("Failed to persist ACP session mode: {}", error);
+            }
+        }
     }
 
     /// Get the current mode.
     pub async fn get_mode(&self) -> Option<String> {
         self.mode.read().await.clone()
+    }
+
+    pub async fn work_mode(&self) -> WorkMode {
+        match self.mode.read().await.as_deref() {
+            Some("plan") => WorkMode::Plan,
+            _ => WorkMode::Build,
+        }
+    }
+
+    /// Persist the ACP model identifier used to restore an unambiguous provider/model pair.
+    pub async fn persist_model(&self, acp_model_id: &str) {
+        if let (Some(storage), Some(session_id)) =
+            (self.storage.as_ref(), self.get_storage_session_id().await)
+        {
+            let storage = storage.lock().await;
+            if let Err(error) = storage.update_session_model(&session_id, Some(acp_model_id)) {
+                warn!("Failed to persist ACP session model: {}", error);
+            }
+        }
     }
 
     /// Add a message to the conversation and persist to storage if available.
@@ -167,8 +262,17 @@ impl SessionState {
             AcpError::InternalError("No storage configured for session".to_string())
         })?;
 
-        let (raw_messages, recovery_state) = {
+        let (raw_messages, recovery_state, session_info) = {
             let storage = storage.lock().await;
+            let session_info = storage
+                .get_session(storage_session_id)
+                .map_err(|e| {
+                    AcpError::InternalError(format!(
+                        "Failed to load session metadata from storage: {}",
+                        e
+                    ))
+                })?
+                .ok_or_else(|| AcpError::SessionNotFound(storage_session_id.to_string()))?;
             let raw_messages = storage
                 .load_session_messages(storage_session_id)
                 .map_err(|e| {
@@ -182,7 +286,7 @@ impl SessionState {
                         e
                     ))
                 })?;
-            (raw_messages, recovery_state)
+            (raw_messages, recovery_state, session_info)
         };
 
         let mut messages = self.messages.write().await;
@@ -209,6 +313,10 @@ impl SessionState {
         drop(messages);
         *self.storage_session_id.write().await = Some(storage_session_id.to_string());
         *self.recovery_state.write().await = recovery_state;
+        *self.mode.write().await = Some(match session_info.work_mode {
+            WorkMode::Plan => "plan".to_string(),
+            WorkMode::Build => "code".to_string(),
+        });
 
         info!(
             "Loaded {} messages from storage session {}",
@@ -222,6 +330,18 @@ impl SessionState {
     /// Get the storage session ID if linked.
     pub async fn get_storage_session_id(&self) -> Option<String> {
         self.storage_session_id.read().await.clone()
+    }
+
+    /// Return the persisted model identifier for this session, if one was selected.
+    pub async fn persisted_model_id(&self) -> Option<String> {
+        let storage = self.storage.as_ref()?;
+        let session_id = self.get_storage_session_id().await?;
+        let storage = storage.lock().await;
+        storage
+            .get_session(&session_id)
+            .ok()
+            .flatten()
+            .and_then(|session| session.model)
     }
 
     /// Get the current persisted permission mode for this session.

@@ -109,6 +109,8 @@ pub struct AppRuntime {
     pub current_model: String,
     /// Token usage tracking
     pub context_tokens_used: usize,
+    /// Last provider usage snapshot with uncached/cache/output buckets intact.
+    pub last_token_usage: Option<Usage>,
     /// Active in-place compaction animation block index
     pub active_pinch_block: Option<usize>,
     /// AI client
@@ -197,6 +199,7 @@ impl AppRuntime {
             chat: ChatState::new(),
             current_model,
             context_tokens_used: 0,
+            last_token_usage: None,
             active_pinch_block: None,
             ai_client: None,
             api_key: None,

@@ -40,6 +40,7 @@ The heart of the system — the agent loop, AI providers, tools, and context man
 | [AI Providers](core-engine/ai-providers.md) | Multi-provider LLM abstraction: how we talk to Anthropic, OpenAI, and others through one interface |
 | [Tool System](core-engine/tool-system.md) | 50+ built-in tools, the registry, execution lifecycle, permissions, and hooks |
 | [Context & Memory](core-engine/context-and-memory.md) | How the agent builds context, manages conversation history, and handles summarization |
+| [Agent Efficiency](core-engine/agent-efficiency.md) | Compact tool exposure, stable prompt/cache layers, rendered-request budgeting, compaction, and usage regression gates |
 | [Sub-Agents & Teams](core-engine/sub-agents.md) | Parallel agent delegation, the team system, and auto-classification |
 
 ## Storage
@@ -76,6 +77,7 @@ Client applications that connect to the Krusty server.
 | Document | Description |
 |----------|-------------|
 | [Mobile App](frontends/mobile-app.md) | Expo/React Native app: platform abstraction, components, widgets, state management |
+| [Conversation Workstream](frontends/conversation-workstream.md) | Shared mobile/web transcript contract: streaming deltas, tool blocks, activity states, errors, and interaction behavior |
 | [Desktop App](frontends/desktop-app.md) | Tauri wrapper around the Expo web build for native desktop distribution |
 | [Shared Packages](frontends/shared-packages.md) | TypeScript monorepo packages shared between mobile and desktop: API client, state, UI |
 
@@ -103,4 +105,3 @@ Historical audit, roadmap, tracker, and closure documents that are preserved for
 | Document | Description |
 |----------|-------------|
 | [Documentation Archive](archive/README.md) | Historical KRUSTY_* planning, audit, tracker, and closure documents |
-

@@ -102,6 +102,13 @@ const RUN_LINE_HEIGHT = 3;
 const RUN_LINE_META_GAP = 3;
 const RUN_LINE_BEAM_WIDTH = 156;
 const MODEL_POPOVER_MAX_HEIGHT = PILL * 5 + GAP * 4;
+/**
+ * The accordion responder spans the full composer width so its provider dock
+ * can extend left of the FAB column. Keep the model list above that responder:
+ * otherwise iOS sends vertical pans to the accordion's GestureDetector instead
+ * of the FlatList even though the transparent rows use `box-none`.
+ */
+const MODEL_POPOVER_Z_INDEX = 45;
 /** Matches AccordionControls PROVIDER_PILL_STEP (56 + 8 gap). */
 const PROVIDER_PILL_STEP = 64;
 /** Gap between provider dock / model list and the bot+crab FAB column. */
@@ -1264,9 +1271,10 @@ export function ChatBar(props: ChatBarProps) {
                   right: dockRightInset,
                   width: modelPopoverWidth,
                   overflow: 'hidden' as const,
-                  // Below the accordion/filter dock (zIndex 40 when open).
-                  zIndex: 25,
-                  elevation: 25,
+                  // The list does not overlap the FAB/filter hit areas, so it
+                  // can safely sit above their full-width responder shell.
+                  zIndex: MODEL_POPOVER_Z_INDEX,
+                  elevation: MODEL_POPOVER_Z_INDEX,
                 }
               : [
                   styles.modelClip,
@@ -1306,6 +1314,9 @@ export function ChatBar(props: ChatBarProps) {
               style={styles.modelList}
               contentContainerStyle={styles.modelListContent}
               extraData={model}
+              nestedScrollEnabled
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="none"
               showsVerticalScrollIndicator={false}
               renderItem={({ item }: { item: ModelInfo }) => (
                 <Pressable
@@ -1513,8 +1524,8 @@ const styles = StyleSheet.create({
     right: PILL + GAP + ROOT_HORIZONTAL_PADDING,
     height: 4 * PILL + 3 * GAP,
     overflow: 'hidden',
-    zIndex: 30,
-    elevation: 30,
+    zIndex: MODEL_POPOVER_Z_INDEX,
+    elevation: MODEL_POPOVER_Z_INDEX,
   },
   // Model popover — slides out from behind accordion
   modelPopover: {

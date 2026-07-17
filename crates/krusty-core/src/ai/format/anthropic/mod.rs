@@ -63,6 +63,46 @@ mod tests {
     use serde_json::json;
 
     use super::AnthropicFormat;
+    use crate::ai::format::FormatHandler;
+    use crate::ai::providers::ProviderId;
+    use crate::ai::types::{Content, ModelMessage, Role};
+
+    #[test]
+    fn anthropic_model_switch_drops_unsigned_thinking_but_keeps_tool_history() {
+        let messages = vec![
+            ModelMessage {
+                role: Role::Assistant,
+                content: vec![
+                    Content::Thinking {
+                        thinking: "unsigned reasoning from another provider".to_string(),
+                        signature: String::new(),
+                    },
+                    Content::ToolUse {
+                        id: "call-1".to_string(),
+                        name: "read".to_string(),
+                        input: json!({"file_path": "README.md"}),
+                    },
+                ],
+            },
+            ModelMessage {
+                role: Role::User,
+                content: vec![Content::ToolResult {
+                    tool_use_id: "call-1".to_string(),
+                    output: json!({"ok": true}),
+                    is_error: None,
+                }],
+            },
+        ];
+
+        let converted =
+            AnthropicFormat::new().convert_messages(&messages, Some(ProviderId::Anthropic));
+        let serialized = serde_json::to_string(&converted).expect("messages should serialize");
+
+        assert!(!serialized.contains("unsigned reasoning from another provider"));
+        assert!(!serialized.contains("\"type\":\"thinking\""));
+        assert!(serialized.contains("\"type\":\"tool_use\""));
+        assert!(serialized.contains("\"type\":\"tool_result\""));
+    }
 
     #[test]
     fn sanitize_removes_orphans_and_injects_missing_results() {

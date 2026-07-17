@@ -9,4 +9,4 @@ mod state;
 mod tests;
 
 pub use manager::SessionManager;
-pub use state::{SessionState, StorageHandle};
+pub use state::{SessionModelSelection, SessionState, StorageHandle};

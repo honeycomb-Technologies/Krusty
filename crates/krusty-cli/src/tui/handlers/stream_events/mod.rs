@@ -143,6 +143,14 @@ impl App {
             } => self.handle_tool_approval_required(id, name),
             LoopEvent::ToolApproved { id } => self.handle_tool_approved(id),
             LoopEvent::ToolDenied { id } => self.handle_tool_denied(id),
+            LoopEvent::SteeringInjected {
+                pending_id,
+                message,
+            } => tracing::info!(
+                pending_id = ?pending_id,
+                "Live steering entered the model conversation: {}",
+                message
+            ),
             LoopEvent::AwaitingInput {
                 tool_call_id,
                 tool_name,
@@ -181,9 +189,21 @@ impl App {
             LoopEvent::TickInjected { tick_number } => self.handle_tick_injected(tick_number),
             LoopEvent::Usage {
                 prompt_tokens,
+                input_tokens,
                 completion_tokens,
-                ..
-            } => self.handle_usage(prompt_tokens, completion_tokens),
+                reasoning_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                total_tokens,
+            } => self.handle_usage(
+                prompt_tokens,
+                input_tokens,
+                completion_tokens,
+                reasoning_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                total_tokens,
+            ),
             LoopEvent::SessionPinched {
                 reason,
                 source_session_id: _,

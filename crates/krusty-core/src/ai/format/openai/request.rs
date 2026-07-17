@@ -1,6 +1,10 @@
 use serde_json::Value;
 
 use super::OpenAIFormat;
+use crate::ai::client::config::{
+    normalized_prompt_cache_key, openai_prompt_cache_options, openai_prompt_cache_retention,
+    OpenAiPromptCacheMode,
+};
 use crate::ai::format::RequestOptions;
 use crate::ai::types::AiTool;
 
@@ -54,12 +58,20 @@ impl OpenAIFormat {
         }
 
         if self.is_responses_format() {
-            if let Some(cache_key) = options
-                .call_options
-                .and_then(|call| call.session_id.as_deref())
-                .filter(|key| !key.is_empty())
-            {
-                body["prompt_cache_key"] = serde_json::json!(cache_key);
+            if let Some(call_options) = options.call_options {
+                if let Some(cache_key) = normalized_prompt_cache_key(call_options) {
+                    body["prompt_cache_key"] = serde_json::json!(cache_key);
+                }
+                if let Some(cache_options) = openai_prompt_cache_options(
+                    call_options,
+                    model,
+                    OpenAiPromptCacheMode::Implicit,
+                ) {
+                    body["prompt_cache_options"] = cache_options;
+                }
+                if let Some(retention) = openai_prompt_cache_retention(call_options, model) {
+                    body["prompt_cache_retention"] = retention;
+                }
             }
         }
 

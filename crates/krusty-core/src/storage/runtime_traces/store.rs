@@ -54,17 +54,21 @@ impl<'a> RuntimeTraceStore<'a> {
                 sequence,
                 turn,
                 event_type,
+                call_kind,
+                operation,
                 payload_json,
                 failure_category,
                 stop_reason,
                 created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 session_id,
                 &event.run_id,
                 event.sequence,
                 event.turn as i64,
                 &event.event_type,
+                &event.call_kind,
+                &event.operation,
                 payload_json,
                 failure_category,
                 stop_reason,
@@ -74,13 +78,187 @@ impl<'a> RuntimeTraceStore<'a> {
         Ok(())
     }
 
+    /// Append an event while allocating its session sequence inside the same
+    /// SQLite statement.
+    ///
+    /// A session can briefly have two trace forwarders during a fast follow-up
+    /// turn (for example while first-turn title generation drains). Computing
+    /// `MAX(sequence) + 1` on each connection before inserting races in that
+    /// case. Keeping allocation and insertion in one write statement lets
+    /// SQLite serialize the writers and guarantees a unique monotonic value.
+    pub fn append_event_with_next_sequence(
+        &self,
+        session_id: &str,
+        event: &RuntimeTraceEvent,
+    ) -> Result<i64> {
+        let payload_json = serde_json::to_string(&event.payload)?;
+        let failure_category = event
+            .failure_category
+            .as_ref()
+            .map(|category| category.as_str().to_string());
+        let stop_reason = event.stop_reason.as_ref().map(|reason| match reason {
+            LoopStopReason::Completed => "completed",
+            LoopStopReason::AwaitingInput => "awaiting_input",
+            LoopStopReason::Sleeping => "sleeping",
+            LoopStopReason::BudgetExhausted => "budget_exhausted",
+            LoopStopReason::ProviderError => "provider_error",
+            LoopStopReason::LoopGuardTriggered => "loop_guard_triggered",
+            LoopStopReason::StreamIdleTimeout => "stream_idle_timeout",
+            LoopStopReason::UserAbort => "user_abort",
+            LoopStopReason::Pinched => "pinched",
+            LoopStopReason::PinchFailed => "pinch_failed",
+        });
+
+        let sequence = self.db.conn().query_row(
+            "INSERT INTO runtime_traces (
+                session_id,
+                run_id,
+                sequence,
+                turn,
+                event_type,
+                call_kind,
+                operation,
+                payload_json,
+                failure_category,
+                stop_reason,
+                created_at
+            )
+            SELECT
+                ?1,
+                ?2,
+                COALESCE(MAX(sequence), 0) + 1,
+                ?3,
+                ?4,
+                ?5,
+                ?6,
+                ?7,
+                ?8,
+                ?9,
+                ?10
+            FROM runtime_traces
+            WHERE session_id = ?1
+            RETURNING sequence",
+            params![
+                session_id,
+                &event.run_id,
+                event.turn as i64,
+                &event.event_type,
+                &event.call_kind,
+                &event.operation,
+                payload_json,
+                failure_category,
+                stop_reason,
+                &event.created_at
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(sequence)
+    }
+
+    /// Append a compact batch while preserving the session-global sequence.
+    ///
+    /// Every insert derives its sequence in the write statement itself. The
+    /// first insert acquires SQLite's writer lock, so concurrent forwarders
+    /// cannot allocate the same `MAX(sequence) + 1` value between a separate
+    /// read and write.
+    pub fn append_events_with_next_sequences(
+        &self,
+        session_id: &str,
+        events: &[RuntimeTraceEvent],
+    ) -> Result<Vec<i64>> {
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let transaction = self.db.conn().unchecked_transaction()?;
+        let mut sequences = Vec::with_capacity(events.len());
+        for event in events {
+            let payload_json = serde_json::to_string(&event.payload)?;
+            let failure_category = event
+                .failure_category
+                .as_ref()
+                .map(|category| category.as_str().to_string());
+            let stop_reason = event.stop_reason.as_ref().map(stop_reason_name);
+            let sequence = transaction.query_row(
+                "INSERT INTO runtime_traces (
+                    session_id,
+                    run_id,
+                    sequence,
+                    turn,
+                    event_type,
+                    call_kind,
+                    operation,
+                    payload_json,
+                    failure_category,
+                    stop_reason,
+                    created_at
+                )
+                SELECT
+                    ?1,
+                    ?2,
+                    COALESCE(MAX(sequence), 0) + 1,
+                    ?3,
+                    ?4,
+                    ?5,
+                    ?6,
+                    ?7,
+                    ?8,
+                    ?9,
+                    ?10
+                FROM runtime_traces
+                WHERE session_id = ?1
+                RETURNING sequence",
+                params![
+                    session_id,
+                    &event.run_id,
+                    event.turn as i64,
+                    &event.event_type,
+                    &event.call_kind,
+                    &event.operation,
+                    payload_json,
+                    failure_category,
+                    stop_reason,
+                    &event.created_at
+                ],
+                |row| row.get(0),
+            )?;
+            sequences.push(sequence);
+        }
+        transaction.commit()?;
+        Ok(sequences)
+    }
+
+    /// Retain only the newest trace rows for a session. Sequence values are
+    /// intentionally not renumbered, so incremental consumers can detect that
+    /// an old cursor has fallen outside the retained window.
+    pub fn prune_session_to_latest(&self, session_id: &str, keep: usize) -> Result<usize> {
+        if keep == 0 {
+            return Ok(self.db.conn().execute(
+                "DELETE FROM runtime_traces WHERE session_id = ?1",
+                [session_id],
+            )?);
+        }
+
+        let deleted = self.db.conn().execute(
+            "DELETE FROM runtime_traces
+             WHERE session_id = ?1
+               AND sequence < (
+                   SELECT COALESCE(MAX(sequence), 0) - ?2 + 1
+                   FROM runtime_traces
+                   WHERE session_id = ?1
+               )",
+            params![session_id, keep as i64],
+        )?;
+        Ok(deleted)
+    }
+
     pub fn list_events(
         &self,
         session_id: &str,
         limit: Option<usize>,
     ) -> Result<Vec<RuntimeTraceEvent>> {
         let mut events = if let Some(limit) = limit {
-            let sql = "SELECT run_id, sequence, turn, event_type, payload_json, failure_category, stop_reason, created_at
+            let sql = "SELECT run_id, sequence, turn, event_type, payload_json, failure_category, stop_reason, created_at, call_kind, operation
                  FROM runtime_traces
                  WHERE session_id = ?1
                  ORDER BY sequence DESC
@@ -91,7 +269,7 @@ impl<'a> RuntimeTraceStore<'a> {
             events.reverse();
             events
         } else {
-            let sql = "SELECT run_id, sequence, turn, event_type, payload_json, failure_category, stop_reason, created_at
+            let sql = "SELECT run_id, sequence, turn, event_type, payload_json, failure_category, stop_reason, created_at, call_kind, operation
                  FROM runtime_traces
                  WHERE session_id = ?1
                  ORDER BY sequence ASC";
@@ -115,7 +293,7 @@ impl<'a> RuntimeTraceStore<'a> {
         limit: Option<usize>,
     ) -> Result<Vec<RuntimeTraceEvent>> {
         let mut sql = String::from(
-            "SELECT run_id, sequence, turn, event_type, payload_json, failure_category, stop_reason, created_at
+            "SELECT run_id, sequence, turn, event_type, payload_json, failure_category, stop_reason, created_at, call_kind, operation
              FROM runtime_traces
              WHERE session_id = ?1
                AND sequence > ?2
@@ -169,6 +347,21 @@ impl<'a> RuntimeTraceStore<'a> {
     }
 }
 
+fn stop_reason_name(reason: &LoopStopReason) -> &'static str {
+    match reason {
+        LoopStopReason::Completed => "completed",
+        LoopStopReason::AwaitingInput => "awaiting_input",
+        LoopStopReason::Sleeping => "sleeping",
+        LoopStopReason::BudgetExhausted => "budget_exhausted",
+        LoopStopReason::ProviderError => "provider_error",
+        LoopStopReason::LoopGuardTriggered => "loop_guard_triggered",
+        LoopStopReason::StreamIdleTimeout => "stream_idle_timeout",
+        LoopStopReason::UserAbort => "user_abort",
+        LoopStopReason::Pinched => "pinched",
+        LoopStopReason::PinchFailed => "pinch_failed",
+    }
+}
+
 fn map_trace_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeTraceEvent> {
     let payload_json: String = row.get(4)?;
     let failure_category = row
@@ -195,6 +388,8 @@ fn map_trace_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RuntimeTraceEvent>
         sequence: row.get(1)?,
         turn: row.get::<_, i64>(2)? as usize,
         event_type: row.get(3)?,
+        call_kind: row.get(8)?,
+        operation: row.get(9)?,
         payload: serde_json::from_str(&payload_json).unwrap_or_else(|_| json!({})),
         failure_category,
         stop_reason,

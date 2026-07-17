@@ -7,6 +7,7 @@ use tokio::sync::{mpsc, RwLock};
 
 use crate::agent::loop_events::LoopEvent;
 use crate::agent::subagent::AgentProgress;
+use crate::agent::ProviderCallTraceContext;
 use crate::ai::client::AiClient;
 use crate::ai::types::ModelMessage;
 use crate::mcp::McpManager;
@@ -44,7 +45,7 @@ impl FilesystemAccess {
     }
 }
 
-/// Shared record of files successfully observed by read-capable tools.
+/// Shared record of files successfully observed or authored by file tools.
 #[derive(Debug, Default)]
 pub struct FileObservationTracker {
     observed_files: StdRwLock<HashSet<PathBuf>>,
@@ -70,6 +71,14 @@ impl FileObservationTracker {
             poisoned.into_inner()
         });
         observed.contains(path)
+    }
+
+    pub fn remove(&self, path: &Path) {
+        let mut observed = self.observed_files.write().unwrap_or_else(|poisoned| {
+            tracing::warn!("File observation tracker write lock was poisoned; recovering");
+            poisoned.into_inner()
+        });
+        observed.remove(path);
     }
 
     pub fn snapshot(&self) -> Vec<PathBuf> {
@@ -138,7 +147,9 @@ pub struct ToolContext {
     pub parent_conversation: Option<Arc<Vec<ModelMessage>>>,
     /// Canonical loop-event sink for hooks/tools that need to surface runtime events.
     pub loop_event_tx: Option<mpsc::UnboundedSender<LoopEvent>>,
-    /// Shared file-observation tracker used to enforce read-before-edit policy.
+    /// Provider-call accounting context inherited from the active agent turn.
+    pub provider_call_trace: Option<ProviderCallTraceContext>,
+    /// Shared file-observation tracker used to enforce observe-before-edit policy.
     pub file_observations: Arc<FileObservationTracker>,
 }
 
@@ -170,6 +181,7 @@ impl Default for ToolContext {
             tool_registry: None,
             parent_conversation: None,
             loop_event_tx: None,
+            provider_call_trace: None,
             file_observations: Arc::new(FileObservationTracker::default()),
         }
     }
@@ -337,15 +349,38 @@ impl ToolContext {
         self
     }
 
+    pub fn with_provider_call_trace(mut self, trace: ProviderCallTraceContext) -> Self {
+        self.provider_call_trace = Some(trace);
+        self
+    }
+
     /// Attach a shared file-observation tracker.
     pub fn with_file_observation_tracker(mut self, tracker: Arc<FileObservationTracker>) -> Self {
         self.file_observations = tracker;
         self
     }
 
-    /// Record that a canonical file path has been successfully observed.
+    /// Record that a canonical file path has been successfully observed or authored.
     pub fn record_file_observation(&self, path: impl Into<PathBuf>) {
         self.file_observations.record(path);
+    }
+
+    /// Record a successful file mutation using the canonical post-mutation path.
+    pub fn record_file_mutation(&self, path: &Path) -> Result<PathBuf, String> {
+        let canonical = path.canonicalize().map_err(|e| {
+            format!(
+                "Failed to resolve mutated file path '{}': {}",
+                path.display(),
+                e
+            )
+        })?;
+        self.record_file_observation(canonical.clone());
+        Ok(canonical)
+    }
+
+    /// Invalidate a canonical file observation after deletion.
+    pub fn forget_file_observation(&self, path: &Path) {
+        self.file_observations.remove(path);
     }
 
     /// Check whether a canonical file path has been successfully observed.

@@ -2,7 +2,10 @@ use anyhow::Result;
 use serde_json::Value;
 use url::Url;
 
-use super::super::super::config::{CallOptions, CodexReasoningEffort};
+use super::super::super::config::{
+    normalized_prompt_cache_key, openai_prompt_cache_options, openai_prompt_cache_retention,
+    CallOptions, CodexReasoningEffort, OpenAiPromptCacheMode,
+};
 use super::super::super::core::AiClient;
 use crate::ai::format::response::extract_text_from_content;
 
@@ -152,15 +155,27 @@ impl AiClient {
             "store": false,
             "stream": true,
             "text": {
-                "verbosity": "medium"
+                "verbosity": "low"
             }
         });
+
+        if let Some(cache_key) = normalized_prompt_cache_key(options) {
+            body["prompt_cache_key"] = serde_json::json!(cache_key);
+        }
+        if let Some(cache_options) =
+            openai_prompt_cache_options(options, model, OpenAiPromptCacheMode::Implicit)
+        {
+            body["prompt_cache_options"] = cache_options;
+        }
+        if let Some(retention) = openai_prompt_cache_retention(options, model) {
+            body["prompt_cache_retention"] = retention;
+        }
 
         if thinking_enabled {
             body["reasoning"] = serde_json::json!({
                 "effort": options
                     .codex_reasoning_effort
-                    .unwrap_or(CodexReasoningEffort::High)
+                    .unwrap_or(CodexReasoningEffort::Medium)
                     .normalized_for_model(model)
                     .as_str(),
                 "summary": "auto"
@@ -181,6 +196,16 @@ impl AiClient {
 
         body
     }
+}
+
+pub(super) fn resolve_codex_ws_url_for_tools(api_url: &str) -> Result<Url> {
+    let mut url = Url::parse(api_url)
+        .map_err(|e| anyhow::anyhow!("Invalid Codex API URL '{}': {}", api_url, e))?;
+
+    url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
+        .map_err(|_| anyhow::anyhow!("Failed to set websocket scheme for '{}'", api_url))?;
+
+    Ok(url)
 }
 
 #[cfg(test)]
@@ -228,15 +253,29 @@ mod tests {
 
         assert_eq!(body["model"], "gpt-5.5");
         assert_eq!(body["service_tier"], "priority");
+        assert_eq!(body["text"]["verbosity"], "low");
     }
-}
 
-pub(super) fn resolve_codex_ws_url_for_tools(api_url: &str) -> Result<Url> {
-    let mut url = Url::parse(api_url)
-        .map_err(|e| anyhow::anyhow!("Invalid Codex API URL '{}': {}", api_url, e))?;
+    #[test]
+    fn chatgpt_codex_subagent_body_uses_session_cache_contract() {
+        let client = openai_responses_client();
+        let options = CallOptions {
+            session_id: Some("subagent-1".to_string()),
+            ..Default::default()
+        };
 
-    url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
-        .map_err(|_| anyhow::anyhow!("Failed to set websocket scheme for '{}'", api_url))?;
+        let body = client.build_codex_tool_call_body(
+            "gpt-5.6",
+            &options,
+            vec![serde_json::json!({
+                "role": "user",
+                "content": [{"type": "text", "text": "Continue"}]
+            })],
+            Vec::new(),
+            false,
+        );
 
-    Ok(url)
+        assert_eq!(body["prompt_cache_key"], "subagent-1");
+        assert_eq!(body["prompt_cache_options"]["mode"], "implicit");
+    }
 }

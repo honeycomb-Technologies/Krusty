@@ -625,7 +625,9 @@ pub enum ChatStreamEvent {
     },
     Usage {
         prompt_tokens: usize,
+        input_tokens: usize,
         completion_tokens: usize,
+        reasoning_tokens: usize,
         cache_creation_input_tokens: usize,
         cache_read_input_tokens: usize,
         total_tokens: usize,
@@ -662,6 +664,10 @@ pub enum ChatStreamEvent {
     },
     ToolDenied {
         id: String,
+    },
+    SteeringInjected {
+        pending_id: Option<String>,
+        message: String,
     },
     Error {
         error: String,
@@ -801,13 +807,33 @@ impl ChatStreamEvent {
             "tick_injected" => Self::TickInjected {
                 tick_number: usize_field(&value, "tick_number"),
             },
-            "usage" => Self::Usage {
-                prompt_tokens: usize_field(&value, "prompt_tokens"),
-                completion_tokens: usize_field(&value, "completion_tokens"),
-                cache_creation_input_tokens: usize_field(&value, "cache_creation_input_tokens"),
-                cache_read_input_tokens: usize_field(&value, "cache_read_input_tokens"),
-                total_tokens: usize_field(&value, "total_tokens"),
-            },
+            "usage" => {
+                let prompt_tokens = usize_field(&value, "prompt_tokens");
+                let completion_tokens = usize_field(&value, "completion_tokens");
+                let reasoning_tokens =
+                    usize_field(&value, "reasoning_tokens").min(completion_tokens);
+                let cache_creation_input_tokens =
+                    usize_field(&value, "cache_creation_input_tokens");
+                let cache_read_input_tokens = usize_field(&value, "cache_read_input_tokens");
+                let input_tokens = value
+                    .get("input_tokens")
+                    .and_then(Value::as_u64)
+                    .map(|tokens| tokens as usize)
+                    .unwrap_or_else(|| {
+                        prompt_tokens
+                            .saturating_add(cache_creation_input_tokens)
+                            .saturating_add(cache_read_input_tokens)
+                    });
+                Self::Usage {
+                    prompt_tokens,
+                    input_tokens,
+                    completion_tokens,
+                    reasoning_tokens,
+                    cache_creation_input_tokens,
+                    cache_read_input_tokens,
+                    total_tokens: usize_field(&value, "total_tokens"),
+                }
+            }
             "session_pinched" => Self::SessionPinched {
                 reason: string_field(&value, "reason"),
                 source_session_id: string_field(&value, "source_session_id"),
@@ -838,6 +864,10 @@ impl ChatStreamEvent {
             },
             "tool_denied" => Self::ToolDenied {
                 id: string_field(&value, "id"),
+            },
+            "steering_injected" => Self::SteeringInjected {
+                pending_id: optional_string_field(&value, "pending_id"),
+                message: string_field(&value, "message"),
             },
             "error" => Self::Error {
                 error: string_field(&value, "error"),
@@ -901,4 +931,54 @@ fn usize_field(value: &Value, field: &str) -> usize {
 
 fn u64_field(value: &Value, field: &str) -> u64 {
     value.get(field).and_then(Value::as_u64).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChatStreamEvent;
+    use serde_json::json;
+
+    #[test]
+    fn usage_parses_explicit_logical_input_tokens() {
+        let event = ChatStreamEvent::from_json_value(json!({
+            "type": "usage",
+            "prompt_tokens": 100,
+            "input_tokens": 1_000,
+            "completion_tokens": 50,
+            "reasoning_tokens": 40,
+            "cache_creation_input_tokens": 200,
+            "cache_read_input_tokens": 700,
+            "total_tokens": 1_050
+        }));
+
+        assert!(matches!(
+            event,
+            ChatStreamEvent::Usage {
+                input_tokens: 1_000,
+                reasoning_tokens: 40,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn usage_derives_input_tokens_for_older_servers() {
+        let event = ChatStreamEvent::from_json_value(json!({
+            "type": "usage",
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "cache_creation_input_tokens": 200,
+            "cache_read_input_tokens": 700,
+            "total_tokens": 1_050
+        }));
+
+        assert!(matches!(
+            event,
+            ChatStreamEvent::Usage {
+                input_tokens: 1_000,
+                reasoning_tokens: 0,
+                ..
+            }
+        ));
+    }
 }

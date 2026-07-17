@@ -4863,6 +4863,7 @@ dependencies = [
  "futures",
  "git2",
  "glob",
+ "globset",
  "grok-auth",
  "hmac",
  "http",

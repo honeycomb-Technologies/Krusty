@@ -182,7 +182,9 @@ pub enum AgenticEvent {
     /// Token usage information
     Usage {
         prompt_tokens: usize,
+        input_tokens: usize,
         completion_tokens: usize,
+        reasoning_tokens: usize,
         cache_creation_input_tokens: usize,
         cache_read_input_tokens: usize,
         total_tokens: usize,
@@ -224,6 +226,11 @@ pub enum AgenticEvent {
     ToolApproved { id: String },
     /// Tool was denied by user
     ToolDenied { id: String },
+    /// A live user follow-up entered canonical history.
+    SteeringInjected {
+        pending_id: Option<String>,
+        message: String,
+    },
     /// Error occurred
     Error { error: String },
     /// A background agent was started
@@ -415,6 +422,13 @@ impl From<krusty_core::agent::LoopEvent> for AgenticEvent {
             },
             LoopEvent::ToolApproved { id } => Self::ToolApproved { id },
             LoopEvent::ToolDenied { id } => Self::ToolDenied { id },
+            LoopEvent::SteeringInjected {
+                pending_id,
+                message,
+            } => Self::SteeringInjected {
+                pending_id,
+                message,
+            },
             LoopEvent::ServerToolStart { id, name } => Self::ServerToolStart { id, name },
             LoopEvent::ServerToolComplete { id, name } => Self::ServerToolComplete { id, name },
             LoopEvent::WebSearchResults {
@@ -468,13 +482,17 @@ impl From<krusty_core::agent::LoopEvent> for AgenticEvent {
             LoopEvent::TickInjected { tick_number } => Self::TickInjected { tick_number },
             LoopEvent::Usage {
                 prompt_tokens,
+                input_tokens,
                 completion_tokens,
+                reasoning_tokens,
                 cache_creation_input_tokens,
                 cache_read_input_tokens,
                 total_tokens,
             } => Self::Usage {
                 prompt_tokens,
+                input_tokens,
                 completion_tokens,
+                reasoning_tokens,
                 cache_creation_input_tokens,
                 cache_read_input_tokens,
                 total_tokens,

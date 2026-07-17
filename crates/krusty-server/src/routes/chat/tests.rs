@@ -25,12 +25,13 @@ use krusty_core::tools::registry::ToolRegistry;
 use krusty_core::SessionManager;
 
 use super::{
-    build_user_content, chat, forward_loop_event, prepare_chat_contract_for_test,
-    run_orchestrator_event_bridge, select_model_for_chat_request, tool_approval, RequestedModel,
+    build_user_content, chat, deliver_steering_with_rollover, forward_loop_event,
+    prepare_chat_contract_for_test, run_orchestrator_event_bridge, select_model_for_chat_request,
+    steer, tool_approval, RequestedModel,
 };
 use crate::auth::{AuthenticatedUser, CurrentUser};
 use crate::error::AppError;
-use crate::types::{ChatRequest, ContentBlock, ToolApprovalRequest};
+use crate::types::{ChatRequest, ContentBlock, SteerRequest, ToolApprovalRequest};
 use crate::AppState;
 
 fn create_test_state() -> (AppState, PathBuf) {
@@ -546,6 +547,99 @@ async fn tool_approval_rejects_foreign_owner() {
 }
 
 #[tokio::test]
+async fn live_steering_retries_the_replacement_run_sender_once() {
+    let (state, _temp_dir) = create_test_state();
+    let session_id = "rollover-session".to_string();
+    let (stale_tx, stale_rx) = mpsc::unbounded_channel();
+    drop(stale_rx);
+    let (replacement_tx, mut replacement_rx) = mpsc::unbounded_channel();
+    state
+        .session_inputs
+        .write()
+        .await
+        .insert(session_id.clone(), replacement_tx);
+    let input = LoopInput::Steer {
+        pending_id: Some("steer-rollover".into()),
+        content: vec![Content::Text {
+            text: "use the new run".into(),
+        }],
+    };
+
+    assert!(
+        deliver_steering_with_rollover(&state, &session_id, stale_tx, input).await,
+        "replacement sender should accept the same durable steering input"
+    );
+    assert!(matches!(
+        replacement_rx.recv().await,
+        Some(LoopInput::Steer {
+            pending_id: Some(pending_id),
+            content,
+        }) if pending_id == "steer-rollover"
+            && matches!(content.first(), Some(Content::Text { text }) if text == "use the new run")
+    ));
+}
+
+#[tokio::test]
+async fn live_steering_is_owner_checked_and_hidden_until_core_injection() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    create_test_user(&state, "bob");
+    let manager = SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = manager
+        .create_session_for_user("Owned Session", None, None, Some("alice"))
+        .expect("session should be created");
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    state
+        .session_inputs
+        .write()
+        .await
+        .insert(session_id.clone(), input_tx);
+
+    let foreign = steer(
+        State(state.clone()),
+        Some(current_user("bob", state.working_dir.as_ref())),
+        Json(SteerRequest {
+            session_id: session_id.clone(),
+            message: "foreign".into(),
+            content: Vec::new(),
+        }),
+    )
+    .await;
+    assert!(matches!(foreign, Err(AppError::NotFound(_))));
+    assert!(input_rx.try_recv().is_err());
+
+    let accepted = steer(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Json(SteerRequest {
+            session_id: session_id.clone(),
+            message: "change direction".into(),
+            content: Vec::new(),
+        }),
+    )
+    .await;
+    let accepted = match accepted {
+        Ok(response) => response,
+        Err(_) => panic!("owner steering should be accepted"),
+    };
+    assert_eq!(accepted.0["status"], "accepted");
+    assert!(matches!(
+        input_rx.recv().await,
+        Some(LoopInput::Steer {
+            pending_id: Some(_),
+            content,
+        }) if matches!(content.first(), Some(Content::Text { text }) if text == "change direction")
+    ));
+    assert!(
+        manager
+            .load_session_messages(&session_id)
+            .expect("canonical history should load")
+            .is_empty(),
+        "durable steering must stay hidden before the core reaches a safe boundary"
+    );
+}
+
+#[tokio::test]
 async fn tool_approval_rejects_closed_session_channel() {
     let (state, _temp_dir) = create_test_state();
     create_test_user(&state, "alice");
@@ -925,6 +1019,62 @@ async fn sse_critical_tool_approval_survives_full_buffer_with_lag_signal() {
     assert!(approval.contains("tool-1"));
 
     assert!(approval_handle.await.expect("approval task should join"));
+}
+
+#[tokio::test]
+async fn sse_usage_survives_full_buffer_before_terminal_delivery() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let mut skipped_events = 0usize;
+
+    assert!(
+        forward_loop_event(
+            &tx,
+            "session-usage",
+            LoopEvent::TextDelta {
+                delta: "first".to_string(),
+            },
+            &mut skipped_events,
+        )
+        .await
+    );
+    assert!(
+        forward_loop_event(
+            &tx,
+            "session-usage",
+            LoopEvent::TextDelta {
+                delta: "dropped".to_string(),
+            },
+            &mut skipped_events,
+        )
+        .await
+    );
+
+    let usage_tx = tx.clone();
+    let usage_handle = tokio::spawn(async move {
+        forward_loop_event(
+            &usage_tx,
+            "session-usage",
+            LoopEvent::Usage {
+                prompt_tokens: 100,
+                input_tokens: 1_000,
+                completion_tokens: 50,
+                reasoning_tokens: 40,
+                cache_creation_input_tokens: 200,
+                cache_read_input_tokens: 700,
+                total_tokens: 1_050,
+            },
+            &mut skipped_events,
+        )
+        .await
+    });
+
+    assert!(format!("{:?}", rx.recv().await.unwrap().unwrap()).contains("text_delta"));
+    assert!(format!("{:?}", rx.recv().await.unwrap().unwrap()).contains("lagged"));
+    let usage = format!("{:?}", rx.recv().await.unwrap().unwrap());
+    assert!(usage.contains("usage"));
+    assert!(usage.contains("input_tokens"));
+    assert!(usage.contains("reasoning_tokens"));
+    assert!(usage_handle.await.expect("usage task should join"));
 }
 
 #[tokio::test]

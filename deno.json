@@ -1,0 +1,12 @@
+{
+  "imports": {
+    "@krusty/api": "./packages/api/src/index.ts",
+    "react": "npm:react@19.2.0",
+    "zustand": "npm:zustand@5.0.12"
+  },
+  "nodeModulesDir": "auto",
+  "tasks": {
+    "check:state": "deno check --unstable-sloppy-imports packages/state/src/index.ts packages/state/test/*.test.ts",
+    "test:state": "deno test --unstable-sloppy-imports --allow-env=NODE_ENV packages/state/test"
+  }
+}

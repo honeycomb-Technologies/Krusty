@@ -4,9 +4,9 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-use super::super::config::CallOptions;
+use super::super::config::{anthropic_prompt_cache_control, CallOptions};
 use super::super::core::AiClient;
-use super::shared::{ensure_success_stream_response, log_system_prompt_layers, start_sse_stream};
+use super::shared::{ensure_success_stream_response, log_request_metrics, start_sse_stream};
 use crate::ai::format::anthropic::AnthropicFormat;
 use crate::ai::format::FormatHandler;
 use crate::ai::parsers::AnthropicParser;
@@ -33,12 +33,6 @@ impl AiClient {
             options.system_prompt.as_deref(),
             options.tools.as_deref(),
         );
-        log_system_prompt_layers(
-            "anthropic_stream",
-            &prompt_sections,
-            options.system_prompt.is_some(),
-        );
-
         // Determine max_tokens based on reasoning format
         let fallback_tokens = options.max_tokens.unwrap_or(self.config().max_tokens) as u32;
         let legacy_thinking = options.thinking.is_some();
@@ -78,17 +72,21 @@ impl AiClient {
         // actually supports cache_control blocks. Sending them to MiniMax, Z.ai,
         // etc. may cause errors since they use Anthropic format but don't support caching.
         let provider_caps = ProviderCapabilities::for_provider(self.provider_id());
-        let use_caching = options.enable_caching && provider_caps.prompt_caching;
+        let cache_control = anthropic_prompt_cache_control(options, self.provider_id());
+        let use_caching = cache_control.is_some();
 
-        if use_caching {
+        if let Some(cache_control) = cache_control.as_ref() {
             let mut system_blocks: Vec<Value> = Vec::new();
 
-            // Block 1 (optional): CC identity — globally cached across all sessions
+            // Block 1 (optional): Anthropic OAuth compatibility identity. Keep
+            // this exact transport-required prefix; the shared prompt describes
+            // the product role (operating inside Krusty) rather than asserting a
+            // second underlying model identity.
             if is_anthropic_oauth {
                 system_blocks.push(serde_json::json!({
                     "type": "text",
                     "text": "You are Claude Code, Anthropic's official CLI for Claude.",
-                    "cache_control": {"type": "ephemeral"}
+                    "cache_control": cache_control.clone()
                 }));
             }
 
@@ -97,7 +95,7 @@ impl AiClient {
                 system_blocks.push(serde_json::json!({
                     "type": "text",
                     "text": prompt_sections.base_prompt.as_str(),
-                    "cache_control": {"type": "ephemeral"}
+                    "cache_control": cache_control.clone()
                 }));
             }
 
@@ -106,7 +104,7 @@ impl AiClient {
                 system_blocks.push(serde_json::json!({
                     "type": "text",
                     "text": prompt_sections.project_context.as_str(),
-                    "cache_control": {"type": "ephemeral"}
+                    "cache_control": cache_control.clone()
                 }));
                 debug!(
                     "Project context block added ({} chars, cached)",
@@ -179,8 +177,8 @@ impl AiClient {
         // block in the request, so we don't need to manually navigate JSON to
         // find the last tool or last message. Block-level breakpoints on system
         // prompt blocks above still work alongside auto-caching for the static prefix.
-        if use_caching {
-            body["cache_control"] = serde_json::json!({"type": "ephemeral"});
+        if let Some(cache_control) = cache_control {
+            body["cache_control"] = cache_control;
             debug!("Auto-caching enabled at request level");
         }
 
@@ -200,6 +198,16 @@ impl AiClient {
             self.provider_id(),
             self.config().api_format,
             &self.config().model,
+        );
+        log_request_metrics(
+            "anthropic_stream",
+            &prompt_sections,
+            &messages,
+            options.tools.as_deref(),
+            options.system_prompt.is_some(),
+            if use_caching { "ephemeral" } else { "none" },
+            false,
+            serde_json::to_vec(&body).map_or(0, |value| value.len()),
         );
 
         debug!("Calling {} API with streaming", self.provider_id());

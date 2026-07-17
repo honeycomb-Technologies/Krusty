@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
+use crate::process::{ProcessRegistry, ProcessStatus};
 use crate::tools::registry::Tool;
 use crate::tools::truncation;
 use crate::tools::{parse_params, ToolContext, ToolResult};
@@ -30,10 +31,94 @@ pub(super) const MAX_OUTPUT_BYTES: usize = 50_000; // 50KB
 // truncated by MAX_OUTPUT_LINES/MAX_OUTPUT_BYTES after ANSI stripping.
 pub(super) const RAW_CAPTURE_MAX_LINES: usize = 8_000;
 pub(super) const RAW_CAPTURE_MAX_BYTES: usize = 2_000_000; // 2MB
-pub(super) const READER_JOIN_TIMEOUT_MS: u64 = 2_000;
+                                                           // Reader tasks batch spool writes, but retain a generous bounded drain window
+                                                           // so a busy or slow filesystem cannot silently discard the command's tail.
+pub(super) const READER_JOIN_TIMEOUT_MS: u64 = 10_000;
 pub(super) const TIMEOUT_KILL_GRACE_MS: u64 = 800;
+const BACKGROUND_STARTUP_GRACE_MS: u64 = 250;
 
 pub struct BashTool;
+
+async fn background_start_result(
+    registry: &ProcessRegistry,
+    user_id: Option<&str>,
+    process_id: String,
+    warnings: Vec<String>,
+) -> ToolResult {
+    tokio::time::sleep(Duration::from_millis(BACKGROUND_STARTUP_GRACE_MS)).await;
+    let process = match user_id {
+        Some(user_id) => registry.get_for_user(user_id, &process_id).await,
+        None => registry.get(&process_id).await,
+    };
+    let Some(process) = process else {
+        return ToolResult::error_with_details(
+            "background_process_missing",
+            "Background process was not registered after startup",
+            Some(json!({"process_id": process_id})),
+            None,
+        );
+    };
+
+    match process.status {
+        ProcessStatus::Running => ToolResult::success_data_with(
+            json!({
+                "message": "Process started in background",
+                "process_id": process_id,
+                "status": "running",
+                "next_action": "The process remains tracked after this turn. Use processes status/control when needed, and probe the advertised endpoint to verify service readiness."
+            }),
+            warnings,
+            None,
+            None,
+        ),
+        ProcessStatus::Suspended => ToolResult::success_data_with(
+            json!({
+                "message": "Process started but is suspended",
+                "process_id": process_id,
+                "status": "suspended"
+            }),
+            warnings,
+            None,
+            None,
+        ),
+        ProcessStatus::Completed {
+            exit_code,
+            duration_ms,
+        } => ToolResult::success_data_with(
+            json!({
+                "message": "Background command completed during startup",
+                "process_id": process_id,
+                "status": "done",
+                "exit_code": exit_code,
+                "duration_ms": duration_ms
+            }),
+            warnings,
+            None,
+            None,
+        ),
+        ProcessStatus::Failed { error, duration_ms } => ToolResult::error_with_details(
+            "background_start_failed",
+            format!("Background process failed during startup: {error}"),
+            Some(json!({
+                "process_id": process_id,
+                "status": "failed",
+                "error": error,
+                "duration_ms": duration_ms
+            })),
+            None,
+        ),
+        ProcessStatus::Killed { duration_ms } => ToolResult::error_with_details(
+            "background_start_killed",
+            "Background process was killed during startup",
+            Some(json!({
+                "process_id": process_id,
+                "status": "killed",
+                "duration_ms": duration_ms
+            })),
+            None,
+        ),
+    }
+}
 
 fn output_spool_path(ctx: &ToolContext) -> PathBuf {
     let session = ctx
@@ -76,8 +161,8 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute shell commands for git, build tools (cargo/bun/make), and system utilities. \
-         For file operations use specialized tools: Read, Write, Edit, Glob, Grep. \
+        "Execute shell commands for git, builds, package managers, compilers, servers, and system utilities. \
+         Do not use find/ls/cat/head/tail/grep for filesystem discovery or reading: use List, Glob, Read, and Grep directly because Bash file operations are rejected. \
          Set run_in_background:true for servers/watchers."
     }
 
@@ -85,7 +170,11 @@ impl Tool for BashTool {
         Some(
             r#"Use bash for git, builds, package managers, compilers, servers/watchers, and system utilities. Use dedicated tools for routine file read/search/edit operations.
 
-Chain dependent commands with `&&`; run independent commands as separate parallel tool calls. Use `run_in_background:true` for servers/watchers instead of a trailing `&`.
+Chain dependent commands with `&&`; run independent commands as separate parallel tool calls. Use `run_in_background:true` for servers/watchers instead of a trailing `&`. Preview servers must bind explicitly to `127.0.0.1` or `localhost`; do not expose a wildcard listener. Run the server as its own command rather than combining it with file discovery.
+
+Background results return a durable `process_id` for lifecycle control after the turn. Use `processes` status/control for that process and probe its endpoint for service readiness; do not launch a duplicate while the tracked process is still running. If startup failed, act on the captured stderr or select an unused high port instead of repeating the command unchanged.
+
+For user-requested private tailnet exposure, keep the application bound to loopback and run a tailnet-only `tailscale serve` proxy as a separate command. Do not use public Tailscale Funnel unless the user explicitly requests public exposure.
 
 Default timeout is 30 seconds; set `timeout` explicitly for long-running commands (max 600000ms). Include a concise `description` for logging/progress.
 
@@ -195,16 +284,13 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
                 };
                 match spawn_result {
                     Ok(process_id) => {
-                        return ToolResult::success_data_with(
-                            json!({
-                                "message": "Process started in background",
-                                "process_id": process_id,
-                                "status": "running"
-                            }),
+                        return background_start_result(
+                            registry,
+                            ctx.user_id.as_deref(),
+                            process_id,
                             warnings,
-                            None,
-                            None,
-                        );
+                        )
+                        .await;
                     }
                     Err(e) => {
                         return ToolResult::error(format!("Failed to start: {}", e));

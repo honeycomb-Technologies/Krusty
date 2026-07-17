@@ -41,7 +41,7 @@ The CI workflow (`.github/workflows/ci.yml`) runs on every push to `main` and on
 | **Rust Test** | `cargo test --workspace` -- runs the full test suite |
 | **Rust Clippy** | `cargo clippy --workspace -- -D warnings` -- lint pass with zero tolerance for warnings |
 | **Rust Format** | `cargo fmt --all -- --check` -- verifies formatting without modifying files |
-| **Mobile Web Export** | Installs Bun and runs `npx expo export --platform web` in `apps/mobile` |
+| **Client Quality Gates** | Calls the reusable client workflow: Bun API contract tests, Deno shared-state type-check/tests, mobile TypeScript, and Expo web export |
 | **Desktop Linux Bundle** | Full Tauri build on Ubuntu with system dependencies (WebKit, GTK, patchelf) |
 
 The Linux jobs install `libudev-dev` because the CLI uses `gilrs` for gamepad support, which requires the udev headers. The desktop bundle job additionally installs `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, and `patchelf` for the Tauri build.
@@ -62,7 +62,7 @@ The preflight is safe for validation: it reads repository metadata, remote refs,
 
 ## Release automation
 
-Releases are triggered by pushing a Git tag that matches `v*` (for example, `v0.7.3`). The release workflow (`.github/workflows/release.yml`) has three stages:
+Releases are triggered by pushing a Git tag that matches `v*` (for example, `v0.7.3`). Before packaging, the release workflow calls `.github/workflows/client-quality.yml`; no release build starts unless the API streaming/error contracts, shared-state type-check/tests, mobile TypeScript check, and Expo web export all pass. The remaining release workflow (`.github/workflows/release.yml`) has three artifact stages:
 
 **1. Build matrix.** A matrix job compiles release binaries for five targets:
 
@@ -162,7 +162,7 @@ Push path filters are intentionally narrow so Rust-only, docs-only, and desktop-
 
 The job targets the GitHub Actions `testflight` environment (`environment: testflight`). Keep that environment configured with human approval/reviewer protection so EAS build and App Store Connect secrets are not exposed and the build is not submitted until the approval gate is satisfied.
 
-The workflow uses concurrency control (`group: mobile-ios-build, cancel-in-progress: true`) so that a new push cancels any in-flight build rather than queueing up stale builds. The steps are:
+The workflow uses concurrency control (`group: mobile-ios-build, cancel-in-progress: true`) so that a new push cancels any in-flight build rather than queueing up stale builds. It first calls the same reusable client-quality workflow used by CI and releases. The TestFlight build job cannot start until the API contract tests, shared-state type-check/tests, mobile TypeScript check, and Expo web export pass. The build and submission steps are:
 
 1. Check out the repo and install Bun
 2. Install dependencies with `bun install --frozen-lockfile`

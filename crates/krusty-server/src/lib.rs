@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::{
     body::Body,
@@ -21,7 +21,7 @@ use axum::{
 };
 use rust_embed::Embed;
 use serde::Serialize;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 use tower_http::{
     cors::{AllowOrigin, Any, CorsLayer},
     trace::TraceLayer,
@@ -46,6 +46,8 @@ use krusty_core::tools::{
 use self::ai_bootstrap::{create_ai_client, create_ai_client_for_model, initialize_models};
 
 type SessionGuard = Arc<Mutex<()>>;
+const SESSION_LOCK_MAX_ENTRIES: usize = 1000;
+const SESSION_LOCK_MAX_AGE: Duration = Duration::from_secs(3600);
 mod ai_bootstrap;
 type SessionLockMap = HashMap<String, (SessionGuard, Instant)>;
 type SessionInputMap =
@@ -195,6 +197,25 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Acquire the canonical per-session mutation lock without waiting.
+    /// Chat, autonomous runs, and manual compaction all share this guard.
+    pub(crate) async fn try_lock_session(&self, session_id: &str) -> Option<OwnedMutexGuard<()>> {
+        let lock = {
+            let mut locks = self.session_locks.write().await;
+            if locks.len() > SESSION_LOCK_MAX_ENTRIES {
+                locks.retain(|_, (lock, created_at)| {
+                    created_at.elapsed() < SESSION_LOCK_MAX_AGE || Arc::strong_count(lock) > 1
+                });
+            }
+            let (lock, _) = locks
+                .entry(session_id.to_string())
+                .or_insert_with(|| (Arc::new(Mutex::new(())), Instant::now()));
+            Arc::clone(lock)
+        };
+
+        lock.try_lock_owned().ok()
+    }
+
     /// Resolve a fresh AI client using the current credential store and requested model.
     pub async fn resolve_ai_client(&self, requested_model: Option<&str>) -> Option<Arc<AiClient>> {
         self.resolve_ai_client_for_user(requested_model, None).await
@@ -299,7 +320,7 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
     }
     // Register MCP tools so they're visible to the AI
     krusty_core::mcp::tool::register_mcp_tools(mcp_manager.clone(), &tool_registry).await;
-    let mcp_tool_count = tool_registry.get_ai_tools().await.len();
+    let mcp_tool_count = tool_registry.get_ai_tools_all().await.len();
     tracing::info!("Tool registry initialized with {} tools", mcp_tool_count);
 
     let push_service =
@@ -516,7 +537,7 @@ fn cache_control(path: &str, http_policy: ServerHttpPolicy) -> String {
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let chat_available = state.ai_client.is_some();
-    let tools_available = !state.tool_registry.get_ai_tools().await.is_empty();
+    let tools_available = !state.tool_registry.get_ai_tools_all().await.is_empty();
 
     Json(HealthResponse {
         status: "ok".to_string(),
@@ -568,7 +589,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_bootstrap_tool_registry_registers_fail_closed_autonomous_classifier() {
+    async fn no_bootstrap_tool_registry_uses_deterministic_autonomous_policy() {
         let mut registry = ToolRegistry::new();
         register_autonomous_classifier_hook(&mut registry, None);
         let registry = Arc::new(registry);
@@ -587,12 +608,26 @@ mod tests {
             .await
             .expect("test write tool should be registered");
 
-        assert!(result.is_error, "unsafe autonomous write must fail closed");
         assert!(
-            result.output.contains("Auto-classifier unavailable")
-                && result.output.contains("fail closed"),
-            "unexpected result output: {}",
+            !result.is_error,
+            "workspace mutation should not require a classifier model: {}",
             result.output
+        );
+
+        let blocked = registry
+            .execute(
+                "write",
+                json!({"path": "/etc/shadow", "content": "unsafe autonomous write"}),
+                &ctx,
+            )
+            .await
+            .expect("test write tool should be registered");
+
+        assert!(blocked.is_error, "sensitive path must fail closed");
+        assert!(
+            blocked.output.contains("credential or system path"),
+            "unexpected result output: {}",
+            blocked.output
         );
     }
 }

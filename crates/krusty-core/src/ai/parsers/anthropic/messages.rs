@@ -3,42 +3,12 @@ use tracing::info;
 
 use super::AnthropicParser;
 use crate::ai::sse::{parse_finish_reason, SseEvent};
-use crate::ai::types::{ContextEditingMetrics, FinishReason, Usage};
+use crate::ai::types::{ContextEditingMetrics, FinishReason};
+use crate::ai::usage::parse_anthropic_usage;
 
 impl AnthropicParser {
     pub(super) fn parse_message_delta(&self, json: &Value) -> SseEvent {
-        let usage = json.get("usage").and_then(|usage| {
-            let input_tokens = usage
-                .get("input_tokens")
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0) as usize;
-            let output_tokens = usage
-                .get("output_tokens")
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0) as usize;
-
-            let cache_read = usage
-                .get("cache_read_input_tokens")
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0) as usize;
-            let cache_creation = usage
-                .get("cache_creation_input_tokens")
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0) as usize;
-
-            (input_tokens > 0 || output_tokens > 0 || cache_read > 0 || cache_creation > 0).then(
-                || Usage {
-                    prompt_tokens: input_tokens,
-                    completion_tokens: output_tokens,
-                    total_tokens: input_tokens
-                        .saturating_add(cache_creation)
-                        .saturating_add(cache_read)
-                        .saturating_add(output_tokens),
-                    cache_creation_input_tokens: cache_creation,
-                    cache_read_input_tokens: cache_read,
-                },
-            )
-        });
+        let usage = json.get("usage").and_then(parse_anthropic_usage);
 
         if let Some(delta) = json.get("delta") {
             if let Some(stop_reason) = delta.get("stop_reason").and_then(|s| s.as_str()) {
@@ -78,36 +48,16 @@ impl AnthropicParser {
                 return SseEvent::ContextEdited(metrics);
             }
 
-            if let Some(usage) = message.get("usage") {
-                let input_tokens = usage
-                    .get("input_tokens")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(0) as usize;
-                let cache_creation = usage
-                    .get("cache_creation_input_tokens")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(0) as usize;
-                let cache_read = usage
-                    .get("cache_read_input_tokens")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(0) as usize;
-
-                if cache_creation > 0 || cache_read > 0 {
+            if let Some(usage) = message.get("usage").and_then(parse_anthropic_usage) {
+                if usage.cache_creation_input_tokens > 0 || usage.cache_read_input_tokens > 0 {
                     info!(
                         "Cache metrics: read={}, created={}, fresh={}",
-                        cache_read, cache_creation, input_tokens
+                        usage.cache_read_input_tokens,
+                        usage.cache_creation_input_tokens,
+                        usage.prompt_tokens
                     );
                 }
-
-                return SseEvent::Usage(Usage {
-                    prompt_tokens: input_tokens,
-                    completion_tokens: 0,
-                    total_tokens: input_tokens
-                        .saturating_add(cache_creation)
-                        .saturating_add(cache_read),
-                    cache_creation_input_tokens: cache_creation,
-                    cache_read_input_tokens: cache_read,
-                });
+                return SseEvent::Usage(usage);
             }
         }
         SseEvent::Skip

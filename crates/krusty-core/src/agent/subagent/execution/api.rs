@@ -17,6 +17,7 @@ pub(super) async fn call_subagent_api(
     tools: &[AiTool],
     max_tokens: usize,
     thinking_enabled: bool,
+    session_id: &str,
 ) -> Result<Value, SubAgentApiError> {
     info!(
         model = model,
@@ -91,6 +92,7 @@ pub(super) async fn call_subagent_api(
                 tools_json.clone(),
                 max_tokens,
                 thinking_enabled,
+                Some(session_id),
             )
             .await
             .map_err(SubAgentApiError::from)

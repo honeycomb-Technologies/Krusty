@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::OwnedMutexGuard;
 
 use krusty_core::agent::autonomy::coordinator_prompt::system_prompt_for_session;
 use krusty_core::ai::client::{AiClient, CallOptions};
@@ -10,16 +9,16 @@ use krusty_core::ai::providers::ProviderId;
 use krusty_core::ai::types::{ModelMessage, WebFetchConfig, WebSearchConfig};
 use krusty_core::plan::PlanManager;
 use krusty_core::storage::{
-    Database, MakoRuntimeStateStore, SessionInfo, SessionType, WorkMode, WorkspaceMode,
+    Database, MakoRuntimeStateStore, ProjectSettings, SessionInfo, SessionType, WorkMode,
+    WorkspaceMode,
 };
-use krusty_core::tools::registry::PermissionMode;
+use krusty_core::tools::registry::{MutationToolSurface, PermissionMode, ToolRequestPolicy};
 use krusty_core::SessionManager;
 
 use super::super::session_access::{
     current_user_id, ensure_owned_session, load_owned_session, request_workspace_scope,
 };
 use super::tools::{apply_thinking_config, chat_system_prompt, filter_tools_for_session_type};
-use super::{SESSION_LOCK_MAX_AGE, SESSION_LOCK_MAX_ENTRIES};
 use crate::ai_bootstrap::{persist_current_model_selection, resolve_preferred_model};
 use crate::auth::CurrentUser;
 use crate::error::AppError;
@@ -438,22 +437,27 @@ pub(super) async fn setup_chat_session(
         &workspace_scope.allowed_root,
     )?
     .map(PathBuf::from);
+    let effective_work_mode = effective_session_work_mode(state, &session);
+    let has_active_plan = PlanManager::new((*state.db_path).clone())
+        .ok()
+        .and_then(|manager| manager.get_active_plan(session_id).ok())
+        .flatten()
+        .is_some();
+    let project_settings = ProjectSettings::load(project_dir.as_deref().unwrap_or(&working_dir));
 
-    let session_lock = {
-        let mut locks = state.session_locks.write().await;
-        if locks.len() > SESSION_LOCK_MAX_ENTRIES {
-            locks.retain(|_, (lock, created_at)| {
-                created_at.elapsed() < SESSION_LOCK_MAX_AGE || Arc::strong_count(lock) > 1
-            });
-        }
-        let (lock, _) = locks
-            .entry(session_id.to_string())
-            .or_insert_with(|| (Arc::new(Mutex::new(())), Instant::now()));
-        lock.clone()
-    };
-    let guard = Arc::clone(&session_lock)
-        .try_lock_owned()
-        .map_err(|_| AppError::Conflict(format!("Session {} is busy", session_id)))?;
+    let guard = state
+        .try_lock_session(session_id)
+        .await
+        .ok_or_else(|| AppError::Conflict(format!("Session {} is busy", session_id)))?;
+
+    let recovered_steering = session_manager.promote_orphaned_pending_steering(session_id)?;
+    if recovered_steering > 0 {
+        tracing::info!(
+            session_id,
+            recovered_steering,
+            "Recovered durable steering left by an interrupted active run"
+        );
+    }
 
     let raw_messages = session_manager.load_session_messages(session_id)?;
     let conversation = parse_stored_model_messages(session_id, raw_messages, "chat conversation");
@@ -463,11 +467,28 @@ pub(super) async fn setup_chat_session(
         session_id = %session_id,
         "Filtering tools for session type"
     );
-    let ai_tools = filter_tools_for_session_type(
-        state.tool_registry.get_ai_tools().await,
-        session.session_type,
-        research_enabled,
-    );
+    let all_tools = state.tool_registry.get_ai_tools_all().await;
+    let ai_tools = if session.session_type == SessionType::Code {
+        ToolRequestPolicy::code(
+            session.permission_mode,
+            effective_work_mode == WorkMode::Plan,
+            has_active_plan,
+            true,
+            project_settings.disabled_tools.as_deref().unwrap_or(&[]),
+        )
+        .with_mutation_surface(MutationToolSurface::for_model(
+            ai_client.provider_id(),
+            &ai_client.config().model,
+        ))
+        .filter(all_tools)
+    } else {
+        let disabled_tools = project_settings.disabled_tools.unwrap_or_default();
+        filter_tools_for_session_type(all_tools, session.session_type, research_enabled)
+            .into_iter()
+            .filter(|tool| !disabled_tools.iter().any(|name| name == &tool.name))
+            .collect()
+    };
+    let hosted_web_tools = session.session_type != SessionType::Code;
     let mut options = CallOptions {
         tools: if ai_tools.is_empty() {
             None
@@ -476,8 +497,8 @@ pub(super) async fn setup_chat_session(
         },
         session_id: Some(session_id.to_string()),
         codex_parallel_tool_calls: true,
-        web_search: Some(WebSearchConfig::default()),
-        web_fetch: Some(WebFetchConfig::default()),
+        web_search: hosted_web_tools.then(WebSearchConfig::default),
+        web_fetch: hosted_web_tools.then(WebFetchConfig::default),
         fast_mode,
         system_prompt: match session.session_type {
             SessionType::Chat => Some(chat_system_prompt(research_enabled)),
@@ -490,7 +511,6 @@ pub(super) async fn setup_chat_session(
         apply_thinking_config(&ai_client, thinking_level, &mut options);
     }
 
-    let effective_work_mode = effective_session_work_mode(state, &session);
     let mako_runtime = if session.session_type == SessionType::Mako {
         MakoRuntimeStateStore::new(Database::new(&state.db_path)?).get_state(session_id)?
     } else {

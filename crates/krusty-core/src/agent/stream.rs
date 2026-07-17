@@ -44,9 +44,23 @@ pub(crate) struct StreamResult {
     pub tool_calls: Vec<AiToolCall>,
     pub recovery_checkpoint: StreamCheckpoint,
     pub last_error: Option<String>,
+    /// Logical input plus output for durable session accounting.
     pub total_tokens: usize,
+    /// Logical input including uncached, cache-write, and cache-read buckets.
     pub prompt_tokens: usize,
+    /// Final normalized usage for this single provider call. Live consumers
+    /// still receive every cumulative `LoopEvent::Usage` snapshot; this copy
+    /// lets observability persist exactly one terminal accounting record.
+    pub usage: Usage,
+    /// Distinguishes an omitted provider usage frame from a real zero value.
+    pub usage_available: bool,
     pub stop_reason: Option<LoopStopReason>,
+    /// Whether the provider emitted content or began work that must not be
+    /// duplicated by an automatic retry.
+    pub produced_output: bool,
+    /// Whether a provider-hosted tool (for example web search/fetch) began or
+    /// returned work that a semantic continuation must not replay blindly.
+    pub had_server_tool_activity: bool,
 }
 
 /// Process an AI streaming response, emitting LoopEvents as chunks arrive.
@@ -60,13 +74,17 @@ pub(crate) async fn process_stream(
 ) -> StreamResult {
     let mut text_buffer = String::new();
     let mut thinking_buffer = String::new();
+    let mut current_thinking_buffer = String::new();
     let mut thinking_blocks = Vec::new();
     let mut tool_calls = Vec::new();
     let mut recovery_tool_calls = Vec::new();
     let mut last_error = None;
     let mut usage = Usage::default();
+    let mut usage_available = false;
     let mut stop_reason = None;
     let mut received_finish = false;
+    let mut produced_output = false;
+    let mut had_server_tool_activity = false;
     let mut last_checkpoint_text_len = 0usize;
 
     loop {
@@ -83,21 +101,12 @@ pub(crate) async fn process_stream(
             Ok(None) if received_finish => break,
             Ok(None) => {
                 let error = "AI stream ended without a finish signal".to_string();
-                let _ = event_tx.send(LoopEvent::Error {
-                    error: error.clone(),
-                });
                 last_error = Some(error);
                 stop_reason = Some(LoopStopReason::ProviderError);
                 break;
             }
             Err(_) if received_finish => break,
             Err(_) => {
-                let _ = event_tx.send(LoopEvent::Error {
-                    error: format!(
-                        "AI stream timeout: no data received for {} seconds",
-                        idle_timeout.as_secs()
-                    ),
-                });
                 last_error = Some(format!(
                     "AI stream timeout: no data received for {} seconds",
                     idle_timeout.as_secs()
@@ -109,17 +118,18 @@ pub(crate) async fn process_stream(
 
         if received_finish && !matches!(&part, StreamPart::Usage { .. } | StreamPart::Finish { .. })
         {
-            let error = "AI provider emitted content after its finish signal".to_string();
-            let _ = event_tx.send(LoopEvent::Error {
-                error: error.clone(),
-            });
-            last_error = Some(error);
-            stop_reason = Some(LoopStopReason::ProviderError);
-            break;
+            // A finish signal commits the response. Some compatible providers
+            // append duplicate bookkeeping (and older Krusty buffering could
+            // also race a final text chunk) after that boundary. Never turn an
+            // already-complete answer into a failed turn; ignore the malformed
+            // tail while continuing to drain usage telemetry.
+            tracing::warn!("Ignoring provider stream event received after finish");
+            continue;
         }
 
         match &part {
             StreamPart::TextDelta { delta } => {
+                produced_output = true;
                 text_buffer.push_str(delta);
                 let _ = event_tx.send(LoopEvent::TextDelta {
                     delta: delta.clone(),
@@ -134,7 +144,9 @@ pub(crate) async fn process_stream(
                 );
             }
             StreamPart::ThinkingDelta { thinking, .. } => {
+                produced_output = true;
                 thinking_buffer.push_str(thinking);
+                current_thinking_buffer.push_str(thinking);
                 let _ = event_tx.send(LoopEvent::ThinkingDelta {
                     thinking: thinking.clone(),
                 });
@@ -152,19 +164,30 @@ pub(crate) async fn process_stream(
                 signature,
                 ..
             } => {
-                if thinking_buffer.is_empty() {
-                    thinking_buffer = thinking.clone();
+                produced_output = true;
+                let completed_thinking = if thinking.is_empty() {
+                    std::mem::take(&mut current_thinking_buffer)
+                } else {
+                    if current_thinking_buffer.is_empty() {
+                        thinking_buffer.push_str(thinking);
+                    } else {
+                        current_thinking_buffer.clear();
+                    }
+                    thinking.clone()
+                };
+                if !completed_thinking.is_empty() || !signature.is_empty() {
+                    thinking_blocks.push(ThinkingBlock {
+                        thinking: completed_thinking.clone(),
+                        signature: signature.clone(),
+                    });
                 }
-                thinking_blocks.push(ThinkingBlock {
-                    thinking: thinking.clone(),
-                    signature: signature.clone(),
-                });
                 let _ = event_tx.send(LoopEvent::ThinkingComplete {
-                    thinking: thinking.clone(),
+                    thinking: completed_thinking,
                     signature: signature.clone(),
                 });
             }
             StreamPart::ToolCallStart { id, name } => {
+                produced_output = true;
                 if !recovery_tool_calls.iter().any(|call| call.id == *id) {
                     recovery_tool_calls.push(StreamToolCallSummary {
                         id: id.clone(),
@@ -186,6 +209,7 @@ pub(crate) async fn process_stream(
                 );
             }
             StreamPart::ToolCallComplete { tool_call } => {
+                produced_output = true;
                 tool_calls.push(tool_call.clone());
                 if let Some(existing) = recovery_tool_calls
                     .iter_mut()
@@ -224,43 +248,28 @@ pub(crate) async fn process_stream(
                         let error = format!(
                             "AI response ended with {incomplete_tool_calls} incomplete tool call(s); none were executed"
                         );
-                        let _ = event_tx.send(LoopEvent::Error {
-                            error: error.clone(),
-                        });
                         last_error = Some(error);
                         stop_reason = Some(LoopStopReason::ProviderError);
                     }
                     FinishReason::ToolCalls if tool_calls.is_empty() => {
                         let error = "AI provider reported tool calls but supplied no complete calls; none were executed".to_string();
-                        let _ = event_tx.send(LoopEvent::Error {
-                            error: error.clone(),
-                        });
                         last_error = Some(error);
                         stop_reason = Some(LoopStopReason::ProviderError);
                     }
                     FinishReason::Stop | FinishReason::ToolCalls => {}
                     FinishReason::Length => {
                         let error = "AI response reached its output-token limit; incomplete tool calls were not executed".to_string();
-                        let _ = event_tx.send(LoopEvent::Error {
-                            error: error.clone(),
-                        });
                         last_error = Some(error);
                         stop_reason = Some(LoopStopReason::ProviderError);
                     }
                     FinishReason::ContentFilter => {
                         let error =
                             "AI response was blocked by the provider content filter".to_string();
-                        let _ = event_tx.send(LoopEvent::Error {
-                            error: error.clone(),
-                        });
                         last_error = Some(error);
                         stop_reason = Some(LoopStopReason::ProviderError);
                     }
                     FinishReason::Other(reason) => {
                         let error = format!("AI response ended unexpectedly: {reason}");
-                        let _ = event_tx.send(LoopEvent::Error {
-                            error: error.clone(),
-                        });
                         last_error = Some(error);
                         stop_reason = Some(LoopStopReason::ProviderError);
                     }
@@ -271,19 +280,23 @@ pub(crate) async fn process_stream(
                 received_finish = true;
             }
             StreamPart::Usage { usage: snapshot } => {
+                usage_available = true;
                 // Usage snapshots can split input and output across events.
                 // Merge them before publishing so downstream cache telemetry and
                 // context budgeting always see the complete turn so far.
                 usage.merge_snapshot(snapshot);
                 let _ = event_tx.send(LoopEvent::Usage {
                     prompt_tokens: usage.prompt_tokens,
+                    input_tokens: usage.input_tokens(),
                     completion_tokens: usage.completion_tokens,
+                    reasoning_tokens: usage.reasoning_tokens,
                     cache_creation_input_tokens: usage.cache_creation_input_tokens,
                     cache_read_input_tokens: usage.cache_read_input_tokens,
-                    total_tokens: usage.total_tokens,
+                    total_tokens: usage.logical_total_tokens(),
                 });
             }
             StreamPart::TextDeltaWithCitations { delta, citations } => {
+                produced_output = true;
                 text_buffer.push_str(delta);
                 let _ = event_tx.send(LoopEvent::TextDeltaWithCitations {
                     delta: delta.clone(),
@@ -299,12 +312,16 @@ pub(crate) async fn process_stream(
                 );
             }
             StreamPart::ServerToolStart { id, name } => {
+                produced_output = true;
+                had_server_tool_activity = true;
                 let _ = event_tx.send(LoopEvent::ServerToolStart {
                     id: id.clone(),
                     name: name.clone(),
                 });
             }
             StreamPart::ServerToolComplete { id, name, .. } => {
+                produced_output = true;
+                had_server_tool_activity = true;
                 let _ = event_tx.send(LoopEvent::ServerToolComplete {
                     id: id.clone(),
                     name: name.clone(),
@@ -314,6 +331,8 @@ pub(crate) async fn process_stream(
                 tool_use_id,
                 results,
             } => {
+                produced_output = true;
+                had_server_tool_activity = true;
                 let _ = event_tx.send(LoopEvent::WebSearchResults {
                     tool_use_id: tool_use_id.clone(),
                     results: results.clone(),
@@ -323,6 +342,8 @@ pub(crate) async fn process_stream(
                 tool_use_id,
                 content,
             } => {
+                produced_output = true;
+                had_server_tool_activity = true;
                 let _ = event_tx.send(LoopEvent::WebFetchResult {
                     tool_use_id: tool_use_id.clone(),
                     content: content.clone(),
@@ -332,20 +353,32 @@ pub(crate) async fn process_stream(
                 tool_use_id,
                 error_code,
             } => {
+                produced_output = true;
+                had_server_tool_activity = true;
                 let _ = event_tx.send(LoopEvent::ServerToolError {
                     tool_use_id: tool_use_id.clone(),
                     error_code: error_code.clone(),
                 });
             }
             StreamPart::Error { error } => {
-                let _ = event_tx.send(LoopEvent::Error {
-                    error: error.clone(),
-                });
                 last_error = Some(error.clone());
                 stop_reason = Some(LoopStopReason::ProviderError);
                 break;
             }
-            _ => {}
+            StreamPart::ThinkingStart { .. } => {
+                produced_output = true;
+                current_thinking_buffer.clear();
+            }
+            StreamPart::ServerToolDelta { .. } => {
+                produced_output = true;
+                had_server_tool_activity = true;
+            }
+            StreamPart::ToolCallDelta { .. }
+            | StreamPart::SignatureDelta { .. }
+            | StreamPart::ContextEdited { .. } => {
+                produced_output = true;
+            }
+            StreamPart::Start { .. } => {}
         }
     }
 
@@ -362,9 +395,13 @@ pub(crate) async fn process_stream(
         tool_calls,
         recovery_checkpoint,
         last_error,
-        total_tokens: usage.total_tokens,
+        total_tokens: usage.logical_total_tokens(),
         prompt_tokens: usage.input_tokens(),
+        usage,
+        usage_available,
         stop_reason,
+        produced_output,
+        had_server_tool_activity,
     }
 }
 
@@ -411,6 +448,7 @@ mod tests {
                 usage: Usage {
                     prompt_tokens: 120,
                     completion_tokens: 45,
+                    reasoning_tokens: 40,
                     total_tokens: 165,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
@@ -426,6 +464,7 @@ mod tests {
 
         let result = process_stream(api_rx, &event_tx, Duration::from_secs(1), |_| {}).await;
         assert_eq!(result.total_tokens, 165);
+        assert!(!result.produced_output);
 
         let usage_event = event_rx
             .recv()
@@ -434,7 +473,9 @@ mod tests {
         match usage_event {
             LoopEvent::Usage {
                 prompt_tokens: 120,
+                input_tokens: 120,
                 completion_tokens: 45,
+                reasoning_tokens: 40,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
                 total_tokens: 165,
@@ -464,18 +505,126 @@ mod tests {
 
         let result = process_stream(api_rx, &event_tx, Duration::from_secs(1), |_| {}).await;
         assert_eq!(result.recovery_checkpoint.thinking, "step one");
+        assert!(result.text.trim().is_empty());
+        assert!(result.tool_calls.is_empty());
+        assert!(result.stop_reason.is_none());
+        assert!(result.produced_output);
+        assert!(!result.had_server_tool_activity);
+    }
+
+    #[tokio::test]
+    async fn thinking_completion_uses_accumulated_deltas() {
+        let (api_tx, api_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        api_tx
+            .send(StreamPart::ThinkingDelta {
+                index: 0,
+                thinking: "step one".to_string(),
+            })
+            .expect("thinking delta should send");
+        api_tx
+            .send(StreamPart::ThinkingDelta {
+                index: 0,
+                thinking: " then step two".to_string(),
+            })
+            .expect("second thinking delta should send");
+        api_tx
+            .send(StreamPart::ThinkingComplete {
+                index: 0,
+                thinking: String::new(),
+                signature: String::new(),
+            })
+            .expect("thinking completion should send");
+        api_tx
+            .send(StreamPart::Finish {
+                reason: crate::ai::types::FinishReason::Stop,
+            })
+            .expect("finish should send");
+        drop(api_tx);
+
+        let result = process_stream(api_rx, &event_tx, Duration::from_secs(1), |_| {}).await;
+
+        assert_eq!(result.thinking_blocks.len(), 1);
+        assert_eq!(result.thinking_blocks[0].thinking, "step one then step two");
+        assert_eq!(
+            result.recovery_checkpoint.thinking,
+            "step one then step two"
+        );
+        let mut completion = None;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(event, LoopEvent::ThinkingComplete { .. }) {
+                completion = Some(event);
+            }
+        }
+        assert!(matches!(
+            completion,
+            Some(LoopEvent::ThinkingComplete { thinking, signature })
+                if thinking == "step one then step two" && signature.is_empty()
+        ));
+    }
+
+    #[tokio::test]
+    async fn thinking_completion_preserves_signed_empty_block() {
+        let (api_tx, api_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+
+        api_tx
+            .send(StreamPart::ThinkingComplete {
+                index: 0,
+                thinking: String::new(),
+                signature: "opaque-signature".to_string(),
+            })
+            .expect("thinking completion should send");
+        api_tx
+            .send(StreamPart::Finish {
+                reason: crate::ai::types::FinishReason::Stop,
+            })
+            .expect("finish should send");
+        drop(api_tx);
+
+        let result = process_stream(api_rx, &event_tx, Duration::from_secs(1), |_| {}).await;
+
+        assert_eq!(result.thinking_blocks.len(), 1);
+        assert!(result.thinking_blocks[0].thinking.is_empty());
+        assert_eq!(result.thinking_blocks[0].signature, "opaque-signature");
+    }
+
+    #[tokio::test]
+    async fn thinking_completion_drops_truly_empty_unsigned_block() {
+        let (api_tx, api_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+
+        api_tx
+            .send(StreamPart::ThinkingComplete {
+                index: 0,
+                thinking: String::new(),
+                signature: String::new(),
+            })
+            .expect("thinking completion should send");
+        api_tx
+            .send(StreamPart::Finish {
+                reason: crate::ai::types::FinishReason::Stop,
+            })
+            .expect("finish should send");
+        drop(api_tx);
+
+        let result = process_stream(api_rx, &event_tx, Duration::from_secs(1), |_| {}).await;
+
+        assert!(result.thinking_blocks.is_empty());
     }
 
     #[tokio::test]
     async fn usage_snapshots_merge_input_cache_and_output() {
         let (api_tx, api_rx) = mpsc::unbounded_channel();
-        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
 
         api_tx
             .send(StreamPart::Usage {
                 usage: Usage {
                     prompt_tokens: 100,
                     completion_tokens: 0,
+                    reasoning_tokens: 0,
                     total_tokens: 1_000,
                     cache_creation_input_tokens: 200,
                     cache_read_input_tokens: 700,
@@ -487,6 +636,7 @@ mod tests {
                 usage: Usage {
                     prompt_tokens: 0,
                     completion_tokens: 50,
+                    reasoning_tokens: 40,
                     total_tokens: 50,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
@@ -503,6 +653,27 @@ mod tests {
         let result = process_stream(api_rx, &event_tx, Duration::from_secs(1), |_| {}).await;
         assert_eq!(result.prompt_tokens, 1_000);
         assert_eq!(result.total_tokens, 1_050);
+        assert_eq!(result.usage.input_tokens(), 1_000);
+        assert_eq!(result.usage.completion_tokens, 50);
+
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(LoopEvent::Usage {
+                input_tokens: 1_000,
+                completion_tokens: 0,
+                total_tokens: 1_000,
+                ..
+            })
+        ));
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(LoopEvent::Usage {
+                input_tokens: 1_000,
+                completion_tokens: 50,
+                total_tokens: 1_050,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
@@ -520,6 +691,7 @@ mod tests {
                 usage: Usage {
                     prompt_tokens: 25,
                     completion_tokens: 10,
+                    reasoning_tokens: 5,
                     total_tokens: 100,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 65,
@@ -532,6 +704,40 @@ mod tests {
         assert_eq!(result.prompt_tokens, 90);
         assert_eq!(result.total_tokens, 100);
         assert!(result.stop_reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn content_after_finish_does_not_invalidate_completed_response() {
+        let (api_tx, api_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        api_tx
+            .send(StreamPart::TextDelta {
+                delta: "complete answer".to_string(),
+            })
+            .expect("text should send");
+        api_tx
+            .send(StreamPart::Finish {
+                reason: crate::ai::types::FinishReason::Stop,
+            })
+            .expect("finish should send");
+        api_tx
+            .send(StreamPart::TextDelta {
+                delta: " malformed tail".to_string(),
+            })
+            .expect("late text should send");
+        drop(api_tx);
+
+        let result = process_stream(api_rx, &event_tx, Duration::from_secs(1), |_| {}).await;
+
+        assert_eq!(result.text, "complete answer");
+        assert!(result.last_error.is_none());
+        assert!(result.stop_reason.is_none());
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(LoopEvent::TextDelta { delta }) if delta == "complete answer"
+        ));
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -606,5 +812,30 @@ mod tests {
             result.last_error.as_deref(),
             Some("AI stream ended without a finish signal")
         );
+        assert!(result.produced_output);
+    }
+
+    #[tokio::test]
+    async fn server_tool_start_prevents_automatic_replay() {
+        let (api_tx, api_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+
+        api_tx
+            .send(StreamPart::ServerToolStart {
+                id: "search-1".to_string(),
+                name: "web_search".to_string(),
+            })
+            .expect("server tool start should send");
+        api_tx
+            .send(StreamPart::Error {
+                error: "API error: 503 Service Unavailable".to_string(),
+            })
+            .expect("provider error should send");
+        drop(api_tx);
+
+        let result = process_stream(api_rx, &event_tx, Duration::from_secs(1), |_| {}).await;
+        assert_eq!(result.stop_reason, Some(LoopStopReason::ProviderError));
+        assert!(result.produced_output);
+        assert!(result.had_server_tool_activity);
     }
 }

@@ -7,6 +7,62 @@ use crate::ai::sse::ToolCallAccumulator;
 use crate::ai::types::AiToolCall;
 
 impl OpenAIParser {
+    pub(super) fn record_response_text_delta(&self, delta: &str) -> anyhow::Result<()> {
+        let mut emitted = self
+            .emitted_response_text
+            .lock()
+            .map_err(|error| anyhow::anyhow!("Response text state lock poisoned: {error}"))?;
+        emitted.push_str(delta);
+        Ok(())
+    }
+
+    pub(super) fn reconcile_response_text_snapshot(
+        &self,
+        snapshot: &str,
+    ) -> anyhow::Result<Option<String>> {
+        if snapshot.is_empty() {
+            return Ok(None);
+        }
+
+        let mut emitted = self
+            .emitted_response_text
+            .lock()
+            .map_err(|error| anyhow::anyhow!("Response text state lock poisoned: {error}"))?;
+
+        if emitted.is_empty() {
+            emitted.push_str(snapshot);
+            return Ok(Some(snapshot.to_string()));
+        }
+
+        if snapshot == emitted.as_str() {
+            return Ok(None);
+        }
+
+        if let Some(suffix) = snapshot.strip_prefix(emitted.as_str()) {
+            let suffix = suffix.to_string();
+            emitted.push_str(&suffix);
+            return Ok((!suffix.is_empty()).then_some(suffix));
+        }
+
+        // Never append a non-prefix snapshot to streamed text: doing so would
+        // corrupt the visible answer. Preserve the authoritative deltas and
+        // make the provider inconsistency observable instead.
+        tracing::warn!(
+            streamed_chars = emitted.chars().count(),
+            snapshot_chars = snapshot.chars().count(),
+            "Responses final text snapshot diverged from streamed text; ignoring snapshot"
+        );
+        Ok(None)
+    }
+
+    pub(super) fn mark_reasoning_complete(&self, key: String) -> anyhow::Result<bool> {
+        let mut emitted = self
+            .reasoning_completions_emitted
+            .lock()
+            .map_err(|error| anyhow::anyhow!("Reasoning state lock poisoned: {error}"))?;
+        Ok(emitted.insert(key))
+    }
+
     /// Lock tool accumulators with proper error handling
     pub(super) fn lock_tool_accumulators(
         &self,

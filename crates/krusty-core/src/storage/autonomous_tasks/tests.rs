@@ -58,7 +58,12 @@ fn get_available_respects_blocked_by() {
     let (store, _tmp) = create_store();
     let t1 = store.create_task("sess-1", "Foundation", "", &[]).unwrap();
     let t2 = store
-        .create_task("sess-1", "Depends on foundation", "", &[t1.clone()])
+        .create_task(
+            "sess-1",
+            "Depends on foundation",
+            "",
+            std::slice::from_ref(&t1),
+        )
         .unwrap();
     let _t3 = store.create_task("sess-1", "Independent", "", &[]).unwrap();
 

@@ -975,6 +975,33 @@ impl Database {
             self.set_schema_version_tx(&tx, 33)?;
         }
 
+        // Migration 34: Queryable provider-call classification.
+        if current_version < 34 {
+            info!("Running migration 34: Provider-call trace classification");
+            if Self::table_exists(&tx, "runtime_traces") {
+                if !Self::column_exists(&tx, "runtime_traces", "call_kind") {
+                    tx.execute_batch("ALTER TABLE runtime_traces ADD COLUMN call_kind TEXT;")?;
+                }
+                if !Self::column_exists(&tx, "runtime_traces", "operation") {
+                    tx.execute_batch("ALTER TABLE runtime_traces ADD COLUMN operation TEXT;")?;
+                }
+                tx.execute_batch(
+                    "UPDATE runtime_traces
+                     SET call_kind = json_extract(payload_json, '$.call_kind')
+                     WHERE call_kind IS NULL
+                       AND event_type = 'provider_call';
+                     UPDATE runtime_traces
+                     SET operation = json_extract(payload_json, '$.operation')
+                     WHERE operation IS NULL
+                       AND event_type = 'provider_call';
+                     CREATE INDEX IF NOT EXISTS idx_runtime_traces_provider_operation
+                       ON runtime_traces(session_id, call_kind, operation, sequence);",
+                )
+                .context("Migration 34: classify provider-call traces")?;
+            }
+            self.set_schema_version_tx(&tx, 34)?;
+        }
+
         tx.commit()?;
 
         info!("Migrations complete");

@@ -95,7 +95,7 @@ mod tests {
         let mut plan = sample_plan();
         plan.status = PlanStatus::Abandoned;
 
-        let lifecycle = PlanLifecycleState::from_session_mode(WorkMode::Plan, Some(plan.clone()));
+        let lifecycle = PlanLifecycleState::from_session_mode(WorkMode::Plan, Some(plan));
 
         assert!(lifecycle.plan.is_some());
         assert!(lifecycle.active_plan.is_none());

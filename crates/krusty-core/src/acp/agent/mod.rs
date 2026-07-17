@@ -15,14 +15,15 @@ use agent_client_protocol::{
     Implementation, McpCapabilities, PromptCapabilities, SessionCapabilities, SessionId,
     SessionNotification, SessionUpdate,
 };
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 
+use super::bridge::AcpOutbound;
 use super::error::AcpError;
 use super::processor::PromptProcessor;
 use super::session::{SessionManager, SessionState};
 use crate::ai::providers::ProviderId;
 use crate::storage::credentials::ActiveProviderStore;
-use crate::storage::{Database, Preferences};
+use crate::storage::{Database, Preferences, SessionManager as StorageSessionManager};
 use crate::tools::ToolRegistry;
 
 /// Current model configuration.
@@ -81,6 +82,23 @@ fn negotiate_protocol_version(
     }
 }
 
+fn default_session_manager() -> SessionManager {
+    let db_path = crate::paths::config_dir().join("krusty.db");
+    match Database::new(&db_path) {
+        Ok(db) => {
+            SessionManager::with_storage(Arc::new(Mutex::new(StorageSessionManager::new(db))))
+        }
+        Err(error) => {
+            tracing::error!(
+                path = %db_path.display(),
+                "ACP session persistence unavailable: {}",
+                error
+            );
+            SessionManager::new()
+        }
+    }
+}
+
 /// Krusty's ACP agent implementation.
 pub struct KrustyAgent {
     /// Session manager.
@@ -94,7 +112,7 @@ pub struct KrustyAgent {
     /// Prompt processor for AI integration.
     processor: RwLock<PromptProcessor>,
     /// Channel for sending notifications to the connection.
-    notification_tx: RwLock<Option<mpsc::Sender<SessionNotification>>>,
+    notification_tx: RwLock<Option<mpsc::Sender<AcpOutbound>>>,
     /// Current model configuration (provider + model).
     current_model: RwLock<Option<ModelConfig>>,
     /// Available model configurations from all providers.
@@ -106,7 +124,7 @@ impl KrustyAgent {
     pub fn new() -> Self {
         let tools = Arc::new(ToolRegistry::new());
         Self {
-            sessions: Arc::new(SessionManager::new()),
+            sessions: Arc::new(default_session_manager()),
             tools: tools.clone(),
             client_capabilities: RwLock::new(None),
             api_key: RwLock::new(None),
@@ -120,7 +138,7 @@ impl KrustyAgent {
     /// Create with custom tool registry.
     pub fn with_tools(tools: Arc<ToolRegistry>) -> Self {
         Self {
-            sessions: Arc::new(SessionManager::new()),
+            sessions: Arc::new(default_session_manager()),
             tools: tools.clone(),
             client_capabilities: RwLock::new(None),
             api_key: RwLock::new(None),
@@ -132,7 +150,7 @@ impl KrustyAgent {
     }
 
     /// Set the notification channel sender.
-    pub async fn set_notification_channel(&self, tx: mpsc::Sender<SessionNotification>) {
+    pub async fn set_notification_channel(&self, tx: mpsc::Sender<AcpOutbound>) {
         *self.notification_tx.write().await = Some(tx);
     }
 
@@ -169,7 +187,7 @@ impl KrustyAgent {
         prompt_caps.embedded_context = true;
         caps.prompt_capabilities = prompt_caps;
 
-        caps.load_session = true;
+        caps.load_session = self.sessions.storage().is_some();
         caps.session_capabilities = SessionCapabilities::new();
 
         let mut mcp_caps = McpCapabilities::new();
@@ -211,13 +229,8 @@ impl KrustyAgent {
 
     /// Get available slash commands.
     pub fn get_available_commands(&self) -> Vec<AvailableCommand> {
-        vec![
-            AvailableCommand::new("compact", "Summarize the conversation to reduce context"),
-            AvailableCommand::new("clear", "Clear the conversation history"),
-            AvailableCommand::new("help", "Show available commands and usage"),
-            AvailableCommand::new("model", "Show or change the current AI model"),
-            AvailableCommand::new("mode", "Switch between code and plan modes"),
-        ]
+        // Do not advertise slash commands until ACP dispatch implements them.
+        Vec::new()
     }
 
     /// Send available commands notification to the client.
@@ -225,12 +238,15 @@ impl KrustyAgent {
         let notification_tx = self.notification_tx.read().await;
         if let Some(tx) = notification_tx.as_ref() {
             let commands = self.get_available_commands();
+            if commands.is_empty() {
+                return;
+            }
             let update = AvailableCommandsUpdate::new(commands);
             let notification = SessionNotification::new(
                 session_id.clone(),
                 SessionUpdate::AvailableCommandsUpdate(update),
             );
-            if let Err(e) = tx.send(notification).await {
+            if let Err(e) = tx.send(AcpOutbound::Notification(notification)).await {
                 tracing::warn!("Failed to send available commands: {}", e);
             } else {
                 tracing::info!("Sent available commands update");

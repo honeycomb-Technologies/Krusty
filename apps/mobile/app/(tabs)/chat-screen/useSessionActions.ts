@@ -379,6 +379,7 @@ export function useSessionActions({
   const handleModelSelect = useCallback(
     (modelId: string) => {
       const modelInfo = models.find((candidate) => candidate.id === modelId);
+      sessionStore.setState({ error: null });
       sessionStore.getState().setModel(modelId, modelInfo?.provider ?? null);
       void SecureStore.setItemAsync(SELECTED_MODEL_KEY, modelId);
     },

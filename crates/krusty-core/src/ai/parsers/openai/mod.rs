@@ -4,7 +4,7 @@ mod chat;
 mod responses;
 mod state;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use serde_json::Value;
@@ -19,6 +19,13 @@ pub struct OpenAIParser {
     tool_order: std::sync::Mutex<Vec<String>>,
     /// Map Responses API item ids to call ids for interleaved argument deltas
     response_item_to_call: std::sync::Mutex<HashMap<String, String>>,
+    /// Responses-compatible providers often emit both text-done and part-done
+    /// events for one reasoning block. Only surface one completion.
+    reasoning_completions_emitted: std::sync::Mutex<HashSet<String>>,
+    /// Exact response text already emitted from streaming deltas. Responses
+    /// final snapshots can repeat the whole message, so retain the prefix to
+    /// recover only genuinely missing text without duplicating streamed output.
+    emitted_response_text: std::sync::Mutex<String>,
 }
 
 impl OpenAIParser {
@@ -27,6 +34,8 @@ impl OpenAIParser {
             tool_accumulators: std::sync::Mutex::new(HashMap::new()),
             tool_order: std::sync::Mutex::new(Vec::new()),
             response_item_to_call: std::sync::Mutex::new(HashMap::new()),
+            reasoning_completions_emitted: std::sync::Mutex::new(HashSet::new()),
+            emitted_response_text: std::sync::Mutex::new(String::new()),
         }
     }
 }
@@ -70,6 +79,24 @@ impl SseParser for OpenAIParser {
 
         self.parse_chat_completions_event(json)
     }
+
+    async fn parse_events(&self, json: &Value) -> Result<Vec<SseEvent>> {
+        let is_responses_finish = matches!(
+            json.get("type").and_then(Value::as_str),
+            Some("response.done" | "response.completed")
+        );
+        let finish = self.parse_event(json).await?;
+
+        if !is_responses_finish {
+            return Ok(vec![finish]);
+        }
+
+        if let Some(delta) = self.final_response_snapshot_delta(json)? {
+            return Ok(vec![SseEvent::TextDelta(delta), finish]);
+        }
+
+        Ok(vec![finish])
+    }
 }
 
 #[cfg(test)]
@@ -77,7 +104,196 @@ mod tests {
     use serde_json::json;
 
     use super::OpenAIParser;
-    use crate::ai::sse::SseEvent;
+    use crate::ai::sse::{SseEvent, SseParser};
+
+    #[tokio::test]
+    async fn responses_final_snapshot_recovers_text_when_deltas_are_absent() {
+        let parser = OpenAIParser::new();
+        let completed = json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "Recovered "},
+                        {"type": "output_text", "text": "answer"}
+                    ]
+                }]
+            }
+        });
+
+        let events = parser
+            .parse_events(&completed)
+            .await
+            .expect("completed response should parse");
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            SseEvent::TextDelta(text) if text == "Recovered answer"
+        ));
+        assert!(matches!(&events[1], SseEvent::Finish { .. }));
+    }
+
+    #[tokio::test]
+    async fn responses_final_snapshot_does_not_duplicate_streamed_text() {
+        let parser = OpenAIParser::new();
+        let delta = json!({
+            "type": "response.output_text.delta",
+            "delta": "Already streamed"
+        });
+        assert!(matches!(
+            parser
+                .parse_event(&delta)
+                .await
+                .expect("delta should parse"),
+            SseEvent::TextDelta(text) if text == "Already streamed"
+        ));
+
+        let completed = json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "Already streamed"}]
+                }]
+            }
+        });
+        let events = parser
+            .parse_events(&completed)
+            .await
+            .expect("completed response should parse");
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Finish { .. }));
+    }
+
+    #[tokio::test]
+    async fn responses_output_text_done_recovers_once_and_completed_deduplicates_it() {
+        let parser = OpenAIParser::new();
+        let text_done = json!({
+            "type": "response.output_text.done",
+            "text": "Done snapshot"
+        });
+        assert!(matches!(
+            parser
+                .parse_event(&text_done)
+                .await
+                .expect("text done should parse"),
+            SseEvent::TextDelta(text) if text == "Done snapshot"
+        ));
+
+        let completed = json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "output_text": "Done snapshot"
+            }
+        });
+        let events = parser
+            .parse_events(&completed)
+            .await
+            .expect("completed response should parse");
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Finish { .. }));
+    }
+
+    #[tokio::test]
+    async fn responses_final_snapshot_recovers_only_exact_missing_suffix() {
+        let parser = OpenAIParser::new();
+        let delta = json!({
+            "type": "response.output_text.delta",
+            "delta": "Partial"
+        });
+        parser
+            .parse_event(&delta)
+            .await
+            .expect("delta should parse");
+
+        let completed = json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "output_text": "Partial completion"
+            }
+        });
+        let events = parser
+            .parse_events(&completed)
+            .await
+            .expect("completed response should parse");
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            SseEvent::TextDelta(text) if text == " completion"
+        ));
+        assert!(matches!(&events[1], SseEvent::Finish { .. }));
+    }
+
+    #[tokio::test]
+    async fn responses_divergent_final_snapshot_never_corrupts_streamed_text() {
+        let parser = OpenAIParser::new();
+        let delta = json!({
+            "type": "response.output_text.delta",
+            "delta": "Authoritative stream"
+        });
+        parser
+            .parse_event(&delta)
+            .await
+            .expect("delta should parse");
+
+        let completed = json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "output_text": "Divergent snapshot"
+            }
+        });
+        let events = parser
+            .parse_events(&completed)
+            .await
+            .expect("completed response should parse");
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], SseEvent::Finish { .. }));
+    }
+
+    #[tokio::test]
+    async fn responses_reasoning_only_final_snapshot_remains_non_visible() {
+        let parser = OpenAIParser::new();
+        let completed = json!({
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "output": [{
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "Internal reasoning"}]
+                }],
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 18,
+                    "output_tokens_details": {"reasoning_tokens": 18}
+                }
+            }
+        });
+        let events = parser
+            .parse_events(&completed)
+            .await
+            .expect("reasoning-only response should parse");
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            SseEvent::Finish {
+                usage: Some(usage),
+                ..
+            } if usage.completion_tokens == 18 && usage.reasoning_tokens == 18
+        ));
+    }
 
     #[test]
     fn responses_web_search_call_emits_server_tool_events() {
@@ -112,6 +328,60 @@ mod tests {
         assert!(
             matches!(event, SseEvent::ServerToolComplete { id, name, .. } if id == "ws_123" && name == "web_search")
         );
+    }
+
+    #[test]
+    fn responses_reasoning_completion_is_emitted_once() {
+        let parser = OpenAIParser::new();
+        let done = json!({"type": "response.reasoning_summary_text.done"});
+        let part_done = json!({"type": "response.reasoning_summary_part.done"});
+
+        let first = parser
+            .parse_responses_api_event(&done, "response.reasoning_summary_text.done")
+            .expect("first reasoning completion should parse");
+        let duplicate = parser
+            .parse_responses_api_event(&part_done, "response.reasoning_summary_part.done")
+            .expect("duplicate reasoning completion should parse");
+
+        assert!(matches!(first, SseEvent::ThinkingComplete { .. }));
+        assert!(matches!(duplicate, SseEvent::Skip));
+    }
+
+    #[test]
+    fn responses_reasoning_completion_deduplicates_per_summary_block() {
+        let parser = OpenAIParser::new();
+        let first_text_done = json!({
+            "type": "response.reasoning_summary_text.done",
+            "item_id": "reasoning-1",
+            "output_index": 0,
+            "summary_index": 0
+        });
+        let first_part_done = json!({
+            "type": "response.reasoning_summary_part.done",
+            "item_id": "reasoning-1",
+            "output_index": 0,
+            "summary_index": 0
+        });
+        let second_done = json!({
+            "type": "response.reasoning_summary_text.done",
+            "item_id": "reasoning-1",
+            "output_index": 0,
+            "summary_index": 1
+        });
+
+        let first = parser
+            .parse_responses_api_event(&first_text_done, "response.reasoning_summary_text.done")
+            .expect("first reasoning block should complete");
+        let duplicate = parser
+            .parse_responses_api_event(&first_part_done, "response.reasoning_summary_part.done")
+            .expect("duplicate completion should parse");
+        let second = parser
+            .parse_responses_api_event(&second_done, "response.reasoning_summary_text.done")
+            .expect("second reasoning block should complete");
+
+        assert!(matches!(first, SseEvent::ThinkingComplete { .. }));
+        assert!(matches!(duplicate, SseEvent::Skip));
+        assert!(matches!(second, SseEvent::ThinkingComplete { .. }));
     }
 
     #[test]
@@ -236,6 +506,7 @@ mod tests {
                     "input_tokens": 40747,
                     "input_tokens_details": {"cached_tokens": 40704},
                     "output_tokens": 244,
+                    "output_tokens_details": {"reasoning_tokens": 200},
                     "total_tokens": 40991
                 }
             }
@@ -254,7 +525,45 @@ mod tests {
         assert_eq!(usage.prompt_tokens, 43);
         assert_eq!(usage.cache_read_input_tokens, 40_704);
         assert_eq!(usage.completion_tokens, 244);
+        assert_eq!(usage.reasoning_tokens, 200);
         assert_eq!(usage.total_tokens, 40_991);
+        assert_eq!(usage.logical_total_tokens(), 40_991);
+    }
+
+    #[test]
+    fn responses_usage_keeps_gpt_5_6_cache_writes_separate() {
+        let parser = OpenAIParser::new();
+        let done_event = json!({
+            "type": "response.done",
+            "response": {
+                "status": "completed",
+                "usage": {
+                    "input_tokens": 1000,
+                    "input_tokens_details": {
+                        "cached_tokens": 400,
+                        "cache_write_tokens": 500
+                    },
+                    "output_tokens": 50,
+                    "total_tokens": 1050
+                }
+            }
+        });
+
+        let event = parser
+            .parse_responses_api_event(&done_event, "response.done")
+            .expect("usage event should parse");
+        let SseEvent::Finish {
+            usage: Some(usage), ..
+        } = event
+        else {
+            panic!("expected finish event with usage");
+        };
+
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.cache_read_input_tokens, 400);
+        assert_eq!(usage.cache_creation_input_tokens, 500);
+        assert_eq!(usage.input_tokens(), 1_000);
+        assert_eq!(usage.logical_total_tokens(), 1_050);
     }
 
     #[test]
@@ -267,6 +576,7 @@ mod tests {
                     "prompt_tokens": 1000,
                     "prompt_tokens_details": {"cached_tokens": 700},
                     "completion_tokens": 50,
+                    "completion_tokens_details": {"reasoning_tokens": 40},
                     "total_tokens": 1050
                 }
             }))
@@ -279,7 +589,36 @@ mod tests {
         assert_eq!(usage.cache_read_input_tokens, 700);
         assert_eq!(usage.input_tokens(), 1_000);
         assert_eq!(usage.completion_tokens, 50);
+        assert_eq!(usage.reasoning_tokens, 40);
         assert_eq!(usage.total_tokens, 1_050);
+        assert_eq!(usage.logical_total_tokens(), 1_050);
+    }
+
+    #[test]
+    fn chat_usage_keeps_gpt_5_6_cache_writes_separate() {
+        let parser = OpenAIParser::new();
+        let event = parser
+            .parse_chat_completions_event(&json!({
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 1000,
+                    "prompt_tokens_details": {
+                        "cached_tokens": 400,
+                        "cache_write_tokens": 500
+                    },
+                    "completion_tokens": 50,
+                    "total_tokens": 1050
+                }
+            }))
+            .expect("chat usage should parse");
+
+        let SseEvent::Usage(usage) = event else {
+            panic!("expected usage event");
+        };
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.cache_read_input_tokens, 400);
+        assert_eq!(usage.cache_creation_input_tokens, 500);
+        assert_eq!(usage.input_tokens(), 1_000);
     }
 
     #[test]

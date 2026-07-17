@@ -8,6 +8,7 @@ mod loop_impl;
 #[cfg(test)]
 mod tests;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::agent::AgentConfig;
@@ -15,8 +16,8 @@ use crate::ai::client::{AiClient, AiClientConfig};
 use crate::ai::format_detection::detect_api_format;
 use crate::ai::providers::{get_provider, AuthHeader, ProviderConfig, ProviderId};
 use crate::auth::{resolve_anthropic_auth, resolve_openai_auth, AnthropicAuthType, OpenAIAuthType};
+use crate::process::ProcessRegistry;
 use crate::storage::CredentialStore;
-use crate::tools::git_identity::GitIdentity;
 use crate::tools::ToolRegistry;
 
 /// ACP default token budget for direct prompt calls.
@@ -28,26 +29,28 @@ pub struct PromptProcessor {
     ai_client: Option<Arc<AiClient>>,
     /// Tool registry for executing tools.
     tools: Arc<ToolRegistry>,
-    /// Git identity for commit attribution.
-    git_identity: Option<GitIdentity>,
     /// Shared agent runtime config.
     agent_config: AgentConfig,
+    /// Background process registry shared by ACP sessions in this connection.
+    process_registry: Arc<ProcessRegistry>,
+    /// Canonical database used by orchestrator persistence and compaction.
+    db_path: PathBuf,
 }
 
 impl PromptProcessor {
     /// Create a new prompt processor.
     pub fn new(tools: Arc<ToolRegistry>) -> Self {
+        Self::with_db_path(tools, crate::paths::config_dir().join("krusty.db"))
+    }
+
+    pub fn with_db_path(tools: Arc<ToolRegistry>, db_path: PathBuf) -> Self {
         Self {
             ai_client: None,
             tools,
-            git_identity: Some(GitIdentity::default()),
             agent_config: AgentConfig::default(),
+            process_registry: Arc::new(ProcessRegistry::new()),
+            db_path,
         }
-    }
-
-    /// Set git identity for commit attribution.
-    pub fn set_git_identity(&mut self, identity: GitIdentity) {
-        self.git_identity = Some(identity);
     }
 
     /// Initialize the AI client with an API key and explicit model selection.
@@ -57,30 +60,44 @@ impl PromptProcessor {
         provider: ProviderId,
         model_override: Option<String>,
     ) -> bool {
+        let client = self.build_ai_client(api_key, provider, model_override);
+        self.ai_client = client;
+        self.ai_client.is_some()
+    }
+
+    /// Build an isolated client without mutating the processor's default model.
+    pub fn build_ai_client(
+        &self,
+        api_key: String,
+        provider: ProviderId,
+        model_override: Option<String>,
+    ) -> Option<Arc<AiClient>> {
         let Some(model) = model_override
             .map(|model| model.trim().to_string())
             .filter(|model| !model.is_empty())
         else {
-            self.ai_client = None;
             tracing::warn!(
                 "ACP AI client not initialized for {:?}: no model selected",
                 provider
             );
-            return false;
+            return None;
         };
 
         let mut config = self.config_for_selected_credential(provider, &model, &api_key);
         config.max_tokens = ACP_DEFAULT_MAX_TOKENS;
 
         let client = Arc::new(AiClient::new(config, api_key));
-        self.ai_client = Some(client);
 
         tracing::info!(
             "AI client initialized: provider={:?}, model={}",
             provider,
             model
         );
-        true
+        Some(client)
+    }
+
+    pub fn default_ai_client(&self) -> Option<Arc<AiClient>> {
+        self.ai_client.clone()
     }
 
     fn config_for_selected_credential(

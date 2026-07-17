@@ -8,6 +8,8 @@ use tracing::info;
 
 use super::super::error::AcpError;
 use super::{SessionState, StorageHandle};
+use crate::storage::{SessionType, WorkspaceMode};
+use crate::tools::registry::PermissionMode;
 
 /// Manager for all ACP sessions.
 pub struct SessionManager {
@@ -62,6 +64,54 @@ impl SessionManager {
         session
     }
 
+    /// Create a durable ACP session whose public ACP ID is the canonical storage UUID.
+    pub async fn create_persisted_session(
+        &self,
+        cwd: Option<PathBuf>,
+        mcp_servers: Option<Vec<McpServer>>,
+    ) -> Result<Arc<SessionState>, AcpError> {
+        let Some(storage) = self.storage.as_ref() else {
+            return Ok(self.create_session(cwd, mcp_servers));
+        };
+
+        let working_dir =
+            cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
+        let working_dir_text = working_dir.to_string_lossy().into_owned();
+        let storage_session_id = {
+            let storage = storage.lock().await;
+            storage
+                .create_session_for_user_with_config_and_permission(
+                    "ACP Session",
+                    None,
+                    Some(&working_dir_text),
+                    Some(&working_dir_text),
+                    WorkspaceMode::Selected,
+                    None,
+                    None,
+                    SessionType::Code,
+                    PermissionMode::Supervised,
+                )
+                .map_err(|error| {
+                    AcpError::InternalError(format!(
+                        "Failed to create persistent ACP session: {}",
+                        error
+                    ))
+                })?
+        };
+
+        let id = SessionId::from(storage_session_id.clone());
+        let session = Arc::new(SessionState::with_storage(
+            id.clone(),
+            Some(working_dir),
+            mcp_servers,
+            self.storage.clone(),
+        ));
+        session.link_storage_session(storage_session_id).await;
+        self.sessions.insert(id.clone(), Arc::clone(&session));
+        info!("Created persistent ACP session: {}", id);
+        Ok(session)
+    }
+
     /// Create a session and restore from storage.
     pub async fn create_session_from_storage(
         &self,
@@ -75,7 +125,10 @@ impl SessionManager {
             ));
         }
 
-        let id = SessionId::from(self.next_id.fetch_add(1, Ordering::SeqCst).to_string());
+        let id = SessionId::from(storage_session_id.to_string());
+        if self.sessions.contains_key(&id) {
+            return Err(AcpError::SessionExists(id.to_string()));
+        }
         let session = Arc::new(SessionState::with_storage(
             id.clone(),
             cwd,

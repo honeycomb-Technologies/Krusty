@@ -5,6 +5,7 @@ use crate::storage::credentials::CredentialStore;
 use super::{
     persist_shared_current_model, AcpError, AvailableModelRecord, KrustyAgent, ModelConfig,
 };
+use crate::acp::session::{SessionModelSelection, SessionState};
 
 fn credential_for_model(
     store: &CredentialStore,
@@ -114,15 +115,10 @@ impl KrustyAgent {
 
     /// Set the current model and reinitialize the processor.
     pub async fn set_model(&self, model_id: &str) -> Result<(), AcpError> {
-        let available = self.available_models.read().await;
-        let model_config = available
-            .iter()
-            .find(|(id, _, _, _, _)| id == model_id)
-            .ok_or_else(|| AcpError::ProtocolError(format!("Model not found: {}", model_id)))?;
-
+        let model_config = self.resolve_model_record(model_id).await?;
         let provider = model_config.1;
         let actual_model_id = model_config.2.clone();
-        let listed_credential = model_config.3.clone();
+        let listed_credential = model_config.3;
         let api_key = CredentialStore::load()
             .ok()
             .and_then(|store| credential_for_model(&store, provider, &actual_model_id))
@@ -146,6 +142,69 @@ impl KrustyAgent {
             .init_ai_client(api_key, provider, Some(actual_model_id));
 
         Ok(())
+    }
+
+    /// Select a model for one session without mutating any other ACP session or
+    /// the connection-wide default model.
+    pub(super) async fn set_model_for_session(
+        &self,
+        session: &SessionState,
+        model_id: &str,
+        persist: bool,
+    ) -> Result<(), AcpError> {
+        let model_config = self.resolve_model_record(model_id).await?;
+        let provider = model_config.1;
+        let actual_model_id = model_config.2.clone();
+        let listed_credential = model_config.3;
+        let api_key = CredentialStore::load()
+            .ok()
+            .and_then(|store| credential_for_model(&store, provider, &actual_model_id))
+            .unwrap_or(listed_credential);
+
+        let client = self
+            .processor
+            .read()
+            .await
+            .build_ai_client(api_key, provider, Some(actual_model_id.clone()))
+            .ok_or_else(|| {
+                AcpError::NotAuthenticated(format!(
+                    "Unable to initialize model {}",
+                    actual_model_id
+                ))
+            })?;
+        session
+            .set_model_client(
+                SessionModelSelection {
+                    provider,
+                    model_id: actual_model_id,
+                    acp_model_id: model_config.0.clone(),
+                },
+                client,
+            )
+            .await;
+        if persist {
+            session.persist_model(&model_config.0).await;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn resolve_persisted_model_id(&self, persisted: &str) -> Option<String> {
+        self.available_models
+            .read()
+            .await
+            .iter()
+            .find(|(id, _, actual, _, _)| id == persisted || actual == persisted)
+            .map(|(id, _, _, _, _)| id.clone())
+    }
+
+    async fn resolve_model_record(&self, model_id: &str) -> Result<AvailableModelRecord, AcpError> {
+        self.available_models
+            .read()
+            .await
+            .iter()
+            .find(|(id, _, _, _, _)| id == model_id)
+            .cloned()
+            .ok_or_else(|| AcpError::ProtocolError(format!("Model not found: {}", model_id)))
     }
 
     /// Get the current model ID.

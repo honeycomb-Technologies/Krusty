@@ -20,7 +20,7 @@ impl Tool for AskUserQuestionTool {
     }
 
     fn description(&self) -> &str {
-        "Ask the user a question to clarify requirements or choose between approaches. Provide 2-4 clear options when applicable."
+        "Ask blocking questions and present 2-4 options when useful."
     }
 
     fn prompt(&self) -> Option<&str> {
@@ -49,31 +49,26 @@ Questions timeout after 5 minutes if the user doesn't respond."#,
             "properties": {
                 "questions": {
                     "type": "array",
-                    "description": "Array of questions to ask (usually just one)",
                     "items": {
                         "type": "object",
                         "properties": {
                             "header": {
                                 "type": "string",
-                                "description": "Short label for the question (shown in title bar, max 20 chars)"
+                                "description": "Short title (max 20 characters)"
                             },
                             "question": {
-                                "type": "string",
-                                "description": "The full question text to display"
+                                "type": "string"
                             },
                             "options": {
                                 "type": "array",
-                                "description": "Available options for the user to choose from",
                                 "items": {
                                     "type": "object",
                                     "properties": {
                                         "label": {
-                                            "type": "string",
-                                            "description": "Option label (what user selects)"
+                                            "type": "string"
                                         },
                                         "description": {
-                                            "type": "string",
-                                            "description": "Brief explanation of this option"
+                                            "type": "string"
                                         }
                                     },
                                     "required": ["label"],
@@ -82,7 +77,7 @@ Questions timeout after 5 minutes if the user doesn't respond."#,
                             },
                             "multiSelect": {
                                 "type": "boolean",
-                                "description": "Allow selecting multiple options (default: false)"
+                                "description": "Allow multiple selections"
                             }
                         },
                         "required": ["header", "question", "options"],

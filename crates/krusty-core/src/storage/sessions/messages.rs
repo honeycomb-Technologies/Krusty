@@ -13,6 +13,33 @@ impl SessionManager {
         )
     }
 
+    pub fn queue_pending_steering(
+        &self,
+        session_id: &str,
+        pending_id: &str,
+        content_json: &str,
+    ) -> Result<()> {
+        super::super::messages::MessageStore::new(&self.db).queue_pending_steering(
+            session_id,
+            pending_id,
+            content_json,
+        )
+    }
+
+    pub fn promote_pending_steering(
+        &self,
+        session_id: &str,
+        pending_id: &str,
+    ) -> Result<Option<String>> {
+        super::super::messages::MessageStore::new(&self.db)
+            .promote_pending_steering(session_id, pending_id)
+    }
+
+    pub fn promote_orphaned_pending_steering(&self, session_id: &str) -> Result<usize> {
+        super::super::messages::MessageStore::new(&self.db)
+            .promote_orphaned_pending_steering(session_id)
+    }
+
     /// Replace every persisted message for a session with a new ordered set.
     pub fn replace_session_messages(
         &self,
@@ -44,35 +71,8 @@ impl SessionManager {
     }
 
     /// Generate a title from the first message content
-    /// Truncates at word boundaries for cleaner display
-    /// Uses char-based indexing for UTF-8 safety
+    /// using the same zero-token, Unicode-safe contract as every client.
     pub fn generate_title_from_content(content: &str) -> String {
-        // Use first line only, cleaned up
-        let first_line = content.lines().next().unwrap_or("").trim();
-
-        // Count chars (not bytes) for UTF-8 safety
-        let char_count = first_line.chars().count();
-
-        // If short enough, use as-is
-        if char_count <= 50 {
-            return first_line.to_string();
-        }
-
-        // Get first 50 chars and find last word boundary
-        let first_50: String = first_line.chars().take(50).collect();
-        if let Some(last_space) = first_50.rfind(char::is_whitespace) {
-            // last_space is a byte index in first_50, but first_50 is already truncated
-            // So we can safely slice it
-            let char_idx = first_50[..last_space].chars().count();
-            if char_idx > 20 {
-                // Only use word boundary if we keep at least 20 chars
-                let prefix: String = first_line.chars().take(char_idx).collect();
-                return format!("{}...", prefix.trim_end());
-            }
-        }
-
-        // Fallback: hard truncate at 47 chars
-        let truncated: String = first_line.chars().take(47).collect();
-        format!("{}...", truncated)
+        crate::ai::derive_title(content)
     }
 }

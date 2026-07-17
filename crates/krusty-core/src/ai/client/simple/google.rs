@@ -4,10 +4,12 @@ use tracing::debug;
 
 use super::super::core::AiClient;
 use super::shared::trim_or_empty;
+use super::SimpleCallResult;
 use crate::ai::format::google::GoogleFormat;
 use crate::ai::format::FormatHandler;
 use crate::ai::transform::apply_request_body_transform;
 use crate::ai::types::ModelMessage;
+use crate::ai::usage::parse_google_usage;
 
 impl AiClient {
     /// Simple non-streaming call using Google format
@@ -17,7 +19,7 @@ impl AiClient {
         system_prompt: &str,
         user_message: &str,
         max_tokens: usize,
-    ) -> Result<String> {
+    ) -> Result<SimpleCallResult> {
         let body = serde_json::json!({
             "contents": [{
                 "role": "user",
@@ -42,17 +44,7 @@ impl AiClient {
         let json: Value = response.json().await?;
 
         // Extract text from Google response format
-        Ok(trim_or_empty(
-            json.get("candidates")
-                .and_then(|c| c.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|candidate| candidate.get("content"))
-                .and_then(|content| content.get("parts"))
-                .and_then(|parts| parts.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|part| part.get("text"))
-                .and_then(|t| t.as_str()),
-        ))
+        Ok(simple_google_result(&json))
     }
 
     /// Cache-safe conversation call using Google format.
@@ -63,7 +55,7 @@ impl AiClient {
         conversation: &[ModelMessage],
         appended_user_message: &str,
         max_tokens: usize,
-    ) -> Result<String> {
+    ) -> Result<SimpleCallResult> {
         let format_handler = GoogleFormat::new();
         let prompt_sections =
             self.system_prompt_sections(model, conversation, Some(base_system_prompt), None);
@@ -101,7 +93,13 @@ impl AiClient {
 
         let json: Value = response.json().await?;
 
-        Ok(trim_or_empty(
+        Ok(simple_google_result(&json))
+    }
+}
+
+fn simple_google_result(json: &Value) -> SimpleCallResult {
+    SimpleCallResult {
+        text: trim_or_empty(
             json.get("candidates")
                 .and_then(|c| c.as_array())
                 .and_then(|arr| arr.first())
@@ -111,6 +109,34 @@ impl AiClient {
                 .and_then(|arr| arr.first())
                 .and_then(|part| part.get("text"))
                 .and_then(|t| t.as_str()),
-        ))
+        ),
+        usage: parse_google_usage(json),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::simple_google_result;
+
+    #[test]
+    fn simple_result_preserves_google_usage() {
+        let result = simple_google_result(&json!({
+            "candidates": [{"content": {"parts": [{"text": "hello"}]}}],
+            "usageMetadata": {
+                "promptTokenCount": 1000,
+                "cachedContentTokenCount": 700,
+                "candidatesTokenCount": 50,
+                "thoughtsTokenCount": 500,
+                "totalTokenCount": 1550
+            }
+        }));
+
+        assert_eq!(result.text, "hello");
+        let usage = result.usage.expect("usage");
+        assert_eq!(usage.prompt_tokens, 300);
+        assert_eq!(usage.reasoning_tokens, 500);
+        assert_eq!(usage.logical_total_tokens(), 1_550);
     }
 }

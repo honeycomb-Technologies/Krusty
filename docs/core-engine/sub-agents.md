@@ -1,6 +1,6 @@
 # Sub-Agents and Teams
 
-Krusty is not a single agent. When a task is large enough, ambiguous enough, or parallelizable enough, the main agent spawns sub-agents to handle parts of the work. These sub-agents are lightweight, sandboxed, and disposable. They do their job, report back, and disappear. This document explains how that delegation works, what kinds of sub-agents exist, how teams coordinate, and what keeps everything safe.
+Krusty is not a single agent. When a task is large enough, ambiguous enough, or parallelizable enough, the main agent spawns sub-agents to handle parts of the work. These sub-agents are lightweight, policy-bounded, and disposable. They inherit explicit tool, permission, path, and turn-budget governance, but that governance is not an operating-system sandbox; any delegated Bash access still has the authority of the server account. They do their job, report back, and disappear. This document explains how that delegation works, what kinds of sub-agents exist, how teams coordinate, and what keeps everything safe.
 
 ## Why Sub-Agents Exist
 
@@ -12,7 +12,7 @@ Sub-agents solve both problems. For exploration, Krusty fans out multiple read-o
 
 At the core of delegation is `SubAgentPool`, defined in `crates/krusty-core/src/agent/subagent/mod.rs`. A pool manages concurrent execution of multiple sub-agent tasks. It takes an AI client, a cancellation token, and configuration for concurrency limits and stagger delays, then spawns tasks as independent tokio tasks.
 
-Each sub-agent gets its own conversation with the AI model. It receives a system prompt, a task prompt, and a filtered set of tools. It runs the same agentic loop as the main agent -- call the model, execute any tool requests, feed results back, repeat -- but in a confined scope. The loop lives in `execution.rs` as `execute_agent_loop`, a generic function parameterized over an `AgentConfig` trait that abstracts the differences between agent types.
+Each sub-agent gets its own conversation with the AI model. It receives a system prompt, a task prompt, and a filtered set of tools. It runs the same agentic loop as the main agent -- call the model, execute any tool requests, feed results back, repeat -- but in a governed scope. The loop lives in `crates/krusty-core/src/agent/subagent/execution/runtime.rs` as `execute_agent_loop`, a generic function parameterized over an `AgentConfig` trait that abstracts the differences between agent types.
 
 A sub-agent task is described by `SubAgentTask`: a struct carrying an ID, a display name, the task prompt, a working directory, an optional delegation policy, and an optional turn budget. The task does not specify which model to use -- that's resolved by the pool based on the user's current model selection, making the system provider-agnostic.
 
@@ -20,7 +20,7 @@ Results come back as `SubAgentResult`, which includes whether the task succeeded
 
 ## The Four Agent Types
 
-The unified `agent` tool (`crates/krusty-core/src/tools/implementations/agent.rs`) is the primary way the main agent spawns sub-agents. It accepts an `agent_type` parameter that selects one of four flavors:
+The unified `agent` tool (`crates/krusty-core/src/tools/implementations/agent/mod.rs`) is the primary way the main agent spawns sub-agents. It accepts an `agent_type` parameter that selects one of four flavors:
 
 **Explore** agents investigate the codebase. They are read-only -- they can use glob, grep, read, and list, but cannot write files, run shell commands, or modify anything. They get a focused system prompt instructing them to gather evidence, follow references across modules, and report findings in a structured format with specific file paths and line references. Explore agents use a fast, inexpensive model when available (Haiku on Anthropic, GPT-4.1 mini on OpenAI) to keep costs low. They also inherit context from the parent conversation, so they understand what the user has been working on.
 
@@ -30,13 +30,9 @@ The unified `agent` tool (`crates/krusty-core/src/tools/implementations/agent.rs
 
 **Build** agents write code. They get the full suite of tools -- glob, grep, read, write, edit, and bash -- plus a special `register_interface` tool for cross-agent coordination. Build agents are the only sub-agent type that can modify the filesystem. When multiple builders run in parallel, they use a shared build context with file-level locking to prevent conflicts.
 
-## Explore: Parallel Codebase Investigation
+## Explore: Codebase Investigation
 
-The `explore` tool (`crates/krusty-core/src/tools/implementations/explore.rs`) is the older, specialized entry point for spawning parallel read-only agents. It takes a prompt and optionally a list of directories or files, then creates one sub-agent per directory (or file, or a single agent for general exploration).
-
-For example, if you pass `directories: ["src/tui", "src/agent", "src/tools", "src/ai"]`, the explore tool spawns four agents that each focus on their assigned directory. They run concurrently, bounded by a configurable concurrency limit (default 10, but provider-aware -- MiniMax gets capped at 3 to avoid rate limits). Results are aggregated: findings are merged, files examined are deduplicated, and the whole package is returned to the main agent.
-
-The unified agent tool's explore mode works similarly but as a single focused agent rather than a fan-out -- better for scoped investigation ("explore the auth module") than broad sweeps.
+The unified agent tool's `explore` mode launches a focused read-only investigator for a scoped prompt such as "explore the auth module." Broader investigations are expressed as multiple independent `agent` calls, which the parent orchestrator may issue concurrently. Each run remains separately governed and returns structured evidence to the parent instead of relying on an obsolete standalone explore implementation.
 
 ## Build: Parallel Code Implementation
 
@@ -54,7 +50,7 @@ Concurrency for build agents defaults to the number of components, clamped betwe
 
 ## The Team System
 
-Beyond the agent tool's one-shot delegation, Krusty has a persistent team system for longer-running coordination. The `TeamManager` (`crates/krusty-core/src/agent/team/manager.rs`) maintains a pool of named teammates that run as background loops, polling a SQLite task queue for work.
+Beyond the agent tool's one-shot delegation, Krusty has a persistent team system for longer-running coordination. The `TeamManager` (`crates/krusty-core/src/agent/autonomy/team/manager.rs`) maintains a pool of named teammates that run as background loops, polling a SQLite task queue for work.
 
 Each teammate is defined by a `TeammateConfig` with a name, a role, and an optional turn budget. There are three roles:
 
@@ -68,15 +64,15 @@ The manager provides lifecycle controls: `list_teammates` to check status, `canc
 
 ## The Auto-Classifier
 
-When Krusty operates in autonomous mode (Mako), there is no human in the loop to approve tool calls. The auto-classifier (`crates/krusty-core/src/agent/auto_classifier.rs`) fills that gap. It is a `PreToolHook` that runs before every tool execution when the permission mode is `Autonomous`.
+When Krusty operates in autonomous mode (Mako), there is no human in the loop to approve tool calls. The auto-classifier (`crates/krusty-core/src/agent/autonomy/auto_classifier.rs`) fills that gap. It is a `PreToolHook` that runs before every tool execution when the permission mode is `Autonomous`.
 
 The classifier works in two stages:
 
 First, it checks an allowlist of inherently safe tools -- read, grep, glob, list, memory, and others that cannot modify the system. If the tool is on the list, it passes immediately without any AI call.
 
-For everything else, the classifier makes a fast AI call (stage 1) with a small token budget (64 tokens) asking a safety-focused model whether the tool call should be ALLOWED or BLOCKED. The prompt includes specific rules: file edits within the project are fine, test runs are fine, git operations are fine, but system modifications, privilege escalation, unknown network requests, and force-pushes are blocked. If stage 1 returns ALLOW, the tool proceeds. If stage 1 returns BLOCK or is ambiguous, the classifier escalates to stage 2.
+Deterministic local policy handles ordinary reads, in-workspace edit tools, common project build/test commands, and delegated calls that inherit the parent's governance contract. Obvious unsafe payloads are blocked locally. Only an operation that remains ambiguous after those checks invokes the fast AI classifier (stage 1) with a 64-token budget.
 
-Stage 2 uses a larger token budget (4096 tokens) to give the model room to reason about edge cases. If stage 2 says ALLOW, it proceeds. If BLOCK, the tool call is rejected with a reason. If the response is ambiguous or the call fails, it defaults to deny -- the safe default in autonomous operation.
+Stage 2 uses a larger token budget (4096 tokens) only after an ambiguous or blocking stage-1 verdict. If stage 2 says ALLOW, the operation proceeds. If it says BLOCK, remains ambiguous, or fails, the operation defaults to deny.
 
 Every decision is emitted as a `ClassifierDecision` event with the tool name, the verdict, the reason, and which stage made the call. This provides a full audit trail.
 

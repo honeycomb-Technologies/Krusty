@@ -224,13 +224,61 @@ fn awk_has_file_operand(tokens: &[String]) -> bool {
     idx < tokens.len()
 }
 
+fn head_or_tail_has_file_operand(tokens: &[String]) -> bool {
+    let mut idx = 1;
+
+    while idx < tokens.len() {
+        let token = tokens[idx].as_str();
+        if token == "--" {
+            return idx + 1 < tokens.len();
+        }
+
+        if matches!(
+            token,
+            "-n" | "--lines" | "-c" | "--bytes" | "-s" | "--sleep-interval" | "--pid"
+        ) {
+            idx += 2;
+            continue;
+        }
+
+        if token.starts_with('-') {
+            idx += 1;
+            continue;
+        }
+
+        return true;
+    }
+
+    false
+}
+
+fn grep_has_file_operand(tokens: &[String]) -> bool {
+    if tokens
+        .iter()
+        .skip(1)
+        .any(|token| matches!(token.as_str(), "-f" | "--file") || token.starts_with("--file="))
+    {
+        return true;
+    }
+
+    let positional_count = tokens
+        .iter()
+        .skip(1)
+        .filter(|token| !token.starts_with('-'))
+        .count();
+    positional_count >= 2
+}
+
 fn classify_file_operation_segment(segment: &str) -> Option<BashFileOperation> {
     let tokens = tokenize_shell(segment);
     let tokens = strip_invocation_wrappers(&tokens);
     let command = command_basename(tokens.first()?);
 
     let (kind, recommended_tool) = match command.as_str() {
+        "head" | "tail" if !head_or_tail_has_file_operand(tokens) => return None,
+        "cat" if has_unquoted_redirect(segment) => (BashFileOperationKind::Edit, "write"),
         "cat" | "head" | "tail" | "less" | "more" => (BashFileOperationKind::Read, "read"),
+        "grep" if !grep_has_file_operand(tokens) => return None,
         "grep" | "rg" => (BashFileOperationKind::Search, "grep"),
         "find" => (BashFileOperationKind::Search, "glob/list"),
         "sed" if sed_in_place(tokens) || has_unquoted_redirect(segment) => {
@@ -362,191 +410,6 @@ fn has_unquoted_redirect(segment: &str) -> bool {
     }
 
     false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn classify(command: &str) -> Option<(BashFileOperationKind, String, &'static str)> {
-        classify_bash_command(command)
-            .file_operation
-            .map(|operation| {
-                (
-                    operation.kind,
-                    operation.command,
-                    operation.recommended_tool,
-                )
-            })
-    }
-
-    #[test]
-    fn classifies_file_read_commands() {
-        assert_eq!(
-            classify("cat /tmp/file.txt"),
-            Some((BashFileOperationKind::Read, "cat".to_string(), "read"))
-        );
-        assert_eq!(
-            classify("DEBUG=1 head -n 20 src/lib.rs"),
-            Some((BashFileOperationKind::Read, "head".to_string(), "read"))
-        );
-        assert_eq!(
-            classify("timeout 5 tail -n 50 /var/log/app.log"),
-            Some((BashFileOperationKind::Read, "tail".to_string(), "read"))
-        );
-        assert_eq!(
-            classify("/usr/bin/cat ./Cargo.toml"),
-            Some((BashFileOperationKind::Read, "cat".to_string(), "read"))
-        );
-    }
-
-    #[test]
-    fn classifies_file_search_commands() {
-        assert_eq!(
-            classify("grep -R \"needle\" src"),
-            Some((BashFileOperationKind::Search, "grep".to_string(), "grep"))
-        );
-        assert_eq!(
-            classify("env RUST_LOG=debug rg needle crates"),
-            Some((BashFileOperationKind::Search, "rg".to_string(), "grep"))
-        );
-        assert_eq!(
-            classify("find . -name '*.rs'"),
-            Some((
-                BashFileOperationKind::Search,
-                "find".to_string(),
-                "glob/list"
-            ))
-        );
-    }
-
-    #[test]
-    fn classifies_file_edit_commands() {
-        assert_eq!(
-            classify("sed -i 's/old/new/' src/lib.rs"),
-            Some((BashFileOperationKind::Edit, "sed".to_string(), "edit"))
-        );
-        assert_eq!(
-            classify("awk -i inplace '{print}' src/lib.rs"),
-            Some((BashFileOperationKind::Edit, "awk".to_string(), "edit"))
-        );
-        assert_eq!(
-            classify("sed 's/old/new/' src/lib.rs > /tmp/out"),
-            Some((BashFileOperationKind::Edit, "sed".to_string(), "edit"))
-        );
-    }
-
-    #[test]
-    fn classifies_non_mutating_sed_and_awk_file_operands_as_reads() {
-        assert_eq!(
-            classify("sed -n '1,20p' src/lib.rs"),
-            Some((BashFileOperationKind::Read, "sed".to_string(), "read"))
-        );
-        assert_eq!(
-            classify("awk '{print $1}' src/lib.rs"),
-            Some((BashFileOperationKind::Read, "awk".to_string(), "read"))
-        );
-    }
-
-    #[test]
-    fn ignores_non_file_operation_commands() {
-        assert_eq!(classify("cargo test -p krusty-core"), None);
-        assert_eq!(classify("git status --short"), None);
-        assert_eq!(classify("echo 'cat file'"), None);
-    }
-
-    #[test]
-    fn classifies_first_file_operation_across_segments() {
-        assert_eq!(
-            classify("cargo check && rg needle crates"),
-            Some((BashFileOperationKind::Search, "rg".to_string(), "grep"))
-        );
-    }
-
-    #[test]
-    fn returns_combined_classification() {
-        let classification =
-            classify_bash_command("git reset --hard && sed -i 's/a/b/' src/lib.rs");
-        assert_eq!(
-            classification.safety_violation.as_deref(),
-            Some("destructive git reset --hard")
-        );
-        assert!(matches!(
-            classification
-                .file_operation
-                .map(|operation| operation.kind),
-            Some(BashFileOperationKind::Edit)
-        ));
-        assert!(classification.modifies_filesystem_or_process);
-    }
-
-    #[test]
-    fn classifies_allowed_build_commands_as_non_file_operations() {
-        for command in [
-            "cargo check --workspace",
-            "cargo test -p krusty-core",
-            "npm run build",
-            "make test",
-        ] {
-            let classification = classify_bash_command(command);
-            assert_eq!(
-                classification.safety_violation, None,
-                "expected {command:?} to have no safety violation"
-            );
-            assert_eq!(
-                classification.file_operation, None,
-                "expected {command:?} not to be classified as file-operation misuse"
-            );
-        }
-    }
-
-    #[test]
-    fn detects_destructive_git_commands() {
-        for (command, reason) in [
-            ("git reset --hard HEAD~1", "destructive git reset --hard"),
-            (
-                "git push --force-with-lease origin main",
-                "destructive git force push",
-            ),
-            (
-                "git checkout -- src/lib.rs",
-                "destructive git checkout path restore",
-            ),
-            ("git restore src/lib.rs", "destructive git restore"),
-            ("git clean -fd", "destructive git clean"),
-            (
-                "git branch -D stale-branch",
-                "destructive git branch delete",
-            ),
-            (
-                "env GIT_OPTIONAL_LOCKS=0 git -C /tmp/repo reset --hard",
-                "destructive git reset --hard",
-            ),
-        ] {
-            assert_eq!(
-                classify_bash_command(command).safety_violation,
-                Some(reason.to_string()),
-                "expected {command:?} to be classified as destructive"
-            );
-        }
-    }
-
-    #[test]
-    fn allows_non_destructive_git_commands() {
-        for command in [
-            "git status --short",
-            "git diff -- src/lib.rs",
-            "git checkout feature-branch",
-            "git clean -nfd",
-            "git branch -d topic",
-        ] {
-            assert_eq!(
-                classify_bash_command(command).safety_violation,
-                None,
-                "expected {command:?} to remain allowed by safety classification"
-            );
-        }
-    }
 }
 
 fn contains_shell_glob(suffix: &str) -> bool {
@@ -801,4 +664,214 @@ fn is_mutating_shell_segment(segment: &str) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn classify(command: &str) -> Option<(BashFileOperationKind, String, &'static str)> {
+        classify_bash_command(command)
+            .file_operation
+            .map(|operation| {
+                (
+                    operation.kind,
+                    operation.command,
+                    operation.recommended_tool,
+                )
+            })
+    }
+
+    #[test]
+    fn classifies_file_read_commands() {
+        assert_eq!(
+            classify("cat /tmp/file.txt"),
+            Some((BashFileOperationKind::Read, "cat".to_string(), "read"))
+        );
+        assert_eq!(
+            classify("DEBUG=1 head -n 20 src/lib.rs"),
+            Some((BashFileOperationKind::Read, "head".to_string(), "read"))
+        );
+        assert_eq!(
+            classify("timeout 5 tail -n 50 /var/log/app.log"),
+            Some((BashFileOperationKind::Read, "tail".to_string(), "read"))
+        );
+        assert_eq!(
+            classify("/usr/bin/cat ./Cargo.toml"),
+            Some((BashFileOperationKind::Read, "cat".to_string(), "read"))
+        );
+    }
+
+    #[test]
+    fn classifies_cat_redirects_as_file_edits() {
+        assert_eq!(
+            classify("cat > src/generated.rs <<'EOF'\nfn main() {}\nEOF"),
+            Some((BashFileOperationKind::Edit, "cat".to_string(), "write"))
+        );
+    }
+
+    #[test]
+    fn allows_head_and_tail_when_they_only_bound_piped_output() {
+        assert_eq!(classify("ls -la | head -100"), None);
+        assert_eq!(classify("cargo test | tail -n 20"), None);
+        assert_eq!(classify("printf 'one\\ntwo\\n' | head -n 1"), None);
+    }
+
+    #[test]
+    fn classifies_file_search_commands() {
+        assert_eq!(
+            classify("grep -R \"needle\" src"),
+            Some((BashFileOperationKind::Search, "grep".to_string(), "grep"))
+        );
+        assert_eq!(
+            classify("env RUST_LOG=debug rg needle crates"),
+            Some((BashFileOperationKind::Search, "rg".to_string(), "grep"))
+        );
+        assert_eq!(
+            classify("find . -name '*.rs'"),
+            Some((
+                BashFileOperationKind::Search,
+                "find".to_string(),
+                "glob/list"
+            ))
+        );
+    }
+
+    #[test]
+    fn allows_grep_when_it_only_filters_standard_input() {
+        assert_eq!(classify("ss -ltnp | grep 5291"), None);
+        assert_eq!(classify("printf 'one\\ntwo\\n' | grep two"), None);
+        assert_eq!(
+            classify("grep needle src/lib.rs"),
+            Some((BashFileOperationKind::Search, "grep".to_string(), "grep"))
+        );
+    }
+
+    #[test]
+    fn classifies_file_edit_commands() {
+        assert_eq!(
+            classify("sed -i 's/old/new/' src/lib.rs"),
+            Some((BashFileOperationKind::Edit, "sed".to_string(), "edit"))
+        );
+        assert_eq!(
+            classify("awk -i inplace '{print}' src/lib.rs"),
+            Some((BashFileOperationKind::Edit, "awk".to_string(), "edit"))
+        );
+        assert_eq!(
+            classify("sed 's/old/new/' src/lib.rs > /tmp/out"),
+            Some((BashFileOperationKind::Edit, "sed".to_string(), "edit"))
+        );
+    }
+
+    #[test]
+    fn classifies_non_mutating_sed_and_awk_file_operands_as_reads() {
+        assert_eq!(
+            classify("sed -n '1,20p' src/lib.rs"),
+            Some((BashFileOperationKind::Read, "sed".to_string(), "read"))
+        );
+        assert_eq!(
+            classify("awk '{print $1}' src/lib.rs"),
+            Some((BashFileOperationKind::Read, "awk".to_string(), "read"))
+        );
+    }
+
+    #[test]
+    fn ignores_non_file_operation_commands() {
+        assert_eq!(classify("cargo test -p krusty-core"), None);
+        assert_eq!(classify("git status --short"), None);
+        assert_eq!(classify("echo 'cat file'"), None);
+    }
+
+    #[test]
+    fn classifies_first_file_operation_across_segments() {
+        assert_eq!(
+            classify("cargo check && rg needle crates"),
+            Some((BashFileOperationKind::Search, "rg".to_string(), "grep"))
+        );
+    }
+
+    #[test]
+    fn returns_combined_classification() {
+        let classification =
+            classify_bash_command("git reset --hard && sed -i 's/a/b/' src/lib.rs");
+        assert_eq!(
+            classification.safety_violation.as_deref(),
+            Some("destructive git reset --hard")
+        );
+        assert!(matches!(
+            classification
+                .file_operation
+                .map(|operation| operation.kind),
+            Some(BashFileOperationKind::Edit)
+        ));
+        assert!(classification.modifies_filesystem_or_process);
+    }
+
+    #[test]
+    fn classifies_allowed_build_commands_as_non_file_operations() {
+        for command in [
+            "cargo check --workspace",
+            "cargo test -p krusty-core",
+            "npm run build",
+            "make test",
+        ] {
+            let classification = classify_bash_command(command);
+            assert_eq!(
+                classification.safety_violation, None,
+                "expected {command:?} to have no safety violation"
+            );
+            assert_eq!(
+                classification.file_operation, None,
+                "expected {command:?} not to be classified as file-operation misuse"
+            );
+        }
+    }
+
+    #[test]
+    fn detects_destructive_git_commands() {
+        for (command, reason) in [
+            ("git reset --hard HEAD~1", "destructive git reset --hard"),
+            (
+                "git push --force-with-lease origin main",
+                "destructive git force push",
+            ),
+            (
+                "git checkout -- src/lib.rs",
+                "destructive git checkout path restore",
+            ),
+            ("git restore src/lib.rs", "destructive git restore"),
+            ("git clean -fd", "destructive git clean"),
+            (
+                "git branch -D stale-branch",
+                "destructive git branch delete",
+            ),
+            (
+                "env GIT_OPTIONAL_LOCKS=0 git -C /tmp/repo reset --hard",
+                "destructive git reset --hard",
+            ),
+        ] {
+            assert_eq!(
+                classify_bash_command(command).safety_violation,
+                Some(reason.to_string()),
+                "expected {command:?} to be classified as destructive"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_non_destructive_git_commands() {
+        for command in [
+            "git status --short",
+            "git diff -- src/lib.rs",
+            "git checkout feature-branch",
+            "git clean -nfd",
+            "git branch -d topic",
+        ] {
+            assert_eq!(
+                classify_bash_command(command).safety_violation,
+                None,
+                "expected {command:?} to remain allowed by safety classification"
+            );
+        }
+    }
 }

@@ -3,14 +3,17 @@ import { View, Text, Pressable, StyleSheet } from "react-native";
 import {
   Check,
   X,
-  Loader,
   Clock,
   ChevronDown,
   ChevronRight,
   FileText,
+  FilePenLine,
   Search,
   FolderTree,
+  Terminal,
   Users,
+  Wrench,
+  CornerDownRight,
 } from "lucide-react-native";
 import * as Haptics from "../../platform/haptics";
 import { useThemeContext } from "../../hooks/useTheme";
@@ -31,25 +34,36 @@ export function ToolCallCard({
   const { theme } = useThemeContext();
   const t = theme.colors;
   const [expanded, setExpanded] = useState(defaultExpanded);
+  const showDetailedSurface =
+    expanded ||
+    Boolean(isStreaming) ||
+    toolCall.status === "awaiting_approval";
+  const isPolicyRedirect =
+    toolCall.status === "error" &&
+    Boolean(
+      toolCall.output?.includes("not allowed here") &&
+        toolCall.output?.includes("use the dedicated"),
+    );
 
   useEffect(() => {
-    if (defaultExpanded) {
-      setExpanded(true);
-    }
-  }, [defaultExpanded]);
+    setExpanded(defaultExpanded);
+  }, [defaultExpanded, toolCall.id]);
 
   const StatusIcon = () => {
     switch (toolCall.status) {
       case "running":
-        return <Loader size={14} color={t.userMessage} strokeWidth={2} />;
+        return <ToolGlyph name={toolCall.name} color={t.thinking} />;
       case "success":
         return <Check size={14} color={t.success} strokeWidth={2.5} />;
       case "error":
+        if (isPolicyRedirect) {
+          return <CornerDownRight size={14} color={t.warning} strokeWidth={2} />;
+        }
         return <X size={14} color={t.error} strokeWidth={2.5} />;
       case "awaiting_approval":
         return <Clock size={14} color={t.warning} strokeWidth={2} />;
       default:
-        return <Loader size={14} color={t.mutedForeground} strokeWidth={2} />;
+        return <ToolGlyph name={toolCall.name} color={t.mutedForeground} />;
     }
   };
 
@@ -69,6 +83,20 @@ export function ToolCallCard({
   // Tool-specific rendering
   const renderBody = () => {
     const name = toolCall.name;
+
+    if (toolCall.status === "error" && !expanded && !isStreaming) {
+      return (
+        <Text
+          style={[
+            styles.failedSummary,
+            { color: isPolicyRedirect ? t.warning : t.error },
+          ]}
+          numberOfLines={2}
+        >
+          {toolCall.output || (isPolicyRedirect ? "Rerouted" : "Tool failed")}
+        </Text>
+      );
+    }
 
     if (toolCall.delegated) {
       const delegated = toolCall.delegated;
@@ -138,6 +166,16 @@ export function ToolCallCard({
 
     // Bash tool — terminal output
     if (name === "bash" || name === "Bash") {
+      if (!expanded && !isStreaming) {
+        return command ? (
+          <Text
+            style={[styles.collapsedCommand, { color: t.mutedForeground }]}
+            numberOfLines={1}
+          >
+            $ {command}
+          </Text>
+        ) : null;
+      }
       return (
         <BashOutput
           command={command || undefined}
@@ -262,7 +300,15 @@ export function ToolCallCard({
   return (
     <Pressable
       onPress={toggle}
-      style={[styles.card, { borderColor: t.border }]}
+      style={[
+        styles.card,
+        showDetailedSurface
+          ? [
+              styles.detailedCard,
+              { borderColor: t.border, backgroundColor: t.card },
+            ]
+          : styles.compactCard,
+      ]}
     >
       <View style={styles.header}>
         <StatusIcon />
@@ -270,10 +316,13 @@ export function ToolCallCard({
           style={[styles.toolName, { color: t.foreground }]}
           numberOfLines={1}
         >
-          {toolCall.name}
+          {formatToolLabel(toolCall.name)}
         </Text>
+        {isPolicyRedirect ? (
+          <Text style={[styles.liveLabel, { color: t.warning }]}>Redirected</Text>
+        ) : null}
         {isStreaming ? (
-          <Text style={[styles.liveLabel, { color: t.userMessage }]}>Live</Text>
+          <Text style={[styles.liveLabel, { color: t.thinking }]}>Live</Text>
         ) : null}
         {toolCall.output &&
           (expanded ? (
@@ -287,13 +336,45 @@ export function ToolCallCard({
   );
 }
 
+function ToolGlyph({ name, color }: { name: string; color: string }) {
+  const normalized = name.toLowerCase();
+  const iconProps = { size: 14, color, strokeWidth: 1.8 } as const;
+
+  if (normalized === "bash") return <Terminal {...iconProps} />;
+  if (["edit", "write", "multiedit"].includes(normalized)) {
+    return <FilePenLine {...iconProps} />;
+  }
+  if (normalized === "read") return <FileText {...iconProps} />;
+  if (["grep", "search"].includes(normalized)) {
+    return <Search {...iconProps} />;
+  }
+  if (["glob", "ls", "list", "list_files"].includes(normalized)) {
+    return <FolderTree {...iconProps} />;
+  }
+  if (["agent", "explore", "plan", "verify", "build"].includes(normalized)) {
+    return <Users {...iconProps} />;
+  }
+  return <Wrench {...iconProps} />;
+}
+
+function formatToolLabel(name: string): string {
+  return name
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
 const styles = StyleSheet.create({
   card: {
+    marginVertical: 3,
+  },
+  compactCard: {
+    paddingVertical: 5,
+    paddingHorizontal: 2,
+  },
+  detailedCard: {
     borderRadius: 10,
     borderWidth: StyleSheet.hairlineWidth,
     padding: 10,
-    marginVertical: 3,
-    backgroundColor: "rgba(255,255,255,0.02)",
   },
   header: {
     flexDirection: "row",
@@ -326,5 +407,17 @@ const styles = StyleSheet.create({
     lineHeight: 17,
     marginTop: 6,
     opacity: 0.85,
+  },
+  failedSummary: {
+    fontFamily: "Courier",
+    fontSize: 11,
+    lineHeight: 15,
+    marginTop: 5,
+  },
+  collapsedCommand: {
+    fontFamily: "Courier",
+    fontSize: 11,
+    lineHeight: 15,
+    marginTop: 5,
   },
 });

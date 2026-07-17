@@ -2,7 +2,7 @@
 
 The tool system is how Krusty does things. When the AI decides it needs to read a file, search the codebase, run a shell command, or edit code, it makes a tool call. The tool system receives that call, checks whether it's allowed, runs any safety checks, executes the tool, and returns the result. Every action the AI takes in your environment flows through this system.
 
-At the center is the **ToolRegistry** -- a HashMap of tool implementations behind an `Arc<RwLock<>>`, with pre-execution and post-execution hooks attached. The registry manages tool registration, lookup, permission enforcement, and the full execution lifecycle. It's defined in `crates/krusty-core/src/tools/registry.rs`.
+At the center is the **ToolRegistry** -- a HashMap of tool implementations behind an `Arc<RwLock<>>`, with pre-execution and post-execution hooks attached. The registry manages tool registration, lookup, permission enforcement, and the full execution lifecycle. It's defined in `crates/krusty-core/src/tools/registry/runtime.rs`.
 
 ## The Tool Trait
 
@@ -21,7 +21,7 @@ pub trait Tool: Send + Sync {
 
 `name()` is the identifier the AI uses when requesting a tool. `description()` goes into the tool schema that gets sent to the LLM so it knows what the tool does. `prompt()` is optional extended guidance that gets injected into the system prompt -- it contains the detailed usage instructions that would be too long for the schema description. `parameters_schema()` returns a JSON Schema that the AI's output must conform to. `execute()` does the actual work.
 
-Every tool receives a `ToolContext` that carries the working directory, sandbox root (for multi-tenant isolation), process registry, permissions, streaming channels, and other runtime state. Tools return a `ToolResult` -- a structured JSON envelope with `ok: true/false`, a data payload, optional warnings, optional diffs, and optional metadata.
+Every tool receives a `ToolContext` that carries the working directory, allowed filesystem root, process registry, permissions, streaming channels, and other runtime state. Tools return a `ToolResult` -- a structured JSON envelope with `ok: true/false`, a data payload, optional warnings, optional diffs, and optional metadata. The filesystem root is a path-containment policy for Krusty-owned file tools; it is not an operating-system sandbox.
 
 ## Built-in Tools
 
@@ -49,9 +49,15 @@ Krusty registers its tools at startup via `register_all_tools()` in `crates/krus
 
 ### Execution
 
-**Bash** runs shell commands with real-time output streaming. It supports foreground execution with configurable timeouts (default 30 seconds, max 10 minutes), background execution via `run_in_background`, and process group management for clean cleanup on timeout. Output is streamed to the UI as it arrives, then ANSI-stripped and truncated before being sent back to the AI. Working directory isolation and sandbox enforcement are checked before execution.
+**Bash** runs shell commands with real-time output streaming. It supports foreground execution with configurable timeouts (default 30 seconds, max 10 minutes), background execution via `run_in_background`, and process group management for clean cleanup on timeout. Output is streamed to the UI as it arrives, then ANSI-stripped and truncated before being sent back to the AI. Krusty validates and scopes the starting working directory, but a shell can still access whatever files, processes, and network resources the server's OS account can access.
 
-**Processes** manages background processes -- list running processes, check status, or kill them by ID.
+This makes Bash a **trusted-host capability**. It is appropriate for a private workstation or tailnet server such as Honey, where the authenticated user intentionally grants the agent that account's authority. It must be disabled for hostile public tenants unless each execution is placed in a real OS boundary such as a container, VM, or separately confined user account. ACP deliberately omits Bash and process tools because an editor connection does not supply such a boundary.
+
+**Processes** manages background processes -- list running processes, check status and recent
+combined output, or kill them by ID. API output replay is a bounded 64 KiB tail so a noisy server
+cannot grow harness memory without limit; model-facing status narrows that to the most recent
+8,000 characters. In authenticated server sessions, process creation, status, output, and control
+operations stay scoped to the owning user.
 
 ### Agent Delegation
 
@@ -66,7 +72,7 @@ Sub-agents can also run in the background via `run_in_background: true`, returni
 
 ### Interaction & State
 
-**AskUserQuestion** prompts the user for input from within the AI's reasoning flow. **Skill** loads specialized instruction sets from `~/.config/krusty/skills/` or the project's `.krusty/skills/` directory. **Memory** persists knowledge across sessions -- user preferences, project context, feedback. **SetWorkMode**, **EnterPlanMode**, and **SetWorkspaceContext** let the AI toggle between plan mode and build mode or update workspace metadata.
+**AskUserQuestion** prompts the user for input from within the AI's reasoning flow. **Skill** loads specialized instruction sets from `~/.krusty/skills/` or the project's `.krusty/skills/` directory. **Memory** persists knowledge across sessions -- user preferences, project context, feedback. **SetWorkMode**, **EnterPlanMode**, and **SetWorkspaceContext** let the AI toggle between plan mode and build mode or update workspace metadata.
 
 ### Mako (Autonomous Mode)
 
@@ -108,7 +114,7 @@ Sub-agents inherit their parent's permission mode through `DelegationPolicy`. An
 
 ## Safety Hooks
 
-The `SafetyHook` (defined in `crates/krusty-core/src/agent/hooks.rs`) is a pre-execution hook that blocks dangerous bash commands before they run. It fires only for bash/shell/execute tools and checks the command against several categories of dangerous patterns.
+The `SafetyHook` (defined in `crates/krusty-core/src/agent/hooks/builtins.rs`) is a pre-execution hook that blocks dangerous bash commands before they run. It fires only for bash/shell/execute tools and checks the command against several categories of dangerous patterns.
 
 **What gets blocked:**
 
