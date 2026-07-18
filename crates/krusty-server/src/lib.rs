@@ -43,7 +43,9 @@ use krusty_core::tools::{
     register_agent_tool, register_all_tools, register_mako_tools, ToolRegistry,
 };
 
-use self::ai_bootstrap::{create_ai_client, create_ai_client_for_model, initialize_models};
+use self::ai_bootstrap::{
+    create_ai_client, create_ai_client_for_model, initialize_models, spawn_model_catalog_refresh,
+};
 
 type SessionGuard = Arc<Mutex<()>>;
 const SESSION_LOCK_MAX_ENTRIES: usize = 1000;
@@ -273,7 +275,7 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
     let credential_store_inner = CredentialStore::load().unwrap_or_default();
     let credential_store = Arc::new(RwLock::new(credential_store_inner.clone()));
     let model_registry = create_model_registry();
-    initialize_models(&model_registry, &credential_store_inner).await;
+    initialize_models(&model_registry, &db_path).await;
     let ai_client = create_ai_client(&credential_store_inner, &model_registry, &db_path)
         .await
         .map(Arc::new);
@@ -498,6 +500,12 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
         oauth_flows: Arc::new(Mutex::new(HashMap::new())),
         mako_runtime: mako_runtime::MakoRuntimeManager::new(),
     };
+
+    spawn_model_catalog_refresh(
+        state.model_registry.clone(),
+        state.credential_store.clone(),
+        state.db_path.clone(),
+    );
 
     state
         .mako_runtime

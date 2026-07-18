@@ -1,5 +1,5 @@
 use super::*;
-use krusty_core::ai::client::supports_openai_xhigh_reasoning;
+use krusty_core::ai::providers::ReasoningControl;
 
 impl App {
     /// Get max context window size for current model
@@ -32,52 +32,68 @@ impl App {
         )
     }
 
-    /// Whether Tab should cycle OpenAI xhigh-capable thinking levels.
-    pub fn is_openai_xhigh_thinking_mode(&self) -> bool {
-        self.runtime.active_provider == ProviderId::OpenAI
-            && supports_openai_xhigh_reasoning(&self.runtime.current_model)
+    fn current_model_metadata(&self) -> Option<crate::ai::models::ModelMetadata> {
+        self.services
+            .model_registry
+            .try_get_model(&self.runtime.current_model)
     }
 
-    /// Whether Tab should cycle Anthropic Opus 4.6 thinking levels.
-    pub fn is_anthropic_opus_thinking_mode(&self) -> bool {
-        self.runtime.active_provider == ProviderId::Anthropic
-            && (self.runtime.current_model.contains("opus-4-6")
-                || self.runtime.current_model.contains("opus-4.6"))
-    }
+    pub fn selectable_thinking_levels(&self) -> Vec<ThinkingLevel> {
+        let Some(metadata) = self.current_model_metadata() else {
+            return vec![ThinkingLevel::Off];
+        };
+        if metadata.reasoning_control == Some(ReasoningControl::OutputOnly) {
+            return vec![ThinkingLevel::Off];
+        }
 
-    /// Whether Tab should cycle Grok Build/Composer thinking effort levels.
-    pub fn is_grok_thinking_mode(&self) -> bool {
-        // The Grok CLI proxy can stream reasoning blocks but rejects explicit
-        // request-side reasoning controls, so Krusty does not expose a Grok
-        // thinking-effort toggle for this provider transport.
-        false
+        let mut levels = metadata
+            .supported_reasoning_levels
+            .iter()
+            .copied()
+            .map(ThinkingLevel::from_reasoning_effort)
+            .filter(|level| *level != ThinkingLevel::Ultra)
+            .collect::<Vec<_>>();
+        levels.dedup();
+        let fallback = metadata
+            .default_reasoning_level
+            .map(ThinkingLevel::from_reasoning_effort)
+            .filter(|level| !matches!(level, ThinkingLevel::Off | ThinkingLevel::Ultra))
+            .unwrap_or(ThinkingLevel::Medium);
+        if levels.is_empty() {
+            return if metadata.supports_thinking {
+                if metadata.reasoning_is_mandatory {
+                    vec![fallback]
+                } else {
+                    vec![ThinkingLevel::Off, fallback]
+                }
+            } else {
+                vec![ThinkingLevel::Off]
+            };
+        }
+        if metadata.reasoning_is_mandatory {
+            levels.retain(|level| *level != ThinkingLevel::Off);
+            if levels.is_empty() {
+                levels.push(fallback);
+            }
+        } else if !levels.contains(&ThinkingLevel::Off) {
+            levels.insert(0, ThinkingLevel::Off);
+        }
+        levels
     }
 
     /// Whether this model supports multi-level thinking cycling.
     pub fn has_multi_level_thinking(&self) -> bool {
-        self.is_openai_xhigh_thinking_mode()
-            || self.is_anthropic_opus_thinking_mode()
-            || self.is_grok_thinking_mode()
+        self.selectable_thinking_levels().len() > 2
     }
 
     /// Handle Tab thinking toggle/cycle.
     pub fn cycle_thinking_level(&mut self) {
-        if self.runtime.active_provider == ProviderId::Grok {
-            self.runtime.thinking_level = ThinkingLevel::Off;
-            tracing::info!(
-                model = %self.runtime.current_model,
-                "Grok CLI proxy does not support explicit thinking controls"
-            );
-            return;
-        }
-
-        self.runtime.thinking_level = if self.is_openai_xhigh_thinking_mode() {
-            self.runtime.thinking_level.cycle_codex()
-        } else if self.is_anthropic_opus_thinking_mode() {
-            self.runtime.thinking_level.cycle_anthropic()
-        } else {
-            self.runtime.thinking_level.toggle_basic()
-        };
+        let levels = self.selectable_thinking_levels();
+        let next_index = levels
+            .iter()
+            .position(|level| *level == self.runtime.thinking_level)
+            .map_or(0, |index| (index + 1) % levels.len());
+        self.runtime.thinking_level = levels[next_index];
         tracing::info!(
             model = %self.runtime.current_model,
             multi_level = self.has_multi_level_thinking(),
@@ -90,10 +106,12 @@ impl App {
     pub fn thinking_border_color(&self) -> Color {
         match self.runtime.thinking_level {
             ThinkingLevel::Off => self.ui.theme.border_color,
+            ThinkingLevel::Minimal => self.ui.theme.mode_view_color,
             ThinkingLevel::Low => self.ui.theme.mode_view_color,
             ThinkingLevel::Medium => self.ui.theme.accent_color,
             ThinkingLevel::High => self.ui.theme.warning_color,
             ThinkingLevel::XHigh => self.ui.theme.error_color,
+            ThinkingLevel::Max | ThinkingLevel::Ultra => self.ui.theme.error_color,
         }
     }
 

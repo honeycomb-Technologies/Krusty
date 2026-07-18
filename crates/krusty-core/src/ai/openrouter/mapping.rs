@@ -1,30 +1,16 @@
 use crate::ai::models::{ApiFormat, ModelMetadata};
-use crate::ai::providers::{ProviderId, ReasoningFormat};
+use crate::ai::providers::{
+    FastMode, ProviderId, ReasoningControl, ReasoningEffort, ReasoningFormat,
+};
 
-use super::types::OpenRouterModel;
+use super::types::{OpenRouterModel, SupportedEfforts};
 
 /// Check if a model is worth showing (filter out obscure/test models)
 pub(super) fn is_useful_model(id: &str) -> bool {
-    let good_prefixes = [
-        "anthropic/",
-        "openai/",
-        "google/",
-        "meta-llama/",
-        "mistralai/",
-        "qwen/",
-        "deepseek/",
-        "cohere/",
-        "x-ai/",
-        "nvidia/",
-        "perplexity/",
-        "databricks/",
-    ];
+    let bad_patterns = [":beta", "-experimental", "-base"];
 
-    let bad_patterns = [":beta", "-preview", "-experimental", "-base"];
-
-    let id_lower = id.to_lowercase();
-
-    if !good_prefixes.iter().any(|p| id_lower.starts_with(p)) {
+    let id_lower = id.trim().to_ascii_lowercase();
+    if id_lower.is_empty() || !id_lower.contains('/') {
         return false;
     }
 
@@ -39,10 +25,11 @@ pub(super) fn parse_model(raw: OpenRouterModel) -> ModelMetadata {
         .and_then(|t| t.max_completion_tokens)
         .unwrap_or(4096);
 
-    let supports_thinking = raw
-        .supported_parameters
-        .iter()
-        .any(|p| p == "reasoning" || p == "include_reasoning" || p == "reasoning_effort");
+    let supports_thinking = raw.reasoning.is_some()
+        || raw
+            .supported_parameters
+            .iter()
+            .any(|p| p == "reasoning" || p == "include_reasoning" || p == "reasoning_effort");
 
     let reasoning_format = if supports_thinking {
         Some(determine_reasoning_format(&raw.id))
@@ -78,14 +65,101 @@ pub(super) fn parse_model(raw: OpenRouterModel) -> ModelMetadata {
     let sub_provider = raw.id.split('/').next().map(|s| s.to_string());
     let is_free = raw.id.ends_with(":free");
 
+    let (
+        mut supported_reasoning_levels,
+        default_reasoning_level,
+        reasoning_is_mandatory,
+        mut reasoning_control,
+    ) = raw
+        .reasoning
+        .as_ref()
+        .map(|reasoning| {
+            let (mut levels, control) = match &reasoning.supported_efforts {
+                SupportedEfforts::Listed(efforts) => {
+                    let parsed = efforts
+                        .iter()
+                        .filter_map(|effort| parse_reasoning_effort(effort))
+                        .collect::<Vec<_>>();
+                    if parsed.is_empty() {
+                        (vec![ReasoningEffort::High], ReasoningControl::Boolean)
+                    } else {
+                        (parsed, ReasoningControl::OpenAiEffort)
+                    }
+                }
+                SupportedEfforts::All => (
+                    vec![
+                        ReasoningEffort::Minimal,
+                        ReasoningEffort::Low,
+                        ReasoningEffort::Medium,
+                        ReasoningEffort::High,
+                        ReasoningEffort::XHigh,
+                        ReasoningEffort::Max,
+                    ],
+                    ReasoningControl::OpenAiEffort,
+                ),
+                SupportedEfforts::Missing => (
+                    vec![ReasoningEffort::High],
+                    if reasoning.supports_max_tokens {
+                        ReasoningControl::AnthropicBudget
+                    } else {
+                        ReasoningControl::Boolean
+                    },
+                ),
+            };
+            levels.sort();
+            levels.dedup();
+            if !reasoning.mandatory && !levels.contains(&ReasoningEffort::None) {
+                levels.insert(0, ReasoningEffort::None);
+            }
+            let default = if reasoning.default_enabled == Some(false) {
+                levels
+                    .contains(&ReasoningEffort::None)
+                    .then_some(ReasoningEffort::None)
+            } else {
+                reasoning
+                    .default_effort
+                    .as_deref()
+                    .and_then(parse_reasoning_effort)
+                    .or_else(|| {
+                        reasoning
+                            .mandatory
+                            .then(|| {
+                                levels
+                                    .iter()
+                                    .copied()
+                                    .find(|level| *level != ReasoningEffort::None)
+                            })
+                            .flatten()
+                    })
+            };
+            (levels, default, reasoning.mandatory, Some(control))
+        })
+        .unwrap_or_default();
+    if supports_thinking && reasoning_control.is_none() {
+        supported_reasoning_levels = vec![ReasoningEffort::None, ReasoningEffort::High];
+        reasoning_control = Some(ReasoningControl::Boolean);
+    }
+
+    // OpenRouter accepts provider-level priority routing with standard fallback;
+    // it is not advertised per model in `supported_parameters`.
+    let fast_mode = Some(FastMode::Priority);
+
     ModelMetadata {
         id: raw.id,
         display_name,
         provider: ProviderId::OpenRouter,
+        auth_scope: None,
         context_window,
         max_output,
         supports_thinking,
         reasoning_format,
+        supported_reasoning_levels,
+        default_reasoning_level,
+        reasoning_is_mandatory,
+        // OpenRouter's Messages surface owns the request shape. The streaming
+        // adapter maps this metadata to `thinking` + `output_config.effort`.
+        reasoning_control,
+        fast_mode,
         supports_tools,
         supports_vision,
         input_price,
@@ -93,6 +167,19 @@ pub(super) fn parse_model(raw: OpenRouterModel) -> ModelMetadata {
         sub_provider,
         is_free,
         api_format: ApiFormat::Anthropic,
+    }
+}
+
+fn parse_reasoning_effort(raw: &str) -> Option<ReasoningEffort> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "none" | "off" => Some(ReasoningEffort::None),
+        "minimal" => Some(ReasoningEffort::Minimal),
+        "low" => Some(ReasoningEffort::Low),
+        "medium" => Some(ReasoningEffort::Medium),
+        "high" => Some(ReasoningEffort::High),
+        "xhigh" | "x-high" => Some(ReasoningEffort::XHigh),
+        "max" => Some(ReasoningEffort::Max),
+        _ => None,
     }
 }
 
@@ -124,7 +211,9 @@ fn determine_reasoning_format(model_id: &str) -> ReasoningFormat {
 
 #[cfg(test)]
 mod tests {
-    use super::is_useful_model;
+    use super::{is_useful_model, parse_model};
+    use crate::ai::openrouter::types::OpenRouterModel;
+    use crate::ai::providers::{FastMode, ReasoningControl, ReasoningEffort};
 
     #[test]
     fn test_is_useful_model() {
@@ -136,9 +225,86 @@ mod tests {
         assert!(is_useful_model("anthropic/claude-3-opus:free"));
         assert!(is_useful_model("meta-llama/llama-3.2-3b-instruct:free"));
         assert!(is_useful_model("mistralai/mistral-7b-instruct"));
+        assert!(is_useful_model("moonshotai/kimi-k2"));
+        assert!(is_useful_model("minimax/minimax-m3"));
+        assert!(is_useful_model("z-ai/glm-5.2"));
 
-        assert!(!is_useful_model("openai/gpt-4-preview"));
-        assert!(!is_useful_model("some-random/model"));
+        // Preview is a valid lifecycle marker on OpenRouter; the live catalog
+        // should decide availability rather than a blanket suffix filter.
+        assert!(is_useful_model("openai/gpt-4-preview"));
+        assert!(is_useful_model("some-random/model"));
+        assert!(!is_useful_model("missing-vendor-prefix"));
         assert!(!is_useful_model("meta-llama/llama-2-7b-base"));
+    }
+
+    #[test]
+    fn nullable_efforts_use_full_levels_and_priority_routing() {
+        let raw: OpenRouterModel = serde_json::from_value(serde_json::json!({
+            "id": "moonshotai/kimi-k2",
+            "name": "Moonshot: Kimi K2",
+            "reasoning": {
+                "supported_efforts": null,
+                "default_enabled": false
+            }
+        }))
+        .expect("nullable effort schema");
+
+        let model = parse_model(raw);
+        assert_eq!(
+            model.reasoning_control,
+            Some(ReasoningControl::OpenAiEffort)
+        );
+        assert!(model
+            .supported_reasoning_levels
+            .contains(&ReasoningEffort::Max));
+        assert_eq!(model.default_reasoning_level, Some(ReasoningEffort::None));
+        assert_eq!(model.fast_mode, Some(FastMode::Priority));
+    }
+
+    #[test]
+    fn missing_efforts_fall_back_without_dropping_reasoning() {
+        let raw: OpenRouterModel = serde_json::from_value(serde_json::json!({
+            "id": "future/model",
+            "name": "Future Model",
+            "reasoning": {"supports_max_tokens": true}
+        }))
+        .expect("partial reasoning schema");
+
+        let model = parse_model(raw);
+        assert!(model.supports_thinking);
+        assert_eq!(
+            model.reasoning_control,
+            Some(ReasoningControl::AnthropicBudget)
+        );
+        assert_eq!(
+            model.supported_reasoning_levels,
+            vec![ReasoningEffort::None, ReasoningEffort::High]
+        );
+    }
+
+    #[test]
+    fn catalog_efforts_are_presented_in_canonical_order() {
+        let raw: OpenRouterModel = serde_json::from_value(serde_json::json!({
+            "id": "anthropic/claude-opus-4.8",
+            "name": "Anthropic: Claude Opus 4.8",
+            "reasoning": {
+                "supported_efforts": ["max", "xhigh", "high", "medium", "low"],
+                "default_effort": "medium"
+            }
+        }))
+        .expect("descending effort schema");
+
+        let model = parse_model(raw);
+        assert_eq!(
+            model.supported_reasoning_levels,
+            vec![
+                ReasoningEffort::None,
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+                ReasoningEffort::Max,
+            ]
+        );
     }
 }

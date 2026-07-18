@@ -12,7 +12,7 @@ use std::collections::HashMap;
 pub use inference::{infer_model_metadata, resolve_context_window, resolve_model_metadata};
 pub use metadata::{
     dynamic_model_cache_ttl, model_catalog_fingerprint, ApiFormat, DynamicModelCacheMetadata,
-    ModelMetadata,
+    ModelAuthScope, ModelMetadata,
 };
 pub use registry::{create_model_registry, ModelRegistry, SharedModelRegistry};
 

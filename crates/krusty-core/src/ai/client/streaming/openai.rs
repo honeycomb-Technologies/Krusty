@@ -66,6 +66,20 @@ fn append_stream_usage_options(body: &mut Value, provider_id: ProviderId, api_fo
     }
 }
 
+fn append_zai_reasoning_config(body: &mut Value, options: &CallOptions) {
+    let enabled = options.thinking.is_some();
+    body["thinking"] = serde_json::json!({
+        "type": if enabled { "enabled" } else { "disabled" }
+    });
+    if enabled {
+        if let Some(effort) = options.codex_reasoning_effort {
+            body["reasoning_effort"] = serde_json::json!(effort.as_str());
+        }
+    } else if let Some(object) = body.as_object_mut() {
+        object.remove("reasoning_effort");
+    }
+}
+
 fn stable_system_prompt(sections: &crate::ai::model_profile::SystemPromptSections) -> String {
     [sections.base_prompt.trim(), sections.project_context.trim()]
         .into_iter()
@@ -235,6 +249,10 @@ impl AiClient {
             });
         }
 
+        if self.provider_id() == ProviderId::ZAi {
+            append_zai_reasoning_config(&mut body, options);
+        }
+
         if let Some(service_tier) = options.service_tier_for_provider(self.provider_id()) {
             body["service_tier"] = serde_json::json!(service_tier);
         }
@@ -370,6 +388,26 @@ mod tests {
         append_stream_usage_options(&mut body, ProviderId::Grok, ApiFormat::OpenAI);
 
         assert!(body.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn zai_uses_top_level_thinking_and_effort_controls() {
+        let mut enabled = json!({});
+        append_zai_reasoning_config(
+            &mut enabled,
+            &CallOptions {
+                thinking: Some(crate::ai::types::ThinkingConfig::default()),
+                codex_reasoning_effort: Some(CodexReasoningEffort::Max),
+                ..Default::default()
+            },
+        );
+        assert_eq!(enabled["thinking"]["type"], "enabled");
+        assert_eq!(enabled["reasoning_effort"], "max");
+
+        let mut disabled = json!({"reasoning_effort": "high"});
+        append_zai_reasoning_config(&mut disabled, &CallOptions::default());
+        assert_eq!(disabled["thinking"]["type"], "disabled");
+        assert!(disabled.get("reasoning_effort").is_none());
     }
 
     #[test]

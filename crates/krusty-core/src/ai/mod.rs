@@ -4,11 +4,13 @@
 //! Supports multiple API formats: Anthropic, OpenAI, and Google.
 
 // Modular architecture
+pub mod anthropic_catalog;
 pub mod catalog;
 pub mod client;
 pub mod format;
 pub mod format_detection;
 pub mod grok;
+pub mod minimax_catalog;
 pub mod retry;
 
 // Provider-specific configuration

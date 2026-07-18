@@ -111,6 +111,47 @@ pub enum ReasoningFormat {
     DeepSeek,
 }
 
+/// User-selectable reasoning effort advertised by a model catalog.
+///
+/// Keep this independent from provider request enums: catalog values describe
+/// what the account/model supports, while the request layer may normalize a
+/// value (for example Codex `ultra`) to a different wire value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+    Ultra,
+}
+
+/// How a selected reasoning level is represented by the active transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningControl {
+    OpenAiEffort,
+    AnthropicAdaptive,
+    AnthropicBudget,
+    Boolean,
+    /// The provider emits reasoning, but the configured transport rejects an
+    /// explicit effort control (currently the Grok subscription CLI proxy).
+    OutputOnly,
+}
+
+/// Model-specific implementation of Krusty's Standard/Fast control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FastMode {
+    /// `service_tier: "priority"` (OpenAI/OpenRouter and compatible APIs).
+    Priority,
+    /// Anthropic Fast Mode: `speed: "fast"` plus its required beta header.
+    AnthropicFast,
+}
+
 /// Information about a model offered by a provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
@@ -124,6 +165,21 @@ pub struct ModelInfo {
     pub max_output: usize,
     /// Reasoning/thinking support (None = not supported).
     pub reasoning: Option<ReasoningFormat>,
+    /// Exact selectable effort levels, in UI order.
+    #[serde(default)]
+    pub supported_reasoning_levels: Vec<ReasoningEffort>,
+    /// Catalog-selected effort when the user has not chosen one explicitly.
+    #[serde(default)]
+    pub default_reasoning_level: Option<ReasoningEffort>,
+    /// Whether the model requires reasoning to remain enabled.
+    #[serde(default)]
+    pub reasoning_is_mandatory: bool,
+    /// Request encoding used by the configured transport.
+    #[serde(default)]
+    pub reasoning_control: Option<ReasoningControl>,
+    /// Optional per-model Standard/Fast implementation.
+    #[serde(default)]
+    pub fast_mode: Option<FastMode>,
 }
 
 impl ModelInfo {
@@ -134,11 +190,46 @@ impl ModelInfo {
             context_window,
             max_output,
             reasoning: None,
+            supported_reasoning_levels: Vec::new(),
+            default_reasoning_level: None,
+            reasoning_is_mandatory: false,
+            reasoning_control: None,
+            fast_mode: None,
         }
     }
 
     pub fn with_reasoning(mut self, reasoning: ReasoningFormat) -> Self {
         self.reasoning = Some(reasoning);
+        self.reasoning_control = Some(match reasoning {
+            ReasoningFormat::OpenAI => ReasoningControl::OpenAiEffort,
+            ReasoningFormat::Anthropic => ReasoningControl::AnthropicBudget,
+            ReasoningFormat::DeepSeek => ReasoningControl::Boolean,
+        });
+        self
+    }
+
+    pub fn with_reasoning_levels(
+        mut self,
+        levels: &[ReasoningEffort],
+        default: ReasoningEffort,
+    ) -> Self {
+        self.supported_reasoning_levels = levels.to_vec();
+        self.default_reasoning_level = Some(default);
+        self
+    }
+
+    pub fn with_reasoning_control(mut self, control: ReasoningControl) -> Self {
+        self.reasoning_control = Some(control);
+        self
+    }
+
+    pub fn with_mandatory_reasoning(mut self) -> Self {
+        self.reasoning_is_mandatory = true;
+        self
+    }
+
+    pub fn with_fast_mode(mut self, fast_mode: FastMode) -> Self {
+        self.fast_mode = Some(fast_mode);
         self
     }
 
@@ -182,10 +273,10 @@ impl ProviderConfig {
             &first.id
         } else {
             match self.id {
-                ProviderId::OpenRouter => "openai/gpt-5-codex",
-                ProviderId::OpenAI => "gpt-5.5",
+                ProviderId::OpenRouter => "openai/gpt-5.6-sol",
+                ProviderId::OpenAI => "gpt-5.6-sol",
                 ProviderId::Grok => "grok-build",
-                _ => "MiniMax-M2.5",
+                _ => "MiniMax-M3",
             }
         }
     }

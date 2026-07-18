@@ -270,6 +270,8 @@ function thinkingDisplayName(level: ThinkingLevel): string {
   switch (level) {
     case 'off':
       return 'Off';
+    case 'minimal':
+      return 'Minimal';
     case 'low':
       return 'Low';
     case 'medium':
@@ -277,7 +279,11 @@ function thinkingDisplayName(level: ThinkingLevel): string {
     case 'high':
       return 'High';
     case 'xhigh':
+      return 'Extra High';
+    case 'max':
       return 'Max';
+    case 'ultra':
+      return 'Ultra';
     default:
       return 'Thinking';
   }
@@ -687,6 +693,10 @@ export function ChatBar(props: ChatBarProps) {
     if (!model) return 'No model selected';
     return models.find(candidate => candidate.id === model)?.display_name ?? model;
   }, [model, models]);
+  const selectedModelInfo = useMemo(
+    () => models.find(candidate => candidate.id === model) ?? null,
+    [model, models],
+  );
   const thinkingLabel = thinkingDisplayName(thinkingLevel);
 
   // ── Keyboard tracking with LayoutAnimation ──
@@ -1249,6 +1259,7 @@ export function ChatBar(props: ChatBarProps) {
               );
             }}
             model={model}
+            modelInfo={selectedModelInfo}
             isOpen={accordionOpen}
             onToggle={toggleAccordion}
             sessionType={sessionType}

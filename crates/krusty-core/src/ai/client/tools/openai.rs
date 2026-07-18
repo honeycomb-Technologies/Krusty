@@ -11,6 +11,7 @@ use super::super::core::AiClient;
 use crate::ai::format::openai::responses_input::convert_openai_tool_message_for_request;
 use crate::ai::format::response::{extract_text_from_content, normalize_openai_response};
 use crate::ai::models::ApiFormat;
+use crate::ai::providers::ReasoningControl;
 use crate::ai::transform::apply_request_body_transform;
 
 fn build_openai_tool_request_body(
@@ -92,6 +93,17 @@ fn build_openai_tool_request_body(
     }
 
     body
+}
+
+fn append_zai_reasoning_config(body: &mut Value, thinking_enabled: bool) {
+    body["thinking"] = serde_json::json!({
+        "type": if thinking_enabled { "enabled" } else { "disabled" }
+    });
+    if !thinking_enabled {
+        if let Some(object) = body.as_object_mut() {
+            object.remove("reasoning_effort");
+        }
+    }
 }
 
 fn openai_tool_definition(tool: &Value, api_format: ApiFormat) -> Value {
@@ -267,20 +279,23 @@ impl AiClient {
             }
         }
 
-        let effort = if thinking_enabled {
-            Some(
-                options
-                    .codex_reasoning_effort
-                    .unwrap_or(CodexReasoningEffort::High)
-                    .normalized_for_model(model)
-                    .as_str()
-                    .to_string(),
-            )
+        let effort = if thinking_enabled
+            && options.reasoning_control == Some(ReasoningControl::OpenAiEffort)
+        {
+            let requested = options
+                .codex_reasoning_effort
+                .unwrap_or(CodexReasoningEffort::High);
+            let normalized = if self.provider_id() == crate::ai::providers::ProviderId::ZAi {
+                requested
+            } else {
+                requested.normalized_for_model(model)
+            };
+            Some(normalized.as_str().to_string())
         } else {
             None
         };
 
-        let body = build_openai_tool_request_body(
+        let mut body = build_openai_tool_request_body(
             model,
             self.config().api_format,
             max_tokens,
@@ -291,6 +306,9 @@ impl AiClient {
             options.service_tier_for_provider(self.provider_id()),
             Some(options),
         );
+        if self.provider_id() == crate::ai::providers::ProviderId::ZAi {
+            append_zai_reasoning_config(&mut body, thinking_enabled);
+        }
 
         let body =
             apply_request_body_transform(body, self.provider_id(), self.config().api_format, model);
@@ -358,5 +376,13 @@ mod tests {
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "read");
         assert!(body["tools"][0].get("function").is_none());
+    }
+
+    #[test]
+    fn zai_tool_requests_can_explicitly_disable_default_reasoning() {
+        let mut body = json!({"reasoning_effort": "high"});
+        super::append_zai_reasoning_config(&mut body, false);
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body.get("reasoning_effort").is_none());
     }
 }

@@ -421,6 +421,11 @@ fn init_model_registry(preferences: &Option<Preferences>) -> SharedModelRegistry
                 if let Some(format) = m.reasoning {
                     meta = meta.with_thinking(format);
                 }
+                meta.supported_reasoning_levels = m.supported_reasoning_levels.clone();
+                meta.default_reasoning_level = m.default_reasoning_level;
+                meta.reasoning_is_mandatory = m.reasoning_is_mandatory;
+                meta.reasoning_control = m.reasoning_control;
+                meta.fast_mode = m.fast_mode;
                 meta.api_format = api_format;
                 meta.supports_vision =
                     krusty_core::ai::models::resolve_model_metadata(provider.id, &m.id, api_format)

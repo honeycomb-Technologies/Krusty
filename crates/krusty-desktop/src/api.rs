@@ -277,6 +277,30 @@ pub struct ModelResponse {
     pub display_name: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
+    #[serde(default)]
+    pub supports_thinking: bool,
+    #[serde(default)]
+    pub reasoning_control: Option<ReasoningControl>,
+    #[serde(default)]
+    pub supported_reasoning_levels: Vec<String>,
+    #[serde(default)]
+    pub default_reasoning_level: Option<String>,
+    #[serde(default)]
+    pub reasoning_is_mandatory: bool,
+    #[serde(default)]
+    pub supports_fast_mode: bool,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningControl {
+    OpenAiEffort,
+    AnthropicAdaptive,
+    AnthropicBudget,
+    Boolean,
+    OutputOnly,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

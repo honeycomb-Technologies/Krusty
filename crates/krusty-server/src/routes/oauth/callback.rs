@@ -10,9 +10,11 @@ use krusty_core::auth::{
     openai_oauth_config, HostedBrowserOAuthFlow, OAuthTokenStore, PkceVerifier,
 };
 
-use super::start::refresh_openai_models;
 use super::{
     parse_provider, OAuthFlowKind, FLOW_TTL_SECS, OAUTH_RESULT_CHANNEL, OAUTH_RESULT_STORAGE_KEY,
+};
+use crate::ai_bootstrap::{
+    invalidate_provider_model_catalog, spawn_provider_model_catalog_refresh,
 };
 use crate::AppState;
 
@@ -143,10 +145,25 @@ pub(super) async fn oauth_callback(
                 );
             }
 
-            let registry = state.model_registry.clone();
-            tokio::spawn(async move {
-                refresh_openai_models(registry).await;
-            });
+            if let Err(error) = invalidate_provider_model_catalog(
+                &state.model_registry,
+                state.db_path.as_path(),
+                provider_id,
+            )
+            .await
+            {
+                return callback_error_page(
+                    provider_id.storage_key().to_string(),
+                    format!("Sign-in completed but model catalog reset failed: {error}"),
+                );
+            }
+            spawn_provider_model_catalog_refresh(
+                state.model_registry.clone(),
+                state.credential_store.clone(),
+                state.db_path.clone(),
+                provider_id,
+                false,
+            );
 
             callback_success_page(provider_id.storage_key().to_string())
         }

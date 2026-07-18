@@ -58,10 +58,19 @@ pub struct OAuthStatusUpdate {
     pub token: Option<krusty_core::auth::OAuthTokenData>,
 }
 
-/// Result from fetching models for a dynamic provider.
-pub struct DynamicModelUpdate {
-    pub provider: ProviderId,
-    pub result: Result<Vec<ModelMetadata>, String>,
+/// Background model-catalog state change.
+pub enum DynamicModelUpdate {
+    /// The old account-scoped catalog was replaced by curated fallbacks.
+    CatalogReset {
+        provider: ProviderId,
+        generation: u64,
+    },
+    /// A live catalog refresh completed for the indicated credential generation.
+    RefreshFinished {
+        provider: ProviderId,
+        generation: u64,
+        result: Result<Vec<ModelMetadata>, String>,
+    },
 }
 
 /// Completion from an executable agent-extension slash command.

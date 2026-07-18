@@ -110,7 +110,7 @@ pub(super) async fn tool_result(
         user.as_ref(),
         &req.session_id,
         RequestedModel::Unspecified,
-        ThinkingLevel::Off,
+        req.thinking_level,
         req.fast_mode,
         false,
         false,
@@ -165,8 +165,11 @@ pub(super) async fn tool_result(
             .iter()
             .any(|content| matches!(content, Content::Thinking { .. }))
     });
-    if has_thinking {
-        apply_thinking_config(&ctx.ai_client, ThinkingLevel::High, &mut ctx.options);
+    // Older persisted turns may contain a thinking block without the exact
+    // request-level setting. Preserve the level restored by setup_chat_session
+    // and use High only as a legacy fallback when no setting was recovered.
+    if has_thinking && ctx.options.thinking.is_none() {
+        apply_thinking_config(ThinkingLevel::High, &mut ctx.options);
     }
 
     let merged = if let Some(last_msg) = ctx.conversation.last_mut() {

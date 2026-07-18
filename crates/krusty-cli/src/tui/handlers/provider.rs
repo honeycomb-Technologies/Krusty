@@ -10,7 +10,9 @@ use crate::ai::client::AiClient;
 use crate::ai::providers::{get_provider, ProviderId};
 use crate::tools::register_agent_tool;
 use crate::tui::app::App;
-use crate::tui::auth::{infer_provider_for_model, translate_model_for_provider};
+use crate::tui::auth::{
+    infer_provider_for_model, resolve_openai_auth_for_model, translate_model_for_provider,
+};
 
 impl App {
     pub(crate) fn has_selected_model(&self) -> bool {
@@ -48,7 +50,7 @@ impl App {
         }
     }
 
-    fn model_available_for_provider(&self, model: &str, provider: ProviderId) -> bool {
+    pub(crate) fn model_available_for_provider(&self, model: &str, provider: ProviderId) -> bool {
         let model = model.trim();
         if model.is_empty() {
             return false;
@@ -71,9 +73,10 @@ impl App {
         }
 
         if self.runtime.active_provider == ProviderId::OpenAI {
-            let resolved = krusty_core::auth::resolve_openai_auth(
-                &self.services.credential_store,
+            let resolved = resolve_openai_auth_for_model(
                 &self.runtime.current_model,
+                &self.services.credential_store,
+                &self.services.model_registry,
             );
             return resolved.credential;
         }
@@ -107,10 +110,8 @@ impl App {
             return Ok(());
         }
 
-        if let Some(key) = auth {
-            let config = self.create_client_config();
-            self.runtime.ai_client = Some(AiClient::with_api_key(config, key.clone()));
-            self.runtime.api_key = Some(key);
+        if let Some(client) = self.create_ai_client() {
+            self.runtime.ai_client = Some(client);
             self.register_agent_tool_if_client().await;
             return Ok(());
         }
@@ -158,6 +159,28 @@ impl App {
         if !self.has_selected_model() {
             return None;
         }
+        if !self
+            .model_available_for_provider(&self.runtime.current_model, self.runtime.active_provider)
+        {
+            return None;
+        }
+
+        if self.runtime.active_provider == ProviderId::OpenAI {
+            // Resolve provenance once and use the same result for both the
+            // credential and endpoint. A scoped catalog row must never fall
+            // back to the other OpenAI transport.
+            let resolution = resolve_openai_auth_for_model(
+                &self.runtime.current_model,
+                &self.services.credential_store,
+                &self.services.model_registry,
+            );
+            let credential = resolution.credential.clone()?;
+            let config = crate::ai::client::AiClientConfig::for_openai_with_auth_resolution(
+                &self.runtime.current_model,
+                resolution,
+            );
+            return Some(AiClient::with_api_key(config, credential));
+        }
 
         let config = self.create_client_config();
         self.resolve_auth_for_active_provider()
@@ -176,13 +199,19 @@ impl App {
             tracing::warn!("Failed to save credential store: {}", e);
         }
 
+        // Catalogs are account-scoped. Discard the previous account snapshot
+        // and force a new fetch before resolving transport for this key. The
+        // refresh path keeps the client disabled until curated/live metadata
+        // for the new credential generation is installed.
+        if crate::ai::catalog::supports_dynamic_models(self.runtime.active_provider) {
+            self.refresh_dynamic_models_after_credential_change(self.runtime.active_provider);
+            return;
+        }
+
         let auth = self.resolve_auth_for_active_provider();
-        self.runtime.api_key = auth.clone();
+        self.runtime.api_key = auth;
         self.runtime.ai_client = if self.has_selected_model() {
-            auth.map(|key| {
-                let config = self.create_client_config();
-                AiClient::with_api_key(config, key)
-            })
+            self.create_ai_client()
         } else {
             None
         };
@@ -215,10 +244,7 @@ impl App {
         let auth = self.resolve_auth_for_active_provider();
         self.runtime.api_key = auth.clone();
         self.runtime.ai_client = if self.has_selected_model() {
-            auth.clone().map(|key| {
-                let config = self.create_client_config();
-                AiClient::with_api_key(config, key)
-            })
+            self.create_ai_client()
         } else {
             None
         };

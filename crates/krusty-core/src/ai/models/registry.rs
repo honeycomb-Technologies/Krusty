@@ -37,6 +37,19 @@ impl ModelRegistry {
 
     /// Set models for a provider (replaces existing)
     pub async fn set_models(&self, provider: ProviderId, models: Vec<ModelMetadata>) {
+        // A successful-but-empty discovery response must not erase the last
+        // known-good or curated fallback catalog. Provider outages and schema
+        // changes occasionally deserialize to an empty list.
+        if models.is_empty() {
+            tracing::warn!(?provider, "Ignoring empty model catalog refresh");
+            return;
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let models = models
+            .into_iter()
+            .filter(|model| seen.insert(model.id.clone()))
+            .collect::<Vec<_>>();
         let mut all_models = self.models.write().await;
         let mut index = self.model_index.write().await;
 

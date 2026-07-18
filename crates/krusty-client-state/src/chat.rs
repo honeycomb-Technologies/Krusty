@@ -263,14 +263,23 @@ impl ChatStore {
 
     pub fn set_models(&mut self, models: Vec<ModelInfo>, default_model: Option<String>) {
         self.state.models = models;
-        if self.state.controls.selected_model.is_none() {
-            self.state.controls.selected_model =
-                default_model.or_else(|| self.state.models.first().map(|model| model.id.clone()));
+        let selection_is_available = self
+            .state
+            .controls
+            .selected_model
+            .as_deref()
+            .is_some_and(|selected| self.state.models.iter().any(|model| model.id == selected));
+        if !selection_is_available {
+            self.state.controls.selected_model = default_model
+                .filter(|default| self.state.models.iter().any(|model| model.id == *default))
+                .or_else(|| self.state.models.first().map(|model| model.id.clone()));
         }
+        self.normalize_model_controls();
     }
 
     pub fn select_model(&mut self, model_id: impl Into<String>) {
         self.state.controls.selected_model = Some(model_id.into());
+        self.normalize_model_controls();
     }
 
     pub fn set_project_dir(&mut self, project_dir: Option<String>) {
@@ -344,7 +353,19 @@ impl ChatStore {
     }
 
     pub fn cycle_thinking(&mut self) {
-        self.state.controls.thinking_level = self.state.controls.thinking_level.cycle();
+        self.state.controls.thinking_level = self
+            .selected_model_info()
+            .map(|model| self.state.controls.thinking_level.cycle_for_model(model))
+            .unwrap_or_else(|| self.state.controls.thinking_level.cycle());
+    }
+
+    pub fn supports_thinking_control(&self) -> bool {
+        self.selected_model_info().is_some_and(|model| {
+            model
+                .selectable_thinking_levels()
+                .iter()
+                .any(|level| *level != ThinkingLevel::Off)
+        })
     }
 
     pub fn toggle_permission_mode(&mut self) {
@@ -352,7 +373,14 @@ impl ChatStore {
     }
 
     pub fn toggle_fast_mode(&mut self) {
-        self.state.controls.fast_mode = !self.state.controls.fast_mode;
+        if self
+            .selected_model_info()
+            .is_some_and(|model| model.supports_fast_mode)
+        {
+            self.state.controls.fast_mode = !self.state.controls.fast_mode;
+        } else {
+            self.state.controls.fast_mode = false;
+        }
     }
 
     pub fn toggle_work_mode(&mut self) {
@@ -361,6 +389,21 @@ impl ChatStore {
 
     pub fn toggle_research(&mut self) {
         self.state.controls.research_enabled = !self.state.controls.research_enabled;
+    }
+
+    fn selected_model_info(&self) -> Option<&ModelInfo> {
+        let selected = self.state.controls.selected_model.as_deref()?;
+        self.state.models.iter().find(|model| model.id == selected)
+    }
+
+    fn normalize_model_controls(&mut self) {
+        let Some(model) = self.selected_model_info().cloned() else {
+            self.state.controls.fast_mode = false;
+            return;
+        };
+        self.state.controls.thinking_level =
+            model.normalize_thinking_level(self.state.controls.thinking_level);
+        self.state.controls.fast_mode &= model.supports_fast_mode;
     }
 
     pub fn queue_attachment_picker(&mut self) {
@@ -843,6 +886,31 @@ impl ChatStore {
 mod tests {
     use super::*;
 
+    fn model(
+        id: &str,
+        levels: Vec<krusty_client::ReasoningEffort>,
+        default: Option<krusty_client::ReasoningEffort>,
+        mandatory: bool,
+        supports_fast_mode: bool,
+    ) -> ModelInfo {
+        ModelInfo {
+            id: id.to_owned(),
+            display_name: id.to_owned(),
+            provider: "test".to_owned(),
+            context_window: 0,
+            max_output: 0,
+            supports_thinking: !levels.is_empty() || default.is_some(),
+            reasoning_control: Some(krusty_client::ReasoningControl::OpenAiEffort),
+            supported_reasoning_levels: levels,
+            default_reasoning_level: default,
+            reasoning_is_mandatory: mandatory,
+            supports_fast_mode,
+            fast_mode: supports_fast_mode.then_some(krusty_client::FastMode::Priority),
+            supports_tools: false,
+            supports_vision: false,
+        }
+    }
+
     fn text_messages(store: &ChatStore) -> Vec<String> {
         store
             .state
@@ -949,6 +1017,49 @@ mod tests {
         assert_eq!(request.permission_mode, Some(PermissionMode::Supervised));
         assert_eq!(request.session_type, Some(SessionType::Chat));
         assert_eq!(request.research_enabled, Some(true));
+    }
+
+    #[test]
+    fn model_refresh_replaces_a_removed_selection_and_normalizes_controls() {
+        let mut store = ChatStore::default();
+        store.state.controls.selected_model = Some("removed-model".to_owned());
+        store.state.controls.thinking_level = ThinkingLevel::Off;
+        store.state.controls.fast_mode = true;
+
+        store.set_models(
+            vec![model(
+                "current-model",
+                vec![
+                    krusty_client::ReasoningEffort::Low,
+                    krusty_client::ReasoningEffort::High,
+                ],
+                Some(krusty_client::ReasoningEffort::High),
+                true,
+                false,
+            )],
+            Some("current-model".to_owned()),
+        );
+
+        assert_eq!(
+            store.state.controls.selected_model.as_deref(),
+            Some("current-model")
+        );
+        assert_eq!(store.state.controls.thinking_level, ThinkingLevel::High);
+        assert!(!store.state.controls.fast_mode);
+    }
+
+    #[test]
+    fn output_only_reasoning_is_not_exposed_as_a_mobile_control() {
+        let mut output_only = model("grok-build", Vec::new(), None, false, false);
+        output_only.supports_thinking = true;
+        output_only.reasoning_control = Some(krusty_client::ReasoningControl::OutputOnly);
+        let mut store = ChatStore::default();
+        store.state.controls.thinking_level = ThinkingLevel::High;
+
+        store.set_models(vec![output_only], Some("grok-build".to_owned()));
+
+        assert_eq!(store.state.controls.thinking_level, ThinkingLevel::Off);
+        assert!(!store.supports_thinking_control());
     }
 
     #[test]

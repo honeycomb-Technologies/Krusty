@@ -58,26 +58,20 @@ impl AiClient {
             body["cache_control"] = cache_control;
         }
 
-        // Add thinking configuration when enabled
-        // MiniMax: Simple thinking without budget_tokens (their API doesn't support it)
-        // Z.ai/others: No thinking support for sub-agents
-        if thinking_enabled {
-            let provider = self.provider_id();
-            if provider == crate::ai::providers::ProviderId::MiniMax {
-                // MiniMax uses Anthropic-compatible thinking but without budget_tokens
-                body["thinking"] = serde_json::json!({
-                    "type": "enabled"
-                });
-            }
-        }
+        self.add_reasoning_config(&mut body, options, thinking_enabled);
+        self.add_provider_params(&mut body, thinking_enabled);
 
         if let Some(service_tier) = options.service_tier_for_provider(self.provider_id()) {
             body["service_tier"] = serde_json::json!(service_tier);
         }
+        if options.uses_anthropic_fast_mode(self.provider_id()) {
+            body["speed"] = serde_json::json!("fast");
+        }
 
         let body =
             apply_request_body_transform(body, self.provider_id(), self.config().api_format, model);
-        let request = self.build_request(&self.config().api_url());
+        let beta_headers = self.build_beta_headers(options);
+        let request = self.build_request_with_beta(&self.config().api_url(), &beta_headers);
 
         info!(model = model, provider = %self.provider_id(), "Sub-agent API call starting");
         let start = Instant::now();

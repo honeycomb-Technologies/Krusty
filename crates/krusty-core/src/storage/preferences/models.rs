@@ -80,6 +80,17 @@ impl Preferences {
         )
     }
 
+    /// Remove every persisted snapshot marker for a provider.
+    ///
+    /// Catalogs are entitlement-scoped. Credential rotation or revocation must
+    /// not allow a prior account's model list to be restored on the next start.
+    pub fn clear_model_cache(&self, provider: ProviderId) -> Result<()> {
+        let prefix = provider.storage_key();
+        self.delete(&format!("{prefix}_models_cache"))?;
+        self.delete(&format!("{prefix}_models_cache_meta"))?;
+        self.delete(&format!("{prefix}_models_cached_at"))
+    }
+
     pub fn get_custom_models(&self, provider: ProviderId) -> Vec<ModelMetadata> {
         self.get(&format!("{}_custom_models", provider.storage_key()))
             .and_then(|s| serde_json::from_str(&s).ok())
@@ -103,7 +114,7 @@ impl Preferences {
         if let Some(metadata) = self.get_model_cache_metadata(provider) {
             if metadata.fetched_at == 0
                 || metadata.ttl_seconds == 0
-                || (unix_timestamp() - metadata.fetched_at) > metadata.ttl_seconds
+                || unix_timestamp().saturating_sub(metadata.fetched_at) > metadata.ttl_seconds
             {
                 return true;
             }
@@ -120,6 +131,6 @@ impl Preferences {
             .get(&format!("{}_models_cached_at", provider.storage_key()))
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        cached_at == 0 || (unix_timestamp() - cached_at) > 86400
+        cached_at == 0 || unix_timestamp().saturating_sub(cached_at) > 86400
     }
 }

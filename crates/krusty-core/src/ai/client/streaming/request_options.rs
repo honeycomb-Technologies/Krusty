@@ -3,7 +3,7 @@ use tracing::{debug, info};
 
 use super::super::config::CallOptions;
 use super::super::core::AiClient;
-use crate::ai::providers::{ProviderCapabilities, ProviderId, ReasoningFormat};
+use crate::ai::providers::{ProviderCapabilities, ProviderId, ReasoningControl, ReasoningFormat};
 use crate::ai::reasoning::{ReasoningConfig, DEFAULT_THINKING_BUDGET};
 use crate::ai::transform::build_provider_params;
 
@@ -118,24 +118,63 @@ impl AiClient {
     }
 
     /// Add reasoning/thinking config to the request body
-    pub(super) fn add_reasoning_config(
+    pub(crate) fn add_reasoning_config(
         &self,
         body: &mut Value,
         options: &CallOptions,
         reasoning_enabled: bool,
     ) {
-        // Anthropic Opus 4.6 adaptive thinking path
-        if self.is_anthropic_opus_4_6() && reasoning_enabled {
+        if !reasoning_enabled {
+            // Sonnet 5 changed Anthropic's default: omitting `thinking` enables
+            // adaptive thinking. Preserve Krusty's explicit Off selection with
+            // the provider's required disabled wire value. Always-on Fable and
+            // Mythos families deliberately keep the field omitted.
+            if self.provider_id() == ProviderId::Anthropic
+                && options.reasoning_control == Some(ReasoningControl::AnthropicAdaptive)
+                && anthropic_adaptive_defaults_on_but_can_disable(&self.config().model)
+            {
+                body["thinking"] = serde_json::json!({ "type": "disabled" });
+            }
+            return;
+        }
+
+        // MiniMax M3 uses the Anthropic-compatible adaptive toggle without an
+        // effort/budget. M2-family models reason mandatorily and reject an
+        // explicit Anthropic budget object, so omission is intentional there.
+        if self.provider_id() == ProviderId::MiniMax {
+            if options.reasoning_control == Some(ReasoningControl::AnthropicAdaptive) {
+                body["thinking"] = serde_json::json!({ "type": "adaptive" });
+            }
+            return;
+        }
+
+        // OpenRouter's Messages surface owns the wire shape regardless of the
+        // routed upstream provider. Preserve the selected effort through its
+        // `thinking` + `output_config.effort` contract.
+        if self.provider_id() == ProviderId::OpenRouter {
+            let effort = options
+                .codex_reasoning_effort
+                .map(|value| value.as_str())
+                .or_else(|| {
+                    options
+                        .anthropic_adaptive_effort
+                        .map(|value| value.as_str())
+                })
+                .unwrap_or("high");
+            body["thinking"] = serde_json::json!({ "type": "enabled" });
+            body["output_config"] = serde_json::json!({ "effort": effort });
+            return;
+        }
+
+        // Current Claude adaptive-thinking families.
+        if options.reasoning_control == Some(ReasoningControl::AnthropicAdaptive) {
             let effort = options
                 .anthropic_adaptive_effort
                 .map(|e| e.as_str())
                 .unwrap_or("high");
             body["thinking"] = serde_json::json!({ "type": "adaptive" });
             body["output_config"] = serde_json::json!({ "effort": effort });
-            debug!(
-                "Anthropic Opus 4.6 adaptive thinking enabled (effort={})",
-                effort
-            );
+            debug!("Anthropic adaptive thinking enabled (effort={})", effort);
             return;
         }
 
@@ -200,13 +239,6 @@ impl AiClient {
         }
     }
 
-    /// Check if current model is Anthropic Opus 4.6
-    fn is_anthropic_opus_4_6(&self) -> bool {
-        self.provider_id() == ProviderId::Anthropic
-            && (self.config().model.contains("opus-4-6")
-                || self.config().model.contains("opus-4.6"))
-    }
-
     /// Add context management to the request body
     pub(super) fn add_context_management(&self, body: &mut Value, options: &CallOptions) {
         if let Some(ctx_mgmt) = &options.context_management {
@@ -225,7 +257,7 @@ impl AiClient {
     }
 
     /// Add provider-specific parameters to the request body
-    pub(super) fn add_provider_params(&self, body: &mut Value, thinking_enabled: bool) {
+    pub(crate) fn add_provider_params(&self, body: &mut Value, thinking_enabled: bool) {
         let provider_params =
             build_provider_params(&self.config().model, self.provider_id(), thinking_enabled);
 
@@ -263,7 +295,7 @@ impl AiClient {
     }
 
     /// Build beta headers based on options
-    pub(super) fn build_beta_headers(&self, options: &CallOptions) -> Vec<&'static str> {
+    pub(crate) fn build_beta_headers(&self, options: &CallOptions) -> Vec<&'static str> {
         let mut beta_headers: Vec<&str> = Vec::new();
 
         let is_anthropic_provider = self.provider_id() == ProviderId::Anthropic;
@@ -277,9 +309,8 @@ impl AiClient {
         }
 
         // Add thinking beta headers for Anthropic reasoning format
-        let anthropic_thinking =
-            matches!(options.reasoning_format, Some(ReasoningFormat::Anthropic))
-                || options.thinking.is_some();
+        let anthropic_thinking = options.thinking.is_some()
+            && matches!(options.reasoning_format, Some(ReasoningFormat::Anthropic));
         if anthropic_thinking {
             beta_headers.push("interleaved-thinking-2025-05-14");
 
@@ -289,12 +320,16 @@ impl AiClient {
             }
         }
 
-        // Anthropic Opus 4.6: adaptive thinking needs interleaved-thinking beta
-        if self.is_anthropic_opus_4_6()
+        // Anthropic adaptive thinking needs interleaved-thinking beta.
+        if options.reasoning_control == Some(ReasoningControl::AnthropicAdaptive)
             && options.anthropic_adaptive_effort.is_some()
             && !beta_headers.contains(&"interleaved-thinking-2025-05-14")
         {
             beta_headers.push("interleaved-thinking-2025-05-14");
+        }
+
+        if options.uses_anthropic_fast_mode(self.provider_id()) {
+            beta_headers.push("fast-mode-2026-02-01");
         }
 
         // Context management beta
@@ -317,10 +352,37 @@ impl AiClient {
     }
 }
 
+fn anthropic_adaptive_defaults_on_but_can_disable(model: &str) -> bool {
+    model
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['.', '_', '/', ' '], "-")
+        .starts_with("claude-sonnet-5")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::client::{AiClientConfig, AnthropicAdaptiveEffort};
+    use crate::ai::models::ApiFormat;
+    use crate::ai::providers::{AuthHeader, ReasoningControl, ReasoningFormat};
+    use crate::ai::types::ThinkingConfig;
     use crate::ai::types::{WebFetchConfig, WebSearchConfig};
+
+    fn client(provider_id: ProviderId, model: &str) -> AiClient {
+        AiClient::new(
+            AiClientConfig {
+                model: model.to_string(),
+                max_tokens: 4096,
+                base_url: Some("http://127.0.0.1".to_string()),
+                auth_header: AuthHeader::Bearer,
+                provider_id,
+                api_format: ApiFormat::Anthropic,
+                custom_headers: Default::default(),
+            },
+            "test-key".to_string(),
+        )
+    }
 
     #[test]
     fn openrouter_server_tools_use_openrouter_tool_types() {
@@ -360,5 +422,59 @@ mod tests {
         assert_eq!(tools[0]["max_uses"], 3);
         assert_eq!(tools[1]["type"], "web_fetch_20250910");
         assert_eq!(tools[1]["name"], "web_fetch");
+    }
+
+    #[test]
+    fn minimax_m3_uses_adaptive_toggle_without_anthropic_budget() {
+        let client = client(ProviderId::MiniMax, "MiniMax-M3");
+        let options = CallOptions {
+            thinking: Some(ThinkingConfig::default()),
+            reasoning_format: Some(ReasoningFormat::Anthropic),
+            reasoning_control: Some(ReasoningControl::AnthropicAdaptive),
+            ..Default::default()
+        };
+        let mut body = serde_json::json!({});
+
+        client.add_reasoning_config(&mut body, &options, true);
+
+        assert_eq!(body["thinking"], serde_json::json!({"type": "adaptive"}));
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn anthropic_adaptive_wire_shape_comes_from_metadata_not_model_name() {
+        let client = client(ProviderId::Anthropic, "claude-future-family");
+        let options = CallOptions {
+            thinking: Some(ThinkingConfig::default()),
+            reasoning_format: Some(ReasoningFormat::Anthropic),
+            reasoning_control: Some(ReasoningControl::AnthropicAdaptive),
+            anthropic_adaptive_effort: Some(AnthropicAdaptiveEffort::Max),
+            ..Default::default()
+        };
+        let mut body = serde_json::json!({});
+
+        client.add_reasoning_config(&mut body, &options, true);
+
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "max");
+    }
+
+    #[test]
+    fn sonnet_five_off_is_explicit_while_fable_omits_disabled() {
+        let options = CallOptions {
+            reasoning_format: Some(ReasoningFormat::Anthropic),
+            reasoning_control: Some(ReasoningControl::AnthropicAdaptive),
+            ..Default::default()
+        };
+
+        let sonnet = client(ProviderId::Anthropic, "claude-sonnet-5");
+        let mut sonnet_body = serde_json::json!({});
+        sonnet.add_reasoning_config(&mut sonnet_body, &options, false);
+        assert_eq!(sonnet_body["thinking"]["type"], "disabled");
+
+        let fable = client(ProviderId::Anthropic, "claude-fable-5");
+        let mut fable_body = serde_json::json!({});
+        fable.add_reasoning_config(&mut fable_body, &options, false);
+        assert!(fable_body.get("thinking").is_none());
     }
 }

@@ -7,11 +7,48 @@
 //! Registry mutations happen on the async fetch tasks — never `block_on` on the
 //! TUI poll path — so model refresh cannot hitch the terminal event loop.
 
-use crate::ai::client::CallOptions;
-use crate::ai::models::ModelMetadata;
-use crate::ai::providers::ProviderId;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
+
+use crate::ai::format_detection::detect_api_format;
+use crate::ai::models::{resolve_model_metadata, ModelMetadata};
+use crate::ai::providers::{get_provider, ProviderId, ReasoningControl};
 use crate::tui::app::App;
+use crate::tui::app::ThinkingLevel;
 use crate::tui::utils::DynamicModelUpdate;
+use tokio::sync::Mutex;
+
+struct CatalogRefreshSlot {
+    fetch_lock: Mutex<()>,
+    commit_lock: Mutex<()>,
+    auth_generation: AtomicU64,
+}
+
+impl CatalogRefreshSlot {
+    fn new() -> Self {
+        Self {
+            fetch_lock: Mutex::new(()),
+            commit_lock: Mutex::new(()),
+            auth_generation: AtomicU64::new(0),
+        }
+    }
+}
+
+static CATALOG_REFRESH_SLOTS: LazyLock<HashMap<ProviderId, CatalogRefreshSlot>> =
+    LazyLock::new(|| {
+        ProviderId::all()
+            .iter()
+            .copied()
+            .map(|provider| (provider, CatalogRefreshSlot::new()))
+            .collect()
+    });
+
+fn catalog_refresh_slot(provider: ProviderId) -> &'static CatalogRefreshSlot {
+    CATALOG_REFRESH_SLOTS
+        .get(&provider)
+        .expect("every provider has a catalog refresh slot")
+}
 
 impl App {
     pub fn apply_model_selection(&mut self, metadata: ModelMetadata, is_custom: bool) {
@@ -26,13 +63,48 @@ impl App {
         }
 
         self.runtime.current_model = model_id.clone();
+        if metadata.fast_mode.is_none() {
+            self.runtime.fast_mode = false;
+        }
 
-        let auth = self.resolve_auth_for_active_provider();
-        self.runtime.api_key = auth.clone();
-        self.runtime.ai_client = auth.map(|key| {
-            let config = self.create_client_config();
-            crate::ai::client::AiClient::with_api_key(config, key)
-        });
+        let reasoning_is_controllable = metadata.supports_thinking
+            && metadata.reasoning_control != Some(ReasoningControl::OutputOnly);
+        let mut thinking_levels = metadata
+            .supported_reasoning_levels
+            .iter()
+            .copied()
+            .map(ThinkingLevel::from_reasoning_effort)
+            .filter(|level| *level != ThinkingLevel::Ultra)
+            .collect::<Vec<_>>();
+        thinking_levels.dedup();
+        let fallback = metadata
+            .default_reasoning_level
+            .map(ThinkingLevel::from_reasoning_effort)
+            .filter(|level| !matches!(level, ThinkingLevel::Off | ThinkingLevel::Ultra))
+            .unwrap_or(ThinkingLevel::Medium);
+        if reasoning_is_controllable && thinking_levels.is_empty() {
+            thinking_levels = if metadata.reasoning_is_mandatory {
+                vec![fallback]
+            } else {
+                vec![ThinkingLevel::Off, fallback]
+            };
+        } else if metadata.reasoning_is_mandatory {
+            thinking_levels.retain(|level| *level != ThinkingLevel::Off);
+            if reasoning_is_controllable && thinking_levels.is_empty() {
+                thinking_levels.push(fallback);
+            }
+        } else if reasoning_is_controllable && !thinking_levels.contains(&ThinkingLevel::Off) {
+            thinking_levels.insert(0, ThinkingLevel::Off);
+        }
+        if !reasoning_is_controllable {
+            self.runtime.thinking_level = ThinkingLevel::Off;
+        } else if !thinking_levels.contains(&self.runtime.thinking_level) {
+            self.runtime.thinking_level = metadata
+                .default_reasoning_level
+                .map(ThinkingLevel::from_reasoning_effort)
+                .filter(|level| thinking_levels.contains(level))
+                .unwrap_or(thinking_levels[0]);
+        }
 
         let registry = self.services.model_registry.clone();
         let metadata_for_registry = metadata.clone();
@@ -42,6 +114,11 @@ impl App {
             registry.upsert_model(metadata_for_registry).await;
             registry.mark_recent(&model_id).await;
         });
+
+        // Construct transport only after custom/live metadata is registered so
+        // model availability and OpenAI auth provenance can fail closed.
+        self.runtime.api_key = self.resolve_auth_for_active_provider();
+        self.runtime.ai_client = self.create_ai_client();
 
         if let Some(ref prefs) = self.services.preferences {
             if let Err(e) = prefs.set_current_model(&model_id) {
@@ -59,12 +136,12 @@ impl App {
     }
 
     pub fn toggle_fast_mode(&mut self) -> Option<bool> {
-        let supports_fast_mode = CallOptions {
-            fast_mode: true,
-            ..Default::default()
-        }
-        .service_tier_for_provider(self.runtime.active_provider)
-        .is_some();
+        let supports_fast_mode = self
+            .services
+            .model_registry
+            .try_get_model(&self.runtime.current_model)
+            .and_then(|model| model.fast_mode)
+            .is_some();
         if !supports_fast_mode {
             return None;
         }
@@ -95,6 +172,10 @@ impl App {
 
     /// Start async fetch of models for a dynamic provider.
     pub fn start_dynamic_model_fetch(&mut self, provider: ProviderId) {
+        self.spawn_dynamic_model_fetch(provider, false);
+    }
+
+    fn spawn_dynamic_model_fetch(&mut self, provider: ProviderId, reset_catalog: bool) {
         if !crate::ai::catalog::supports_dynamic_models(provider) {
             return;
         }
@@ -103,19 +184,17 @@ impl App {
             return;
         }
 
-        let credential = crate::ai::catalog::credential_for_dynamic_models(
-            provider,
-            &self.services.credential_store,
-        );
-
-        let Some(credential) = credential else {
+        let credentials = self.services.credential_store.clone();
+        let has_credentials =
+            !crate::ai::catalog::credentials_for_dynamic_models(provider, &credentials).is_empty();
+        if !has_credentials && !reset_catalog {
             tracing::warn!(
                 "Cannot fetch {:?} models: no credential configured",
                 provider
             );
             self.runtime.dynamic_model_fetches.remove(&provider);
             return;
-        };
+        }
 
         let custom_models = self
             .services
@@ -123,16 +202,57 @@ impl App {
             .as_ref()
             .map(|prefs| prefs.get_custom_models(provider))
             .unwrap_or_default();
-
+        let curated_models = reset_catalog.then(|| curated_provider_models(provider));
+        let registry = self.services.model_registry.clone();
+        let generation = catalog_refresh_slot(provider)
+            .auth_generation
+            .load(Ordering::Acquire);
         let tx = self.ensure_dynamic_model_tx();
         self.ui.popups.model.set_loading(true);
 
-        let registry = self.services.model_registry.clone();
         tokio::spawn(async move {
-            let result = crate::ai::catalog::fetch_dynamic_models(provider, &credential).await;
+            let slot = catalog_refresh_slot(provider);
+
+            if let Some(curated_models) = curated_models {
+                let commit_guard = slot.commit_lock.lock().await;
+                if slot.auth_generation.load(Ordering::Acquire) != generation {
+                    return;
+                }
+                registry.set_models(provider, curated_models).await;
+                for metadata in custom_models.iter().cloned() {
+                    registry.upsert_model(metadata).await;
+                }
+                drop(commit_guard);
+                let _ = tx.send(DynamicModelUpdate::CatalogReset {
+                    provider,
+                    generation,
+                });
+            }
+
+            if !has_credentials {
+                let _ = tx.send(DynamicModelUpdate::RefreshFinished {
+                    provider,
+                    generation,
+                    result: Err(format!("No catalog credential configured for {provider}")),
+                });
+                return;
+            }
+
+            // Serialize provider fetches, but capture/check credential generation
+            // independently so rotation can supersede a slow request immediately.
+            let _fetch_guard = slot.fetch_lock.lock().await;
+            if slot.auth_generation.load(Ordering::Acquire) != generation {
+                return;
+            }
+            let result =
+                crate::ai::catalog::fetch_dynamic_models_for_store(provider, &credentials).await;
 
             match &result {
                 Ok(models) => {
+                    let _commit_guard = slot.commit_lock.lock().await;
+                    if slot.auth_generation.load(Ordering::Acquire) != generation {
+                        return;
+                    }
                     registry.set_models(provider, models.clone()).await;
                     for metadata in custom_models {
                         registry.upsert_model(metadata).await;
@@ -144,8 +264,9 @@ impl App {
                 }
             }
 
-            let _ = tx.send(DynamicModelUpdate {
+            let _ = tx.send(DynamicModelUpdate::RefreshFinished {
                 provider,
+                generation,
                 result: result.map_err(|e| e.to_string()),
             });
         });
@@ -189,24 +310,57 @@ impl App {
             return;
         }
 
+        let mut catalog_changed = false;
         let mut any_success = false;
         let mut last_error: Option<String> = None;
 
         for update in received {
-            self.runtime.dynamic_model_fetches.remove(&update.provider);
-            match update.result {
-                Ok(models) => {
-                    // Registry already updated on the async task — only cache + UI here.
-                    self.cache_dynamic_models(update.provider, &models);
-                    any_success = true;
+            match update {
+                DynamicModelUpdate::CatalogReset {
+                    provider,
+                    generation,
+                } => {
+                    if catalog_refresh_slot(provider)
+                        .auth_generation
+                        .load(Ordering::Acquire)
+                        != generation
+                    {
+                        continue;
+                    }
+                    self.rebind_active_client_after_catalog_change(provider);
+                    catalog_changed = true;
                 }
-                Err(error) => {
-                    last_error = Some(format!("{:?}: {error}", update.provider));
+                DynamicModelUpdate::RefreshFinished {
+                    provider,
+                    generation,
+                    result,
+                } => {
+                    if catalog_refresh_slot(provider)
+                        .auth_generation
+                        .load(Ordering::Acquire)
+                        != generation
+                    {
+                        continue;
+                    }
+                    self.runtime.dynamic_model_fetches.remove(&provider);
+                    match result {
+                        Ok(models) => {
+                            // The background task installed the registry snapshot
+                            // under the same generation/commit guard.
+                            self.cache_dynamic_models(provider, &models);
+                            self.rebind_active_client_after_catalog_change(provider);
+                            catalog_changed = true;
+                            any_success = true;
+                        }
+                        Err(error) => {
+                            last_error = Some(format!("{provider:?}: {error}"));
+                        }
+                    }
                 }
             }
         }
 
-        if any_success {
+        if catalog_changed {
             self.refresh_model_popup();
         }
 
@@ -223,6 +377,57 @@ impl App {
             self.runtime.channels.dynamic_models = None;
             self.runtime.channels.dynamic_models_tx = None;
         }
+    }
+
+    /// Invalidate entitlement-scoped catalog state and fetch with the new credential.
+    ///
+    /// A provider generation and commit lock prevent an older in-flight account
+    /// fetch from being applied after credential rotation. Other providers keep
+    /// refreshing independently.
+    pub fn refresh_dynamic_models_after_credential_change(&mut self, provider: ProviderId) {
+        if !crate::ai::catalog::supports_dynamic_models(provider) {
+            return;
+        }
+
+        // Supersede first so an old fetch cannot commit while local account
+        // state is being reset.
+        catalog_refresh_slot(provider)
+            .auth_generation
+            .fetch_add(1, Ordering::AcqRel);
+
+        if self.runtime.active_provider == provider {
+            // Do not allow the old account's selected row to execute during
+            // the asynchronous reset/refetch window.
+            self.runtime.api_key = None;
+            self.runtime.ai_client = None;
+        }
+
+        if let Some(ref prefs) = self.services.preferences {
+            if let Err(error) = prefs.clear_model_cache(provider) {
+                tracing::warn!("Failed to invalidate {:?} model cache: {}", provider, error);
+            }
+        }
+
+        // Other providers remain active while this provider is reset/refetched.
+        self.runtime.dynamic_model_fetches.remove(&provider);
+        self.spawn_dynamic_model_fetch(provider, true);
+    }
+
+    fn rebind_active_client_after_catalog_change(&mut self, provider: ProviderId) {
+        if self.runtime.active_provider != provider || !self.has_selected_model() {
+            return;
+        }
+
+        // Account-only models disappear during reset. Do not keep a client
+        // alive for stale catalog state while the replacement fetch is pending.
+        if !self.model_available_for_provider(&self.runtime.current_model, provider) {
+            self.runtime.api_key = None;
+            self.runtime.ai_client = None;
+            return;
+        }
+
+        self.runtime.api_key = self.resolve_auth_for_active_provider();
+        self.runtime.ai_client = self.create_ai_client();
     }
 
     fn cache_dynamic_models(&self, provider: ProviderId, models: &[ModelMetadata]) {
@@ -278,4 +483,33 @@ impl App {
             self.ui.popups.model.set_models(recent_models, models_vec);
         }
     }
+}
+
+fn curated_provider_models(provider: ProviderId) -> Vec<ModelMetadata> {
+    let Some(config) = get_provider(provider) else {
+        return Vec::new();
+    };
+
+    config
+        .models
+        .iter()
+        .map(|model_info| {
+            let api_format = detect_api_format(provider, &model_info.id);
+            let inferred = resolve_model_metadata(provider, &model_info.id, api_format);
+            let mut model = ModelMetadata::new(&model_info.id, &model_info.display_name, provider)
+                .with_context(model_info.context_window, model_info.max_output);
+            if let Some(reasoning) = model_info.reasoning {
+                model = model.with_thinking(reasoning);
+            }
+            model.supported_reasoning_levels = model_info.supported_reasoning_levels.clone();
+            model.default_reasoning_level = model_info.default_reasoning_level;
+            model.reasoning_is_mandatory = model_info.reasoning_is_mandatory;
+            model.reasoning_control = model_info.reasoning_control;
+            model.fast_mode = model_info.fast_mode;
+            model.supports_tools = config.supports_tools;
+            model.supports_vision = inferred.supports_vision;
+            model.api_format = inferred.api_format;
+            model
+        })
+        .collect()
 }

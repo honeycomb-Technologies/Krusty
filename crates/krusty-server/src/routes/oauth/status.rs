@@ -8,6 +8,9 @@ use krusty_core::ai::providers::ProviderId;
 use krusty_core::auth::{clear_grok_cli_auth, OAuthTokenStore};
 
 use super::parse_provider;
+use crate::ai_bootstrap::{
+    invalidate_provider_model_catalog, spawn_provider_model_catalog_refresh,
+};
 use crate::error::AppError;
 use crate::routes::credentials::has_provider_oauth;
 use crate::AppState;
@@ -70,6 +73,25 @@ pub(super) async fn revoke_oauth(
 
     OAuthTokenStore::remove_persisted(&provider_id)
         .map_err(|error| AppError::Internal(error.to_string()))?;
+
+    if krusty_core::ai::catalog::supports_dynamic_models(provider_id) {
+        invalidate_provider_model_catalog(
+            &state.model_registry,
+            state.db_path.as_path(),
+            provider_id,
+        )
+        .await
+        .map_err(|error| AppError::Internal(error.to_string()))?;
+        // A stored API key or environment credential may remain after OAuth
+        // revocation. Rebuild from it; otherwise the curated fallback remains.
+        spawn_provider_model_catalog_refresh(
+            state.model_registry.clone(),
+            state.credential_store.clone(),
+            state.db_path.clone(),
+            provider_id,
+            false,
+        );
+    }
 
     state
         .oauth_flows

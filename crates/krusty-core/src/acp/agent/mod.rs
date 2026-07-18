@@ -21,6 +21,7 @@ use super::bridge::AcpOutbound;
 use super::error::AcpError;
 use super::processor::PromptProcessor;
 use super::session::{SessionManager, SessionState};
+use crate::ai::models::ModelAuthScope;
 use crate::ai::providers::ProviderId;
 use crate::storage::credentials::ActiveProviderStore;
 use crate::storage::{Database, Preferences, SessionManager as StorageSessionManager};
@@ -33,8 +34,20 @@ pub struct ModelConfig {
     pub model_id: String,
 }
 
-/// (model_id, provider, actual_model_id, api_key, display_name)
-type AvailableModelRecord = (String, ProviderId, String, String, String);
+/// ACP picker row plus the exact transport that advertised it.
+///
+/// The credential remains private and this type intentionally does not derive
+/// `Debug`, so model-picker diagnostics cannot print secrets accidentally.
+#[derive(Clone)]
+struct AvailableModelRecord {
+    acp_model_id: String,
+    provider: ProviderId,
+    model_id: String,
+    credential: String,
+    display_name: String,
+    auth_scope: Option<ModelAuthScope>,
+    account_id: Option<String>,
+}
 
 fn persist_shared_current_model(provider: ProviderId, model_id: &str) {
     let model_id = model_id.trim();

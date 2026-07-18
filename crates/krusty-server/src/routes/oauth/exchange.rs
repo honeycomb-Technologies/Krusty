@@ -6,6 +6,9 @@ use krusty_core::auth::{
 };
 
 use super::{parse_provider, OAuthFlowKind};
+use crate::ai_bootstrap::{
+    invalidate_provider_model_catalog, spawn_provider_model_catalog_refresh,
+};
 use crate::error::AppError;
 use crate::AppState;
 
@@ -57,6 +60,17 @@ pub(super) async fn exchange_code(
         tracing::error!("Failed to save OAuth token: {}", error);
         AppError::Internal(error.to_string())
     })?;
+
+    invalidate_provider_model_catalog(&state.model_registry, state.db_path.as_path(), provider_id)
+        .await
+        .map_err(|error| AppError::Internal(error.to_string()))?;
+    spawn_provider_model_catalog_refresh(
+        state.model_registry.clone(),
+        state.credential_store.clone(),
+        state.db_path.clone(),
+        provider_id,
+        false,
+    );
 
     tracing::info!("OAuth token stored successfully for {}", provider_id);
     state
