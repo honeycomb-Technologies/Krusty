@@ -2036,6 +2036,19 @@ async fn tool_approval_outbox_retries_until_the_active_host_accepts_it() {
     .await;
 
     wait_for(|| backend.delivered.load(Ordering::SeqCst)).await;
+    wait_for(|| {
+        let db = Database::new(&runtime_config.database_path).unwrap();
+        db.conn()
+            .query_row(
+                "SELECT COUNT(*) FROM mako_control_outbox
+                 WHERE session_id = ?1 AND dedupe_key = ?2 AND status = 'delivered'",
+                rusqlite::params![session_id, format!("{run_id}:tool-1")],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 1
+    })
+    .await;
     let db = Database::new(&runtime_config.database_path).unwrap();
     let (rows, status, attempts): (i64, String, i64) = db
         .conn()
