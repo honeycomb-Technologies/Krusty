@@ -163,9 +163,14 @@ upgrade, but fencing makes only one generation authoritative.
 
 The daemon never changes process-global current working directory to run a
 schedule. Each execution receives an explicit, frozen workspace and its tool
-context is scoped there. The current in-daemon execution host still inherits a
-minimal daemon process environment; explicit per-run environment construction
-belongs at the future child-worker boundary.
+context is scoped there. The current in-daemon execution host still inherits
+its supervised service environment, including that environment in shell tools.
+Deployments must therefore keep the service-manager environment minimal and
+use an `UnsetEnvironment=` drop-in for unrelated ambient credentials or
+bootstrap tokens. Provider and push variables that the deployment intentionally
+uses remain part of the daemon's trusted service environment. A strict,
+allow-listed environment for each run belongs at the future child-worker
+boundary; until then the service environment itself is a security boundary.
 
 ## Crash Recovery
 
