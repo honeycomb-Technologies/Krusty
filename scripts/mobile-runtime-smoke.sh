@@ -3,13 +3,10 @@ set -euo pipefail
 
 BASE_URL="${KRUSTY_MOBILE_SERVER:-http://127.0.0.1:3000}"
 RUN_CHAT="${MOBILE_SMOKE_CHAT:-0}"
-RUN_LAUNCH="${MOBILE_SMOKE_LAUNCH:-0}"
-LAUNCH_TIMEOUT="${MOBILE_SMOKE_LAUNCH_TIMEOUT:-8s}"
 
 for arg in "$@"; do
 	case "$arg" in
 	--chat) RUN_CHAT=1 ;;
-	--launch) RUN_LAUNCH=1 ;;
 	*)
 		printf 'unknown argument: %s\n' "$arg" >&2
 		exit 2
@@ -37,7 +34,7 @@ curl_json() {
 	curl -fsS -H 'Accept: application/json' "$@"
 }
 
-printf '== Krusty mobile runtime smoke ==\n'
+printf '== Krusty Expo/mobile server runtime smoke ==\n'
 printf 'server: %s\n' "$BASE_URL"
 
 curl_json "$(api /health)" >"$HEALTH_JSON"
@@ -145,24 +142,6 @@ print('chat stream ok:', finish)
 PY
 else
 	printf 'chat stream skipped (pass --chat to run a real model request)\n'
-fi
-
-if [[ "$RUN_LAUNCH" == "1" ]]; then
-	printf 'launch smoke: cargo run -p krusty-mobile (timeout %s)\n' "$LAUNCH_TIMEOUT"
-	set +e
-	KRUSTY_MOBILE_SERVER="$BASE_URL" timeout "$LAUNCH_TIMEOUT" cargo run -p krusty-mobile
-	status=$?
-	set -e
-	case "$status" in
-	0) printf 'mobile launch smoke: exited_cleanly\n' ;;
-	124) printf 'mobile launch smoke: running_window_timed_out\n' ;;
-	*)
-		printf 'mobile launch smoke: failed with status %s\n' "$status" >&2
-		exit "$status"
-		;;
-	esac
-else
-	printf 'mobile launch skipped (pass --launch to compile/run the GPUI preview briefly)\n'
 fi
 
 printf 'mobile runtime smoke passed\n'
