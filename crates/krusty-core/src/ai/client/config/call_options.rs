@@ -1,5 +1,7 @@
 use crate::ai::models::{resolve_model_metadata, ApiFormat};
-use crate::ai::providers::{FastMode, ProviderCapabilities, ProviderId, ReasoningFormat};
+use crate::ai::providers::{
+    FastMode, ProviderCapabilities, ProviderId, ReasoningControl, ReasoningFormat,
+};
 use crate::ai::types::{
     AiTool, ContextManagement, ThinkingConfig, WebFetchConfig, WebSearchConfig,
 };
@@ -62,9 +64,13 @@ pub struct CallOptions {
     pub system_prompt: Option<String>,
     /// Extended thinking configuration (Anthropic-style)
     pub thinking: Option<ThinkingConfig>,
-    /// Universal reasoning format - determines how to encode reasoning in requests
-    /// When Some, enables reasoning for the model using the appropriate format
+    /// Reasoning capability advertised by the selected model. This does not
+    /// enable reasoning; `thinking` remains the single source of truth for the
+    /// request's active/off state.
     pub reasoning_format: Option<ReasoningFormat>,
+    /// Catalog-selected wire control. When present, this is authoritative over
+    /// model-name heuristics and keeps dynamically discovered models usable.
+    pub reasoning_control: Option<ReasoningControl>,
     /// Enable prompt caching (default: true)
     pub enable_caching: bool,
     /// Requested provider prompt-cache lifetime. Defaults from
@@ -101,6 +107,7 @@ impl Default for CallOptions {
             system_prompt: None,
             thinking: None,
             reasoning_format: None,
+            reasoning_control: None,
             enable_caching: true,
             prompt_cache_retention: PromptCacheRetention::from_env(),
             context_management: None,
@@ -140,38 +147,59 @@ impl CallOptions {
             options.fast_mode_format = None;
         }
 
-        if provider == ProviderId::Grok {
+        let authoritative_reasoning_metadata = options.reasoning_control.is_some();
+        let resolved_reasoning_format = if authoritative_reasoning_metadata {
+            options.reasoning_format
+        } else {
+            inferred.reasoning_format
+        };
+        let resolved_reasoning_control = options.reasoning_control.or(inferred.reasoning_control);
+
+        if provider == ProviderId::Grok
+            || resolved_reasoning_control == Some(ReasoningControl::OutputOnly)
+        {
             // Krusty's Grok provider targets the Grok CLI proxy, which can emit
             // reasoning blocks but rejects explicit `reasoning`/`reasoningEffort`
             // request controls. Keep parsing reasoning output, but never send a
             // provider-native thinking knob on this transport.
-            options.reasoning_format = None;
+            options.reasoning_format = resolved_reasoning_format;
+            options.reasoning_control = Some(ReasoningControl::OutputOnly);
             options.thinking = None;
             options.codex_reasoning_effort = None;
             options.anthropic_adaptive_effort = None;
-        } else if inferred.reasoning_format.is_none() {
+        } else if resolved_reasoning_format.is_none() {
             options.reasoning_format = None;
+            options.reasoning_control = None;
             options.thinking = None;
             options.codex_reasoning_effort = None;
             options.anthropic_adaptive_effort = None;
         } else {
-            if options.reasoning_format != inferred.reasoning_format {
-                options.reasoning_format = inferred.reasoning_format;
+            options.reasoning_format = resolved_reasoning_format;
+            options.reasoning_control = resolved_reasoning_control;
+
+            // Mandatory-reasoning models cannot honor an Off request. Internal
+            // call paths that bypass the UI still need a valid request.
+            if inferred.reasoning_is_mandatory && options.thinking.is_none() {
+                options.thinking = Some(ThinkingConfig::default());
             }
 
-            match options.reasoning_format {
-                Some(ReasoningFormat::OpenAI) => {
+            match options.reasoning_control {
+                Some(ReasoningControl::OpenAiEffort) => {
                     options.anthropic_adaptive_effort = None;
                 }
-                Some(ReasoningFormat::Anthropic) => {
-                    if provider != ProviderId::OpenRouter {
-                        options.codex_reasoning_effort = None;
-                    }
+                Some(ReasoningControl::AnthropicAdaptive) => {
+                    options.codex_reasoning_effort = None;
                 }
-                _ => {
+                Some(ReasoningControl::AnthropicBudget | ReasoningControl::Boolean) | None => {
                     options.codex_reasoning_effort = None;
                     options.anthropic_adaptive_effort = None;
                 }
+                Some(ReasoningControl::OutputOnly) => unreachable!("handled above"),
+            }
+
+            if options.thinking.is_none() {
+                options.codex_reasoning_effort = None;
+                options.anthropic_adaptive_effort = None;
             }
         }
 
@@ -216,9 +244,11 @@ impl CallOptions {
     /// `gpt-5.5-mini` can both run in standard or fast service tiers.
     pub fn service_tier_for_provider(&self, provider: ProviderId) -> Option<&'static str> {
         match (provider, self.fast_mode, self.fast_mode_format) {
-            (ProviderId::OpenAI | ProviderId::OpenRouter, true, Some(FastMode::Priority)) => {
-                Some("priority")
-            }
+            (
+                ProviderId::OpenAI | ProviderId::OpenRouter | ProviderId::MiniMax,
+                true,
+                Some(FastMode::Priority),
+            ) => Some("priority"),
             _ => None,
         }
     }
@@ -388,7 +418,7 @@ mod tests {
     };
     use crate::ai::client::config::CodexReasoningEffort;
     use crate::ai::models::ApiFormat;
-    use crate::ai::providers::{ProviderId, ReasoningFormat};
+    use crate::ai::providers::{FastMode, ProviderId, ReasoningControl, ReasoningFormat};
     use crate::ai::types::{
         AiTool, ContextManagement, ThinkingConfig, WebFetchConfig, WebSearchConfig,
     };
@@ -736,7 +766,11 @@ mod tests {
         let canonical =
             options.canonicalized_for(ProviderId::Grok, "grok-build", ApiFormat::OpenAIResponses);
 
-        assert!(canonical.reasoning_format.is_none());
+        assert_eq!(canonical.reasoning_format, Some(ReasoningFormat::OpenAI));
+        assert_eq!(
+            canonical.reasoning_control,
+            Some(ReasoningControl::OutputOnly)
+        );
         assert!(canonical.codex_reasoning_effort.is_none());
         assert!(canonical.codex_parallel_tool_calls);
         assert!(canonical.thinking.is_none());
@@ -746,6 +780,7 @@ mod tests {
     fn fast_mode_maps_to_provider_service_tiers_without_changing_models() {
         let options = CallOptions {
             fast_mode: true,
+            fast_mode_format: Some(FastMode::Priority),
             ..Default::default()
         };
 
@@ -755,13 +790,16 @@ mod tests {
         );
         assert_eq!(
             options.service_tier_for_provider(ProviderId::Anthropic),
-            Some("auto")
+            None
         );
         assert_eq!(
             options.service_tier_for_provider(ProviderId::OpenRouter),
             Some("priority")
         );
-        assert_eq!(options.service_tier_for_provider(ProviderId::MiniMax), None);
+        assert_eq!(
+            options.service_tier_for_provider(ProviderId::MiniMax),
+            Some("priority")
+        );
         assert_eq!(options.service_tier_for_provider(ProviderId::ZAi), None);
     }
 
@@ -772,11 +810,30 @@ mod tests {
         assert_eq!(options.service_tier_for_provider(ProviderId::OpenAI), None);
         assert_eq!(
             options.service_tier_for_provider(ProviderId::Anthropic),
-            Some("standard_only")
+            None
         );
         assert_eq!(
             options.service_tier_for_provider(ProviderId::OpenRouter),
             None
         );
+    }
+
+    #[test]
+    fn reasoning_capability_does_not_turn_an_off_request_on() {
+        let options = CallOptions {
+            reasoning_format: Some(ReasoningFormat::Anthropic),
+            reasoning_control: Some(ReasoningControl::AnthropicAdaptive),
+            ..Default::default()
+        };
+
+        let canonical = options.canonicalized_for(
+            ProviderId::Anthropic,
+            "claude-opus-4-8",
+            ApiFormat::Anthropic,
+        );
+
+        assert_eq!(canonical.reasoning_format, Some(ReasoningFormat::Anthropic));
+        assert!(canonical.thinking.is_none());
+        assert!(canonical.anthropic_adaptive_effort.is_none());
     }
 }

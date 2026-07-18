@@ -569,8 +569,12 @@ impl KrustyMobile {
             .when(self.accordion_open, |this| {
                 this.child(
                     self.control_pill("model-pill", "Bot", false, cx, |app, cx| {
-                        app.model_picker_open = !app.model_picker_open;
+                        let opening = !app.model_picker_open;
+                        app.model_picker_open = opening;
                         app.attach_sheet_open = false;
+                        if opening {
+                            app.load_models(cx);
+                        }
                         cx.notify();
                     }),
                 )
@@ -627,16 +631,19 @@ impl KrustyMobile {
                         cx.notify();
                     },
                 ))
-                .child(self.control_pill(
-                    "thinking-pill",
-                    self.store.state.controls.thinking_level.label(),
-                    self.store.state.controls.thinking_level != krusty_client::ThinkingLevel::Off,
-                    cx,
-                    |app, cx| {
-                        app.store.cycle_thinking();
-                        cx.notify();
-                    },
-                ))
+                .when(self.store.supports_thinking_control(), |this| {
+                    this.child(self.control_pill(
+                        "thinking-pill",
+                        self.store.state.controls.thinking_level.label(),
+                        self.store.state.controls.thinking_level
+                            != krusty_client::ThinkingLevel::Off,
+                        cx,
+                        |app, cx| {
+                            app.store.cycle_thinking();
+                            cx.notify();
+                        },
+                    ))
+                })
             })
             .child(
                 div()

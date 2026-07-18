@@ -257,10 +257,13 @@ mod tests {
     fn chatgpt_codex_streaming_body_carries_fast_mode_service_tier() {
         let client = openai_responses_client();
         let format_handler = OpenAIFormat::new(ApiFormat::OpenAIResponses);
-        let options = CallOptions {
-            fast_mode: true,
-            ..Default::default()
-        };
+        let options = client.canonical_call_options(
+            "gpt-5.5",
+            &CallOptions {
+                fast_mode: true,
+                ..Default::default()
+            },
+        );
         let messages = vec![ModelMessage {
             role: Role::User,
             content: vec![Content::Text {

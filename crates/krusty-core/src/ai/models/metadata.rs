@@ -14,6 +14,19 @@ pub struct DynamicModelCacheMetadata {
     pub fingerprint: u64,
 }
 
+/// Authentication surface that advertised a model in a live catalog.
+///
+/// This is intentionally internal model-routing metadata, not a UI capability.
+/// OpenAI API-key and ChatGPT OAuth catalogs may contain overlapping IDs with
+/// different capabilities, so the selected row must retain its transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelAuthScope {
+    ApiKey,
+    #[serde(rename = "oauth")]
+    OAuth,
+}
+
 /// API format for model requests
 ///
 /// Different model families route to different provider endpoints based on format.
@@ -40,6 +53,9 @@ pub struct ModelMetadata {
     pub display_name: String,
     /// Which provider offers this model
     pub provider: ProviderId,
+    /// Credential surface that supplied this catalog row, when transport-sensitive.
+    #[serde(default)]
+    pub auth_scope: Option<ModelAuthScope>,
     /// Maximum context window in tokens
     pub context_window: usize,
     /// Maximum output tokens
@@ -95,6 +111,7 @@ impl ModelMetadata {
             id: id.to_string(),
             display_name: display_name.to_string(),
             provider,
+            auth_scope: None,
             context_window: 128_000,
             max_output: 4096,
             supports_thinking: false,
@@ -198,12 +215,13 @@ pub fn model_catalog_fingerprint(models: &[ModelMetadata]) -> u64 {
         .iter()
         .map(|model| {
             format!(
-                "{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{:?}|{:?}|{}|{}|{:?}|{:?}",
+                "{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}|{:?}|{:?}|{}|{}|{:?}|{:?}",
                 model.id,
                 model.display_name,
                 model.context_window,
                 model.max_output,
                 model.provider,
+                model.auth_scope,
                 model.api_format,
                 model.reasoning_format,
                 model.supported_reasoning_levels,

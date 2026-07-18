@@ -51,44 +51,34 @@ impl App {
             .iter()
             .copied()
             .map(ThinkingLevel::from_reasoning_effort)
+            .filter(|level| *level != ThinkingLevel::Ultra)
             .collect::<Vec<_>>();
         levels.dedup();
+        let fallback = metadata
+            .default_reasoning_level
+            .map(ThinkingLevel::from_reasoning_effort)
+            .filter(|level| !matches!(level, ThinkingLevel::Off | ThinkingLevel::Ultra))
+            .unwrap_or(ThinkingLevel::Medium);
         if levels.is_empty() {
             return if metadata.supports_thinking {
-                vec![ThinkingLevel::Off, ThinkingLevel::Medium]
+                if metadata.reasoning_is_mandatory {
+                    vec![fallback]
+                } else {
+                    vec![ThinkingLevel::Off, fallback]
+                }
             } else {
                 vec![ThinkingLevel::Off]
             };
         }
         if metadata.reasoning_is_mandatory {
             levels.retain(|level| *level != ThinkingLevel::Off);
+            if levels.is_empty() {
+                levels.push(fallback);
+            }
         } else if !levels.contains(&ThinkingLevel::Off) {
             levels.insert(0, ThinkingLevel::Off);
         }
         levels
-    }
-
-    /// Whether the active transport accepts OpenAI-style effort controls.
-    pub fn is_openai_xhigh_thinking_mode(&self) -> bool {
-        self.current_model_metadata().is_some_and(|metadata| {
-            metadata.reasoning_control == Some(ReasoningControl::OpenAiEffort)
-                && !metadata.supported_reasoning_levels.is_empty()
-        })
-    }
-
-    /// Whether the active transport accepts Anthropic adaptive effort.
-    pub fn is_anthropic_opus_thinking_mode(&self) -> bool {
-        self.current_model_metadata().is_some_and(|metadata| {
-            metadata.reasoning_control == Some(ReasoningControl::AnthropicAdaptive)
-        })
-    }
-
-    /// Whether Tab should cycle Grok Build/Composer thinking effort levels.
-    pub fn is_grok_thinking_mode(&self) -> bool {
-        // The Grok CLI proxy can stream reasoning blocks but rejects explicit
-        // request-side reasoning controls, so Krusty does not expose a Grok
-        // thinking-effort toggle for this provider transport.
-        false
     }
 
     /// Whether this model supports multi-level thinking cycling.

@@ -116,7 +116,7 @@ pub enum ReasoningFormat {
 /// Keep this independent from provider request enums: catalog values describe
 /// what the account/model supports, while the request layer may normalize a
 /// value (for example Codex `ultra`) to a different wire value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
     None,

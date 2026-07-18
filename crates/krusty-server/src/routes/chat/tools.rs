@@ -1,10 +1,5 @@
-use krusty_core::ai::client::{
-    supports_openai_xhigh_reasoning, AiClient, AnthropicAdaptiveEffort, CallOptions,
-    CodexReasoningEffort,
-};
-use krusty_core::ai::model_profile::{ModelProfile, PromptFamily};
-use krusty_core::ai::models::ApiFormat;
-use krusty_core::ai::providers::{get_model_family, ModelFamily, ProviderId};
+use krusty_core::ai::client::{AnthropicAdaptiveEffort, CallOptions, CodexReasoningEffort};
+use krusty_core::ai::providers::ReasoningControl;
 use krusty_core::ai::types::{AiTool, ThinkingConfig};
 use krusty_core::storage::SessionType;
 
@@ -237,50 +232,35 @@ pub(super) fn chat_system_prompt(research_enabled: bool) -> String {
     )
 }
 
-pub(super) fn apply_thinking_config(
-    ai_client: &AiClient,
-    thinking_level: ThinkingLevel,
-    options: &mut CallOptions,
-) {
+pub(super) fn apply_thinking_config(thinking_level: ThinkingLevel, options: &mut CallOptions) {
     if !thinking_level.is_enabled() {
         return;
     }
 
-    let cfg = ai_client.config();
     options.thinking = Some(ThinkingConfig::default());
 
-    if cfg.provider_id == ProviderId::OpenRouter {
-        options.codex_reasoning_effort = raw_codex_effort_for_level(thinking_level);
-    } else if supports_openai_reasoning_effort(cfg.provider_id, cfg.api_format, &cfg.model) {
-        options.codex_reasoning_effort = codex_effort_for_level(thinking_level, &cfg.model);
-    } else if supports_anthropic_adaptive_effort(cfg.provider_id, &cfg.model) {
-        options.anthropic_adaptive_effort = anthropic_effort_for_level(thinking_level);
+    match options.reasoning_control {
+        Some(ReasoningControl::OpenAiEffort) => {
+            options.codex_reasoning_effort = raw_codex_effort_for_level(thinking_level);
+        }
+        Some(ReasoningControl::AnthropicAdaptive) => {
+            options.anthropic_adaptive_effort = anthropic_effort_for_level(thinking_level);
+        }
+        Some(ReasoningControl::OutputOnly) => {
+            options.thinking = None;
+        }
+        Some(ReasoningControl::AnthropicBudget | ReasoningControl::Boolean) | None => {}
     }
 }
 
-fn codex_effort_for_level(
-    thinking_level: ThinkingLevel,
-    model: &str,
-) -> Option<CodexReasoningEffort> {
-    raw_codex_effort_for_level(thinking_level).map(|effort| effort.normalized_for_model(model))
-}
-
-fn raw_codex_effort_for_level(
-    thinking_level: ThinkingLevel,
-) -> Option<CodexReasoningEffort> {
+fn raw_codex_effort_for_level(thinking_level: ThinkingLevel) -> Option<CodexReasoningEffort> {
     Some(match thinking_level {
         ThinkingLevel::Off => return None,
         ThinkingLevel::Minimal => CodexReasoningEffort::Minimal,
         ThinkingLevel::Low => CodexReasoningEffort::Low,
         ThinkingLevel::Medium => CodexReasoningEffort::Medium,
         ThinkingLevel::High => CodexReasoningEffort::High,
-        ThinkingLevel::XHigh => {
-            if supports_openai_xhigh_reasoning(model) {
-                CodexReasoningEffort::XHigh
-            } else {
-                CodexReasoningEffort::High
-            }
-        }
+        ThinkingLevel::XHigh => CodexReasoningEffort::XHigh,
         ThinkingLevel::Max | ThinkingLevel::Ultra => CodexReasoningEffort::Max,
     })
 }
@@ -294,39 +274,6 @@ fn anthropic_effort_for_level(thinking_level: ThinkingLevel) -> Option<Anthropic
         ThinkingLevel::XHigh => AnthropicAdaptiveEffort::XHigh,
         ThinkingLevel::Max | ThinkingLevel::Ultra => AnthropicAdaptiveEffort::Max,
     })
-}
-
-fn supports_openai_reasoning_effort(
-    provider_id: ProviderId,
-    api_format: ApiFormat,
-    model_id: &str,
-) -> bool {
-    matches!(
-        ModelProfile::resolve(provider_id, api_format, model_id).prompt_family,
-        PromptFamily::OpenAiCodex | PromptFamily::OpenAiReasoning
-    )
-}
-
-fn supports_anthropic_adaptive_effort(provider_id: ProviderId, model_id: &str) -> bool {
-    provider_id == ProviderId::Anthropic && is_claude_adaptive_family(model_id)
-}
-
-fn is_claude_adaptive_family(model_id: &str) -> bool {
-    let normalized = normalize_model_id(model_id);
-    get_model_family(normalized.as_str()) == Some(ModelFamily::ClaudeOpus4_6)
-        || normalized.contains("claude-opus-4-6")
-        || normalized.starts_with("opus-4-6")
-        || normalized.contains("claude-opus-4-8")
-        || normalized.starts_with("opus-4-8")
-        || normalized.contains("claude-sonnet-5")
-        || normalized.contains("claude-fable-5")
-}
-
-fn normalize_model_id(model_id: &str) -> String {
-    model_id
-        .trim()
-        .to_ascii_lowercase()
-        .replace([' ', '.'], "-")
 }
 
 #[cfg(test)]
@@ -489,48 +436,17 @@ mod tests {
     }
 
     #[test]
-    fn openai_reasoning_support_uses_shared_model_profile_resolution() {
-        assert!(supports_openai_reasoning_effort(
-            ProviderId::OpenAI,
-            ApiFormat::OpenAIResponses,
-            "gpt-5.3-codex"
-        ));
-        assert!(supports_openai_reasoning_effort(
-            ProviderId::OpenAI,
-            ApiFormat::OpenAIResponses,
-            "gpt-5.4"
-        ));
-        assert!(supports_openai_reasoning_effort(
-            ProviderId::OpenAI,
-            ApiFormat::OpenAIResponses,
-            "gpt-5.5"
-        ));
-        assert!(!supports_openai_reasoning_effort(
-            ProviderId::Anthropic,
-            ApiFormat::Anthropic,
-            "claude-opus-4.6"
-        ));
-    }
-
-    #[test]
-    fn xhigh_reasoning_support_tracks_openai_model_family() {
-        assert!(supports_openai_xhigh_reasoning("gpt-5.4"));
-        assert!(supports_openai_xhigh_reasoning("gpt-5.5"));
-        assert!(!supports_openai_xhigh_reasoning("gpt-5.2"));
-    }
-
-    #[test]
     fn extended_levels_map_to_provider_efforts() {
         assert_eq!(
-            codex_effort_for_level(ThinkingLevel::Minimal, "gpt-5.6"),
+            raw_codex_effort_for_level(ThinkingLevel::Minimal),
             Some(CodexReasoningEffort::Minimal)
         );
         assert_eq!(
-            codex_effort_for_level(ThinkingLevel::Max, "gpt-5.6"),
+            raw_codex_effort_for_level(ThinkingLevel::Max),
             Some(CodexReasoningEffort::Max)
         );
         assert_eq!(
-            codex_effort_for_level(ThinkingLevel::Ultra, "gpt-5.6"),
+            raw_codex_effort_for_level(ThinkingLevel::Ultra),
             Some(CodexReasoningEffort::Max)
         );
         assert_eq!(
@@ -544,22 +460,23 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_adaptive_effort_support_accepts_versioned_opus_variants() {
-        assert!(supports_anthropic_adaptive_effort(
-            ProviderId::Anthropic,
-            "claude-opus-4.6-20250320"
-        ));
-        assert!(supports_anthropic_adaptive_effort(
-            ProviderId::Anthropic,
-            " claude opus 4.6 "
-        ));
-        assert!(!supports_anthropic_adaptive_effort(
-            ProviderId::OpenRouter,
-            "anthropic/claude-opus-4.6"
-        ));
-        assert!(!supports_anthropic_adaptive_effort(
-            ProviderId::Anthropic,
-            "claude-sonnet-4.5"
-        ));
+    fn thinking_config_uses_catalog_reasoning_control() {
+        let mut options = CallOptions {
+            reasoning_control: Some(ReasoningControl::AnthropicAdaptive),
+            ..Default::default()
+        };
+        apply_thinking_config(ThinkingLevel::XHigh, &mut options);
+        assert!(options.thinking.is_some());
+        assert_eq!(
+            options.anthropic_adaptive_effort,
+            Some(AnthropicAdaptiveEffort::XHigh)
+        );
+
+        let mut output_only = CallOptions {
+            reasoning_control: Some(ReasoningControl::OutputOnly),
+            ..Default::default()
+        };
+        apply_thinking_config(ThinkingLevel::High, &mut output_only);
+        assert!(output_only.thinking.is_none());
     }
 }

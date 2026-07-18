@@ -1,4 +1,4 @@
-use crate::ai::models::{ApiFormat, ModelMetadata};
+use crate::ai::models::{ApiFormat, ModelAuthScope, ModelMetadata};
 use crate::ai::providers::{
     FastMode, ProviderConfig, ProviderId, ReasoningControl, ReasoningEffort, ReasoningFormat,
 };
@@ -27,14 +27,7 @@ const GPT_54_LEVELS: &[ReasoningEffort] = &[
     ReasoningEffort::High,
     ReasoningEffort::XHigh,
 ];
-const GPT_55_PRO_LEVELS: &[ReasoningEffort] = &[
-    ReasoningEffort::Medium,
-    ReasoningEffort::High,
-    ReasoningEffort::XHigh,
-];
 const GPT_PRO_LEVELS: &[ReasoningEffort] = &[
-    ReasoningEffort::Minimal,
-    ReasoningEffort::Low,
     ReasoningEffort::Medium,
     ReasoningEffort::High,
     ReasoningEffort::XHigh,
@@ -82,6 +75,7 @@ pub(super) fn is_useful_model(id: &str) -> bool {
     gpt_major_version(normalized).is_some_and(|major| major >= 4)
         || is_openai_o_series(normalized)
         || normalized.starts_with("chatgpt-")
+        || normalized == "chat-latest"
         || normalized.starts_with("codex-")
 }
 
@@ -95,6 +89,7 @@ pub(super) fn parse_model(raw: OpenAiModel) -> ModelMetadata {
     let mut metadata = ModelMetadata::new(&id, &display_name(&id), ProviderId::OpenAI)
         .with_context(profile.context_window, profile.max_output);
     metadata.supports_tools = true;
+    metadata.auth_scope = Some(ModelAuthScope::ApiKey);
     metadata.supports_vision = profile.supports_vision;
     metadata.api_format = if prefers_responses {
         ApiFormat::OpenAIResponses
@@ -140,16 +135,24 @@ pub(super) fn parse_chatgpt_model(raw: ChatGptModel) -> Option<ModelMetadata> {
         .unwrap_or(metadata.context_window);
     metadata.max_output = raw.max_output_tokens.unwrap_or(metadata.max_output);
     metadata.api_format = ApiFormat::OpenAIResponses;
+    metadata.auth_scope = Some(ModelAuthScope::OAuth);
 
     let mut levels = Vec::new();
     for preset in raw.supported_reasoning_levels {
-        let Some(level) = parse_reasoning_effort(&preset.effort) else {
+        let Some(mut level) = parse_reasoning_effort(&preset.effort) else {
             continue;
         };
+        // Codex's `ultra` label is an orchestration mode layered on top of the
+        // model effort, not a distinct provider wire value. Krusty preserves
+        // legacy Ultra input elsewhere but exposes the underlying Max effort.
+        if level == ReasoningEffort::Ultra {
+            level = ReasoningEffort::Max;
+        }
         if !levels.contains(&level) {
             levels.push(level);
         }
     }
+    levels.sort();
     metadata.supports_thinking = !levels.is_empty();
     metadata.reasoning_format = (!levels.is_empty()).then_some(ReasoningFormat::OpenAI);
     metadata.reasoning_control = (!levels.is_empty()).then_some(ReasoningControl::OpenAiEffort);
@@ -206,7 +209,7 @@ fn capability_profile(model_id: &str) -> CapabilityProfile {
             context_window: 1_050_000,
             max_output: 128_000,
             reasoning_levels: GPT_56_LEVELS,
-            default_reasoning: Some(ReasoningEffort::Low),
+            default_reasoning: Some(ReasoningEffort::Medium),
             reasoning_is_mandatory: false,
             fast_mode: Some(FastMode::Priority),
             supports_vision: true,
@@ -221,7 +224,7 @@ fn capability_profile(model_id: &str) -> CapabilityProfile {
             supports_vision: true,
         },
         "gpt-5.5" => CapabilityProfile {
-            context_window: 272_000,
+            context_window: 1_050_000,
             max_output: 128_000,
             reasoning_levels: GPT_55_LEVELS,
             default_reasoning: Some(ReasoningEffort::Medium),
@@ -232,7 +235,7 @@ fn capability_profile(model_id: &str) -> CapabilityProfile {
         "gpt-5.5-pro" => CapabilityProfile {
             context_window: 1_050_000,
             max_output: 128_000,
-            reasoning_levels: GPT_55_PRO_LEVELS,
+            reasoning_levels: GPT_PRO_LEVELS,
             default_reasoning: Some(ReasoningEffort::High),
             reasoning_is_mandatory: true,
             fast_mode: None,
@@ -242,16 +245,25 @@ fn capability_profile(model_id: &str) -> CapabilityProfile {
             context_window: 1_050_000,
             max_output: 128_000,
             reasoning_levels: GPT_54_LEVELS,
-            default_reasoning: Some(ReasoningEffort::Medium),
+            default_reasoning: Some(ReasoningEffort::None),
             reasoning_is_mandatory: false,
             fast_mode: Some(FastMode::Priority),
             supports_vision: true,
         },
-        "gpt-5.4-mini" | "gpt-5.4-nano" => CapabilityProfile {
+        "gpt-5.4-mini" => CapabilityProfile {
             context_window: 400_000,
             max_output: 128_000,
             reasoning_levels: GPT_54_LEVELS,
-            default_reasoning: Some(ReasoningEffort::Medium),
+            default_reasoning: Some(ReasoningEffort::None),
+            reasoning_is_mandatory: false,
+            fast_mode: Some(FastMode::Priority),
+            supports_vision: true,
+        },
+        "gpt-5.4-nano" => CapabilityProfile {
+            context_window: 400_000,
+            max_output: 128_000,
+            reasoning_levels: GPT_54_LEVELS,
+            default_reasoning: Some(ReasoningEffort::None),
             reasoning_is_mandatory: false,
             fast_mode: None,
             supports_vision: true,
@@ -260,7 +272,7 @@ fn capability_profile(model_id: &str) -> CapabilityProfile {
             context_window: 1_050_000,
             max_output: 128_000,
             reasoning_levels: GPT_PRO_LEVELS,
-            default_reasoning: Some(ReasoningEffort::High),
+            default_reasoning: Some(ReasoningEffort::Medium),
             reasoning_is_mandatory: true,
             fast_mode: None,
             supports_vision: true,
@@ -286,6 +298,15 @@ fn capability_profile(model_id: &str) -> CapabilityProfile {
         "gpt-5.3-chat-latest" => CapabilityProfile {
             context_window: 128_000,
             max_output: 16_384,
+            reasoning_levels: &[],
+            default_reasoning: None,
+            reasoning_is_mandatory: false,
+            fast_mode: None,
+            supports_vision: true,
+        },
+        "chat-latest" => CapabilityProfile {
+            context_window: 400_000,
+            max_output: 128_000,
             reasoning_levels: &[],
             default_reasoning: None,
             reasoning_is_mandatory: false,
@@ -453,7 +474,7 @@ fn gpt_major_version(model_id: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{display_name, is_useful_model, parse_chatgpt_model, parse_model};
-    use crate::ai::models::ApiFormat;
+    use crate::ai::models::{ApiFormat, ModelAuthScope};
     use crate::ai::openai::types::{ChatGptModelsResponse, OpenAiModel};
     use crate::ai::providers::{FastMode, ReasoningControl, ReasoningEffort};
 
@@ -464,6 +485,7 @@ mod tests {
             "gpt-6.4",
             "o5",
             "chatgpt-4o-latest",
+            "chat-latest",
             "codex-mini-latest",
             "openai/gpt-5.5-mini",
         ] {
@@ -503,6 +525,7 @@ mod tests {
         assert_eq!(metadata.context_window, 1_050_000);
         assert_eq!(metadata.max_output, 128_000);
         assert_eq!(metadata.api_format, ApiFormat::OpenAIResponses);
+        assert_eq!(metadata.auth_scope, Some(ModelAuthScope::ApiKey));
         assert_eq!(metadata.fast_mode, Some(FastMode::Priority));
         assert_eq!(
             metadata.reasoning_control,
@@ -529,7 +552,7 @@ mod tests {
         let gpt_55 = parse_model(OpenAiModel {
             id: "gpt-5.5".to_string(),
         });
-        assert_eq!(gpt_55.context_window, 272_000);
+        assert_eq!(gpt_55.context_window, 1_050_000);
         assert_eq!(gpt_55.fast_mode, Some(FastMode::Priority));
         assert!(!gpt_55
             .supported_reasoning_levels
@@ -542,12 +565,42 @@ mod tests {
             id: "gpt-5.4-mini".to_string(),
         });
         assert_eq!(gpt_54_mini.context_window, 400_000);
-        assert_eq!(gpt_54_mini.fast_mode, None);
+        assert_eq!(gpt_54_mini.fast_mode, Some(FastMode::Priority));
+        assert_eq!(
+            gpt_54_mini.default_reasoning_level,
+            Some(ReasoningEffort::None)
+        );
 
         let gpt_54 = parse_model(OpenAiModel {
             id: "gpt-5.4".to_string(),
         });
         assert_eq!(gpt_54.context_window, 1_050_000);
+        assert_eq!(gpt_54.default_reasoning_level, Some(ReasoningEffort::None));
+
+        let gpt_54_pro = parse_model(OpenAiModel {
+            id: "gpt-5.4-pro".to_string(),
+        });
+        assert_eq!(
+            gpt_54_pro.supported_reasoning_levels,
+            vec![
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+            ]
+        );
+        assert_eq!(
+            gpt_54_pro.default_reasoning_level,
+            Some(ReasoningEffort::Medium)
+        );
+        assert!(gpt_54_pro.reasoning_is_mandatory);
+
+        let chat_latest = parse_model(OpenAiModel {
+            id: "chat-latest".to_string(),
+        });
+        assert_eq!(chat_latest.context_window, 400_000);
+        assert_eq!(chat_latest.max_output, 128_000);
+        assert!(chat_latest.supported_reasoning_levels.is_empty());
+        assert!(chat_latest.supports_vision);
 
         let spark = parse_model(OpenAiModel {
             id: "gpt-5.3-codex-spark".to_string(),
@@ -628,12 +681,15 @@ mod tests {
                 ReasoningEffort::High,
                 ReasoningEffort::XHigh,
                 ReasoningEffort::Max,
-                ReasoningEffort::Ultra,
             ]
         );
+        assert!(!model
+            .supported_reasoning_levels
+            .contains(&ReasoningEffort::Ultra));
         assert!(model.reasoning_is_mandatory);
         assert_eq!(model.fast_mode, Some(FastMode::Priority));
         assert_eq!(model.api_format, ApiFormat::OpenAIResponses);
+        assert_eq!(model.auth_scope, Some(ModelAuthScope::OAuth));
         assert!(model.supports_vision);
         assert!(model.supports_tools);
     }

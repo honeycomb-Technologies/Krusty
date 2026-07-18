@@ -97,10 +97,6 @@ impl App {
                             .messages
                             .push(("system".to_string(), format!("{} API key saved!", provider)));
                         self.ui.popups.auth.set_api_key_complete();
-
-                        if self.should_refresh_dynamic_models(provider) {
-                            self.start_dynamic_model_fetch(provider);
-                        }
                     }
                 }
             }

@@ -188,6 +188,7 @@ export interface ToolResultRequest {
 	tool_call_id: string;
 	result: string;
 	fast_mode?: boolean;
+	thinking_enabled?: ThinkingLevel | boolean;
 	permission_mode?: PermissionMode;
 }
 
@@ -1072,6 +1073,7 @@ export interface ModelInfo {
 	max_output: number;
 	/** Legacy flag retained for compatibility; prefer supported_reasoning_levels. */
 	supports_thinking: boolean;
+	reasoning_control?: ReasoningControl | null;
 	supported_reasoning_levels?: ReasoningEffort[];
 	default_reasoning_level?: ReasoningEffort | null;
 	reasoning_is_mandatory?: boolean;
@@ -1090,6 +1092,13 @@ export type ReasoningEffort =
 	| "xhigh"
 	| "max"
 	| "ultra";
+
+export type ReasoningControl =
+	| "open_ai_effort"
+	| "anthropic_adaptive"
+	| "anthropic_budget"
+	| "boolean"
+	| "output_only";
 
 export type FastMode = "priority" | "anthropic_fast";
 

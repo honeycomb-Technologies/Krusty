@@ -1,5 +1,7 @@
 use crate::ai::models::{ApiFormat, ModelMetadata};
-use crate::ai::providers::{ProviderId, ReasoningControl, ReasoningEffort, ReasoningFormat};
+use crate::ai::providers::{
+    FastMode, ProviderId, ReasoningControl, ReasoningEffort, ReasoningFormat,
+};
 
 use super::types::MiniMaxModel;
 
@@ -11,7 +13,10 @@ struct CuratedCapabilities {
     max_output: usize,
     reasoning_levels: &'static [ReasoningEffort],
     default_reasoning_level: Option<ReasoningEffort>,
+    reasoning_is_mandatory: bool,
     reasoning_control: ReasoningControl,
+    supports_vision: bool,
+    fast_mode: Option<FastMode>,
 }
 
 pub(super) fn parse_model(raw: MiniMaxModel) -> Option<ModelMetadata> {
@@ -38,14 +43,12 @@ pub(super) fn parse_model(raw: MiniMaxModel) -> Option<ModelMetadata> {
         metadata.reasoning_format = Some(ReasoningFormat::Anthropic);
         metadata.supported_reasoning_levels = curated.reasoning_levels.to_vec();
         metadata.default_reasoning_level = curated.default_reasoning_level;
-        metadata.reasoning_is_mandatory = false;
+        metadata.reasoning_is_mandatory = curated.reasoning_is_mandatory;
         metadata.reasoning_control = Some(curated.reasoning_control);
+        metadata.supports_vision = curated.supports_vision;
+        metadata.fast_mode = curated.fast_mode;
     }
 
-    // `-highspeed` is a distinct MiniMax model ID. It is deliberately not
-    // exposed as Krusty's Standard/Fast toggle because the provider does not
-    // offer a per-request speed switch for these catalog entries.
-    metadata.fast_mode = None;
     Some(metadata)
 }
 
@@ -57,10 +60,10 @@ fn curated_capabilities(id: &str) -> Option<CuratedCapabilities> {
             max_output: 131_072,
             reasoning_levels: M3_REASONING_LEVELS,
             default_reasoning_level: Some(ReasoningEffort::High),
-            // M3 exposes adaptive thinking as an on/off control through this
-            // transport; the UI's `high` preset means enabled, not a graded
-            // provider effort.
-            reasoning_control: ReasoningControl::Boolean,
+            reasoning_is_mandatory: false,
+            reasoning_control: ReasoningControl::AnthropicAdaptive,
+            supports_vision: true,
+            fast_mode: Some(FastMode::Priority),
         }),
         "minimax-m2.7" => Some(older_model("MiniMax M2.7")),
         "minimax-m2.7-highspeed" => Some(older_model("MiniMax M2.7 Highspeed")),
@@ -75,9 +78,12 @@ fn older_model(display_name: &'static str) -> CuratedCapabilities {
         display_name,
         context_window: 204_800,
         max_output: 131_072,
-        reasoning_levels: &[],
-        default_reasoning_level: None,
+        reasoning_levels: &[ReasoningEffort::High],
+        default_reasoning_level: Some(ReasoningEffort::High),
+        reasoning_is_mandatory: true,
         reasoning_control: ReasoningControl::Boolean,
+        supports_vision: false,
+        fast_mode: None,
     }
 }
 
@@ -92,7 +98,7 @@ fn non_empty(value: Option<String>) -> Option<String> {
 mod tests {
     use super::parse_model;
     use crate::ai::minimax_catalog::types::ModelsResponse;
-    use crate::ai::providers::{ReasoningControl, ReasoningEffort};
+    use crate::ai::providers::{FastMode, ReasoningControl, ReasoningEffort};
 
     fn fixture_models() -> Vec<crate::ai::models::ModelMetadata> {
         serde_json::from_str::<ModelsResponse>(include_str!("fixtures/models.json"))
@@ -121,8 +127,10 @@ mod tests {
         assert_eq!(m3.default_reasoning_level, Some(ReasoningEffort::High));
         assert_eq!(
             m3.reasoning_control,
-            Some(ReasoningControl::Boolean)
+            Some(ReasoningControl::AnthropicAdaptive)
         );
+        assert!(m3.supports_vision);
+        assert_eq!(m3.fast_mode, Some(FastMode::Priority));
     }
 
     #[test]
@@ -137,7 +145,11 @@ mod tests {
         assert_eq!(highspeed.context_window, 204_800);
         assert_eq!(highspeed.max_output, 131_072);
         assert!(highspeed.fast_mode.is_none());
-        assert!(highspeed.supported_reasoning_levels.is_empty());
+        assert_eq!(
+            highspeed.supported_reasoning_levels,
+            vec![ReasoningEffort::High]
+        );
+        assert!(highspeed.reasoning_is_mandatory);
         assert_eq!(highspeed.reasoning_control, Some(ReasoningControl::Boolean));
     }
 

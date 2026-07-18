@@ -46,22 +46,29 @@ export function selectableThinkingLevels(model: ModelCapabilityInput): ThinkingL
   if (!isModelInfo(model)) {
     return legacyThinkingLevels(model);
   }
+  if (model.reasoning_control === 'output_only') {
+    return ['off'];
+  }
 
   const advertised = (model.supported_reasoning_levels ?? [])
     .map(toThinkingLevel)
-    .filter((level): level is ThinkingLevel => level !== null);
+    .filter((level): level is ThinkingLevel => level !== null && level !== 'ultra');
   const levels = [...new Set(advertised)];
+  const defaultLevel = toThinkingLevel(model.default_reasoning_level);
+  const fallback = defaultLevel && defaultLevel !== 'off' && defaultLevel !== 'ultra'
+    ? defaultLevel
+    : legacyThinkingLevels(model.id).find((level) => level !== 'off') ?? 'medium';
 
   if (levels.length === 0) {
     if (!model.supports_thinking) return ['off'];
-    const fallback = legacyThinkingLevels(model.id);
     return model.reasoning_is_mandatory
-      ? fallback.filter((level) => level !== 'off')
-      : fallback;
+      ? [fallback]
+      : ['off', fallback];
   }
 
   if (model.reasoning_is_mandatory) {
-    return levels.filter((level) => level !== 'off');
+    const mandatoryLevels = levels.filter((level) => level !== 'off');
+    return mandatoryLevels.length > 0 ? mandatoryLevels : [fallback];
   }
   return levels.includes('off') ? levels : ['off', ...levels];
 }
@@ -93,8 +100,11 @@ export function cycleThinkingLevel(
 
 export function supportsThinking(model: ModelCapabilityInput): boolean {
   if (!isModelInfo(model)) return true;
+  if (model.reasoning_control === 'output_only') return false;
   return model.supports_thinking
-    || (model.supported_reasoning_levels ?? []).some((level) => level !== 'none');
+    || (model.supported_reasoning_levels ?? []).some(
+      (level) => level !== 'none' && level !== 'ultra',
+    );
 }
 
 export function supportsFastMode(
@@ -130,7 +140,7 @@ export function isThinkingEnabled(level: ThinkingLevel): boolean {
   return level !== 'off';
 }
 
-export function thinkingLevelToApiValue(level: ThinkingLevel): string | undefined {
+export function thinkingLevelToApiValue(level: ThinkingLevel): ThinkingLevel | undefined {
   return level === 'off' ? undefined : level;
 }
 

@@ -74,14 +74,6 @@ impl ThinkingLevel {
         !matches!(self, Self::Off)
     }
 
-    pub fn toggle_basic(self) -> Self {
-        if self.is_enabled() {
-            Self::Off
-        } else {
-            Self::Medium
-        }
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Self::Off => "off",
@@ -95,9 +87,7 @@ impl ThinkingLevel {
         }
     }
 
-    pub fn from_reasoning_effort(
-        effort: krusty_core::ai::providers::ReasoningEffort,
-    ) -> Self {
+    pub fn from_reasoning_effort(effort: krusty_core::ai::providers::ReasoningEffort) -> Self {
         use krusty_core::ai::providers::ReasoningEffort;
         match effort {
             ReasoningEffort::None => Self::Off,

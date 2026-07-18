@@ -300,10 +300,26 @@ impl App {
             project_settings.disabled_tools.as_deref().unwrap_or(&[]),
         )
         .filter(self.services.cached_ai_tools.clone());
-        let can_use_thinking = self.runtime.thinking_level.is_enabled();
+        // Keep the request controls on one live registry snapshot. Dynamic
+        // catalogs can change wire semantics without changing the model slug.
+        let selected_model_metadata = self
+            .services
+            .model_registry
+            .try_get_model(&self.runtime.current_model);
+        let reasoning_format = selected_model_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.reasoning_format);
+        let reasoning_control = selected_model_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.reasoning_control);
+        let fast_mode_format = selected_model_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.fast_mode);
+        let can_use_thinking = self.runtime.thinking_level.is_enabled()
+            && reasoning_control != Some(crate::ai::providers::ReasoningControl::OutputOnly);
         let thinking = can_use_thinking.then(ThinkingConfig::default);
         let codex_reasoning_effort =
-            if self.is_openai_xhigh_thinking_mode() || self.is_grok_thinking_mode() {
+            if reasoning_control == Some(crate::ai::providers::ReasoningControl::OpenAiEffort) {
                 match self.runtime.thinking_level {
                     ThinkingLevel::Off => None,
                     ThinkingLevel::Minimal => Some(CodexReasoningEffort::Minimal),
@@ -311,25 +327,21 @@ impl App {
                     ThinkingLevel::Medium => Some(CodexReasoningEffort::Medium),
                     ThinkingLevel::High => Some(CodexReasoningEffort::High),
                     ThinkingLevel::XHigh => Some(CodexReasoningEffort::XHigh),
-                    ThinkingLevel::Max | ThinkingLevel::Ultra => {
-                        Some(CodexReasoningEffort::Max)
-                    }
+                    ThinkingLevel::Max | ThinkingLevel::Ultra => Some(CodexReasoningEffort::Max),
                 }
             } else {
                 None
             };
-        let anthropic_adaptive_effort = if self.is_anthropic_opus_thinking_mode() {
+        let anthropic_adaptive_effort = if reasoning_control
+            == Some(crate::ai::providers::ReasoningControl::AnthropicAdaptive)
+        {
             match self.runtime.thinking_level {
                 ThinkingLevel::Off => None,
-                ThinkingLevel::Minimal | ThinkingLevel::Low => {
-                    Some(AnthropicAdaptiveEffort::Low)
-                }
+                ThinkingLevel::Minimal | ThinkingLevel::Low => Some(AnthropicAdaptiveEffort::Low),
                 ThinkingLevel::Medium => Some(AnthropicAdaptiveEffort::Medium),
                 ThinkingLevel::High => Some(AnthropicAdaptiveEffort::High),
                 ThinkingLevel::XHigh => Some(AnthropicAdaptiveEffort::XHigh),
-                ThinkingLevel::Max | ThinkingLevel::Ultra => {
-                    Some(AnthropicAdaptiveEffort::Max)
-                }
+                ThinkingLevel::Max | ThinkingLevel::Ultra => Some(AnthropicAdaptiveEffort::Max),
             }
         } else {
             None
@@ -354,12 +366,10 @@ impl App {
             codex_reasoning_effort,
             codex_parallel_tool_calls: true,
             anthropic_adaptive_effort,
-            fast_mode: self.runtime.fast_mode,
-            fast_mode_format: self
-                .services
-                .model_registry
-                .try_get_model(&self.runtime.current_model)
-                .and_then(|model| model.fast_mode),
+            reasoning_format,
+            reasoning_control,
+            fast_mode: self.runtime.fast_mode && fast_mode_format.is_some(),
+            fast_mode_format,
             ..Default::default()
         };
 

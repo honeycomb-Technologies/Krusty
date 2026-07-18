@@ -352,6 +352,20 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   }, [client, ensureModelReady, isConnected, sessionsStore]);
 
   useEffect(() => {
+    if (!client || !isConnected) {
+      return;
+    }
+
+    const refreshHandle = setInterval(() => {
+      if (AppState.currentState === "active") {
+        void loadModelCatalog().catch(() => null);
+      }
+    }, 5 * 60 * 1000);
+
+    return () => clearInterval(refreshHandle);
+  }, [client, isConnected, loadModelCatalog]);
+
+  useEffect(() => {
     if (!client || !isConnected || sessionId || !workspaceSessionId) {
       return;
     }
@@ -393,10 +407,11 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       if (currentSessionId) {
         void sessionStore.getState().loadSession(currentSessionId, true);
       }
+      void loadModelCatalog().catch(() => null);
     });
 
     return () => subscription.remove();
-  }, [sessionStore, workspace]);
+  }, [loadModelCatalog, sessionStore, workspace]);
 
   useEffect(() => {
     if (!sessionId) {

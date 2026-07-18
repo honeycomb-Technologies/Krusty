@@ -275,7 +275,7 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
     let credential_store_inner = CredentialStore::load().unwrap_or_default();
     let credential_store = Arc::new(RwLock::new(credential_store_inner.clone()));
     let model_registry = create_model_registry();
-    initialize_models(&model_registry, &credential_store_inner, &db_path).await;
+    initialize_models(&model_registry, &db_path).await;
     let ai_client = create_ai_client(&credential_store_inner, &model_registry, &db_path)
         .await
         .map(Arc::new);

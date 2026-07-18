@@ -1,6 +1,6 @@
 use crate::constants;
 
-use super::super::providers::{ProviderId, ReasoningFormat};
+use super::super::providers::{ProviderId, ReasoningControl, ReasoningFormat};
 use super::metadata::{ApiFormat, ModelMetadata};
 
 /// Infer minimal metadata for an arbitrary model ID.
@@ -36,31 +36,48 @@ pub fn infer_model_metadata(
         api_format
     };
 
-    metadata.reasoning_format =
-        if normalized.contains("claude") || normalized.starts_with("anthropic/") {
-            Some(ReasoningFormat::Anthropic)
-        } else if normalized.contains("deepseek") {
-            Some(ReasoningFormat::DeepSeek)
-        } else if provider == ProviderId::Grok
-            || crate::ai::providers::ProviderConfig::openai_prefers_responses_api(model_id)
-        {
-            Some(ReasoningFormat::OpenAI)
-        } else {
-            None
-        };
+    metadata.reasoning_format = if provider == ProviderId::MiniMax
+        || normalized.contains("claude")
+        || normalized.starts_with("anthropic/")
+    {
+        Some(ReasoningFormat::Anthropic)
+    } else if provider == ProviderId::ZAi && normalized.contains("glm") {
+        Some(ReasoningFormat::OpenAI)
+    } else if normalized.contains("deepseek") {
+        Some(ReasoningFormat::DeepSeek)
+    } else if provider == ProviderId::Grok
+        || crate::ai::providers::ProviderConfig::openai_prefers_responses_api(model_id)
+    {
+        Some(ReasoningFormat::OpenAI)
+    } else {
+        None
+    };
     metadata.supports_thinking = metadata.reasoning_format.is_some();
     metadata.reasoning_control = match metadata.reasoning_format {
-        Some(ReasoningFormat::OpenAI) => {
-            Some(super::super::providers::ReasoningControl::OpenAiEffort)
-        }
-        Some(ReasoningFormat::Anthropic) => {
-            Some(super::super::providers::ReasoningControl::AnthropicBudget)
-        }
-        Some(ReasoningFormat::DeepSeek) => Some(super::super::providers::ReasoningControl::Boolean),
+        Some(ReasoningFormat::OpenAI) => Some(ReasoningControl::OpenAiEffort),
+        Some(ReasoningFormat::Anthropic) => Some(ReasoningControl::AnthropicBudget),
+        Some(ReasoningFormat::DeepSeek) => Some(ReasoningControl::Boolean),
         None => None,
     };
+    if provider == ProviderId::Anthropic && is_anthropic_adaptive_family(&normalized) {
+        metadata.reasoning_control = Some(ReasoningControl::AnthropicAdaptive);
+    }
+    if provider == ProviderId::MiniMax {
+        metadata.reasoning_control = Some(if normalized.contains("minimax-m3") {
+            ReasoningControl::AnthropicAdaptive
+        } else {
+            ReasoningControl::Boolean
+        });
+    }
+    if provider == ProviderId::ZAi && normalized.contains("glm") {
+        metadata.reasoning_control = Some(if normalized.contains("glm-5.2") {
+            ReasoningControl::OpenAiEffort
+        } else {
+            ReasoningControl::Boolean
+        });
+    }
     if provider == ProviderId::Grok && metadata.supports_thinking {
-        metadata.reasoning_control = Some(super::super::providers::ReasoningControl::OutputOnly);
+        metadata.reasoning_control = Some(ReasoningControl::OutputOnly);
     }
     metadata.supports_tools = true;
     metadata.supports_vision = normalized.contains("gpt-4o")
@@ -69,9 +86,26 @@ pub fn infer_model_metadata(
         || normalized.contains("gpt-6")
         || normalized.contains("gemini")
         || normalized.contains("claude")
-        || normalized.contains("grok");
+        || normalized.contains("grok")
+        || (provider == ProviderId::MiniMax && normalized.contains("minimax-m3"));
 
     metadata
+}
+
+fn is_anthropic_adaptive_family(model_id: &str) -> bool {
+    let normalized = model_id.replace(['.', '_', '/', ' '], "-");
+    [
+        "opus-4-6",
+        "opus-4-7",
+        "opus-4-8",
+        "sonnet-4-6",
+        "sonnet-5",
+        "fable-5",
+        "mythos-5",
+        "mythos-preview",
+    ]
+    .iter()
+    .any(|family| normalized.contains(family))
 }
 
 /// Resolve best-known metadata for a model by checking built-in provider catalog first,
@@ -201,4 +235,39 @@ fn gpt_major_version(model_id: &str) -> Option<u32> {
         .split(|ch: char| !ch.is_ascii_digit())
         .find(|segment| !segment.is_empty())?;
     digits.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_anthropic_families_fall_back_to_adaptive_control() {
+        for model in [
+            "claude-opus-4.7",
+            "claude-sonnet-4-6",
+            "claude-mythos-preview",
+        ] {
+            let metadata = infer_model_metadata(ProviderId::Anthropic, model, ApiFormat::Anthropic);
+            assert_eq!(
+                metadata.reasoning_control,
+                Some(ReasoningControl::AnthropicAdaptive),
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn zai_and_minimax_fallbacks_use_provider_wire_controls() {
+        let zai = infer_model_metadata(ProviderId::ZAi, "glm-5.2", ApiFormat::OpenAI);
+        assert_eq!(zai.reasoning_format, Some(ReasoningFormat::OpenAI));
+        assert_eq!(zai.reasoning_control, Some(ReasoningControl::OpenAiEffort));
+
+        let minimax = infer_model_metadata(ProviderId::MiniMax, "MiniMax-M3", ApiFormat::Anthropic);
+        assert_eq!(
+            minimax.reasoning_control,
+            Some(ReasoningControl::AnthropicAdaptive)
+        );
+        assert!(minimax.supports_vision);
+    }
 }

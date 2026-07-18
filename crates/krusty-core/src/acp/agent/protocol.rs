@@ -107,28 +107,23 @@ impl Agent for KrustyAgent {
                 *available = detected_models.clone();
             }
 
-            let model_infos: Vec<AcpModelInfo> = detected_models
-                .iter()
-                .map(
-                    |(model_id, provider, _actual_model, _api_key, display_name)| {
-                        let name = format!("[{}] {}", provider, display_name);
-                        AcpModelInfo::new(ModelId::new(model_id.clone()), name)
-                    },
-                )
-                .collect();
+            let model_infos = acp_model_infos(&detected_models);
 
             let default_model = self.current_model.read().await.clone();
             let current_model_id = default_model.as_ref().and_then(|selected| {
                 detected_models
                     .iter()
-                    .find(|(_, provider, actual_model, _, _)| {
-                        *provider == selected.provider && *actual_model == selected.model_id
+                    .find(|record| {
+                        record.provider == selected.provider && record.model_id == selected.model_id
                     })
-                    .map(|(model_id, _, _, _, _)| model_id.clone())
+                    .map(|record| record.acp_model_id.clone())
             });
 
-            let selected_model_id =
-                current_model_id.or_else(|| detected_models.first().map(|record| record.0.clone()));
+            let selected_model_id = current_model_id.or_else(|| {
+                detected_models
+                    .first()
+                    .map(|record| record.acp_model_id.clone())
+            });
             if let Some(current_model_id) = selected_model_id {
                 self.set_model_for_session(&session, &current_model_id, true)
                     .await
@@ -212,10 +207,10 @@ impl Agent for KrustyAgent {
         let default_model_id = default_model.and_then(|selected| {
             detected_models
                 .iter()
-                .find(|(_, provider, actual_model, _, _)| {
-                    *provider == selected.provider && *actual_model == selected.model_id
+                .find(|record| {
+                    record.provider == selected.provider && record.model_id == selected.model_id
                 })
-                .map(|(id, _, _, _, _)| id.clone())
+                .map(|record| record.acp_model_id.clone())
         });
         let selected_model_id = if let Some(persisted) = persisted_model.as_deref() {
             self.resolve_persisted_model_id(persisted).await
@@ -223,7 +218,11 @@ impl Agent for KrustyAgent {
             None
         }
         .or(default_model_id)
-        .or_else(|| detected_models.first().map(|record| record.0.clone()));
+        .or_else(|| {
+            detected_models
+                .first()
+                .map(|record| record.acp_model_id.clone())
+        });
 
         if let Some(model_id) = selected_model_id.as_deref() {
             self.set_model_for_session(&session, model_id, false)
@@ -502,11 +501,9 @@ fn available_session_modes() -> Vec<SessionMode> {
 fn acp_model_infos(models: &[AvailableModelRecord]) -> Vec<AcpModelInfo> {
     models
         .iter()
-        .map(
-            |(model_id, provider, _actual_model, _api_key, display_name)| {
-                let name = format!("[{}] {}", provider, display_name);
-                AcpModelInfo::new(ModelId::new(model_id.clone()), name)
-            },
-        )
+        .map(|record| {
+            let name = format!("[{}] {}", record.provider, record.display_name);
+            AcpModelInfo::new(ModelId::new(record.acp_model_id.clone()), name)
+        })
         .collect()
 }

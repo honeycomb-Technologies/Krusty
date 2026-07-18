@@ -32,8 +32,7 @@ impl ThinkingLevel {
             Self::Medium => Self::High,
             Self::High => Self::XHigh,
             Self::XHigh => Self::Max,
-            Self::Max => Self::Ultra,
-            Self::Ultra => Self::Off,
+            Self::Max | Self::Ultra => Self::Off,
         }
     }
 

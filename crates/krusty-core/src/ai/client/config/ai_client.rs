@@ -94,10 +94,23 @@ impl AiClientConfig {
         model: &str,
         credentials: &crate::storage::CredentialStore,
     ) -> Self {
-        use crate::ai::providers::ProviderConfig;
         use crate::auth::resolve_openai_auth;
 
         let auth_resolution = resolve_openai_auth(credentials, model);
+        Self::for_openai_with_auth_resolution(model, auth_resolution)
+    }
+
+    /// Create an OpenAI config from a model-catalog-selected auth surface.
+    ///
+    /// Live API-key and ChatGPT catalogs can advertise the same slug with
+    /// different capabilities. Callers that have catalog provenance must use
+    /// this constructor so request routing matches the metadata they selected.
+    pub fn for_openai_with_auth_resolution(
+        model: &str,
+        auth_resolution: crate::auth::OpenAIAuthResolution,
+    ) -> Self {
+        use crate::ai::providers::ProviderConfig;
+
         let auth_type = auth_resolution.auth_type;
         let base_url = ProviderConfig::openai_url_for_auth(model, auth_type);
         let api_format = ProviderConfig::openai_format_for_auth(model, auth_type);

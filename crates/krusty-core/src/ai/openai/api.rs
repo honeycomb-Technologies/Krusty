@@ -10,6 +10,11 @@ use super::types::{ChatGptModelsResponse, ModelsResponse};
 const OPENAI_MODELS_URL: &str = "https://api.openai.com/v1/models";
 const CHATGPT_MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
 const CHATGPT_ACCOUNT_ID_HEADER: &str = "ChatGPT-Account-ID";
+// This is a Codex catalog protocol compatibility version, not Krusty's package
+// version. Keep it aligned with a stable official Codex release; operators can
+// override it if the catalog raises its minimum before Krusty's next release.
+const DEFAULT_CODEX_CLIENT_VERSION: &str = "0.144.4";
+const CODEX_CLIENT_VERSION_ENV: &str = "KRUSTY_CODEX_CLIENT_VERSION";
 
 /// Fetch available OpenAI models for the authenticated account.
 pub async fn fetch_models(api_key: &str) -> Result<Vec<ModelMetadata>> {
@@ -125,9 +130,10 @@ fn chatgpt_models_request(
     access_token: &str,
     account_id: Option<&str>,
 ) -> reqwest::RequestBuilder {
+    let client_version = codex_client_version();
     let mut request = client
         .get(url)
-        .query(&[("client_version", env!("CARGO_PKG_VERSION"))])
+        .query(&[("client_version", client_version.as_str())])
         .bearer_auth(access_token);
     if let Some(account_id) = account_id.filter(|value| !value.trim().is_empty()) {
         request = request.header(CHATGPT_ACCOUNT_ID_HEADER, account_id);
@@ -135,9 +141,23 @@ fn chatgpt_models_request(
     request
 }
 
+fn codex_client_version() -> String {
+    codex_client_version_from(std::env::var(CODEX_CLIENT_VERSION_ENV).ok())
+}
+
+fn codex_client_version_from(configured: Option<String>) -> String {
+    configured
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_CODEX_CLIENT_VERSION.to_string())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{chatgpt_models_request, CHATGPT_ACCOUNT_ID_HEADER, CHATGPT_MODELS_URL};
+    use super::{
+        chatgpt_models_request, codex_client_version, codex_client_version_from,
+        CHATGPT_ACCOUNT_ID_HEADER, CHATGPT_MODELS_URL, DEFAULT_CODEX_CLIENT_VERSION,
+    };
     use reqwest::header::AUTHORIZATION;
     use reqwest::Client;
 
@@ -156,7 +176,7 @@ mod tests {
             request.url().as_str(),
             format!(
                 "{CHATGPT_MODELS_URL}?client_version={}",
-                env!("CARGO_PKG_VERSION")
+                codex_client_version()
             )
         );
         assert_eq!(
@@ -181,5 +201,22 @@ mod tests {
         .unwrap();
 
         assert!(!request.headers().contains_key(CHATGPT_ACCOUNT_ID_HEADER));
+    }
+
+    #[test]
+    fn codex_catalog_version_is_protocol_scoped_and_overridable() {
+        assert_eq!(
+            codex_client_version_from(None),
+            DEFAULT_CODEX_CLIENT_VERSION
+        );
+        assert_eq!(
+            codex_client_version_from(Some(" 0.200.1 ".to_string())),
+            "0.200.1"
+        );
+        assert_eq!(
+            codex_client_version_from(Some("  ".to_string())),
+            DEFAULT_CODEX_CLIENT_VERSION
+        );
+        assert_ne!(DEFAULT_CODEX_CLIENT_VERSION, env!("CARGO_PKG_VERSION"));
     }
 }

@@ -1,7 +1,8 @@
 use anyhow::{bail, Result};
 use reqwest::{Client, RequestBuilder};
-use tracing::{debug, warn};
+use tracing::debug;
 
+use crate::ai::catalog::{next_catalog_cursor, MAX_CATALOG_PAGES};
 use crate::ai::models::ModelMetadata;
 
 use super::mapping::parse_model;
@@ -39,8 +40,14 @@ pub async fn fetch_models_with_client(
     };
 
     let mut cursor: Option<String> = None;
+    let mut seen_cursors = std::collections::HashSet::new();
     let mut models = Vec::new();
+    let mut page_count = 0usize;
     loop {
+        page_count += 1;
+        if page_count > MAX_CATALOG_PAGES {
+            bail!("Anthropic model catalog exceeded {MAX_CATALOG_PAGES} pages");
+        }
         let response = build_request(client, credential, oauth, cursor.as_deref())
             .send()
             .await?;
@@ -51,27 +58,18 @@ pub async fn fetch_models_with_client(
         }
 
         let page = response.json::<ModelsResponse>().await?;
-        let has_more = page.has_more;
-        let next_cursor = page
-            .last_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
+        let next_cursor = next_catalog_cursor(
+            "Anthropic",
+            page.has_more,
+            page.last_id.as_deref(),
+            &mut seen_cursors,
+        )?;
         models.extend(page.data.into_iter().filter_map(parse_model));
 
-        if !has_more {
-            break;
+        match next_cursor {
+            Some(next_cursor) => cursor = Some(next_cursor),
+            None => break,
         }
-        let Some(next_cursor) = next_cursor else {
-            warn!("Anthropic model catalog indicated another page without a cursor");
-            break;
-        };
-        if cursor.as_deref() == Some(next_cursor.as_str()) {
-            warn!("Anthropic model catalog repeated its pagination cursor");
-            break;
-        }
-        cursor = Some(next_cursor);
     }
 
     models.sort_by(|left, right| left.id.cmp(&right.id));

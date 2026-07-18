@@ -698,6 +698,7 @@ export function AccordionControls({
   const providerDragScrollDelta = useSharedValue(0);
   const isChat = sessionType === 'chat';
   const isMako = sessionType === 'mako';
+  const thinkingSupported = supportsThinking(modelInfo ?? model);
 
   const clearProviderEditExitTimer = useCallback(() => {
     if (!providerEditExitTimerRef.current) return;
@@ -818,7 +819,7 @@ export function AccordionControls({
   }, [providerDragIndex, providerDragScrollDelta, providerDropIndex, providerDragX, stopProviderAutoScroll]);
 
   const handleThinking = () => {
-    if (!supportsThinking(modelInfo ?? model)) return;
+    if (!thinkingSupported) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     const next = cycleThinkingLevel(thinkingLevel, modelInfo ?? model);
     onThinkingChange(next);
@@ -1201,14 +1202,15 @@ export function AccordionControls({
             />
           </AccordionPill>
 
-          <AccordionPill
-            index={0}
-            isOpen={isOpen}
-            onPress={handleThinking}
-            disabled={!supportsThinking(modelInfo ?? model)}
-          >
-            <Brain size={24} color={thinkingColor} strokeWidth={1.6} />
-          </AccordionPill>
+          {thinkingSupported ? (
+            <AccordionPill
+              index={0}
+              isOpen={isOpen}
+              onPress={handleThinking}
+            >
+              <Brain size={24} color={thinkingColor} strokeWidth={1.6} />
+            </AccordionPill>
+          ) : null}
         </Animated.View>
       </GestureDetector>
     </View>

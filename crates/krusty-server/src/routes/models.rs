@@ -172,16 +172,32 @@ mod tests {
         let response = ModelResponse::from_metadata(&model, "OpenAI".to_string());
         assert!(response.supports_thinking);
         assert_eq!(
+            response.reasoning_control,
+            Some(ReasoningControl::OpenAiEffort)
+        );
+        assert_eq!(
             response.supported_reasoning_levels,
-            vec![
-                ReasoningEffort::None,
-                ReasoningEffort::Low,
-                ReasoningEffort::Ultra,
-            ]
+            vec![ReasoningEffort::None, ReasoningEffort::Low]
         );
         assert_eq!(response.default_reasoning_level, Some(ReasoningEffort::Low));
         assert!(!response.reasoning_is_mandatory);
         assert!(response.supports_fast_mode);
         assert_eq!(response.fast_mode, Some(FastMode::Priority));
+    }
+
+    #[test]
+    fn model_response_marks_output_only_reasoning_as_non_controllable() {
+        let model = ModelMetadata::new("grok-test", "Grok Test", ProviderId::Grok)
+            .with_thinking(ReasoningFormat::OpenAI)
+            .with_reasoning_control(ReasoningControl::OutputOnly);
+
+        let response = ModelResponse::from_metadata(&model, "Grok".to_string());
+
+        assert!(response.supports_thinking);
+        assert_eq!(
+            response.reasoning_control,
+            Some(ReasoningControl::OutputOnly)
+        );
+        assert!(response.supported_reasoning_levels.is_empty());
     }
 }

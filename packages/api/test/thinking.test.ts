@@ -1,14 +1,12 @@
+import { test } from 'bun:test';
 import type { ModelInfo } from '../src/types.ts';
 import {
   cycleThinkingLevel,
   normalizeThinkingLevel,
   selectableThinkingLevels,
   supportsFastMode,
+  supportsThinking,
 } from '../src/thinking.ts';
-
-declare const Deno: {
-  test(name: string, fn: () => void | Promise<void>): void;
-};
 
 function assertEquals(actual: unknown, expected: unknown, message: string) {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -30,7 +28,7 @@ function model(overrides: Partial<ModelInfo> = {}): ModelInfo {
   };
 }
 
-Deno.test('reasoning cycle follows model metadata and mandatory default', () => {
+test('reasoning cycle follows controllable metadata and omits delegation-only ultra', () => {
   const metadata = model({
     supported_reasoning_levels: ['low', 'high', 'ultra'],
     default_reasoning_level: 'high',
@@ -39,8 +37,8 @@ Deno.test('reasoning cycle follows model metadata and mandatory default', () => 
 
   assertEquals(
     selectableThinkingLevels(metadata),
-    ['low', 'high', 'ultra'],
-    'mandatory reasoning must not expose off',
+    ['low', 'high'],
+    'mandatory reasoning must not expose off or delegation-only ultra',
   );
   assertEquals(
     normalizeThinkingLevel('off', metadata),
@@ -49,12 +47,41 @@ Deno.test('reasoning cycle follows model metadata and mandatory default', () => 
   );
   assertEquals(
     cycleThinkingLevel('high', metadata),
-    'ultra',
+    'low',
     'cycle order must follow the catalog',
   );
 });
 
-Deno.test('explicit fast capability overrides provider-name inference', () => {
+test('output-only and malformed mandatory metadata stay non-interactive and safe', () => {
+  const outputOnly = model({
+    reasoning_control: 'output_only',
+    supported_reasoning_levels: [],
+  });
+  assertEquals(
+    selectableThinkingLevels(outputOnly),
+    ['off'],
+    'output-only reasoning must not expose an explicit control',
+  );
+  assertEquals(
+    supportsThinking(outputOnly),
+    false,
+    'output-only reasoning is observable but not user-controllable',
+  );
+
+  const mandatoryWithoutEnabledLevel = model({
+    reasoning_control: 'open_ai_effort',
+    supported_reasoning_levels: ['none'],
+    default_reasoning_level: null,
+    reasoning_is_mandatory: true,
+  });
+  assertEquals(
+    selectableThinkingLevels(mandatoryWithoutEnabledLevel),
+    ['medium'],
+    'mandatory cycles must retain a safe non-off fallback',
+  );
+});
+
+test('explicit fast capability overrides provider-name inference', () => {
   assertEquals(
     supportsFastMode(model({ supports_fast_mode: false, fast_mode: null })),
     false,

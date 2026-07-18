@@ -982,6 +982,7 @@ export function createSessionStore(
             tool_call_id: toolCallId,
             result,
             fast_mode: state.fastModeEnabled,
+            thinking_enabled: thinkingLevelToApiValue(state.thinkingLevel),
             permission_mode: state.permissionMode,
           },
           callbacks,

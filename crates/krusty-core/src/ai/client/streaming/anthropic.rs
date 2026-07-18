@@ -36,8 +36,11 @@ impl AiClient {
         // Determine max_tokens based on reasoning format
         let fallback_tokens = options.max_tokens.unwrap_or(self.config().max_tokens) as u32;
         let legacy_thinking = options.thinking.is_some();
+        let active_reasoning_format = legacy_thinking
+            .then_some(options.reasoning_format)
+            .flatten();
         let max_tokens = ReasoningConfig::max_tokens_for_format(
-            options.reasoning_format,
+            active_reasoning_format,
             fallback_tokens,
             legacy_thinking,
         );
@@ -139,7 +142,7 @@ impl AiClient {
         }
 
         // Temperature incompatible with reasoning - only add if reasoning is off
-        let reasoning_enabled = options.reasoning_format.is_some() || options.thinking.is_some();
+        let reasoning_enabled = options.thinking.is_some();
         if !reasoning_enabled {
             if let Some(temp) = options.temperature {
                 body["temperature"] = serde_json::json!(temp);

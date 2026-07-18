@@ -40,9 +40,7 @@ impl ThinkingLevel {
         !matches!(self, Self::Off)
     }
 
-    pub fn from_reasoning_effort(
-        effort: krusty_core::ai::providers::ReasoningEffort,
-    ) -> Self {
+    pub fn from_reasoning_effort(effort: krusty_core::ai::providers::ReasoningEffort) -> Self {
         use krusty_core::ai::providers::ReasoningEffort;
         match effort {
             ReasoningEffort::None => Self::Off,
@@ -207,7 +205,21 @@ mod tests {
         .expect("request should deserialize");
 
         assert!(req.fast_mode);
+        assert_eq!(req.thinking_enabled, ThinkingLevel::Off);
         assert_eq!(req.permission_mode, None);
+    }
+
+    #[test]
+    fn tool_result_request_accepts_reasoning_level() {
+        let req: super::ToolResultRequest = serde_json::from_value(json!({
+            "session_id": "session-1",
+            "tool_call_id": "tool-1",
+            "result": "ok",
+            "thinking_enabled": "max"
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(req.thinking_level, ThinkingLevel::Max);
     }
 
     #[test]
@@ -423,6 +435,13 @@ pub struct ToolResultRequest {
     /// Request provider fast/priority service tier while resuming after a tool result
     #[serde(default)]
     pub fast_mode: bool,
+    /// Preserve the selected reasoning level while resuming after a tool result.
+    #[serde(
+        default,
+        rename = "thinking_enabled",
+        deserialize_with = "deserialize_thinking_level"
+    )]
+    pub thinking_level: ThinkingLevel,
     /// Permission mode to preserve while resuming after an interactive tool result.
     /// If omitted, the server uses recovery/session metadata.
     #[serde(default)]

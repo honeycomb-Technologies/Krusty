@@ -1,6 +1,8 @@
 //! Shared provider model catalog helpers.
 
-use anyhow::Result;
+use std::collections::HashSet;
+
+use anyhow::{Context, Result};
 
 use crate::auth::{
     resolve_anthropic_auth, resolve_grok_auth, resolve_openai_auth, AnthropicAuthType,
@@ -10,6 +12,8 @@ use crate::storage::CredentialStore;
 
 use super::models::ModelMetadata;
 use super::providers::{get_provider, ProviderId};
+
+pub(crate) const MAX_CATALOG_PAGES: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogAuthKind {
@@ -64,6 +68,32 @@ pub fn dynamic_model_providers() -> Vec<ProviderId> {
         .copied()
         .filter(|provider| supports_dynamic_models(*provider))
         .collect()
+}
+
+/// Validate a provider's cursor-based pagination contract.
+///
+/// A partial catalog is unsafe to publish because it would replace the
+/// last-known-good snapshot. Missing or cycling cursors therefore fail the
+/// entire refresh instead of returning the pages collected so far.
+pub(crate) fn next_catalog_cursor(
+    provider: &str,
+    has_more: bool,
+    last_id: Option<&str>,
+    seen: &mut HashSet<String>,
+) -> Result<Option<String>> {
+    if !has_more {
+        return Ok(None);
+    }
+
+    let cursor = last_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("{provider} model catalog has another page but no cursor"))?
+        .to_string();
+    if !seen.insert(cursor.clone()) {
+        anyhow::bail!("{provider} model catalog repeated pagination cursor {cursor}");
+    }
+    Ok(Some(cursor))
 }
 
 /// Resolve every usable catalog identity for a provider.
@@ -191,8 +221,10 @@ pub async fn fetch_dynamic_models(
 }
 
 /// Fetch and combine every configured catalog identity for a provider.
-/// A partial success wins over a failed sibling identity; all failures surface
-/// an error so callers retain their last-known-good snapshot.
+///
+/// Every configured identity must succeed. Publishing only the API-key or only
+/// the OAuth half of an OpenAI catalog would erase models available through the
+/// failed sibling identity and incorrectly mark that reduced snapshot fresh.
 pub async fn fetch_dynamic_models_for_store(
     provider: ProviderId,
     credentials: &CredentialStore,
@@ -202,40 +234,54 @@ pub async fn fetch_dynamic_models_for_store(
         anyhow::bail!("No catalog credential configured for {provider}");
     }
 
-    let mut merged = Vec::<ModelMetadata>::new();
-    let mut last_error = None;
-    let mut successes = 0usize;
-
+    let mut catalogs = Vec::with_capacity(auth.len());
     for identity in auth {
-        match fetch_dynamic_models(provider, &identity).await {
-            Ok(models) if !models.is_empty() => {
-                successes += 1;
-                for model in models {
-                    if let Some(existing) = merged.iter_mut().find(|item| item.id == model.id) {
-                        // Later, richer identities (ChatGPT OAuth for OpenAI)
-                        // replace sparse API-key metadata without reordering.
-                        *existing = model;
-                    } else {
-                        merged.push(model);
-                    }
-                }
+        let kind = identity.kind;
+        catalogs.push(
+            fetch_dynamic_models(provider, &identity)
+                .await
+                .with_context(|| format!("{provider} {kind:?} catalog identity failed")),
+        );
+    }
+
+    merge_identity_catalogs(catalogs)
+}
+
+fn merge_identity_catalogs(
+    catalogs: impl IntoIterator<Item = Result<Vec<ModelMetadata>>>,
+) -> Result<Vec<ModelMetadata>> {
+    let mut merged = Vec::<ModelMetadata>::new();
+    for catalog in catalogs {
+        let models = catalog?;
+        if models.is_empty() {
+            anyhow::bail!("Provider returned an empty model catalog");
+        }
+        for model in models {
+            if let Some(existing) = merged.iter_mut().find(|item| item.id == model.id) {
+                // Later, richer identities (ChatGPT OAuth for OpenAI) replace
+                // sparse API-key metadata without reordering.
+                *existing = model;
+            } else {
+                merged.push(model);
             }
-            Ok(_) => {
-                last_error = Some(anyhow::anyhow!("Provider returned an empty model catalog"));
-            }
-            Err(error) => last_error = Some(error),
         }
     }
 
-    if successes == 0 {
-        return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Model catalog refresh failed")));
+    if merged.is_empty() {
+        anyhow::bail!("Model catalog refresh produced no models");
     }
     Ok(merged)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{credentials_for_dynamic_models_with_env, CatalogAuthKind};
+    use std::collections::HashSet;
+
+    use super::{
+        credentials_for_dynamic_models_with_env, merge_identity_catalogs, next_catalog_cursor,
+        CatalogAuthKind,
+    };
+    use crate::ai::models::{ModelAuthScope, ModelMetadata};
     use crate::ai::providers::ProviderId;
     use crate::storage::CredentialStore;
 
@@ -244,11 +290,8 @@ mod tests {
         let mut credentials = CredentialStore::default();
         credentials.set(ProviderId::OpenAI, "sk-openai".to_string());
 
-        let auth = credentials_for_dynamic_models_with_env(
-            ProviderId::OpenAI,
-            &credentials,
-            |_| None,
-        );
+        let auth =
+            credentials_for_dynamic_models_with_env(ProviderId::OpenAI, &credentials, |_| None);
 
         assert!(auth.iter().any(|entry| {
             entry.kind == CatalogAuthKind::ApiKey && entry.credential() == "sk-openai"
@@ -260,12 +303,12 @@ mod tests {
         let mut credentials = CredentialStore::default();
         credentials.set(ProviderId::ZAi, "zai-key".to_string());
 
-        assert!(credentials_for_dynamic_models_with_env(
-            ProviderId::ZAi,
-            &credentials,
-            |_| Some("env-key".to_string()),
-        )
-        .is_empty());
+        assert!(
+            credentials_for_dynamic_models_with_env(ProviderId::ZAi, &credentials, |_| Some(
+                "env-key".to_string()
+            ),)
+            .is_empty()
+        );
     }
 
     #[test]
@@ -277,5 +320,42 @@ mod tests {
         assert!(providers.contains(&ProviderId::MiniMax));
         assert!(providers.contains(&ProviderId::Anthropic));
         assert!(!providers.contains(&ProviderId::ZAi));
+    }
+
+    #[test]
+    fn pagination_rejects_missing_and_repeated_cursors() {
+        let mut seen = HashSet::new();
+        assert!(next_catalog_cursor("Test", true, None, &mut seen).is_err());
+        assert_eq!(
+            next_catalog_cursor("Test", true, Some("page-2"), &mut seen).unwrap(),
+            Some("page-2".to_string())
+        );
+        assert!(next_catalog_cursor("Test", true, Some("page-2"), &mut seen).is_err());
+        assert_eq!(
+            next_catalog_cursor("Test", false, Some("ignored"), &mut seen).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn multi_identity_merge_fails_closed_and_prefers_later_metadata() {
+        let mut api = ModelMetadata::new("shared", "API", ProviderId::OpenAI);
+        api.auth_scope = Some(ModelAuthScope::ApiKey);
+        let mut oauth = ModelMetadata::new("shared", "OAuth", ProviderId::OpenAI);
+        oauth.auth_scope = Some(ModelAuthScope::OAuth);
+        let merged = merge_identity_catalogs(vec![Ok(vec![api]), Ok(vec![oauth])]).unwrap();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].display_name, "OAuth");
+        assert_eq!(merged[0].auth_scope, Some(ModelAuthScope::OAuth));
+
+        let partial = merge_identity_catalogs(vec![
+            Ok(vec![ModelMetadata::new(
+                "api-only",
+                "API only",
+                ProviderId::OpenAI,
+            )]),
+            Err(anyhow::anyhow!("OAuth unavailable")),
+        ]);
+        assert!(partial.is_err());
     }
 }

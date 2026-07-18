@@ -12,11 +12,12 @@ use super::providers::ProviderId;
 /// Provider-specific routing:
 /// - Grok Build models: OpenAI Responses format through the Grok CLI proxy
 /// - OpenAI: OpenAI chat/completions format unless auth/model routing overrides it
-/// - All others (OpenRouter, MiniMax, ZAi): Anthropic format
+/// - Z.ai Coding Plan: OpenAI chat/completions format
+/// - OpenRouter and MiniMax: Anthropic format
 pub fn detect_api_format(provider: ProviderId, model: &str) -> ApiFormat {
     match provider {
         ProviderId::Grok => grok_api_format(model),
-        ProviderId::OpenAI => ApiFormat::OpenAI,
+        ProviderId::OpenAI | ProviderId::ZAi => ApiFormat::OpenAI,
         _ => ApiFormat::Anthropic,
     }
 }
@@ -69,7 +70,7 @@ mod tests {
     fn test_detect_api_format_zai_provider() {
         assert!(matches!(
             detect_api_format(ProviderId::ZAi, "GLM-5"),
-            ApiFormat::Anthropic
+            ApiFormat::OpenAI
         ));
     }
 }

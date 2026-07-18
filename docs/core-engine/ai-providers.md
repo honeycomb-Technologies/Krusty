@@ -1,10 +1,10 @@
 # Multi-Provider AI Layer
 
-Krusty talks to several AI providers -- Anthropic, OpenAI, MiniMax, Z.ai, OpenRouter, and Google -- through a single unified interface. This document explains how that works, from the high-level abstraction down to SSE byte parsing.
+Krusty exposes six selectable AI providers -- MiniMax, Anthropic, OpenAI, Grok, Z.ai, and OpenRouter -- through a single unified interface. Google/Gemini remains a supported wire format inside the abstraction layer, but it is not a selectable `ProviderId`. This document explains how the system works, from the high-level abstraction down to SSE byte parsing.
 
 ## The Problem
 
-Every AI provider invented its own API. Anthropic uses a Messages API with content blocks and `x-api-key` authentication. OpenAI uses Chat Completions (and now a Responses API) with Bearer tokens and a completely different message shape. Google's Gemini API uses `contents` with `parts` and `functionDeclarations`. Even providers that claim Anthropic compatibility -- like MiniMax and Z.ai -- have quirks around thinking blocks, caching, and vision support.
+Every AI provider invented its own API. Anthropic uses a Messages API with content blocks and `x-api-key` authentication. OpenAI uses Chat Completions (and now a Responses API) with Bearer tokens and a completely different message shape. Google's Gemini API uses `contents` with `parts` and `functionDeclarations`. Compatibility surfaces still have provider-specific contracts: MiniMax is Anthropic-compatible, Z.ai's Coding Plan is OpenAI Chat Completions-compatible, OpenRouter uses its own Messages schema, and Grok's subscription proxy uses an OpenAI Responses-style transport.
 
 Without an abstraction layer, every feature in Krusty would need provider-specific branches: separate code for sending messages, separate code for parsing streaming responses, separate code for tool calls, separate code for extended thinking. That sprawl would make adding a new provider a multi-week project touching dozens of files.
 
@@ -37,7 +37,7 @@ Authentication is handled at the request-building level. The `build_request()` m
 
 `AiClientConfig` (in `crates/krusty-core/src/ai/client/config/ai_client.rs`) captures everything needed to configure a client: the model ID, max tokens, optional base URL override, authentication style, provider ID, API format, and custom headers. Helper constructors like `for_anthropic_with_auth_detection()` and `for_openai_with_auth_detection()` handle the complexity of OAuth vs. API key routing, including choosing the correct endpoint (ChatGPT's Responses API vs. OpenAI's standard API) based on credential type.
 
-`CallOptions` is the per-request configuration: max tokens, temperature, tools, system prompt, thinking config, reasoning format, caching, context management, web search/fetch, and provider-specific knobs like Codex reasoning effort and Anthropic adaptive thinking effort.
+`CallOptions` is the per-request configuration: max tokens, temperature, tools, system prompt, thinking config, reasoning format, caching, context management, web search/fetch, and provider-specific knobs like Codex reasoning effort, Anthropic adaptive thinking effort, and the model-specific Fast implementation.
 
 The key method is `canonicalized_for()`, which normalizes a `CallOptions` for a specific provider/model combination. It strips features the provider does not support (web search, context management, parallel tool calls), aligns the reasoning format with what the model actually uses (Anthropic thinking vs. OpenAI reasoning vs. DeepSeek), and removes conflicting effort controls. This prevents configuration drift between different call sites -- everyone gets the same canonicalized options.
 
@@ -61,23 +61,26 @@ The factory function `get_format_handler()` selects the right implementation bas
 
 ## Provider Registry
 
-The provider registry (under `crates/krusty-core/src/ai/providers/registry/`) is a lazily initialized, statically cached list of `ProviderConfig` entries. Each entry specifies the provider's ID, display name, base URL, authentication style, available models, and capabilities.
+The provider registry (under `crates/krusty-core/src/ai/providers/registry/`) is a lazily initialized, statically cached list of `ProviderConfig` entries. Each entry specifies the provider's ID, display name, base URL, authentication style, curated fallback models, and capabilities. Live catalog results replace those fallback rows when discovery succeeds.
 
-Five providers are built in:
+Six selectable providers are built in:
 
-- **MiniMax** -- Anthropic-compatible endpoint at `api.minimax.io`, uses `x-api-key` auth, offers MiniMax M2.5 with interleaved thinking.
-- **OpenRouter** -- Anthropic-compatible at `openrouter.ai`, uses Bearer auth, supports 100+ dynamic models from multiple upstream providers.
-- **Z.ai** -- Anthropic-compatible at `api.z.ai`, offers GLM-5.
-- **Anthropic** -- Direct Anthropic API with OAuth or API key, offers Claude Opus 4.6 and Haiku 4.5.
-- **OpenAI** -- Direct OpenAI API with OAuth or API key, offers GPT-5.3 Codex, GPT-5.4, and GPT-5.4 Mini.
+| Provider | Live catalog | Curated fallback | Important transport behavior |
+| --- | --- | --- | --- |
+| **OpenAI** | API keys query `/v1/models`; ChatGPT OAuth queries the account-scoped Codex catalog. If both identities exist, Krusty merges them by model ID and prefers the richer ChatGPT metadata. | GPT-5.6 Sol/Terra/Luna, GPT-5.5/5.5 Pro, GPT-5.4/5.4 Pro/5.4 Mini/5.4 Nano, Chat Latest, and GPT-5.3 Codex/Spark. | Successful live API/OAuth discovery is authoritative because each identity can expose different entitlements, context limits, reasoning presets, and Fast eligibility. |
+| **Anthropic** | Paginates `/v1/models` with either API-key or OAuth authentication. | Claude Opus 4.8, Fable 5, Sonnet 5, and Haiku 4.5. | Catalog capabilities are used when present; curated family overlays fill sparse thinking, context, vision, and Fast metadata. |
+| **MiniMax** | Paginates the Anthropic-compatible `/anthropic/v1/models` endpoint. | MiniMax M3, M2.7, and M2.7 Highspeed. | The live list supplies availability while curated family overlays make M3 adaptive-thinking and Priority-capable; M2 reasoning is mandatory, and Highspeed remains a distinct model ID. |
+| **Grok** | Queries the authenticated Grok CLI subscription proxy's `/models` endpoint. | Grok Build and Composer 2.5. | This is the subscription CLI transport, not the public xAI API; reasoning output can be displayed, but the curated proxy contract does not expose an effort selector. |
+| **OpenRouter** | Queries `/api/v1/models`, keeps every usable vendor model rather than applying a family allowlist, and consumes catalog reasoning, service-tier, modality, and pricing metadata. | A small tool-capable set covering current Claude and GPT families. | The OpenRouter Messages schema owns the request shape even when the routed upstream model is OpenAI or Anthropic. |
+| **Z.ai** | No supported model-list endpoint; this provider is static. | GLM 5.2, GLM 5 Turbo, and GLM 4.7. | The Coding Plan uses OpenAI-compatible Chat Completions with Bearer auth. Thinking is encoded with top-level `thinking.type`; `reasoning_effort` is sent only for models whose metadata exposes graded effort. |
 
 `ProviderCapabilities` is a parallel structure that tracks feature support per provider: prompt caching, web search, web fetch, context management, web plugins (OpenRouter-style), and vision. This is what `CallOptions::canonicalized_for()` checks to strip unsupported features.
 
-Adding a new provider means adding a `ProviderConfig` entry to the `BUILTIN_PROVIDERS` list, a `ProviderCapabilities` match arm, and (if it uses a new API format) a `FormatHandler` implementation. For Anthropic-compatible providers like MiniMax and Z.ai, only the first two are needed.
+Adding a new provider means adding a `ProviderConfig` entry to the `BUILTIN_PROVIDERS` list, a `ProviderCapabilities` match arm, and (if it uses a new API format) a `FormatHandler` implementation. A dynamic provider also needs a catalog-listing adapter. Existing compatible formats can be reused: MiniMax uses the Anthropic handler, while Z.ai uses the OpenAI handler.
 
 ## Model Profiles and Capabilities
 
-The model system has two layers. `ModelMetadata` (in `crates/krusty-core/src/ai/models/metadata.rs`) stores factual data about a model: context window, max output, reasoning format, pricing, vision support. The `ModelRegistry` is a thread-safe store (`Arc<RwLock>`) that holds models from all providers, supports O(1) lookup by ID via an index, and tracks recently used models.
+The model system has two layers. `ModelMetadata` (in `crates/krusty-core/src/ai/models/metadata.rs`) stores factual data about a model: context window, max output, reasoning format, exact selectable reasoning levels, provider default, whether reasoning is mandatory, request control type, Fast implementation, pricing, and vision support. The `ModelRegistry` is a thread-safe store (`Arc<RwLock>`) that holds models from all providers, supports O(1) lookup by ID via an index, and tracks recently used models. Server, TUI, mobile, and desktop clients prefer this metadata over guessing capabilities from model names; compatibility heuristics remain for older responses that do not include it.
 
 `ModelProfile` (in `crates/krusty-core/src/ai/model_profile/profile/mod.rs`) captures behavioral characteristics tied to a model family. It determines the prompt family (AnthropicClaude, OpenAiCodex, OpenAiReasoning, GoogleGemini, or GenericCoding), context utilization ratios for compaction, stream drain policies, and whether the model supports reasoning summaries. Profiles are resolved from the provider, API format, and model ID using pattern matching on the model name.
 
@@ -99,9 +102,16 @@ Tool calls are accumulated using `ToolCallAccumulator`, which collects argument 
 
 ## Extended Thinking
 
-Extended thinking (in `crates/krusty-core/src/ai/client/thinking.rs`) lets models "think out loud" before responding. Krusty sends a `thinking` configuration with a budget in tokens, and the response includes `Thinking` content blocks alongside regular text.
+Extended thinking (in `crates/krusty-core/src/ai/client/thinking.rs`) lets reasoning models return `Thinking` content blocks alongside regular text. The model catalog, rather than a global hard-coded cycle, determines which of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max` are selectable. Requests for an unavailable level are normalized to the catalog default (or the first valid level), and models marked as mandatory reasoning cannot be switched off. `ultra` is retained only for backward-compatible parsing; it is never advertised as selectable and a legacy `ultra` request normalizes to `max`.
 
-For Anthropic, this requires beta headers (`interleaved-thinking-2025-05-14`) and, for Opus 4.5 models, an effort parameter with its own beta flag. The thinking budget is set independently of max output tokens, and max tokens must exceed the budget.
+The request encoding is provider-specific:
+
+- **OpenAI/ChatGPT** uses OpenAI reasoning effort. Entitlement-specific ChatGPT catalog levels are authoritative.
+- **Anthropic adaptive families** use `thinking: { type: "adaptive" }` plus `output_config.effort`; Sonnet 5 sends `thinking: { type: "disabled" }` for an explicit Off selection because omission enables thinking on that family, while always-on Fable 5 cannot be disabled. Older families retain budget-based thinking and the interleaved-thinking beta.
+- **OpenRouter Messages** uses `thinking: { type: "enabled" }` plus `output_config.effort`, regardless of the routed upstream provider.
+- **MiniMax M3** uses the Anthropic-compatible `thinking: { type: "adaptive" }` toggle without an effort or token budget. M2-family reasoning is mandatory, so Krusty omits a conflicting optional thinking object.
+- **Z.ai** uses top-level `thinking: { type: "enabled" | "disabled" }`; `reasoning_effort` accompanies it only for models such as GLM 5.2 whose catalog metadata exposes graded effort. It never receives an Anthropic budget object.
+- **Grok's subscription proxy** can return reasoning output, but explicit effort controls are suppressed for the output-only transport contract.
 
 The streaming path handles thinking through `ThinkingStart`, `ThinkingDelta`, `SignatureDelta`, and `ThinkingComplete` events. The signature is a cryptographic value that Anthropic uses to validate thinking block integrity -- it must be preserved when sending thinking blocks back in subsequent requests. MiniMax uses the same thinking block structure but without signatures.
 
@@ -113,19 +123,38 @@ The `with_retry()` function wraps any async operation. On failure, it checks the
 
 ## Format Auto-Detection
 
-`detect_api_format()` (in `crates/krusty-core/src/ai/format_detection.rs`) provides the canonical mapping from provider to API format. OpenAI gets `ApiFormat::OpenAI`; everyone else gets `ApiFormat::Anthropic`. This is the fallback used when the caller does not specify a format explicitly.
+`detect_api_format()` (in `crates/krusty-core/src/ai/format_detection.rs`) provides the canonical mapping from provider to API format. OpenAI and Z.ai use `ApiFormat::OpenAI`; Grok uses `ApiFormat::OpenAIResponses`; Anthropic, MiniMax, and OpenRouter use `ApiFormat::Anthropic`. This is the fallback used when the caller does not specify a format explicitly. `ApiFormat::Google` is available to explicit internal/custom configurations, but there is no selectable Google provider.
 
 More nuanced detection happens in `AiClientConfig::for_openai_with_auth_detection()`, which examines the credential type and model name to choose between Chat Completions, Responses API, and ChatGPT's backend API. GPT-5+ models and Codex models prefer the Responses API. ChatGPT OAuth tokens require the ChatGPT backend endpoint. Everything else uses Chat Completions.
 
-## Model Translation and Fast Mode
+## Model Translation and Standard/Fast Mode
 
-The provider registry includes a model translation system. `ModelFamily` defines canonical model families (Claude Opus 4.6, Claude Sonnet 4, etc.) and `MODEL_MAPPINGS` maps them to provider-specific IDs. `translate_model_id()` converts between providers -- for example, `claude-opus-4-6` on Anthropic becomes `anthropic/claude-opus-4.6` on OpenRouter. `translate_model_or_default()` falls back to the target provider's default model when no mapping exists.
+The provider registry includes a model translation system. `ModelFamily` defines canonical model families and `MODEL_MAPPINGS` maps them to provider-specific IDs. `translate_model_id()` converts between providers; `translate_model_or_default()` falls back to the target provider's default model when no mapping exists. Translation is separate from live catalog metadata and must not be used to infer reasoning or Fast support.
 
-Krusty keeps model identity separate from request speed. Mini/Haiku models are explicit model selections, while the TUI/mobile fast toggle requests a provider service tier through `CallOptions::service_tier_for_provider()` without mutating the selected model ID.
+Krusty also keeps model identity separate from request speed. Standard is represented by omitting a speed override. Fast is enabled only when the selected model advertises an implementation:
+
+- OpenAI, OpenRouter, and MiniMax models whose catalog metadata advertises Priority send `service_tier: "priority"`.
+- Anthropic Fast Mode sends `speed: "fast"` and the `fast-mode-2026-02-01` beta header.
+- MiniMax M3 supports the per-request Priority tier; MiniMax Highspeed entries remain distinct model IDs.
+- Models without a catalog `fast_mode` value keep the control disabled.
 
 ## Dynamic Model Discovery
 
-Providers marked with `dynamic_models: true` (OpenRouter and OpenAI) support runtime model discovery. The catalog module (`crates/krusty-core/src/ai/catalog.rs`) routes to provider-specific fetch functions that query each provider's model listing API, parse the response into `ModelMetadata`, and populate the `ModelRegistry`. Cached catalogs include a fingerprint hash and TTL (6 hours for OpenAI, 12 for OpenRouter) to avoid unnecessary refetches.
+Providers marked with `dynamic_models: true` (OpenAI, Anthropic, MiniMax, Grok, and OpenRouter) support runtime model discovery. The catalog module (`crates/krusty-core/src/ai/catalog.rs`) resolves provider credentials, routes to the provider-specific listing adapter, and parses each result into the shared `ModelMetadata` contract. Z.ai remains on curated static metadata because it does not expose a supported model-list endpoint.
+
+Catalog startup and refresh are deliberately stale-safe:
+
+1. Seed every provider with curated fallback models so model selection works without network access.
+2. Restore the last-known-good cached snapshots immediately, then reapply custom models.
+3. Force one credential-backed revalidation sweep concurrently at startup, without delaying router startup, then use provider TTLs for later refreshes. OpenAI's API-key and ChatGPT OAuth identities are fetched independently, and both must complete before their entitlement-scoped rows are merged.
+4. Replace and persist a provider catalog only after a complete, non-empty success. Malformed pagination, an empty identity catalog, or any failed identity leaves the last-known-good snapshot untouched.
+5. Check for stale catalogs every five minutes while the server runs; TTLs gate the actual network calls.
+
+Credential changes invalidate the affected provider's cache before a canonical refresh. Provider-specific singleflight locks prevent duplicate fetches, and an authentication generation check discards results that began under older credentials. OpenAI catalog rows also retain API-key or ChatGPT OAuth provenance so the selected model is routed through the transport whose capabilities were advertised instead of guessing from its slug.
+
+ChatGPT catalog requests identify themselves with a Codex protocol compatibility version rather than Krusty's package version. The stable default is `0.144.4`; set `KRUSTY_CODEX_CLIENT_VERSION` when a newer server contract requires an explicit compatibility override.
+
+The current TTLs are 5 minutes for OpenAI, 6 hours for Anthropic and MiniMax, 12 hours for OpenRouter, and 24 hours for Grok. Cache metadata records fetch time, model count, and a fingerprint over model capabilities, auth provenance, and pricing, so missing or corrupted snapshots are treated as stale. This is a last-known-good cache, not a source of model truth: the live provider catalog wins whenever a refresh succeeds, while curated fallbacks remain the safety net when discovery is unavailable.
 
 ## How It All Fits Together
 

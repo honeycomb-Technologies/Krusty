@@ -6,7 +6,7 @@ use agent_client_protocol::{
 use tempfile::tempdir;
 use tokio::sync::{mpsc, Mutex, RwLock};
 
-use super::{negotiate_protocol_version, KrustyAgent};
+use super::{negotiate_protocol_version, AvailableModelRecord, KrustyAgent};
 use crate::acp::processor::PromptProcessor;
 use crate::acp::session::SessionManager;
 use crate::agent::loop_events::LoopStopReason;
@@ -139,20 +139,24 @@ async fn model_selection_is_isolated_per_acp_session() -> anyhow::Result<()> {
     let db = Database::new(&dir.path().join("test.db"))?;
     let agent = agent_with_storage(Arc::new(Mutex::new(StorageSessionManager::new(db))));
     *agent.available_models.write().await = vec![
-        (
-            "minimax:model-a".to_string(),
-            ProviderId::MiniMax,
-            "model-a".to_string(),
-            "test-key-a".to_string(),
-            "Model A".to_string(),
-        ),
-        (
-            "minimax:model-b".to_string(),
-            ProviderId::MiniMax,
-            "model-b".to_string(),
-            "test-key-b".to_string(),
-            "Model B".to_string(),
-        ),
+        AvailableModelRecord {
+            acp_model_id: "minimax:model-a".to_string(),
+            provider: ProviderId::MiniMax,
+            model_id: "model-a".to_string(),
+            credential: "test-key-a".to_string(),
+            display_name: "Model A".to_string(),
+            auth_scope: None,
+            account_id: None,
+        },
+        AvailableModelRecord {
+            acp_model_id: "minimax:model-b".to_string(),
+            provider: ProviderId::MiniMax,
+            model_id: "model-b".to_string(),
+            credential: "test-key-b".to_string(),
+            display_name: "Model B".to_string(),
+            auth_scope: None,
+            account_id: None,
+        },
     ];
     let first = agent.sessions().create_session(Some("/tmp".into()), None);
     let second = agent.sessions().create_session(Some("/tmp".into()), None);
