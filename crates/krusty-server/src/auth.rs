@@ -394,10 +394,10 @@ mod tests {
     use krusty_core::tools::registry::ToolRegistry;
 
     use super::{
-        authorize_request_surface, authorize_shared_extensibility_admin, is_local_host,
-        is_trusted_local_origin, percent_decode_query_component, resolve_workspace_dir,
-        authenticated_user_for_surface, AuthenticatedUser, RequestSurface, USER_ID_HEADER,
-        WORKSPACE_DIR_HEADER,
+        authenticated_user_for_surface, authorize_request_surface,
+        authorize_shared_extensibility_admin, is_local_host, is_trusted_local_origin,
+        percent_decode_query_component, resolve_workspace_dir, AuthenticatedUser, RequestSurface,
+        USER_ID_HEADER, WORKSPACE_DIR_HEADER,
     };
     use crate::{remote_access::RemoteAccessConfig, AppState};
 

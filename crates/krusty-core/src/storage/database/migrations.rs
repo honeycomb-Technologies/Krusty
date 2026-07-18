@@ -112,15 +112,8 @@ impl Database {
         // 44 is committed only after the post-transaction checkpoint/VACUUM
         // completes, so a crash at any point before physical erasure resumes
         // cleanup on the next open instead of treating redaction as finished.
-        let privacy_cleanup_requested = match observed_version {
-            Some(0) => false,
-            Some(version) => version < 44,
-            // A missing table and a transient preflight read failure are
-            // indistinguishable here. Enter the conservative mode; the
-            // authoritative transaction below still skips VACUUM for a truly
-            // fresh version-0 database.
-            None => true,
-        };
+        let privacy_cleanup_requested =
+            observed_version.is_some_and(|version| version > 0 && version < 44);
         if privacy_cleanup_requested {
             self.conn
                 .pragma_update(None, "secure_delete", "ON")
@@ -155,6 +148,24 @@ impl Database {
             "Database schema version: {} (target: {})",
             current_version, SCHEMA_VERSION
         );
+
+        // A missing version table and a transient read blocked by another
+        // process look identical during the optimistic preflight. Once the
+        // immediate transaction reveals an existing pre-44 database, release
+        // the shared migration reservation and restart under the privacy
+        // migration's exclusive/secure-delete policy. Fresh version-0
+        // databases never request exclusive locking, so concurrent first opens
+        // serialize on the ordinary writer lock instead of deadlocking.
+        if current_version > 0 && current_version < 44 && !privacy_cleanup_requested {
+            tx.commit()?;
+            self.conn
+                .pragma_update(None, "secure_delete", "ON")
+                .context("enabling secure deletion for Mako privacy migration")?;
+            self.conn
+                .pragma_update(None, "locking_mode", "EXCLUSIVE")
+                .context("reserving exclusive access for Mako privacy migration")?;
+            return self.run_migrations();
+        }
 
         if current_version >= SCHEMA_VERSION {
             tx.commit()?;

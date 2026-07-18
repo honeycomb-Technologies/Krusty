@@ -127,7 +127,10 @@ impl MakoRuntimeConfig {
 mod tests {
     use std::time::Duration;
 
-    use super::MakoRuntimeConfig;
+    use super::{
+        MakoRuntimeConfig, MAX_EXECUTION_EVENT_BYTES, MAX_EXECUTION_EVENT_CAPACITY,
+        MAX_LIVE_EVENT_CAPACITY, MAX_SUBSCRIBER_CAPACITY,
+    };
 
     #[test]
     fn scheduler_must_renew_before_its_daemon_lease_expires() {
@@ -154,6 +157,7 @@ mod tests {
         config.cancellation_grace_period = Duration::from_secs(2);
         assert!(config.validate().is_err());
 
+        config.worker_heartbeat_interval = Duration::from_secs(1);
         config.cancellation_grace_period = Duration::from_millis(500);
         assert!(config.validate().is_ok());
     }

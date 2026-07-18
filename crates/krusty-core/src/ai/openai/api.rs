@@ -1,6 +1,6 @@
 use anyhow::Result;
 use reqwest::Client;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use crate::ai::models::ModelMetadata;
 

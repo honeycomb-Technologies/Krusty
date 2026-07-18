@@ -3,9 +3,10 @@
 mod migrations;
 
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, ErrorCode};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Current schema version
 const SCHEMA_VERSION: i32 = 44;
@@ -33,11 +34,15 @@ impl Database {
 
         // Apply contention policy before any pragma that may need a write
         // lock. The server and Mako daemon commonly initialize together.
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // Startup can legitimately overlap between the HTTP server, the Mako
+        // daemon, and short-lived clients. Give the migration winner enough
+        // time to finish even on a busy developer or deployment host instead
+        // of turning normal startup serialization into a transient failure.
+        conn.busy_timeout(Duration::from_secs(30))?;
 
         // Enable WAL mode for better concurrent access
         // This prevents lock contention when multiple instances try to access the database
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        retry_sqlite_busy(|| conn.pragma_update(None, "journal_mode", "WAL"))?;
 
         // Enable foreign key enforcement for referential integrity
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -58,4 +63,24 @@ impl Database {
     pub fn shared(path: &Path) -> Result<SharedDatabase> {
         Ok(Arc::new(Mutex::new(Self::new(path)?)))
     }
+}
+
+fn retry_sqlite_busy<T>(mut operation: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::Result<T> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match operation() {
+            Err(error) if is_sqlite_busy(&error) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            result => return result,
+        }
+    }
+}
+
+fn is_sqlite_busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if matches!(code.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+    )
 }

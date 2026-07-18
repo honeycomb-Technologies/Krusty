@@ -13,6 +13,14 @@ fn setup() -> (TempDir, Database) {
 fn create_session(db: &Database, user_id: Option<&str>, project_dir: &str) -> String {
     let id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
+    if let Some(user_id) = user_id {
+        db.conn()
+            .execute(
+                "INSERT OR IGNORE INTO users (id, email) VALUES (?1, ?2)",
+                rusqlite::params![user_id, format!("{user_id}@example.invalid")],
+            )
+            .expect("user");
+    }
     db.conn()
         .execute(
             "INSERT INTO sessions (
@@ -22,6 +30,13 @@ fn create_session(db: &Database, user_id: Option<&str>, project_dir: &str) -> St
             rusqlite::params![id, now, project_dir, user_id],
         )
         .expect("session");
+    db.conn()
+        .execute(
+            "INSERT INTO messages (session_id, role, content, created_at)
+             VALUES (?1, 'user', '[]', ?2)",
+            rusqlite::params![id, now],
+        )
+        .expect("source message");
     id
 }
 

@@ -790,14 +790,13 @@ mod tests {
         .expect("daemon-root MCP config should be written");
         let registry = ToolRegistry::new();
 
-        let manager =
-            initialize_mcp_manager(
-                MakoRuntimeMode::ExecutionHost,
-                temp.path(),
-                &registry,
-                Vec::new(),
-            )
-            .await;
+        let manager = initialize_mcp_manager(
+            MakoRuntimeMode::ExecutionHost,
+            temp.path(),
+            &registry,
+            Vec::new(),
+        )
+        .await;
 
         assert!(manager.list_servers().await.is_empty());
         assert!(registry

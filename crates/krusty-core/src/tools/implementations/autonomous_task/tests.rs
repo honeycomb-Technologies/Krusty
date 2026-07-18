@@ -2,7 +2,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use super::AutonomousTaskTool;
-use crate::storage::{Database, MemoryStore, CURRENT_SNAPSHOT_TITLE};
+use crate::storage::{get_current_snapshot, Database};
 use crate::tools::registry::{Tool, ToolContext};
 
 fn default_ctx() -> ToolContext {
@@ -120,9 +120,8 @@ async fn autonomous_task_create_refreshes_current_snapshot() {
         .await;
     assert!(!result.is_error);
 
-    let store = MemoryStore::new(Database::new(ctx.db_path.as_ref().expect("db")).expect("db"));
-    let snapshot = store
-        .find_by_title_for_user(CURRENT_SNAPSHOT_TITLE, Some("/repo"), None)
+    let snapshot = get_current_snapshot(ctx.db_path.as_ref().expect("db"), Some("/repo"), None)
+        .expect("snapshot lookup")
         .expect("snapshot should exist");
     assert!(snapshot.content.contains("Open tasks: 1"));
     assert!(snapshot.content.contains("Lock wake policy"));

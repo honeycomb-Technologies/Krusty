@@ -8,7 +8,6 @@
 mod episodes;
 mod mako;
 mod memory;
-mod episodes;
 mod plan;
 mod project;
 mod reports;

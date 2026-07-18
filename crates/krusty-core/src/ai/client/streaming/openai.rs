@@ -86,10 +86,10 @@ fn stable_system_prompt(sections: &crate::ai::model_profile::SystemPromptSection
         sections.identity_context.trim(),
         sections.project_context.trim(),
     ]
-        .into_iter()
-        .filter(|section| !section.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n---\n\n")
+    .into_iter()
+    .filter(|section| !section.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n\n---\n\n")
 }
 
 fn responses_instructions(system_prompt: String, explicit_breakpoint: bool) -> Value {
