@@ -10,8 +10,10 @@ use gpui::{
 use gpui_component::input::{InputEvent, InputState};
 use std::time::Duration;
 
-use crate::api::{ChatRequest, ChatStreamEvent, KrustyApiClient, ModelResponse, PlanItem};
-use crate::chat::session::ChatSessionState;
+use crate::api::{
+    ChatRequest, ChatStreamEvent, KrustyApiClient, ModelResponse, PlanItem, ReasoningControl,
+};
+use crate::chat::session::{ChatSessionState, ThinkingLevel};
 use crate::components::chat::approval_bar::tool_approval_bar;
 use crate::components::chat::blocks::bash_output::BashOutputBlockState;
 use crate::components::chat::blocks::thinking::ThinkingBlockState;
@@ -21,6 +23,8 @@ use crate::components::chat::composer::chat_composer;
 use crate::components::chat::plan_tracker::plan_tracker;
 use crate::components::chat::transcript::{transcript_view, TranscriptItem};
 use crate::design::theme;
+
+const MODEL_CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingToolApproval {
@@ -37,6 +41,7 @@ pub struct ChatPanel {
     model_index: usize,
     plan_items: Vec<PlanItem>,
     pending_approval: Option<PendingToolApproval>,
+    model_refresh_pending: bool,
     stop_requested: Arc<AtomicBool>,
     _input_subscription: Subscription,
 }
@@ -55,27 +60,32 @@ impl ChatPanel {
                 }
             });
 
-        let models = client
-            .list_models()
-            .map(|response| response.models)
-            .unwrap_or_default();
-        let model_index = 0;
+        let model_response = client.list_models().unwrap_or_default();
+        let model_index = default_model_index(
+            &model_response.models,
+            model_response.default_model.as_deref(),
+        );
+        let models = model_response.models;
         let server = client.base_url().to_owned();
+        let mut session = ChatSessionState::new();
+        sync_model_controls(&mut session, models.get(model_index));
         let mut panel = Self {
             client,
             input,
-            session: ChatSessionState::new(),
+            session,
             items: Vec::new(),
             models,
             model_index,
             plan_items: Vec::new(),
             pending_approval: None,
+            model_refresh_pending: false,
             stop_requested: Arc::new(AtomicBool::new(false)),
             _input_subscription: input_subscription,
         };
         panel.items.push(TranscriptItem::System(format!(
             "Chat ready. Streaming through {server}/api/chat."
         )));
+        Self::schedule_model_catalog_refresh(cx);
         panel
     }
 
@@ -85,12 +95,9 @@ impl ChatPanel {
         }
         let server = client.base_url().to_owned();
         self.client = client;
-        self.models = self
-            .client
-            .list_models()
-            .map(|response| response.models)
-            .unwrap_or_default();
-        self.model_index = 0;
+        let model_response = self.client.list_models().unwrap_or_default();
+        self.apply_model_catalog(model_response);
+        self.model_refresh_pending = false;
         self.session.session_id = None;
         self.plan_items.clear();
         self.pending_approval = None;
@@ -124,16 +131,80 @@ impl ChatPanel {
     }
 
     pub fn cycle_model(&mut self, cx: &mut Context<Self>) {
+        self.refresh_model_catalog(cx);
         if self.models.is_empty() {
             return;
         }
         self.model_index = (self.model_index + 1) % self.models.len();
-        self.session.model = self.models.get(self.model_index).map(|m| m.id.clone());
+        sync_model_controls(&mut self.session, self.models.get(self.model_index));
         cx.notify();
     }
 
+    fn apply_model_catalog(&mut self, response: crate::api::ModelsResponse) {
+        let selected_model = self.session.model.as_deref();
+        self.model_index = selected_model
+            .and_then(|selected| {
+                response
+                    .models
+                    .iter()
+                    .position(|model| model.id == selected)
+            })
+            .unwrap_or_else(|| {
+                default_model_index(&response.models, response.default_model.as_deref())
+            });
+        self.models = response.models;
+        sync_model_controls(&mut self.session, self.models.get(self.model_index));
+    }
+
+    fn refresh_model_catalog(&mut self, cx: &mut Context<Self>) {
+        if self.model_refresh_pending {
+            return;
+        }
+        self.model_refresh_pending = true;
+        let client = self.client.clone();
+        let source_server = client.base_url().to_owned();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { client.list_models() })
+                .await;
+            let _ = this.update(cx, |panel, cx| {
+                if panel.client.base_url() != source_server {
+                    return;
+                }
+                panel.model_refresh_pending = false;
+                if let Ok(response) = result {
+                    panel.apply_model_catalog(response);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn schedule_model_catalog_refresh(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| loop {
+            Timer::after(MODEL_CATALOG_REFRESH_INTERVAL).await;
+            if this
+                .update(cx, |panel, cx| panel.refresh_model_catalog(cx))
+                .is_err()
+            {
+                break;
+            }
+        })
+        .detach();
+    }
+
     pub fn cycle_thinking(&mut self, cx: &mut Context<Self>) {
-        self.session.thinking_level = self.session.thinking_level.cycle();
+        if let Some(model) = self.models.get(self.model_index) {
+            let levels = selectable_thinking_levels(model);
+            let next = levels
+                .iter()
+                .position(|level| *level == self.session.thinking_level)
+                .map_or(0, |index| (index + 1) % levels.len());
+            self.session.thinking_level = levels[next];
+        } else {
+            self.session.thinking_level = self.session.thinking_level.cycle();
+        }
         cx.notify();
     }
 
@@ -143,7 +214,15 @@ impl ChatPanel {
     }
 
     pub fn toggle_fast_mode(&mut self, cx: &mut Context<Self>) {
-        self.session.fast_mode = !self.session.fast_mode;
+        if self
+            .models
+            .get(self.model_index)
+            .is_some_and(|model| model.supports_fast_mode)
+        {
+            self.session.fast_mode = !self.session.fast_mode;
+        } else {
+            self.session.fast_mode = false;
+        }
         cx.notify();
     }
 
@@ -463,6 +542,87 @@ impl ChatPanel {
             })
             .unwrap_or_else(|| "default".to_owned())
     }
+
+    fn supports_thinking_control(&self) -> bool {
+        self.models.get(self.model_index).is_some_and(|model| {
+            selectable_thinking_levels(model)
+                .iter()
+                .any(|level| *level != ThinkingLevel::Off)
+        })
+    }
+}
+
+fn selectable_thinking_levels(model: &ModelResponse) -> Vec<ThinkingLevel> {
+    if model.reasoning_control == Some(ReasoningControl::OutputOnly) {
+        return vec![ThinkingLevel::Off];
+    }
+
+    let mut levels = model
+        .supported_reasoning_levels
+        .iter()
+        .filter_map(|level| ThinkingLevel::from_api_value(level))
+        .filter(|level| *level != ThinkingLevel::Ultra)
+        .collect::<Vec<_>>();
+    levels.dedup();
+    if levels.is_empty() {
+        return if model.supports_thinking {
+            let fallback = model
+                .default_reasoning_level
+                .as_deref()
+                .and_then(ThinkingLevel::from_api_value)
+                .filter(|level| !matches!(level, ThinkingLevel::Off | ThinkingLevel::Ultra))
+                .unwrap_or(ThinkingLevel::Medium);
+            if model.reasoning_is_mandatory {
+                vec![fallback]
+            } else {
+                vec![ThinkingLevel::Off, fallback]
+            }
+        } else {
+            vec![ThinkingLevel::Off]
+        };
+    }
+    if model.reasoning_is_mandatory {
+        levels.retain(|level| *level != ThinkingLevel::Off);
+        if levels.is_empty() {
+            levels.push(
+                model
+                    .default_reasoning_level
+                    .as_deref()
+                    .and_then(ThinkingLevel::from_api_value)
+                    .filter(|level| !matches!(level, ThinkingLevel::Off | ThinkingLevel::Ultra))
+                    .unwrap_or(ThinkingLevel::Medium),
+            );
+        }
+    } else if !levels.contains(&ThinkingLevel::Off) {
+        levels.insert(0, ThinkingLevel::Off);
+    }
+    levels
+}
+
+fn default_model_index(models: &[ModelResponse], default_model: Option<&str>) -> usize {
+    default_model
+        .and_then(|default| models.iter().position(|model| model.id == default))
+        .unwrap_or(0)
+}
+
+fn sync_model_controls(session: &mut ChatSessionState, model: Option<&ModelResponse>) {
+    let Some(model) = model else {
+        session.model = None;
+        session.fast_mode = false;
+        return;
+    };
+
+    session.model = Some(model.id.clone());
+    session.fast_mode &= model.supports_fast_mode;
+    let levels = selectable_thinking_levels(model);
+    if !levels.contains(&session.thinking_level) {
+        session.thinking_level = model
+            .default_reasoning_level
+            .as_deref()
+            .and_then(ThinkingLevel::from_api_value)
+            .filter(|level| levels.contains(level))
+            .unwrap_or(levels[0]);
+    }
 }
 
 impl Render for ChatPanel {
@@ -489,7 +649,66 @@ impl Render for ChatPanel {
                 &self.input,
                 &self.session,
                 &self.model_label(),
+                self.supports_thinking_control(),
                 cx,
             ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model(id: &str) -> ModelResponse {
+        ModelResponse {
+            id: id.to_owned(),
+            display_name: None,
+            provider: None,
+            supports_thinking: true,
+            reasoning_control: Some(ReasoningControl::OpenAiEffort),
+            supported_reasoning_levels: vec!["low".to_owned(), "high".to_owned()],
+            default_reasoning_level: Some("high".to_owned()),
+            reasoning_is_mandatory: true,
+            supports_fast_mode: false,
+        }
+    }
+
+    #[test]
+    fn advertised_default_model_drives_initial_controls() {
+        let models = vec![model("first"), model("default")];
+        let index = default_model_index(&models, Some("default"));
+        let mut session = ChatSessionState::new();
+        session.fast_mode = true;
+
+        sync_model_controls(&mut session, models.get(index));
+
+        assert_eq!(index, 1);
+        assert_eq!(session.model.as_deref(), Some("default"));
+        assert_eq!(session.thinking_level, ThinkingLevel::High);
+        assert!(!session.fast_mode);
+    }
+
+    #[test]
+    fn legacy_model_metadata_uses_its_advertised_default_effort() {
+        let mut legacy = model("legacy");
+        legacy.supported_reasoning_levels.clear();
+
+        assert_eq!(
+            selectable_thinking_levels(&legacy),
+            vec![ThinkingLevel::High]
+        );
+
+        legacy.supported_reasoning_levels = vec!["none".to_owned()];
+        legacy.default_reasoning_level = None;
+        assert_eq!(
+            selectable_thinking_levels(&legacy),
+            vec![ThinkingLevel::Medium]
+        );
+
+        legacy.reasoning_control = Some(ReasoningControl::OutputOnly);
+        assert_eq!(
+            selectable_thinking_levels(&legacy),
+            vec![ThinkingLevel::Off]
+        );
     }
 }

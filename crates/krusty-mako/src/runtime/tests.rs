@@ -3258,6 +3258,12 @@ async fn durable_runtime_stats_count_each_scheduler_state_exactly() {
         .unwrap();
     db.conn()
         .execute(
+            "INSERT INTO users (id, email) VALUES ('alice', 'alice@example.invalid')",
+            [],
+        )
+        .unwrap();
+    db.conn()
+        .execute(
             "UPDATE mako_controllers SET user_id = 'alice'
              WHERE id = 'controller-alice-running'",
             [],

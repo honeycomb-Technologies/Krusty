@@ -1,5 +1,13 @@
+use std::path::{Path, PathBuf};
+
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+
+pub(super) const DEFAULT_HOOK_TIMEOUT_SECONDS: u64 = 30;
+
+fn default_hook_timeout_seconds() -> u64 {
+    DEFAULT_HOOK_TIMEOUT_SECONDS
+}
 
 /// Type of user hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +71,70 @@ impl std::fmt::Display for UserHookType {
     }
 }
 
+/// Runtime provenance for a hook.
+///
+/// Package hooks are deliberately ephemeral: they are reconstructed from an
+/// enabled plugin's immutable snapshot and are never written to `user_hooks`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UserHookSource {
+    /// A hook explicitly created by the user and persisted in SQLite.
+    #[default]
+    User,
+    /// A read-only hook contributed by an installed plugin package.
+    Package {
+        plugin_id: String,
+        /// Internal immutable config path. Do not expose host paths through
+        /// serialized hook responses.
+        #[serde(skip)]
+        config_path: PathBuf,
+    },
+}
+
+impl UserHookSource {
+    /// Whether this hook came from a plugin package.
+    pub fn is_package(&self) -> bool {
+        matches!(self, Self::Package { .. })
+    }
+
+    /// Package identifier for package hooks.
+    pub fn plugin_id(&self) -> Option<&str> {
+        match self {
+            Self::User => None,
+            Self::Package { plugin_id, .. } => Some(plugin_id),
+        }
+    }
+}
+
+/// One validated package hook configuration input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageHookConfig {
+    pub plugin_id: String,
+    pub config_path: PathBuf,
+    pub package_root: PathBuf,
+}
+
+impl PackageHookConfig {
+    pub fn new(
+        plugin_id: impl Into<String>,
+        config_path: impl Into<PathBuf>,
+        package_root: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            plugin_id: plugin_id.into(),
+            config_path: config_path.into(),
+            package_root: package_root.into(),
+        }
+    }
+}
+
+/// Summary returned after atomically replacing all package hooks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PackageHookLoadReport {
+    pub config_count: usize,
+    pub hook_count: usize,
+}
+
 /// A user-defined hook.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserHook {
@@ -76,8 +148,22 @@ pub struct UserHook {
     pub command: String,
     /// Whether this hook is enabled.
     pub enabled: bool,
+    /// Maximum command runtime. Package formats may override the 30-second default.
+    #[serde(default = "default_hook_timeout_seconds")]
+    pub timeout_seconds: u64,
     /// When the hook was created.
     pub created_at: String,
+    /// Whether this is a persisted user hook or an ephemeral package hook.
+    #[serde(default)]
+    pub source: UserHookSource,
+    /// Owner of a persisted tenant hook. `None` identifies a local/global hook.
+    /// Package hooks are global contributions and never carry an owner.
+    #[serde(skip)]
+    pub(super) owner_user_id: Option<String>,
+    /// Working directory used for execution. Package hooks run from their
+    /// immutable package root so relative script references are deterministic.
+    #[serde(skip)]
+    pub(super) working_dir: Option<PathBuf>,
     /// Compiled regex (not serialized).
     #[serde(skip)]
     pub(super) compiled_pattern: Option<Regex>,
@@ -93,9 +179,68 @@ impl UserHook {
             tool_pattern,
             command,
             enabled: true,
+            timeout_seconds: DEFAULT_HOOK_TIMEOUT_SECONDS,
             created_at: chrono::Utc::now().to_rfc3339(),
+            source: UserHookSource::User,
+            owner_user_id: None,
+            working_dir: None,
             compiled_pattern: compiled,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_package(
+        id: String,
+        hook_type: UserHookType,
+        tool_pattern: String,
+        command: String,
+        enabled: bool,
+        timeout_seconds: u64,
+        plugin_id: String,
+        config_path: PathBuf,
+        package_root: PathBuf,
+    ) -> Self {
+        let compiled_pattern = Regex::new(&tool_pattern).ok();
+        Self {
+            id,
+            hook_type,
+            tool_pattern,
+            command,
+            enabled,
+            timeout_seconds,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            source: UserHookSource::Package {
+                plugin_id,
+                config_path,
+            },
+            owner_user_id: None,
+            working_dir: Some(package_root),
+            compiled_pattern,
+        }
+    }
+
+    /// Whether this hook is an ephemeral, read-only package contribution.
+    pub fn is_package_hook(&self) -> bool {
+        self.source.is_package()
+    }
+
+    /// Persisted tenant owner, if any. Global and package hooks return `None`.
+    pub fn owner_user_id(&self) -> Option<&str> {
+        self.owner_user_id.as_deref()
+    }
+
+    /// Whether this hook is visible and executable for the given request user.
+    /// Global persisted hooks and package hooks apply to every context, while a
+    /// tenant-owned hook applies only to its exact owner.
+    pub fn applies_to_user(&self, user_id: Option<&str>) -> bool {
+        self.is_package_hook()
+            || self.owner_user_id.is_none()
+            || self.owner_user_id.as_deref() == user_id
+    }
+
+    /// Working directory used to execute this hook.
+    pub fn working_dir(&self) -> Option<&Path> {
+        self.working_dir.as_deref()
     }
 
     /// Check if this hook matches a tool name.
@@ -138,7 +283,7 @@ pub enum UserHookResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{UserHook, UserHookType};
+    use super::{UserHook, UserHookSource, UserHookType, DEFAULT_HOOK_TIMEOUT_SECONDS};
 
     fn create_test_hook(hook_type: UserHookType, pattern: &str, command: &str) -> UserHook {
         UserHook::new(hook_type, pattern.to_string(), command.to_string())
@@ -252,7 +397,11 @@ mod tests {
             tool_pattern: "Write".to_string(),
             command: "echo 'test'".to_string(),
             enabled: true,
+            timeout_seconds: DEFAULT_HOOK_TIMEOUT_SECONDS,
             created_at: chrono::Utc::now().to_rfc3339(),
+            source: UserHookSource::User,
+            owner_user_id: None,
+            working_dir: None,
             compiled_pattern: None,
         };
 

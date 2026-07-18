@@ -7,9 +7,14 @@ CLAUDE.md
 # Build outputs
 target/
 .fastembed_cache/
+/.tmp/
 **/target/
 **/dist/
 **/.krusty-shadow/
+
+# Python test caches
+**/__pycache__/
+*.py[cod]
 
 # MCP configuration (user-specific)
 .mcp.json
@@ -53,3 +58,7 @@ oauth.json
 *.jks
 *.keystore
 .krusty/
+
+# Python test caches
+**/__pycache__/
+*.py[cod]

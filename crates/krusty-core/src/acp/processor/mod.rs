@@ -14,8 +14,12 @@ use std::sync::Arc;
 use crate::agent::AgentConfig;
 use crate::ai::client::{AiClient, AiClientConfig};
 use crate::ai::format_detection::detect_api_format;
+use crate::ai::models::ModelAuthScope;
 use crate::ai::providers::{get_provider, AuthHeader, ProviderConfig, ProviderId};
-use crate::auth::{resolve_anthropic_auth, resolve_openai_auth, AnthropicAuthType, OpenAIAuthType};
+use crate::auth::{
+    resolve_anthropic_auth, resolve_openai_auth, AnthropicAuthType, OpenAIAuthResolution,
+    OpenAIAuthType,
+};
 use crate::process::ProcessRegistry;
 use crate::storage::CredentialStore;
 use crate::tools::ToolRegistry;
@@ -60,7 +64,24 @@ impl PromptProcessor {
         provider: ProviderId,
         model_override: Option<String>,
     ) -> bool {
-        let client = self.build_ai_client(api_key, provider, model_override);
+        self.init_ai_client_with_auth_scope(api_key, provider, model_override, None, None)
+    }
+
+    pub(super) fn init_ai_client_with_auth_scope(
+        &mut self,
+        api_key: String,
+        provider: ProviderId,
+        model_override: Option<String>,
+        auth_scope: Option<ModelAuthScope>,
+        account_id: Option<String>,
+    ) -> bool {
+        let client = self.build_ai_client_with_auth_scope(
+            api_key,
+            provider,
+            model_override,
+            auth_scope,
+            account_id,
+        );
         self.ai_client = client;
         self.ai_client.is_some()
     }
@@ -71,6 +92,17 @@ impl PromptProcessor {
         api_key: String,
         provider: ProviderId,
         model_override: Option<String>,
+    ) -> Option<Arc<AiClient>> {
+        self.build_ai_client_with_auth_scope(api_key, provider, model_override, None, None)
+    }
+
+    pub(super) fn build_ai_client_with_auth_scope(
+        &self,
+        api_key: String,
+        provider: ProviderId,
+        model_override: Option<String>,
+        auth_scope: Option<ModelAuthScope>,
+        account_id: Option<String>,
     ) -> Option<Arc<AiClient>> {
         let Some(model) = model_override
             .map(|model| model.trim().to_string())
@@ -83,7 +115,8 @@ impl PromptProcessor {
             return None;
         };
 
-        let mut config = self.config_for_selected_credential(provider, &model, &api_key);
+        let mut config =
+            self.config_for_selected_credential(provider, &model, &api_key, auth_scope, account_id);
         config.max_tokens = ACP_DEFAULT_MAX_TOKENS;
 
         let client = Arc::new(AiClient::new(config, api_key));
@@ -105,9 +138,12 @@ impl PromptProcessor {
         provider: ProviderId,
         model: &str,
         credential: &str,
+        auth_scope: Option<ModelAuthScope>,
+        account_id: Option<String>,
     ) -> AiClientConfig {
         match provider {
-            ProviderId::OpenAI => self.openai_config_for_selected_credential(model, credential),
+            ProviderId::OpenAI => self
+                .openai_config_for_selected_credential(model, credential, auth_scope, account_id),
             ProviderId::Anthropic => {
                 self.anthropic_config_for_selected_credential(model, credential)
             }
@@ -120,30 +156,35 @@ impl PromptProcessor {
         &self,
         model: &str,
         credential: &str,
+        auth_scope: Option<ModelAuthScope>,
+        account_id: Option<String>,
     ) -> AiClientConfig {
-        let credentials = CredentialStore::load().unwrap_or_default();
-        let resolved = resolve_openai_auth(&credentials, model);
-        let auth_type = if resolved.credential.as_deref() == Some(credential) {
-            resolved.auth_type
-        } else {
-            OpenAIAuthType::ApiKey
-        };
-        let mut custom_headers = std::collections::HashMap::new();
-        if matches!(auth_type, OpenAIAuthType::ChatGptOAuth) {
-            if let Some(account_id) = resolved.account_id {
-                custom_headers.insert("ChatGPT-Account-Id".to_string(), account_id);
+        let resolved = match auth_scope {
+            Some(ModelAuthScope::ApiKey) => OpenAIAuthResolution {
+                auth_type: OpenAIAuthType::ApiKey,
+                credential: Some(credential.to_string()),
+                account_id: None,
+            },
+            Some(ModelAuthScope::OAuth) => OpenAIAuthResolution {
+                auth_type: OpenAIAuthType::ChatGptOAuth,
+                credential: Some(credential.to_string()),
+                account_id,
+            },
+            None => {
+                let credentials = CredentialStore::load().unwrap_or_default();
+                let resolved = resolve_openai_auth(&credentials, model);
+                if resolved.credential.as_deref() == Some(credential) {
+                    resolved
+                } else {
+                    OpenAIAuthResolution {
+                        auth_type: OpenAIAuthType::ApiKey,
+                        credential: Some(credential.to_string()),
+                        account_id: None,
+                    }
+                }
             }
-        }
-
-        AiClientConfig {
-            model: model.to_string(),
-            max_tokens: ACP_DEFAULT_MAX_TOKENS,
-            base_url: Some(ProviderConfig::openai_url_for_auth(model, auth_type).to_string()),
-            auth_header: AuthHeader::Bearer,
-            provider_id: ProviderId::OpenAI,
-            api_format: ProviderConfig::openai_format_for_auth(model, auth_type),
-            custom_headers,
-        }
+        };
+        AiClientConfig::for_openai_with_auth_resolution(model, resolved)
     }
 
     fn anthropic_config_for_selected_credential(

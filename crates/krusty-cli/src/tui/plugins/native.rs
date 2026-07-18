@@ -81,10 +81,38 @@ pub struct NativePluginHost {
 }
 
 struct NativePluginInstance {
-    _library: Library,
-    _shadow_path: PathBuf,
+    library: Option<Library>,
+    _shadow: NativeShadowCopy,
     api: KrustyNativePluginV1,
     instance: *mut c_void,
+    active: bool,
+}
+
+/// Deletes a native library's private load copy on every exit path. Declaring
+/// the guard before opening the library also makes partial-load failures clean
+/// up automatically after the temporary `Library` handle is dropped.
+struct NativeShadowCopy {
+    path: PathBuf,
+}
+
+impl NativeShadowCopy {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for NativeShadowCopy {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_file(&self.path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    %error,
+                    "Failed to remove native plugin shadow copy"
+                );
+            }
+        }
+    }
 }
 
 // Native plugins are arbitrary code. The host only calls them from the TUI thread,
@@ -95,7 +123,7 @@ unsafe impl Send for NativePluginHost {}
 unsafe impl Sync for NativePluginHost {}
 
 impl NativePluginHost {
-    pub fn new(descriptor: InstalledPluginDescriptor) -> Self {
+    pub(super) fn new(descriptor: InstalledPluginDescriptor) -> Self {
         let inner = NativePluginInstance::load(&descriptor).map_err(|err| err.to_string());
         Self { descriptor, inner }
     }
@@ -122,7 +150,7 @@ impl NativePluginHost {
 
 impl NativePluginInstance {
     fn load(descriptor: &InstalledPluginDescriptor) -> anyhow::Result<Self> {
-        let shadow_path = shadow_copy_native_library(
+        let shadow = shadow_copy_native_library(
             &descriptor.id,
             &descriptor.install_path,
             &descriptor.entry_component_path,
@@ -130,7 +158,7 @@ impl NativePluginInstance {
 
         // SAFETY: Loading a native plugin is explicitly unsafe by policy. The path is
         // a shadow copy of the installed plugin entry component.
-        let library = unsafe { Library::new(&shadow_path)? };
+        let library = unsafe { Library::new(shadow.path())? };
         let api = unsafe {
             let entry: libloading::Symbol<unsafe extern "C" fn() -> *const KrustyNativePluginV1> =
                 library.get(b"krusty_plugin_entry")?;
@@ -155,10 +183,11 @@ impl NativePluginInstance {
         };
 
         Ok(Self {
-            _library: library,
-            _shadow_path: shadow_path,
+            library: Some(library),
+            _shadow: shadow,
             api,
             instance,
+            active: false,
         })
     }
 
@@ -206,15 +235,23 @@ impl NativePluginInstance {
     }
 
     fn on_activate(&mut self) {
+        if self.active {
+            return;
+        }
         if let Some(on_activate) = self.api.on_activate {
             unsafe { on_activate(self.instance) };
         }
+        self.active = true;
     }
 
     fn on_deactivate(&mut self) {
+        if !self.active {
+            return;
+        }
         if let Some(on_deactivate) = self.api.on_deactivate {
             unsafe { on_deactivate(self.instance) };
         }
+        self.active = false;
     }
 }
 
@@ -224,6 +261,10 @@ impl Drop for NativePluginInstance {
         if let Some(destroy) = self.api.destroy {
             unsafe { destroy(self.instance) };
         }
+        self.instance = std::ptr::null_mut();
+        // Windows cannot delete a loaded DLL. Explicitly drop the library
+        // handle before the shadow guard runs; Unix benefits too.
+        self.library.take();
     }
 }
 
@@ -245,7 +286,7 @@ fn shadow_copy_native_library(
     id: &str,
     install_path: &Path,
     source: &Path,
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<NativeShadowCopy> {
     if !source.exists() {
         anyhow::bail!("native plugin entry does not exist: {}", source.display());
     }
@@ -263,7 +304,7 @@ fn shadow_copy_native_library(
         .collect::<String>();
     let shadow_path = shadow_dir.join(format!("{}-{}.{}", sanitized_id, Uuid::new_v4(), ext));
     fs::copy(source, &shadow_path)?;
-    Ok(shadow_path)
+    Ok(NativeShadowCopy { path: shadow_path })
 }
 
 fn map_event(event: &Event) -> Option<KrustyNativeEvent> {
@@ -386,6 +427,19 @@ impl Plugin for NativePluginHost {
 mod tests {
     use super::*;
 
+    fn no_op_api() -> KrustyNativePluginV1 {
+        KrustyNativePluginV1 {
+            abi_version: KRUSTY_NATIVE_PLUGIN_ABI_VERSION,
+            create: None,
+            destroy: None,
+            on_activate: None,
+            on_deactivate: None,
+            tick: None,
+            render_text: None,
+            handle_event: None,
+        }
+    }
+
     #[test]
     fn maps_basic_key_events() {
         let event = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
@@ -400,5 +454,54 @@ mod tests {
         let event = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
         let mapped = map_event(&event).expect("key event");
         assert_eq!(mapped.key_code, KRUSTY_NATIVE_EVENT_ESC);
+    }
+
+    #[test]
+    fn failed_native_load_removes_shadow_copy() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("invalid-native-library.bin");
+        fs::write(&source, b"not a dynamic library").expect("write invalid library");
+        let descriptor = InstalledPluginDescriptor {
+            id: "invalid-native".to_string(),
+            name: "Invalid Native".to_string(),
+            version: "1.0.0".to_string(),
+            publisher: "test.publisher".to_string(),
+            description: None,
+            runtime: crate::plugins::PluginRuntime::Native,
+            install_path: temp.path().to_path_buf(),
+            entry_component_path: source,
+            enabled: true,
+            render_mode: PluginRenderMode::Text,
+            process_granted: true,
+        };
+
+        assert!(
+            NativePluginInstance::load(&descriptor).is_err(),
+            "invalid library must fail to load"
+        );
+
+        let shadow_dir = temp.path().join(".krusty-shadow");
+        let remaining = fs::read_dir(shadow_dir).expect("shadow directory").count();
+        assert_eq!(remaining, 0, "failed load left a native shadow copy");
+    }
+
+    #[test]
+    fn native_instance_drop_removes_shadow_copy_without_real_plugin() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let shadow_path = temp.path().join("shadow-library.bin");
+        fs::write(&shadow_path, b"shadow").expect("write shadow copy");
+        let instance = NativePluginInstance {
+            library: None,
+            _shadow: NativeShadowCopy {
+                path: shadow_path.clone(),
+            },
+            api: no_op_api(),
+            instance: std::ptr::null_mut(),
+            active: false,
+        };
+
+        drop(instance);
+
+        assert!(!shadow_path.exists());
     }
 }

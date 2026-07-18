@@ -1,11 +1,15 @@
 use serde_json::{json, Value};
 
 use super::{
-    diff_preview, tool_payload, truncate_array_strings, truncate_utf8, unique_file_count,
-    MAX_BASH_OUTPUT_CHARS, MAX_LIST_ITEMS, MAX_MATCH_ITEMS, MAX_PREVIEW_CHARS,
+    diff_preview, tool_payload, truncate_array_strings, truncate_utf8, truncate_utf8_head_tail,
+    unique_file_count, MAX_BASH_OUTPUT_CHARS, MAX_LIST_ITEMS, MAX_MATCH_ITEMS, MAX_PREVIEW_CHARS,
 };
 
 const MAX_BASH_ERROR_SUMMARY_OUTPUT_CHARS: usize = 700;
+const MAX_AGENT_FINDINGS_HEAD_CHARS: usize = 1_900;
+const MAX_AGENT_FINDINGS_TAIL_CHARS: usize = 900;
+const MAX_AGENT_DETAIL_CHARS: usize = 600;
+const MAX_AGENT_PATH_CHARS: usize = 300;
 
 pub(super) fn summarize_tool_result(
     tool_name: &str,
@@ -23,6 +27,7 @@ pub(super) fn summarize_tool_result(
         "edit" => summarize_edit(parsed, is_error),
         "multiedit" => summarize_multiedit(parsed, is_error),
         "apply_patch" => summarize_apply_patch(parsed, is_error),
+        "agent" => summarize_agent(parsed, is_error),
         "explore" => {
             summarize_structured_or_large_text_tool(parsed, "explore", raw_output, is_error)
         }
@@ -41,6 +46,7 @@ pub(super) fn summarized_result(tool_name: &str, parsed: &Value, raw_output: &st
         "edit" => summarize_edit_result(parsed),
         "multiedit" => summarize_multiedit_result(parsed),
         "apply_patch" => summarize_apply_patch_result(parsed),
+        "agent" => summarize_agent_result(parsed),
         "explore" | "build" => json!({
             "preview": truncate_utf8(raw_output, MAX_PREVIEW_CHARS),
         }),
@@ -48,6 +54,131 @@ pub(super) fn summarized_result(tool_name: &str, parsed: &Value, raw_output: &st
             "preview": truncate_utf8(raw_output, MAX_PREVIEW_CHARS),
         }),
     }
+}
+
+fn summarize_agent(parsed: &Value, is_error: bool) -> String {
+    if is_error {
+        return summarize_message_tool(parsed, true);
+    }
+
+    let payload = tool_payload(parsed);
+    let agent_type = payload
+        .get("agent_type")
+        .and_then(Value::as_str)
+        .unwrap_or("delegated");
+    let status = payload
+        .get("status")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("outcome").and_then(Value::as_str))
+        .unwrap_or("completed");
+    let run_id = payload
+        .get("delegated_run_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!(" (run {value})"))
+        .unwrap_or_default();
+    let detail = payload
+        .get("investigation_summary")
+        .or_else(|| payload.get("findings"))
+        .or_else(|| payload.get("message"))
+        .and_then(Value::as_str)
+        .map(|value| truncate_utf8(value, MAX_AGENT_DETAIL_CHARS))
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!(": {value}"))
+        .unwrap_or_default();
+
+    format!("{agent_type} agent {status}{run_id}{detail}")
+}
+
+fn summarize_agent_result(parsed: &Value) -> Value {
+    let payload = tool_payload(parsed);
+    let paths = payload
+        .get("paths_examined")
+        .or_else(|| payload.get("files_examined"))
+        .and_then(Value::as_array)
+        .map(|items| truncate_array_strings(items, MAX_LIST_ITEMS, MAX_AGENT_PATH_CHARS))
+        .unwrap_or_default();
+    let errors = payload
+        .get("errors")
+        .and_then(Value::as_array)
+        .map(|items| truncate_array_strings(items, MAX_MATCH_ITEMS, MAX_AGENT_DETAIL_CHARS))
+        .unwrap_or_default();
+    let background_processes = payload
+        .get("background_processes")
+        .and_then(Value::as_array)
+        .map(|processes| {
+            processes
+                .iter()
+                .take(MAX_MATCH_ITEMS)
+                .map(|process| {
+                    json!({
+                        "process_id": process.get("process_id").and_then(Value::as_str),
+                        "status": process.get("status").and_then(Value::as_str),
+                        "command": process
+                            .get("command")
+                            .and_then(Value::as_str)
+                            .map(|value| truncate_utf8(value, MAX_AGENT_DETAIL_CHARS)),
+                        "working_dir": process.get("working_dir").and_then(Value::as_str),
+                        "endpoint_hints": process
+                            .get("endpoint_hints")
+                            .and_then(Value::as_array)
+                            .map(|items| truncate_array_strings(items, 6, 200))
+                            .unwrap_or_default(),
+                        "reused_existing": process
+                            .get("reused_existing")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    json!({
+        "status": payload.get("status").and_then(Value::as_str),
+        "delegated_run_id": payload.get("delegated_run_id").and_then(Value::as_str),
+        "agent_type": payload.get("agent_type").and_then(Value::as_str),
+        "name": payload.get("name").and_then(Value::as_str),
+        "message": payload
+            .get("message")
+            .and_then(Value::as_str)
+            .map(|value| truncate_utf8(value, MAX_AGENT_DETAIL_CHARS)),
+        "investigation_summary": payload
+            .get("investigation_summary")
+            .and_then(Value::as_str)
+            .map(|value| truncate_utf8(value, MAX_AGENT_DETAIL_CHARS)),
+        "findings": payload
+            .get("findings")
+            .and_then(Value::as_str)
+            .map(|value| truncate_utf8_head_tail(
+                value,
+                MAX_AGENT_FINDINGS_HEAD_CHARS,
+                MAX_AGENT_FINDINGS_TAIL_CHARS,
+            )),
+        "outcome": payload.get("outcome").and_then(Value::as_str),
+        "outcome_reason": payload.get("outcome_reason").and_then(Value::as_str),
+        "confidence": payload.get("confidence").and_then(Value::as_str),
+        "paths_examined": paths,
+        "paths_examined_count": payload
+            .get("paths_examined_count")
+            .or_else(|| payload.get("files_examined_count"))
+            .and_then(Value::as_u64),
+        "agent_count": payload
+            .get("agent_count")
+            .or_else(|| payload.get("builder_count"))
+            .and_then(Value::as_u64),
+        "successful_agents": payload.get("successful_agents").and_then(Value::as_u64),
+        "failed_agents": payload.get("failed_agents").and_then(Value::as_u64),
+        "files_modified": payload.get("files_modified").and_then(Value::as_u64),
+        "lines_added": payload.get("lines_added").and_then(Value::as_u64),
+        "lines_removed": payload.get("lines_removed").and_then(Value::as_u64),
+        "errors": errors,
+        "coverage_gap_notice": payload
+            .get("coverage_gap_notice")
+            .and_then(Value::as_str)
+            .map(|value| truncate_utf8(value, MAX_AGENT_DETAIL_CHARS)),
+        "background_processes": background_processes,
+    })
 }
 
 fn summarize_read(parsed: &Value, is_error: bool) -> String {
@@ -177,9 +308,22 @@ fn summarize_bash(parsed: &Value, is_error: bool) -> String {
             .get("status")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
+        let endpoint_suffix = payload
+            .get("endpoint_hints")
+            .and_then(Value::as_array)
+            .map(|endpoints| {
+                endpoints
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|endpoints| !endpoints.is_empty())
+            .map(|endpoints| format!(" at {endpoints}"))
+            .unwrap_or_default();
         return format!(
-            "background process {} (id {}); it remains available through processes status/control while the harness is running",
-            status, process_id
+            "background process {} (id {}){}; it remains available through processes status/control while the harness is running",
+            status, process_id, endpoint_suffix
         );
     }
 
@@ -443,6 +587,8 @@ fn summarize_bash_result(parsed: &Value) -> Value {
         "message": payload.get("message").and_then(Value::as_str),
         "process_id": payload.get("process_id").and_then(Value::as_str),
         "status": payload.get("status").and_then(Value::as_str),
+        "endpoint_hints": payload.get("endpoint_hints").cloned().unwrap_or_else(|| json!([])),
+        "reused_existing": payload.get("reused_existing").and_then(Value::as_bool).unwrap_or(false),
         "next_action": payload.get("next_action").and_then(Value::as_str),
         "process_error": payload.get("error").and_then(Value::as_str),
         "output_preview": output_preview,

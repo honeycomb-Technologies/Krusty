@@ -7,8 +7,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
+use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use http::{HeaderName, HeaderValue};
@@ -16,11 +16,10 @@ use rmcp::model::{ClientJsonRpcMessage, ServerJsonRpcMessage};
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClient, StreamableHttpError, StreamableHttpPostResponse,
 };
-use sha2::{Digest, Sha256};
 use sse_stream::{Error as SseError, Sse, SseStream};
 
-const MAX_MCP_JSON_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-const MCP_JSON_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_MCP_HTTP_JSON_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_MCP_SSE_EVENT_BYTES: usize = 1024 * 1024;
 
 /// A reqwest 0.12 based implementation of rmcp's `StreamableHttpClient` trait.
 #[derive(Debug, Clone)]
@@ -37,7 +36,10 @@ impl Default for ReqwestStreamableHttpClient {
 impl ReqwestStreamableHttpClient {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("static MCP HTTP client configuration must be valid"),
         }
     }
 
@@ -69,6 +71,14 @@ impl ReqwestStreamableHttpClient {
 #[derive(Debug, thiserror::Error)]
 #[error("reqwest error: {0}")]
 pub struct ReqwestError(#[from] reqwest::Error);
+
+#[derive(Debug, thiserror::Error)]
+enum BoundedSseBodyError {
+    #[error("reqwest error: {0}")]
+    Reqwest(#[from] reqwest::Error),
+    #[error("MCP SSE event exceeds the {limit} byte decompressed limit")]
+    EventTooLarge { limit: usize },
+}
 
 impl StreamableHttpClient for ReqwestStreamableHttpClient {
     type Error = ReqwestError;
@@ -128,23 +138,19 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
 
         match content_type.as_deref() {
             Some(ct) if ct.contains("text/event-stream") => {
-                let byte_stream = response.bytes_stream();
+                let byte_stream = bounded_sse_byte_stream(response);
                 let sse_stream = SseStream::from_byte_stream(byte_stream);
                 let boxed: BoxStream<'static, Result<Sse, SseError>> = sse_stream.boxed();
                 Ok(StreamableHttpPostResponse::Sse(boxed, session_id))
             }
             Some(ct) if ct.contains("application/json") => {
-                let body = read_bounded_mcp_json_response(response).await?;
+                let body = read_bounded_json_body(response).await?;
                 let message: ServerJsonRpcMessage =
-                    serde_json::from_slice(&body).map_err(|error| {
-                        StreamableHttpError::UnexpectedServerResponse(
-                            safe_mcp_json_decode_error(&error, &body).into(),
-                        )
-                    })?;
+                    serde_json::from_slice(&body).map_err(StreamableHttpError::Deserialize)?;
                 Ok(StreamableHttpPostResponse::Json(message, session_id))
             }
             other => Err(StreamableHttpError::UnexpectedContentType(
-                other.map(|_| "unsupported".to_string()),
+                other.map(|s| s.to_string()),
             )),
         }
     }
@@ -217,96 +223,136 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
             ));
         }
 
-        let byte_stream = response.bytes_stream();
+        let byte_stream = bounded_sse_byte_stream(response);
         let sse_stream = SseStream::from_byte_stream(byte_stream);
         Ok(sse_stream.boxed())
     }
 }
 
-async fn read_bounded_mcp_json_response(
+async fn read_bounded_json_body(
     response: reqwest::Response,
-) -> Result<Vec<u8>, StreamableHttpError<ReqwestError>> {
+) -> Result<Bytes, StreamableHttpError<ReqwestError>> {
     if response
         .content_length()
-        .is_some_and(|length| length > MAX_MCP_JSON_RESPONSE_BYTES as u64)
+        .is_some_and(|length| length > MAX_MCP_HTTP_JSON_RESPONSE_BYTES as u64)
     {
-        return Err(StreamableHttpError::UnexpectedServerResponse(
-            format!(
-                "MCP JSON response exceeded byte limit (limit_bytes={MAX_MCP_JSON_RESPONSE_BYTES})"
-            )
-            .into(),
+        return Err(response_limit_error(
+            "JSON response",
+            MAX_MCP_HTTP_JSON_RESPONSE_BYTES,
         ));
     }
 
+    let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
-    let mut body = Vec::with_capacity(8 * 1024);
-    let deadline = tokio::time::Instant::now() + MCP_JSON_RESPONSE_TIMEOUT;
-    loop {
-        let next = tokio::time::timeout_at(deadline, stream.next())
-            .await
-            .map_err(|_| {
-                StreamableHttpError::UnexpectedServerResponse(
-                    format!(
-                        "MCP JSON response body timed out (limit_bytes={}, captured_bytes={}, response_fingerprint={})",
-                        MAX_MCP_JSON_RESPONSE_BYTES,
-                        body.len(),
-                        mcp_response_fingerprint(&body)
-                    )
-                    .into(),
-                )
-            })?;
-        let Some(chunk) = next else {
-            break;
-        };
-        let chunk = chunk.map_err(|_| {
-            StreamableHttpError::UnexpectedServerResponse(
-                format!(
-                    "MCP JSON response body read failed (captured_bytes={}, response_fingerprint={})",
-                    body.len(),
-                    mcp_response_fingerprint(&body)
-                )
-                .into(),
-            )
-        })?;
-        let remaining = MAX_MCP_JSON_RESPONSE_BYTES.saturating_sub(body.len());
-        if chunk.len() > remaining {
-            body.extend_from_slice(&chunk[..remaining]);
-            return Err(StreamableHttpError::UnexpectedServerResponse(
-                format!(
-                    "MCP JSON response exceeded byte limit (limit_bytes={}, response_fingerprint={})",
-                    MAX_MCP_JSON_RESPONSE_BYTES,
-                    mcp_response_fingerprint(&body)
-                )
-                .into(),
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| StreamableHttpError::Client(ReqwestError(error)))?;
+        if !extend_bounded(&mut bytes, &chunk, MAX_MCP_HTTP_JSON_RESPONSE_BYTES) {
+            return Err(response_limit_error(
+                "JSON response",
+                MAX_MCP_HTTP_JSON_RESPONSE_BYTES,
             ));
         }
-        body.extend_from_slice(&chunk);
     }
-    Ok(body)
+    Ok(Bytes::from(bytes))
 }
 
-fn safe_mcp_json_decode_error(error: &serde_json::Error, body: &[u8]) -> String {
-    let category = match error.classify() {
-        serde_json::error::Category::Io => "io",
-        serde_json::error::Category::Syntax => "syntax",
-        serde_json::error::Category::Data => "data",
-        serde_json::error::Category::Eof => "eof",
-    };
-    format!(
-        "MCP JSON response was invalid (category={}, line={}, column={}, response_fingerprint={})",
-        category,
-        error.line(),
-        error.column(),
-        mcp_response_fingerprint(body)
+fn extend_bounded(buffer: &mut Vec<u8>, chunk: &[u8], limit: usize) -> bool {
+    if chunk.len() > limit.saturating_sub(buffer.len()) {
+        return false;
+    }
+    buffer.extend_from_slice(chunk);
+    true
+}
+
+fn response_limit_error(
+    response_kind: &'static str,
+    limit: usize,
+) -> StreamableHttpError<ReqwestError> {
+    StreamableHttpError::UnexpectedServerResponse(
+        format!("MCP {response_kind} exceeds the {limit} byte decompressed limit").into(),
     )
 }
 
-fn mcp_response_fingerprint(body: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"krusty-mcp-response-v1\0");
-    hasher.update(body.len().to_le_bytes());
-    hasher.update(body);
-    format!("sha256:{:x}", hasher.finalize())
+fn bounded_sse_byte_stream(
+    response: reqwest::Response,
+) -> BoxStream<'static, Result<Bytes, BoundedSseBodyError>> {
+    response
+        .bytes_stream()
+        .scan(SseEventLimit::default(), |state, chunk| {
+            let next = if state.failed {
+                None
+            } else {
+                Some(match chunk {
+                    Ok(bytes) => match state.observe(&bytes) {
+                        Ok(()) => Ok(bytes),
+                        Err(error) => {
+                            state.failed = true;
+                            Err(error)
+                        }
+                    },
+                    Err(error) => {
+                        state.failed = true;
+                        Err(BoundedSseBodyError::Reqwest(error))
+                    }
+                })
+            };
+            futures::future::ready(next)
+        })
+        .boxed()
+}
+
+#[derive(Debug, Default)]
+struct SseEventLimit {
+    event_bytes: usize,
+    line_has_content: bool,
+    previous_was_cr: bool,
+    failed: bool,
+}
+
+impl SseEventLimit {
+    fn observe(&mut self, bytes: &[u8]) -> Result<(), BoundedSseBodyError> {
+        self.observe_with_limit(bytes, MAX_MCP_SSE_EVENT_BYTES)
+    }
+
+    fn observe_with_limit(
+        &mut self,
+        bytes: &[u8],
+        limit: usize,
+    ) -> Result<(), BoundedSseBodyError> {
+        for byte in bytes {
+            // CRLF is one line ending. The CR was already accounted for and
+            // finalized the line, so the following LF is not a blank line.
+            if self.previous_was_cr && *byte == b'\n' {
+                self.previous_was_cr = false;
+                continue;
+            }
+            self.previous_was_cr = false;
+            self.event_bytes = self
+                .event_bytes
+                .checked_add(1)
+                .ok_or(BoundedSseBodyError::EventTooLarge { limit })?;
+
+            match byte {
+                b'\r' => {
+                    self.finish_line();
+                    self.previous_was_cr = true;
+                }
+                b'\n' => self.finish_line(),
+                _ => self.line_has_content = true,
+            }
+            if self.event_bytes > limit {
+                return Err(BoundedSseBodyError::EventTooLarge { limit });
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_line(&mut self) {
+        if !self.line_has_content {
+            self.event_bytes = 0;
+        }
+        self.line_has_content = false;
+    }
 }
 
 #[cfg(test)]
@@ -314,19 +360,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mcp_json_decode_error_does_not_reflect_response_content() {
-        const SENTINEL: &str = "MCP_RESPONSE_SENTINEL_86ac";
-        let body = format!(r#"{{"jsonrpc":"2.0","result":"{SENTINEL}""#);
-        let parse_error = serde_json::from_slice::<ServerJsonRpcMessage>(body.as_bytes())
-            .expect_err("invalid JSON should fail");
-        let safe_error = safe_mcp_json_decode_error(&parse_error, body.as_bytes());
-        assert!(!safe_error.contains(SENTINEL));
-        assert!(safe_error.contains("response_fingerprint=sha256:"));
+    fn sse_limit_is_per_event_and_handles_split_crlf() {
+        let mut limit = SseEventLimit::default();
+        limit.observe_with_limit(b"data: 1\r", 16).unwrap();
+        limit.observe_with_limit(b"\n\r", 16).unwrap();
+        limit.observe_with_limit(b"\ndata: 2\n\n", 16).unwrap();
+        assert!(limit
+            .observe_with_limit(b"data: this event is too large", 8)
+            .is_err());
     }
 
     #[test]
-    fn mcp_response_limit_is_finite() {
-        assert!(MAX_MCP_JSON_RESPONSE_BYTES <= 4 * 1024 * 1024);
-        assert!(MCP_JSON_RESPONSE_TIMEOUT <= Duration::from_secs(10));
+    fn json_body_limit_is_aggregate_and_does_not_append_overflow_chunk() {
+        let mut body = Vec::new();
+        assert!(extend_bounded(&mut body, b"1234", 6));
+        assert!(!extend_bounded(&mut body, b"789", 6));
+        assert_eq!(body, b"1234");
+        assert!(extend_bounded(&mut body, b"56", 6));
+        assert_eq!(body, b"123456");
+    }
+
+    #[tokio::test]
+    async fn mcp_http_client_does_not_follow_redirects() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let address = server.server_addr().to_ip().unwrap();
+        let server_thread = std::thread::spawn(move || {
+            let request = server
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+                .expect("redirect test request");
+            let location = tiny_http::Header::from_bytes("Location", "/redirected").unwrap();
+            request
+                .respond(tiny_http::Response::empty(302).with_header(location))
+                .unwrap();
+        });
+
+        let client = ReqwestStreamableHttpClient::new();
+        let response = client
+            .build_request(
+                reqwest::Method::GET,
+                &format!("http://{address}/origin"),
+                None,
+                None,
+                &HashMap::new(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        server_thread.join().unwrap();
     }
 }

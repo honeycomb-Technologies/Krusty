@@ -1181,6 +1181,95 @@ def validate_trace_response(trace: Any, label: str) -> dict[str, Any]:
     return summary
 
 
+def wait_for_completed_trace_run(
+    api: KrustyApi,
+    session_id: str,
+    label: str,
+    *,
+    after_sequence: int = 0,
+    timeout: float = 5.0,
+    poll_interval: float = 0.05,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Wait for one newly completed run to become durably observable.
+
+    Runtime traces are intentionally forwarded to SSE before their compact
+    SQLite batch is flushed. A terminal SSE event and idle session therefore
+    do not imply that the trace endpoint has already crossed the same boundary.
+    Poll only across that bounded persistence window, and require both the
+    canonical ``finished`` event and provider-call accounting for the same run
+    before accepting the snapshot as complete.
+
+    A newly persisted non-completed terminal is definitive and fails
+    immediately; the wait must never turn a real provider/cancellation failure
+    into a timing retry.
+    """
+    require(
+        isinstance(after_sequence, int)
+        and not isinstance(after_sequence, bool)
+        and after_sequence >= 0,
+        f"{label}: invalid trace cursor {after_sequence!r}",
+    )
+    deadline = time.monotonic() + timeout
+    latest_trace: dict[str, Any] | None = None
+    latest_summary: dict[str, Any] | None = None
+
+    while True:
+        trace = api.json_request(
+            "GET", f"/api/sessions/{session_id}/trace?limit=1000"
+        )
+        summary = validate_trace_response(trace, label)
+        latest_trace = trace
+        latest_summary = summary
+        new_events = [
+            event
+            for event in trace["events"]
+            if event.get("sequence", 0) > after_sequence
+        ]
+        finished = [
+            event for event in new_events if event.get("event_type") == "finished"
+        ]
+        non_completed = [
+            event
+            for event in finished
+            if event.get("stop_reason") != "completed"
+            or event.get("payload", {}).get("stop_reason") != "completed"
+        ]
+        require(
+            not non_completed,
+            f"{label}: newly persisted run did not complete: {non_completed}",
+        )
+
+        completed_run_ids = {
+            event.get("run_id")
+            for event in finished
+            if isinstance(event.get("run_id"), str) and event.get("run_id")
+        }
+        accounted_run_ids = {
+            event.get("run_id")
+            for event in new_events
+            if event.get("event_type") == "provider_call"
+            and isinstance(event.get("run_id"), str)
+            and event.get("run_id")
+        }
+        if completed_run_ids & accounted_run_ids:
+            return trace, summary
+
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(max(0.0, poll_interval))
+
+    latest_types = (
+        [event.get("event_type") for event in latest_trace["events"]]
+        if latest_trace is not None
+        else []
+    )
+    raise AcceptanceFailure(
+        f"{label}: trace did not durably expose a newly completed, provider-accounted "
+        f"run after sequence {after_sequence} within {timeout:.1f}s; "
+        f"latest_summary={latest_summary}, latest_event_types={latest_types}"
+    )
+
+
 def trace_summary(
     api: KrustyApi,
     session_id: str,
@@ -2494,11 +2583,10 @@ def run_failed_bash_lane(
         prelude_snapshot = canonical_json_bytes(prelude_messages)
         prelude_sha256 = hashlib.sha256(prelude_snapshot).hexdigest()
 
-        prelude_trace = api.json_request(
-            "GET", f"/api/sessions/{session_id}/trace?limit=1000"
-        )
-        prelude_summary = validate_trace_response(
-            prelude_trace, f"{lane} prelude trace"
+        prelude_trace, prelude_summary = wait_for_completed_trace_run(
+            api,
+            session_id,
+            f"{lane} prelude trace",
         )
         for key in (
             "tool_errors",
@@ -2618,11 +2706,11 @@ expected failure, reply exactly {failure_reply}"""
             f"{lane}: raw result envelope leaked into persisted assistant prose",
         )
 
-        failed_trace = api.json_request(
-            "GET", f"/api/sessions/{session_id}/trace?limit=1000"
-        )
-        failed_summary = validate_trace_response(
-            failed_trace, f"{lane} failed-turn trace"
+        failed_trace, failed_summary = wait_for_completed_trace_run(
+            api,
+            session_id,
+            f"{lane} failed-turn trace",
+            after_sequence=prelude_trace_events[-1]["sequence"],
         )
         failed_trace_events = failed_trace["events"]
         require(
@@ -2789,11 +2877,11 @@ expected failure, reply exactly {failure_reply}"""
             f"{lane}: exact recovery was not preserved: {persisted_recovery_prose}",
         )
 
-        recovery_trace = api.json_request(
-            "GET", f"/api/sessions/{session_id}/trace?limit=1000"
-        )
-        recovery_summary = validate_trace_response(
-            recovery_trace, f"{lane} recovery trace"
+        recovery_trace, recovery_summary = wait_for_completed_trace_run(
+            api,
+            session_id,
+            f"{lane} recovery trace",
+            after_sequence=failed_trace_events[-1]["sequence"],
         )
         recovery_trace_events = recovery_trace["events"]
         require(

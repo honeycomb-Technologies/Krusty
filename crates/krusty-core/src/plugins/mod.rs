@@ -8,8 +8,12 @@ mod signing;
 mod types;
 
 pub use manager::PluginManager;
+pub use signing::plugin_release_signing_payload;
 pub use types::{
-    InstalledPlugin, PluginCatalogEntry, PluginCatalogFile, PluginCompat, PluginLockEntry,
-    PluginLockfile, PluginManifestV1, PluginPermissionSet, PluginPermissionsFile, PluginRelease,
-    PluginRenderCapability, PluginRuntime, PluginSource, PluginSourcesFile, PluginTrustPolicy,
+    InstalledPlugin, PluginCatalogEntry, PluginCatalogFile, PluginCompat, PluginInstallOptions,
+    PluginLockEntry, PluginLockfile, PluginManifestV1, PluginPermission, PluginPermissionGrant,
+    PluginPermissionSet, PluginPermissionStatus, PluginPermissionsFile, PluginReconcileReport,
+    PluginRelease, PluginReleaseArtifactKind, PluginRenderCapability, PluginRuntime, PluginSource,
+    PluginSourceTrust, PluginSourcesFile, PluginTrustPolicy, PluginUpdateRecord,
+    PluginUpdateReport,
 };

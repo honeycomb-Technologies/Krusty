@@ -39,7 +39,9 @@ pub(super) async fn execute_regular_tool(
     provider_call_trace: Option<&ProviderCallTraceContext>,
     subagent_max_turns_override: Option<usize>,
     file_observations: Arc<FileObservationTracker>,
+    extension_intercept_prepared: bool,
 ) -> ToolResult {
+    let background_agent = call.name == "agent" && agent_runs_in_background(&call.arguments);
     let (output_tx, mut output_rx) =
         mpsc::unbounded_channel::<crate::tools::registry::ToolOutputChunk>();
 
@@ -138,19 +140,40 @@ pub(super) async fn execute_regular_tool(
         }
     }
 
-    let result = tool_registry
-        .execute(&call.name, call.arguments.clone(), &ctx)
-        .await
-        .unwrap_or_else(|| {
-            ToolResult::error_with_code("unknown_tool", format!("Unknown tool: {}", call.name))
-        });
+    let result = if extension_intercept_prepared {
+        tool_registry
+            .execute_prepared(&call.name, call.arguments.clone(), &ctx)
+            .await
+    } else {
+        tool_registry
+            .execute(&call.name, call.arguments.clone(), &ctx)
+            .await
+    }
+    .unwrap_or_else(|| {
+        ToolResult::error_with_code("unknown_tool", format!("Unknown tool: {}", call.name))
+    });
 
     drop(ctx);
     if let Some(handle) = delegated_forwarder_handle {
-        let _ = handle.await;
+        if background_agent {
+            // The spawned agent owns a progress sender until it completes. Awaiting the
+            // forwarder here would turn an explicitly background launch back into a
+            // synchronous tool call. Dropping a Tokio JoinHandle detaches the forwarder,
+            // which can continue relaying progress until the background sender closes.
+            drop(handle);
+        } else {
+            let _ = handle.await;
+        }
     }
     let _ = forwarder_handle.await;
     result
+}
+
+fn agent_runs_in_background(arguments: &serde_json::Value) -> bool {
+    arguments
+        .get("run_in_background")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn delegated_kind_from_agent_call(arguments: &serde_json::Value) -> DelegatedToolKind {
@@ -202,7 +225,7 @@ fn delegated_stage_from_progress(progress: &AgentProgress) -> DelegatedRunStage 
 
 #[cfg(test)]
 mod tests {
-    use super::delegated_kind_from_agent_call;
+    use super::{agent_runs_in_background, delegated_kind_from_agent_call};
     use crate::agent::DelegatedToolKind;
     use serde_json::json;
 
@@ -224,5 +247,16 @@ mod tests {
             delegated_kind_from_agent_call(&json!({"agent_type":"explore"})),
             DelegatedToolKind::Explore
         );
+    }
+
+    #[test]
+    fn background_agent_detection_requires_explicit_true() {
+        assert!(agent_runs_in_background(
+            &json!({"run_in_background": true})
+        ));
+        assert!(!agent_runs_in_background(
+            &json!({"run_in_background": false})
+        ));
+        assert!(!agent_runs_in_background(&json!({})));
     }
 }

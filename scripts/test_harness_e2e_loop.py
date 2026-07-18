@@ -7,6 +7,7 @@ import importlib.util
 from pathlib import Path
 import sys
 import unittest
+from typing import Any
 
 
 SCRIPT_PATH = Path(__file__).with_name("harness-e2e-loop.py")
@@ -16,6 +17,122 @@ if SPEC is None or SPEC.loader is None:  # pragma: no cover - import bootstrap g
 HARNESS = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = HARNESS
 SPEC.loader.exec_module(HARNESS)
+
+
+class SequenceTraceApi:
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        self.responses = responses
+        self.calls = 0
+
+    def json_request(self, method: str, path: str) -> dict[str, Any]:
+        if method != "GET" or "/trace?limit=1000" not in path:
+            raise AssertionError(f"unexpected request: {method} {path}")
+        index = min(self.calls, len(self.responses) - 1)
+        self.calls += 1
+        return self.responses[index]
+
+
+def trace_response(events: list[dict[str, Any]]) -> dict[str, Any]:
+    stop_reason = next(
+        (
+            event.get("stop_reason")
+            for event in reversed(events)
+            if event.get("event_type") == "finished"
+        ),
+        None,
+    )
+    return {
+        "events": events,
+        "latest_sequence": events[-1]["sequence"] if events else None,
+        "summary": {"last_stop_reason": stop_reason},
+    }
+
+
+def trace_event(
+    sequence: int,
+    event_type: str,
+    *,
+    run_id: str = "run-1",
+    stop_reason: str | None = None,
+) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "sequence": sequence,
+        "run_id": run_id,
+        "event_type": event_type,
+        "payload": {},
+    }
+    if stop_reason is not None:
+        event["stop_reason"] = stop_reason
+        event["payload"] = {"stop_reason": stop_reason}
+    return event
+
+
+class TraceConvergenceTests(unittest.TestCase):
+    def test_waits_through_async_batches_until_terminal_call_is_accounted(self) -> None:
+        thinking = trace_event(1, "thinking_delta")
+        finished = trace_event(2, "finished", stop_reason="completed")
+        provider_call = trace_event(3, "provider_call")
+        api = SequenceTraceApi(
+            [
+                trace_response([thinking]),
+                trace_response([thinking, finished]),
+                trace_response([thinking, finished, provider_call]),
+            ]
+        )
+
+        trace, summary = HARNESS.wait_for_completed_trace_run(
+            api,
+            "session-1",
+            "trace convergence",
+            timeout=1.0,
+            poll_interval=0.0,
+        )
+
+        self.assertEqual(api.calls, 3)
+        self.assertEqual(trace["latest_sequence"], 3)
+        self.assertEqual(summary["last_stop_reason"], "completed")
+
+    def test_ignores_prior_terminal_and_requires_a_run_after_cursor(self) -> None:
+        prior = [
+            trace_event(1, "finished", run_id="run-1", stop_reason="completed"),
+            trace_event(2, "provider_call", run_id="run-1"),
+        ]
+        next_run = [
+            trace_event(3, "finished", run_id="run-2", stop_reason="completed"),
+            trace_event(4, "provider_call", run_id="run-2"),
+        ]
+        api = SequenceTraceApi(
+            [trace_response(prior), trace_response(prior + next_run)]
+        )
+
+        trace, _ = HARNESS.wait_for_completed_trace_run(
+            api,
+            "session-1",
+            "trace cursor",
+            after_sequence=2,
+            timeout=1.0,
+            poll_interval=0.0,
+        )
+
+        self.assertEqual(api.calls, 2)
+        self.assertEqual(trace["latest_sequence"], 4)
+
+    def test_fails_immediately_on_new_non_completed_terminal(self) -> None:
+        failed = trace_event(1, "finished", stop_reason="provider_error")
+        api = SequenceTraceApi([trace_response([failed])])
+
+        with self.assertRaisesRegex(
+            HARNESS.AcceptanceFailure, "newly persisted run did not complete"
+        ):
+            HARNESS.wait_for_completed_trace_run(
+                api,
+                "session-1",
+                "trace failure",
+                timeout=1.0,
+                poll_interval=0.0,
+            )
+
+        self.assertEqual(api.calls, 1)
 
 
 class LiveSteeringValidationTests(unittest.TestCase):

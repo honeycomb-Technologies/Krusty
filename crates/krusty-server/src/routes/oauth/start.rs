@@ -11,6 +11,9 @@ use krusty_core::auth::{
 };
 
 use super::{parse_provider, OAuthFlowKind, OAuthFlowState, FLOW_TTL_SECS};
+use crate::ai_bootstrap::{
+    invalidate_provider_model_catalog, refresh_provider_model_catalog, CatalogRefreshOutcome,
+};
 use crate::error::AppError;
 use crate::AppState;
 
@@ -151,18 +154,23 @@ async fn start_openai_local_browser_oauth(
 
     let oauth_flows = state.oauth_flows.clone();
     let model_registry = state.model_registry.clone();
+    let credential_store = state.credential_store.clone();
+    let db_path = state.db_path.clone();
     tokio::spawn(async move {
         let result = BrowserOAuthFlow::new(openai_oauth_config()).run().await;
         match result {
             Ok(token_data) => {
-                if let Ok(mut store) = OAuthTokenStore::load() {
-                    store.set(provider_id, token_data);
-                    if let Err(error) = store.save() {
-                        tracing::error!("Failed to save OpenAI OAuth token: {}", error);
-                    } else {
-                        tracing::info!("OpenAI browser OAuth token stored successfully");
-                        refresh_openai_models(model_registry.clone()).await;
-                    }
+                if let Err(error) = OAuthTokenStore::set_persisted(provider_id, token_data) {
+                    tracing::error!("Failed to save OpenAI OAuth token: {}", error);
+                } else {
+                    tracing::info!("OpenAI browser OAuth token stored successfully");
+                    refresh_provider_models(
+                        model_registry.clone(),
+                        credential_store.clone(),
+                        db_path.clone(),
+                        provider_id,
+                    )
+                    .await;
                 }
             }
             Err(error) => tracing::warn!("OpenAI browser OAuth failed: {}", error),
@@ -187,17 +195,27 @@ async fn start_grok_browser_oauth(
     mark_spawned_oauth_flow(&state, provider_id).await;
 
     let oauth_flows = state.oauth_flows.clone();
+    let model_registry = state.model_registry.clone();
+    let credential_store = state.credential_store.clone();
+    let db_path = state.db_path.clone();
     tokio::spawn(async move {
         let result = force_grok_browser_login().await;
         match result {
             Ok(token) => {
-                if let Ok(mut store) = OAuthTokenStore::load() {
-                    store.set(provider_id, grok_auth_token_to_oauth_data(&token));
-                    if let Err(error) = store.save() {
-                        tracing::error!("Failed to save xAI/Grok OAuth token: {}", error);
-                    } else {
-                        tracing::info!("xAI/Grok browser OAuth token stored successfully");
-                    }
+                if let Err(error) = OAuthTokenStore::set_persisted(
+                    provider_id,
+                    grok_auth_token_to_oauth_data(&token),
+                ) {
+                    tracing::error!("Failed to save xAI/Grok OAuth token: {}", error);
+                } else {
+                    tracing::info!("xAI/Grok browser OAuth token stored successfully");
+                    refresh_provider_models(
+                        model_registry.clone(),
+                        credential_store.clone(),
+                        db_path.clone(),
+                        provider_id,
+                    )
+                    .await;
                 }
             }
             Err(error) => tracing::warn!("xAI/Grok browser OAuth failed: {}", error),
@@ -255,6 +273,8 @@ async fn start_openai_device_oauth(
 
     let oauth_flows = state.oauth_flows.clone();
     let model_registry = state.model_registry.clone();
+    let credential_store = state.credential_store.clone();
+    let db_path = state.db_path.clone();
     let device_auth_id = code_response.device_auth_id.clone();
     let user_code = code_response.user_code.clone();
     let poll_interval = code_response.interval;
@@ -275,14 +295,17 @@ async fn start_openai_device_oauth(
                     return;
                 }
 
-                if let Ok(mut store) = OAuthTokenStore::load() {
-                    store.set(provider_id, token_data);
-                    if let Err(error) = store.save() {
-                        tracing::error!("Failed to save OAuth token: {}", error);
-                    } else {
-                        tracing::info!("OpenAI OAuth token stored successfully");
-                        refresh_openai_models(model_registry.clone()).await;
-                    }
+                if let Err(error) = OAuthTokenStore::set_persisted(provider_id, token_data) {
+                    tracing::error!("Failed to save OAuth token: {}", error);
+                } else {
+                    tracing::info!("OpenAI OAuth token stored successfully");
+                    refresh_provider_models(
+                        model_registry.clone(),
+                        credential_store.clone(),
+                        db_path.clone(),
+                        provider_id,
+                    )
+                    .await;
                 }
             }
             Err(error) => {
@@ -348,29 +371,38 @@ fn device_code_response(code: &OpenAIDeviceCodeResponse) -> OAuthDeviceCodeRespo
     }
 }
 
-pub(super) async fn refresh_openai_models(registry: krusty_core::ai::models::SharedModelRegistry) {
-    let credentials = match krusty_core::storage::CredentialStore::load() {
-        Ok(credentials) => credentials,
-        Err(error) => {
-            tracing::warn!(
-                "Failed to load credentials for OpenAI model refresh: {}",
-                error
-            );
-            return;
-        }
-    };
-
-    let Some(credential) =
-        krusty_core::ai::catalog::credential_for_dynamic_models(ProviderId::OpenAI, &credentials)
-    else {
-        tracing::debug!(
-            "Skipping OpenAI model refresh after OAuth: OpenAI API key is required for /v1/models"
-        );
+pub(super) async fn refresh_provider_models(
+    registry: krusty_core::ai::models::SharedModelRegistry,
+    credentials: std::sync::Arc<tokio::sync::RwLock<krusty_core::storage::CredentialStore>>,
+    db_path: std::sync::Arc<std::path::PathBuf>,
+    provider: ProviderId,
+) {
+    if let Err(error) =
+        invalidate_provider_model_catalog(&registry, db_path.as_path(), provider).await
+    {
+        tracing::warn!(%provider, %error, "Failed to invalidate model catalog after OAuth");
         return;
-    };
+    }
 
-    match krusty_core::ai::catalog::fetch_dynamic_models(ProviderId::OpenAI, &credential).await {
-        Ok(models) => registry.set_models(ProviderId::OpenAI, models).await,
-        Err(error) => tracing::warn!("Failed to refresh OpenAI models after OAuth: {}", error),
+    match refresh_provider_model_catalog(
+        &registry,
+        &credentials,
+        db_path.as_path(),
+        provider,
+        false,
+    )
+    .await
+    {
+        Ok(CatalogRefreshOutcome::Refreshed(count)) => {
+            tracing::info!(%provider, count, "Refreshed model catalog after OAuth");
+        }
+        Ok(CatalogRefreshOutcome::SkippedNoCredentials) => {
+            tracing::debug!(%provider, "No catalog credential available after OAuth");
+        }
+        Ok(CatalogRefreshOutcome::Superseded) => {
+            tracing::debug!(%provider, "OAuth catalog refresh was superseded");
+        }
+        Ok(CatalogRefreshOutcome::SkippedFresh) => {}
+        Err(error) => tracing::warn!(%provider, %error, "Failed to refresh models after OAuth"),
     }
 }

@@ -60,6 +60,51 @@ pub struct ProjectMakoSettings {
     pub max_turns_per_tick: Option<usize>,
 }
 
+/// Repository-owned restrictions for executable agent extensions after a
+/// separate user-owned project trust grant. Patterns use the standard glob
+/// grammar (`review-*`, `acme.*`, or `*`). Deny wins over allow; this structure
+/// can never grant execution authority by itself.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ProjectAgentExtensionSettings {
+    /// Disable all executable extensions for this project when false.
+    pub enabled: Option<bool>,
+    /// Optional allowlist. An empty list allows every extension not denied.
+    pub allow: Vec<String>,
+    /// Explicit denylist evaluated before allow.
+    pub deny: Vec<String>,
+}
+
+impl ProjectAgentExtensionSettings {
+    fn is_empty(&self) -> bool {
+        self.enabled.is_none() && self.allow.is_empty() && self.deny.is_empty()
+    }
+
+    pub fn allows(&self, extension_id: &str) -> bool {
+        if self.enabled == Some(false) {
+            return false;
+        }
+        if self
+            .deny
+            .iter()
+            .any(|pattern| extension_pattern_matches(pattern, extension_id))
+        {
+            return false;
+        }
+        self.allow.is_empty()
+            || self
+                .allow
+                .iter()
+                .any(|pattern| extension_pattern_matches(pattern, extension_id))
+    }
+}
+
+fn extension_pattern_matches(pattern: &str, extension_id: &str) -> bool {
+    glob::Pattern::new(pattern)
+        .map(|pattern| pattern.matches(extension_id))
+        .unwrap_or_else(|_| pattern == extension_id)
+}
+
 impl ProjectMakoSettings {
     fn is_empty(&self) -> bool {
         self.tick_interval_secs.is_none()
@@ -94,6 +139,10 @@ pub struct ProjectSettings {
 
     /// Optional Mako-specific cadence settings.
     pub mako: Option<ProjectMakoSettings>,
+
+    /// Trust/enablement policy for executable agent extensions.
+    #[serde(alias = "agentExtensions")]
+    pub agent_extensions: Option<ProjectAgentExtensionSettings>,
 }
 
 impl ProjectSettings {
@@ -121,6 +170,10 @@ impl ProjectSettings {
             && self.conventions.is_none()
             && self.disabled_tools.is_none()
             && self.mako.as_ref().is_none_or(ProjectMakoSettings::is_empty)
+            && self
+                .agent_extensions
+                .as_ref()
+                .is_none_or(ProjectAgentExtensionSettings::is_empty)
     }
 
     /// Resolve Mako settings for read-only/status surfaces.
@@ -178,6 +231,12 @@ impl ProjectSettings {
             .map(Self::load)
             .unwrap_or_default()
             .mako_settings()
+    }
+
+    pub fn allows_agent_extension(&self, extension_id: &str) -> bool {
+        self.agent_extensions
+            .as_ref()
+            .is_none_or(|settings| settings.allows(extension_id))
     }
 
     /// Load Mako settings for an execution boundary. Unlike the status helper,
@@ -421,5 +480,18 @@ mod tests {
         assert!(settings.max_turns_per_tick <= MAX_MAKO_MAX_TURNS_PER_TICK);
         assert!(settings.max_ticks <= MAX_MAKO_MAX_TICKS);
         assert!(settings.tick_interval_secs <= MAX_MAKO_TICK_INTERVAL_SECS);
+    }
+
+    #[test]
+    fn agent_extension_policy_supports_allow_and_deny_globs() {
+        let settings = ProjectAgentExtensionSettings {
+            enabled: Some(true),
+            allow: vec!["acme-*".to_string()],
+            deny: vec!["acme-dangerous".to_string()],
+        };
+
+        assert!(settings.allows("acme-review"));
+        assert!(!settings.allows("acme-dangerous"));
+        assert!(!settings.allows("other"));
     }
 }

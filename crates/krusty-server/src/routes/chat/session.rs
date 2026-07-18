@@ -497,6 +497,16 @@ pub(super) async fn setup_chat_session(
             .collect()
     };
     let hosted_web_tools = session.session_type != SessionType::Code;
+    let model_metadata = state.model_registry.get_model(&resolved_model).await;
+    let effective_thinking_level =
+        normalize_thinking_level_for_model(thinking_level, model_metadata.as_ref());
+    let reasoning_format = model_metadata
+        .as_ref()
+        .and_then(|model| model.reasoning_format);
+    let reasoning_control = model_metadata
+        .as_ref()
+        .and_then(|model| model.reasoning_control);
+    let fast_mode_format = model_metadata.as_ref().and_then(|model| model.fast_mode);
     let mut options = CallOptions {
         tools: if ai_tools.is_empty() {
             None
@@ -507,7 +517,10 @@ pub(super) async fn setup_chat_session(
         codex_parallel_tool_calls: true,
         web_search: hosted_web_tools.then(WebSearchConfig::default),
         web_fetch: hosted_web_tools.then(WebFetchConfig::default),
-        fast_mode,
+        reasoning_format,
+        reasoning_control,
+        fast_mode: fast_mode && fast_mode_format.is_some(),
+        fast_mode_format,
         system_prompt: match session.session_type {
             SessionType::Chat => Some(chat_system_prompt(research_enabled)),
             SessionType::Mako => system_prompt_for_session(SessionType::Mako),
@@ -515,8 +528,8 @@ pub(super) async fn setup_chat_session(
         },
         ..Default::default()
     };
-    if thinking_level.is_enabled() {
-        apply_thinking_config(&ai_client, thinking_level, &mut options);
+    if effective_thinking_level.is_enabled() {
+        apply_thinking_config(effective_thinking_level, &mut options);
     }
 
     let mako_runtime = if session.session_type == SessionType::Mako {
@@ -540,4 +553,111 @@ pub(super) async fn setup_chat_session(
         user_id,
         guard,
     })
+}
+
+fn normalize_thinking_level_for_model(
+    requested: ThinkingLevel,
+    metadata: Option<&krusty_core::ai::models::ModelMetadata>,
+) -> ThinkingLevel {
+    let Some(metadata) = metadata else {
+        return requested;
+    };
+    if !metadata.supports_thinking
+        || metadata.reasoning_control
+            == Some(krusty_core::ai::providers::ReasoningControl::OutputOnly)
+    {
+        return ThinkingLevel::Off;
+    }
+
+    let mut levels = metadata
+        .supported_reasoning_levels
+        .iter()
+        .copied()
+        .map(ThinkingLevel::from_reasoning_effort)
+        .filter(|level| *level != ThinkingLevel::Ultra)
+        .collect::<Vec<_>>();
+    levels.dedup();
+    let fallback = metadata
+        .default_reasoning_level
+        .map(ThinkingLevel::from_reasoning_effort)
+        .filter(|level| !matches!(level, ThinkingLevel::Off | ThinkingLevel::Ultra))
+        .unwrap_or(ThinkingLevel::Medium);
+    if levels.is_empty() {
+        return if metadata.reasoning_is_mandatory {
+            fallback
+        } else if requested == ThinkingLevel::Ultra {
+            ThinkingLevel::Max
+        } else {
+            requested
+        };
+    }
+    if metadata.reasoning_is_mandatory {
+        levels.retain(|level| *level != ThinkingLevel::Off);
+        if levels.is_empty() {
+            levels.push(fallback);
+        }
+    } else if !levels.contains(&ThinkingLevel::Off) {
+        levels.insert(0, ThinkingLevel::Off);
+    }
+    let requested = if requested == ThinkingLevel::Ultra && levels.contains(&ThinkingLevel::Max) {
+        ThinkingLevel::Max
+    } else {
+        requested
+    };
+    if levels.contains(&requested) {
+        return requested;
+    }
+    metadata
+        .default_reasoning_level
+        .map(ThinkingLevel::from_reasoning_effort)
+        .filter(|level| levels.contains(level))
+        .unwrap_or(levels[0])
+}
+
+#[cfg(test)]
+mod reasoning_level_tests {
+    use super::normalize_thinking_level_for_model;
+    use crate::types::ThinkingLevel;
+    use krusty_core::ai::models::ModelMetadata;
+    use krusty_core::ai::providers::{
+        ProviderId, ReasoningControl, ReasoningEffort, ReasoningFormat,
+    };
+
+    #[test]
+    fn mandatory_reasoning_never_normalizes_to_an_empty_or_off_cycle() {
+        let model = ModelMetadata::new("future-model", "Future", ProviderId::OpenAI)
+            .with_thinking(ReasoningFormat::OpenAI)
+            .with_reasoning_levels(
+                vec![ReasoningEffort::None, ReasoningEffort::Ultra],
+                Some(ReasoningEffort::Ultra),
+                true,
+            )
+            .with_reasoning_control(ReasoningControl::OpenAiEffort);
+
+        assert_eq!(
+            normalize_thinking_level_for_model(ThinkingLevel::Off, Some(&model)),
+            ThinkingLevel::Medium
+        );
+    }
+
+    #[test]
+    fn legacy_ultra_requests_degrade_to_max_without_advertising_ultra() {
+        let model = ModelMetadata::new("gpt-test", "GPT Test", ProviderId::OpenAI)
+            .with_thinking(ReasoningFormat::OpenAI)
+            .with_reasoning_levels(
+                vec![
+                    ReasoningEffort::Low,
+                    ReasoningEffort::Max,
+                    ReasoningEffort::Ultra,
+                ],
+                Some(ReasoningEffort::Low),
+                true,
+            )
+            .with_reasoning_control(ReasoningControl::OpenAiEffort);
+
+        assert_eq!(
+            normalize_thinking_level_for_model(ThinkingLevel::Ultra, Some(&model)),
+            ThinkingLevel::Max
+        );
+    }
 }

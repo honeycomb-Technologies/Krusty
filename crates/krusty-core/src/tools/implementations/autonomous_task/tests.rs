@@ -121,7 +121,7 @@ async fn autonomous_task_create_refreshes_current_snapshot() {
     assert!(!result.is_error);
 
     let snapshot = get_current_snapshot(ctx.db_path.as_ref().expect("db"), Some("/repo"), None)
-        .expect("load snapshot")
+        .expect("snapshot lookup")
         .expect("snapshot should exist");
     assert!(snapshot.content.contains("Open tasks: 1"));
     assert!(snapshot.content.contains("Lock wake policy"));

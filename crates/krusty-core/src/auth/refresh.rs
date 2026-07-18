@@ -1,11 +1,14 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::time::Duration;
 
 use super::credential_loading::extract_openai_account_id;
-use super::http::read_auth_response;
 use super::providers::{anthropic_oauth_config, openai_oauth_config};
 use super::{refresh_grok_oauth_token, OAuthTokenData, OAuthTokenStore};
 use crate::ai::providers::ProviderId;
+
+const REFRESH_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+const REFRESH_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Deserialize)]
 struct TokenResponse {
@@ -20,11 +23,50 @@ struct TokenResponse {
 
 /// Refresh an expired OAuth token using the stored refresh token
 pub async fn refresh_oauth_token(provider_id: ProviderId) -> Result<OAuthTokenData> {
-    match provider_id {
-        ProviderId::Anthropic => refresh_anthropic_oauth_token().await,
-        ProviderId::Grok => refresh_grok_oauth_token().await,
-        _ => refresh_openai_oauth_token(provider_id).await,
+    // Capture the generation before waiting so callers queued behind an
+    // in-flight refresh can reuse its result instead of issuing a second
+    // request with a rotated or rejected credential.
+    let observed = load_provider_token(provider_id)?;
+    let _refresh_lock = tokio::time::timeout(
+        REFRESH_LOCK_TIMEOUT,
+        OAuthTokenStore::lock_provider_refresh(provider_id),
+    )
+    .await
+    .context("Timed out waiting for provider OAuth refresh lock")?
+    .context("Failed to acquire provider OAuth refresh lock")?;
+    let current = load_provider_token(provider_id)?;
+    if credential_generation_changed(&observed, &current) {
+        tracing::info!(
+            provider = %provider_id,
+            "OAuth credential changed while waiting for refresh lock; reusing stored result"
+        );
+        return Ok(current);
     }
+
+    tokio::time::timeout(REFRESH_EXCHANGE_TIMEOUT, async {
+        match provider_id {
+            ProviderId::Anthropic => refresh_anthropic_oauth_token().await,
+            ProviderId::Grok => refresh_grok_oauth_token().await,
+            _ => refresh_openai_oauth_token(provider_id).await,
+        }
+    })
+    .await
+    .context("OAuth refresh exchange timed out")?
+}
+
+fn load_provider_token(provider_id: ProviderId) -> Result<OAuthTokenData> {
+    OAuthTokenStore::load()
+        .context("Failed to load OAuth token store")?
+        .get(&provider_id)
+        .cloned()
+        .with_context(|| format!("No OAuth token stored for {provider_id}"))
+}
+
+fn credential_generation_changed(observed: &OAuthTokenData, current: &OAuthTokenData) -> bool {
+    observed.access_token != current.access_token
+        || observed.refresh_token != current.refresh_token
+        || observed.expires_at != current.expires_at
+        || observed.last_refresh != current.last_refresh
 }
 
 async fn refresh_openai_oauth_token(provider_id: ProviderId) -> Result<OAuthTokenData> {
@@ -35,7 +77,7 @@ async fn refresh_openai_oauth_token(provider_id: ProviderId) -> Result<OAuthToke
         .clone();
     let refresh_token = token
         .refresh_token
-        .as_ref()
+        .clone()
         .context("No refresh token available")?;
 
     let config = openai_oauth_config();
@@ -46,20 +88,23 @@ async fn refresh_openai_oauth_token(provider_id: ProviderId) -> Result<OAuthToke
         .form(&[
             ("grant_type", "refresh_token"),
             ("client_id", &config.client_id),
-            ("refresh_token", refresh_token),
+            ("refresh_token", &refresh_token),
         ])
         .send()
         .await
         .context("Failed to send token refresh request")?;
-    let response = read_auth_response(response)
-        .await
-        .context("Failed to read token refresh response")?;
 
     if !response.status().is_success() {
-        return Err(response.safe_error("Token refresh failed"));
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        invalidate_rejected_refresh_token(provider_id, status.as_u16(), &body, &refresh_token);
+        anyhow::bail!("Token refresh failed ({}): {}", status, body);
     }
 
-    let token_response: TokenResponse = response.parse_json("Token refresh response")?;
+    let token_response: TokenResponse = response
+        .json()
+        .await
+        .context("Failed to parse token refresh response")?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -84,11 +129,12 @@ async fn refresh_openai_oauth_token(provider_id: ProviderId) -> Result<OAuthToke
         account_id,
     };
 
-    let mut store = OAuthTokenStore::load().context("Failed to reload OAuth token store")?;
-    store.set(provider_id, refreshed.clone());
-    store
-        .save()
-        .context("Failed to save refreshed OAuth token")?;
+    let refreshed = persist_refreshed_token_if_current(
+        provider_id,
+        &refresh_token,
+        refreshed,
+        "Failed to save refreshed OAuth token",
+    )?;
 
     tracing::info!("Successfully refreshed OAuth token for {}", provider_id);
     Ok(refreshed)
@@ -105,7 +151,7 @@ async fn refresh_anthropic_oauth_token() -> Result<OAuthTokenData> {
         .clone();
     let refresh_token = token
         .refresh_token
-        .as_ref()
+        .clone()
         .context("No refresh token available")?;
 
     let config = anthropic_oauth_config();
@@ -116,20 +162,28 @@ async fn refresh_anthropic_oauth_token() -> Result<OAuthTokenData> {
         .json(&serde_json::json!({
             "grant_type": "refresh_token",
             "client_id": config.client_id,
-            "refresh_token": refresh_token,
+            "refresh_token": &refresh_token,
         }))
         .send()
         .await
         .context("Failed to send Anthropic token refresh request")?;
-    let response = read_auth_response(response)
-        .await
-        .context("Failed to read Anthropic token refresh response")?;
 
     if !response.status().is_success() {
-        return Err(response.safe_error("Anthropic token refresh failed"));
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        invalidate_rejected_refresh_token(
+            ProviderId::Anthropic,
+            status.as_u16(),
+            &body,
+            &refresh_token,
+        );
+        anyhow::bail!("Anthropic token refresh failed ({}): {}", status, body);
     }
 
-    let token_response: TokenResponse = response.parse_json("Anthropic token refresh response")?;
+    let token_response: TokenResponse = response
+        .json()
+        .await
+        .context("Failed to parse Anthropic token refresh response")?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -145,14 +199,92 @@ async fn refresh_anthropic_oauth_token() -> Result<OAuthTokenData> {
         account_id: token.account_id.clone(),
     };
 
-    let mut store = OAuthTokenStore::load().context("Failed to reload OAuth token store")?;
-    store.set(ProviderId::Anthropic, refreshed.clone());
-    store
-        .save()
-        .context("Failed to save refreshed Anthropic OAuth token")?;
+    let refreshed = persist_refreshed_token_if_current(
+        ProviderId::Anthropic,
+        &refresh_token,
+        refreshed,
+        "Failed to save refreshed Anthropic OAuth token",
+    )?;
 
     tracing::info!("Successfully refreshed Anthropic OAuth token");
     Ok(refreshed)
+}
+
+fn persist_refreshed_token_if_current(
+    provider_id: ProviderId,
+    request_refresh_token: &str,
+    refreshed: OAuthTokenData,
+    error_context: &'static str,
+) -> Result<OAuthTokenData> {
+    if OAuthTokenStore::replace_persisted_if_refresh_token_matches(
+        &provider_id,
+        request_refresh_token,
+        refreshed.clone(),
+    )
+    .context(error_context)?
+    {
+        return Ok(refreshed);
+    }
+
+    let current = OAuthTokenStore::load()
+        .context("Failed to reload concurrently refreshed OAuth token")?
+        .get(&provider_id)
+        .cloned()
+        .context("OAuth credential changed during refresh but no replacement is stored")?;
+    tracing::info!(
+        provider = %provider_id,
+        "OAuth credential changed concurrently; using the newer stored credential"
+    );
+    Ok(current)
+}
+
+fn refresh_token_is_rejected(status: u16, body: &str) -> bool {
+    if !matches!(status, 400 | 401) {
+        return false;
+    }
+
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_ascii_lowercase)
+        })
+        .is_some_and(|error| matches!(error.as_str(), "invalid_grant" | "invalid_token"))
+}
+
+fn invalidate_rejected_refresh_token(
+    provider_id: ProviderId,
+    status: u16,
+    body: &str,
+    rejected_refresh_token: &str,
+) {
+    if !refresh_token_is_rejected(status, body) {
+        return;
+    }
+
+    let result = OAuthTokenStore::remove_persisted_if_refresh_token_matches(
+        &provider_id,
+        rejected_refresh_token,
+    )
+    .context("Failed to save OAuth token invalidation");
+
+    match result {
+        Ok(true) => tracing::warn!(
+            provider = %provider_id,
+            "OAuth refresh credential was rejected and has been cleared; reauthentication is required"
+        ),
+        Ok(false) => tracing::warn!(
+            provider = %provider_id,
+            "OAuth refresh credential was rejected, but the stored credential changed concurrently and was preserved"
+        ),
+        Err(error) => tracing::warn!(
+            provider = %provider_id,
+            error = %error,
+            "OAuth refresh credential was rejected but could not be cleared"
+        ),
+    }
 }
 
 fn log_refresh_failure(provider_id: ProviderId, context: &'static str, error: &anyhow::Error) {
@@ -249,8 +381,20 @@ pub fn try_refresh_oauth_token_blocking(provider_id: ProviderId) -> Option<OAuth
 
 #[cfg(test)]
 mod tests {
-    use super::join_refresh_thread;
+    use super::{credential_generation_changed, join_refresh_thread, refresh_token_is_rejected};
     use crate::ai::providers::ProviderId;
+    use crate::auth::OAuthTokenData;
+
+    fn token(access_token: &str, refresh_token: &str, last_refresh: u64) -> OAuthTokenData {
+        OAuthTokenData {
+            access_token: access_token.to_string(),
+            refresh_token: Some(refresh_token.to_string()),
+            id_token: None,
+            expires_at: Some(last_refresh + 3600),
+            last_refresh,
+            account_id: None,
+        }
+    }
 
     #[test]
     fn join_refresh_thread_returns_inner_result() {
@@ -273,5 +417,44 @@ mod tests {
         );
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn invalid_grant_requires_reauthentication() {
+        assert!(refresh_token_is_rejected(
+            400,
+            r#"{"error":"invalid_grant","error_description":"Refresh token expired"}"#,
+        ));
+        assert!(refresh_token_is_rejected(
+            401,
+            r#"{"error":"invalid_token"}"#,
+        ));
+    }
+
+    #[test]
+    fn transient_or_unrelated_refresh_errors_keep_the_credential() {
+        assert!(!refresh_token_is_rejected(
+            503,
+            r#"{"error":"invalid_grant"}"#,
+        ));
+        assert!(!refresh_token_is_rejected(
+            400,
+            r#"{"error":"temporarily_unavailable"}"#,
+        ));
+        assert!(!refresh_token_is_rejected(400, "not json"));
+    }
+
+    #[test]
+    fn queued_refresh_detects_an_already_persisted_result() {
+        let observed = token("old-access", "old-refresh", 10);
+        assert!(!credential_generation_changed(&observed, &observed));
+        assert!(credential_generation_changed(
+            &observed,
+            &token("new-access", "new-refresh", 20)
+        ));
+        assert!(credential_generation_changed(
+            &observed,
+            &token("new-access", "old-refresh", 20)
+        ));
     }
 }

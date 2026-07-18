@@ -244,11 +244,14 @@ mod tests {
     #[test]
     fn chatgpt_codex_tool_body_carries_fast_mode_service_tier() {
         let client = openai_responses_client();
-        let options = CallOptions {
-            fast_mode: true,
-            system_prompt: Some("system".to_string()),
-            ..Default::default()
-        };
+        let options = client.canonical_call_options(
+            "gpt-5.5",
+            &CallOptions {
+                fast_mode: true,
+                system_prompt: Some("system".to_string()),
+                ..Default::default()
+            },
+        );
 
         let body = client.build_codex_tool_call_body(
             "gpt-5.5",

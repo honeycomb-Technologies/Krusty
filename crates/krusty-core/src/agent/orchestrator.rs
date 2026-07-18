@@ -64,7 +64,7 @@ use self::persistence::{
     clear_recovery_state, persist_context_state, persist_recovery_state, save_message,
     set_agent_state, update_token_count,
 };
-use self::plan_flow::handle_plan_detection;
+use self::plan_flow::{handle_plan_detection, PlanDetectionOutcome};
 use self::recovery::{
     build_awaiting_input_recovery_state, build_partial_assistant_state, build_recovery_state,
     continuation_recovery_message,
@@ -278,6 +278,21 @@ impl AgenticOrchestrator {
         let trace_db_path = self.services.db_path.clone();
         let trace_session_id = self.config.session_id.clone();
         let trace_run_id = super::observability::new_runtime_trace_run_id();
+        let extension_dispatch =
+            self.services
+                .tool_registry
+                .agent_extension_manager()
+                .map(|manager| {
+                    let context = crate::extensions::ExtensionCallContext::for_turn(
+                        self.config.working_dir.clone(),
+                        self.config.project_dir.clone(),
+                        Some(self.config.session_id.clone()),
+                        Some(self.services.ai_client.config().model.clone()),
+                        format!("{:?}", self.config.permission_mode).to_ascii_lowercase(),
+                        matches!(self.config.initial_work_mode, WorkMode::Plan),
+                    );
+                    (manager, context)
+                });
 
         tokio::spawn(async move {
             super::observability::forward_runtime_traces(
@@ -287,6 +302,7 @@ impl AgenticOrchestrator {
                 trace_rx,
                 provider_call_rx,
                 event_tx,
+                extension_dispatch,
             )
             .await;
         });
@@ -474,6 +490,29 @@ impl AgenticOrchestrator {
                 session_type,
                 user_id.as_deref(),
             );
+            if let Some(extension_manager) = tool_registry.agent_extension_manager() {
+                let extension_context = crate::extensions::ExtensionCallContext::for_turn(
+                    working_dir.clone(),
+                    project_dir.clone(),
+                    Some(session_id.clone()),
+                    Some(ai_client.config().model.clone()),
+                    format!("{:?}", permission_mode).to_ascii_lowercase(),
+                    matches!(work_mode, WorkMode::Plan),
+                );
+                let extension_context_additions =
+                    extension_manager.context_for_turn(&extension_context).await;
+                if !extension_context_additions.is_empty() {
+                    conversation_with_context.push(ModelMessage {
+                        role: Role::System,
+                        content: vec![Content::Text {
+                            text: format!(
+                                "[AGENT EXTENSION CONTEXT]\n\n{}\n\n[END AGENT EXTENSION CONTEXT]",
+                                extension_context_additions.join("\n\n")
+                            ),
+                        }],
+                    });
+                }
+            }
             if empty_completion_recovery_pending {
                 conversation_with_context.push(ModelMessage {
                     role: Role::System,
@@ -971,7 +1010,7 @@ impl AgenticOrchestrator {
                 maybe_generate_title(&conversation, &event_tx, &session_id, &db_path);
             }
 
-            // No tool calls → check plan detection → finish turn
+            // A tool-free completion is also a safe boundary for live steering.
             if result.tool_calls.is_empty() {
                 let injected_steering = inject_pending_steering(
                     &mut input_inbox,
@@ -999,38 +1038,98 @@ impl AgenticOrchestrator {
                     emit_steering_events(&event_tx, injected_steering);
                     continue;
                 }
+            }
 
-                if work_mode == WorkMode::Plan {
-                    if let Some(pending_interaction) = handle_plan_detection(
-                        &result.text,
-                        &session_id,
-                        &working_dir,
-                        &db_path,
-                        &event_tx,
-                    ) {
-                        // Plan detected — emit events, persist the pending confirmation snapshot, and return.
-                        // The server's tool-result handler manages confirmation.
-                        if last_token_count > 0 {
-                            update_token_count(&db_path, &session_id, last_token_count);
+            // Supervised planning retains the explicit confirmation boundary.
+            // Autonomous planning promotes a detected plan to Build mode at the
+            // same canonical boundary. Detect before tool execution in that mode
+            // so a provider that returns a plan and its first write together does
+            // not bounce against the read-only PlanModeHook first.
+            let should_detect_plan = should_detect_plan_transition(
+                work_mode,
+                permission_mode,
+                !result.tool_calls.is_empty(),
+            );
+            if should_detect_plan {
+                if let Some(outcome) = handle_plan_detection(
+                    &result.text,
+                    &session_id,
+                    &working_dir,
+                    &db_path,
+                    permission_mode,
+                    &event_tx,
+                ) {
+                    match outcome {
+                        PlanDetectionOutcome::AwaitingConfirmation(pending_interaction) => {
+                            // The server's tool-result handler manages supervised confirmation.
+                            if last_token_count > 0 {
+                                update_token_count(&db_path, &session_id, last_token_count);
+                            }
+                            persist_recovery_state(
+                                &db_path,
+                                &session_id,
+                                &build_awaiting_input_recovery_state(
+                                    build_partial_assistant_state(&result.recovery_checkpoint),
+                                    vec![pending_interaction],
+                                    permission_mode,
+                                ),
+                            );
+                            set_agent_state(&db_path, &session_id, "awaiting_input");
+                            let _ = event_tx.send(LoopEvent::Finished {
+                                session_id: session_id.clone(),
+                                stop_reason: LoopStopReason::AwaitingInput,
+                            });
+                            return;
                         }
-                        persist_recovery_state(
-                            &db_path,
-                            &session_id,
-                            &build_awaiting_input_recovery_state(
-                                build_partial_assistant_state(&result.recovery_checkpoint),
-                                vec![pending_interaction],
-                                permission_mode,
-                            ),
-                        );
-                        set_agent_state(&db_path, &session_id, "awaiting_input");
-                        let _ = event_tx.send(LoopEvent::Finished {
-                            session_id: session_id.clone(),
-                            stop_reason: LoopStopReason::AwaitingInput,
-                        });
-                        return;
+                        PlanDetectionOutcome::ContinueInBuildMode => {
+                            work_mode = WorkMode::Build;
+                            if result.tool_calls.is_empty() {
+                                if last_token_count > 0 {
+                                    update_token_count(&db_path, &session_id, last_token_count);
+                                }
+                                clear_recovery_state(&db_path, &session_id);
+                                set_agent_state(&db_path, &session_id, "streaming");
+                                let _ = event_tx.send(LoopEvent::TurnComplete {
+                                    turn: iteration,
+                                    has_more: true,
+                                });
+                                continue;
+                            }
+                        }
+                        PlanDetectionOutcome::Failed(error) => {
+                            tracing::error!(
+                                session_id = %session_id,
+                                %error,
+                                "Plan lifecycle transition failed"
+                            );
+                            if last_token_count > 0 {
+                                update_token_count(&db_path, &session_id, last_token_count);
+                            }
+                            persist_recovery_state(
+                                &db_path,
+                                &session_id,
+                                &build_recovery_state(
+                                    &context_ledger,
+                                    RecoveryStatus::Interrupted,
+                                    Some(LoopStopReason::ProviderError),
+                                    Some(error.clone()),
+                                    build_partial_assistant_state(&result.recovery_checkpoint),
+                                ),
+                            );
+                            set_agent_state(&db_path, &session_id, "error");
+                            let _ = event_tx.send(LoopEvent::Error { error });
+                            let _ = event_tx.send(LoopEvent::Finished {
+                                session_id: session_id.clone(),
+                                stop_reason: LoopStopReason::ProviderError,
+                            });
+                            return;
+                        }
                     }
                 }
+            }
 
+            // No tool calls and no plan transition → finish turn.
+            if result.tool_calls.is_empty() {
                 let _ = event_tx.send(LoopEvent::TurnComplete {
                     turn: iteration,
                     has_more: false,
@@ -1451,6 +1550,15 @@ fn no_tool_completion_should_continue(steering: &[InjectedSteering]) -> bool {
     !steering.is_empty()
 }
 
+fn should_detect_plan_transition(
+    work_mode: WorkMode,
+    permission_mode: PermissionMode,
+    has_tool_calls: bool,
+) -> bool {
+    work_mode == WorkMode::Plan
+        && (!has_tool_calls || permission_mode == PermissionMode::Autonomous)
+}
+
 fn emit_steering_events(
     event_tx: &mpsc::UnboundedSender<LoopEvent>,
     steering: Vec<InjectedSteering>,
@@ -1690,6 +1798,7 @@ mod tests {
     use super::no_tool_completion_should_continue;
     use super::remove_validation_reminders;
     use super::resolve_project_permission_mode;
+    use super::should_detect_plan_transition;
     use super::should_retry_empty_stream_interruption;
     use super::terminal_agent_state_after_interruption;
     use super::update_validation_state;
@@ -1855,6 +1964,30 @@ mod tests {
                 message: "keep going".into(),
             }
         ]));
+    }
+
+    #[test]
+    fn autonomous_plan_is_detected_before_bundled_writes() {
+        assert!(should_detect_plan_transition(
+            WorkMode::Plan,
+            PermissionMode::Autonomous,
+            true,
+        ));
+        assert!(!should_detect_plan_transition(
+            WorkMode::Plan,
+            PermissionMode::Supervised,
+            true,
+        ));
+        assert!(should_detect_plan_transition(
+            WorkMode::Plan,
+            PermissionMode::Supervised,
+            false,
+        ));
+        assert!(!should_detect_plan_transition(
+            WorkMode::Build,
+            PermissionMode::Autonomous,
+            false,
+        ));
     }
 
     #[test]

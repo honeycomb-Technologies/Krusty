@@ -106,8 +106,5 @@ pub fn poll_oauth_status(
 
 /// Save OAuth token to storage
 fn save_oauth_token(provider: ProviderId, token: OAuthTokenData) -> anyhow::Result<()> {
-    let mut store = OAuthTokenStore::load()?;
-    store.set(provider, token);
-    store.save()?;
-    Ok(())
+    OAuthTokenStore::set_persisted(provider, token)
 }

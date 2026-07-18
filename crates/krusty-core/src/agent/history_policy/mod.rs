@@ -41,7 +41,7 @@ pub(crate) fn tool_retention(name: &str) -> ToolRetention {
         "grep" | "glob" | "list" | "write" | "edit" | "multiedit" | "apply_patch" => {
             ToolRetention::SummarizeAfterTurn
         }
-        "bash" | "processes" | "web_search" | "web_fetch" | "explore" | "build" => {
+        "agent" | "bash" | "processes" | "web_search" | "web_fetch" | "explore" | "build" => {
             ToolRetention::DropAfterCompaction
         }
         _ => ToolRetention::RetainFull,
@@ -185,19 +185,67 @@ pub(crate) fn truncate_utf8(text: &str, limit: usize) -> String {
     }
 
     let truncated = &text[..boundary];
-    let break_point = truncated.rfind('\n').unwrap_or(boundary);
+    let window_start = boundary.saturating_sub(160);
+    let break_point = truncated[window_start..]
+        .rfind('\n')
+        .map(|relative| window_start + relative)
+        .unwrap_or(boundary);
     truncated[..break_point].trim_end().to_string()
+}
+
+pub(crate) fn truncate_utf8_head_tail(text: &str, head_limit: usize, tail_limit: usize) -> String {
+    if text.len() <= head_limit.saturating_add(tail_limit) {
+        return text.to_string();
+    }
+
+    let mut head_end = head_limit.min(text.len());
+    while head_end > 0 && !text.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let head_window_start = head_end.saturating_sub(160);
+    if let Some(relative_break) = text[head_window_start..head_end].rfind('\n') {
+        head_end = head_window_start + relative_break;
+    }
+
+    let mut tail_start = text.len().saturating_sub(tail_limit);
+    while tail_start < text.len() && !text.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    let tail_window_end = tail_start.saturating_add(160).min(text.len());
+    if let Some(relative_break) = text[tail_start..tail_window_end].find('\n') {
+        tail_start += relative_break + 1;
+    }
+
+    format!(
+        "{}\n...[middle truncated]...\n{}",
+        text[..head_end].trim_end(),
+        text[tail_start..].trim_start()
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::{build_history_tool_result, tool_retention, ToolRetention};
+    use super::{build_history_tool_result, tool_retention, truncate_utf8, ToolRetention};
+
+    #[test]
+    fn prefix_truncation_does_not_collapse_to_an_early_heading() {
+        let value = format!("# Plan\n{}", "x".repeat(2_000));
+        let truncated = truncate_utf8(&value, 600);
+
+        assert!(truncated.starts_with("# Plan\n"));
+        assert!(truncated.len() > 500);
+    }
 
     #[test]
     fn classifies_bash_as_drop_after_compaction() {
         assert_eq!(tool_retention("bash"), ToolRetention::DropAfterCompaction);
+    }
+
+    #[test]
+    fn classifies_canonical_agent_as_drop_after_compaction() {
+        assert_eq!(tool_retention("agent"), ToolRetention::DropAfterCompaction);
     }
 
     #[test]
@@ -281,6 +329,7 @@ mod tests {
                 "message": "Process started in background",
                 "process_id": "process-123",
                 "status": "running",
+                "endpoint_hints": ["127.0.0.1:5940"],
                 "next_action": "Use processes status/control when needed."
             }
         })
@@ -292,6 +341,7 @@ mod tests {
             .get("summary")
             .and_then(|value| value.as_str())
             .is_some_and(|summary| summary.contains("process-123")
+                && summary.contains("127.0.0.1:5940")
                 && summary.contains("processes status/control")));
         assert_eq!(
             history
@@ -307,6 +357,74 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("running")
         );
+        assert_eq!(
+            history
+                .get("result")
+                .and_then(|value| value.get("endpoint_hints")),
+            Some(&json!(["127.0.0.1:5940"]))
+        );
+    }
+
+    #[test]
+    fn agent_history_is_bounded_but_keeps_handoff_evidence() {
+        let findings = format!("# Plan\n{}\nFINAL-CONCLUSION-SENTINEL", "x".repeat(20_000));
+        let output = json!({
+            "ok": true,
+            "data": {
+                "delegated_run_id": "run-123",
+                "outcome": "success",
+                "confidence": "high",
+                "investigation_summary": "Implemented the requested component and handed off its preview process.",
+                "findings": findings,
+                "paths_examined": ["src/lib.rs", "src/main.rs"],
+                "paths_examined_count": 2,
+                "agent_count": 1,
+                "successful_agents": 1,
+                "failed_agents": 0,
+                "files_modified": 2,
+                "builders": [{"unbounded_nested_payload": "do not retain this"}],
+                "background_processes": [{
+                    "process_id": "process-123",
+                    "status": "running",
+                    "command": "npm run dev -- --port 5940",
+                    "working_dir": "/workspace",
+                    "endpoint_hints": ["127.0.0.1:5940"],
+                    "reused_existing": false
+                }]
+            }
+        })
+        .to_string();
+
+        let history = build_history_tool_result("agent", &output, false);
+        assert_eq!(
+            history.get("retention").and_then(|value| value.as_str()),
+            Some("drop_after_compaction")
+        );
+        let result = history.get("result").expect("structured agent result");
+        assert_eq!(
+            result
+                .get("delegated_run_id")
+                .and_then(|value| value.as_str()),
+            Some("run-123")
+        );
+        let retained_findings = result
+            .get("findings")
+            .and_then(|value| value.as_str())
+            .expect("bounded findings");
+        assert!(retained_findings.len() <= 3_000);
+        assert!(retained_findings.contains("# Plan"));
+        assert!(retained_findings.contains("xxxxx"));
+        assert!(retained_findings.contains("FINAL-CONCLUSION-SENTINEL"));
+        assert!(retained_findings.contains("middle truncated"));
+        assert_eq!(
+            result
+                .get("background_processes")
+                .and_then(|value| value.get(0))
+                .and_then(|value| value.get("endpoint_hints")),
+            Some(&json!(["127.0.0.1:5940"]))
+        );
+        assert!(result.get("builders").is_none());
+        assert!(!history.to_string().contains("unbounded_nested_payload"));
     }
 
     #[test]

@@ -11,6 +11,9 @@ use tracing::warn;
 use krusty_core::ai::providers::ProviderId;
 use krusty_core::auth::{AuthMethod, OAuthTokenStore};
 
+use crate::ai_bootstrap::{
+    invalidate_provider_model_catalog, spawn_provider_model_catalog_refresh,
+};
 use crate::error::AppError;
 use crate::AppState;
 
@@ -101,7 +104,20 @@ async fn set_credential(
     }
 
     if krusty_core::ai::catalog::supports_dynamic_models(provider_id) {
-        spawn_dynamic_model_refresh(state.model_registry.clone(), provider_id, req.api_key);
+        invalidate_provider_model_catalog(
+            &state.model_registry,
+            state.db_path.as_path(),
+            provider_id,
+        )
+        .await
+        .map_err(|error| AppError::Internal(error.to_string()))?;
+        spawn_provider_model_catalog_refresh(
+            state.model_registry.clone(),
+            state.credential_store.clone(),
+            state.db_path.clone(),
+            provider_id,
+            false,
+        );
     }
 
     let oauth_store = load_oauth_store_or_default("setting credential provider");
@@ -132,34 +148,23 @@ async fn delete_credential(
     }
 
     if krusty_core::ai::catalog::supports_dynamic_models(provider_id) {
-        // Fall back to builtin static catalog for this provider when live creds go away.
-        let fallback = krusty_core::ai::providers::get_provider(provider_id)
-            .map(|provider| {
-                provider
-                    .models
-                    .iter()
-                    .map(|m| {
-                        let api_format = krusty_core::ai::format_detection::detect_api_format(
-                            provider.id,
-                            &m.id,
-                        );
-                        let mut model = krusty_core::ai::models::ModelMetadata::new(
-                            &m.id,
-                            &m.display_name,
-                            provider.id,
-                        )
-                        .with_context(m.context_window, m.max_output);
-                        if let Some(reasoning) = m.reasoning {
-                            model = model.with_thinking(reasoning);
-                        }
-                        model.api_format = api_format;
-                        model.supports_tools = provider.supports_tools;
-                        model
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        state.model_registry.set_models(provider_id, fallback).await;
+        invalidate_provider_model_catalog(
+            &state.model_registry,
+            state.db_path.as_path(),
+            provider_id,
+        )
+        .await
+        .map_err(|error| AppError::Internal(error.to_string()))?;
+        // An OAuth or environment identity may remain after deleting the stored
+        // API key. The canonical refresh either restores that catalog or safely
+        // leaves the curated fallback when no credential remains.
+        spawn_provider_model_catalog_refresh(
+            state.model_registry.clone(),
+            state.credential_store.clone(),
+            state.db_path.clone(),
+            provider_id,
+            false,
+        );
     }
 
     let oauth_store = load_oauth_store_or_default("deleting credential provider");
@@ -226,19 +231,6 @@ fn load_oauth_store_or_else(
             OAuthTokenStore::default()
         }
     }
-}
-
-fn spawn_dynamic_model_refresh(
-    registry: krusty_core::ai::models::SharedModelRegistry,
-    provider_id: ProviderId,
-    credential: String,
-) {
-    tokio::spawn(async move {
-        match krusty_core::ai::catalog::fetch_dynamic_models(provider_id, &credential).await {
-            Ok(models) => registry.set_models(provider_id, models).await,
-            Err(e) => tracing::warn!("Failed to refresh {} models: {}", provider_id, e),
-        }
-    });
 }
 
 #[cfg(test)]

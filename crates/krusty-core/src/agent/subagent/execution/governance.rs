@@ -35,6 +35,10 @@ pub(super) fn build_subagent_tool_context(task: &SubAgentTask, timeout_secs: u64
         ctx = ctx.with_sandbox(sandbox_root);
     }
 
+    ctx.process_registry = task.process_registry.clone();
+    ctx.user_id = task.process_owner_id.clone();
+    ctx.session_id = task.parent_session_id.clone();
+
     ctx
 }
 

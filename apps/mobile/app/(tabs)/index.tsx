@@ -156,7 +156,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     [model, models],
   );
   const fastModeSupported = supportsFastMode(
-    model,
+    selectedModelInfo ?? model,
     selectedModelInfo?.provider ?? null,
   );
   const fastModeEnabled = fastModeSupported && fastModeStoreEnabled;
@@ -165,7 +165,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     if (!model || !selectedModelInfo) {
       return;
     }
-    sessionStore.getState().setModel(model, selectedModelInfo.provider);
+    sessionStore.getState().setModel(model, selectedModelInfo.provider, selectedModelInfo);
   }, [model, selectedModelInfo, sessionStore]);
 
   const previousStreamingRef = useRef(false);
@@ -332,7 +332,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     if (selectedModel) {
       sessionStore
         .getState()
-        .setModel(selectedModel.id, selectedModel.provider ?? null);
+        .setModel(selectedModel.id, selectedModel.provider ?? null, selectedModel);
       await SecureStore.setItemAsync(SELECTED_MODEL_KEY, selectedModel.id);
       return selectedModel.id;
     }
@@ -350,6 +350,20 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     void sessionsStore.getState().loadSessions();
     void ensureModelReady();
   }, [client, ensureModelReady, isConnected, sessionsStore]);
+
+  useEffect(() => {
+    if (!client || !isConnected) {
+      return;
+    }
+
+    const refreshHandle = setInterval(() => {
+      if (AppState.currentState === "active") {
+        void loadModelCatalog().catch(() => null);
+      }
+    }, 5 * 60 * 1000);
+
+    return () => clearInterval(refreshHandle);
+  }, [client, isConnected, loadModelCatalog]);
 
   useEffect(() => {
     if (!client || !isConnected || sessionId || !workspaceSessionId) {
@@ -393,10 +407,11 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       if (currentSessionId) {
         void sessionStore.getState().loadSession(currentSessionId, true);
       }
+      void loadModelCatalog().catch(() => null);
     });
 
     return () => subscription.remove();
-  }, [sessionStore, workspace]);
+  }, [loadModelCatalog, sessionStore, workspace]);
 
   useEffect(() => {
     if (!sessionId) {

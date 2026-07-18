@@ -69,6 +69,69 @@ pub(crate) fn classify_bash_command(command: &str) -> BashCommandClassification 
     }
 }
 
+/// Plan-mode Bash is deny-by-default. Static mutation blacklists cannot prove
+/// that interpreters, downloader flags, shell expansions, or uncommon tools
+/// are read-only, so only a small auditable command surface is admitted.
+pub(crate) fn is_write_capable_in_plan_mode(command: &str) -> bool {
+    if command.contains("$(")
+        || command.contains('`')
+        || command.contains("<(")
+        || command.contains(">(")
+    {
+        return true;
+    }
+
+    let segments = split_shell_segments(command);
+    segments.is_empty()
+        || !segments
+            .iter()
+            .all(|segment| is_plan_mode_read_only_segment(segment))
+}
+
+fn is_plan_mode_read_only_segment(segment: &str) -> bool {
+    if has_unquoted_redirect(segment) {
+        return false;
+    }
+
+    let raw_tokens = tokenize_shell(segment);
+    if raw_tokens
+        .first()
+        .is_some_and(|token| is_env_assignment(token) || command_basename(token) == "env")
+    {
+        return false;
+    }
+    let tokens = strip_invocation_wrappers(&raw_tokens);
+    let Some(executable) = tokens.first() else {
+        return false;
+    };
+    if executable.contains('/') || executable.contains('\\') {
+        return false;
+    }
+    let command = command_basename(executable);
+
+    match command.as_str() {
+        "git" => is_plan_mode_read_only_git(tokens),
+        "ls" | "tree" | "cat" | "head" | "tail" | "wc" | "stat" | "file" | "rg" | "grep"
+        | "diff" | "cmp" | "sort" | "uniq" | "cut" | "tr" | "column" | "jq" | "basename"
+        | "dirname" | "realpath" | "readlink" | "pwd" | "du" | "df" | "ps" | "pgrep" | "ss"
+        | "netstat" | "lsof" | "which" | "whereis" | "type" | "printenv" | "whoami" | "id"
+        | "uname" | "date" | "uptime" | "hostname" | "free" | "md5sum" | "sha256sum" | "shasum"
+        | "echo" | "printf" | "true" | "false" | "test" | "[" => true,
+        _ => false,
+    }
+}
+
+fn is_plan_mode_read_only_git(tokens: &[String]) -> bool {
+    match tokens.get(1).map(String::as_str) {
+        Some(
+            "status" | "diff" | "show" | "log" | "grep" | "rev-parse" | "ls-files" | "describe"
+            | "shortlog" | "name-rev" | "blame",
+        ) => true,
+        Some("branch") => tokens.len() == 2 || tokens[2..] == ["--show-current"],
+        _ => false,
+    }
+}
+
 fn strip_invocation_wrappers(mut tokens: &[String]) -> &[String] {
     loop {
         tokens = strip_env_prefix(tokens);
@@ -624,8 +687,8 @@ fn is_mutating_shell_segment(segment: &str) -> bool {
     }
 
     let tokens = tokenize_shell(segment);
-    let tokens = strip_env_prefix(&tokens);
-    let Some(command) = tokens.first().map(|t| t.to_ascii_lowercase()) else {
+    let tokens = strip_invocation_wrappers(&tokens);
+    let Some(command) = tokens.first().map(|token| command_basename(token)) else {
         return false;
     };
 
@@ -805,6 +868,80 @@ mod tests {
             Some(BashFileOperationKind::Edit)
         ));
         assert!(classification.modifies_filesystem_or_process);
+    }
+
+    #[test]
+    fn treats_general_purpose_interpreters_as_write_capable() {
+        for command in [
+            "python3 - <<'PY'\nfrom pathlib import Path\nPath('server.py').write_text('ok')\nPY",
+            "python3.14 -c \"from pathlib import Path; Path('server.py').write_text('ok')\"",
+            "node -e \"require('fs').writeFileSync('server.js', 'ok')\"",
+            "sh -c 'touch generated.txt'",
+        ] {
+            assert!(
+                is_write_capable_in_plan_mode(command),
+                "expected interpreter command to be treated as write-capable: {command}"
+            );
+        }
+
+        assert!(is_write_capable_in_plan_mode("mkdir generated"));
+        assert!(!is_write_capable_in_plan_mode("git status --short"));
+        assert!(!is_write_capable_in_plan_mode("cat Cargo.toml"));
+    }
+
+    #[test]
+    fn plan_mode_denies_unproven_shell_surfaces_and_expansion_bypasses() {
+        for command in [
+            "dash -c 'touch generated.txt'",
+            "php -r 'file_put_contents(\"generated.txt\", \"x\");'",
+            "lua -e 'io.open(\"generated.txt\", \"w\")'",
+            "deno eval 'Deno.writeTextFileSync(\"generated.txt\", \"x\")'",
+            "awk 'BEGIN { system(\"touch generated.txt\") }'",
+            "find . -exec touch generated.txt ;",
+            "curl -o generated.txt https://example.com/file",
+            "echo $(touch generated.txt)",
+            "cat <(touch generated.txt)",
+            "PAGER='touch generated.txt' git log",
+            "git fetch origin",
+            "./git status",
+        ] {
+            assert!(
+                is_write_capable_in_plan_mode(command),
+                "expected unproven Plan-mode command to be blocked: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_mode_allows_only_the_audited_read_only_shell_surface() {
+        for command in [
+            "git status --short",
+            "git diff --stat",
+            "git branch --show-current",
+            "rg needle crates | head -20",
+            "cat Cargo.toml",
+            "ps -ef | grep krusty",
+            "sha256sum target/release/krusty",
+        ] {
+            assert!(
+                !is_write_capable_in_plan_mode(command),
+                "expected audited Plan-mode command to be allowed: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapped_mutating_commands_remain_write_capable_in_plan_mode() {
+        for command in [
+            "command mkdir generated",
+            "env mkdir generated",
+            "timeout 1 mkdir generated",
+        ] {
+            assert!(
+                is_write_capable_in_plan_mode(command),
+                "expected wrapped mutating command to be write-capable: {command}"
+            );
+        }
     }
 
     #[test]

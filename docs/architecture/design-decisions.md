@@ -92,18 +92,28 @@ This document covers the major architectural decisions behind Krusty — what we
 
 ## 7. Why WASM for Extensions?
 
-**The choice:** Use WebAssembly (via Wasmtime) for the extension system, with Zed-compatible WIT interfaces.
+**The choice:** Use WebAssembly (via Wasmtime) for isolated editor/language
+extensions, with Zed-compatible WIT interfaces, and a visibly separate trusted
+Bun worker for coding-agent extensions.
 
 **Alternatives considered:** Dynamic libraries (.so/.dylib), Lua scripting, JavaScript/V8, no extension system.
 
-**Why WASM won:** Extensions run untrusted code from third parties. Safety is non-negotiable:
+**Why WASM won for the untrusted boundary:** Third-party editor extensions need
+hard isolation. Safety is non-negotiable:
 
 - **Sandboxed** — WASM extensions can't access the filesystem, network, or system APIs unless the host explicitly grants it
 - **Portable** — one .wasm binary runs on every platform Krusty supports
 - **Zed compatibility** — by adopting Zed's WIT interface definitions, extensions written for Zed can potentially run in Krusty. This gives us access to an existing and growing extension ecosystem
 - **Deterministic resource limits** — epoch-based interruption prevents runaway extensions
 
-**The trade-off:** WASM extensions are harder to write than scripts. The WIT interface is powerful but verbose. Development feedback loops are slower (compile to WASM, load, test). For simpler extensibility needs, skills (YAML instruction files) and MCP servers provide lower-friction alternatives.
+**The trade-off:** WASM extensions are harder to write than scripts. The WIT
+interface is powerful but verbose and the compile/load loop is slower. Agent
+extensions therefore use persistent JavaScript/TypeScript workers for the same
+low-friction tool, command, event, and context workflows offered by Pi and
+OpenCode. Those workers are explicitly trusted local code: package permissions,
+environment filtering, timeouts, and process isolation make authority visible,
+but are not described as a sandbox. Skills and MCP remain the non-code and
+remote-capability alternatives.
 
 ## 8. Why the Event-Driven Architecture?
 

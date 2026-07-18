@@ -188,6 +188,7 @@ export interface ToolResultRequest {
 	tool_call_id: string;
 	result: string;
 	fast_mode?: boolean;
+	thinking_enabled?: ThinkingLevel | boolean;
 	permission_mode?: PermissionMode;
 }
 
@@ -1070,10 +1071,36 @@ export interface ModelInfo {
 	provider: string;
 	context_window: number;
 	max_output: number;
+	/** Legacy flag retained for compatibility; prefer supported_reasoning_levels. */
 	supports_thinking: boolean;
+	reasoning_control?: ReasoningControl | null;
+	supported_reasoning_levels?: ReasoningEffort[];
+	default_reasoning_level?: ReasoningEffort | null;
+	reasoning_is_mandatory?: boolean;
+	supports_fast_mode?: boolean;
+	fast_mode?: FastMode | null;
 	supports_tools: boolean;
 	supports_vision: boolean;
 }
+
+export type ReasoningEffort =
+	| "none"
+	| "minimal"
+	| "low"
+	| "medium"
+	| "high"
+	| "xhigh"
+	| "max"
+	| "ultra";
+
+export type ReasoningControl =
+	| "open_ai_effort"
+	| "anthropic_adaptive"
+	| "anthropic_budget"
+	| "boolean"
+	| "output_only";
+
+export type FastMode = "priority" | "anthropic_fast";
 
 export interface ModelsResponse {
 	models: ModelInfo[];
@@ -1180,7 +1207,15 @@ export type SessionMode = "build" | "plan";
 export type SessionType = "chat" | "code" | "mako";
 export type PermissionMode = "supervised" | "autonomous";
 export type WorkspaceMode = "neutral" | "selected" | "created";
-export type ThinkingLevel = "off" | "low" | "medium" | "high" | "xhigh";
+export type ThinkingLevel =
+	| "off"
+	| "minimal"
+	| "low"
+	| "medium"
+	| "high"
+	| "xhigh"
+	| "max"
+	| "ultra";
 
 // ============================================================================
 // Report Types

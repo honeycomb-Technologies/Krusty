@@ -4,7 +4,9 @@ export * from './session/modelSelection';
 export {
   cycleThinkingLevel,
   isThinkingEnabled,
+  normalizeThinkingLevel,
   supportsFastMode,
+  supportsThinking,
   thinkingLevelLabel,
   thinkingLevelToApiValue,
 } from './session/thinking';

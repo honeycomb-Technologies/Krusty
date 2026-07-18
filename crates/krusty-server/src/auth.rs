@@ -65,6 +65,31 @@ where
     }
 }
 
+/// Guard for process-wide extensibility managers that are not tenant scoped.
+///
+/// Local requests remain the single-tenant administrator. A request carrying a
+/// user identity must fail closed until extension, skill, MCP/OAuth, and plugin
+/// managers are keyed by that identity and workspace.
+pub async fn shared_extensibility_admin_middleware(request: Request, next: Next) -> Response {
+    match authorize_shared_extensibility_admin(request.extensions().get::<AuthenticatedUser>()) {
+        Ok(()) => next.run(request).await,
+        Err(rejection) => rejection.into_response(),
+    }
+}
+
+fn authorize_shared_extensibility_admin(
+    user: Option<&AuthenticatedUser>,
+) -> Result<(), (StatusCode, &'static str)> {
+    match user {
+        Some(user) if user.user_id.is_none() => Ok(()),
+        Some(_) => Err((
+            StatusCode::FORBIDDEN,
+            "Shared extensibility administration is unavailable in tenant-scoped mode",
+        )),
+        None => Err((StatusCode::UNAUTHORIZED, "Not authenticated")),
+    }
+}
+
 /// Middleware that attaches optional user info to request extensions.
 pub async fn auth_middleware(
     State(state): State<AppState>,
@@ -369,9 +394,10 @@ mod tests {
     use krusty_core::tools::registry::ToolRegistry;
 
     use super::{
-        authenticated_user_for_surface, authorize_request_surface, is_local_host,
-        is_trusted_local_origin, percent_decode_query_component, resolve_workspace_dir,
-        RequestSurface, USER_ID_HEADER, WORKSPACE_DIR_HEADER,
+        authenticated_user_for_surface, authorize_request_surface,
+        authorize_shared_extensibility_admin, is_local_host, is_trusted_local_origin,
+        percent_decode_query_component, resolve_workspace_dir, AuthenticatedUser, RequestSurface,
+        USER_ID_HEADER, WORKSPACE_DIR_HEADER,
     };
     use crate::{remote_access::RemoteAccessConfig, AppState};
 
@@ -392,6 +418,23 @@ mod tests {
         assert!(is_trusted_local_origin("https://tauri.localhost"));
         assert!(!is_trusted_local_origin("https://evil.example"));
         assert!(!is_trusted_local_origin("null"));
+    }
+
+    #[test]
+    fn shared_extensibility_admin_is_local_only_and_fails_closed() {
+        assert!(authorize_shared_extensibility_admin(Some(&AuthenticatedUser::local())).is_ok());
+
+        let tenant = AuthenticatedUser {
+            user_id: Some("tenant-a".to_string()),
+            home_dir: None,
+        };
+        let rejection = authorize_shared_extensibility_admin(Some(&tenant))
+            .expect_err("tenant-scoped requests must not use shared managers");
+        assert_eq!(rejection.0, axum::http::StatusCode::FORBIDDEN);
+
+        let missing = authorize_shared_extensibility_admin(None)
+            .expect_err("missing auth context must fail closed");
+        assert_eq!(missing.0, axum::http::StatusCode::UNAUTHORIZED);
     }
 
     #[test]

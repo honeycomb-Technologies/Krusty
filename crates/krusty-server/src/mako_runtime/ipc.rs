@@ -889,7 +889,7 @@ mod tests {
         let ClientFrame::Request(request) = frame else {
             panic!("second client frame was not a request");
         };
-        (stream, request)
+        (stream, *request)
     }
 
     #[cfg(unix)]

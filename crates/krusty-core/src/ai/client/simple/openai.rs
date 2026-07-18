@@ -21,7 +21,7 @@ impl AiClient {
         user_message: &str,
         max_tokens: usize,
     ) -> Result<SimpleCallResult> {
-        let body = openai_simple_body(
+        let mut body = openai_simple_body(
             self.config().api_format,
             model,
             max_tokens,
@@ -30,6 +30,9 @@ impl AiClient {
                 serde_json::json!({"role": "user", "content": user_message}),
             ],
         );
+        if self.provider_id() == crate::ai::providers::ProviderId::ZAi {
+            body["thinking"] = serde_json::json!({"type": "disabled"});
+        }
 
         let body =
             apply_request_body_transform(body, self.provider_id(), self.config().api_format, model);
@@ -74,7 +77,11 @@ impl AiClient {
             "content": appended_user_message
         }));
 
-        let body = openai_simple_body(self.config().api_format, model, max_tokens, api_messages);
+        let mut body =
+            openai_simple_body(self.config().api_format, model, max_tokens, api_messages);
+        if self.provider_id() == crate::ai::providers::ProviderId::ZAi {
+            body["thinking"] = serde_json::json!({"type": "disabled"});
+        }
 
         debug!(
             "Cache-safe OpenAI call: {} conversation messages + appended user message",

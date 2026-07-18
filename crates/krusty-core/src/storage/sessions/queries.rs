@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::params;
+use rusqlite::types::ValueRef;
 
 use crate::tools::registry::PermissionMode;
 
@@ -132,7 +133,6 @@ impl SessionManager {
 
     /// Helper to map a row to SessionInfo
     fn map_session_row(row: &rusqlite::Row) -> rusqlite::Result<SessionInfo> {
-        let updated_at: String = row.get(2)?;
         let token_count: Option<i64> = row.get(3)?;
         let work_mode_raw: String = row.get(7)?;
         let model: Option<String> = row.get(8)?;
@@ -154,9 +154,7 @@ impl SessionManager {
         Ok(SessionInfo {
             id: row.get(0)?,
             title: row.get(1)?,
-            updated_at: DateTime::parse_from_rfc3339(&updated_at)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
+            updated_at: parse_session_timestamp(row, 2)?,
             token_count: token_count.map(|t| t as usize),
             parent_session_id: row.get(4)?,
             working_dir,
@@ -277,5 +275,49 @@ impl SessionManager {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+}
+
+fn parse_session_timestamp(row: &rusqlite::Row, index: usize) -> rusqlite::Result<DateTime<Utc>> {
+    let value = row.get_ref(index)?;
+    match value {
+        ValueRef::Text(text) => {
+            let text = std::str::from_utf8(text).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            DateTime::parse_from_rfc3339(text)
+                .map(|date| date.with_timezone(&Utc))
+                .or_else(|_| {
+                    text.parse::<i64>()
+                        .ok()
+                        .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0))
+                        .ok_or(())
+                })
+                .map_err(|_| {
+                    rusqlite::Error::InvalidColumnType(
+                        index,
+                        "updated_at".to_string(),
+                        rusqlite::types::Type::Text,
+                    )
+                })
+        }
+        ValueRef::Integer(timestamp) => {
+            DateTime::<Utc>::from_timestamp(timestamp, 0).ok_or_else(|| {
+                rusqlite::Error::InvalidColumnType(
+                    index,
+                    "updated_at".to_string(),
+                    rusqlite::types::Type::Integer,
+                )
+            })
+        }
+        _ => Err(rusqlite::Error::InvalidColumnType(
+            index,
+            "updated_at".to_string(),
+            value.data_type(),
+        )),
     }
 }

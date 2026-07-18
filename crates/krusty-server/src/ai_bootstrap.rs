@@ -1,15 +1,62 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use anyhow::Result;
+use krusty_core::ai::catalog::{CatalogAuthKind, CatalogCredential};
 use krusty_core::ai::client::{AiClient, AiClientConfig};
 use krusty_core::ai::format_detection::detect_api_format;
-use krusty_core::ai::models::{resolve_model_metadata, ModelMetadata, SharedModelRegistry};
+use krusty_core::ai::models::{
+    resolve_model_metadata, ModelAuthScope, ModelMetadata, SharedModelRegistry,
+};
 use krusty_core::ai::providers::{builtin_providers, get_provider, ProviderId};
+use krusty_core::auth::{OpenAIAuthResolution, OpenAIAuthType};
 use krusty_core::constants;
 use krusty_core::storage::credentials::{ActiveProviderStore, CredentialStore};
 use krusty_core::storage::{Database, Preferences};
+use tokio::sync::{Mutex, RwLock};
 
 use crate::utils;
+
+struct CatalogRefreshSlot {
+    fetch_lock: Mutex<()>,
+    commit_lock: Mutex<()>,
+    auth_generation: AtomicU64,
+}
+
+impl CatalogRefreshSlot {
+    fn new() -> Self {
+        Self {
+            fetch_lock: Mutex::new(()),
+            commit_lock: Mutex::new(()),
+            auth_generation: AtomicU64::new(0),
+        }
+    }
+}
+
+static CATALOG_REFRESH_SLOTS: LazyLock<HashMap<ProviderId, CatalogRefreshSlot>> =
+    LazyLock::new(|| {
+        ProviderId::all()
+            .iter()
+            .copied()
+            .map(|provider| (provider, CatalogRefreshSlot::new()))
+            .collect()
+    });
+
+fn catalog_refresh_slot(provider: ProviderId) -> &'static CatalogRefreshSlot {
+    CATALOG_REFRESH_SLOTS
+        .get(&provider)
+        .expect("every provider has a catalog refresh slot")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CatalogRefreshOutcome {
+    Refreshed(usize),
+    SkippedFresh,
+    SkippedNoCredentials,
+    Superseded,
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 struct AiBootstrapPolicy;
@@ -198,13 +245,27 @@ pub async fn create_ai_client_for_model(
         .resolve_model_selection(model_registry, db_path, requested_model, user_id)
         .await?;
 
-    create_ai_client_for_provider(credentials, provider, model)
+    let auth_scope = model_registry
+        .get_model(&model)
+        .await
+        .and_then(|metadata| metadata.auth_scope);
+
+    create_ai_client_for_provider_with_scope(credentials, provider, model, auth_scope)
 }
 
 fn create_ai_client_for_provider(
     credentials: &CredentialStore,
     provider: ProviderId,
     model: String,
+) -> Option<AiClient> {
+    create_ai_client_for_provider_with_scope(credentials, provider, model, None)
+}
+
+fn create_ai_client_for_provider_with_scope(
+    credentials: &CredentialStore,
+    provider: ProviderId,
+    model: String,
+    auth_scope: Option<ModelAuthScope>,
 ) -> Option<AiClient> {
     let policy = AiBootstrapPolicy;
     let auth = if provider == ProviderId::Grok {
@@ -219,22 +280,25 @@ fn create_ai_client_for_provider(
 
     let (config, api_key) = match provider {
         ProviderId::OpenAI => {
-            let config = AiClientConfig::for_openai_with_auth_detection(&model, credentials);
-            let resolved = krusty_core::auth::resolve_openai_auth(credentials, &model);
+            let resolved = resolve_openai_auth_for_model(credentials, &model, auth_scope);
 
             let auth = resolved
-                .credential
-                .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+                .as_ref()
+                .and_then(|resolution| resolution.credential.clone());
             let api_key = match auth {
                 Some(key) => key,
                 None => {
                     tracing::warn!(
-                        "No OpenAI credentials found for resolved auth mode ({:?}); chat API unavailable",
-                        resolved.auth_type
+                        ?auth_scope,
+                        "No OpenAI credential matches the selected model catalog; chat API unavailable"
                     );
                     return None;
                 }
             };
+            let config = AiClientConfig::for_openai_with_auth_resolution(
+                &model,
+                resolved.expect("credential checked above"),
+            );
             (config, api_key)
         }
         ProviderId::Anthropic => {
@@ -276,6 +340,7 @@ fn create_ai_client_for_provider(
                     return None;
                 }
             };
+            let api_format = detect_api_format(provider, &model);
             (
                 AiClientConfig {
                     model,
@@ -283,7 +348,7 @@ fn create_ai_client_for_provider(
                     base_url: Some(provider_cfg.base_url.clone()),
                     auth_header: provider_cfg.auth_header,
                     provider_id: provider,
-                    api_format: Default::default(),
+                    api_format,
                     custom_headers: provider_cfg.custom_headers.clone(),
                 },
                 api_key,
@@ -294,49 +359,303 @@ fn create_ai_client_for_provider(
     Some(AiClient::new(config, api_key))
 }
 
-/// Initialize models in the shared registry.
-pub async fn initialize_models(registry: &SharedModelRegistry, credentials: &CredentialStore) {
+fn resolve_openai_auth_for_model(
+    credentials: &CredentialStore,
+    model: &str,
+    auth_scope: Option<ModelAuthScope>,
+) -> Option<OpenAIAuthResolution> {
+    let Some(scope) = auth_scope else {
+        let resolved = krusty_core::auth::resolve_openai_auth(credentials, model);
+        return resolved.credential.is_some().then_some(resolved);
+    };
+
+    let desired = match scope {
+        ModelAuthScope::ApiKey => CatalogAuthKind::ApiKey,
+        ModelAuthScope::OAuth => CatalogAuthKind::OAuth,
+    };
+    let identity =
+        krusty_core::ai::catalog::credentials_for_dynamic_models(ProviderId::OpenAI, credentials)
+            .into_iter()
+            .find(|identity| identity.kind == desired)?;
+
+    Some(openai_resolution_for_catalog_identity(identity))
+}
+
+fn openai_resolution_for_catalog_identity(identity: CatalogCredential) -> OpenAIAuthResolution {
+    OpenAIAuthResolution {
+        auth_type: match identity.kind {
+            CatalogAuthKind::ApiKey => OpenAIAuthType::ApiKey,
+            CatalogAuthKind::OAuth => OpenAIAuthType::ChatGptOAuth,
+        },
+        credential: Some(identity.credential().to_string()),
+        account_id: identity.account_id,
+    }
+}
+
+fn curated_model_metadata(provider: ProviderId) -> Vec<ModelMetadata> {
+    let Some(config) = get_provider(provider) else {
+        return Vec::new();
+    };
+
+    config
+        .models
+        .iter()
+        .map(|model_info| {
+            let api_format = detect_api_format(provider, &model_info.id);
+            let inferred = resolve_model_metadata(provider, &model_info.id, api_format);
+            let mut model = ModelMetadata::new(&model_info.id, &model_info.display_name, provider)
+                .with_context(model_info.context_window, model_info.max_output);
+            if let Some(reasoning) = model_info.reasoning {
+                model = model.with_thinking(reasoning);
+            }
+            model.supported_reasoning_levels = model_info.supported_reasoning_levels.clone();
+            model.default_reasoning_level = model_info.default_reasoning_level;
+            model.reasoning_is_mandatory = model_info.reasoning_is_mandatory;
+            model.reasoning_control = model_info.reasoning_control;
+            model.fast_mode = model_info.fast_mode;
+            model.supports_tools = config.supports_tools;
+            model.supports_vision = inferred.supports_vision;
+            model.api_format = inferred.api_format;
+            model
+        })
+        .collect()
+}
+
+async fn install_curated_catalog(
+    registry: &SharedModelRegistry,
+    db_path: &Path,
+    provider: ProviderId,
+) {
+    registry
+        .set_models(provider, curated_model_metadata(provider))
+        .await;
+    if let Ok(db) = Database::new(db_path) {
+        let preferences = Preferences::new(db);
+        for custom in preferences.get_custom_models(provider) {
+            registry.upsert_model(custom).await;
+        }
+    }
+}
+
+/// Initialize static fallbacks and restore durable last-known-good snapshots.
+/// Network discovery is intentionally excluded so router startup never waits on
+/// a provider. `spawn_model_catalog_refresh` performs an immediate forced sweep.
+pub async fn initialize_models(registry: &SharedModelRegistry, db_path: &Path) {
     for provider in builtin_providers() {
-        let models: Vec<ModelMetadata> = provider
-            .models
-            .iter()
-            .map(|m| {
-                let api_format = detect_api_format(provider.id, &m.id);
-                let mut model = ModelMetadata::new(&m.id, &m.display_name, provider.id)
-                    .with_context(m.context_window, m.max_output);
-                let inferred = resolve_model_metadata(provider.id, &m.id, api_format);
-
-                if let Some(reasoning) = m.reasoning {
-                    model = model.with_thinking(reasoning);
-                }
-
-                model.supports_tools = provider.supports_tools;
-                model.supports_vision = inferred.supports_vision;
-                model.api_format = inferred.api_format;
-                model
-            })
-            .collect();
-
-        registry.set_models(provider.id, models).await;
+        registry
+            .set_models(provider.id, curated_model_metadata(provider.id))
+            .await;
     }
 
-    for provider in krusty_core::ai::catalog::dynamic_model_providers() {
-        let Some(credential) =
-            krusty_core::ai::catalog::credential_for_dynamic_models(provider, credentials)
-        else {
-            tracing::debug!(
-                "Skipping {:?} dynamic model refresh: no catalog API key configured",
-                provider
-            );
-            continue;
-        };
-
-        match krusty_core::ai::catalog::fetch_dynamic_models(provider, &credential).await {
-            Ok(models) => {
-                tracing::info!("Fetched {} {:?} models", models.len(), provider);
+    if let Ok(db) = Database::new(db_path) {
+        let preferences = Preferences::new(db);
+        for provider in krusty_core::ai::catalog::dynamic_model_providers() {
+            if let Some(models) = preferences.get_cached_models(provider) {
                 registry.set_models(provider, models).await;
             }
-            Err(e) => tracing::warn!("Failed to fetch {:?} models: {}", provider, e),
+            for custom in preferences.get_custom_models(provider) {
+                registry.upsert_model(custom).await;
+            }
         }
+    }
+}
+
+/// Invalidate entitlement-scoped state after any credential mutation.
+///
+/// Generation changes happen before local reset so an older in-flight fetch is
+/// guaranteed to discard its result. The commit lock closes the small race
+/// between a fetch's final generation check and its registry/cache writes.
+pub(crate) async fn invalidate_provider_model_catalog(
+    registry: &SharedModelRegistry,
+    db_path: &Path,
+    provider: ProviderId,
+) -> Result<()> {
+    let slot = catalog_refresh_slot(provider);
+    slot.auth_generation.fetch_add(1, Ordering::AcqRel);
+    let _commit_guard = slot.commit_lock.lock().await;
+
+    let clear_result = Database::new(db_path)
+        .map(Preferences::new)
+        .and_then(|preferences| preferences.clear_model_cache(provider));
+    install_curated_catalog(registry, db_path, provider).await;
+    clear_result
+}
+
+/// Canonical provider refresh. Every successful result is persisted before it
+/// becomes visible, and custom model overlays are always restored afterward.
+pub(crate) async fn refresh_provider_model_catalog(
+    registry: &SharedModelRegistry,
+    credentials: &Arc<RwLock<CredentialStore>>,
+    db_path: &Path,
+    provider: ProviderId,
+    stale_only: bool,
+) -> Result<CatalogRefreshOutcome> {
+    let slot = catalog_refresh_slot(provider);
+    let _fetch_guard = slot.fetch_lock.lock().await;
+
+    if stale_only {
+        let fresh = Database::new(db_path)
+            .ok()
+            .map(Preferences::new)
+            .is_some_and(|preferences| !preferences.is_model_cache_stale(provider));
+        if fresh {
+            return Ok(CatalogRefreshOutcome::SkippedFresh);
+        }
+    }
+
+    let generation = slot.auth_generation.load(Ordering::Acquire);
+    let credential_snapshot = credentials.read().await.clone();
+    if krusty_core::ai::catalog::credentials_for_dynamic_models(provider, &credential_snapshot)
+        .is_empty()
+    {
+        // Cached catalogs are entitlement-scoped. Credentials can disappear
+        // outside the HTTP mutation routes (for example between restarts), so
+        // a forced startup sweep must retire the previous account's snapshot.
+        let _commit_guard = slot.commit_lock.lock().await;
+        if slot.auth_generation.load(Ordering::Acquire) != generation {
+            return Ok(CatalogRefreshOutcome::Superseded);
+        }
+        let clear_result = Database::new(db_path)
+            .map(Preferences::new)
+            .and_then(|preferences| preferences.clear_model_cache(provider));
+        install_curated_catalog(registry, db_path, provider).await;
+        clear_result?;
+        return Ok(CatalogRefreshOutcome::SkippedNoCredentials);
+    }
+
+    let models =
+        krusty_core::ai::catalog::fetch_dynamic_models_for_store(provider, &credential_snapshot)
+            .await?;
+
+    let _commit_guard = slot.commit_lock.lock().await;
+    if slot.auth_generation.load(Ordering::Acquire) != generation {
+        return Ok(CatalogRefreshOutcome::Superseded);
+    }
+
+    let preferences = Preferences::new(Database::new(db_path)?);
+    preferences.cache_models(provider, &models)?;
+    let custom_models = preferences.get_custom_models(provider);
+    registry.set_models(provider, models.clone()).await;
+    for custom in custom_models {
+        registry.upsert_model(custom).await;
+    }
+
+    Ok(CatalogRefreshOutcome::Refreshed(models.len()))
+}
+
+pub(crate) fn spawn_provider_model_catalog_refresh(
+    registry: SharedModelRegistry,
+    credentials: Arc<RwLock<CredentialStore>>,
+    db_path: Arc<PathBuf>,
+    provider: ProviderId,
+    stale_only: bool,
+) {
+    tokio::spawn(async move {
+        match refresh_provider_model_catalog(
+            &registry,
+            &credentials,
+            db_path.as_path(),
+            provider,
+            stale_only,
+        )
+        .await
+        {
+            Ok(CatalogRefreshOutcome::Refreshed(count)) => {
+                tracing::info!(?provider, count, "Refreshed model catalog");
+            }
+            Ok(CatalogRefreshOutcome::Superseded) => {
+                tracing::debug!(?provider, "Discarded superseded model catalog refresh");
+            }
+            Ok(CatalogRefreshOutcome::SkippedFresh)
+            | Ok(CatalogRefreshOutcome::SkippedNoCredentials) => {}
+            Err(error) => tracing::warn!(?provider, %error, "Failed to refresh model catalog"),
+        }
+    });
+}
+
+async fn refresh_model_catalogs(
+    registry: &SharedModelRegistry,
+    credentials: &Arc<RwLock<CredentialStore>>,
+    db_path: &Path,
+    stale_only: bool,
+) {
+    let mut refreshes = tokio::task::JoinSet::new();
+    for provider in krusty_core::ai::catalog::dynamic_model_providers() {
+        let registry = registry.clone();
+        let credentials = credentials.clone();
+        let db_path = db_path.to_path_buf();
+        refreshes.spawn(async move {
+            (
+                provider,
+                refresh_provider_model_catalog(
+                    &registry,
+                    &credentials,
+                    &db_path,
+                    provider,
+                    stale_only,
+                )
+                .await,
+            )
+        });
+    }
+
+    while let Some(result) = refreshes.join_next().await {
+        match result {
+            Ok((provider, Ok(CatalogRefreshOutcome::Refreshed(count)))) => {
+                tracing::info!(?provider, count, "Refreshed stale model catalog");
+            }
+            Ok((provider, Ok(CatalogRefreshOutcome::Superseded))) => {
+                tracing::debug!(?provider, "Discarded superseded model catalog refresh");
+            }
+            Ok((_, Ok(CatalogRefreshOutcome::SkippedFresh)))
+            | Ok((_, Ok(CatalogRefreshOutcome::SkippedNoCredentials))) => {}
+            Ok((provider, Err(error))) => {
+                tracing::warn!(?provider, %error, "Failed to refresh stale model catalog");
+            }
+            Err(error) => tracing::warn!(%error, "Model catalog refresh task failed to join"),
+        }
+    }
+}
+
+/// Keep server-owned catalogs current without delaying request startup. The
+/// first sweep always revalidates account-scoped snapshots so credentials that
+/// changed outside server routes cannot reuse another account's fresh cache.
+/// Later sweeps only issue network requests after the provider TTL expires.
+pub fn spawn_model_catalog_refresh(
+    registry: SharedModelRegistry,
+    credentials: Arc<RwLock<CredentialStore>>,
+    db_path: Arc<PathBuf>,
+) {
+    tokio::spawn(async move {
+        refresh_model_catalogs(&registry, &credentials, db_path.as_path(), false).await;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
+        // Consume Tokio's immediate first tick: the forced startup sweep above
+        // already performed the initial network revalidation.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            refresh_model_catalogs(&registry, &credentials, db_path.as_path(), true).await;
+        }
+    });
+}
+
+#[cfg(test)]
+mod catalog_refresh_tests {
+    use super::{openai_resolution_for_catalog_identity, CatalogCredential, OpenAIAuthType};
+
+    #[test]
+    fn catalog_identity_selects_matching_openai_transport() {
+        let api = openai_resolution_for_catalog_identity(CatalogCredential::api_key(
+            "sk-api".to_string(),
+        ));
+        assert_eq!(api.auth_type, OpenAIAuthType::ApiKey);
+        assert_eq!(api.credential.as_deref(), Some("sk-api"));
+
+        let oauth = openai_resolution_for_catalog_identity(CatalogCredential::oauth(
+            "oauth-token".to_string(),
+            Some("account-1".to_string()),
+        ));
+        assert_eq!(oauth.auth_type, OpenAIAuthType::ChatGptOAuth);
+        assert_eq!(oauth.account_id.as_deref(), Some("account-1"));
     }
 }

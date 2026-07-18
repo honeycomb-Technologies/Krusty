@@ -19,7 +19,7 @@ use tokio::task::AbortHandle;
 
 use krusty_core::agent::LoopInput;
 
-use crate::ai_bootstrap::initialize_models;
+use crate::ai_bootstrap::{initialize_models, spawn_model_catalog_refresh};
 use crate::mako_runtime::runner::{run_mako_session_inner, MakoExecutionEventSink};
 use crate::types::AgenticEvent;
 use crate::{build_app_state, AppState, MakoRuntimeMode, ServerConfig};
@@ -420,7 +420,12 @@ impl MakoExecutionHost {
             .await
             .is_none();
         if changed || claimed_model_unknown {
-            initialize_models(&self.state.model_registry, &loaded).await;
+            initialize_models(&self.state.model_registry, self.state.db_path.as_path()).await;
+            spawn_model_catalog_refresh(
+                self.state.model_registry.clone(),
+                self.state.credential_store.clone(),
+                self.state.db_path.clone(),
+            );
             tracing::info!(
                 credentials_changed = changed,
                 claimed_model_was_unknown = claimed_model_unknown,

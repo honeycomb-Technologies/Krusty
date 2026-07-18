@@ -100,11 +100,12 @@ The key insight is that `krusty-core` is the shared brain, and everything else i
 
 Krusty doesn't tie you to one AI provider. It supports:
 
-- **Anthropic** — Claude models (Opus, Sonnet, Haiku) via direct API or OAuth
-- **OpenAI** — GPT models via API key or device flow OAuth
-- **OpenRouter** — 100+ models from various providers through one API
-- **MiniMax** — MiniMax M2.5
-- **Z.ai** — GLM-5
+- **Anthropic** — Live Claude catalog via direct API or OAuth, with curated Opus/Fable/Sonnet/Haiku fallbacks
+- **OpenAI** — GPT and Codex catalogs via API key or account-scoped ChatGPT OAuth
+- **OpenRouter** — Live tool-capable catalog spanning multiple upstream providers
+- **MiniMax** — Live catalog with curated MiniMax M3 and M2.7 capability overlays
+- **Z.ai** — Static GLM 5.2, GLM 5 Turbo, and GLM 4.7 catalog
+- **Grok** — Live Grok Build catalog through the X subscription CLI proxy
 
 You can switch providers and models mid-conversation. The provider layer handles the format differences (Anthropic's message format vs OpenAI's vs Google's) so the rest of the system doesn't have to care.
 

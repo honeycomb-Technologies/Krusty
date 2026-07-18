@@ -11,6 +11,24 @@ use crate::plugins::{PluginCatalogEntry, PluginCatalogFile};
 const BUILTIN_CATALOG: &[u8] = include_bytes!("../../../../../docs/extensions/catalog.json");
 
 impl PluginManager {
+    pub(super) fn validate_catalog_source_ref(&self, source_ref: &str) -> Result<()> {
+        if let Ok(url) = url::Url::parse(source_ref) {
+            return match url.scheme() {
+                "https" | "file" => Ok(()),
+                "http" => bail!(
+                    "remote plugin catalogs must use HTTPS; use a local file path for development"
+                ),
+                scheme => bail!("unsupported catalog source scheme '{}'", scheme),
+            };
+        }
+
+        let path = PathBuf::from(source_ref);
+        if path.as_os_str().is_empty() {
+            bail!("plugin catalog source cannot be empty");
+        }
+        Ok(())
+    }
+
     /// Load plugin catalog entries from configured sources.
     ///
     /// Catalog files are static TOML/JSON documents with shape:
@@ -59,7 +77,12 @@ impl PluginManager {
                     source.name
                 );
             }
-            entries.extend(catalog.plugins);
+            // `official` is a property of the catalog trust root, not a claim
+            // third-party catalog authors can make about themselves.
+            entries.extend(catalog.plugins.into_iter().map(|mut entry| {
+                entry.official = false;
+                entry
+            }));
         }
 
         entries.sort_by_key(|entry| entry.id.clone());

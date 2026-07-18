@@ -8,8 +8,12 @@ mod adapters;
 mod executor;
 mod manager;
 mod model;
+mod package;
 
 pub use self::adapters::{UserPostToolHook, UserPreToolHook};
 pub use self::executor::UserHookExecutor;
 pub use self::manager::UserHookManager;
-pub use self::model::{UserHook, UserHookResult, UserHookType};
+pub use self::model::{
+    PackageHookConfig, PackageHookLoadReport, UserHook, UserHookResult, UserHookSource,
+    UserHookType,
+};

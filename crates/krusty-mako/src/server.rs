@@ -405,7 +405,7 @@ async fn serve_connection(
         .fetch_add(1, Ordering::Relaxed);
 
     let request_id = request.request_id.clone();
-    let (reply, shutdown_reason) = dispatch_request(request, peer, &services).await;
+    let (reply, shutdown_reason) = dispatch_request(*request, peer, &services).await;
     match reply {
         Ok(HandlerReply::Response(payload)) => {
             let response = ResponseEnvelope::success(request_id, payload);

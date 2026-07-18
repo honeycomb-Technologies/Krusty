@@ -58,10 +58,25 @@ pub struct OAuthStatusUpdate {
     pub token: Option<krusty_core::auth::OAuthTokenData>,
 }
 
-/// Result from fetching models for a dynamic provider.
-pub struct DynamicModelUpdate {
-    pub provider: ProviderId,
-    pub result: Result<Vec<ModelMetadata>, String>,
+/// Background model-catalog state change.
+pub enum DynamicModelUpdate {
+    /// The old account-scoped catalog was replaced by curated fallbacks.
+    CatalogReset {
+        provider: ProviderId,
+        generation: u64,
+    },
+    /// A live catalog refresh completed for the indicated credential generation.
+    RefreshFinished {
+        provider: ProviderId,
+        generation: u64,
+        result: Result<Vec<ModelMetadata>, String>,
+    },
+}
+
+/// Completion from an executable agent-extension slash command.
+pub struct ExtensionCommandUpdate {
+    pub command: String,
+    pub result: Result<serde_json::Value, String>,
 }
 
 /// Device code information for OAuth device flow
@@ -107,11 +122,57 @@ pub struct AsyncChannels {
     pub loop_input: Option<mpsc::UnboundedSender<LoopInput>>,
     /// Delegated agent progress emitted by the core orchestrator.
     pub delegated_progress: Option<mpsc::UnboundedReceiver<DelegatedProgressEvent>>,
+    /// Agent-extension slash command completions.
+    pub extension_commands: Option<mpsc::UnboundedReceiver<ExtensionCommandUpdate>>,
+    /// Shared sender so concurrent extension commands cannot replace and lose
+    /// an earlier command's completion receiver.
+    pub extension_commands_tx: Option<mpsc::UnboundedSender<ExtensionCommandUpdate>>,
 }
 
 impl AsyncChannels {
     /// Create new empty channels container
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn extension_command_sender(&mut self) -> mpsc::UnboundedSender<ExtensionCommandUpdate> {
+        if let Some(sender) = &self.extension_commands_tx {
+            return sender.clone();
+        }
+        let (sender, receiver) = mpsc::unbounded_channel();
+        self.extension_commands = Some(receiver);
+        self.extension_commands_tx = Some(sender.clone());
+        sender
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AsyncChannels, ExtensionCommandUpdate};
+
+    #[test]
+    fn extension_commands_share_one_completion_queue() {
+        let mut channels = AsyncChannels::new();
+        let first = channels.extension_command_sender();
+        let second = channels.extension_command_sender();
+        first
+            .send(ExtensionCommandUpdate {
+                command: "/one".to_string(),
+                result: Ok(serde_json::Value::Null),
+            })
+            .expect("first completion");
+        second
+            .send(ExtensionCommandUpdate {
+                command: "/two".to_string(),
+                result: Ok(serde_json::Value::Null),
+            })
+            .expect("second completion");
+
+        let receiver = channels
+            .extension_commands
+            .as_mut()
+            .expect("shared receiver");
+        assert_eq!(receiver.try_recv().expect("first").command, "/one");
+        assert_eq!(receiver.try_recv().expect("second").command, "/two");
     }
 }

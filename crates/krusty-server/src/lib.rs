@@ -3,7 +3,7 @@
 //! Self-hosted API server for chat, tools, sessions, and local workspace access.
 //! This is a library crate — the server is started via `start_server()`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -29,12 +29,12 @@ use tower_http::{
 };
 
 use krusty_core::agent::{
-    AgentCancellation, LoggingHook, PlanModeHook, SafetyHook, UserHookManager, UserPostToolHook,
-    UserPreToolHook,
+    AgentCancellation, LoggingHook, PackageHookConfig, PlanModeHook, SafetyHook, UserHookManager,
+    UserPostToolHook, UserPreToolHook,
 };
 use krusty_core::ai::client::AiClient;
 use krusty_core::ai::models::{create_model_registry, SharedModelRegistry};
-use krusty_core::mcp::McpManager;
+use krusty_core::mcp::{McpConnectionAuthority, McpManager, McpPackageConfig};
 use krusty_core::paths;
 use krusty_core::process::ProcessRegistry;
 use krusty_core::skills::SkillsManager;
@@ -44,7 +44,9 @@ use krusty_core::tools::{
     register_agent_tool, register_all_tools, register_mako_tools, ToolRegistry,
 };
 
-use self::ai_bootstrap::{create_ai_client, create_ai_client_for_model, initialize_models};
+use self::ai_bootstrap::{
+    create_ai_client, create_ai_client_for_model, initialize_models, spawn_model_catalog_refresh,
+};
 
 type SessionGuard = Arc<Mutex<()>>;
 const SESSION_LOCK_MAX_ENTRIES: usize = 1000;
@@ -275,6 +277,7 @@ async fn initialize_mcp_manager(
     mode: MakoRuntimeMode,
     working_dir: &std::path::Path,
     tool_registry: &ToolRegistry,
+    package_configs: Vec<McpPackageConfig>,
 ) -> Arc<McpManager> {
     let manager = Arc::new(McpManager::new(working_dir.to_path_buf()));
     if matches!(mode, MakoRuntimeMode::ExecutionHost) {
@@ -291,6 +294,7 @@ async fn initialize_mcp_manager(
         return manager;
     }
 
+    manager.set_package_configs(package_configs).await;
     if let Err(error) = manager.load_config().await {
         tracing::warn!(error = %error, "Failed to load MCP config");
     } else if let Err(error) = manager.connect_all().await {
@@ -311,7 +315,6 @@ fn initialize_remote_access(
         }
     }
 }
-
 /// Build the shared agent/tool state used by either the HTTP process or the
 /// standalone Mako executor. Only the HTTP process connects to the daemon
 /// control plane; the executor deliberately receives an embedded manager so
@@ -330,7 +333,7 @@ pub(crate) async fn build_app_state(
     let credential_store_inner = CredentialStore::load().unwrap_or_default();
     let credential_store = Arc::new(RwLock::new(credential_store_inner.clone()));
     let model_registry = create_model_registry();
-    initialize_models(&model_registry, &credential_store_inner).await;
+    initialize_models(&model_registry, &db_path).await;
     let ai_client = create_ai_client(&credential_store_inner, &model_registry, &db_path)
         .await
         .map(Arc::new);
@@ -338,11 +341,89 @@ pub(crate) async fn build_app_state(
     let process_registry = Arc::new(ProcessRegistry::new());
     let cancellation = AgentCancellation::new();
 
+    let plugin_manager = routes::plugins::plugin_manager();
+    let installed_plugins = match plugin_manager.ensure_layout().await {
+        Ok(()) => match plugin_manager.list_installed_plugins().await {
+            Ok(plugins) => plugins
+                .into_iter()
+                .filter(|plugin| plugin.enabled)
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                tracing::warn!(error = %error, "Failed to resolve installed plugin contributions");
+                Vec::new()
+            }
+        },
+        Err(error) => {
+            tracing::warn!(error = %error, "Failed to initialize plugin layout");
+            Vec::new()
+        }
+    };
+    let mut executable_plugin_ids = HashSet::new();
+    let mut mcp_plugin_authorities = HashMap::new();
+    for plugin in &installed_plugins {
+        if !plugin.agent_extension_paths.is_empty() || !plugin.hook_paths.is_empty() {
+            match plugin_manager
+                .ensure_installed_plugin_permission(
+                    plugin,
+                    krusty_core::plugins::PluginPermission::Process,
+                )
+                .await
+            {
+                Ok(()) => {
+                    executable_plugin_ids.insert(plugin.id.clone());
+                }
+                Err(error) => tracing::warn!(
+                    plugin_id = %plugin.id,
+                    error = %error,
+                    "Executable plugin contribution remains disabled until process permission is granted"
+                ),
+            }
+        }
+        if plugin.mcp_servers_path.is_some() {
+            match plugin_manager.permission_status_for_installed(plugin).await {
+                Ok(status) if status.grant_is_current => {
+                    let authority =
+                        McpConnectionAuthority::new(status.granted.process, status.granted.network);
+                    if !authority.is_empty() {
+                        mcp_plugin_authorities.insert(plugin.id.clone(), authority);
+                    }
+                }
+                Ok(_) => tracing::warn!(
+                    plugin_id = %plugin.id,
+                    "Plugin MCP contribution remains disabled until process or network authority is granted"
+                ),
+                Err(error) => {
+                    tracing::warn!(plugin_id = %plugin.id, error = %error, "Failed to resolve plugin MCP permissions")
+                }
+            }
+        }
+    }
+
     // Load user hooks from database
     let mut hook_manager_inner = UserHookManager::new();
     if let Ok(db) = Database::new(&db_path) {
         if let Err(e) = hook_manager_inner.load(&db) {
             tracing::warn!("Failed to load hooks: {}", e);
+        }
+    }
+    let package_hook_configs = installed_plugins
+        .iter()
+        .filter(|plugin| executable_plugin_ids.contains(&plugin.id))
+        .flat_map(|plugin| {
+            plugin.hook_paths.iter().map(|path| {
+                PackageHookConfig::new(plugin.id.clone(), path.clone(), plugin.install_path.clone())
+            })
+        })
+        .collect();
+    match hook_manager_inner.replace_package_hooks(package_hook_configs) {
+        Ok(report) if report.hook_count > 0 => tracing::info!(
+            config_count = report.config_count,
+            hook_count = report.hook_count,
+            "Loaded declarative package hooks"
+        ),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(error = %error, "Failed to initialize declarative package hooks")
         }
     }
     let hook_manager = Arc::new(RwLock::new(hook_manager_inner));
@@ -362,13 +443,59 @@ pub(crate) async fn build_app_state(
     register_all_tools(&tool_registry).await;
     register_mako_tools(&tool_registry).await;
 
+    let agent_extensions = krusty_core::extensions::AgentExtensionManager::new(&config.working_dir);
+    for plugin in &installed_plugins {
+        if !executable_plugin_ids.contains(&plugin.id) {
+            continue;
+        }
+        for path in &plugin.agent_extension_paths {
+            agent_extensions
+                .register_root(krusty_core::extensions::AgentExtensionRoot::new(
+                    path,
+                    krusty_core::extensions::AgentExtensionScope::Package,
+                ))
+                .await;
+        }
+    }
+    tool_registry.set_agent_extension_manager(agent_extensions.clone());
+    if let Err(error) = agent_extensions.refresh_and_register(&tool_registry).await {
+        tracing::warn!(error = %error, "Failed to initialize agent extensions");
+    } else {
+        let loaded = agent_extensions.loaded_ids().await;
+        if !loaded.is_empty() {
+            tracing::info!(extensions = ?loaded, "Loaded executable agent extensions");
+        }
+        for diagnostic in agent_extensions.diagnostics().await {
+            tracing::warn!(
+                path = %diagnostic.path.display(),
+                extension_id = ?diagnostic.extension_id,
+                message = %diagnostic.message,
+                "Agent extension diagnostic"
+            );
+        }
+    }
+
     // Register unified agent tool (explore, plan, verify, build) if AI client is available
     if let Some(ref client) = ai_client {
         register_agent_tool(&tool_registry, client.clone(), cancellation.clone()).await;
         tracing::info!("Registered unified agent sub-agent tool");
     }
 
-    let mcp_manager = initialize_mcp_manager(mako_mode, &config.working_dir, &tool_registry).await;
+    let package_configs = installed_plugins
+        .iter()
+        .filter_map(|plugin| {
+            let path = plugin.mcp_servers_path.clone()?;
+            let authority = mcp_plugin_authorities.get(&plugin.id).copied()?;
+            Some(McpPackageConfig::new(path, authority))
+        })
+        .collect();
+    let mcp_manager = initialize_mcp_manager(
+        mako_mode,
+        &config.working_dir,
+        &tool_registry,
+        package_configs,
+    )
+    .await;
     let tool_count = tool_registry.get_ai_tools_all().await.len();
     tracing::info!("Tool registry initialized with {} tools", tool_count);
 
@@ -395,6 +522,14 @@ pub(crate) async fn build_app_state(
         MakoRuntimeMode::ExecutionHost => mako_runtime::MakoRuntimeManager::execution_host(),
     };
 
+    let mut skills = SkillsManager::with_defaults(&config.working_dir);
+    for plugin in &installed_plugins {
+        for path in &plugin.skill_paths {
+            skills.register_package_root(&plugin.id, path.clone());
+        }
+    }
+    skills.refresh();
+
     let state = AppState {
         server_port: config.port,
         db_path: Arc::new(db_path),
@@ -406,9 +541,7 @@ pub(crate) async fn build_app_state(
         credential_store,
         mcp_manager,
         hook_manager,
-        skills_manager: Arc::new(RwLock::new(SkillsManager::with_defaults(
-            &config.working_dir,
-        ))),
+        skills_manager: Arc::new(RwLock::new(skills)),
         cancellation,
         session_locks: Arc::new(RwLock::new(HashMap::new())),
         session_inputs: Arc::new(RwLock::new(HashMap::new())),
@@ -424,6 +557,11 @@ pub(crate) async fn build_app_state(
         mako_runtime,
     };
 
+    spawn_model_catalog_refresh(
+        state.model_registry.clone(),
+        state.credential_store.clone(),
+        state.db_path.clone(),
+    );
     if matches!(mako_mode, MakoRuntimeMode::DaemonProxy) {
         state
             .mako_runtime
@@ -652,8 +790,13 @@ mod tests {
         .expect("daemon-root MCP config should be written");
         let registry = ToolRegistry::new();
 
-        let manager =
-            initialize_mcp_manager(MakoRuntimeMode::ExecutionHost, temp.path(), &registry).await;
+        let manager = initialize_mcp_manager(
+            MakoRuntimeMode::ExecutionHost,
+            temp.path(),
+            &registry,
+            Vec::new(),
+        )
+        .await;
 
         assert!(manager.list_servers().await.is_empty());
         assert!(registry

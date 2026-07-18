@@ -673,6 +673,136 @@ async fn session_state_exposes_recovery_live_partial_and_trace_sequence() {
     assert_eq!(response.last_event_sequence, Some(42));
 }
 
+fn seed_trace_snapshot(state: &AppState, session_id: &str) -> Vec<RuntimeTraceEvent> {
+    let db = Database::new(&state.db_path).expect("database should open");
+    let store = RuntimeTraceStore::new(&db);
+    let events = vec![
+        LoopEvent::ThinkingDelta {
+            thinking: "inspect".to_string(),
+        },
+        LoopEvent::TextDelta {
+            delta: "answer".to_string(),
+        },
+        LoopEvent::TurnComplete {
+            turn: 1,
+            has_more: false,
+        },
+        LoopEvent::Finished {
+            session_id: session_id.to_string(),
+            stop_reason: LoopStopReason::Completed,
+        },
+        LoopEvent::TitleGenerated {
+            title: "Snapshot complete".to_string(),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, event)| {
+        RuntimeTraceEvent::from_loop_event(
+            "snapshot-run",
+            i64::try_from(index + 1).expect("small sequence"),
+            1,
+            &event,
+        )
+    })
+    .collect::<Vec<_>>();
+
+    for event in &events {
+        store
+            .append_event(session_id, event)
+            .expect("trace event should persist");
+    }
+    events
+}
+
+#[tokio::test]
+async fn session_trace_latest_limit_uses_one_coherent_snapshot() {
+    let (state, temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user(
+            "Trace Snapshot",
+            None,
+            Some(state.working_dir.to_string_lossy().as_ref()),
+            Some("alice"),
+        )
+        .expect("session should create");
+    seed_trace_snapshot(&state, &session_id);
+
+    let Json(response) = get_session_trace(
+        State(state),
+        Some(current_user("alice", &temp_dir)),
+        Path(session_id),
+        Query(state::GetSessionTraceQuery {
+            limit: Some(2),
+            after_sequence: None,
+        }),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("trace endpoint should succeed"));
+
+    assert_eq!(response.summary.total_events, 5);
+    assert_eq!(
+        response.summary.last_stop_reason,
+        Some(LoopStopReason::Completed)
+    );
+    assert_eq!(response.latest_sequence, Some(5));
+    assert_eq!(
+        response
+            .events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![4, 5]
+    );
+}
+
+#[tokio::test]
+async fn session_trace_after_sequence_applies_limit_without_changing_snapshot_metadata() {
+    let (state, temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user(
+            "Incremental Trace Snapshot",
+            None,
+            Some(state.working_dir.to_string_lossy().as_ref()),
+            Some("alice"),
+        )
+        .expect("session should create");
+    seed_trace_snapshot(&state, &session_id);
+
+    let Json(response) = get_session_trace(
+        State(state),
+        Some(current_user("alice", &temp_dir)),
+        Path(session_id),
+        Query(state::GetSessionTraceQuery {
+            limit: Some(2),
+            after_sequence: Some(2),
+        }),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("trace endpoint should succeed"));
+
+    assert_eq!(response.summary.total_events, 5);
+    assert_eq!(
+        response.summary.last_stop_reason,
+        Some(LoopStopReason::Completed)
+    );
+    assert_eq!(response.latest_sequence, Some(5));
+    assert_eq!(
+        response
+            .events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![3, 4]
+    );
+}
+
 #[tokio::test]
 async fn get_session_state_exposes_awaiting_input_details_after_reload() {
     let (state, _temp_dir) = create_test_state();

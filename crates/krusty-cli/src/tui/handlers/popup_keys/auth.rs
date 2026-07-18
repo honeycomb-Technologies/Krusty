@@ -97,10 +97,6 @@ impl App {
                             .messages
                             .push(("system".to_string(), format!("{} API key saved!", provider)));
                         self.ui.popups.auth.set_api_key_complete();
-
-                        if self.should_refresh_dynamic_models(provider) {
-                            self.start_dynamic_model_fetch(provider);
-                        }
                     }
                 }
             }
@@ -203,11 +199,8 @@ impl App {
             {
                 Ok(token) => {
                     // Save token to OAuth store
-                    if let Ok(mut store) = OAuthTokenStore::load() {
-                        store.set(provider, token.clone());
-                        if let Err(e) = store.save() {
-                            tracing::warn!("Failed to save Anthropic OAuth token: {}", e);
-                        }
+                    if let Err(e) = OAuthTokenStore::set_persisted(provider, token.clone()) {
+                        tracing::warn!("Failed to save Anthropic OAuth token: {}", e);
                     }
 
                     let _ = status_tx.send(OAuthStatusUpdate {

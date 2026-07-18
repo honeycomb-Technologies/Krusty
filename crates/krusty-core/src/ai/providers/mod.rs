@@ -10,8 +10,8 @@ mod registry;
 
 pub use self::capabilities::ProviderCapabilities;
 pub use self::config::{
-    AuthHeader, ModelInfo, ProviderConfig, ProviderId, ReasoningFormat, CHATGPT_RESPONSES_API,
-    OPENAI_CHAT_API, OPENAI_RESPONSES_API,
+    AuthHeader, FastMode, ModelInfo, ProviderConfig, ProviderId, ReasoningControl, ReasoningEffort,
+    ReasoningFormat, CHATGPT_RESPONSES_API, OPENAI_CHAT_API, OPENAI_RESPONSES_API,
 };
 pub use self::mapping::{
     get_model_family, translate_model_id, translate_model_or_default, ModelFamily,

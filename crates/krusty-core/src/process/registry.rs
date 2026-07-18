@@ -38,6 +38,17 @@ fn append_output_tail(tail: &mut ProcessOutputBuffer, bytes: &[u8]) {
 pub struct ProcessRegistry {
     /// Outer key: user_id, Inner key: process_id
     processes: Arc<RwLock<HashMap<String, HashMap<ProcessId, ProcessEntry>>>>,
+    /// Per-owner launch gates make check-and-spawn decisions atomic across all
+    /// clones without serializing launches belonging to unrelated owners.
+    launch_gates: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+}
+
+impl std::fmt::Debug for ProcessRegistry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProcessRegistry")
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for ProcessRegistry {
@@ -50,6 +61,7 @@ impl ProcessRegistry {
     pub fn new() -> Self {
         Self {
             processes: Arc::new(RwLock::new(HashMap::new())),
+            launch_gates: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -58,6 +70,15 @@ impl ProcessRegistry {
         user_id: &str,
     ) -> &'a mut HashMap<ProcessId, ProcessEntry> {
         map.entry(user_id.to_string()).or_default()
+    }
+
+    async fn launch_gate_for_user(&self, user_id: &str) -> Arc<Mutex<()>> {
+        let mut gates = self.launch_gates.lock().await;
+        Arc::clone(
+            gates
+                .entry(user_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
     }
 
     pub async fn spawn(
@@ -71,6 +92,99 @@ impl ProcessRegistry {
     }
 
     pub async fn spawn_for_user(
+        &self,
+        user_id: &str,
+        command: String,
+        working_dir: PathBuf,
+        description: Option<String>,
+    ) -> Result<ProcessId> {
+        let launch_gate = self.launch_gate_for_user(user_id).await;
+        let _launch_guard = launch_gate.lock().await;
+        self.spawn_for_user_with_launch_guard(user_id, command, working_dir, description)
+            .await
+    }
+
+    /// Atomically reuse an equivalent active process or launch a new one for
+    /// the default owner. The predicate runs only against that owner's tracked
+    /// processes while the same launch gate used by [`Self::spawn`] is held.
+    pub async fn spawn_or_reuse_matching<F>(
+        &self,
+        command: String,
+        working_dir: PathBuf,
+        description: Option<String>,
+        is_equivalent: F,
+    ) -> Result<(ProcessInfo, bool)>
+    where
+        F: Fn(&ProcessInfo) -> bool + Send,
+    {
+        self.spawn_or_reuse_matching_for_user(
+            DEFAULT_USER,
+            command,
+            working_dir,
+            description,
+            is_equivalent,
+        )
+        .await
+    }
+
+    /// Atomically reuse an equivalent active process or launch a new one for a
+    /// specific owner. The returned boolean is true when an existing process
+    /// was reused and false when this call spawned the returned process.
+    pub async fn spawn_or_reuse_matching_for_user<F>(
+        &self,
+        user_id: &str,
+        command: String,
+        working_dir: PathBuf,
+        description: Option<String>,
+        is_equivalent: F,
+    ) -> Result<(ProcessInfo, bool)>
+    where
+        F: Fn(&ProcessInfo) -> bool + Send,
+    {
+        let launch_gate = self.launch_gate_for_user(user_id).await;
+        let _launch_guard = launch_gate.lock().await;
+
+        let existing = self
+            .processes
+            .read()
+            .await
+            .get(user_id)
+            .and_then(|user_map| {
+                user_map
+                    .values()
+                    .find(|entry| is_equivalent(&entry.info))
+                    .map(|entry| entry.info.clone())
+            });
+        if let Some(process) = existing {
+            tracing::info!(
+                id = %process.id,
+                user_id = %user_id,
+                command = %command,
+                "Equivalent process launch reused"
+            );
+            return Ok((process, true));
+        }
+
+        let process_id = self
+            .spawn_for_user_with_launch_guard(user_id, command, working_dir, description)
+            .await?;
+        let process = self
+            .processes
+            .read()
+            .await
+            .get(user_id)
+            .and_then(|user_map| user_map.get(&process_id))
+            .map(|entry| entry.info.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "spawned process {process_id} was not registered for user {user_id}"
+                )
+            })?;
+        Ok((process, false))
+    }
+
+    /// Spawn after the caller has acquired this owner's launch gate.
+    async fn spawn_for_user_with_launch_guard(
         &self,
         user_id: &str,
         command: String,
@@ -330,12 +444,7 @@ impl ProcessRegistry {
     }
 
     pub async fn list(&self) -> Vec<ProcessInfo> {
-        self.processes
-            .read()
-            .await
-            .values()
-            .flat_map(|user_map| user_map.values().map(|e| e.info.clone()))
-            .collect()
+        self.list_for_user(DEFAULT_USER).await
     }
 
     pub async fn list_for_user(&self, user_id: &str) -> Vec<ProcessInfo> {
@@ -350,7 +459,8 @@ impl ProcessRegistry {
     pub fn try_running_count(&self) -> Option<usize> {
         self.processes.try_read().ok().map(|guard| {
             guard
-                .values()
+                .get(DEFAULT_USER)
+                .into_iter()
                 .flat_map(|user_map| user_map.values())
                 .filter(|e| e.info.is_running())
                 .count()
@@ -360,7 +470,8 @@ impl ProcessRegistry {
     pub fn try_oldest_running_elapsed(&self) -> Option<std::time::Duration> {
         self.processes.try_read().ok().and_then(|guard| {
             guard
-                .values()
+                .get(DEFAULT_USER)
+                .into_iter()
                 .flat_map(|user_map| user_map.values())
                 .filter(|e| e.info.is_running())
                 .map(|e| e.info.started_at.elapsed())
@@ -371,18 +482,15 @@ impl ProcessRegistry {
     pub fn try_list(&self) -> Option<Vec<ProcessInfo>> {
         self.processes.try_read().ok().map(|guard| {
             guard
-                .values()
+                .get(DEFAULT_USER)
+                .into_iter()
                 .flat_map(|user_map| user_map.values().map(|e| e.info.clone()))
                 .collect()
         })
     }
 
     pub async fn get(&self, id: &str) -> Option<ProcessInfo> {
-        self.processes
-            .read()
-            .await
-            .values()
-            .find_map(|user_map| user_map.get(id).map(|e| e.info.clone()))
+        self.get_for_user(DEFAULT_USER, id).await
     }
 
     pub async fn get_for_user(&self, user_id: &str, id: &str) -> Option<ProcessInfo> {
@@ -396,17 +504,7 @@ impl ProcessRegistry {
     /// Return the bounded combined stdout/stderr tail for a tracked process.
     /// The boolean indicates that older output was discarded.
     pub async fn output(&self, id: &str) -> Option<(String, bool)> {
-        let output = self
-            .processes
-            .read()
-            .await
-            .values()
-            .find_map(|user_map| user_map.get(id).map(|entry| Arc::clone(&entry.output)))?;
-        let output = output.lock().await;
-        Some((
-            String::from_utf8_lossy(&output.bytes).into_owned(),
-            output.truncated,
-        ))
+        self.output_for_user(DEFAULT_USER, id).await
     }
 
     /// User-scoped variant of [`Self::output`].
@@ -426,14 +524,7 @@ impl ProcessRegistry {
     }
 
     pub async fn update_status(&self, id: &str, status: ProcessStatus) {
-        let mut processes = self.processes.write().await;
-        for user_map in processes.values_mut() {
-            if let Some(entry) = user_map.get_mut(id) {
-                tracing::info!(id = %id, status = ?status, "Process status updated");
-                entry.info.status = status;
-                return;
-            }
-        }
+        self.update_status_for_user(DEFAULT_USER, id, status).await;
     }
 
     pub async fn update_status_for_user(&self, user_id: &str, id: &str, status: ProcessStatus) {
@@ -536,13 +627,7 @@ impl ProcessRegistry {
     }
 
     pub async fn unregister(&self, id: &str) {
-        let mut processes = self.processes.write().await;
-        for user_map in processes.values_mut() {
-            if let Some(entry) = user_map.remove(id) {
-                tracing::info!(id = %id, status = ?entry.info.status, "Process unregistered");
-                return;
-            }
-        }
+        self.unregister_for_user(DEFAULT_USER, id).await;
     }
 
     pub async fn unregister_for_user(&self, user_id: &str, id: &str) {
@@ -702,6 +787,66 @@ mod tests {
         assert!(output.contains("stderr line"));
         assert!(!truncated);
         assert_eq!(registry.output_for_user("bob", &id).await, None);
+    }
+
+    #[tokio::test]
+    async fn unscoped_operations_only_access_the_default_owner() {
+        let registry = ProcessRegistry::new();
+        let directory = TempDir::new().expect("temp dir");
+        let shared_id = "same-id-in-two-owner-maps".to_string();
+
+        registry
+            .register_external(
+                shared_id.clone(),
+                "default command".to_string(),
+                None,
+                None,
+                directory.path().to_path_buf(),
+            )
+            .await;
+        registry
+            .register_external_for_user(
+                "alice",
+                shared_id.clone(),
+                "alice command".to_string(),
+                None,
+                None,
+                directory.path().to_path_buf(),
+            )
+            .await;
+
+        let unscoped = registry.list().await;
+        assert_eq!(unscoped.len(), 1);
+        assert_eq!(unscoped[0].command, "default command");
+        assert_eq!(registry.try_list().expect("registry lock").len(), 1);
+        assert_eq!(registry.try_running_count(), Some(1));
+        assert_eq!(
+            registry
+                .get(&shared_id)
+                .await
+                .expect("default process")
+                .command,
+            "default command"
+        );
+
+        registry
+            .update_status(&shared_id, ProcessStatus::Suspended)
+            .await;
+        assert!(registry
+            .get(&shared_id)
+            .await
+            .expect("default process")
+            .is_suspended());
+        assert!(registry
+            .get_for_user("alice", &shared_id)
+            .await
+            .expect("alice process")
+            .is_running());
+
+        registry.unregister(&shared_id).await;
+        assert!(registry.get(&shared_id).await.is_none());
+        assert!(registry.output(&shared_id).await.is_none());
+        assert!(registry.get_for_user("alice", &shared_id).await.is_some());
     }
 
     #[cfg(unix)]

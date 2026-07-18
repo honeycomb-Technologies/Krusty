@@ -1,13 +1,13 @@
-//! Skills system for extending Claude's capabilities
+//! Agent Skills-compatible progressive-disclosure system.
 //!
 //! Skills are modular, filesystem-based resources that provide Claude with
 //! domain-specific expertise: workflows, context, and best practices.
 //!
 //! # Directory Structure
 //!
-//! Skills are stored in two locations:
-//! - Global: `~/.krusty/skills/` - Available across all sessions
-//! - Project: `.krusty/skills/` - Project-specific skills
+//! Native Krusty roots are `~/.krusty/skills/` and `.krusty/skills/`. The
+//! manager also discovers `.agents`, OpenCode, Claude, Codex, Pi, and registered
+//! package roots with deterministic precedence.
 //!
 //! Each skill is a directory containing a `SKILL.md` file with YAML frontmatter:
 //!
@@ -43,8 +43,11 @@ mod loader;
 mod manager;
 mod skill;
 
-pub use manager::SkillsManager;
-pub use skill::{Skill, SkillInfo, SkillSource};
+pub use manager::{SkillRoot, SkillsManager};
+pub use skill::{Skill, SkillInfo, SkillPermission, SkillSource};
 
 // Re-export loader functions for direct use
-pub use loader::{load_skill, load_skill_file, scaffold_skill};
+pub use loader::{
+    load_skill, load_skill_file, load_skills_from_dir, load_skills_from_root, scaffold_skill,
+    SkillDiagnostic, SkillDiagnosticSeverity, SkillLoadOptions, SkillLoadReport,
+};

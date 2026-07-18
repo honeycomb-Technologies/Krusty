@@ -87,10 +87,7 @@ pub async fn refresh_grok_oauth_token() -> Result<OAuthTokenData> {
     let token = ensure_grok_auth_token().await?;
     let oauth = grok_auth_token_to_oauth_data(&token);
 
-    let mut store = OAuthTokenStore::load().context("failed to load Krusty OAuth store")?;
-    store.set(ProviderId::Grok, oauth.clone());
-    store
-        .save()
+    OAuthTokenStore::set_persisted(ProviderId::Grok, oauth.clone())
         .context("failed to save mirrored Grok OAuth token")?;
 
     Ok(oauth)

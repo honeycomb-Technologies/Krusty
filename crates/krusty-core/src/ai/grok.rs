@@ -6,7 +6,7 @@ use serde::Deserialize;
 use tracing::{debug, info};
 
 use crate::ai::models::{ApiFormat, ModelMetadata};
-use crate::ai::providers::{ProviderId, ReasoningFormat};
+use crate::ai::providers::{ProviderId, ReasoningControl, ReasoningFormat};
 
 const DEFAULT_GROK_PROXY_BASE_URL: &str = "https://cli-chat-proxy.grok.com/v1";
 
@@ -136,6 +136,10 @@ fn parse_model(model: GrokModel) -> Option<ModelMetadata> {
     metadata.supports_vision = true;
     if supports_reasoning {
         metadata = metadata.with_thinking(ReasoningFormat::OpenAI);
+        // Grok Build's subscription proxy chooses its own reasoning behavior.
+        // It may advertise that reasoning is produced, but it does not expose
+        // the public xAI API's explicit effort controls.
+        metadata.reasoning_control = Some(ReasoningControl::OutputOnly);
     }
 
     // Preserve the upstream description in logs/debuggable metadata indirectly by
@@ -185,6 +189,7 @@ mod tests {
         assert_eq!(model.context_window, 512_000);
         assert_eq!(model.api_format, ApiFormat::OpenAIResponses);
         assert_eq!(model.reasoning_format, Some(ReasoningFormat::OpenAI));
+        assert_eq!(model.reasoning_control, Some(ReasoningControl::OutputOnly));
     }
 
     #[test]

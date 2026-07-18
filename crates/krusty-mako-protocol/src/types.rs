@@ -527,7 +527,7 @@ pub struct ExtensionEvent {
 #[serde(tag = "frame", content = "body", rename_all = "snake_case")]
 pub enum ClientFrame {
     Hello(Hello),
-    Request(RequestEnvelope),
+    Request(Box<RequestEnvelope>),
 }
 
 impl ClientFrame {

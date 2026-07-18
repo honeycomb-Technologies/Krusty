@@ -30,9 +30,126 @@ pub struct ModelInfo {
     #[serde(default)]
     pub supports_thinking: bool,
     #[serde(default)]
+    pub reasoning_control: Option<ReasoningControl>,
+    #[serde(default)]
+    pub supported_reasoning_levels: Vec<ReasoningEffort>,
+    #[serde(default)]
+    pub default_reasoning_level: Option<ReasoningEffort>,
+    #[serde(default)]
+    pub reasoning_is_mandatory: bool,
+    #[serde(default)]
+    pub supports_fast_mode: bool,
+    #[serde(default)]
+    pub fast_mode: Option<FastMode>,
+    #[serde(default)]
     pub supports_tools: bool,
     #[serde(default)]
     pub supports_vision: bool,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+    Ultra,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningControl {
+    OpenAiEffort,
+    AnthropicAdaptive,
+    AnthropicBudget,
+    Boolean,
+    OutputOnly,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FastMode {
+    Priority,
+    AnthropicFast,
+    #[serde(other)]
+    Unknown,
+}
+
+impl ModelInfo {
+    pub fn selectable_thinking_levels(&self) -> Vec<ThinkingLevel> {
+        if self.reasoning_control == Some(ReasoningControl::OutputOnly) {
+            return vec![ThinkingLevel::Off];
+        }
+
+        let mut levels = self
+            .supported_reasoning_levels
+            .iter()
+            .filter(|effort| **effort != ReasoningEffort::Ultra)
+            .filter_map(|effort| ThinkingLevel::from_reasoning_effort(*effort))
+            .collect::<Vec<_>>();
+        levels.dedup();
+
+        // Older Krusty servers only advertised the coarse `supports_thinking`
+        // flag. Keep those models usable while newer servers provide the exact
+        // ordered effort list.
+        if levels.is_empty() {
+            if !self.supports_thinking {
+                return vec![ThinkingLevel::Off];
+            }
+
+            let fallback = self
+                .default_reasoning_level
+                .and_then(ThinkingLevel::from_reasoning_effort)
+                .filter(|level| !matches!(level, ThinkingLevel::Off | ThinkingLevel::Ultra))
+                .unwrap_or(ThinkingLevel::Medium);
+            return if self.reasoning_is_mandatory {
+                vec![fallback]
+            } else {
+                vec![ThinkingLevel::Off, fallback]
+            };
+        }
+
+        if self.reasoning_is_mandatory {
+            levels.retain(|level| *level != ThinkingLevel::Off);
+            if levels.is_empty() {
+                levels.push(
+                    self.default_reasoning_level
+                        .and_then(ThinkingLevel::from_reasoning_effort)
+                        .filter(|level| !matches!(level, ThinkingLevel::Off | ThinkingLevel::Ultra))
+                        .unwrap_or(ThinkingLevel::Medium),
+                );
+            }
+        } else if !levels.contains(&ThinkingLevel::Off) {
+            levels.insert(0, ThinkingLevel::Off);
+        }
+        levels
+    }
+
+    pub fn normalize_thinking_level(&self, current: ThinkingLevel) -> ThinkingLevel {
+        let levels = self.selectable_thinking_levels();
+        if levels.is_empty() {
+            return if self.supports_thinking {
+                current
+            } else {
+                ThinkingLevel::Off
+            };
+        }
+        if levels.contains(&current) {
+            return current;
+        }
+        self.default_reasoning_level
+            .and_then(ThinkingLevel::from_reasoning_effort)
+            .filter(|level| levels.contains(level))
+            .unwrap_or(levels[0])
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -202,41 +319,75 @@ impl PermissionMode {
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingLevel {
     Off,
+    Minimal,
     Low,
     #[default]
     Medium,
     High,
     XHigh,
+    Max,
+    Ultra,
 }
 
 impl ThinkingLevel {
     pub fn api_value(self) -> Option<&'static str> {
         match self {
             Self::Off => None,
+            Self::Minimal => Some("minimal"),
             Self::Low => Some("low"),
             Self::Medium => Some("medium"),
             Self::High => Some("high"),
             Self::XHigh => Some("xhigh"),
+            Self::Max => Some("max"),
+            Self::Ultra => Some("ultra"),
         }
     }
 
     pub fn cycle(self) -> Self {
         match self {
-            Self::Off => Self::Low,
+            Self::Off => Self::Minimal,
+            Self::Minimal => Self::Low,
             Self::Low => Self::Medium,
             Self::Medium => Self::High,
             Self::High => Self::XHigh,
-            Self::XHigh => Self::Off,
+            Self::XHigh => Self::Max,
+            Self::Max | Self::Ultra => Self::Off,
+        }
+    }
+
+    pub fn cycle_for_model(self, model: &ModelInfo) -> Self {
+        let levels = model.selectable_thinking_levels();
+        if levels.is_empty() {
+            return model.normalize_thinking_level(self);
+        }
+        let index = levels.iter().position(|level| *level == self);
+        levels[index.map_or(0, |index| (index + 1) % levels.len())]
+    }
+
+    fn from_reasoning_effort(effort: ReasoningEffort) -> Option<Self> {
+        match effort {
+            ReasoningEffort::None => Some(Self::Off),
+            ReasoningEffort::Minimal => Some(Self::Minimal),
+            ReasoningEffort::Low => Some(Self::Low),
+            ReasoningEffort::Medium => Some(Self::Medium),
+            ReasoningEffort::High => Some(Self::High),
+            ReasoningEffort::XHigh => Some(Self::XHigh),
+            ReasoningEffort::Max => Some(Self::Max),
+            ReasoningEffort::Ultra => Some(Self::Ultra),
+            ReasoningEffort::Unknown => None,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Off => "off",
+            Self::Minimal => "min",
             Self::Low => "low",
             Self::Medium => "med",
             Self::High => "high",
-            Self::XHigh => "max",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
         }
     }
 }
@@ -935,7 +1086,9 @@ fn u64_field(value: &Value, field: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::ChatStreamEvent;
+    use super::{
+        ChatStreamEvent, FastMode, ModelInfo, ReasoningControl, ReasoningEffort, ThinkingLevel,
+    };
     use serde_json::json;
 
     #[test]
@@ -980,5 +1133,108 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn model_capabilities_drive_reasoning_cycle_and_fast_support() {
+        let model = ModelInfo {
+            id: "gpt-test".to_string(),
+            display_name: "GPT Test".to_string(),
+            provider: "OpenAI".to_string(),
+            context_window: 128_000,
+            max_output: 16_384,
+            supports_thinking: true,
+            reasoning_control: Some(ReasoningControl::OpenAiEffort),
+            supported_reasoning_levels: vec![
+                ReasoningEffort::Minimal,
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+                ReasoningEffort::Max,
+                ReasoningEffort::Ultra,
+            ],
+            default_reasoning_level: Some(ReasoningEffort::High),
+            reasoning_is_mandatory: true,
+            supports_fast_mode: true,
+            fast_mode: Some(FastMode::Priority),
+            supports_tools: true,
+            supports_vision: true,
+        };
+
+        assert_eq!(
+            model.selectable_thinking_levels(),
+            vec![
+                ThinkingLevel::Minimal,
+                ThinkingLevel::Low,
+                ThinkingLevel::Medium,
+                ThinkingLevel::High,
+                ThinkingLevel::XHigh,
+                ThinkingLevel::Max
+            ]
+        );
+        assert_eq!(
+            model.normalize_thinking_level(ThinkingLevel::Off),
+            ThinkingLevel::High
+        );
+        assert_eq!(
+            ThinkingLevel::XHigh.cycle_for_model(&model),
+            ThinkingLevel::Max
+        );
+        assert_eq!(
+            ThinkingLevel::Max.cycle_for_model(&model),
+            ThinkingLevel::Minimal
+        );
+        assert!(model.supports_fast_mode);
+    }
+
+    #[test]
+    fn legacy_reasoning_metadata_keeps_a_safe_selectable_fallback() {
+        let mut model = ModelInfo {
+            id: "legacy-model".to_string(),
+            display_name: "Legacy Model".to_string(),
+            provider: "Legacy".to_string(),
+            context_window: 0,
+            max_output: 0,
+            supports_thinking: true,
+            reasoning_control: Some(ReasoningControl::AnthropicBudget),
+            supported_reasoning_levels: Vec::new(),
+            default_reasoning_level: None,
+            reasoning_is_mandatory: false,
+            supports_fast_mode: false,
+            fast_mode: None,
+            supports_tools: false,
+            supports_vision: false,
+        };
+
+        assert_eq!(
+            model.selectable_thinking_levels(),
+            vec![ThinkingLevel::Off, ThinkingLevel::Medium]
+        );
+
+        model.reasoning_is_mandatory = true;
+        model.default_reasoning_level = Some(ReasoningEffort::High);
+        assert_eq!(
+            model.selectable_thinking_levels(),
+            vec![ThinkingLevel::High]
+        );
+        assert_eq!(
+            model.normalize_thinking_level(ThinkingLevel::Off),
+            ThinkingLevel::High
+        );
+
+        model.supported_reasoning_levels = vec![ReasoningEffort::None];
+        model.default_reasoning_level = None;
+        assert_eq!(
+            model.selectable_thinking_levels(),
+            vec![ThinkingLevel::Medium]
+        );
+
+        model.reasoning_control = Some(ReasoningControl::OutputOnly);
+        assert_eq!(model.selectable_thinking_levels(), vec![ThinkingLevel::Off]);
+        assert_eq!(
+            model.normalize_thinking_level(ThinkingLevel::High),
+            ThinkingLevel::Off
+        );
     }
 }

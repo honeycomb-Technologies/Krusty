@@ -105,7 +105,7 @@ impl MakoIpcClient {
 
         tokio::time::timeout(
             timeout,
-            crate::write_frame(&mut stream, &crate::ClientFrame::Request(request)),
+            crate::write_frame(&mut stream, &crate::ClientFrame::Request(Box::new(request))),
         )
         .await
         .map_err(|_| ClientError::RequestTimeout)??;
@@ -164,7 +164,7 @@ impl MakoIpcClient {
         let mut stream = self.connect_and_authenticate().await?;
         tokio::time::timeout(
             timeout,
-            crate::write_frame(&mut stream, &crate::ClientFrame::Request(request)),
+            crate::write_frame(&mut stream, &crate::ClientFrame::Request(Box::new(request))),
         )
         .await
         .map_err(|_| ClientError::RequestTimeout)??;

@@ -83,9 +83,11 @@ mod tests {
     use super::governance::{build_subagent_tool_context, delegated_turn_budget};
     use crate::agent::subagent::SubAgentTask;
     use crate::agent::AgentConfig as RuntimeAgentConfig;
+    use crate::process::ProcessRegistry;
     use crate::tools::registry::{DelegationPolicy, PermissionMode};
     use serde_json::json;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     #[test]
     fn delegated_turn_budget_prefers_task_override_then_policy_then_runtime_default() {
@@ -149,6 +151,30 @@ mod tests {
 
         assert_eq!(ctx.working_dir, working_dir);
         assert_eq!(ctx.sandbox_root, Some(sandbox_root));
+    }
+
+    #[test]
+    fn build_subagent_tool_context_preserves_process_owner_and_registry() {
+        let registry = Arc::new(ProcessRegistry::new());
+        let task = SubAgentTask::new("task", "prompt")
+            .with_delegation_policy(DelegationPolicy::for_subagent_build(
+                PermissionMode::Autonomous,
+                Some(17),
+            ))
+            .with_process_context(
+                Some(Arc::clone(&registry)),
+                Some("owner-a".to_string()),
+                Some("session-a".to_string()),
+            );
+
+        let ctx = build_subagent_tool_context(&task, 45);
+
+        assert!(ctx
+            .process_registry
+            .as_ref()
+            .is_some_and(|inherited| Arc::ptr_eq(inherited, &registry)));
+        assert_eq!(ctx.user_id.as_deref(), Some("owner-a"));
+        assert_eq!(ctx.session_id.as_deref(), Some("session-a"));
     }
 
     #[test]

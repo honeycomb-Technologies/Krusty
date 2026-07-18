@@ -60,3 +60,20 @@ fn invalid_cache_metadata_marks_model_cache_stale() {
 
     assert!(prefs.is_model_cache_stale(ProviderId::OpenAI));
 }
+
+#[test]
+fn clearing_model_cache_removes_snapshot_and_metadata() {
+    let (prefs, _temp) = create_preferences();
+    let models = vec![ModelMetadata::new(
+        "gpt-5.6-sol",
+        "GPT-5.6 Sol",
+        ProviderId::OpenAI,
+    )];
+    prefs.cache_models(ProviderId::OpenAI, &models).unwrap();
+
+    prefs.clear_model_cache(ProviderId::OpenAI).unwrap();
+
+    assert!(prefs.get_cached_models(ProviderId::OpenAI).is_none());
+    assert!(prefs.get_model_cache_metadata(ProviderId::OpenAI).is_none());
+    assert!(prefs.is_model_cache_stale(ProviderId::OpenAI));
+}

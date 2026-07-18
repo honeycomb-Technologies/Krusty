@@ -4,7 +4,7 @@ use axum::{
 };
 use serde::Deserialize;
 
-use krusty_core::storage::{Database, DelegatedRunStore};
+use krusty_core::storage::{Database, DelegatedRunStore, RuntimeTraceEvent, RuntimeTraceSummary};
 
 use super::{
     ensure_owned_session, load_agent_state_or_idle, load_owned_session, open_session_manager,
@@ -89,21 +89,46 @@ pub(super) async fn get_session_trace(
         .limit
         .unwrap_or(DEFAULT_TRACE_LIMIT)
         .min(MAX_TRACE_LIMIT);
-    let summary = session_manager.load_runtime_trace_summary(&id)?;
-    let latest_sequence = session_manager.load_runtime_trace_latest_sequence(&id)?;
-    let events = match query.after_sequence {
-        Some(after_sequence) => {
-            session_manager.load_runtime_trace_events_after(&id, after_sequence, Some(limit))?
-        }
-        None => session_manager.load_runtime_trace_events(&id, Some(limit))?,
+    let snapshot = session_manager.load_runtime_trace_events(&id, None)?;
+
+    Ok(Json(trace_response_from_snapshot(
+        id,
+        snapshot,
+        query.after_sequence,
+        limit,
+    )))
+}
+
+/// Build every response field from one exact persisted event snapshot.
+///
+/// Trace writes are intentionally asynchronous. Performing independent reads
+/// for the summary, watermark, and event window allowed a batch commit between
+/// those reads and produced internally contradictory responses. The retained
+/// trace is bounded, so one ordered read is both cheap and a coherent snapshot.
+fn trace_response_from_snapshot(
+    id: String,
+    snapshot: Vec<RuntimeTraceEvent>,
+    after_sequence: Option<i64>,
+    limit: usize,
+) -> SessionTraceResponse {
+    let summary = RuntimeTraceSummary::from_events(&snapshot);
+    let latest_sequence = snapshot.last().map(|event| event.sequence);
+    let latest_window_start = snapshot.len().saturating_sub(limit);
+    let events = match after_sequence {
+        Some(after_sequence) => snapshot
+            .into_iter()
+            .filter(|event| event.sequence > after_sequence)
+            .take(limit)
+            .collect(),
+        None => snapshot.into_iter().skip(latest_window_start).collect(),
     };
 
-    Ok(Json(SessionTraceResponse {
+    SessionTraceResponse {
         id,
         summary,
         events,
         latest_sequence,
-    }))
+    }
 }
 
 pub(super) fn live_partial_assistant_for_state(

@@ -157,6 +157,7 @@ mod tests {
         config.cancellation_grace_period = Duration::from_secs(2);
         assert!(config.validate().is_err());
 
+        config.worker_heartbeat_interval = Duration::from_secs(1);
         config.cancellation_grace_period = Duration::from_millis(500);
         assert!(config.validate().is_ok());
     }
