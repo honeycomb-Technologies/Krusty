@@ -20,8 +20,8 @@ use crate::tools::{parse_params, ToolContext, ToolResult};
 
 use execution::{execute_foreground, StreamContext};
 use shell::{
-    build_shell_command, configure_foreground_process_group, strip_ansi,
-    strip_shell_background_suffix,
+    build_shell_command, configure_foreground_process_group, normalize_tracked_background_command,
+    strip_ansi,
 };
 
 pub(super) const MAX_OUTPUT_LINES: usize = 2000;
@@ -197,9 +197,12 @@ fn normalized_working_dir(path: &std::path::Path) -> PathBuf {
 
 fn launch_signature(command: &str, working_dir: &std::path::Path) -> (PathBuf, String) {
     let mut effective_dir = normalized_working_dir(working_dir);
-    let mut effective_command = command.trim();
+    let (mut effective_command, _, _) = normalize_tracked_background_command(command);
 
-    if let Some((directory_segment, remainder)) = effective_command.split_once("&&") {
+    if let Some((directory_segment, remainder)) = effective_command
+        .split_once("&&")
+        .map(|(directory, remainder)| (directory.to_string(), remainder.to_string()))
+    {
         let directory_segment = directory_segment.trim();
         if let Some(directory) = directory_segment.strip_prefix("cd ") {
             let directory = clean_shell_token(directory.trim());
@@ -210,7 +213,7 @@ fn launch_signature(command: &str, working_dir: &std::path::Path) -> (PathBuf, S
                 working_dir.join(directory)
             };
             effective_dir = normalized_working_dir(&resolved_directory);
-            effective_command = remainder.trim();
+            effective_command = normalize_tracked_background_command(remainder.trim()).0;
         }
     }
 
@@ -397,20 +400,23 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
             params.command.clone()
         };
 
-        let inferred_background_command = strip_shell_background_suffix(&effective_command);
-        let inferred_from_shell_suffix = inferred_background_command.is_some();
+        let (clean_command, inferred_from_shell_suffix, removed_detachment_wrapper) =
+            normalize_tracked_background_command(&effective_command);
 
         if params.run_in_background.unwrap_or(false) || inferred_from_shell_suffix {
-            let clean_command =
-                inferred_background_command.unwrap_or_else(|| effective_command.clone());
-            let warnings = if inferred_from_shell_suffix {
-                vec![
+            let mut warnings = Vec::new();
+            if inferred_from_shell_suffix {
+                warnings.push(
                     "Background mode inferred from trailing '&'; prefer run_in_background:true for clarity."
                         .to_string(),
-                ]
-            } else {
-                Vec::new()
-            };
+                );
+            }
+            if removed_detachment_wrapper {
+                warnings.push(
+                    "Removed redundant nohup and /dev/null detachment syntax; the shared process registry owns lifecycle and output capture."
+                        .to_string(),
+                );
+            }
 
             if let Some(ref registry) = ctx.process_registry {
                 let endpoint_hints = background_endpoint_hints(&clean_command);

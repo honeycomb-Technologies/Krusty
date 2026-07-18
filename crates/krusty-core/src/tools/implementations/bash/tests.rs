@@ -1,9 +1,9 @@
 #[cfg(unix)]
 use super::execution::execute_foreground;
 use super::execution::{join_reader_with_timeout, BoundedOutputBuffer};
-use super::shell::strip_shell_background_suffix;
 #[cfg(unix)]
 use super::shell::{build_shell_command, configure_foreground_process_group};
+use super::shell::{normalize_tracked_background_command, strip_shell_background_suffix};
 use super::{background_endpoint_hints, output_spool_path, BashTool};
 use crate::process::ProcessRegistry;
 use crate::tools::registry::Tool;
@@ -138,6 +138,37 @@ fn strip_shell_background_suffix_rejects_escaped_ampersand() {
 fn strip_shell_background_suffix_rejects_double_ampersand() {
     let parsed = strip_shell_background_suffix("echo hi &&");
     assert!(parsed.is_none());
+}
+
+#[test]
+fn tracked_background_command_removes_redundant_detachment_wrapper() {
+    let (command, inferred, removed_wrapper) = normalize_tracked_background_command(
+        "nohup python3 -m http.server 6180 --bind 127.0.0.1 > /dev/null 2>&1 &",
+    );
+
+    assert_eq!(command, "python3 -m http.server 6180 --bind 127.0.0.1");
+    assert!(inferred);
+    assert!(removed_wrapper);
+}
+
+#[test]
+fn tracked_background_command_preserves_quoted_redirect_text() {
+    let (command, inferred, removed_wrapper) =
+        normalize_tracked_background_command("printf '%s' '> /dev/null 2>&1' &");
+
+    assert_eq!(command, "printf '%s' '> /dev/null 2>&1'");
+    assert!(inferred);
+    assert!(!removed_wrapper);
+}
+
+#[test]
+fn tracked_background_command_preserves_embedded_nohup_text() {
+    let (command, inferred, removed_wrapper) =
+        normalize_tracked_background_command("printf 'nohup server > /dev/null 2>&1'");
+
+    assert_eq!(command, "printf 'nohup server > /dev/null 2>&1'");
+    assert!(!inferred);
+    assert!(!removed_wrapper);
 }
 
 #[test]
@@ -426,6 +457,69 @@ async fn equivalent_background_launch_reuses_owner_scoped_process() {
         .kill(&unscoped_process_id)
         .await
         .expect("kill default-owner process");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn detached_shell_wrapper_is_canonicalized_and_reused() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let working_dir = temp.path().canonicalize().expect("canonical tempdir");
+    let registry = Arc::new(ProcessRegistry::new());
+    let ctx = ToolContext::with_process_registry(working_dir, Arc::clone(&registry))
+        .with_user_id("detachment-owner".to_string());
+    let canonical = "sh -c 'sleep 30' preview --host 127.0.0.1 --port 45941";
+    let wrapped = format!("nohup {canonical} > /dev/null 2>&1 &");
+
+    let first = BashTool
+        .execute(json!({"command": wrapped, "run_in_background": true}), &ctx)
+        .await;
+    assert!(!first.is_error, "{}", first.output);
+    let first_envelope: serde_json::Value =
+        serde_json::from_str(&first.output).expect("first tool JSON");
+    let process_id = first_envelope["data"]["process_id"]
+        .as_str()
+        .expect("first process id")
+        .to_string();
+    assert!(first_envelope["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains("process registry"))));
+
+    let tracked = registry
+        .get_for_user("detachment-owner", &process_id)
+        .await
+        .expect("tracked process");
+    assert_eq!(tracked.command, canonical);
+
+    let repeated = BashTool
+        .execute(
+            json!({"command": canonical, "run_in_background": true}),
+            &ctx,
+        )
+        .await;
+    assert!(!repeated.is_error, "{}", repeated.output);
+    let repeated_envelope: serde_json::Value =
+        serde_json::from_str(&repeated.output).expect("repeated tool JSON");
+    assert_eq!(
+        repeated_envelope["data"]["process_id"].as_str(),
+        Some(process_id.as_str())
+    );
+    assert_eq!(
+        repeated_envelope["data"]["reused_existing"].as_bool(),
+        Some(true)
+    );
+
+    let processes = registry.list_for_user("detachment-owner").await;
+    assert_eq!(processes.len(), 1);
+    assert!(processes[0].is_active());
+
+    registry
+        .kill_for_user("detachment-owner", &process_id)
+        .await
+        .expect("kill detachment test process");
 }
 
 #[cfg(unix)]

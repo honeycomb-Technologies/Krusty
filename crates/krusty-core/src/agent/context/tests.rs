@@ -392,6 +392,75 @@ fn aggregate_dynamic_context_budget_preserves_high_priority_sections() {
 }
 
 #[test]
+fn chat_context_does_not_inject_a_conflicting_tool_policy() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path();
+    let skills = RwLock::new(SkillsManager::with_defaults(repo));
+    let conversation = vec![ModelMessage {
+        role: Role::User,
+        content: vec![Content::Text {
+            text: "research the current release".to_string(),
+        }],
+    }];
+
+    let injected = inject_context(
+        &conversation,
+        repo.join("krusty.db").as_path(),
+        "chat-session",
+        repo,
+        None,
+        WorkMode::Build,
+        &skills,
+        None,
+        Some("chat"),
+        None,
+        None,
+    );
+
+    assert!(injected.iter().all(|message| {
+        message.content.iter().all(|content| match content {
+            Content::Text { text } => !text.contains("do NOT have access to any tools"),
+            _ => true,
+        })
+    }));
+    assert_eq!(injected.last().unwrap().role, Role::User);
+}
+
+#[test]
+fn aggregate_dynamic_context_budget_preserves_high_priority_sections() {
+    let system_message = |text: String| ModelMessage {
+        role: Role::System,
+        content: vec![Content::Text { text }],
+    };
+    let mut messages = vec![
+        system_message(format!("[PERSISTENT MEMORY]\n{}", "memory ".repeat(8_000))),
+        system_message(format!(
+            "[PROJECT INSTRUCTIONS - AGENTS.md]\n{}",
+            "instructions ".repeat(4_000)
+        )),
+        system_message("[ACTIVE PLAN - audit]\nFinish the selected task.".to_string()),
+    ];
+
+    bound_dynamic_context_messages(&mut messages);
+
+    let retained_bytes = messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|content| match content {
+            Content::Text { text } => Some(text.len()),
+            _ => None,
+        })
+        .sum::<usize>();
+    assert!(retained_bytes <= MAX_DYNAMIC_CONTEXT_BYTES);
+    assert!(messages.iter().any(|message| {
+        matches!(&message.content[0], Content::Text { text } if text.starts_with("[ACTIVE PLAN"))
+    }));
+    assert!(messages.iter().any(|message| {
+        matches!(&message.content[0], Content::Text { text } if text.starts_with("[PROJECT INSTRUCTIONS"))
+    }));
+}
+
+#[test]
 fn inject_context_filters_persistent_memory_by_user_id() {
     let temp = TempDir::new().unwrap();
     let repo = temp.path();
