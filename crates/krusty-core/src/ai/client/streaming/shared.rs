@@ -15,6 +15,7 @@ use crate::ai::types::{AiTool, ModelMessage, Role};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RequestComponentMetrics {
     pub base_bytes: usize,
+    pub identity_bytes: usize,
     pub project_bytes: usize,
     pub session_bytes: usize,
     pub tool_schema_bytes: usize,
@@ -37,6 +38,7 @@ pub(super) fn request_component_metrics(
     tools: Option<&[AiTool]>,
 ) -> RequestComponentMetrics {
     let base_bytes = sections.base_prompt.len();
+    let identity_bytes = sections.identity_context.len();
     let project_bytes = sections.project_context.len();
     let session_bytes = sections.session_context.len();
     let system_message_count = messages
@@ -67,6 +69,7 @@ pub(super) fn request_component_metrics(
     let mut hasher = Sha256::new();
     for component in [
         sections.base_prompt.as_bytes(),
+        sections.identity_context.as_bytes(),
         sections.project_context.as_bytes(),
     ] {
         hasher.update(component.len().to_le_bytes());
@@ -79,6 +82,7 @@ pub(super) fn request_component_metrics(
     let request_shape_fingerprint = format!("{:x}", hasher.finalize());
 
     let request_content_bytes = base_bytes
+        .saturating_add(identity_bytes)
         .saturating_add(project_bytes)
         .saturating_add(session_bytes)
         .saturating_add(tool_schema_bytes)
@@ -86,6 +90,7 @@ pub(super) fn request_component_metrics(
 
     RequestComponentMetrics {
         base_bytes,
+        identity_bytes,
         project_bytes,
         session_bytes,
         tool_schema_bytes,
@@ -178,6 +183,8 @@ pub(super) fn log_request_metrics(
         prompt_family = ?sections.profile.prompt_family,
         base_bytes = metrics.base_bytes,
         base_estimated_tokens = estimate_tokens(metrics.base_bytes),
+        identity_bytes = metrics.identity_bytes,
+        identity_estimated_tokens = estimate_tokens(metrics.identity_bytes),
         project_bytes = metrics.project_bytes,
         project_estimated_tokens = estimate_tokens(metrics.project_bytes),
         session_bytes = metrics.session_bytes,

@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::response::sse::{Event, KeepAlive, Sse};
-use futures::stream::Stream;
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -12,7 +11,7 @@ use krusty_core::agent::{
     AgenticOrchestrator, LoopEvent, OrchestratorConfig, OrchestratorServices,
 };
 use krusty_core::ai::model_profile::ModelProfile;
-use krusty_core::storage::{ProjectSettings, SessionType, WorkMode};
+use krusty_core::storage::{SessionType, WorkMode};
 use krusty_core::tools::registry::PermissionMode;
 
 use super::stream_notify::ChatStreamRunOutcome;
@@ -114,7 +113,13 @@ pub(super) async fn start_orchestrator_sse(
     work_mode: WorkMode,
     permission_mode: PermissionMode,
     generate_title: bool,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
+) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, AppError> {
+    if ctx.session_type == SessionType::Mako {
+        return Err(AppError::BadGateway(
+            "Mako execution is owned by the daemon control plane".to_string(),
+        ));
+    }
+
     let (sse_tx, sse_rx) = mpsc::channel::<Result<Event, Infallible>>(SSE_CHANNEL_BUFFER);
     let stream_idle_timeout = model_stream_idle_timeout(&ctx.ai_client);
 
@@ -125,8 +130,6 @@ pub(super) async fn start_orchestrator_sse(
         db_path: (*state.db_path).clone(),
         skills_manager: Arc::clone(&state.skills_manager),
     };
-    let mako_settings = ProjectSettings::load_mako_settings(ctx.project_dir.as_deref());
-
     let config = OrchestratorConfig {
         session_id: ctx.session_id.clone(),
         working_dir: ctx.working_dir,
@@ -138,24 +141,12 @@ pub(super) async fn start_orchestrator_sse(
         initial_work_mode: work_mode,
         stream_idle_timeout,
         generate_title,
-        max_iterations: (ctx.session_type != SessionType::Mako)
-            .then(|| krusty_core::agent::AgentConfig::default().primary_max_turns())
-            .flatten(),
+        max_iterations: krusty_core::agent::AgentConfig::default().primary_max_turns(),
         ..Default::default()
     };
 
-    let (event_rx, input_tx) = if ctx.session_type == SessionType::Mako {
-        use krusty_core::agent::autonomy::tick_engine::{TickEngine, TickEngineConfig};
-        let tick_config = TickEngineConfig {
-            tick_interval: std::time::Duration::from_secs(mako_settings.tick_interval_secs),
-            max_ticks: mako_settings.max_ticks,
-            enabled: true,
-        };
-        TickEngine::run(services, config, tick_config, ctx.conversation, ctx.options)
-    } else {
-        let orchestrator = AgenticOrchestrator::new(services, config);
-        orchestrator.run(ctx.conversation, ctx.options)
-    };
+    let orchestrator = AgenticOrchestrator::new(services, config);
+    let (event_rx, input_tx) = orchestrator.run(ctx.conversation, ctx.options);
 
     let session_id = ctx.session_id;
     {

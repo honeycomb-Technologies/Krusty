@@ -7,7 +7,7 @@ use crate::paths;
 
 use super::model::{
     CHANNELS_CANDIDATES, CREW_IDENTITY_CANDIDATES, CREW_MEMORY_CANDIDATES, CREW_SOUL_CANDIDATES,
-    HEARTBEAT_CANDIDATES, IDENTITY_CANDIDATES, MEMORY_CANDIDATES, SOUL_CANDIDATES,
+    HEARTBEAT_CANDIDATES, IDENTITY_CANDIDATES, MEMORY_CANDIDATES, SOUL_CANDIDATES, USER_CANDIDATES,
 };
 use super::{MakoContextLayer, MakoCrewProfile, MakoHomeDocument, MakoHomeProfile};
 
@@ -20,6 +20,7 @@ impl MakoHomeProfile {
         Self {
             soul: load_named_document(mako_home, SOUL_CANDIDATES, "Mako soul"),
             identity: load_named_document(mako_home, IDENTITY_CANDIDATES, "Mako identity"),
+            user: load_named_document(mako_home, USER_CANDIDATES, "Mako user model"),
             heartbeat: load_named_document(mako_home, HEARTBEAT_CANDIDATES, "Mako heartbeat"),
             memory: load_named_document(mako_home, MEMORY_CANDIDATES, "Mako memory"),
             channels: load_named_document(mako_home, CHANNELS_CANDIDATES, "Mako channels"),
@@ -31,8 +32,8 @@ impl MakoHomeProfile {
         let mut layers = Vec::new();
         push_layer(&mut layers, "SOUL", self.soul.clone());
         push_layer(&mut layers, "IDENTITY", self.identity.clone());
+        push_layer(&mut layers, "USER", self.user.clone());
         push_layer(&mut layers, "HEARTBEAT", self.heartbeat.clone());
-        push_layer(&mut layers, "MEMORY", self.memory.clone());
         push_layer(&mut layers, "CHANNELS", self.channels.clone());
         layers
     }

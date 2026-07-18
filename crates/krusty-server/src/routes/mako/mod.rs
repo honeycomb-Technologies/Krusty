@@ -1,5 +1,6 @@
 //! Mako dispatch and session management endpoints
 
+#[cfg(test)]
 use std::path::PathBuf;
 
 use axum::{
@@ -8,11 +9,14 @@ use axum::{
 };
 use serde::Serialize;
 
+#[cfg(test)]
 use krusty_core::paths as core_paths;
 use krusty_core::storage::Database;
 use krusty_core::SessionManager;
 
+#[cfg(test)]
 use super::session_access::current_user_home_dir;
+#[cfg(test)]
 use crate::auth::CurrentUser;
 use crate::error::AppError;
 use crate::AppState;
@@ -20,6 +24,7 @@ use crate::AppState;
 mod attention;
 mod current;
 mod home;
+mod learning;
 mod sessions;
 
 pub fn router() -> Router<AppState> {
@@ -37,6 +42,15 @@ pub fn router() -> Router<AppState> {
         .route(
             "/attention/:id/clear",
             post(attention::set_attention_cleared),
+        )
+        .route("/learning-candidates", get(learning::list_candidates))
+        .route(
+            "/learning-candidates/:id/accept",
+            post(learning::accept_candidate),
+        )
+        .route(
+            "/learning-candidates/:id/reject",
+            post(learning::reject_candidate),
         )
         .route("/daemon/recover", post(sessions::recover_daemon))
         .route("/sessions", get(sessions::list_sessions))
@@ -60,6 +74,7 @@ fn open_session_manager(state: &AppState) -> Result<SessionManager, AppError> {
     Ok(SessionManager::new(Database::new(&state.db_path)?))
 }
 
+#[cfg(test)]
 fn mako_home_dir_for_user(user: Option<&CurrentUser>) -> PathBuf {
     current_user_home_dir(user)
         .map(core_paths::mako_dir_for_home)

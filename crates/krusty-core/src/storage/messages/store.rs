@@ -3,6 +3,7 @@ use chrono::Utc;
 use rusqlite::{params, OptionalExtension};
 
 use crate::storage::database::Database;
+use crate::storage::episodes::EpisodeStore;
 
 use super::model::StoredMessageRecord;
 
@@ -23,6 +24,22 @@ impl<'a> MessageStore<'a> {
              VALUES (?1, ?2, ?3, ?4)",
             params![session_id, role, content_json, now],
         )?;
+        let message_id = self.db.conn().last_insert_rowid();
+
+        if let Err(error) = EpisodeStore::new(self.db).record_message(
+            session_id,
+            message_id,
+            role,
+            content_json,
+            &now,
+        ) {
+            tracing::warn!(
+                session_id,
+                message_id,
+                error = %error,
+                "Canonical message saved but episodic recall indexing failed"
+            );
+        }
 
         self.db.conn().execute(
             "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
@@ -79,11 +96,27 @@ impl<'a> MessageStore<'a> {
              VALUES (?1, 'user', ?2, ?3)",
             params![session_id, content, now],
         )?;
+        let promoted_message_id = tx.last_insert_rowid();
         tx.execute(
             "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
             params![now, session_id],
         )?;
         tx.commit()?;
+
+        if let Err(error) = EpisodeStore::new(self.db).record_message(
+            session_id,
+            promoted_message_id,
+            "user",
+            &content,
+            &now,
+        ) {
+            tracing::warn!(
+                session_id,
+                message_id = promoted_message_id,
+                error = %error,
+                "Promoted steering saved but episodic recall indexing failed"
+            );
+        }
 
         Ok(Some(content))
     }
@@ -115,18 +148,33 @@ impl<'a> MessageStore<'a> {
              WHERE session_id = ?1 AND role LIKE 'pending_user:%'",
             [session_id],
         )?;
+        let mut promoted = Vec::with_capacity(pending.len());
         for content in &pending {
             tx.execute(
                 "INSERT INTO messages (session_id, role, content, created_at)
                  VALUES (?1, 'user', ?2, ?3)",
                 params![session_id, content, now],
             )?;
+            promoted.push((tx.last_insert_rowid(), content.clone()));
         }
         tx.execute(
             "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
             params![now, session_id],
         )?;
         tx.commit()?;
+
+        for (message_id, content) in promoted {
+            if let Err(error) = EpisodeStore::new(self.db)
+                .record_message(session_id, message_id, "user", &content, &now)
+            {
+                tracing::warn!(
+                    session_id,
+                    message_id,
+                    error = %error,
+                    "Recovered steering saved but episodic recall indexing failed"
+                );
+            }
+        }
 
         Ok(pending.len())
     }
@@ -256,26 +304,46 @@ impl<'a> MessageStore<'a> {
         content_json: &str,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        let affected = self.db.conn().execute(
-            "UPDATE messages SET content = ?1
-             WHERE id = (
-                 SELECT id FROM messages
-                 WHERE session_id = ?2 AND role = ?3
-                 ORDER BY id DESC LIMIT 1
-             )",
-            params![content_json, session_id, role],
-        )?;
-        if affected == 0 {
+        let message = self
+            .db
+            .conn()
+            .query_row(
+                "SELECT id, created_at FROM messages
+                 WHERE session_id = ?1 AND role = ?2
+                 ORDER BY id DESC LIMIT 1",
+                params![session_id, role],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((message_id, created_at)) = message else {
             anyhow::bail!(
                 "No {} message found to update in session {}",
                 role,
                 session_id
             );
-        }
+        };
+        self.db.conn().execute(
+            "UPDATE messages SET content = ?1 WHERE id = ?2",
+            params![content_json, message_id],
+        )?;
         self.db.conn().execute(
             "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
             params![now, session_id],
         )?;
+        if let Err(error) = EpisodeStore::new(self.db).record_message(
+            session_id,
+            message_id,
+            role,
+            content_json,
+            &created_at,
+        ) {
+            tracing::warn!(
+                session_id,
+                message_id,
+                error = %error,
+                "Edited canonical message saved but episodic recall indexing failed"
+            );
+        }
         Ok(())
     }
 

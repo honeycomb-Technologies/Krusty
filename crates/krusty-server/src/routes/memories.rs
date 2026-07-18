@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use krusty_core::storage::{
     is_compaction_flush_memory, is_current_snapshot, refresh_current_snapshot, AgentMemory,
-    Database, MemoryStore, MemoryType,
+    Database, KnowledgeSnapshot, MemoryStore, MemoryType,
 };
 
 use super::session_access::{current_user_id, request_workspace_scope};
@@ -74,6 +74,23 @@ pub(super) fn memory_to_response(memory: AgentMemory) -> MemoryResponse {
         project_dir: memory.project_dir,
         created_at: memory.created_at,
         updated_at: memory.updated_at,
+        content_preview: None,
+        content_chars: None,
+        truncated: None,
+    }
+}
+
+fn knowledge_snapshot_to_response(snapshot: KnowledgeSnapshot) -> MemoryResponse {
+    MemoryResponse {
+        id: snapshot.id,
+        // Preserve the existing HTTP shape while keeping generated snapshots
+        // out of the canonical memory store.
+        memory_type: MemoryType::Project.as_str().to_string(),
+        title: snapshot.title,
+        content: snapshot.content,
+        project_dir: snapshot.project_dir,
+        created_at: snapshot.created_at,
+        updated_at: snapshot.updated_at,
         content_preview: None,
         content_chars: None,
         truncated: None,
@@ -164,7 +181,7 @@ async fn get_memory_snapshot(
     )?;
     let user_id = current_user_id(user.as_ref());
     let snapshot = refresh_current_snapshot(&state.db_path, project_dir.as_deref(), user_id)?
-        .map(memory_to_response);
+        .map(knowledge_snapshot_to_response);
 
     Ok(Json(MemorySnapshotResponse { snapshot }))
 }

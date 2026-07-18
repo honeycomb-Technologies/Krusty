@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use axum::{
     body::Body,
     extract::{DefaultBodyLimit, State},
@@ -60,6 +61,7 @@ pub mod apns;
 pub mod auth;
 pub mod error;
 pub mod mako_runtime;
+pub mod mako_execution_host;
 pub mod notifications;
 pub(crate) mod oauth_flow;
 pub mod presence;
@@ -265,12 +267,26 @@ fn register_autonomous_classifier_hook(
     tool_registry_inner.add_pre_hook(Arc::new(hook));
 }
 
-/// Build the Axum router with all routes and embedded web assets.
-pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppState)> {
-    let http_policy = ServerHttpPolicy::default();
-    let db_path = paths::config_dir().join("krusty.db");
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum MakoRuntimeMode {
+    DaemonProxy,
+    ExecutionHost,
+}
+
+/// Build the shared agent/tool state used by either the HTTP process or the
+/// standalone Mako executor. Only the HTTP process connects to the daemon
+/// control plane; the executor deliberately receives an embedded manager so
+/// it can run the agent core without recursively calling its own socket.
+pub(crate) async fn build_app_state(
+    config: &ServerConfig,
+    mako_mode: MakoRuntimeMode,
+    database_path: Option<PathBuf>,
+) -> anyhow::Result<AppState> {
+    let db_path = database_path.unwrap_or_else(|| paths::config_dir().join("krusty.db"));
     let _db = Database::new(&db_path)?;
-    reconcile_transient_agent_states(&db_path)?;
+    if matches!(mako_mode, MakoRuntimeMode::DaemonProxy) {
+        reconcile_transient_agent_states(&db_path)?;
+    }
 
     let credential_store_inner = CredentialStore::load().unwrap_or_default();
     let credential_store = Arc::new(RwLock::new(credential_store_inner.clone()));
@@ -465,6 +481,12 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
     let remote_access = Arc::new(RwLock::new(
         remote_access::RemoteAccessConfig::load_or_create(&db_path)?,
     ));
+    let mako_runtime = match mako_mode {
+        MakoRuntimeMode::DaemonProxy => mako_runtime::MakoRuntimeManager::daemon_from_discovered()
+            .await
+            .context("connecting krusty-server to the Mako daemon")?,
+        MakoRuntimeMode::ExecutionHost => mako_runtime::MakoRuntimeManager::new(),
+    };
 
     let mut skills = SkillsManager::with_defaults(&config.working_dir);
     for plugin in &installed_plugins {
@@ -498,7 +520,7 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
         push_service,
         apns_service,
         oauth_flows: Arc::new(Mutex::new(HashMap::new())),
-        mako_runtime: mako_runtime::MakoRuntimeManager::new(),
+        mako_runtime,
     };
 
     spawn_model_catalog_refresh(
@@ -507,10 +529,20 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
         state.db_path.clone(),
     );
 
-    state
-        .mako_runtime
-        .restore_persisted_sessions(state.clone())
-        .await?;
+    if matches!(mako_mode, MakoRuntimeMode::DaemonProxy) {
+        state
+            .mako_runtime
+            .restore_persisted_sessions(state.clone())
+            .await?;
+    }
+
+    Ok(state)
+}
+
+/// Build the Axum router with all routes and embedded web assets.
+pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppState)> {
+    let http_policy = ServerHttpPolicy::default();
+    let state = build_app_state(config, MakoRuntimeMode::DaemonProxy, None).await?;
 
     let cors = http_policy.cors_layer();
 

@@ -47,6 +47,7 @@ pub mod failure;
 pub mod history_policy;
 pub mod hooks;
 pub mod loop_events;
+pub mod learning;
 mod observability;
 pub mod orchestrator;
 pub mod pinch_context;

@@ -295,6 +295,12 @@ pub enum LoopInput {
         content: Vec<Content>,
     },
 
+    /// A canonical user message that was committed by an external durable
+    /// controller before delivery to the live loop. It follows the same safe
+    /// model-boundary injection path as steering, but must never be written to
+    /// conversation history a second time.
+    PersistedUserMessage { content: Vec<Content> },
+
     /// User requested cancellation.
     Cancel,
 }
@@ -314,6 +320,7 @@ pub(crate) struct LoopInputInbox {
 pub(crate) struct PendingSteering {
     pub(crate) pending_id: Option<String>,
     pub(crate) content: Vec<Content>,
+    pub(crate) already_persisted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -348,7 +355,15 @@ impl LoopInputInbox {
                 }) => self.steering.push_back(PendingSteering {
                     pending_id,
                     content,
+                    already_persisted: false,
                 }),
+                Some(LoopInput::PersistedUserMessage { content }) => {
+                    self.steering.push_back(PendingSteering {
+                        pending_id: None,
+                        content,
+                        already_persisted: true,
+                    })
+                }
                 input => return input,
             }
         }
@@ -371,7 +386,15 @@ impl LoopInputInbox {
                 }) => self.steering.push_back(PendingSteering {
                     pending_id,
                     content,
+                    already_persisted: false,
                 }),
+                Some(LoopInput::PersistedUserMessage { content }) => {
+                    self.steering.push_back(PendingSteering {
+                        pending_id: None,
+                        content,
+                        already_persisted: true,
+                    })
+                }
                 Some(input) => self.controls.push_back(input),
                 None => return None,
             }
@@ -416,7 +439,15 @@ impl LoopInputInbox {
                 }) => self.steering.push_back(PendingSteering {
                     pending_id,
                     content,
+                    already_persisted: false,
                 }),
+                Some(LoopInput::PersistedUserMessage { content }) => {
+                    self.steering.push_back(PendingSteering {
+                        pending_id: None,
+                        content,
+                        already_persisted: true,
+                    })
+                }
                 Some(input) => self.controls.push_back(input),
                 None => return ToolApprovalInput::Closed,
             }
@@ -434,7 +465,15 @@ impl LoopInputInbox {
                 }) => self.steering.push_back(PendingSteering {
                     pending_id,
                     content,
+                    already_persisted: false,
                 }),
+                Ok(LoopInput::PersistedUserMessage { content }) => {
+                    self.steering.push_back(PendingSteering {
+                        pending_id: None,
+                        content,
+                        already_persisted: true,
+                    })
+                }
                 Ok(input) => self.controls.push_back(input),
                 Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
                     break;

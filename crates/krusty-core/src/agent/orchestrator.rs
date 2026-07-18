@@ -40,8 +40,8 @@ use crate::constants;
 use crate::process::ProcessRegistry;
 use crate::skills::SkillsManager;
 use crate::storage::{
-    Database, PartialAssistantState, PendingInteractionSnapshot, ProjectSettings, RecoveryStatus,
-    SessionManager, SessionType, WorkMode,
+    Database, MakoProfileSnapshot, PartialAssistantState, PendingInteractionSnapshot,
+    ProjectSettings, RecoveryStatus, SessionManager, SessionType, WorkMode,
 };
 use crate::tools::registry::effective_tool_call;
 use crate::tools::registry::{FileObservationTracker, PermissionMode, ToolRegistry};
@@ -130,6 +130,8 @@ pub struct OrchestratorConfig {
     pub working_dir: PathBuf,
     pub project_dir: Option<PathBuf>,
     pub mako_crew_slug: Option<String>,
+    /// Database-owned Mako identity frozen once at run start.
+    pub mako_profile: Option<Arc<MakoProfileSnapshot>>,
     pub session_type: SessionType,
     pub permission_mode: PermissionMode,
     pub max_iterations: Option<usize>,
@@ -150,6 +152,7 @@ impl Default for OrchestratorConfig {
             working_dir: PathBuf::new(),
             project_dir: None,
             mako_crew_slug: None,
+            mako_profile: None,
             session_type: SessionType::Code,
             permission_mode: PermissionMode::default(),
             max_iterations: None,
@@ -226,13 +229,14 @@ fn inject_runtime_context(
     working_dir: &Path,
     project_dir: Option<&Path>,
     mako_crew_slug: Option<&str>,
+    mako_profile: Option<&MakoProfileSnapshot>,
     work_mode: WorkMode,
     skills_manager: &RwLock<SkillsManager>,
     model: Option<&str>,
     session_type: SessionType,
     user_id: Option<&str>,
 ) -> Vec<ModelMessage> {
-    context::inject_context(
+    context::inject_context_with_mako_profile(
         conversation,
         db_path,
         session_id,
@@ -244,6 +248,7 @@ fn inject_runtime_context(
         Some(session_type_name(session_type)),
         mako_crew_slug,
         user_id,
+        mako_profile,
     )
 }
 
@@ -332,6 +337,7 @@ impl AgenticOrchestrator {
             working_dir,
             project_dir,
             mako_crew_slug,
+            mako_profile,
             session_type,
             permission_mode,
             max_iterations,
@@ -477,6 +483,7 @@ impl AgenticOrchestrator {
                 &working_dir,
                 project_dir.as_deref(),
                 mako_crew_slug.as_deref(),
+                mako_profile.as_deref(),
                 work_mode,
                 &skills_manager,
                 Some(ai_client.config().model.as_str()),
@@ -1631,7 +1638,7 @@ fn inject_pending_steering(
             content: steering.content,
         };
         conversation.push(message.clone());
-        if steering.pending_id.is_none() {
+        if steering.pending_id.is_none() && !steering.already_persisted {
             save_message(db_path, session_id, &message);
         }
         injected.push(InjectedSteering {
@@ -1885,6 +1892,65 @@ mod tests {
                 .count(),
             1,
             "steering must persist exactly once"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn externally_persisted_user_message_is_injected_without_duplicate_history(
+    ) -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.path().join("krusty.db");
+        let manager = SessionManager::new(Database::new(&db_path)?);
+        let session_id = manager.create_session("persisted input", Some("test-model"), None)?;
+        let initial_user = ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "start".into(),
+            }],
+        };
+        let follow_up = vec![Content::Text {
+            text: "already committed by daemon".into(),
+        }];
+        manager.save_message(
+            &session_id,
+            "user",
+            &serde_json::to_string(&initial_user.content)?,
+        )?;
+        manager.save_message(&session_id, "user", &serde_json::to_string(&follow_up)?)?;
+
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        input_tx.send(LoopInput::PersistedUserMessage {
+            content: follow_up.clone(),
+        })?;
+        let mut inbox = LoopInputInbox::new(input_rx);
+        inbox.collect_ready();
+        let mut conversation = vec![initial_user];
+        let mut ledger = ContextLedger::from_conversation(&conversation);
+
+        let injected = inject_pending_steering(
+            &mut inbox,
+            &mut conversation,
+            &mut ledger,
+            &db_path,
+            &session_id,
+        );
+
+        assert_eq!(injected.len(), 1);
+        assert_eq!(conversation.len(), 2);
+        assert_eq!(
+            serde_json::to_value(&conversation[1].content)?,
+            serde_json::to_value(&follow_up)?
+        );
+        let stored = manager.load_session_messages(&session_id)?;
+        assert_eq!(stored.len(), 2, "live injection must not save a third row");
+        assert_eq!(
+            stored
+                .iter()
+                .filter(|(_, content)| content.contains("already committed by daemon"))
+                .count(),
+            1,
+            "the daemon-owned canonical message must remain exactly once"
         );
         Ok(())
     }
@@ -2222,6 +2288,7 @@ mod tests {
             repo,
             Some(repo),
             None,
+            None,
             WorkMode::Build,
             &skills,
             None,
@@ -2234,6 +2301,7 @@ mod tests {
             "session-id",
             repo,
             Some(repo),
+            None,
             None,
             WorkMode::Build,
             &skills,

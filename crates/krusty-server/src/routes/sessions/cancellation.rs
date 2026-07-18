@@ -5,7 +5,7 @@ use axum::{
 
 use krusty_core::agent::LoopInput;
 
-use super::{ensure_owned_session, open_session_manager};
+use super::{current_user_id, load_owned_session, open_session_manager};
 use crate::auth::CurrentUser;
 use crate::error::AppError;
 use crate::types::SimpleOkResponse;
@@ -17,7 +17,16 @@ pub(super) async fn cancel_session(
     Path(session_id): Path<String>,
 ) -> Result<Json<SimpleOkResponse>, AppError> {
     let manager = open_session_manager(&state)?;
-    ensure_owned_session(&manager, &session_id, user.as_ref())?;
+    let session = load_owned_session(&manager, &session_id, user.as_ref())?;
+
+    if session.session_type == krusty_core::storage::SessionType::Mako {
+        state
+            .mako_runtime
+            .cancel_session_for_user(&state, &session_id, current_user_id(user.as_ref()))
+            .await
+            .map_err(crate::mako_runtime::control_plane_app_error)?;
+        return Ok(Json(SimpleOkResponse { ok: true }));
+    }
 
     let sender = state.session_inputs.read().await.get(&session_id).cloned();
     if let Some(sender) = sender {

@@ -81,7 +81,11 @@ fn append_zai_reasoning_config(body: &mut Value, options: &CallOptions) {
 }
 
 fn stable_system_prompt(sections: &crate::ai::model_profile::SystemPromptSections) -> String {
-    [sections.base_prompt.trim(), sections.project_context.trim()]
+    [
+        sections.base_prompt.trim(),
+        sections.identity_context.trim(),
+        sections.project_context.trim(),
+    ]
         .into_iter()
         .filter(|section| !section.is_empty())
         .collect::<Vec<_>>()

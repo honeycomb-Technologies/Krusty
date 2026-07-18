@@ -3,7 +3,9 @@ use std::path::Path;
 use tracing::warn;
 
 use crate::paths;
-use crate::storage::MakoHomeProfile;
+use crate::storage::{
+    MakoCrewProfileDocumentKind, MakoProfileDocumentKind, MakoProfileSnapshot, MakoHomeProfile,
+};
 
 use super::project::discover_named_file;
 use super::truncate_utf8_bytes;
@@ -50,6 +52,60 @@ pub(super) fn build_mako_context_sections_with_home(
                     sections.push(format!(
                         "[MAKO {} - {} - {}]\n\n{}\n\n[END MAKO {}]",
                         kind, member.slug, document.file_name, document.content, kind
+                    ));
+                }
+            }
+        }
+    }
+
+    if let Some(path) = discover_named_file(project_root, MAKO_FILES) {
+        if let Some(content) = load_mako_context_file(&path, "Mako project overlay") {
+            let label = display_context_file_name(&path, "MAKO.md");
+            sections.push(format!(
+                "[MAKO PROJECT OVERLAY - {}]\n\n{}\n\n[END MAKO PROJECT OVERLAY]",
+                label, content
+            ));
+        }
+    }
+
+    bound_mako_sections(sections, MAX_MAKO_CONTEXT_BYTES)
+}
+
+/// Render a database-owned profile snapshot that was frozen at run start.
+/// Soul, Identity, and User are stable identity layers; Heartbeat and Channels
+/// remain dynamic operational context. Durable learned memory is injected from
+/// the canonical memory store, never from the legacy home file.
+pub(super) fn build_mako_context_sections_with_profile(
+    project_root: &Path,
+    profile: &MakoProfileSnapshot,
+    mako_crew_slug: Option<&str>,
+) -> Vec<String> {
+    let mut sections = Vec::new();
+    for kind in MakoProfileDocumentKind::ALL {
+        if let Some(document) = profile.document(kind) {
+            let label = kind.as_str().to_ascii_uppercase();
+            sections.push(format!(
+                "[MAKO {label} - profile:{} - revision:{}]\n\n{}\n\n[END MAKO {label}]",
+                profile.profile_id, profile.revision, document.content
+            ));
+        }
+    }
+
+    if let Some(crew_slug) = mako_crew_slug
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Some(member) = profile.crew_member(crew_slug) {
+            for kind in MakoCrewProfileDocumentKind::ALL {
+                let document = match kind {
+                    MakoCrewProfileDocumentKind::Identity => member.identity.as_ref(),
+                    MakoCrewProfileDocumentKind::Soul => member.soul.as_ref(),
+                };
+                if let Some(document) = document {
+                    let label = kind.as_str().to_ascii_uppercase();
+                    sections.push(format!(
+                        "[MAKO CREW {label} - {} - profile-revision:{} - crew-revision:{}]\n\n{}\n\n[END MAKO CREW {label}]",
+                        member.slug, profile.revision, member.revision, document.content
                     ));
                 }
             }

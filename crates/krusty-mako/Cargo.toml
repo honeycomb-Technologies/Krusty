@@ -1,0 +1,28 @@
+[package]
+name = "krusty-mako"
+version = "0.1.0"
+edition = "2021"
+description = "Independently supervised backend daemon for Mako"
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6.0"
+krusty-core = { path = "../krusty-core" }
+krusty-mako-protocol = { path = "../krusty-mako-protocol" }
+krusty-server = { path = "../krusty-server" }
+libc = "0.2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.40", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.11", features = ["v4", "v5"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

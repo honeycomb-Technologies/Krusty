@@ -3,16 +3,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
-use krusty_core::agent::autonomy::coordinator_prompt::system_prompt_for_session;
+use krusty_core::agent::learning::{
+    review_latest_completed_mako_turn, PostTurnLearningReviewRequest,
+};
 use krusty_core::agent::{LoopEvent, OrchestratorConfig, OrchestratorServices};
 use krusty_core::ai::client::CallOptions;
 use krusty_core::ai::types::{Role, WebFetchConfig, WebSearchConfig};
 use krusty_core::plan::PlanManager;
 use krusty_core::storage::{
-    Database, MakoRuntimeStateStatus, MakoRuntimeStateStore, ProjectSettings, SessionManager,
-    SessionType,
+    Database, MakoProfileOwner, MakoProfileStore, MakoRuntimeStateStatus, MakoRuntimeStateStore,
+    ProjectSettings, SessionManager, SessionType,
 };
 use krusty_core::tools::registry::PermissionMode;
 
@@ -24,6 +26,30 @@ use super::state::{
 use super::MakoRuntimeManager;
 use crate::types::AgenticEvent;
 use crate::AppState;
+
+#[derive(Clone)]
+pub(crate) enum MakoExecutionEventSink {
+    Broadcast(broadcast::Sender<AgenticEvent>),
+    Bounded(mpsc::Sender<AgenticEvent>),
+}
+
+impl MakoExecutionEventSink {
+    pub(crate) async fn send(&self, event: AgenticEvent) -> Result<()> {
+        match self {
+            // Background embedded runs are valid without an attached observer.
+            Self::Broadcast(sender) => {
+                let _ = sender.send(event);
+                Ok(())
+            }
+            // The daemon path is lossless and bounded. A vanished consumer
+            // must stop the run instead of silently continuing unmanaged.
+            Self::Bounded(sender) => sender
+                .send(event)
+                .await
+                .map_err(|_| anyhow::anyhow!("Mako execution event consumer closed")),
+        }
+    }
+}
 
 pub(super) async fn run_mako_session(
     state: AppState,
@@ -38,8 +64,9 @@ pub(super) async fn run_mako_session(
         session_id.clone(),
         run_id.clone(),
         wake_reason,
-        event_tx.clone(),
+        MakoExecutionEventSink::Broadcast(event_tx.clone()),
         manager.clone(),
+        true,
     )
     .await;
 
@@ -62,13 +89,14 @@ pub(super) async fn run_mako_session(
     manager.finish_run(&session_id, &run_id).await;
 }
 
-async fn run_mako_session_inner(
+pub(crate) async fn run_mako_session_inner(
     state: AppState,
     session_id: String,
     run_id: String,
     _wake_reason: String,
-    event_tx: broadcast::Sender<AgenticEvent>,
+    event_sink: MakoExecutionEventSink,
     manager: Arc<MakoRuntimeManager>,
+    allow_embedded_wakes: bool,
 ) -> Result<()> {
     let _guard = state
         .try_lock_session(&session_id)
@@ -88,6 +116,8 @@ async fn run_mako_session_inner(
         .resolve_ai_client_for_user(session.model.as_deref(), session.user_id.as_deref())
         .await
         .ok_or_else(|| anyhow::anyhow!("No AI credentials configured"))?;
+    let learning_ai_client = Arc::clone(&ai_client);
+    let learning_model = ai_client.config().model.clone();
 
     let raw_messages = session_manager.load_session_messages(&session_id)?;
     let conversation = load_conversation(raw_messages);
@@ -108,6 +138,13 @@ async fn run_mako_session_inner(
     let mako_settings = ProjectSettings::load_mako_settings(project_dir.as_deref());
     let runtime_state =
         MakoRuntimeStateStore::new(Database::new(&state.db_path)?).get_state(&session_id)?;
+    let profile_owner = MakoProfileOwner::from_user_id(session.user_id.as_deref())?;
+    let profile_store = MakoProfileStore::new(Database::new(&state.db_path)?);
+    if profile_owner.is_local() {
+        profile_store.import_local_legacy_home(&profile_owner, &krusty_core::paths::mako_dir())?;
+    }
+    let mako_profile =
+        std::sync::Arc::new(profile_store.bootstrap_defaults(&profile_owner)?.snapshot);
 
     let options = CallOptions {
         tools: Some(state.tool_registry.get_ai_tools_all().await),
@@ -115,7 +152,9 @@ async fn run_mako_session_inner(
         codex_parallel_tool_calls: true,
         web_search: Some(WebSearchConfig::default()),
         web_fetch: Some(WebFetchConfig::default()),
-        system_prompt: system_prompt_for_session(SessionType::Mako),
+        // Mako's coordinator/persona layers are context sections so the base
+        // Krusty safety/runtime contract and model-family overlay remain intact.
+        system_prompt: None,
         ..Default::default()
     };
 
@@ -131,6 +170,7 @@ async fn run_mako_session_inner(
         working_dir,
         project_dir,
         mako_crew_slug: runtime_state.and_then(|state| state.crew_slug),
+        mako_profile: Some(mako_profile),
         session_type: SessionType::Mako,
         permission_mode: PermissionMode::Autonomous,
         user_id: session.user_id.clone(),
@@ -168,12 +208,44 @@ async fn run_mako_session_inner(
                     &session_id,
                     user_id.as_deref(),
                     &loop_event,
+                    allow_embedded_wakes,
                 )
                 .await;
 
             apply_runtime_event_state(&state.db_path, &session_id, &run_id, &loop_event)?;
+            if matches!(
+                loop_event,
+                LoopEvent::TurnComplete {
+                    has_more: false,
+                    ..
+                }
+            ) && outcome.allows_learning_review()
+            {
+                let review = PostTurnLearningReviewRequest::new(
+                    (*state.db_path).clone(),
+                    session_id.clone(),
+                    Arc::clone(&learning_ai_client),
+                    learning_model.clone(),
+                );
+                tokio::spawn(async move {
+                    match review_latest_completed_mako_turn(review).await {
+                        Ok(result) if result.skipped => {}
+                        Ok(result) => tracing::debug!(
+                            through_message_id = ?result.through_message_id,
+                            candidates = result.candidates,
+                            auto_promoted = result.auto_promoted,
+                            tombstoned = result.tombstoned,
+                            "Completed governed Mako post-turn learning review"
+                        ),
+                        Err(error) => tracing::warn!(
+                            error = %error,
+                            "Background Mako post-turn learning review failed"
+                        ),
+                    }
+                });
+            }
             let is_finished = matches!(loop_event, LoopEvent::Finished { .. });
-            let _ = event_tx.send(loop_event.into());
+            event_sink.send(loop_event.into()).await?;
             if is_finished {
                 break;
             }
@@ -186,6 +258,7 @@ async fn run_mako_session_inner(
                 &session_id,
                 user_id.as_deref(),
                 project_scope.as_deref(),
+                allow_embedded_wakes,
             )
             .await
     })

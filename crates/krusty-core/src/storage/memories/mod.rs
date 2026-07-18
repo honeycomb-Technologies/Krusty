@@ -11,6 +11,11 @@ mod store;
 mod tests;
 
 pub use model::{
-    is_compaction_flush_memory, AgentMemory, MemoryType, COMPACTION_FLUSH_TITLE_PREFIX,
+    is_compaction_flush_memory, AgentMemory, AgentMemoryRevision, CanonicalMemoryInput,
+    MemoryNamespace, MemoryRevisionEvent, MemorySensitivity, MemorySource, MemoryStatus,
+    MemoryType, COMPACTION_FLUSH_TITLE_PREFIX,
 };
 pub use store::MemoryStore;
+pub(crate) use store::{
+    load_canonical_for_provenance_from_connection, save_canonical_in_transaction,
+};

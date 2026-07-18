@@ -19,6 +19,7 @@ fn load_mako_home_prefers_branded_top_level_files() {
     let temp = TempDir::new().unwrap();
     fs::write(temp.path().join(paths::MAKO_SOUL_FILE), "Soul.").unwrap();
     fs::write(temp.path().join(paths::MAKO_IDENTITY_FILE), "Identity.").unwrap();
+    fs::write(temp.path().join(paths::MAKO_USER_FILE), "User.").unwrap();
 
     let profile = MakoHomeProfile::load_from(temp.path());
 
@@ -27,17 +28,20 @@ fn load_mako_home_prefers_branded_top_level_files() {
         profile.identity.unwrap().file_name,
         paths::MAKO_IDENTITY_FILE
     );
+    assert_eq!(profile.user.unwrap().file_name, paths::MAKO_USER_FILE);
 }
 
 #[test]
 fn load_mako_home_falls_back_to_legacy_generic_files() {
     let temp = TempDir::new().unwrap();
     fs::write(temp.path().join("SOUL.md"), "Soul.").unwrap();
+    fs::write(temp.path().join("USER.md"), "User.").unwrap();
     fs::write(temp.path().join("CHANNELS.md"), "Channels.").unwrap();
 
     let profile = MakoHomeProfile::load_from(temp.path());
 
     assert_eq!(profile.soul.unwrap().file_name, "SOUL.md");
+    assert_eq!(profile.user.unwrap().file_name, "USER.md");
     assert_eq!(profile.channels.unwrap().file_name, "CHANNELS.md");
 }
 
@@ -74,8 +78,31 @@ fn bootstrap_mako_home_creates_branded_files_and_default_crew() {
     assert!(result
         .created_files
         .iter()
+        .any(|path| path == paths::MAKO_USER_FILE));
+    assert!(result
+        .created_files
+        .iter()
         .any(|path| path == "crew/builder/IDENTITY.md"));
     assert_eq!(result.profile.crew.len(), 3);
+}
+
+#[test]
+fn active_legacy_context_layers_include_user_but_exclude_memory() {
+    let temp = TempDir::new().unwrap();
+    fs::write(temp.path().join(paths::MAKO_SOUL_FILE), "Soul.").unwrap();
+    fs::write(temp.path().join(paths::MAKO_IDENTITY_FILE), "Identity.").unwrap();
+    fs::write(temp.path().join(paths::MAKO_USER_FILE), "User.").unwrap();
+    fs::write(temp.path().join(paths::MAKO_MEMORY_FILE), "Legacy memory.").unwrap();
+
+    let profile = MakoHomeProfile::load_from(temp.path());
+    let kinds = profile
+        .context_layers()
+        .into_iter()
+        .map(|layer| layer.kind)
+        .collect::<Vec<_>>();
+
+    assert_eq!(kinds, vec!["SOUL", "IDENTITY", "USER"]);
+    assert!(profile.memory.is_some(), "legacy memory remains importable");
 }
 
 #[test]

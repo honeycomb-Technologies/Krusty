@@ -19,11 +19,20 @@ mod database;
 #[cfg(test)]
 mod database_tests;
 mod delegated_runs;
+mod episodes;
 mod file_activity;
 mod knowledge;
+mod learning_candidates;
 mod mako_attention_state;
+mod mako_controller_events;
+mod mako_controllers;
+mod mako_daemon_leases;
 mod mako_home;
+mod mako_idempotency;
+mod mako_profiles;
+mod mako_runs;
 mod mako_runtime_state;
+mod mako_schedules;
 mod memories;
 mod messages;
 mod plans;
@@ -47,12 +56,23 @@ pub use delegated_runs::{
     normalize_scope_key, DelegatedRunAgentSnapshot, DelegatedRunRecord, DelegatedRunRole,
     DelegatedRunScope, DelegatedRunSnapshot, DelegatedRunStartInput, DelegatedRunStore,
 };
+pub use episodes::{ConversationEpisode, EpisodeSearch, EpisodeStore};
 pub use file_activity::{FileActivityTracker, RankedFile};
 pub use knowledge::{
-    is_current_snapshot, is_current_snapshot_title, refresh_current_snapshot,
-    CURRENT_SNAPSHOT_TITLE,
+    get_current_snapshot, is_current_snapshot, is_current_snapshot_title, refresh_current_snapshot,
+    KnowledgeSnapshot, CURRENT_SNAPSHOT_TITLE,
+};
+pub(crate) use learning_candidates::load_candidate_owned_from_connection;
+pub use learning_candidates::{
+    LearningCandidate, LearningCandidateInput, LearningCandidateStatus, LearningCandidateStore,
+    LearningKind, LearningSensitivity, LearningThroughState,
 };
 pub use mako_attention_state::{MakoAttentionItemState, MakoAttentionStateStore};
+pub use mako_controller_events::{
+    MakoControllerEvent, MakoControllerEventStore, MakoControllerEventType, NewMakoControllerEvent,
+};
+pub use mako_controllers::{MakoController, MakoControllerStatus, MakoControllerStore};
+pub use mako_daemon_leases::{DaemonLease, DaemonLeaseAcquire, MakoDaemonLeaseStore};
 pub use mako_home::{
     bootstrap_mako_home, is_valid_crew_slug, summarize_channel_bindings, summarize_crew_runtime,
     write_mako_crew_document, write_mako_home_document, MakoBootstrapResult, MakoChannelBinding,
@@ -60,11 +80,33 @@ pub use mako_home::{
     MakoCrewRuntimeStatus, MakoCrewRuntimeSummary, MakoHomeDocument, MakoHomeDocumentKind,
     MakoHomeProfile,
 };
+pub use mako_idempotency::{
+    hash_request_bytes, IdempotencyClaim, IdempotencyRecord, MakoIdempotencyStore,
+};
+pub use mako_profiles::{
+    default_profile_seed, MakoCrewProfileDocumentKind, MakoCrewProfileSeed,
+    MakoCrewProfileSnapshot, MakoLegacyImportResult, MakoProfileDocument, MakoProfileDocumentKind,
+    MakoProfileMergeResult, MakoProfileOwner, MakoProfileOwnerError, MakoProfileSeed,
+    MakoProfileSnapshot, MakoProfileStore, MakoProfileStoreError, MAX_MAKO_PROFILE_DOCUMENT_BYTES,
+};
+pub use mako_runs::{
+    ClaimRunRequest, ClaimedMakoRun, DaemonFence, LeaseReconciliation, MakoRun, MakoRunAttempt,
+    MakoRunAttemptOutcome, MakoRunKind, MakoRunStore, RunCompletion,
+};
 pub use mako_runtime_state::{
     MakoRunPriority, MakoRuntimeState, MakoRuntimeStateStatus, MakoRuntimeStateStore,
 };
+pub use mako_schedules::{
+    MakoSchedule, MakoScheduleOccurrence, MakoScheduleOccurrenceStatus, MakoScheduleStatus,
+    MakoScheduleStore, OverlapPolicy,
+};
 pub use memories::{
-    is_compaction_flush_memory, AgentMemory, MemoryStore, MemoryType, COMPACTION_FLUSH_TITLE_PREFIX,
+    is_compaction_flush_memory, AgentMemory, AgentMemoryRevision, CanonicalMemoryInput,
+    MemoryNamespace, MemoryRevisionEvent, MemorySensitivity, MemorySource, MemoryStatus,
+    MemoryStore, MemoryType, COMPACTION_FLUSH_TITLE_PREFIX,
+};
+pub(crate) use memories::{
+    load_canonical_for_provenance_from_connection, save_canonical_in_transaction,
 };
 pub use messages::{MessageStore, StoredMessageRecord};
 pub use plans::{PlanStore, PlanSummary};

@@ -15,6 +15,7 @@ pub mod constants;
 pub mod extensions;
 pub mod git;
 pub mod mcp;
+pub mod mako;
 pub mod paths;
 pub mod plan;
 pub mod plugins;
