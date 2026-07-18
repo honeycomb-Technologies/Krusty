@@ -12,12 +12,13 @@ if [[ $# -ne 1 ]]; then
 fi
 
 version=${1#v}
-if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-    echo "invalid release version: $1" >&2
+if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "invalid stable release version: $1 (AUR pkgver values cannot contain '-')" >&2
     exit 2
 fi
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$script_dir/.." && pwd)
 pkgbuild="$script_dir/PKGBUILD"
 srcinfo="$script_dir/.SRCINFO"
 archive_name="krusty-$version.tar.gz"
@@ -25,6 +26,21 @@ archive_url="https://github.com/honeycomb-Technologies/Krusty/archive/refs/tags/
 expected_prefix="Krusty-$version/"
 temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/krusty-aur-release.XXXXXX")
 trap 'rm -rf -- "$temp_dir"' EXIT
+archive_listing="$temp_dir/archive-entries.txt"
+archive_type_listing="$temp_dir/archive-entry-types.txt"
+archive_regular_listing="$temp_dir/archive-regular-entries.txt"
+source_manifest="$temp_dir/krusty-cli-Cargo.toml"
+
+tar_bin=${TAR:-tar}
+if ! command -v "$tar_bin" >/dev/null 2>&1; then
+    echo "GNU tar is required to validate the release archive" >&2
+    exit 1
+fi
+tar_version=$("$tar_bin" --version 2>/dev/null || true)
+if [[ "${tar_version%%$'\n'*}" != *"GNU tar"* ]]; then
+    echo "GNU tar is required to validate the release archive (set TAR to its path)" >&2
+    exit 1
+fi
 
 curl \
     --proto '=https' \
@@ -36,10 +52,130 @@ curl \
     --output "$temp_dir/$archive_name" \
     "$archive_url"
 
-first_entry=$(tar -tzf "$temp_dir/$archive_name" | sed -n '1p')
+LC_ALL=C "$tar_bin" --absolute-names --quoting-style=escape -tzf \
+    "$temp_dir/$archive_name" > "$archive_listing"
+LC_ALL=C "$tar_bin" --absolute-names --quoting-style=escape -tvzf \
+    "$temp_dir/$archive_name" > "$archive_type_listing"
+first_entry=$(sed -n '1p' "$archive_listing")
 if [[ "$first_entry" != "$expected_prefix" ]]; then
     echo "unexpected archive root: $first_entry (expected $expected_prefix)" >&2
     exit 1
+fi
+
+manifest_entry="${expected_prefix}crates/krusty-cli/Cargo.toml"
+if ! LC_ALL=C awk -v prefix="$expected_prefix" -v manifest="$manifest_entry" '
+    function unsafe_path(path, normalized, count, components, index_) {
+        if (path == "" || substr(path, 1, 1) == "/" || path ~ /\\/) {
+            return 1
+        }
+
+        normalized = path
+        if (substr(normalized, length(normalized), 1) == "/") {
+            normalized = substr(normalized, 1, length(normalized) - 1)
+        }
+        count = split(normalized, components, "/")
+        for (index_ = 1; index_ <= count; index_++) {
+            if (components[index_] == "" || components[index_] == "." ||
+                    components[index_] == ".." ||
+                    components[index_] ~ /^[A-Za-z]:/) {
+                return 1
+            }
+        }
+        return 0
+    }
+
+    {
+        entry = $0
+        if (unsafe_path(entry) || seen[entry]++) {
+            invalid = 1
+            exit 1
+        }
+        if (entry == prefix) {
+            root_count++
+        } else if (index(entry, prefix) != 1) {
+            invalid = 1
+            exit 1
+        }
+        if (entry == manifest) {
+            manifest_count++
+        }
+    }
+    END {
+        if (invalid || NR == 0 || root_count != 1 || manifest_count != 1) {
+            exit 1
+        }
+    }
+' "$archive_listing"; then
+    echo "release archive contains an unsafe, ambiguous, duplicate, or out-of-root path" >&2
+    exit 1
+fi
+
+if ! LC_ALL=C awk -v prefix="$expected_prefix" -v manifest="$manifest_entry" '
+    FNR == NR {
+        paths[++path_count] = $0
+        next
+    }
+    {
+        type_count++
+        type = substr($0, 1, 1)
+        path = paths[type_count]
+        if (type != "-" && type != "d") {
+            invalid = 1
+        }
+        if (path == prefix && type != "d") {
+            invalid = 1
+        }
+        if (path == manifest && type != "-") {
+            invalid = 1
+        }
+        if (type == "-" && substr(path, length(path), 1) == "/") {
+            invalid = 1
+        }
+        if (type == "-") {
+            print path
+        }
+    }
+    END {
+        if (invalid || path_count == 0 || path_count != type_count) {
+            exit 1
+        }
+    }
+' "$archive_listing" "$archive_type_listing"; then
+    echo "release archive contains an unsafe member type or inconsistent listing" >&2
+    exit 1
+fi > "$archive_regular_listing"
+
+LC_ALL=C "$tar_bin" -xOzf "$temp_dir/$archive_name" \
+    -- "$manifest_entry" > "$source_manifest"
+source_version=$(
+    awk '
+        /^\[package\][[:space:]]*$/ { in_package = 1; next }
+        in_package && /^\[/ { exit }
+        in_package && /^[[:space:]]*version[[:space:]]*=/ {
+            value = $0
+            sub(/^[^=]*=[[:space:]]*"/, "", value)
+            sub(/"[[:space:]]*(#.*)?$/, "", value)
+            print value
+            exit
+        }
+    ' "$source_manifest"
+)
+if [[ "$source_version" != "$version" ]]; then
+    echo "release tag v$version contains krusty package version ${source_version:-<missing>}" >&2
+    exit 1
+fi
+
+if [[ -f "$repo_root/crates/krusty-mako/Cargo.toml" ]]; then
+    for required_entry in \
+        "${expected_prefix}crates/krusty-mako/Cargo.toml" \
+        "${expected_prefix}deploy/systemd/krusty-mako.service" \
+        "${expected_prefix}deploy/systemd/krusty-mako.socket" \
+        "${expected_prefix}deploy/systemd/krusty-serve.service"; do
+        if ! grep -Fqx "$required_entry" "$archive_regular_listing"; then
+            echo "release archive is missing required regular Mako file: $required_entry" >&2
+            exit 1
+        fi
+    done
 fi
 
 if command -v sha256sum >/dev/null 2>&1; then
@@ -65,12 +201,20 @@ update_file() {
             print "pkgver=" version
             next
         }
+        file_kind == "pkgbuild" && /^pkgrel=/ {
+            print "pkgrel=1"
+            next
+        }
         file_kind == "pkgbuild" && /^sha256sums=/ {
             print "sha256sums=(\047" checksum "\047)"
             next
         }
         file_kind == "srcinfo" && /^\tpkgver = / {
             print "\tpkgver = " version
+            next
+        }
+        file_kind == "srcinfo" && /^\tpkgrel = / {
+            print "\tpkgrel = 1"
             next
         }
         file_kind == "srcinfo" && /^\tsource = / {
@@ -91,8 +235,10 @@ update_file "$pkgbuild" pkgbuild
 update_file "$srcinfo" srcinfo
 
 grep -Fqx "pkgver=$version" "$pkgbuild"
+grep -Fqx "pkgrel=1" "$pkgbuild"
 grep -Fqx "sha256sums=('$checksum')" "$pkgbuild"
 grep -Fqx $'\tpkgver = '"$version" "$srcinfo"
+grep -Fqx $'\tpkgrel = 1' "$srcinfo"
 grep -Fqx $'\tsha256sums = '"$checksum" "$srcinfo"
 
 if command -v makepkg >/dev/null 2>&1; then

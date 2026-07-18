@@ -8,7 +8,7 @@
 
 ## Overview
 
-Krusty is a multi-platform AI coding assistant. A single Rust binary bundles a terminal TUI, a web server with an embedded frontend, editor integration via ACP, and an autonomous agent mode (Mako). The frontend is built with Expo (React Native) and shared across mobile (iOS/Android), web (embedded in the server binary), and desktop (Tauri wrapper).
+Krusty is a multi-platform AI coding assistant. The `krusty` binary bundles a terminal TUI, a web server with an embedded frontend, and editor integration via ACP. Autonomous Mako execution lives in the separately supervised `krusty-mako` daemon, so it survives client and HTTP-server restarts without creating a second execution owner. The frontend is built with Expo (React Native) and shared across mobile (iOS/Android), web (embedded in the server binary), and desktop (Tauri wrapper).
 
 ## Repository Layout
 
@@ -180,7 +180,13 @@ All conversations are saved locally in SQLite. Resume any session with `/load` (
 31 built-in themes including krusty (default), tokyo_night, dracula, catppuccin_mocha, gruvbox_dark, nord, one_dark, solarized_dark, synthwave_84, monokai, rosepine, and more. Switch with `/theme`.
 
 ### Auto-Updates
-Krusty checks for updates and can self-update via `/update`.
+Krusty checks for updates via `/update`. Windows can apply the standalone
+binary update in place after verifying the release SHA-256 manifest.
+Mako-bearing Unix releases distribute `krusty`, the supervised `krusty-mako`
+daemon, and service units as one set, so Krusty fails closed instead of updating
+only one binary. Use a Mako-capable package channel or the checksum-verifying
+installer after that release is published; until then, build the complete set
+from source.
 
 ## Configuration
 

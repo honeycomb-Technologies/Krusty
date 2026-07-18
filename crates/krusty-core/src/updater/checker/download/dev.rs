@@ -1,6 +1,7 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use tokio::sync::mpsc;
 
+use crate::updater::checker::apply::{discard_pending_update, write_pending_dev_marker};
 use crate::updater::checker::paths::{
     ensure_pending_update_dir, pending_update_path, pending_version_path,
 };
@@ -48,6 +49,13 @@ pub(super) async fn download_update_dev(
     ensure_pending_update_dir()?;
     let source = repo_path.join("target/release/krusty");
     let dest = pending_update_path();
+    let version_path = pending_version_path();
+    discard_pending_update(&dest, &version_path)
+        .context("failed to clear stale pending update artifacts")?;
+    let pending_cleanup =
+        scopeguard::guard((dest.clone(), version_path), |(dest, version_path)| {
+            let _ = discard_pending_update(&dest, &version_path);
+        });
 
     std::fs::copy(&source, &dest)?;
 
@@ -59,7 +67,8 @@ pub(super) async fn download_update_dev(
         std::fs::set_permissions(&dest, perms)?;
     }
 
-    let _ = std::fs::write(pending_version_path(), version);
+    write_pending_dev_marker(version)?;
+    scopeguard::ScopeGuard::into_inner(pending_cleanup);
 
     let _ = progress_tx.send(UpdateStatus::Ready {
         version: version.to_string(),

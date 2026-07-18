@@ -64,7 +64,7 @@ impl App {
             "/mcp" => self.open_mcp_browser(),
             "/hooks" => self.open_hooks_popup(),
             "/permissions" | "/perm" => self.show_permission_select(),
-            "/update" => self.start_update_check(),
+            "/update" => self.start_manual_update_check(),
             _ => {
                 self.runtime
                     .chat

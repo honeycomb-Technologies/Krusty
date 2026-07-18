@@ -442,7 +442,7 @@ fn print_help() {
            krusty-mako [daemon] [OPTIONS]\n  \
            krusty-mako ping|stats [--socket PATH] [--key PATH]\n  \
            krusty-mako shutdown [--reason TEXT] [--socket PATH] [--key PATH]\n  \
-           krusty-mako dispatch --task TEXT [--working-dir PATH] [--model ID]\n  \
+           krusty-mako dispatch --task TEXT --model ID [--working-dir PATH] [--start-at-unix-ms N]\n  \
            krusty-mako events --session ID [--after N] [--follow]\n\n\
          Options:\n  \
            --socket <PATH>       Private Unix socket path\n  \
@@ -455,6 +455,8 @@ fn print_help() {
            --model <ID>          Model for diagnostic dispatch\n  \
            --priority <NAME>     Priority for diagnostic dispatch\n  \
            --crew <SLUG>         Crew profile for diagnostic dispatch\n  \
+           --start-at-unix-ms N  Do not claim the dispatched run before this Unix time\n  \
+           --reason <TEXT>       Audit reason for a diagnostic daemon shutdown\n  \
            --session <ID>        Session for diagnostic event replay\n  \
            --after <SEQUENCE>    Replay events after this sequence\n  \
            --replay-limit <N>    Maximum replay events (default 1000)\n  \

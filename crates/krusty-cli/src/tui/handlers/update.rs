@@ -6,12 +6,22 @@
 use crate::tui::app::App;
 use crate::tui::components::Toast;
 use krusty_core::updater::{
-    check_for_updates, cleanup_pending_update, download_update, has_pending_update, UpdateStatus,
-    VERSION,
+    check_for_updates, cleanup_pending_update, download_update, has_pending_update,
+    self_update_guidance, UpdateStatus, VERSION,
 };
 use tokio::sync::mpsc;
 
 impl App {
+    /// Handle an explicit `/update` request. Unix installations must update the
+    /// complete supervised release set, so surface that guidance directly.
+    pub fn start_manual_update_check(&mut self) {
+        if let Some(guidance) = self_update_guidance() {
+            self.show_toast(Toast::warning(guidance.to_string()));
+            return;
+        }
+        self.start_update_check();
+    }
+
     /// Check if there's a pending update that was downloaded previously.
     /// Called early in startup - if we get here, apply_pending_update() was already
     /// called in main.rs. If a pending file still exists, it means apply failed,
@@ -123,6 +133,9 @@ impl App {
                     // Only show error for non-network issues
                     if !e.contains("timeout") && !e.contains("connection") {
                         tracing::warn!("Update check failed: {}", e);
+                        if self_update_guidance() != Some(e.as_str()) {
+                            self.show_toast(Toast::warning(e.clone()));
+                        }
                     }
                     self.runtime.update_status = None;
                     clear_channel = true;

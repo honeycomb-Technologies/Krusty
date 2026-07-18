@@ -55,11 +55,11 @@ jobs:
 
       - name: Build (Unix)
         if: matrix.os != 'windows-latest'
-        run: cargo build --release --target ${{ matrix.target }} -p krusty -p krusty-mako
+        run: cargo build --release --locked --target ${{ matrix.target }} -p krusty -p krusty-mako
 
       - name: Build (Windows)
         if: matrix.os == 'windows-latest'
-        run: cargo build --release --target ${{ matrix.target }} -p krusty
+        run: cargo build --release --locked --target ${{ matrix.target }} -p krusty
 
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
@@ -142,10 +142,23 @@ jobs:
           echo "Release tags must be protected before publishing artifacts." >&2
           exit 1
 
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
       - name: Download all artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir artifacts
+
+      - name: Render and validate Homebrew formula
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          bash .github/homebrew/render-formula.sh \
+            "$TAG_NAME" \
+            artifacts \
+            artifacts/homebrew/krusty.rb
 
       - name: Create Release
         env:
@@ -158,10 +171,95 @@ jobs:
             exit 1
           fi
 
+          declare -A expected_by_name=()
+          desktop_deb_count=0
+          desktop_rpm_count=0
+          for asset in "${release_assets[@]}"; do
+            asset_name=${asset##*/}
+            if [[ -n "${expected_by_name[$asset_name]+present}" ]]; then
+              echo "Release assets contain duplicate basename: $asset_name" >&2
+              exit 1
+            fi
+            expected_by_name[$asset_name]=$asset
+            case "$asset_name" in
+              krusty-aarch64-apple-darwin.tar.gz | \
+              krusty-aarch64-apple-darwin.tar.gz.sha256 | \
+              krusty-x86_64-apple-darwin.tar.gz | \
+              krusty-x86_64-apple-darwin.tar.gz.sha256 | \
+              krusty-aarch64-unknown-linux-gnu.tar.gz | \
+              krusty-aarch64-unknown-linux-gnu.tar.gz.sha256 | \
+              krusty-x86_64-unknown-linux-gnu.tar.gz | \
+              krusty-x86_64-unknown-linux-gnu.tar.gz.sha256 | \
+              krusty-x86_64-pc-windows-msvc.zip | \
+              krusty-x86_64-pc-windows-msvc.zip.sha256 | \
+              krusty.rb)
+                ;;
+              *.deb)
+                desktop_deb_count=$((desktop_deb_count + 1))
+                ;;
+              *.rpm)
+                desktop_rpm_count=$((desktop_rpm_count + 1))
+                ;;
+              *)
+                echo "Unexpected release asset: $asset_name" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+          required_assets=(
+            krusty-aarch64-apple-darwin.tar.gz
+            krusty-aarch64-apple-darwin.tar.gz.sha256
+            krusty-x86_64-apple-darwin.tar.gz
+            krusty-x86_64-apple-darwin.tar.gz.sha256
+            krusty-aarch64-unknown-linux-gnu.tar.gz
+            krusty-aarch64-unknown-linux-gnu.tar.gz.sha256
+            krusty-x86_64-unknown-linux-gnu.tar.gz
+            krusty-x86_64-unknown-linux-gnu.tar.gz.sha256
+            krusty-x86_64-pc-windows-msvc.zip
+            krusty-x86_64-pc-windows-msvc.zip.sha256
+            krusty.rb
+          )
+          for asset_name in "${required_assets[@]}"; do
+            if [[ -z "${expected_by_name[$asset_name]+present}" ]]; then
+              echo "Required release asset is missing: $asset_name" >&2
+              exit 1
+            fi
+          done
+          if [[ "$desktop_deb_count" -ne 1 || "$desktop_rpm_count" -ne 1 ]]; then
+            echo "Expected exactly one desktop .deb and one .rpm asset." >&2
+            exit 1
+          fi
+
           if gh release view "$TAG_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG_NAME" "${release_assets[@]}" \
-              --repo "$GITHUB_REPOSITORY" \
-              --clobber
+            existing_dir=$(mktemp -d)
+            trap 'rm -rf -- "$existing_dir"' EXIT
+            gh release download "$TAG_NAME" --repo "$GITHUB_REPOSITORY" --dir "$existing_dir"
+            mapfile -t existing_assets < <(find "$existing_dir" -type f -print | sort)
+            if [[ "${#existing_assets[@]}" -ne "${#release_assets[@]}" ]]; then
+              echo "Existing release asset set differs; protected-tag assets are immutable." >&2
+              exit 1
+            fi
+            declare -A existing_by_name=()
+            for asset in "${existing_assets[@]}"; do
+              asset_name=${asset##*/}
+              if [[ -n "${existing_by_name[$asset_name]+present}" ]]; then
+                echo "Existing release contains duplicate basename: $asset_name" >&2
+                exit 1
+              fi
+              existing_by_name[$asset_name]=$asset
+            done
+            for asset_name in "${!expected_by_name[@]}"; do
+              if [[ -z "${existing_by_name[$asset_name]+present}" ]]; then
+                echo "Existing release is missing immutable asset: $asset_name" >&2
+                exit 1
+              fi
+              if ! cmp -s "${expected_by_name[$asset_name]}" "${existing_by_name[$asset_name]}"; then
+                echo "Existing release asset differs and will not be replaced: $asset_name" >&2
+                exit 1
+              fi
+            done
+            echo "Existing release assets are byte-identical; no upload required."
           else
             gh release create "$TAG_NAME" "${release_assets[@]}" \
               --repo "$GITHUB_REPOSITORY" \

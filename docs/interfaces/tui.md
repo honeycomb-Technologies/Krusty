@@ -137,7 +137,7 @@ The command system maps input prefixed with `/` to application actions. Commands
 | `/mcp` | Browse MCP servers |
 | `/hooks` | Configure tool execution hooks |
 | `/permissions` | Toggle supervised/autonomous mode |
-| `/update` | Check for updates |
+| `/update` | Check for updates; Unix upgrades use the package manager or verified installer so Krusty and Mako remain aligned |
 
 Unknown commands produce a system message. Each command either manipulates state directly (e.g., `/clear`), opens a popup (e.g., `/model`), or kicks off an async operation (e.g., `/init`).
 

@@ -4,27 +4,32 @@ This document explains how Krusty is built, tested, and distributed across all o
 
 ## Rust workspace
 
-The Rust side of Krusty is organized as a Cargo workspace with eight Krusty crates plus the `grok-auth` support crate. The primary runtime boundaries are:
+The Rust side of Krusty is organized as a Cargo workspace with ten Krusty crates plus the `grok-auth` support crate. The primary runtime boundaries are:
 
 - **krusty-cli** (`crates/krusty-cli`) -- The terminal application with the TUI. This is the default member of the workspace, so a bare `cargo build` compiles it. It depends on both `krusty-core` and `krusty-server`.
 - **krusty-core** (`crates/krusty-core`) -- The core library containing AI provider integrations, tool implementations, the ACP/MCP protocol layers, WASM extension hosting, and local storage. Everything shared between the CLI and the server lives here.
 - **krusty-server** (`crates/krusty-server`) -- The self-hosted API server built on Axum. It serves the REST/WebSocket APIs used by the mobile and desktop clients, and optionally embeds the web frontend (more on that below).
+- **krusty-mako** (`crates/krusty-mako`) -- The independently supervised autonomous execution owner, durable scheduler, recovery loop, and event-log service.
+- **krusty-mako-protocol** (`crates/krusty-mako-protocol`) -- The typed, authenticated local protocol shared by the server, daemon, and control clients.
 - **krusty-client** and **krusty-client-state** -- Typed transport and shared client-state boundaries.
 - **krusty-desktop**, **krusty-mobile**, and **krusty-mobile-ui** -- Native desktop/mobile presentation crates that consume the same core contracts.
 
-The workspace root `Cargo.toml` sets a few important release profile options: link-time optimization (`lto = true`), a single codegen unit (`codegen-units = 1`), and symbol stripping (`strip = true`). These produce smaller, faster release binaries at the cost of longer compile times. The workspace also defines shared lint rules so all three crates enforce the same code quality standards through Clippy.
+The workspace root `Cargo.toml` sets a few important release profile options: link-time optimization (`lto = true`), a single codegen unit (`codegen-units = 1`), and symbol stripping (`strip = true`). These produce smaller, faster release binaries at the cost of longer compile times. The workspace also defines shared lint rules so all workspace crates enforce the same code quality standards through Clippy.
 
-The eight Krusty crates and desktop bundle share version `0.7.3` and edition 2021.
+The product-facing Krusty crates and desktop bundle currently share version
+`0.7.3` and edition 2021. The internal Mako daemon/protocol crates have their
+own `0.1.0` package versions; release tags are validated against the `krusty`
+package version.
 
 ## Build commands
 
 Four commands must pass before any code is committed or released:
 
 ```bash
-cargo fmt --all              # Format all crates
-cargo clippy --workspace -- -D warnings   # Lint with warnings as errors
-cargo build --workspace      # Compile all three crates
-cargo test --workspace       # Run all tests
+cargo check --workspace                 # Compile the workspace
+cargo test --workspace                  # Run all tests
+cargo clippy --workspace -- -D warnings # Lint with warnings as errors
+cargo fmt --all                         # Format all crates
 ```
 
 `cargo fmt` enforces consistent formatting. `cargo clippy` catches common mistakes and enforces the workspace lint configuration, which warns on dead code, unused imports, redundant clones, and unnecessary wraps. The build and test steps ensure everything compiles and the test suite passes.
@@ -78,7 +83,7 @@ Each job first builds the Expo web frontend from `apps/mobile` (so it can be emb
 
 **2. Desktop Linux bundles.** A separate job builds the Tauri desktop shell on Ubuntu, producing `.deb` and `.rpm` packages from `apps/desktop/shell`.
 
-**3. Create release.** Once both build stages complete, all artifacts are downloaded and a GitHub Release is created with auto-generated release notes. The release includes the CLI binaries for all five platforms plus the desktop Linux packages.
+**3. Create release.** Once both build stages complete, all artifacts are downloaded. CI requires the protected tag version to equal the `krusty` Cargo package version, verifies all five platform archive checksum manifests against their archives, renders `.github/homebrew/krusty.rb` with that version and the four Unix hashes, rejects remaining template tokens, and checks the generated formula with `ruby -c`. The publisher allowlists the exact five platform archive/manifest pairs, one `.deb`, one `.rpm`, and the formula. A GitHub Release is then created with auto-generated release notes. An existing protected-tag release is accepted only when every asset is byte-identical; CI never clobbers an asset at an immutable release URL.
 
 The publish job fails closed unless GitHub reports the release tag as protected (`github.ref_protected == true`). The repository also maintains an active `Protect release tags` ruleset. Do not push a `v*` tag merely to test the workflow; create one only for an approved, fully verified release.
 
@@ -92,12 +97,20 @@ The fastest way to install Krusty is the one-liner:
 curl -fsSL https://raw.githubusercontent.com/honeycomb-Technologies/Krusty/main/install.sh | sh
 ```
 
-The script (`install.sh`) detects the host OS and architecture, fetches the latest release from the GitHub API, downloads the correct archive, verifies its SHA-256 checksum when available, extracts the binary, and copies it to `~/.local/bin` (configurable via `INSTALL_DIR`). It supports Linux (x86_64, aarch64), macOS (Intel and Apple Silicon), and Windows under MSYS/Cygwin. If the install directory is not already in `PATH`, it prints the line you need to add to your shell config.
+The script (`install.sh`) detects the host OS and architecture, fetches the latest release from the GitHub API, downloads the exact archive and its required SHA-256 manifest, verifies the manifest record and archive before extraction, and rejects unsafe archive paths or entry types. On Unix it stages an immutable release containing `krusty`, `krusty-mako`, and the service units, then switches one managed release pointer; a service reload/restart failure restores the prior binary and unit set. Existing direct installs are retained as a rollback release, and releases are not pruned automatically. On default Linux installs the units are linked into `~/.config/systemd/user`; custom `INSTALL_DIR` values deliberately skip automatic unit management. Windows remains a verified standalone-binary install. The script supports Linux (x86_64, aarch64), macOS (Intel and Apple Silicon), and Windows under MSYS/Cygwin. If the install directory is not already in `PATH`, it prints the line you need to add to your shell config.
+
+Installer rollback does not reverse a database migration performed by a briefly
+started service. Back up and verify the database before a production upgrade,
+and exercise the offline installer fixture after changing installer logic:
+
+```bash
+sh install.sh --self-test
+```
 
 You can pin a specific version by setting `VERSION` before running the script:
 
 ```bash
-VERSION=v0.7.3 curl -fsSL ... | sh
+curl -fsSL ... | VERSION=v0.7.3 sh
 ```
 
 ## Self-hosted systemd service
@@ -126,9 +139,10 @@ confirm the three tracked unit states, an authenticated Mako diagnostics/API
 request through the server, and a restart-recovery test; a successful Cargo
 build alone is not proof that autonomous work is live.
 
-Release archives include these user units, the shell installer places them in
-`~/.config/systemd/user`, and the AUR package places them in
-`/usr/lib/systemd/user`. The default hardening grants writes under `~/Work` and
+Mako-bearing release archives include these user units. The shell installer
+links them into `~/.config/systemd/user`, and the future Mako-bearing AUR package
+places them in `/usr/lib/systemd/user`. The default hardening grants writes
+under `~/Work` and
 Krusty's state/cache directories; add a user-service drop-in with an additional
 `ReadWritePaths=` entry when autonomous sessions use another project root.
 Homebrew exposes `krusty-mako` through `brew services`; the HTTP server remains
@@ -150,17 +164,23 @@ macOS and Linux users with Homebrew can install from the tap:
 brew install BurgessTG/tap/krusty
 ```
 
-The formula (`.github/homebrew/krusty.rb`) selects the correct binary archive based on CPU architecture. It supports macOS ARM64, macOS x86_64, Linux ARM64, and Linux x86_64. The version, URLs, and SHA-256 checksums use placeholders that are updated by CI automation on each release.
+The formula template (`.github/homebrew/krusty.rb`) selects the correct binary archive based on CPU architecture. It supports macOS ARM64, macOS x86_64, Linux ARM64, and Linux x86_64. Release CI deterministically renders the version, URLs, and SHA-256 checksums from the protected tag and its four verified Unix archives, then attaches the fully rendered `krusty.rb` formula to the GitHub Release.
 
-### AUR package
+This repository does not automatically write to `BurgessTG/homebrew-tap`, so the public tap can trail the latest GitHub Release until a maintainer publishes the generated formula as `Formula/krusty.rb`. That publication is a separate reviewed step. Any future cross-repository automation must be opted into with an explicitly configured token scoped to the tap; the release workflow does not require or assume that secret.
 
-Arch Linux users can install from the AUR. The `PKGBUILD` (`aur/PKGBUILD`)
-downloads the source tarball for a given release tag, verifies its pinned SHA-256
-checksum, builds from source using Cargo with the stable toolchain, runs the test
-suite during the `check()` phase, and installs the Krusty and Mako binaries,
-their systemd user units, and the license. It supports both `x86_64` and
-`aarch64` architectures. Runtime dependencies are `gcc-libs` and `openssl`; the
-only build dependency is `cargo`.
+### AUR recipe
+
+The repository contains a prepared AUR recipe, but `krusty` is not currently
+published in the AUR. The checked metadata targets legacy release `v0.7.3`,
+which predates the dedicated Mako daemon and therefore installs `krusty` only.
+For the next Mako-bearing stable release, the conditional `PKGBUILD`
+(`aur/PKGBUILD`) will build and install both Krusty and Mako plus their systemd
+user units. It downloads the source tarball for the release tag, verifies its
+pinned SHA-256 checksum, builds from source using Cargo with the stable
+toolchain, runs the test suite during the `check()` phase, and installs the
+license. It supports both `x86_64` and `aarch64` architectures. Runtime
+dependencies are `gcc-libs` and `openssl`; the only build dependency is
+`cargo`.
 
 GitHub does not publish the versioned source archive until its tag exists, so
 AUR metadata is updated after the protected release tag is published. Run:
@@ -172,11 +192,13 @@ makepkg --verifysource -f
 makepkg --printsrcinfo | diff -u .SRCINFO -
 ```
 
-The updater downloads over HTTPS, validates the archive's top-level directory,
-computes SHA-256 locally, and updates both `PKGBUILD` and `.SRCINFO`. Review and
-publish those two files to the AUR repository. Never replace the checksum with
-`SKIP`; if a release tag or its archive changes, checksum verification must fail
-until a maintainer explicitly reviews and updates the package metadata.
+The updater accepts stable versions only, downloads over HTTPS, validates every
+archive entry stays beneath the expected top-level directory, verifies the
+source's `krusty` Cargo version matches the requested tag, computes SHA-256
+locally, and updates both `PKGBUILD` and `.SRCINFO`. Review and publish those two
+files to the AUR repository. Never replace the checksum with `SKIP`; if a
+release tag or its archive changes, checksum verification must fail until a
+maintainer explicitly reviews and updates the package metadata.
 
 ## Cross-compilation
 

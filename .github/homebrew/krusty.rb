@@ -1,8 +1,9 @@
 # Homebrew formula for Krusty
 # To use: brew install BurgessTG/tap/krusty
 #
-# This formula is auto-updated by GitHub Actions on each release.
-# Create a repo called 'homebrew-tap' and add this file as Formula/krusty.rb
+# Release CI renders this template and attaches krusty.rb to the GitHub Release.
+# Publishing Formula/krusty.rb to BurgessTG/homebrew-tap is a separate maintainer
+# step unless an explicitly configured, repository-scoped token enables it.
 
 class Krusty < Formula
   desc "Terminal-based AI coding assistant powered by Claude"

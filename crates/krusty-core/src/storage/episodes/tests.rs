@@ -13,6 +13,15 @@ fn setup() -> (TempDir, Database) {
 fn create_session(db: &Database, user_id: Option<&str>, project_dir: &str) -> String {
     let id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
+    if let Some(user_id) = user_id {
+        db.conn()
+            .execute(
+                "INSERT OR IGNORE INTO users (id, email, license_tier)
+                 VALUES (?1, ?2, 'free')",
+                rusqlite::params![user_id, format!("{user_id}@episodes.test")],
+            )
+            .expect("user");
+    }
     db.conn()
         .execute(
             "INSERT INTO sessions (
@@ -25,6 +34,17 @@ fn create_session(db: &Database, user_id: Option<&str>, project_dir: &str) -> St
     id
 }
 
+fn create_message(db: &Database, session_id: &str, role: &str, content: &str, now: &str) -> i64 {
+    db.conn()
+        .execute(
+            "INSERT INTO messages (session_id, role, content, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![session_id, role, content, now],
+        )
+        .expect("message");
+    db.conn().last_insert_rowid()
+}
+
 #[test]
 fn search_is_user_and_project_scoped() {
     let (_temp, db) = setup();
@@ -35,20 +55,16 @@ fn search_is_user_and_project_scoped() {
     let store = EpisodeStore::new(&db);
     let now = Utc::now().to_rfc3339();
 
-    for (id, session, text) in [
-        (1, &alice, "the mako scheduler uses leases"),
-        (2, &bob, "the mako scheduler belongs to bob"),
-        (3, &alice_other, "the beta scheduler is separate"),
-        (4, &local, "the local scheduler is unowned"),
+    for (session, text) in [
+        (&alice, "the mako scheduler uses leases"),
+        (&bob, "the mako scheduler belongs to bob"),
+        (&alice_other, "the beta scheduler is separate"),
+        (&local, "the local scheduler is unowned"),
     ] {
+        let content = serde_json::json!([{"type": "text", "text": text}]).to_string();
+        let message_id = create_message(&db, session, "user", &content, &now);
         store
-            .record_message(
-                session,
-                id,
-                "user",
-                &serde_json::json!([{"type": "text", "text": text}]).to_string(),
-                &now,
-            )
+            .record_message(session, message_id, "user", &content, &now)
             .expect("episode");
     }
 
@@ -77,13 +93,14 @@ fn record_is_idempotent_and_excludes_non_text_data() {
         {"type": "tool_result", "tool_use_id": "t1", "output": "raw secret"}
     ])
     .to_string();
+    let message_id = create_message(&db, &session, "assistant", &content, &now);
 
     let first = store
-        .record_message(&session, 1, "assistant", &content, &now)
+        .record_message(&session, message_id, "assistant", &content, &now)
         .expect("first")
         .expect("indexed");
     let second = store
-        .record_message(&session, 1, "assistant", &content, &now)
+        .record_message(&session, message_id, "assistant", &content, &now)
         .expect("second")
         .expect("indexed");
     assert_eq!(first, second);

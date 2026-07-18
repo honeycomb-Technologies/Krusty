@@ -673,8 +673,10 @@ async fn main() -> Result<()> {
         .init();
 
     // Apply any pending update before starting TUI
-    if let Ok(Some(version)) = krusty_core::updater::apply_pending_update() {
-        tracing::info!("Applied pending update to v{}", version);
+    match krusty_core::updater::apply_pending_update() {
+        Ok(Some(version)) => tracing::info!("Applied pending update to v{}", version),
+        Ok(None) => {}
+        Err(error) => tracing::warn!("Pending update was not applied: {}", error),
     }
 
     match cli.command {
