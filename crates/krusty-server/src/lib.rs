@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use axum::{
     body::Body,
     extract::{DefaultBodyLimit, State},
@@ -57,6 +58,7 @@ type DelegatedStateMap = HashMap<String, Vec<types::DelegatedToolStateResponse>>
 pub mod apns;
 pub mod auth;
 pub mod error;
+pub mod mako_execution_host;
 pub mod mako_runtime;
 pub mod notifications;
 pub(crate) mod oauth_flow;
@@ -263,12 +265,67 @@ fn register_autonomous_classifier_hook(
     tool_registry_inner.add_pre_hook(Arc::new(hook));
 }
 
-/// Build the Axum router with all routes and embedded web assets.
-pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppState)> {
-    let http_policy = ServerHttpPolicy::default();
-    let db_path = paths::config_dir().join("krusty.db");
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum MakoRuntimeMode {
+    DaemonProxy,
+    ExecutionHost,
+}
+
+async fn initialize_mcp_manager(
+    mode: MakoRuntimeMode,
+    working_dir: &std::path::Path,
+    tool_registry: &ToolRegistry,
+) -> Arc<McpManager> {
+    let manager = Arc::new(McpManager::new(working_dir.to_path_buf()));
+    if matches!(mode, MakoRuntimeMode::ExecutionHost) {
+        // The daemon can execute runs for many frozen project roots. Loading
+        // `.mcp.json` from its launch directory would expose the wrong remote
+        // tools to every project, while HTTP-process connect/trust state cannot
+        // safely authorize a different process. Keep autonomous MCP fail-closed
+        // until the daemon has canonical project+config trust and child/server
+        // lifecycle ownership.
+        tracing::info!(
+            working_dir = %working_dir.display(),
+            "Skipping cwd-scoped MCP bootstrap in the Mako execution host"
+        );
+        return manager;
+    }
+
+    if let Err(error) = manager.load_config().await {
+        tracing::warn!(error = %error, "Failed to load MCP config");
+    } else if let Err(error) = manager.connect_all().await {
+        tracing::warn!(error = %error, "Failed to connect MCP servers");
+    }
+    krusty_core::mcp::tool::register_mcp_tools(Arc::clone(&manager), tool_registry).await;
+    manager
+}
+
+fn initialize_remote_access(
+    mode: MakoRuntimeMode,
+    db_path: &std::path::Path,
+) -> anyhow::Result<remote_access::RemoteAccessConfig> {
+    match mode {
+        MakoRuntimeMode::DaemonProxy => remote_access::RemoteAccessConfig::load_or_create(db_path),
+        MakoRuntimeMode::ExecutionHost => {
+            Ok(remote_access::RemoteAccessConfig::disabled_ephemeral())
+        }
+    }
+}
+
+/// Build the shared agent/tool state used by either the HTTP process or the
+/// standalone Mako executor. Only the HTTP process connects to the daemon
+/// control plane; the executor deliberately receives an embedded manager so
+/// it can run the agent core without recursively calling its own socket.
+pub(crate) async fn build_app_state(
+    config: &ServerConfig,
+    mako_mode: MakoRuntimeMode,
+    database_path: Option<PathBuf>,
+) -> anyhow::Result<AppState> {
+    let db_path = database_path.unwrap_or_else(|| paths::config_dir().join("krusty.db"));
     let _db = Database::new(&db_path)?;
-    reconcile_transient_agent_states(&db_path)?;
+    if matches!(mako_mode, MakoRuntimeMode::DaemonProxy) {
+        reconcile_transient_agent_states(&db_path)?;
+    }
 
     let credential_store_inner = CredentialStore::load().unwrap_or_default();
     let credential_store = Arc::new(RwLock::new(credential_store_inner.clone()));
@@ -311,17 +368,9 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
         tracing::info!("Registered unified agent sub-agent tool");
     }
 
-    // MCP server connections + tool registration
-    let mcp_manager = Arc::new(McpManager::new(config.working_dir.clone()));
-    if let Err(e) = mcp_manager.load_config().await {
-        tracing::warn!("Failed to load MCP config: {}", e);
-    } else if let Err(e) = mcp_manager.connect_all().await {
-        tracing::warn!("Failed to connect MCP servers: {}", e);
-    }
-    // Register MCP tools so they're visible to the AI
-    krusty_core::mcp::tool::register_mcp_tools(mcp_manager.clone(), &tool_registry).await;
-    let mcp_tool_count = tool_registry.get_ai_tools_all().await.len();
-    tracing::info!("Tool registry initialized with {} tools", mcp_tool_count);
+    let mcp_manager = initialize_mcp_manager(mako_mode, &config.working_dir, &tool_registry).await;
+    let tool_count = tool_registry.get_ai_tools_all().await.len();
+    tracing::info!("Tool registry initialized with {} tools", tool_count);
 
     let push_service =
         match push::PushService::init(&paths::vapid_key_path(), Arc::new(db_path.clone())) {
@@ -338,9 +387,13 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
     if apns_service.is_some() {
         tracing::info!("APNs service initialized");
     }
-    let remote_access = Arc::new(RwLock::new(
-        remote_access::RemoteAccessConfig::load_or_create(&db_path)?,
-    ));
+    let remote_access = Arc::new(RwLock::new(initialize_remote_access(mako_mode, &db_path)?));
+    let mako_runtime = match mako_mode {
+        MakoRuntimeMode::DaemonProxy => mako_runtime::MakoRuntimeManager::daemon_from_discovered()
+            .await
+            .context("connecting krusty-server to the Mako daemon")?,
+        MakoRuntimeMode::ExecutionHost => mako_runtime::MakoRuntimeManager::execution_host(),
+    };
 
     let state = AppState {
         server_port: config.port,
@@ -368,13 +421,23 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
         push_service,
         apns_service,
         oauth_flows: Arc::new(Mutex::new(HashMap::new())),
-        mako_runtime: mako_runtime::MakoRuntimeManager::new(),
+        mako_runtime,
     };
 
-    state
-        .mako_runtime
-        .restore_persisted_sessions(state.clone())
-        .await?;
+    if matches!(mako_mode, MakoRuntimeMode::DaemonProxy) {
+        state
+            .mako_runtime
+            .restore_persisted_sessions(state.clone())
+            .await?;
+    }
+
+    Ok(state)
+}
+
+/// Build the Axum router with all routes and embedded web assets.
+pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppState)> {
+    let http_policy = ServerHttpPolicy::default();
+    let state = build_app_state(config, MakoRuntimeMode::DaemonProxy, None).await?;
 
     let cors = http_policy.cors_layer();
 
@@ -558,8 +621,11 @@ struct HealthResponse {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use axum::async_trait;
     use serde_json::{json, Value};
+    use tempfile::TempDir;
 
     use krusty_core::tools::registry::{
         PermissionMode, Tool, ToolContext, ToolRegistry, ToolResult,
@@ -568,6 +634,53 @@ mod tests {
     use super::*;
 
     struct TestWriteTool;
+
+    #[tokio::test]
+    async fn execution_host_does_not_load_daemon_cwd_mcp_config() {
+        let temp = TempDir::new().expect("temporary daemon root should exist");
+        fs::write(
+            temp.path().join(".mcp.json"),
+            r#"{
+                "mcpServers": {
+                    "wrong-project": {
+                        "type": "url",
+                        "url": "http://127.0.0.1:9/mcp"
+                    }
+                }
+            }"#,
+        )
+        .expect("daemon-root MCP config should be written");
+        let registry = ToolRegistry::new();
+
+        let manager =
+            initialize_mcp_manager(MakoRuntimeMode::ExecutionHost, temp.path(), &registry).await;
+
+        assert!(manager.list_servers().await.is_empty());
+        assert!(registry
+            .get_ai_tools_all()
+            .await
+            .iter()
+            .all(|tool| !tool.name.starts_with("mcp__")));
+    }
+
+    #[test]
+    fn execution_host_remote_access_is_ephemeral_and_does_not_write_preferences() {
+        use krusty_core::storage::Preferences;
+
+        let temp = TempDir::new().expect("temporary daemon root should exist");
+        let db_path = temp.path().join("krusty.db");
+        let _db = Database::new(&db_path).expect("test database should initialize");
+
+        let config = initialize_remote_access(MakoRuntimeMode::ExecutionHost, &db_path)
+            .expect("execution host placeholder should initialize");
+
+        assert!(!config.enabled);
+        assert!(config.token.is_empty());
+        let preferences =
+            Preferences::new(Database::new(&db_path).expect("test database should reopen"));
+        assert!(preferences.get("server_remote_access_enabled").is_none());
+        assert!(preferences.get("server_remote_access_token").is_none());
+    }
 
     #[async_trait]
     impl Tool for TestWriteTool {

@@ -160,7 +160,16 @@ The auth middleware in `auth.rs` takes a layered approach. Local requests from l
 
 Remote requests require a bearer token. On first startup, the server generates a random token (`kr_remote_<uuid>`) and stores it in the database. This token is shown in the server status API and can be rotated. Clients accessing the server over a network (including Tailscale) must include `Authorization: Bearer <token>` on every request.
 
-For multi-tenant scoping, clients send `X-User-Id` and optionally `X-Workspace-Dir` headers. The middleware resolves these into an `AuthenticatedUser` that gets attached to the request extensions. Route handlers extract this via the `CurrentUser` extractor, which provides the user ID and home directory for ownership checks and path scoping.
+Loopback development clients connecting to a localhost host may send
+`X-User-Id` and optionally `X-Workspace-Dir`. The middleware resolves these
+into an `AuthenticatedUser` for ownership checks and path scoping.
+
+The remote-access token is a server-wide, single-tenant capability rather than
+a per-user credential. Remote requests carrying either identity header are
+rejected, even when the bearer token is valid, so a token holder cannot choose
+another session owner. Deployments that need multiple remote users must add a
+server-side identity-provider integration that binds each verified credential
+to its principal; an untrusted forwarded header is insufficient.
 
 ## First-Run Setup
 

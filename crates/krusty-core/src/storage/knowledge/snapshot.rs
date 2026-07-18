@@ -54,8 +54,8 @@ pub fn refresh_current_snapshot(
 ) -> Result<Option<KnowledgeSnapshot>> {
     let memory_store = MemoryStore::new(Database::new(db_path)?);
     let report_store = ReportStore::new(Database::new(db_path)?);
-    let memories = memory_store.list(project_dir, user_id);
-    let reports = report_store.list_reports_for_user(project_dir, user_id)?;
+    let memories = memory_store.list_for_exact_owner(project_dir, user_id);
+    let reports = report_store.list_reports_for_exact_owner(project_dir, user_id)?;
     let (recent_runs, task_outcomes) = load_snapshot_activity(db_path, project_dir, user_id)?;
 
     let content = build_current_snapshot_content(

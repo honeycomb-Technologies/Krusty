@@ -6,6 +6,7 @@ description = "Self-hosted Krusty API server library"
 
 [dependencies]
 krusty-core = { path = "../krusty-core" }
+krusty-mako-protocol = { path = "../krusty-mako-protocol" }
 
 tokio = { version = "1.40", features = ["full"] }
 
@@ -23,6 +24,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 tokio-stream = "0.1"
 futures = "0.3"
+fs2 = "0.4"
 
 dirs = "6.0"
 regex = "1.10"
@@ -34,11 +36,14 @@ portable-pty = "0.8"
 # Web Push notifications (pure Rust, no OpenSSL — matches rustls stack)
 web-push-native = "0.4"
 base64ct = { version = "1", features = ["alloc"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
 # APNs (Apple Push Notification service) — JWT auth via ES256
 jsonwebtoken = "9"
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["rustls-tls-webpki-roots", "connect"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [lints]
 workspace = true

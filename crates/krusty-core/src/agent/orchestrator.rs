@@ -1530,7 +1530,7 @@ fn inject_pending_steering(
             content: steering.content,
         };
         conversation.push(message.clone());
-        if steering.pending_id.is_none() {
+        if steering.pending_id.is_none() && !steering.already_persisted {
             save_message(db_path, session_id, &message);
         }
         injected.push(InjectedSteering {
@@ -1783,6 +1783,65 @@ mod tests {
                 .count(),
             1,
             "steering must persist exactly once"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn externally_persisted_user_message_is_injected_without_duplicate_history(
+    ) -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.path().join("krusty.db");
+        let manager = SessionManager::new(Database::new(&db_path)?);
+        let session_id = manager.create_session("persisted input", Some("test-model"), None)?;
+        let initial_user = ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "start".into(),
+            }],
+        };
+        let follow_up = vec![Content::Text {
+            text: "already committed by daemon".into(),
+        }];
+        manager.save_message(
+            &session_id,
+            "user",
+            &serde_json::to_string(&initial_user.content)?,
+        )?;
+        manager.save_message(&session_id, "user", &serde_json::to_string(&follow_up)?)?;
+
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        input_tx.send(LoopInput::PersistedUserMessage {
+            content: follow_up.clone(),
+        })?;
+        let mut inbox = LoopInputInbox::new(input_rx);
+        inbox.collect_ready();
+        let mut conversation = vec![initial_user];
+        let mut ledger = ContextLedger::from_conversation(&conversation);
+
+        let injected = inject_pending_steering(
+            &mut inbox,
+            &mut conversation,
+            &mut ledger,
+            &db_path,
+            &session_id,
+        );
+
+        assert_eq!(injected.len(), 1);
+        assert_eq!(conversation.len(), 2);
+        assert_eq!(
+            serde_json::to_value(&conversation[1].content)?,
+            serde_json::to_value(&follow_up)?
+        );
+        let stored = manager.load_session_messages(&session_id)?;
+        assert_eq!(stored.len(), 2, "live injection must not save a third row");
+        assert_eq!(
+            stored
+                .iter()
+                .filter(|(_, content)| content.contains("already committed by daemon"))
+                .count(),
+            1,
+            "the daemon-owned canonical message must remain exactly once"
         );
         Ok(())
     }

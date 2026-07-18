@@ -237,3 +237,91 @@ fn test_clear_stale_transient_recovery_states_preserves_pending_interactions() {
         .expect("Failed to load pending session")
         .is_some());
 }
+
+#[test]
+fn startup_repair_preserves_daemon_owned_mako_state() {
+    use crate::agent::loop_events::LoopStopReason;
+    use crate::storage::{
+        PartialAssistantState, RecoveryDecision, RecoveryNonResumableReason, RecoveryStatus,
+        SessionRecoveryState, SessionType, WorkspaceMode,
+    };
+
+    let (db, _temp) = create_test_db();
+    let manager = SessionManager::new(db);
+    let code_session = manager
+        .create_session("Code", Some("gpt-5"), Some("/tmp"))
+        .expect("create code session");
+    let chat_session = manager
+        .create_session_for_user_with_config(
+            "Chat",
+            Some("gpt-5"),
+            Some("/tmp"),
+            Some("/tmp"),
+            WorkspaceMode::Selected,
+            None,
+            None,
+            SessionType::Chat,
+        )
+        .expect("create chat session");
+    let mako_session = manager
+        .create_session_for_user_with_config(
+            "Mako",
+            Some("gpt-5"),
+            Some("/tmp"),
+            Some("/tmp"),
+            WorkspaceMode::Selected,
+            None,
+            None,
+            SessionType::Mako,
+        )
+        .expect("create Mako session");
+
+    let stale_recovery = SessionRecoveryState::new(
+        RecoveryStatus::Interrupted,
+        Some(LoopStopReason::ProviderError),
+        None,
+        PartialAssistantState::default(),
+        RecoveryDecision::NonResumable {
+            reason: RecoveryNonResumableReason::EmptyConversation,
+        },
+    );
+    for session_id in [&code_session, &chat_session, &mako_session] {
+        manager
+            .set_agent_state(session_id, "streaming")
+            .expect("set active state");
+        manager
+            .update_recovery_state(session_id, &stale_recovery)
+            .expect("persist stale recovery");
+    }
+
+    assert_eq!(
+        manager
+            .reset_transient_agent_states()
+            .expect("repair transient states"),
+        2
+    );
+    assert_eq!(
+        manager
+            .clear_stale_transient_recovery_states()
+            .expect("clear stale recovery"),
+        2
+    );
+
+    for session_id in [&code_session, &chat_session] {
+        assert_eq!(manager.get_agent_state(session_id).unwrap().state, "idle");
+        assert!(manager
+            .load_recovery_state(session_id)
+            .expect("load repaired recovery")
+            .is_none());
+    }
+    assert_eq!(
+        manager.get_agent_state(&mako_session).unwrap().state,
+        "streaming"
+    );
+    assert_eq!(
+        manager
+            .load_recovery_state(&mako_session)
+            .expect("load Mako recovery"),
+        Some(stale_recovery)
+    );
+}

@@ -10,6 +10,7 @@ mod credential_loading;
 pub mod device_flow;
 mod grok;
 pub mod hosted_browser_flow;
+mod http;
 pub mod openai_device_flow;
 pub mod pkce;
 pub mod providers;

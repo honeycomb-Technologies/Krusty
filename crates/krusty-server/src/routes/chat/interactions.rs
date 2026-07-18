@@ -2,33 +2,41 @@ use std::convert::Infallible;
 
 use axum::{
     extract::State,
-    response::sse::{Event, Sse},
+    http::HeaderMap,
+    response::sse::{Event, KeepAlive, Sse},
     Json,
 };
-use futures::stream::Stream;
 use serde_json::json;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 use krusty_core::agent::plan_handler::parse_plan_confirm_choice;
 use krusty_core::agent::LoopInput;
 use krusty_core::ai::types::{Content, ModelMessage, Role};
 use krusty_core::plan::PlanManager;
-use krusty_core::storage::{Database, PendingInteractionSnapshot, SessionType, WorkMode};
+use krusty_core::storage::{
+    Database, MakoControllerEventStore, MakoControllerStore, PendingInteractionSnapshot,
+    SessionType, WorkMode,
+};
 use krusty_core::tools::registry::PermissionMode;
 use krusty_core::SessionManager;
 
-use super::super::session_access::ensure_owned_session;
+use super::super::session_access::{current_user_id, load_owned_session};
 use super::content::{build_user_content, validate_content_blocks};
 use super::session::{setup_chat_session, RequestedModel};
 use super::stream::start_orchestrator_sse;
 use super::tools::apply_thinking_config;
 use crate::auth::CurrentUser;
 use crate::error::AppError;
-use crate::types::{SteerRequest, ThinkingLevel, ToolApprovalRequest, ToolResultRequest};
+use crate::types::{
+    AgenticEvent, SteerRequest, ThinkingLevel, ToolApprovalRequest, ToolResultRequest,
+};
 use crate::AppState;
 
 pub(super) async fn steer(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
+    headers: HeaderMap,
     Json(req): Json<SteerRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     validate_content_blocks(&req.content)?;
@@ -39,7 +47,29 @@ pub(super) async fn steer(
     }
 
     let session_manager = SessionManager::new(Database::new(&state.db_path)?);
-    ensure_owned_session(&session_manager, &req.session_id, user.as_ref())?;
+    let session = load_owned_session(&session_manager, &req.session_id, user.as_ref())?;
+
+    let content = build_user_content(&req.message, &req.content)?;
+    let pending_id = uuid::Uuid::new_v4().to_string();
+    if session.session_type == SessionType::Mako {
+        let idempotency_key = super::super::mako::idempotency_key_from_headers(&headers)?;
+        let status = state
+            .mako_runtime
+            .steer_for_user(
+                &state,
+                &req.session_id,
+                &pending_id,
+                content,
+                current_user_id(user.as_ref()),
+                idempotency_key.as_deref(),
+            )
+            .await
+            .map_err(mako_control_error)?;
+        return Ok(Json(json!({
+            "status": status.as_str(),
+            "pending_id": pending_id,
+        })));
+    }
 
     let sender = state
         .session_inputs
@@ -54,9 +84,7 @@ pub(super) async fn steer(
             ))
         })?;
 
-    let content = build_user_content(&req.message, &req.content)?;
     let content_json = serde_json::to_string(&content)?;
-    let pending_id = uuid::Uuid::new_v4().to_string();
     session_manager.queue_pending_steering(&req.session_id, &pending_id, &content_json)?;
 
     let input = LoopInput::Steer {
@@ -103,8 +131,36 @@ pub(super) async fn deliver_steering_with_rollover(
 pub(super) async fn tool_result(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
+    headers: HeaderMap,
     Json(req): Json<ToolResultRequest>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
+) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, AppError> {
+    let session_manager = SessionManager::new(Database::new(&state.db_path)?);
+    let session = load_owned_session(&session_manager, &req.session_id, user.as_ref())?;
+    if session.session_type == SessionType::Mako {
+        let run_id = resolve_pending_mako_run(
+            &state,
+            &req.session_id,
+            &req.tool_call_id,
+            req.run_id.as_deref(),
+            PendingMakoInteraction::UserResponse,
+        )?;
+        let idempotency_key = super::super::mako::idempotency_key_from_headers(&headers)?;
+        let receiver = state
+            .mako_runtime
+            .user_response_and_subscribe_for_user(
+                &state,
+                &req.session_id,
+                &run_id,
+                &req.tool_call_id,
+                &req.result,
+                current_user_id(user.as_ref()),
+                idempotency_key.as_deref(),
+            )
+            .await
+            .map_err(mako_control_error)?;
+        return Ok(mako_response_sse(receiver));
+    }
+
     let mut ctx = setup_chat_session(
         &state,
         user.as_ref(),
@@ -250,18 +306,45 @@ fn resumed_permission_mode(
 pub(super) async fn tool_approval(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
+    headers: HeaderMap,
     Json(req): Json<ToolApprovalRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    submit_tool_approval(&state, user.as_ref(), req).await
+    let idempotency_key = super::super::mako::idempotency_key_from_headers(&headers)?;
+    submit_tool_approval(&state, user.as_ref(), req, idempotency_key.as_deref()).await
 }
 
 pub(crate) async fn submit_tool_approval(
     state: &AppState,
     user: Option<&CurrentUser>,
     req: ToolApprovalRequest,
+    idempotency_key: Option<&str>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let session_manager = SessionManager::new(Database::new(&state.db_path)?);
-    ensure_owned_session(&session_manager, &req.session_id, user)?;
+    let session = load_owned_session(&session_manager, &req.session_id, user)?;
+
+    if session.session_type == SessionType::Mako {
+        let run_id = resolve_pending_mako_run(
+            state,
+            &req.session_id,
+            &req.tool_call_id,
+            req.run_id.as_deref(),
+            PendingMakoInteraction::ToolApproval,
+        )?;
+        state
+            .mako_runtime
+            .tool_approval_for_user(
+                state,
+                &req.session_id,
+                &run_id,
+                &req.tool_call_id,
+                req.approved,
+                current_user_id(user),
+                idempotency_key,
+            )
+            .await
+            .map_err(mako_control_error)?;
+        return Ok(Json(json!({"status": "ok"})));
+    }
 
     let sender = {
         let inputs = state.session_inputs.read().await;
@@ -289,6 +372,98 @@ pub(crate) async fn submit_tool_approval(
             ))
         })?;
     Ok(Json(json!({"status": "ok"})))
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum PendingMakoInteraction {
+    ToolApproval,
+    UserResponse,
+}
+
+pub(super) fn resolve_pending_mako_run(
+    state: &AppState,
+    session_id: &str,
+    tool_call_id: &str,
+    requested_run_id: Option<&str>,
+    interaction: PendingMakoInteraction,
+) -> Result<String, AppError> {
+    let controller = MakoControllerStore::new(Database::new(&state.db_path)?)
+        .get_by_session(session_id)?
+        .ok_or_else(|| AppError::Conflict("Mako session has no durable controller".into()))?;
+    let event_store = MakoControllerEventStore::new(Database::new(&state.db_path)?);
+    let pending = match interaction {
+        PendingMakoInteraction::ToolApproval => event_store
+            .list_pending_tool_approvals(&controller.id)?
+            .into_iter()
+            .filter(|event| {
+                event.payload.get("id").and_then(serde_json::Value::as_str) == Some(tool_call_id)
+            })
+            .filter_map(|event| event.run_id)
+            .collect::<std::collections::BTreeSet<_>>(),
+        PendingMakoInteraction::UserResponse => event_store
+            .list_pending_user_response_runs(&controller.id, tool_call_id)?
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+    };
+
+    if let Some(requested_run_id) = requested_run_id {
+        if pending.contains(requested_run_id) {
+            return Ok(requested_run_id.to_string());
+        }
+        return Err(AppError::Conflict(format!(
+            "Run {requested_run_id} is not awaiting this interaction"
+        )));
+    }
+
+    if pending.len() != 1 {
+        return Err(AppError::Conflict(if pending.is_empty() {
+            "No exact pending Mako run matches this interaction".into()
+        } else {
+            "Multiple Mako runs match this interaction; run_id is required".into()
+        }));
+    }
+    Ok(pending.into_iter().next().expect("one pending run"))
+}
+
+pub(super) fn mako_response_sse(
+    mut receiver: tokio::sync::broadcast::Receiver<AgenticEvent>,
+) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let (tx, rx) = mpsc::channel(32);
+    tokio::spawn(async move {
+        loop {
+            match receiver.recv().await {
+                Ok(event) => {
+                    let terminal = matches!(
+                        event,
+                        AgenticEvent::Finish { .. } | AgenticEvent::Error { .. }
+                    );
+                    let Ok(event) = Event::default().json_data(event) else {
+                        continue;
+                    };
+                    if tx.send(Ok(event)).await.is_err() || terminal {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    let event = AgenticEvent::Lagged {
+                        skipped: usize::try_from(skipped).unwrap_or(usize::MAX),
+                    };
+                    let Ok(event) = Event::default().json_data(event) else {
+                        continue;
+                    };
+                    if tx.send(Ok(event)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
+}
+
+pub(super) fn mako_control_error(error: anyhow::Error) -> AppError {
+    crate::mako_runtime::control_plane_app_error(error)
 }
 
 fn recovery_has_pending_tool_approval(

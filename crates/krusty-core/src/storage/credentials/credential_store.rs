@@ -9,7 +9,7 @@ use crate::auth::{try_refresh_oauth_token_blocking, OAuthTokenStore};
 use crate::paths;
 
 /// Storage for API keys indexed by provider.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialStore {
     #[serde(flatten)]
     keys: HashMap<String, String>,

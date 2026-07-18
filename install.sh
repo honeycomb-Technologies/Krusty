@@ -6,6 +6,7 @@ set -e
 
 REPO="honeycomb-Technologies/Krusty"
 BINARY="krusty"
+DAEMON_BINARY="krusty-mako"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 # Detect OS and architecture
@@ -109,6 +110,26 @@ install() {
     mkdir -p "$INSTALL_DIR"
     mv "$BINARY" "$INSTALL_DIR/"
     chmod +x "$INSTALL_DIR/$BINARY"
+    if [ -f "$DAEMON_BINARY" ]; then
+        mv "$DAEMON_BINARY" "$INSTALL_DIR/"
+        chmod +x "$INSTALL_DIR/$DAEMON_BINARY"
+    fi
+
+    INSTALLED_SYSTEMD_UNITS=false
+    if [ "$OS" = "Linux" ] && [ -d systemd ]; then
+        SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+        mkdir -p "$SYSTEMD_USER_DIR"
+        for unit in krusty-mako.socket krusty-mako.service krusty-serve.service; do
+            if [ -f "systemd/$unit" ]; then
+                cp "systemd/$unit" "$SYSTEMD_USER_DIR/$unit"
+                chmod 644 "$SYSTEMD_USER_DIR/$unit"
+            fi
+        done
+        INSTALLED_SYSTEMD_UNITS=true
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl --user daemon-reload >/dev/null 2>&1 || true
+        fi
+    fi
 
     rm -rf "$TMP_DIR"
 
@@ -128,6 +149,10 @@ install() {
     esac
 
     echo "Run 'krusty' to start."
+    if [ "$INSTALLED_SYSTEMD_UNITS" = true ]; then
+        echo "To supervise Mako and the self-hosted server:"
+        echo "  systemctl --user enable --now krusty-mako.socket krusty-serve.service"
+    fi
 }
 
 install

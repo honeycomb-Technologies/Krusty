@@ -11,20 +11,24 @@ use std::convert::Infallible;
 
 use axum::{
     extract::State,
+    http::HeaderMap,
     response::sse::{Event, Sse},
     routing::post,
     Json, Router,
 };
-use futures::stream::Stream;
 use krusty_core::ai::types::{ModelMessage, Role};
-use krusty_core::storage::SessionType;
+use krusty_core::storage::{Database, SessionType};
 use krusty_core::tools::registry::PermissionMode;
+use krusty_core::SessionManager;
+use tokio_stream::wrappers::ReceiverStream;
 
 use self::content::{build_user_content, content_blocks_include_images, validate_content_blocks};
 #[cfg(test)]
 use self::interactions::deliver_steering_with_rollover;
 pub(crate) use self::interactions::submit_tool_approval;
-use self::interactions::{steer, tool_approval, tool_result};
+use self::interactions::{
+    mako_control_error, mako_response_sse, steer, tool_approval, tool_result,
+};
 #[cfg(test)]
 use self::session::{prepare_chat_contract_for_test, select_model_for_chat_request};
 use self::session::{
@@ -34,7 +38,7 @@ use self::stream::start_orchestrator_sse;
 #[cfg(test)]
 use self::stream::{forward_loop_event, run_orchestrator_event_bridge};
 use self::tools::should_suppress_code_tools;
-use super::session_access::current_user_id;
+use super::session_access::{current_user_id, load_owned_session};
 use crate::ai_bootstrap::persist_current_model_selection;
 use crate::auth::CurrentUser;
 use crate::error::AppError;
@@ -54,13 +58,34 @@ pub fn router() -> Router<AppState> {
 async fn chat(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
+    headers: HeaderMap,
     Json(req): Json<ChatRequest>,
-) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
+) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, AppError> {
     validate_content_blocks(&req.content)?;
 
     let user_id = current_user_id(user.as_ref()).map(ToOwned::to_owned);
+    let idempotency_key = super::mako::idempotency_key_from_headers(&headers)?;
     let requested_model = RequestedModel::from_request(req.model.as_deref());
     let requested_session_type = req.session_type.unwrap_or(SessionType::Code);
+    if req.session_id.is_none() && requested_session_type == SessionType::Mako {
+        return Err(AppError::Conflict(
+            "Create Mako sessions through POST /mako/dispatch before sending chat messages".into(),
+        ));
+    }
+    if let Some(session_id) = req.session_id.as_deref() {
+        let manager = SessionManager::new(Database::new(&state.db_path)?);
+        let existing = load_owned_session(&manager, session_id, user.as_ref())?;
+        if existing.session_type == SessionType::Mako
+            && (req.model.is_some()
+                || req.target_branch.is_some()
+                || req.mode.is_some()
+                || req.permission_mode.is_some())
+        {
+            return Err(AppError::Conflict(
+                "Mako model, branch, work mode, and permission mode are daemon-owned; send the message without mutation overrides".into(),
+            ));
+        }
+    }
     let requires_vision = content_blocks_include_images(&req.content);
     let prepared = prepare_chat_route_session(
         &state,
@@ -74,6 +99,56 @@ async fn chat(
     let session_id = prepared.session_id;
     let is_first_message = prepared.is_first_message;
     let pending_model_update = prepared.pending_model_update;
+
+    let session_manager = SessionManager::new(Database::new(&state.db_path)?);
+    let session = load_owned_session(&session_manager, &session_id, user.as_ref())?;
+    if session.session_type == SessionType::Mako {
+        if !req.content.is_empty() {
+            return Err(AppError::BadRequest(
+                "Mako daemon messages currently support text content only".to_string(),
+            ));
+        }
+        let message = req.message.trim();
+        if message.is_empty() {
+            return Err(AppError::BadRequest(
+                "A Mako message cannot be empty".to_string(),
+            ));
+        }
+        let receiver = if state.mako_runtime.is_daemon_backed() {
+            state
+                .mako_runtime
+                .begin_daemon_chat_turn_for_user(
+                    &session_id,
+                    message,
+                    user_id.as_deref(),
+                    is_first_message,
+                    idempotency_key.as_deref(),
+                )
+                .await
+                .map_err(mako_control_error)?
+        } else {
+            // Preserve the embedded runner used by focused tests. Its message
+            // method persists and starts the run itself, unlike daemon IPC.
+            let receiver = state
+                .mako_runtime
+                .subscribe_for_user(&session_id, user_id.as_deref())
+                .await
+                .map_err(mako_control_error)?;
+            state
+                .mako_runtime
+                .send_message_for_user(
+                    state.clone(),
+                    session_id,
+                    message,
+                    user_id.as_deref(),
+                    idempotency_key.as_deref(),
+                )
+                .await
+                .map_err(mako_control_error)?;
+            receiver
+        };
+        return Ok(mako_response_sse(receiver));
+    }
 
     let mut ctx = setup_chat_session(
         &state,

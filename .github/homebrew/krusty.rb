@@ -32,9 +32,23 @@ class Krusty < Formula
 
   def install
     bin.install "krusty"
+    bin.install "krusty-mako"
   end
 
   test do
     assert_match "krusty", shell_output("#{bin}/krusty --help")
+    assert_match "krusty-mako", shell_output("#{bin}/krusty-mako --version")
+  end
+
+  service do
+    run [opt_bin/"krusty-mako", "daemon"]
+    keep_alive true
+    working_dir var
+    log_path var/"log/krusty-mako.log"
+    error_log_path var/"log/krusty-mako.log"
+    # launchd does not inherit the interactive shell PATH. Preserve Homebrew's
+    # standard service path so daemon-owned coding tools remain discoverable.
+    environment_variables PATH: std_service_path_env,
+                          RUST_LOG: "krusty_mako=info"
   end
 end

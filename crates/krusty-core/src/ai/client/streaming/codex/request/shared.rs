@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 use super::super::super::super::core::AiClient;
+use crate::ai::retry::safe_provider_event_error;
 
 impl AiClient {
     pub(crate) fn codex_ws_create_payload(body: Value) -> Value {
@@ -24,69 +25,80 @@ impl AiClient {
     }
 
     pub(crate) fn codex_ws_error_message(event: &Value) -> Option<String> {
-        if let Some(message) = event.get("message").and_then(|m| m.as_str()) {
-            if !message.is_empty() {
-                return Some(message.to_string());
-            }
-        }
-
-        if let Some(message) = event
-            .pointer("/error/message")
-            .and_then(|m| m.as_str())
+        let message = event
+            .get("message")
+            .and_then(|message| message.as_str())
+            .or_else(|| {
+                event
+                    .pointer("/error/message")
+                    .and_then(|message| message.as_str())
+            })
             .or_else(|| {
                 event
                     .pointer("/response/error/message")
-                    .and_then(|m| m.as_str())
+                    .and_then(|message| message.as_str())
             })
             .or_else(|| {
                 event
                     .pointer("/response/status_details/error/message")
-                    .and_then(|m| m.as_str())
+                    .and_then(|message| message.as_str())
             })
-        {
-            if !message.is_empty() {
-                return Some(message.to_string());
-            }
-        }
-
-        if let Some(error_text) = event.get("error").and_then(|e| e.as_str()) {
-            if !error_text.is_empty() {
-                return Some(error_text.to_string());
-            }
-        }
-
+            .or_else(|| event.get("error").and_then(|error| error.as_str()));
         let error_type = event
             .pointer("/error/type")
-            .and_then(|t| t.as_str())
+            .and_then(|value| value.as_str())
             .or_else(|| {
                 event
                     .pointer("/response/error/type")
-                    .and_then(|t| t.as_str())
+                    .and_then(|value| value.as_str())
             });
         let error_code = event
             .pointer("/error/code")
-            .and_then(|t| t.as_str())
+            .and_then(|value| value.as_str())
             .or_else(|| {
                 event
                     .pointer("/response/error/code")
-                    .and_then(|t| t.as_str())
+                    .and_then(|value| value.as_str())
             });
-        match (error_type, error_code) {
-            (Some(error_type), Some(error_code))
-                if !error_type.is_empty() || !error_code.is_empty() =>
-            {
-                Some(format!("{} ({})", error_type, error_code))
-            }
-            (Some(error_type), None) if !error_type.is_empty() => Some(error_type.to_string()),
-            (None, Some(error_code)) if !error_code.is_empty() => Some(error_code.to_string()),
-            _ => None,
+
+        if message.is_none() && error_type.is_none() && error_code.is_none() {
+            return None;
         }
+        Some(safe_provider_event_error(
+            "Codex websocket API error",
+            error_code,
+            error_type,
+            message,
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::AiClient;
+
+    #[test]
+    fn websocket_error_metadata_never_reflects_provider_strings() {
+        const MESSAGE_SENTINEL: &str = "WS_MESSAGE_SENTINEL_19b7";
+        const CODE_SENTINEL: &str = "WS_CODE_SENTINEL_c42a";
+        const TYPE_SENTINEL: &str = "WS_TYPE_SENTINEL_04de";
+        let error = AiClient::codex_ws_error_message(&serde_json::json!({
+            "type": "error",
+            "error": {
+                "message": MESSAGE_SENTINEL,
+                "code": CODE_SENTINEL,
+                "type": TYPE_SENTINEL
+            }
+        }))
+        .expect("error metadata should be present");
+
+        for sentinel in [MESSAGE_SENTINEL, CODE_SENTINEL, TYPE_SENTINEL] {
+            assert!(!error.contains(sentinel));
+        }
+        assert!(error.contains("message_fingerprint=sha256:"));
+        assert!(error.contains("code_fingerprint=sha256:"));
+        assert!(error.contains("category_fingerprint=sha256:"));
+    }
 
     #[test]
     fn websocket_payload_removes_http_transport_fields() {

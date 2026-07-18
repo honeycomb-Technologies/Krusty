@@ -5,9 +5,9 @@
 //! This ensures the AI is always aware of the active plan, available skills,
 //! and project-specific instructions.
 
+mod episodes;
 mod mako;
 mod memory;
-mod episodes;
 mod plan;
 mod project;
 mod reports;
@@ -354,7 +354,14 @@ fn context_message_text(message: &ModelMessage) -> Option<&str> {
 }
 
 fn dynamic_context_priority(text: &str) -> u8 {
-    if text.starts_with("[PLAN MODE ACTIVE")
+    // Mako's coordinator and frozen identity are the behavioral continuity
+    // contract. They must survive aggregate request pressure before project,
+    // retrieval, skills, or current-work context. The profile renderer keeps
+    // this tier independently bounded, so reserving it first cannot make the
+    // overall request unbounded.
+    if is_stable_mako_identity_context(text) {
+        200
+    } else if text.starts_with("[PLAN MODE ACTIVE")
         || text.starts_with("[ACTIVE PLAN")
         || text.starts_with("[AUTONOMOUS TASKS]")
         || text.starts_with("[WORKSPACE MODE:")
@@ -363,15 +370,32 @@ fn dynamic_context_priority(text: &str) -> u8 {
         120
     } else if text.starts_with("[PROJECT INSTRUCTIONS")
         || text.starts_with("[PROJECT SETTINGS]")
-        || text.starts_with("[MAKO ")
+        || text.starts_with("[MAKO PROJECT OVERLAY")
     {
         100
+    } else if text.starts_with("[MAKO HEARTBEAT") || text.starts_with("[MAKO CHANNELS") {
+        // Heartbeat and channel guidance is intentionally volatile. It keeps
+        // developer authority, but it cannot displace the frozen persona.
+        90
     } else if text.starts_with("[AVAILABLE SKILLS]") || text.starts_with("[RECENT DELEGATED RUNS]")
     {
         80
     } else {
         60
     }
+}
+
+fn is_stable_mako_identity_context(text: &str) -> bool {
+    [
+        "[MAKO COORDINATOR]",
+        "[MAKO SOUL",
+        "[MAKO IDENTITY",
+        "[MAKO USER",
+        "[MAKO CREW IDENTITY",
+        "[MAKO CREW SOUL",
+    ]
+    .iter()
+    .any(|prefix| text.starts_with(prefix))
 }
 
 fn context_section_label(text: &str) -> String {

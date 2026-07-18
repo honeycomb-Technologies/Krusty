@@ -8,6 +8,7 @@ use super::super::super::config::{
 };
 use super::super::super::core::AiClient;
 use crate::ai::format::response::extract_text_from_content;
+use crate::ai::retry::safe_provider_event_error;
 
 fn collect_text_content_with_separator(content_arr: &[Value], separator: &str) -> String {
     let mut text_content = String::new();
@@ -199,11 +200,24 @@ impl AiClient {
 }
 
 pub(super) fn resolve_codex_ws_url_for_tools(api_url: &str) -> Result<Url> {
-    let mut url = Url::parse(api_url)
-        .map_err(|e| anyhow::anyhow!("Invalid Codex API URL '{}': {}", api_url, e))?;
+    let mut url = Url::parse(api_url).map_err(|_| {
+        anyhow::Error::msg(safe_provider_event_error(
+            "Invalid sub-agent Codex API URL",
+            None,
+            Some("invalid_request_error"),
+            Some(api_url),
+        ))
+    })?;
 
     url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
-        .map_err(|_| anyhow::anyhow!("Failed to set websocket scheme for '{}'", api_url))?;
+        .map_err(|_| {
+            anyhow::Error::msg(safe_provider_event_error(
+                "Failed to set sub-agent Codex websocket scheme",
+                None,
+                Some("invalid_request_error"),
+                Some(api_url),
+            ))
+        })?;
 
     Ok(url)
 }

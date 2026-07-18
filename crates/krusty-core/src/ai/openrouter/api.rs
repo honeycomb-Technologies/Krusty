@@ -1,6 +1,6 @@
 use anyhow::Result;
 use reqwest::Client;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 use crate::ai::models::ModelMetadata;
 
@@ -42,15 +42,10 @@ pub async fn fetch_models_with_client(
         .send()
         .await?;
 
-    let status = response.status();
-    if !status.is_success() {
-        let error_text = response.text().await.unwrap_or_default();
-        error!("OpenRouter API error: {} - {}", status, error_text);
-        return Err(anyhow::anyhow!(
-            "OpenRouter API error: {} - {}",
-            status,
-            error_text
-        ));
+    if !response.status().is_success() {
+        let error = crate::ai::retry::provider_http_error(response, "OpenRouter API error").await;
+        error.log();
+        return Err(error.into());
     }
 
     let data: ModelsResponse = response.json().await?;

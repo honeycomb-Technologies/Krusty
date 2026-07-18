@@ -38,14 +38,21 @@ Credentials can also be set through:
 - Desktop shell wraps the same Expo web bundle and therefore uses the same server API.
 - Mobile clients connect directly to the same HTTP and WebSocket surface.
 
-## Optional User Scoping
+## Optional Loopback User Scoping
 
 Requests without auth headers run in single-user local mode.
 
-For scoped mode, clients may send:
+For local development, loopback clients connecting to a localhost host may send:
 
 - `X-User-Id`
 - `X-Workspace-Dir` (optional)
+
+Remote access uses one server-wide bearer token and therefore remains
+single-tenant. Remote requests that include either identity header are rejected:
+the shared bearer token never authorizes a caller to select another user or
+workspace. A multi-user deployment must put a real identity provider in front
+of Krusty and bind verified principals through a dedicated server integration;
+forwarding arbitrary client headers is not an authentication mechanism.
 
 ## Main API Groups
 

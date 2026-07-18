@@ -59,6 +59,22 @@ impl MakoIpcClient {
         Ok(Self::new(config, IpcKey::load(key_path.as_ref())?))
     }
 
+    /// Load the shared key or atomically initialize it before connecting.
+    ///
+    /// Use this only for trusted same-user control clients that are allowed to
+    /// bootstrap daemon authority (for example a socket-activating service or
+    /// its local diagnostic CLI). Other clients should retain load-only
+    /// [`Self::from_key_path`] behavior.
+    pub fn from_key_path_or_create(
+        config: MakoIpcClientConfig,
+        key_path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, ClientError> {
+        Ok(Self::new(
+            config,
+            IpcKey::load_or_create(key_path.as_ref())?,
+        ))
+    }
+
     pub async fn command(
         &self,
         actor: crate::Actor,

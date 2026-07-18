@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 use super::OpenAIParser;
+use crate::ai::retry::safe_provider_code;
 use crate::ai::sse::SseEvent;
 use crate::ai::types::FinishReason;
 use crate::ai::usage::parse_openai_responses_usage;
@@ -94,12 +95,14 @@ impl OpenAIParser {
                 match reason {
                     "max_output_tokens" | "max_tokens" | "length" => FinishReason::Length,
                     "tool_calls" | "tool_use" => FinishReason::ToolCalls,
-                    other => FinishReason::Other(format!("incomplete:{other}")),
+                    other => {
+                        FinishReason::Other(format!("incomplete:{}", safe_provider_code(other)))
+                    }
                 }
             }
             "cancelled" => FinishReason::Other("cancelled".to_string()),
             "failed" => FinishReason::Other("failed".to_string()),
-            other => FinishReason::Other(other.to_string()),
+            other => FinishReason::Other(safe_provider_code(other)),
         }
     }
 
@@ -110,7 +113,35 @@ impl OpenAIParser {
         json: &Value,
         event_type: &str,
     ) -> anyhow::Result<SseEvent> {
-        tracing::debug!("Responses API event: {} - {:?}", event_type, json);
+        let event_kind = match event_type {
+            "response.output_text.delta" => "output_text_delta",
+            "response.output_text.done" => "output_text_done",
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                "reasoning_delta"
+            }
+            "response.reasoning_summary_part.added" => "reasoning_start",
+            "response.reasoning_summary_text.done"
+            | "response.reasoning_text.done"
+            | "response.reasoning_summary_part.done" => "reasoning_done",
+            "response.done" | "response.completed" => "response_complete",
+            "response.function_call_arguments.start"
+            | "response.output_item.added"
+            | "response.output_item.done" => "tool_call_item",
+            "response.function_call_arguments.delta" => "tool_arguments_delta",
+            "response.function_call_arguments.done" => "tool_arguments_done",
+            "response.usage" => "usage",
+            _ => "unknown",
+        };
+        let content_bytes = ["delta", "text", "arguments"]
+            .iter()
+            .find_map(|field| json.get(*field).and_then(Value::as_str))
+            .map_or(0, str::len);
+        tracing::debug!(
+            event_kind,
+            top_level_field_count = json.as_object().map_or(0, |object| object.len()),
+            content_bytes,
+            "Responses API event received"
+        );
 
         match event_type {
             "response.output_text.delta" => {
@@ -131,10 +162,7 @@ impl OpenAIParser {
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 if let Some(delta) = json.get("delta").and_then(|d| d.as_str()) {
                     if !delta.is_empty() {
-                        tracing::debug!(
-                            "Reasoning delta: {}...",
-                            &delta.chars().take(50).collect::<String>()
-                        );
+                        tracing::debug!(delta_bytes = delta.len(), "Reasoning delta received");
                         return Ok(SseEvent::ThinkingDelta {
                             index: 0,
                             thinking: delta.to_string(),
@@ -248,9 +276,9 @@ impl OpenAIParser {
                             }
 
                             tracing::info!(
-                                "Responses API tool call start: id={}, name={}",
-                                tool_id,
-                                name
+                                tool_id_bytes = tool_id.len(),
+                                tool_name_bytes = name.len(),
+                                "Responses API tool call started"
                             );
                             if inserted {
                                 return Ok(SseEvent::ToolCallStart { id: tool_id, name });
@@ -276,9 +304,9 @@ impl OpenAIParser {
                     if let Some(key) = self.resolve_responses_tool_key(json)? {
                         if let Some(id) = self.apply_tool_arguments_snapshot(&key, arguments)? {
                             tracing::debug!(
-                                "Tool call arguments complete: id={}, args_len={}",
-                                id,
-                                arguments.len()
+                                tool_id_bytes = id.len(),
+                                argument_bytes = arguments.len(),
+                                "Tool call arguments complete"
                             );
                         }
                     }
@@ -298,7 +326,10 @@ impl OpenAIParser {
                 }
             }
             _ => {
-                tracing::trace!("Skipping Responses API event: {}", event_type);
+                tracing::trace!(
+                    event_type_bytes = event_type.len(),
+                    "Skipping unknown Responses API event"
+                );
             }
         }
 

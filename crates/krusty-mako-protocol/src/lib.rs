@@ -25,6 +25,6 @@ pub use types::*;
 /// JSON document at 1 MiB to bound allocation before deserialization.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const PROTOCOL_MAJOR: u16 = 1;
-pub const PROTOCOL_MINOR: u16 = 0;
+pub const PROTOCOL_MINOR: u16 = 1;
 pub const IPC_KEY_BYTES: usize = 32;
 pub const NONCE_BYTES: usize = 32;

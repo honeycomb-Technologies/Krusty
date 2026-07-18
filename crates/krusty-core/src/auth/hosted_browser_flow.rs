@@ -1,11 +1,12 @@
 //! Hosted browser OAuth flow for web callbacks.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::RngCore;
 use url::Url;
 
 use super::extract_openai_account_id;
+use super::http::read_auth_response;
 use super::pkce::PkceVerifier;
 use super::types::{OAuthConfig, OAuthTokenData};
 
@@ -54,17 +55,15 @@ impl HostedBrowserOAuthFlow {
             .send()
             .await
             .context("Failed to send OAuth token request")?;
+        let response = read_auth_response(response)
+            .await
+            .context("Failed to read OAuth token response")?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Token exchange failed ({}): {}", status, body));
+            return Err(response.safe_error("Token exchange failed"));
         }
 
-        let token_response: TokenResponse = response
-            .json()
-            .await
-            .context("Failed to parse OAuth token response")?;
+        let token_response: TokenResponse = response.parse_json("OAuth token response")?;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

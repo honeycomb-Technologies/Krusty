@@ -16,7 +16,9 @@ pub(super) use self::state::{
 };
 pub(crate) use self::time::parse_timestamp;
 pub(super) use self::time::{earlier_timestamp, later_timestamp};
-pub(super) use self::trace::{load_run_trace_diagnostics, RunTraceDiagnostics};
+pub(super) use self::trace::{
+    load_run_trace_diagnostics, pending_approval_summaries_from_durable_events, RunTraceDiagnostics,
+};
 
 const ACTIVE_STALE_SECS: i64 = 30 * 60;
 const WAITING_STALE_SECS: i64 = 15 * 60;

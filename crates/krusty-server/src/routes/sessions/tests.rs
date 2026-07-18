@@ -91,6 +91,84 @@ fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
 }
 
 #[tokio::test]
+async fn generic_session_routes_reject_daemon_owned_mako_create_update_and_pinch() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let create = create_session(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Json(CreateSessionRequest {
+            title: Some("Orphan Mako".into()),
+            model: Some("test:model".into()),
+            project_dir: None,
+            working_dir: None,
+            workspace_mode: None,
+            target_branch: None,
+            session_type: Some(SessionType::Mako),
+            permission_mode: None,
+        }),
+    )
+    .await;
+    assert!(matches!(create, Err(AppError::Conflict(_))));
+
+    let manager = SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    assert!(manager
+        .list_sessions_for_user_by_type(None, Some("alice"), SessionType::Mako)
+        .expect("sessions should list")
+        .is_empty());
+    let session_id = manager
+        .create_session_for_user_with_config(
+            "Daemon Mako",
+            Some("test:model"),
+            Some(state.working_dir.to_string_lossy().as_ref()),
+            Some(state.working_dir.to_string_lossy().as_ref()),
+            WorkspaceMode::Selected,
+            Some("alice"),
+            None,
+            SessionType::Mako,
+        )
+        .expect("test Mako session should create");
+
+    let update = update_session(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        Json(UpdateSessionRequest {
+            title: Some("Bypassed title".into()),
+            project_dir: None,
+            working_dir: None,
+            workspace_mode: None,
+            mode: None,
+            model: None,
+            target_branch: None,
+            permission_mode: None,
+        }),
+    )
+    .await;
+    assert!(matches!(update, Err(AppError::Conflict(_))));
+
+    let pinch = pinch_session(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        Json(PinchRequest {
+            preservation_hints: None,
+            direction: None,
+        }),
+    )
+    .await;
+    assert!(matches!(pinch, Err(AppError::Conflict(_))));
+    assert_eq!(
+        manager
+            .get_session(&session_id)
+            .expect("session should load")
+            .expect("session should exist")
+            .title,
+        "Daemon Mako"
+    );
+}
+
+#[tokio::test]
 async fn session_create_persists_full_continuation_contract() {
     let (state, temp_dir) = create_test_state();
     create_test_user(&state, "alice");
@@ -430,6 +508,22 @@ async fn load_owned_session_rejects_legacy_userless_session_for_authenticated_us
     let user = current_user("alice", std::path::Path::new("/tmp"));
 
     let result = super::load_owned_session(&session_manager, &session_id, Some(&user));
+
+    assert!(matches!(result, Err(AppError::NotFound(_))));
+}
+
+#[tokio::test]
+async fn load_owned_session_rejects_authenticated_session_for_local_actor() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user("Alice Session", None, None, Some("alice"))
+        .expect("session creation should succeed");
+
+    let result = super::load_owned_session(&session_manager, &session_id, None);
 
     assert!(matches!(result, Err(AppError::NotFound(_))));
 }

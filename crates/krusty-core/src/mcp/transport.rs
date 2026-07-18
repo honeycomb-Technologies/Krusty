@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::stream::BoxStream;
 use futures::StreamExt;
@@ -15,7 +16,11 @@ use rmcp::model::{ClientJsonRpcMessage, ServerJsonRpcMessage};
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClient, StreamableHttpError, StreamableHttpPostResponse,
 };
+use sha2::{Digest, Sha256};
 use sse_stream::{Error as SseError, Sse, SseStream};
+
+const MAX_MCP_JSON_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MCP_JSON_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A reqwest 0.12 based implementation of rmcp's `StreamableHttpClient` trait.
 #[derive(Debug, Clone)]
@@ -129,16 +134,17 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
                 Ok(StreamableHttpPostResponse::Sse(boxed, session_id))
             }
             Some(ct) if ct.contains("application/json") => {
-                let text = response
-                    .text()
-                    .await
-                    .map_err(|e| StreamableHttpError::Client(ReqwestError(e)))?;
+                let body = read_bounded_mcp_json_response(response).await?;
                 let message: ServerJsonRpcMessage =
-                    serde_json::from_str(&text).map_err(StreamableHttpError::Deserialize)?;
+                    serde_json::from_slice(&body).map_err(|error| {
+                        StreamableHttpError::UnexpectedServerResponse(
+                            safe_mcp_json_decode_error(&error, &body).into(),
+                        )
+                    })?;
                 Ok(StreamableHttpPostResponse::Json(message, session_id))
             }
             other => Err(StreamableHttpError::UnexpectedContentType(
-                other.map(|s| s.to_string()),
+                other.map(|_| "unsupported".to_string()),
             )),
         }
     }
@@ -214,5 +220,113 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
         let byte_stream = response.bytes_stream();
         let sse_stream = SseStream::from_byte_stream(byte_stream);
         Ok(sse_stream.boxed())
+    }
+}
+
+async fn read_bounded_mcp_json_response(
+    response: reqwest::Response,
+) -> Result<Vec<u8>, StreamableHttpError<ReqwestError>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_MCP_JSON_RESPONSE_BYTES as u64)
+    {
+        return Err(StreamableHttpError::UnexpectedServerResponse(
+            format!(
+                "MCP JSON response exceeded byte limit (limit_bytes={MAX_MCP_JSON_RESPONSE_BYTES})"
+            )
+            .into(),
+        ));
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::with_capacity(8 * 1024);
+    let deadline = tokio::time::Instant::now() + MCP_JSON_RESPONSE_TIMEOUT;
+    loop {
+        let next = tokio::time::timeout_at(deadline, stream.next())
+            .await
+            .map_err(|_| {
+                StreamableHttpError::UnexpectedServerResponse(
+                    format!(
+                        "MCP JSON response body timed out (limit_bytes={}, captured_bytes={}, response_fingerprint={})",
+                        MAX_MCP_JSON_RESPONSE_BYTES,
+                        body.len(),
+                        mcp_response_fingerprint(&body)
+                    )
+                    .into(),
+                )
+            })?;
+        let Some(chunk) = next else {
+            break;
+        };
+        let chunk = chunk.map_err(|_| {
+            StreamableHttpError::UnexpectedServerResponse(
+                format!(
+                    "MCP JSON response body read failed (captured_bytes={}, response_fingerprint={})",
+                    body.len(),
+                    mcp_response_fingerprint(&body)
+                )
+                .into(),
+            )
+        })?;
+        let remaining = MAX_MCP_JSON_RESPONSE_BYTES.saturating_sub(body.len());
+        if chunk.len() > remaining {
+            body.extend_from_slice(&chunk[..remaining]);
+            return Err(StreamableHttpError::UnexpectedServerResponse(
+                format!(
+                    "MCP JSON response exceeded byte limit (limit_bytes={}, response_fingerprint={})",
+                    MAX_MCP_JSON_RESPONSE_BYTES,
+                    mcp_response_fingerprint(&body)
+                )
+                .into(),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn safe_mcp_json_decode_error(error: &serde_json::Error, body: &[u8]) -> String {
+    let category = match error.classify() {
+        serde_json::error::Category::Io => "io",
+        serde_json::error::Category::Syntax => "syntax",
+        serde_json::error::Category::Data => "data",
+        serde_json::error::Category::Eof => "eof",
+    };
+    format!(
+        "MCP JSON response was invalid (category={}, line={}, column={}, response_fingerprint={})",
+        category,
+        error.line(),
+        error.column(),
+        mcp_response_fingerprint(body)
+    )
+}
+
+fn mcp_response_fingerprint(body: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"krusty-mcp-response-v1\0");
+    hasher.update(body.len().to_le_bytes());
+    hasher.update(body);
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_json_decode_error_does_not_reflect_response_content() {
+        const SENTINEL: &str = "MCP_RESPONSE_SENTINEL_86ac";
+        let body = format!(r#"{{"jsonrpc":"2.0","result":"{SENTINEL}""#);
+        let parse_error = serde_json::from_slice::<ServerJsonRpcMessage>(body.as_bytes())
+            .expect_err("invalid JSON should fail");
+        let safe_error = safe_mcp_json_decode_error(&parse_error, body.as_bytes());
+        assert!(!safe_error.contains(SENTINEL));
+        assert!(safe_error.contains("response_fingerprint=sha256:"));
+    }
+
+    #[test]
+    fn mcp_response_limit_is_finite() {
+        assert!(MAX_MCP_JSON_RESPONSE_BYTES <= 4 * 1024 * 1024);
+        assert!(MCP_JSON_RESPONSE_TIMEOUT <= Duration::from_secs(10));
     }
 }

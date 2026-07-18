@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use super::credential_loading::extract_openai_account_id;
+use super::http::read_auth_response;
 use super::providers::{anthropic_oauth_config, openai_oauth_config};
 use super::{refresh_grok_oauth_token, OAuthTokenData, OAuthTokenStore};
 use crate::ai::providers::ProviderId;
@@ -50,17 +51,15 @@ async fn refresh_openai_oauth_token(provider_id: ProviderId) -> Result<OAuthToke
         .send()
         .await
         .context("Failed to send token refresh request")?;
+    let response = read_auth_response(response)
+        .await
+        .context("Failed to read token refresh response")?;
 
     if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("Token refresh failed ({}): {}", status, body);
+        return Err(response.safe_error("Token refresh failed"));
     }
 
-    let token_response: TokenResponse = response
-        .json()
-        .await
-        .context("Failed to parse token refresh response")?;
+    let token_response: TokenResponse = response.parse_json("Token refresh response")?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -122,17 +121,15 @@ async fn refresh_anthropic_oauth_token() -> Result<OAuthTokenData> {
         .send()
         .await
         .context("Failed to send Anthropic token refresh request")?;
+    let response = read_auth_response(response)
+        .await
+        .context("Failed to read Anthropic token refresh response")?;
 
     if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("Anthropic token refresh failed ({}): {}", status, body);
+        return Err(response.safe_error("Anthropic token refresh failed"));
     }
 
-    let token_response: TokenResponse = response
-        .json()
-        .await
-        .context("Failed to parse Anthropic token refresh response")?;
+    let token_response: TokenResponse = response.parse_json("Anthropic token refresh response")?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

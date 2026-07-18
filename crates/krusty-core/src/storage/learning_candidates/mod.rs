@@ -10,4 +10,5 @@ pub use model::{
     LearningCandidate, LearningCandidateInput, LearningCandidateStatus, LearningKind,
     LearningSensitivity, LearningThroughState,
 };
+pub(crate) use store::load_candidate_owned_from_connection;
 pub use store::LearningCandidateStore;

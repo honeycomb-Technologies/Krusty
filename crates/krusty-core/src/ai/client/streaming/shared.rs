@@ -1,6 +1,5 @@
 use anyhow::Result;
 use futures::StreamExt;
-use reqwest::header::RETRY_AFTER;
 use sha2::{Digest, Sha256};
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -226,24 +225,9 @@ pub(super) async fn ensure_success_stream_response(
         return Ok(response);
     }
 
-    let retry_after = response
-        .headers()
-        .get(RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(crate::ai::retry::parse_retry_after);
-    let error_text = response
-        .text()
-        .await
-        .unwrap_or_else(|_| "Unknown error".to_string());
-    error!("{}: {} - {}", error_label, status, error_text);
-    Err(crate::ai::retry::ProviderHttpError::new(
-        error_label,
-        status.as_u16(),
-        status.to_string(),
-        error_text,
-        retry_after,
-    )
-    .into())
+    let error = crate::ai::retry::provider_http_error(response, error_label).await;
+    error.log();
+    Err(error.into())
 }
 
 pub(super) fn start_sse_stream<P>(

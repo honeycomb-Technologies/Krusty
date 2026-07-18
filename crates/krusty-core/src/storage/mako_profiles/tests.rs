@@ -316,3 +316,26 @@ fn legacy_import_rejects_authenticated_profile_targets() {
         MakoProfileStoreError::LegacyImportRequiresLocalOwner
     ));
 }
+
+#[test]
+fn profile_documents_are_bounded_before_persistence() {
+    let (_temp, store) = test_store();
+    let owner = MakoProfileOwner::local();
+    let initial = store.get_or_create(&owner).unwrap();
+    let oversized = "x".repeat(super::MAX_MAKO_PROFILE_DOCUMENT_BYTES + 1);
+
+    let error = store
+        .update_document(
+            &owner,
+            MakoProfileDocumentKind::Soul,
+            &oversized,
+            initial.revision,
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, MakoProfileStoreError::ContentTooLarge));
+    assert_eq!(
+        store.load(&owner).unwrap().unwrap().revision,
+        initial.revision
+    );
+}

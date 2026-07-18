@@ -8,6 +8,7 @@ use super::shared::{collect_anthropic_text, trim_or_empty};
 use super::SimpleCallResult;
 use crate::ai::format::anthropic::AnthropicFormat;
 use crate::ai::format::FormatHandler;
+use crate::ai::model_profile::SystemPromptSections;
 use crate::ai::transform::apply_request_body_transform;
 use crate::ai::types::ModelMessage;
 use crate::ai::usage::parse_anthropic_usage;
@@ -77,7 +78,8 @@ impl AiClient {
     /// Cache-safe conversation call using Anthropic format.
     ///
     /// Builds the same multi-block system prompt structure as the streaming path:
-    /// base prompt (cached) → project context (cached) → session context (not cached).
+    /// base prompt (cached) → identity context (cached) → project context (cached)
+    /// → session context (not cached).
     /// Conversation messages are converted using the same format handler, so the
     /// entire prefix matches what the parent conversation built.
     pub(super) async fn call_conversation_anthropic(
@@ -106,39 +108,8 @@ impl AiClient {
 
         // Build system prompt with the same multi-block structure as streaming.
         // This ensures the cached prefix from the parent conversation is reused.
-        let system_value: Value = if let Some(cache_control) = cache_control.as_ref() {
-            let mut blocks: Vec<Value> = Vec::new();
-
-            // Block 1: Base system prompt — cached
-            if !prompt_sections.base_prompt.is_empty() {
-                blocks.push(serde_json::json!({
-                    "type": "text",
-                    "text": prompt_sections.base_prompt.as_str(),
-                    "cache_control": cache_control
-                }));
-            }
-
-            // Block 2 (optional): Project context — cached
-            if !prompt_sections.project_context.is_empty() {
-                blocks.push(serde_json::json!({
-                    "type": "text",
-                    "text": prompt_sections.project_context.as_str(),
-                    "cache_control": cache_control
-                }));
-            }
-
-            // Block 3 (optional): Session context — not cached (dynamic)
-            if !prompt_sections.session_context.is_empty() {
-                blocks.push(serde_json::json!({
-                    "type": "text",
-                    "text": prompt_sections.session_context.as_str()
-                }));
-            }
-
-            Value::Array(blocks)
-        } else {
-            Value::String(prompt_sections.combined())
-        };
+        let system_value =
+            anthropic_conversation_system_value(&prompt_sections, cache_control.as_ref());
 
         let mut body = serde_json::json!({
             "model": model,
@@ -180,11 +151,103 @@ impl AiClient {
     }
 }
 
+fn anthropic_conversation_system_value(
+    prompt_sections: &SystemPromptSections,
+    cache_control: Option<&Value>,
+) -> Value {
+    let Some(cache_control) = cache_control else {
+        return Value::String(prompt_sections.combined());
+    };
+
+    let mut blocks: Vec<Value> = Vec::new();
+
+    // Stable prefix order must match streaming exactly.
+    for text in [
+        prompt_sections.base_prompt.as_str(),
+        prompt_sections.identity_context.as_str(),
+        prompt_sections.project_context.as_str(),
+    ] {
+        if !text.is_empty() {
+            blocks.push(serde_json::json!({
+                "type": "text",
+                "text": text,
+                "cache_control": cache_control
+            }));
+        }
+    }
+
+    if !prompt_sections.session_context.is_empty() {
+        blocks.push(serde_json::json!({
+            "type": "text",
+            "text": prompt_sections.session_context.as_str()
+        }));
+    }
+
+    Value::Array(blocks)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
+    use super::anthropic_conversation_system_value;
+    use crate::ai::model_profile::build_system_prompt_sections;
+    use crate::ai::models::ApiFormat;
+    use crate::ai::providers::ProviderId;
+    use crate::ai::types::{Content, ModelMessage, Role};
     use crate::ai::usage::parse_anthropic_usage;
+
+    #[test]
+    fn conversation_system_blocks_match_streaming_identity_order() {
+        let messages = [
+            ModelMessage {
+                role: Role::System,
+                content: vec![Content::Text {
+                    text: "[MAKO SOUL - MAKO_SOUL.md]\nidentity-layer".into(),
+                }],
+            },
+            ModelMessage {
+                role: Role::System,
+                content: vec![Content::Text {
+                    text: "[PROJECT INSTRUCTIONS - AGENTS.md]\nproject-layer".into(),
+                }],
+            },
+            ModelMessage {
+                role: Role::System,
+                content: vec![Content::Text {
+                    text: "[MAKO HEARTBEAT]\nsession-layer".into(),
+                }],
+            },
+        ];
+        let sections = build_system_prompt_sections(
+            ProviderId::Anthropic,
+            ApiFormat::Anthropic,
+            "claude-sonnet-4-5",
+            &messages,
+            Some("base-layer"),
+            &[],
+        );
+        let system =
+            anthropic_conversation_system_value(&sections, Some(&json!({"type": "ephemeral"})));
+        let blocks = system.as_array().expect("cached system blocks");
+
+        assert_eq!(blocks.len(), 4);
+        for (index, marker) in [
+            "base-layer",
+            "identity-layer",
+            "project-layer",
+            "session-layer",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert!(blocks[index]["text"].as_str().unwrap().contains(marker));
+        }
+        assert!(blocks[..3]
+            .iter()
+            .all(|block| block.get("cache_control").is_some()));
+        assert!(blocks[3].get("cache_control").is_none());
+    }
 
     #[test]
     fn response_usage_preserves_anthropic_cache_buckets() {

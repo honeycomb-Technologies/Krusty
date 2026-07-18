@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+use crate::ai::retry::safe_provider_code;
 use crate::ai::types::{
     AiToolCall, Citation, ContextEditingMetrics, FinishReason, Usage, WebFetchContent,
     WebSearchResult,
@@ -104,6 +105,6 @@ pub fn parse_finish_reason(reason_str: &str) -> FinishReason {
         "stop" | "end_turn" => FinishReason::Stop,
         "max_tokens" => FinishReason::Length,
         "tool_use" => FinishReason::ToolCalls,
-        _ => FinishReason::Other(reason_str.to_string()),
+        _ => FinishReason::Other(safe_provider_code(reason_str)),
     }
 }

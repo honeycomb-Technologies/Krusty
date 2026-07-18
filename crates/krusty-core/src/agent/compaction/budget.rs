@@ -23,6 +23,7 @@ const CODEX_RUNTIME_CONTEXT_PREFIX: &str =
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RenderedRequestTokenEstimate {
     pub base_prompt_tokens: usize,
+    pub identity_context_tokens: usize,
     pub project_context_tokens: usize,
     pub session_context_tokens: usize,
     pub message_tokens: usize,
@@ -34,6 +35,7 @@ impl RenderedRequestTokenEstimate {
     /// Tokens that compaction cannot remove from conversation history.
     pub fn fixed_overhead_tokens(self) -> usize {
         self.base_prompt_tokens
+            .saturating_add(self.identity_context_tokens)
             .saturating_add(self.project_context_tokens)
             .saturating_add(self.session_context_tokens)
             .saturating_add(self.tool_tokens)
@@ -201,23 +203,34 @@ pub fn estimate_rendered_request_tokens(
             .saturating_add("You are Claude Code, Anthropic's official CLI for Claude.".len());
     }
 
-    let project_context_bytes = sections.project_context.len().saturating_add(
+    let identity_context_bytes = sections.identity_context.len().saturating_add(
         usize::from(
             !sections.base_prompt.is_empty()
-                && !sections.project_context.is_empty()
+                && !sections.identity_context.is_empty()
                 && !uses_split_anthropic_blocks,
         ) * SYSTEM_SECTION_SEPARATOR.len(),
     );
+    let project_context_bytes = sections.project_context.len().saturating_add(
+        usize::from(
+            !sections.project_context.is_empty()
+                && (!sections.base_prompt.is_empty() || !sections.identity_context.is_empty())
+                && !uses_split_anthropic_blocks,
+        ) * SYSTEM_SECTION_SEPARATOR.len(),
+    );
+    let uses_runtime_context_message =
+        uses_codex_transport || matches!(client.config().api_format, ApiFormat::OpenAIResponses);
     let session_context_bytes =
         sections
             .session_context
             .len()
             .saturating_add(if sections.session_context.is_empty() {
                 0
-            } else if uses_codex_transport {
+            } else if uses_runtime_context_message {
                 CODEX_RUNTIME_CONTEXT_PREFIX.len()
             } else if !uses_split_anthropic_blocks
-                && (!sections.base_prompt.is_empty() || !sections.project_context.is_empty())
+                && (!sections.base_prompt.is_empty()
+                    || !sections.identity_context.is_empty()
+                    || !sections.project_context.is_empty())
             {
                 SYSTEM_SECTION_SEPARATOR.len()
             } else {
@@ -225,6 +238,7 @@ pub fn estimate_rendered_request_tokens(
             });
 
     let base_prompt_tokens = bytes_to_tokens(base_prompt_bytes);
+    let identity_context_tokens = bytes_to_tokens(identity_context_bytes);
     let project_context_tokens = bytes_to_tokens(project_context_bytes);
     let session_context_tokens = bytes_to_tokens(session_context_bytes);
     let non_system_messages = messages
@@ -239,6 +253,7 @@ pub fn estimate_rendered_request_tokens(
     );
     let tool_tokens = estimate_tool_wire_tokens(client, &options);
     let total_tokens = base_prompt_tokens
+        .saturating_add(identity_context_tokens)
         .saturating_add(project_context_tokens)
         .saturating_add(session_context_tokens)
         .saturating_add(message_tokens)
@@ -246,6 +261,7 @@ pub fn estimate_rendered_request_tokens(
 
     RenderedRequestTokenEstimate {
         base_prompt_tokens,
+        identity_context_tokens,
         project_context_tokens,
         session_context_tokens,
         message_tokens,
@@ -529,6 +545,7 @@ mod tests {
         assert_eq!(
             with_tools.fixed_overhead_tokens(),
             with_tools.base_prompt_tokens
+                + with_tools.identity_context_tokens
                 + with_tools.project_context_tokens
                 + with_tools.session_context_tokens
                 + with_tools.tool_tokens
@@ -536,10 +553,68 @@ mod tests {
         assert_eq!(
             with_tools.total_tokens,
             with_tools.base_prompt_tokens
+                + with_tools.identity_context_tokens
                 + with_tools.project_context_tokens
                 + with_tools.session_context_tokens
                 + with_tools.message_tokens
                 + with_tools.tool_tokens
+        );
+    }
+
+    #[test]
+    fn rendered_request_estimate_counts_frozen_mako_identity_context() {
+        let client = AiClient::new(
+            AiClientConfig {
+                model: "gpt-5.5".to_string(),
+                provider_id: ProviderId::OpenAI,
+                api_format: ApiFormat::OpenAIResponses,
+                ..Default::default()
+            },
+            "test-key".to_string(),
+        );
+        let mako_identity = format!(
+            "[MAKO SOUL - profile-id=test]\n{}",
+            "personality and behavioral continuity ".repeat(128)
+        );
+        let user_message = ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "hello".to_string(),
+            }],
+        };
+        let without_identity = estimate_rendered_request_tokens(
+            &client,
+            std::slice::from_ref(&user_message),
+            &CallOptions::default(),
+        );
+        let with_identity = estimate_rendered_request_tokens(
+            &client,
+            &[
+                ModelMessage {
+                    role: Role::System,
+                    content: vec![Content::Text {
+                        text: mako_identity.clone(),
+                    }],
+                },
+                user_message,
+            ],
+            &CallOptions::default(),
+        );
+
+        let expected_identity_tokens =
+            super::bytes_to_tokens(mako_identity.len() + super::SYSTEM_SECTION_SEPARATOR.len());
+        assert_eq!(
+            with_identity.identity_context_tokens,
+            expected_identity_tokens
+        );
+        assert_eq!(without_identity.identity_context_tokens, 0);
+        assert_eq!(
+            with_identity.total_tokens,
+            without_identity.total_tokens + expected_identity_tokens
+        );
+        assert_eq!(
+            with_identity.fixed_overhead_tokens(),
+            without_identity.fixed_overhead_tokens() + expected_identity_tokens
         );
     }
 }

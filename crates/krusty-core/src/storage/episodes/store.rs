@@ -75,7 +75,7 @@ impl<'a> EpisodeStore<'a> {
                  ORDER BY id
                  LIMIT ?2",
             )?;
-            statement
+            let rows = statement
                 .query_map(params![after_message_id, limit], |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
@@ -85,7 +85,8 @@ impl<'a> EpisodeStore<'a> {
                         row.get::<_, String>(4)?,
                     ))
                 })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
         };
 
         let mut indexed = 0;
@@ -236,7 +237,10 @@ mod private_tests {
     #[test]
     fn extracts_only_text_content() {
         let json = r#"[{"type":"thinking","thinking":"secret","signature":"x"},{"type":"text","text":"  hello   world  "},{"type":"tool_result","tool_use_id":"1","output":"raw"}]"#;
-        assert_eq!(episode_body("assistant", json).as_deref(), Some("hello world"));
+        assert_eq!(
+            episode_body("assistant", json).as_deref(),
+            Some("hello world")
+        );
         assert!(episode_body("tool", json).is_none());
         assert!(episode_body("pending_user:1", json).is_none());
     }

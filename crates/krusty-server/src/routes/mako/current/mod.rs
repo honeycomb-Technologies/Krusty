@@ -5,20 +5,22 @@ use serde::Serialize;
 use serde_json::Value;
 
 use krusty_core::storage::{
-    AutonomousTaskStore, Database, MakoRunPriority, MakoRuntimeState, MakoRuntimeStateStore,
-    MemoryStore, ProjectSettings, ReportStore, SessionType,
+    AutonomousTaskStore, Database, MakoControllerEventStore, MakoControllerStore, MakoRunPriority,
+    MakoRuntimeState, MakoRuntimeStateStore, MemoryStore, ProjectSettings, ReportStore,
+    SessionType,
 };
 
 use self::diagnostics::{
     build_run_diagnostic, classify_run_state, diagnostic_needs_attention, earlier_timestamp,
     has_due_soon_wake, is_stalled_diagnostic, later_timestamp, latest_task_activity_at,
-    load_run_trace_diagnostics, overall_home_status, run_has_open_work, summarize_health_state,
+    load_run_trace_diagnostics, overall_home_status,
+    pending_approval_summaries_from_durable_events, run_has_open_work, summarize_health_state,
     summarize_queue_pressure, summarize_tasks,
 };
 use self::knowledge::summarize_knowledge_health;
 use self::ordering::{compare_pending_approvals, compare_run_summaries};
 use super::super::session_access::{
-    current_user_id, load_agent_state_or_idle, request_workspace_scope,
+    current_user_id, load_agent_state_or_idle, request_workspace_scope, session_visible_to_user,
 };
 use super::open_session_manager;
 use crate::auth::CurrentUser;
@@ -53,6 +55,7 @@ pub(super) struct MakoCurrentRunSummary {
 #[derive(Debug, Serialize, Clone)]
 pub(super) struct MakoPendingApprovalSummary {
     pub(super) session_id: String,
+    pub(super) run_id: String,
     pub(super) session_title: String,
     pub(super) project_dir: Option<String>,
     pub(super) target_branch: Option<String>,
@@ -156,13 +159,21 @@ pub(super) async fn build_mako_current_response(
     let user_id = current_user_id(user);
     let sessions = {
         let session_manager = open_session_manager(state)?;
-        session_manager.list_sessions_for_user_by_type(None, user_id, SessionType::Mako)?
+        session_manager
+            .list_sessions_for_user_by_type(None, user_id, SessionType::Mako)?
+            .into_iter()
+            .filter(|session| session_visible_to_user(session, user_id))
+            .collect::<Vec<_>>()
     };
     let session_ids = sessions
         .iter()
         .map(|session| session.id.clone())
         .collect::<Vec<_>>();
-    let daemon_stats = state.mako_runtime.stats_for_sessions(&session_ids).await;
+    let daemon_stats = state
+        .mako_runtime
+        .stats_for_sessions_for_user(&session_ids, user_id)
+        .await
+        .map_err(crate::mako_runtime::control_plane_app_error)?;
     let session_manager = open_session_manager(state)?;
     let runtime_store = MakoRuntimeStateStore::new(Database::new(&state.db_path)?);
     let task_store = AutonomousTaskStore::new(Database::new(&state.db_path)?);
@@ -170,6 +181,8 @@ pub(super) async fn build_mako_current_response(
     let report_store = ReportStore::new(Database::new(&state.db_path)?);
     let trace_db = Database::new(&state.db_path)?;
     let trace_store = krusty_core::storage::RuntimeTraceStore::new(&trace_db);
+    let controller_store = MakoControllerStore::new(Database::new(&state.db_path)?);
+    let controller_event_store = MakoControllerEventStore::new(Database::new(&state.db_path)?);
     let workspace_scope = request_workspace_scope(state, user);
     let runtime_states = runtime_store.list_states_for_sessions(&session_ids)?;
     let recoverable_session_ids = runtime_store
@@ -203,27 +216,32 @@ pub(super) async fn build_mako_current_response(
         let runtime = runtime_states.get(&session.id).cloned();
         let tasks = task_store.list_tasks(&session.id)?;
         let task_counts = summarize_tasks(&tasks);
-        let trace_diagnostics = load_run_trace_diagnostics(
-            &trace_store,
-            &session.id,
-            &session.title,
-            session.project_dir.as_deref(),
-            session.target_branch.as_deref(),
-            runtime
-                .as_ref()
-                .map(|state| state.priority)
-                .unwrap_or(MakoRunPriority::Normal),
-        )?;
+        let priority = runtime
+            .as_ref()
+            .map(|state| state.priority)
+            .unwrap_or(MakoRunPriority::Normal);
+        let pending_approvals =
+            if let Some(controller) = controller_store.get_by_session(&session.id)? {
+                let events = controller_event_store.list_pending_tool_approvals(&controller.id)?;
+                pending_approval_summaries_from_durable_events(
+                    &events,
+                    &session.id,
+                    &session.title,
+                    session.project_dir.as_deref(),
+                    session.target_branch.as_deref(),
+                    priority,
+                )
+            } else {
+                Vec::new()
+            };
+        let trace_diagnostics =
+            load_run_trace_diagnostics(&trace_store, &session.id, pending_approvals)?;
         let cadence = load_mako_cadence(
             session.project_dir.as_deref(),
             session.working_dir.as_deref(),
             &workspace_scope.base_dir,
             &workspace_scope.allowed_root,
         );
-        let priority = runtime
-            .as_ref()
-            .map(|state| state.priority)
-            .unwrap_or(MakoRunPriority::Normal);
         if priority == MakoRunPriority::High {
             high_priority_count += 1;
         }

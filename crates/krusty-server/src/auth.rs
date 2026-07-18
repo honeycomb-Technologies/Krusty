@@ -1,8 +1,11 @@
 //! Lightweight auth middleware for self-host deployments.
 //!
-//! This keeps request-level user context optional:
-//! - No auth headers => single-tenant local mode.
-//! - `X-User-Id` + optional `X-Workspace-Dir` => scoped multi-user mode.
+//! This keeps request-level user context optional while preserving a hard trust
+//! boundary between loopback development and remote bearer access:
+//! - No identity headers => single-tenant mode.
+//! - Loopback-only `X-User-Id` + optional `X-Workspace-Dir` => scoped development mode.
+//! - A remote shared bearer token authenticates the server's single tenant and
+//!   never delegates an arbitrary user identity supplied by the caller.
 
 use axum::{
     async_trait,
@@ -16,6 +19,15 @@ use std::path::{Path, PathBuf};
 
 use crate::utils::workspace::resolve_scoped_workspace_path;
 use crate::AppState;
+
+const USER_ID_HEADER: &str = "X-User-Id";
+const WORKSPACE_DIR_HEADER: &str = "X-Workspace-Dir";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestSurface {
+    Loopback,
+    Remote,
+}
 
 /// User context attached to request extensions by middleware.
 #[derive(Debug, Clone)]
@@ -60,34 +72,28 @@ pub async fn auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Response {
-    if let Err(rejection) =
-        authorize_request_surface(&state, addr, request.headers(), request.uri()).await
-    {
-        tracing::warn!(
-            remote_ip = %addr.ip(),
-            "Rejected non-loopback API request"
-        );
-        return rejection.into_response();
-    }
+    let surface =
+        match authorize_request_surface(&state, addr, request.headers(), request.uri()).await {
+            Ok(surface) => surface,
+            Err(rejection) => {
+                tracing::warn!(
+                    remote_ip = %addr.ip(),
+                    "Rejected API request at the transport authorization boundary"
+                );
+                return rejection.into_response();
+            }
+        };
 
-    let mut user = AuthenticatedUser::local();
-
-    if let Some(user_id) = request
-        .headers()
-        .get("X-User-Id")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.trim().is_empty())
-    {
-        user.user_id = Some(user_id.to_string());
-        let requested_workspace = request
-            .headers()
-            .get("X-Workspace-Dir")
-            .and_then(|v| v.to_str().ok());
-        match resolve_workspace_dir(&state.working_dir, requested_workspace) {
-            Ok(workspace_dir) => user.home_dir = Some(workspace_dir),
-            Err(rejection) => return rejection.into_response(),
+    let user = match authenticated_user_for_surface(&state, surface, request.headers()) {
+        Ok(user) => user,
+        Err(rejection) => {
+            tracing::warn!(
+                remote_ip = %addr.ip(),
+                "Rejected unbound request identity"
+            );
+            return rejection.into_response();
         }
-    }
+    };
 
     request.extensions_mut().insert(user);
     next.run(request).await
@@ -98,17 +104,56 @@ async fn authorize_request_surface(
     addr: SocketAddr,
     headers: &HeaderMap,
     uri: &Uri,
-) -> Result<(), (StatusCode, &'static str)> {
+) -> Result<RequestSurface, (StatusCode, &'static str)> {
     let host = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
 
     if addr.ip().is_loopback() && is_local_host(host) {
-        authorize_local_browser_origin(headers)
+        authorize_local_browser_origin(headers).map(|()| RequestSurface::Loopback)
     } else {
-        authorize_remote_request(state, headers, uri).await
+        authorize_remote_request(state, headers, uri)
+            .await
+            .map(|()| RequestSurface::Remote)
     }
+}
+
+fn authenticated_user_for_surface(
+    state: &AppState,
+    surface: RequestSurface,
+    headers: &HeaderMap,
+) -> Result<AuthenticatedUser, (StatusCode, &'static str)> {
+    // The remote token is one server-wide capability, not a user credential.
+    // Letting its holder choose a principal would make every ownership check
+    // below this boundary caller-controlled. Reject both identity-bearing
+    // headers even when they are empty or malformed so the policy fails closed.
+    if surface == RequestSurface::Remote {
+        if headers.contains_key(USER_ID_HEADER) || headers.contains_key(WORKSPACE_DIR_HEADER) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Remote bearer access does not authorize user or workspace identity headers",
+            ));
+        }
+        return Ok(AuthenticatedUser::local());
+    }
+
+    let mut user = AuthenticatedUser::local();
+    if let Some(user_id) = headers
+        .get(USER_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+    {
+        user.user_id = Some(user_id.to_string());
+        let requested_workspace = headers
+            .get(WORKSPACE_DIR_HEADER)
+            .and_then(|value| value.to_str().ok());
+        user.home_dir = Some(resolve_workspace_dir(
+            &state.working_dir,
+            requested_workspace,
+        )?);
+    }
+    Ok(user)
 }
 
 fn authorize_local_browser_origin(headers: &HeaderMap) -> Result<(), (StatusCode, &'static str)> {
@@ -324,8 +369,9 @@ mod tests {
     use krusty_core::tools::registry::ToolRegistry;
 
     use super::{
-        authorize_request_surface, is_local_host, is_trusted_local_origin,
-        percent_decode_query_component, resolve_workspace_dir,
+        authenticated_user_for_surface, authorize_request_surface, is_local_host,
+        is_trusted_local_origin, percent_decode_query_component, resolve_workspace_dir,
+        RequestSurface, USER_ID_HEADER, WORKSPACE_DIR_HEADER,
     };
     use crate::{remote_access::RemoteAccessConfig, AppState};
 
@@ -434,8 +480,65 @@ mod tests {
         );
 
         let uri = Uri::from_static("/api/sessions");
-        let result = authorize_request_surface(&state, addr, &headers, &uri).await;
-        assert!(result.is_ok());
+        let surface = authorize_request_surface(&state, addr, &headers, &uri)
+            .await
+            .expect("valid remote bearer should authorize the request surface");
+        assert_eq!(surface, RequestSurface::Remote);
+        let user = authenticated_user_for_surface(&state, surface, &headers)
+            .expect("remote bearer without identity headers should remain valid");
+        assert!(user.user_id.is_none());
+        assert!(user.home_dir.is_none());
+    }
+
+    #[tokio::test]
+    async fn remote_bearer_rejects_caller_supplied_identity_headers() {
+        let state = test_state();
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 8)), 3000);
+        let uri = Uri::from_static("/api/mako/sessions/victim/status");
+
+        for (header_name, value) in [
+            (USER_ID_HEADER, "victim"),
+            (WORKSPACE_DIR_HEADER, "victim-workspace"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                HeaderValue::from_static("Bearer secret"),
+            );
+            headers.insert(
+                header_name.parse::<header::HeaderName>().unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+
+            let surface = authorize_request_surface(&state, addr, &headers, &uri)
+                .await
+                .expect("the bearer itself is valid");
+            let rejection = authenticated_user_for_surface(&state, surface, &headers)
+                .expect_err("an unbound remote identity must be rejected");
+            assert_eq!(rejection.0, axum::http::StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[tokio::test]
+    async fn loopback_scoped_identity_remains_available_for_local_development() {
+        let state = test_state();
+        let project_dir = state.working_dir.join("project");
+        std::fs::create_dir_all(&project_dir).expect("project directory should exist");
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:3000"));
+        headers.insert(USER_ID_HEADER, HeaderValue::from_static("local-user"));
+        headers.insert(WORKSPACE_DIR_HEADER, HeaderValue::from_static("project"));
+
+        let surface =
+            authorize_request_surface(&state, addr, &headers, &Uri::from_static("/api/sessions"))
+                .await
+                .expect("loopback request should be authorized");
+        assert_eq!(surface, RequestSurface::Loopback);
+        let user = authenticated_user_for_surface(&state, surface, &headers)
+            .expect("loopback identity should resolve");
+        assert_eq!(user.user_id.as_deref(), Some("local-user"));
+        assert_eq!(user.home_dir.as_deref(), Some(project_dir.as_path()));
     }
 
     #[tokio::test]

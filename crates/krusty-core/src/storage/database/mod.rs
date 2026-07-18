@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 39;
+const SCHEMA_VERSION: i32 = 44;
 
 /// Shared database handle for connection reuse
 ///
@@ -31,15 +31,16 @@ impl Database {
 
         let conn = Connection::open(path)?;
 
+        // Apply contention policy before any pragma that may need a write
+        // lock. The server and Mako daemon commonly initialize together.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+
         // Enable WAL mode for better concurrent access
         // This prevents lock contention when multiple instances try to access the database
         conn.pragma_update(None, "journal_mode", "WAL")?;
 
         // Enable foreign key enforcement for referential integrity
         conn.pragma_update(None, "foreign_keys", "ON")?;
-
-        // Set busy timeout to avoid immediate failures on lock contention
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         let db = Self { conn };
         db.run_migrations()?;

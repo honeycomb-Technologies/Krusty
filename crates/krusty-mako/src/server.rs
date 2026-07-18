@@ -12,12 +12,15 @@ use krusty_mako_protocol::{
     DaemonStats, IpcKey, MakoEvent, NonceReplayGuard, PongResponse, ProtocolErrorPayload,
     ProtocolVersion, RequestEnvelope, ResponseEnvelope, ResponsePayload, ServerFrame,
 };
+use tokio::io::AsyncWrite;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::handler::{CommandContext, CommandHandler, HandlerReply};
 use crate::{MakoDaemonConfig, DAEMON_VERSION};
+
+const MAX_SHUTDOWN_REASON_BYTES: usize = 1024;
 
 #[derive(Debug)]
 pub struct DaemonInfo {
@@ -54,7 +57,8 @@ pub struct DaemonServerHandle {
 
 impl DaemonServerHandle {
     pub fn shutdown(&self, reason: impl Into<String>) {
-        self.shutdown_tx.send_replace(Some(reason.into()));
+        self.shutdown_tx
+            .send_replace(Some(bounded_shutdown_reason(reason.into())));
     }
 
     pub fn info(&self) -> Arc<DaemonInfo> {
@@ -190,12 +194,9 @@ impl DaemonServer {
             }
         }
 
-        let reason = self
-            .shutdown_rx
-            .borrow()
-            .clone()
-            .unwrap_or_else(|| "daemon shutdown".to_string());
-        tracing::info!(reason, "Mako daemon stopping");
+        // Shutdown reasons can originate in authenticated user input. Keep
+        // them out of logs and other unbounded observability fields.
+        tracing::info!("Mako daemon stopping");
 
         let grace_period = self.config.connection_grace_period;
         if tokio::time::timeout(grace_period, async {
@@ -429,8 +430,32 @@ async fn serve_connection(
                 services.control_io_timeout,
             )
             .await?;
+            let (mut peer_reader, mut event_writer) = stream.into_split();
+            // A subscription is server-to-client after its one accepted
+            // request. Keep one cancellation-safe read future alive for the
+            // entire stream so quiet peer EOF releases the connection permit
+            // and drops the handler receiver. Recreating a read on every event
+            // could consume a partial frame before select cancellation.
+            let peer_input = async move {
+                read_frame::<_, ClientFrame>(&mut peer_reader)
+                    .await
+                    .map_err(anyhow::Error::from)
+            };
+            tokio::pin!(peer_input);
             loop {
                 tokio::select! {
+                    peer = &mut peer_input => {
+                        match peer? {
+                            None => break,
+                            Some(frame) => {
+                                tracing::warn!(
+                                    frame_kind = frame.kind(),
+                                    "Closing Mako subscription after unexpected client input"
+                                );
+                                break;
+                            }
+                        }
+                    }
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || shutdown_rx.borrow().is_some() {
                             let event = krusty_mako_protocol::EventEnvelope {
@@ -444,7 +469,7 @@ async fn serve_connection(
                                 },
                             };
                             let _ = write_server_frame(
-                                &mut stream,
+                                &mut event_writer,
                                 &ServerFrame::Event(event),
                                 services.control_io_timeout,
                             )
@@ -457,7 +482,7 @@ async fn serve_connection(
                             break;
                         };
                         write_server_frame(
-                            &mut stream,
+                            &mut event_writer,
                             &ServerFrame::Event(event),
                             services.control_io_timeout,
                         )
@@ -522,7 +547,8 @@ async fn dispatch_request(
             None,
         ),
         Command::Stats => {
-            let runtime = tokio::time::timeout(timeout, services.handler.runtime_stats()).await;
+            let runtime =
+                tokio::time::timeout(timeout, services.handler.runtime_stats(&context.actor)).await;
             match runtime {
                 Ok(runtime) => (
                     Ok(HandlerReply::Response(ResponsePayload::Stats(
@@ -555,9 +581,20 @@ async fn dispatch_request(
             }
         }
         Command::Shutdown(command) => {
-            let reason = command
-                .reason
-                .unwrap_or_else(|| "requested over authenticated IPC".to_string());
+            let reason = match command.reason {
+                Some(reason) if reason.len() > MAX_SHUTDOWN_REASON_BYTES => {
+                    return (
+                        Err(ProtocolErrorPayload::new(
+                            "invalid_request",
+                            format!("shutdown reason exceeds {MAX_SHUTDOWN_REASON_BYTES} bytes"),
+                            false,
+                        )),
+                        None,
+                    );
+                }
+                Some(reason) => reason,
+                None => "requested over authenticated IPC".to_string(),
+            };
             (
                 Ok(HandlerReply::Response(ResponsePayload::Ack(AckResponse {
                     accepted: true,
@@ -579,6 +616,19 @@ async fn dispatch_request(
             (result, None)
         }
     }
+}
+
+fn bounded_shutdown_reason(mut reason: String) -> String {
+    if reason.len() <= MAX_SHUTDOWN_REASON_BYTES {
+        return reason;
+    }
+    let mut cutoff = MAX_SHUTDOWN_REASON_BYTES.saturating_sub(" [truncated]".len());
+    while cutoff > 0 && !reason.is_char_boundary(cutoff) {
+        cutoff -= 1;
+    }
+    reason.truncate(cutoff);
+    reason.push_str(" [truncated]");
+    reason
 }
 
 async fn send_protocol_error(
@@ -608,11 +658,10 @@ async fn read_client_frame(
         .map_err(Into::into)
 }
 
-async fn write_server_frame(
-    stream: &mut UnixStream,
-    frame: &ServerFrame,
-    timeout: Duration,
-) -> Result<()> {
+async fn write_server_frame<W>(stream: &mut W, frame: &ServerFrame, timeout: Duration) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     tokio::time::timeout(timeout, write_frame(stream, frame))
         .await
         .context("Mako IPC response write timed out")??;
@@ -743,20 +792,73 @@ fn activated_listener() -> Result<Option<UnixListener>> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     use async_trait::async_trait;
     use krusty_mako_protocol::{
-        Actor, Command, ExtensionCommand, ExtensionResponse, MakoIpcClient, MakoIpcClientConfig,
-        ResponsePayload, ShutdownCommand,
+        Actor, Command, DaemonRuntimeStats, ExtensionCommand, ExtensionResponse, MakoIpcClient,
+        MakoIpcClientConfig, RequestEnvelope, ResponsePayload, ShutdownCommand, SubscribeCommand,
+        SubscriptionAccepted,
     };
+    use tokio::sync::mpsc;
 
     use super::*;
     use crate::handler::{CommandContext, HandlerResult};
     use crate::MakoPaths;
 
+    #[test]
+    fn direct_shutdown_reasons_are_utf8_safely_bounded() {
+        let reason = "é".repeat(MAX_SHUTDOWN_REASON_BYTES);
+        let bounded = bounded_shutdown_reason(reason);
+        assert!(bounded.len() <= MAX_SHUTDOWN_REASON_BYTES);
+        assert!(bounded.ends_with(" [truncated]"));
+    }
+
     #[derive(Debug)]
     struct TestHandler;
+
+    #[derive(Debug)]
+    struct QuietSubscriptionHandler {
+        subscribed: AtomicBool,
+        bridge_stopped: Arc<AtomicBool>,
+    }
+
+    impl QuietSubscriptionHandler {
+        fn new() -> Self {
+            Self {
+                subscribed: AtomicBool::new(false),
+                bridge_stopped: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CommandHandler for QuietSubscriptionHandler {
+        async fn handle(&self, _context: CommandContext, command: Command) -> HandlerResult {
+            let Command::Subscribe(command) = command else {
+                return Err(ProtocolErrorPayload::new(
+                    "unsupported",
+                    "unsupported test command",
+                    false,
+                ));
+            };
+            assert!(!self.subscribed.swap(true, Ordering::SeqCst));
+            let (sender, events) = mpsc::channel(1);
+            let bridge_stopped = Arc::clone(&self.bridge_stopped);
+            tokio::spawn(async move {
+                sender.closed().await;
+                bridge_stopped.store(true, Ordering::SeqCst);
+            });
+            Ok(HandlerReply::Subscription {
+                accepted: SubscriptionAccepted {
+                    session_id: command.session_id,
+                    high_water_sequence: None,
+                },
+                events,
+            })
+        }
+    }
 
     #[async_trait]
     impl CommandHandler for TestHandler {
@@ -776,8 +878,15 @@ mod tests {
             }
         }
 
-        async fn runtime_stats(&self) -> serde_json::Value {
-            serde_json::json!({"scheduler": "ready"})
+        async fn runtime_stats(&self, _actor: &Actor) -> DaemonRuntimeStats {
+            DaemonRuntimeStats {
+                active_controllers: 4,
+                active_runs: 3,
+                queued_runs: 2,
+                recovery_required: 1,
+                pump_alive: true,
+                scheduler_ready: true,
+            }
         }
     }
 
@@ -826,7 +935,12 @@ mod tests {
         match stats {
             ResponsePayload::Stats(stats) => {
                 assert_eq!(stats.instance_id, "test-instance");
-                assert_eq!(stats.runtime["scheduler"], "ready");
+                assert_eq!(stats.runtime.active_controllers, 4);
+                assert_eq!(stats.runtime.active_runs, 3);
+                assert_eq!(stats.runtime.queued_runs, 2);
+                assert_eq!(stats.runtime.recovery_required, 1);
+                assert!(stats.runtime.pump_alive);
+                assert!(stats.runtime.scheduler_ready);
             }
             other => panic!("unexpected response: {other:?}"),
         }
@@ -843,6 +957,28 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(extension, ResponsePayload::Extension(_)));
+
+        let oversized_shutdown = client
+            .command(
+                actor.clone(),
+                Command::Shutdown(ShutdownCommand {
+                    reason: Some("x".repeat(MAX_SHUTDOWN_REASON_BYTES + 1)),
+                }),
+                None,
+            )
+            .await
+            .expect_err("an oversized shutdown reason must not stop the daemon");
+        assert!(matches!(
+            oversized_shutdown,
+            krusty_mako_protocol::ClientError::Remote { ref code, .. }
+                if code == "invalid_request"
+        ));
+
+        let still_ready = client
+            .command(actor.clone(), Command::Ping, None)
+            .await
+            .expect("daemon should remain ready after rejecting an oversized reason");
+        assert!(matches!(still_ready, ResponsePayload::Pong(_)));
 
         let shutdown = client
             .command(
@@ -915,6 +1051,55 @@ mod tests {
         assert!(matches!(response, ResponsePayload::Pong(_)));
 
         drop(stalled);
+        handle.shutdown("test complete");
+        server_task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn quiet_subscription_disconnect_releases_receiver_and_connection_slot() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(&temp);
+        config.max_connections = 1;
+        let key_path = config.paths.key_path.clone();
+        let socket_path = config.paths.socket_path.clone();
+        let handler = Arc::new(QuietSubscriptionHandler::new());
+        let bridge_stopped = Arc::clone(&handler.bridge_stopped);
+        let server = DaemonServer::bind(config, handler).await.unwrap();
+        let handle = server.handle();
+        let server_task = tokio::spawn(server.serve());
+        let client = MakoIpcClient::from_key_path(
+            MakoIpcClientConfig::new(socket_path, "quiet-subscription-test"),
+            key_path,
+        )
+        .unwrap();
+
+        let subscription = client
+            .subscribe(RequestEnvelope::new(
+                Actor::local("test"),
+                Command::Subscribe(SubscribeCommand {
+                    session_id: "quiet-session".into(),
+                    after_sequence: Some(0),
+                    replay_limit: Some(0),
+                }),
+                1_000,
+            ))
+            .await
+            .unwrap();
+        assert!(!bridge_stopped.load(Ordering::SeqCst));
+        drop(subscription);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !bridge_stopped.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("disconnect should drop the receiver and stop its quiet bridge task");
+
+        let pong = client
+            .command(Actor::local("test"), Command::Ping, None)
+            .await
+            .expect("the sole connection slot should be reusable");
+        assert!(matches!(pong, ResponsePayload::Pong(_)));
         handle.shutdown("test complete");
         server_task.await.unwrap().unwrap();
     }

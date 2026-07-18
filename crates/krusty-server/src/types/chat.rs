@@ -378,6 +378,10 @@ mod tests {
 pub struct ToolResultRequest {
     /// Session ID
     pub session_id: String,
+    /// Exact autonomous run that requested the response. Older clients may
+    /// omit this; the server then resolves one unambiguous pending run.
+    #[serde(default)]
+    pub run_id: Option<String>,
     /// Tool use ID to respond to
     pub tool_call_id: String,
     /// Tool result content (JSON string)
@@ -394,6 +398,9 @@ pub struct ToolResultRequest {
 #[derive(Deserialize)]
 pub struct ToolApprovalRequest {
     pub session_id: String,
+    /// Exact autonomous run that emitted the approval request.
+    #[serde(default)]
+    pub run_id: Option<String>,
     pub tool_call_id: String,
     pub approved: bool,
 }

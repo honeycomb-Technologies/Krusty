@@ -5,19 +5,19 @@ use krusty_core::agent::{
 };
 use krusty_core::ai::types::{Citation, WebFetchContent, WebSearchResult};
 use krusty_core::storage::RuntimeTraceEvent;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // Plan Types
 // ============================================================================
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanItem {
     pub content: String,
     pub completed: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DelegatedToolKind {
     Explore,
@@ -37,7 +37,7 @@ impl From<CoreDelegatedToolKind> for DelegatedToolKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DelegatedProgressStatus {
     Running,
@@ -55,7 +55,7 @@ impl From<&AgentProgressStatus> for DelegatedProgressStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DelegatedRunStage {
     Created,
@@ -86,7 +86,7 @@ impl From<CoreDelegatedRunStage> for DelegatedRunStage {
 // ============================================================================
 
 /// Events sent to the client during agentic chat loop
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgenticEvent {
     /// Text content delta from AI
@@ -209,6 +209,18 @@ pub enum AgenticEvent {
     },
     /// Some non-terminal stream events were dropped because the client fell behind.
     Lagged { skipped: usize },
+    /// A durable Mako daemon event that does not have a legacy chat-event mapping.
+    ///
+    /// Keeping the daemon sequence and raw payload makes controller lifecycle
+    /// events replayable without forcing older clients to understand them.
+    MakoControllerEvent {
+        session_id: Option<String>,
+        run_id: Option<String>,
+        sequence: Option<i64>,
+        emitted_at_unix_ms: i64,
+        event_type: String,
+        payload: serde_json::Value,
+    },
     /// Agentic loop finished
     Finish {
         session_id: String,

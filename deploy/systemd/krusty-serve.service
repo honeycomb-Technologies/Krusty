@@ -1,13 +1,15 @@
 [Unit]
 Description=Krusty self-hosted server
-After=network-online.target
+Requires=krusty-mako.socket
+After=network-online.target krusty-mako.socket
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/Work/krusty
-ExecStart=%h/Work/krusty/target/release/krusty serve --port 3000
+WorkingDirectory=%h
+ExecStart=/usr/bin/env krusty serve --port 3000
 Environment=RUST_LOG=info
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:%h/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=30

@@ -91,6 +91,29 @@ impl MakoScheduleStore {
             .context("reading Mako schedule")
     }
 
+    pub fn list_for_controller(
+        &self,
+        controller_id: &str,
+        limit: usize,
+    ) -> Result<Vec<MakoSchedule>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT {SCHEDULE_COLUMNS}
+             FROM mako_schedules
+             WHERE controller_id = ?1
+             ORDER BY created_at DESC, id ASC
+             LIMIT ?2"
+        );
+        let mut statement = self.db.conn().prepare(&sql)?;
+        let rows = statement
+            .query_map(params![controller_id, limit as i64], map_schedule)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("listing Mako schedules for controller")?;
+        Ok(rows)
+    }
+
     pub fn list_due(&self, now: &str, limit: usize) -> Result<Vec<MakoSchedule>> {
         if limit == 0 {
             return Ok(Vec::new());
@@ -106,10 +129,11 @@ impl MakoScheduleStore {
              LIMIT ?2"
         );
         let mut statement = self.db.conn().prepare(&sql)?;
-        statement
+        let schedules = statement
             .query_map(params![now, limit as i64], map_schedule)?
             .collect::<rusqlite::Result<Vec<_>>>()
-            .context("listing due Mako schedules")
+            .context("listing due Mako schedules")?;
+        Ok(schedules)
     }
 
     pub fn advance_schedule(
@@ -234,6 +258,29 @@ impl MakoScheduleStore {
             .query_row(&sql, params![schedule_id, scheduled_for], map_occurrence)
             .optional()
             .context("reading Mako schedule occurrence")
+    }
+
+    pub fn list_occurrences(
+        &self,
+        schedule_id: &str,
+        limit: usize,
+    ) -> Result<Vec<MakoScheduleOccurrence>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT {OCCURRENCE_COLUMNS}
+             FROM mako_schedule_occurrences
+             WHERE schedule_id = ?1
+             ORDER BY scheduled_for DESC, id ASC
+             LIMIT ?2"
+        );
+        let mut statement = self.db.conn().prepare(&sql)?;
+        let rows = statement
+            .query_map(params![schedule_id, limit as i64], map_occurrence)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("listing Mako schedule occurrences")?;
+        Ok(rows)
     }
 }
 

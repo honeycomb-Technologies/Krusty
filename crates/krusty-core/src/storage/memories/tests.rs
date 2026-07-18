@@ -63,6 +63,53 @@ fn list_without_user_id_excludes_user_scoped_memories() {
 }
 
 #[test]
+fn exact_owner_listing_never_inherits_local_or_foreign_memory() {
+    let (store, _tmp) = create_store();
+    for (title, content, project_dir, user_id) in [
+        ("Local global", "local-global", None, None),
+        ("Local project", "local-project", Some("/repo"), None),
+        ("Alice global", "alice-global", None, Some("alice")),
+        (
+            "Alice project",
+            "alice-project",
+            Some("/repo"),
+            Some("alice"),
+        ),
+        ("Bob project", "bob-project", Some("/repo"), Some("bob")),
+    ] {
+        store
+            .save(MemoryType::Project, title, content, project_dir, user_id)
+            .unwrap();
+    }
+
+    let alice = store.list_for_exact_owner(Some("/repo"), Some("alice"));
+    assert_eq!(alice.len(), 2);
+    assert!(alice
+        .iter()
+        .all(|memory| memory.user_id.as_deref() == Some("alice")));
+    assert!(alice.iter().any(|memory| memory.content == "alice-global"));
+    assert!(alice.iter().any(|memory| memory.content == "alice-project"));
+    assert!(alice
+        .iter()
+        .all(|memory| !memory.content.starts_with("local-")));
+    assert!(alice
+        .iter()
+        .all(|memory| !memory.content.starts_with("bob-")));
+
+    let local = store.list_for_exact_owner(Some("/repo"), None);
+    assert_eq!(local.len(), 2);
+    assert!(local.iter().all(|memory| memory.user_id.is_none()));
+    assert!(local.iter().any(|memory| memory.content == "local-global"));
+    assert!(local.iter().any(|memory| memory.content == "local-project"));
+    assert!(local
+        .iter()
+        .all(|memory| !memory.content.starts_with("alice-")));
+    assert!(local
+        .iter()
+        .all(|memory| !memory.content.starts_with("bob-")));
+}
+
+#[test]
 fn update_memory() {
     let (store, _tmp) = create_store();
     let mem = store
@@ -292,7 +339,7 @@ fn canonical_save_supersedes_the_same_active_key_transactionally() {
     first_input.source_session_id = Some("session-1".to_string());
     let first = store.save_canonical(&first_input).unwrap();
 
-    let mut replacement_input = first_input.clone();
+    let mut replacement_input = first_input;
     replacement_input.content = "Use the revised boundary.".to_string();
     replacement_input.source_session_id = Some("session-2".to_string());
     let replacement = store.save_canonical(&replacement_input).unwrap();
@@ -442,6 +489,77 @@ fn owner_scoped_mutations_do_not_reveal_or_modify_other_users() {
     assert_eq!(
         revisions.last().unwrap().snapshot.status,
         MemoryStatus::Deleted
+    );
+}
+
+#[test]
+fn canonical_tombstone_is_exactly_scoped_revisioned_and_idempotent() {
+    let (store, _tmp) = create_store();
+    let mut alice_repo = CanonicalMemoryInput::new(
+        MemoryType::Feedback,
+        "communication.progress",
+        "Progress style",
+        "Use concise progress updates.",
+    );
+    alice_repo.user_id = Some("alice".to_string());
+    alice_repo.project_dir = Some("/repo-a".to_string());
+    let mut alice_other_repo = alice_repo.clone();
+    alice_other_repo.project_dir = Some("/repo-b".to_string());
+    let mut bob_repo = alice_repo.clone();
+    bob_repo.user_id = Some("bob".to_string());
+
+    let target = store.save_canonical(&alice_repo).unwrap();
+    let other_repo = store.save_canonical(&alice_other_repo).unwrap();
+    let other_owner = store.save_canonical(&bob_repo).unwrap();
+
+    assert!(store
+        .tombstone_canonical_for_owner(
+            "communication.progress",
+            Some("/repo-a"),
+            Some("bob"),
+            MemoryNamespace::Shared,
+            None,
+        )
+        .unwrap()
+        .is_some());
+    assert!(store.get(&other_owner.id).unwrap().is_none());
+    assert!(store.get(&target.id).unwrap().is_some());
+    assert!(store.get(&other_repo.id).unwrap().is_some());
+
+    let deleted = store
+        .tombstone_canonical_for_owner(
+            "communication.progress",
+            Some("/repo-a"),
+            Some("alice"),
+            MemoryNamespace::Shared,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(deleted.id, target.id);
+    assert_eq!(deleted.status, MemoryStatus::Deleted);
+    assert!(store.get(&target.id).unwrap().is_none());
+    assert!(store.get(&other_repo.id).unwrap().is_some());
+    assert!(store
+        .tombstone_canonical_for_owner(
+            "communication.progress",
+            Some("/repo-a"),
+            Some("alice"),
+            MemoryNamespace::Shared,
+            None,
+        )
+        .unwrap()
+        .is_none());
+
+    let revisions = store
+        .list_revisions_for_owner(&target.id, Some("alice"))
+        .unwrap();
+    assert_eq!(
+        revisions
+            .iter()
+            .map(|revision| revision.event)
+            .collect::<Vec<_>>(),
+        vec![MemoryRevisionEvent::Created, MemoryRevisionEvent::Deleted]
     );
 }
 

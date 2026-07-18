@@ -3,6 +3,7 @@
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::ai::retry::safe_provider_code;
 use crate::ai::sse::{SseEvent, SseParser};
 use crate::ai::types::{AiToolCall, FinishReason};
 use crate::ai::usage::parse_google_usage;
@@ -28,7 +29,7 @@ impl GoogleParser {
             "SAFETY" | "RECITATION" | "PROHIBITED_CONTENT" | "SPII" | "IMAGE_SAFETY" => {
                 FinishReason::ContentFilter
             }
-            _ => FinishReason::Other(reason.to_string()),
+            _ => FinishReason::Other(safe_provider_code(reason)),
         }
     }
 
@@ -270,7 +271,8 @@ mod tests {
         );
         assert!(matches!(
             GoogleParser::parse_finish_reason("OTHER"),
-            FinishReason::Other(reason) if reason == "OTHER"
+            FinishReason::Other(reason)
+                if reason.starts_with("unknown:sha256:") && !reason.contains("OTHER")
         ));
     }
 }

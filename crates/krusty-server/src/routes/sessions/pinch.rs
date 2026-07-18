@@ -29,6 +29,11 @@ pub(super) async fn pinch_session(
 ) -> Result<Json<PinchResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
     let source_session = load_owned_session(&session_manager, &id, user.as_ref())?;
+    if source_session.session_type == krusty_core::storage::SessionType::Mako {
+        return Err(AppError::Conflict(
+            "Mako compaction must be coordinated by the daemon; /sessions/:id/pinch is unavailable for Mako sessions".into(),
+        ));
+    }
     let _session_guard = state
         .try_lock_session(&id)
         .await

@@ -164,13 +164,9 @@ impl<'a> MessageStore<'a> {
         tx.commit()?;
 
         for (message_id, content) in promoted {
-            if let Err(error) = EpisodeStore::new(self.db).record_message(
-                session_id,
-                message_id,
-                "user",
-                &content,
-                &now,
-            ) {
+            if let Err(error) = EpisodeStore::new(self.db)
+                .record_message(session_id, message_id, "user", &content, &now)
+            {
                 tracing::warn!(
                     session_id,
                     message_id,

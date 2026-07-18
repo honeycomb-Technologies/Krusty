@@ -149,6 +149,16 @@ pub struct ClaimRunRequest {
     pub global_concurrency_limit: u32,
 }
 
+/// The scheduler-level lease that fences a worker mutation. Run leases stop
+/// duplicate workers for one run; this additional fence stops an entire stale
+/// daemon generation after another process takes over the scheduler lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonFence {
+    pub lease_name: String,
+    pub owner_id: String,
+    pub fencing_token: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClaimedMakoRun {
     pub run: MakoRun,
@@ -169,8 +179,16 @@ pub struct RunCompletion {
     pub trace_sequence_end: Option<i64>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LeaseReconciliation {
     pub requeued_unstarted: usize,
     pub recovery_required: usize,
+    pub requeued_runs: Vec<ReconciledRun>,
+    pub recovery_required_runs: Vec<ReconciledRun>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciledRun {
+    pub run_id: String,
+    pub attempt_no: u32,
 }

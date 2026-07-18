@@ -15,9 +15,7 @@ use krusty_core::storage::{
 use krusty_core::tools::registry::{MutationToolSurface, PermissionMode, ToolRequestPolicy};
 use krusty_core::SessionManager;
 
-use super::super::session_access::{
-    current_user_id, ensure_owned_session, load_owned_session, request_workspace_scope,
-};
+use super::super::session_access::{current_user_id, load_owned_session, request_workspace_scope};
 use super::tools::{apply_thinking_config, chat_system_prompt, filter_tools_for_session_type};
 use crate::ai_bootstrap::{persist_current_model_selection, resolve_preferred_model};
 use crate::auth::CurrentUser;
@@ -119,7 +117,13 @@ pub(super) async fn prepare_chat_route_session(
         Some(id) => {
             let db = Database::new(&state.db_path)?;
             let sm = SessionManager::new(db);
-            ensure_owned_session(&sm, id, user)?;
+            let session = load_owned_session(&sm, id, user)?;
+            if session.session_type == SessionType::Mako && req.target_branch.is_some() {
+                return Err(AppError::Conflict(
+                    "Mako target branches are daemon-owned and cannot be changed through /chat"
+                        .into(),
+                ));
+            }
             if let Some(target_branch) = req.target_branch.as_deref() {
                 sm.update_session_target_branch(id, trimmed_nonempty(Some(target_branch)))?;
             }
@@ -127,9 +131,13 @@ pub(super) async fn prepare_chat_route_session(
             Ok(PreparedChatRouteSession {
                 session_id: id.to_string(),
                 is_first_message: messages.is_empty(),
-                pending_model_update: requested_model
-                    .persisted()
-                    .map(|model| model.map(ToOwned::to_owned)),
+                pending_model_update: (session.session_type != SessionType::Mako)
+                    .then(|| {
+                        requested_model
+                            .persisted()
+                            .map(|model| model.map(ToOwned::to_owned))
+                    })
+                    .flatten(),
             })
         }
         None => {

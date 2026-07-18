@@ -3,13 +3,16 @@
 //! Handles VAPID key management and sending push notifications
 //! via the Web Push protocol (RFC 8030).
 
-use std::path::PathBuf;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::http;
 use base64ct::{Base64UrlUnpadded, Encoding};
+use fs2::FileExt;
 use serde::Serialize;
 use tokio::time::sleep;
 use web_push_native::jwt_simple::algorithms::{ECDSAP256PublicKeyLike, ES256KeyPair};
@@ -135,27 +138,109 @@ enum DeliveryOutcome {
     },
 }
 
+struct VapidInitLock(File);
+
+impl VapidInitLock {
+    fn acquire(key_path: &Path) -> Result<Self> {
+        let lock_path = sidecar_path(key_path, ".lock");
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&lock_path)
+            .with_context(|| format!("Failed to open VAPID init lock {}", lock_path.display()))?;
+        set_private_file_permissions(&lock_path)?;
+        FileExt::lock_exclusive(&file).context("Failed to lock VAPID key initialization")?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for VapidInitLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
+fn load_or_create_vapid_keypair(key_path: &Path) -> Result<ES256KeyPair> {
+    let parent = key_path
+        .parent()
+        .context("VAPID key path must have a parent directory")?;
+    fs::create_dir_all(parent)?;
+    let _init_lock = VapidInitLock::acquire(key_path)?;
+
+    if key_path.exists() {
+        set_private_file_permissions(key_path)?;
+        let pem = fs::read_to_string(key_path).context("Failed to read VAPID key file")?;
+        return ES256KeyPair::from_pem(&pem).context("Failed to parse VAPID PEM");
+    }
+
+    let keypair = ES256KeyPair::generate();
+    let pem = keypair.to_pem().context("Failed to serialize VAPID key")?;
+    let temp_path = sidecar_path(key_path, &format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+    let write_result = (|| -> Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temp_path)
+            .with_context(|| format!("Failed to create VAPID temp file {}", temp_path.display()))?;
+        file.write_all(pem.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temp_path, key_path).with_context(|| {
+            format!(
+                "Failed to atomically install VAPID key {}",
+                key_path.display()
+            )
+        })?;
+        set_private_file_permissions(key_path)?;
+        if let Ok(directory) = File::open(parent) {
+            let _ = directory.sync_all();
+        }
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    write_result?;
+
+    tracing::info!(
+        "Generated new private VAPID keypair at {}",
+        key_path.display()
+    );
+    Ok(keypair)
+}
+
+fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn set_private_file_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(path, permissions)
+            .with_context(|| format!("Failed to set private permissions on {}", path.display()))?;
+    }
+    Ok(())
+}
+
 impl PushService {
     /// Load or generate a VAPID keypair and create the service.
     pub fn init(vapid_key_path: &std::path::Path, db_path: Arc<PathBuf>) -> Result<Self> {
-        if let Some(parent) = vapid_key_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let keypair = if vapid_key_path.exists() {
-            let pem =
-                std::fs::read_to_string(vapid_key_path).context("Failed to read VAPID key file")?;
-            ES256KeyPair::from_pem(&pem).context("Failed to parse VAPID PEM")?
-        } else {
-            let kp = ES256KeyPair::generate();
-            let pem = kp.to_pem().context("Failed to serialize VAPID key")?;
-            std::fs::write(vapid_key_path, &pem).context("Failed to write VAPID key file")?;
-            tracing::info!(
-                "Generated new VAPID keypair at {}",
-                vapid_key_path.display()
-            );
-            kp
-        };
+        let keypair = load_or_create_vapid_keypair(vapid_key_path)?;
 
         let public_key_bytes = keypair.public_key().public_key().to_bytes_uncompressed();
         let public_key_base64url = Base64UrlUnpadded::encode_string(&public_key_bytes);
@@ -458,4 +543,60 @@ fn backoff_delay(attempt: usize) -> Duration {
 
 fn elapsed_ms(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+
+    use tempfile::TempDir;
+
+    use super::PushService;
+
+    #[test]
+    fn concurrent_vapid_initializers_converge_on_one_private_key() {
+        let temp = TempDir::new().expect("temporary push root should exist");
+        let key_path = Arc::new(temp.path().join("vapid.pem"));
+        let db_path = Arc::new(temp.path().join("krusty.db"));
+        let barrier = Arc::new(Barrier::new(8));
+        let handles = (0..8)
+            .map(|_| {
+                let key_path = Arc::clone(&key_path);
+                let db_path = Arc::clone(&db_path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    PushService::init(key_path.as_path(), db_path)
+                        .expect("concurrent push initialization should succeed")
+                        .vapid_public_key_base64url()
+                        .to_string()
+                })
+            })
+            .collect::<Vec<_>>();
+        let public_keys = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("initializer thread should not panic"))
+            .collect::<Vec<_>>();
+
+        assert!(public_keys
+            .iter()
+            .all(|public_key| public_key == &public_keys[0]));
+        assert!(key_path.exists());
+        assert!(super::sidecar_path(key_path.as_path(), ".lock").exists());
+        assert!(std::fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp")));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(key_path.as_path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
 }

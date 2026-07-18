@@ -6,7 +6,7 @@ use rusqlite::{params, OptionalExtension, Row, Transaction, TransactionBehavior}
 use crate::mako::normalize_timestamp;
 use crate::storage::Database;
 
-use super::{MakoControllerEvent, MakoControllerEventType, NewMakoControllerEvent};
+use super::{MakoControllerEvent, NewMakoControllerEvent};
 
 const COLUMNS: &str = "id, controller_id, sequence, event_type, run_id, schedule_id, dedupe_key, payload_json, created_at";
 
@@ -92,13 +92,114 @@ impl MakoControllerEventStore {
              ORDER BY sequence ASC LIMIT ?3"
         );
         let mut statement = self.db.conn().prepare(&sql)?;
-        statement
+        let events = statement
             .query_map(
                 params![controller_id, after_sequence, limit as i64],
                 map_event,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()
-            .context("listing Mako controller events")
+            .context("listing Mako controller events")?;
+        Ok(events)
+    }
+
+    /// Returns exact durable approval requests whose latest state for the
+    /// same `(run_id, tool_call_id)` remains pending and whose run can still
+    /// accept an approval. Trace-run identifiers are deliberately excluded.
+    pub fn list_pending_tool_approvals(
+        &self,
+        controller_id: &str,
+    ) -> Result<Vec<MakoControllerEvent>> {
+        let sql = format!(
+            "WITH interactions AS (
+                SELECT e.id, e.controller_id, e.sequence, e.event_type, e.run_id,
+                       e.schedule_id, e.dedupe_key, e.payload_json, e.created_at,
+                       r.status AS run_status,
+                       CASE
+                         WHEN e.event_type = 'agentic_event'
+                           THEN json_extract(e.payload_json, '$.type')
+                         ELSE e.event_type
+                       END AS interaction_state,
+                       CASE
+                         WHEN e.event_type = 'agentic_event'
+                           THEN json_extract(e.payload_json, '$.id')
+                         ELSE json_extract(e.payload_json, '$.tool_call_id')
+                       END AS tool_call_id
+                  FROM mako_controller_events e
+                  JOIN mako_runs r ON r.id = e.run_id
+                 WHERE e.controller_id = ?1
+                   AND e.run_id IS NOT NULL
+                   AND (
+                     (e.event_type = 'agentic_event'
+                       AND json_extract(e.payload_json, '$.type') IN (
+                         'tool_approval_required', 'tool_approved', 'tool_denied', 'tool_result'
+                       ))
+                     OR e.event_type IN ('tool_approval_queued', 'tool_approval_delivered')
+                   )
+            ), ranked AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY run_id, tool_call_id ORDER BY sequence DESC
+                ) AS state_rank
+                  FROM interactions
+                 WHERE tool_call_id IS NOT NULL
+            )
+            SELECT {COLUMNS} FROM ranked
+             WHERE state_rank = 1
+               AND interaction_state = 'tool_approval_required'
+               AND run_status IN ('leased', 'running')
+             ORDER BY sequence ASC"
+        );
+        let mut statement = self.db.conn().prepare(&sql)?;
+        let events = statement
+            .query_map([controller_id], map_event)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("listing pending durable Mako tool approvals")?;
+        Ok(events)
+    }
+
+    /// Returns durable run ids whose latest state for this exact question is
+    /// still awaiting a response.
+    pub fn list_pending_user_response_runs(
+        &self,
+        controller_id: &str,
+        tool_call_id: &str,
+    ) -> Result<Vec<String>> {
+        let mut statement = self.db.conn().prepare(
+            "WITH interactions AS (
+                SELECT e.run_id, e.sequence, r.status AS run_status,
+                       CASE
+                         WHEN e.event_type = 'agentic_event'
+                           THEN json_extract(e.payload_json, '$.type')
+                         ELSE e.event_type
+                       END AS interaction_state
+                  FROM mako_controller_events e
+                  JOIN mako_runs r ON r.id = e.run_id
+                 WHERE e.controller_id = ?1
+                   AND e.run_id IS NOT NULL
+                   AND (
+                     (e.event_type = 'agentic_event'
+                       AND json_extract(e.payload_json, '$.type') = 'awaiting_input'
+                       AND json_extract(e.payload_json, '$.tool_call_id') = ?2)
+                     OR
+                     (e.event_type IN ('user_response_received', 'user_response_staged')
+                       AND json_extract(e.payload_json, '$.tool_call_id') = ?2)
+                   )
+            ), ranked AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY run_id ORDER BY sequence DESC
+                ) AS state_rank
+                  FROM interactions
+            )
+            SELECT run_id FROM ranked
+             WHERE state_rank = 1
+               AND interaction_state = 'awaiting_input'
+               AND run_status IN ('leased', 'running', 'awaiting_input')
+             ORDER BY sequence ASC",
+        )?;
+        let run_ids = statement
+            .query_map(params![controller_id, tool_call_id], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("listing pending durable Mako user responses")?;
+        Ok(run_ids)
     }
 
     #[cfg(test)]
@@ -123,13 +224,7 @@ fn get_by_dedupe(
 
 fn map_event(row: &Row<'_>) -> rusqlite::Result<MakoControllerEvent> {
     let sequence = nonnegative_i64(row, 2)? as u64;
-    let raw_event_type = row.get::<_, String>(3)?;
-    let event_type = MakoControllerEventType::parse(&raw_event_type).ok_or_else(|| {
-        conversion_error(
-            3,
-            format!("invalid controller event type: {raw_event_type}"),
-        )
-    })?;
+    let event_type = row.get::<_, String>(3)?;
     let payload_json = row.get::<_, String>(7)?;
     let payload = serde_json::from_str(&payload_json)
         .map_err(|error| conversion_error(7, format!("invalid event payload JSON: {error}")))?;

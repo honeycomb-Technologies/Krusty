@@ -7,6 +7,10 @@ use krusty_core::storage::{Database, Preferences};
 const REMOTE_ACCESS_ENABLED_KEY: &str = "server_remote_access_enabled";
 const REMOTE_ACCESS_TOKEN_KEY: &str = "server_remote_access_token";
 
+/// Server-wide capability used by the single-tenant remote-access surface.
+///
+/// This token is not a per-user credential. The HTTP auth boundary must never
+/// combine it with a caller-supplied user or workspace identity.
 #[derive(Debug, Clone, Serialize)]
 pub struct RemoteAccessConfig {
     pub enabled: bool,
@@ -14,6 +18,16 @@ pub struct RemoteAccessConfig {
 }
 
 impl RemoteAccessConfig {
+    /// Non-persisting placeholder for process roles that never serve remote
+    /// HTTP traffic. In particular, the standalone Mako executor must not race
+    /// the HTTP server to generate or persist a remote-access token.
+    pub(crate) fn disabled_ephemeral() -> Self {
+        Self {
+            enabled: false,
+            token: String::new(),
+        }
+    }
+
     pub fn load_or_create(db_path: &std::path::Path) -> Result<Self> {
         let db = Database::new(db_path)?;
         let preferences = Preferences::new(db);

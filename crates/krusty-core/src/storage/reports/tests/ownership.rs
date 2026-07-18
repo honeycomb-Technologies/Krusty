@@ -40,6 +40,46 @@ fn list_reports_for_user_filters_via_session_owner() {
 }
 
 #[test]
+fn exact_owner_report_listing_isolates_alice_bob_and_local() {
+    let (store, _tmp) = create_store_with_users();
+    for (title, session_id) in [
+        ("Local Queue", "sess-1"),
+        ("Alice Queue", "sess-a"),
+        ("Bob Queue", "sess-b"),
+    ] {
+        store
+            .create_report(CreateReportInput {
+                title,
+                session_id,
+                project_dir: Some("/shared"),
+                report_root: None,
+                content: title,
+                summary: "queue ownership evidence",
+                tags: &[],
+                sources: &[],
+            })
+            .unwrap();
+    }
+
+    let alice = store
+        .list_reports_for_exact_owner(Some("/shared"), Some("user-a"))
+        .unwrap();
+    let bob = store
+        .list_reports_for_exact_owner(Some("/shared"), Some("user-b"))
+        .unwrap();
+    let local = store
+        .list_reports_for_exact_owner(Some("/shared"), None)
+        .unwrap();
+
+    assert_eq!(alice.len(), 1);
+    assert_eq!(alice[0].title, "Alice Queue");
+    assert_eq!(bob.len(), 1);
+    assert_eq!(bob[0].title, "Bob Queue");
+    assert_eq!(local.len(), 1);
+    assert_eq!(local[0].title, "Local Queue");
+}
+
+#[test]
 fn get_report_for_user_hides_foreign_reports() {
     let (store, _tmp) = create_store_with_users();
     let report_id = store

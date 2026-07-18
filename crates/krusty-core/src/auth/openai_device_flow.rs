@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use super::extract_openai_account_id;
+use super::http::read_auth_response;
 use super::types::{OAuthConfig, OAuthTokenData};
 
 /// Response returned to the caller when starting the OpenAI device flow.
@@ -47,21 +48,16 @@ impl OpenAIDeviceAuthFlow {
             .send()
             .await
             .context("Failed to send OpenAI device code request")?;
+        let response = read_auth_response(response)
+            .await
+            .context("Failed to read OpenAI device code response")?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "OpenAI device code request failed ({}): {}",
-                status,
-                body
-            ));
+            return Err(response.safe_error("OpenAI device code request failed"));
         }
 
-        let user_code_response: UserCodeResponse = response
-            .json()
-            .await
-            .context("Failed to parse OpenAI device code response")?;
+        let user_code_response: UserCodeResponse =
+            response.parse_json("OpenAI device code response")?;
 
         let mut verification_uri_complete = Url::parse(&format!("{issuer}/codex/device"))
             .context("Failed to build OpenAI verification URL")?;
@@ -103,14 +99,15 @@ impl OpenAIDeviceAuthFlow {
                 .send()
                 .await
                 .context("Failed to poll OpenAI device auth token")?;
+            let response = read_auth_response(response)
+                .await
+                .context("Failed to read OpenAI device auth response")?;
 
             let status = response.status();
 
             if status.is_success() {
-                let code_response: DeviceAuthTokenResponse = response
-                    .json()
-                    .await
-                    .context("Failed to parse OpenAI device auth token response")?;
+                let code_response: DeviceAuthTokenResponse =
+                    response.parse_json("OpenAI device auth token response")?;
                 return self
                     .exchange_code(
                         &code_response.authorization_code,
@@ -132,8 +129,7 @@ impl OpenAIDeviceAuthFlow {
                 continue;
             }
 
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("OpenAI device auth failed ({}): {}", status, body));
+            return Err(response.safe_error("OpenAI device auth failed"));
         }
     }
 
@@ -154,21 +150,15 @@ impl OpenAIDeviceAuthFlow {
             .send()
             .await
             .context("Failed to exchange OpenAI device authorization code")?;
+        let response = read_auth_response(response)
+            .await
+            .context("Failed to read OpenAI token exchange response")?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "OpenAI token exchange failed ({}): {}",
-                status,
-                body
-            ));
+            return Err(response.safe_error("OpenAI token exchange failed"));
         }
 
-        let token_response: TokenResponse = response
-            .json()
-            .await
-            .context("Failed to parse OpenAI token response")?;
+        let token_response: TokenResponse = response.parse_json("OpenAI token response")?;
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)

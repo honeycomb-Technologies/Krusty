@@ -56,7 +56,11 @@ pub fn retry_delay(
     jitter_unit: f64,
     retry_after: Option<StdDuration>,
 ) -> Option<StdDuration> {
-    if attempt_number == 0 || attempt_number >= policy.max_attempts {
+    if attempt_number == 0
+        || attempt_number >= policy.max_attempts
+        || policy.base_delay_secs == 0
+        || policy.max_delay_secs < policy.base_delay_secs
+    {
         return None;
     }
 
@@ -76,7 +80,9 @@ pub fn retry_delay(
             (cap as f64 * unit).floor() as u64
         }
     };
-    let calculated = StdDuration::from_secs(calculated_secs);
+    // Full jitter may round a positive sub-second fraction down to zero.
+    // Preserve jitter while preventing a tight immediate-retry loop.
+    let calculated = StdDuration::from_secs(calculated_secs.max(1));
     Some(
         retry_after
             .map(|provider_delay| provider_delay.max(calculated))
@@ -159,6 +165,26 @@ mod tests {
         assert_eq!(
             next_retry_at(now, policy, 1, 0.0, None),
             Some(now + Duration::seconds(15))
+        );
+    }
+
+    #[test]
+    fn retry_policy_rejects_zero_base_and_full_jitter_never_returns_zero() {
+        assert_eq!(
+            retry_delay(
+                RetryPolicy {
+                    base_delay_secs: 0,
+                    ..RetryPolicy::default()
+                },
+                1,
+                0.0,
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            retry_delay(RetryPolicy::default(), 1, 0.0, None),
+            Some(StdDuration::from_secs(1))
         );
     }
 }

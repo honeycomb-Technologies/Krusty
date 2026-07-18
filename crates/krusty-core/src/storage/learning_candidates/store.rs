@@ -5,10 +5,7 @@ use uuid::Uuid;
 
 use crate::storage::database::Database;
 
-use super::{
-    LearningCandidate, LearningCandidateInput, LearningCandidateStatus, LearningKind,
-    LearningSensitivity,
-};
+use super::{LearningCandidate, LearningCandidateInput, LearningCandidateStatus};
 
 pub struct LearningCandidateStore<'a> {
     db: &'a Database,
@@ -109,25 +106,8 @@ impl<'a> LearningCandidateStore<'a> {
         self.get_owned(id, user_id)
     }
 
-    pub fn get_owned(
-        &self,
-        id: &str,
-        user_id: Option<&str>,
-    ) -> Result<Option<LearningCandidate>> {
-        self.db
-            .conn()
-            .query_row(
-                "SELECT id, user_id, project_dir, canonical_key, kind, proposed_content,
-                        evidence_session_id, evidence_message_id, evidence_excerpt,
-                        explicit, confidence, sensitivity, status, reason, created_at, reviewed_at
-                 FROM mako_learning_candidates
-                 WHERE id = ?1
-                   AND ((?2 IS NULL AND user_id IS NULL) OR user_id = ?2)",
-                params![id, user_id],
-                map_candidate,
-            )
-            .optional()
-            .map_err(Into::into)
+    pub fn get_owned(&self, id: &str, user_id: Option<&str>) -> Result<Option<LearningCandidate>> {
+        load_candidate_owned_from_connection(self.db.conn(), id, user_id)
     }
 
     pub fn begin_review(
@@ -140,10 +120,52 @@ impl<'a> LearningCandidateStore<'a> {
             "INSERT INTO mako_learning_runs (
                 session_id, through_message_id, status, model, created_at
              ) VALUES (?1, ?2, 'running', ?3, ?4)
-             ON CONFLICT(session_id, through_message_id) DO NOTHING",
-            params![session_id, through_message_id, model, Utc::now().to_rfc3339()],
+             ON CONFLICT(session_id, through_message_id) DO UPDATE SET
+                status = 'running',
+                model = excluded.model,
+                created_at = excluded.created_at,
+                completed_at = NULL
+             WHERE mako_learning_runs.status = 'failed'
+                OR (mako_learning_runs.status = 'running'
+                    AND julianday(mako_learning_runs.created_at)
+                        <= julianday('now', '-15 minutes'))",
+            params![
+                session_id,
+                through_message_id,
+                model,
+                Utc::now().to_rfc3339()
+            ],
         )?;
         Ok(changed == 1)
+    }
+
+    /// Return whether this user message is already covered by a running or
+    /// completed review. Autonomous tick turns can produce additional
+    /// assistant messages without new canonical user evidence; those ticks
+    /// must not fan out duplicate background reviewers.
+    pub fn has_nonfailed_review_covering(
+        &self,
+        session_id: &str,
+        user_message_id: i64,
+    ) -> Result<bool> {
+        self.db
+            .conn()
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM mako_learning_runs
+                    WHERE session_id = ?1
+                      AND through_message_id > ?2
+                      AND (
+                        status = 'completed'
+                        OR (status = 'running'
+                            AND julianday(created_at) > julianday('now', '-15 minutes'))
+                      )
+                 )",
+                params![session_id, user_message_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     pub fn finish_review(
@@ -155,7 +177,9 @@ impl<'a> LearningCandidateStore<'a> {
         self.db.conn().execute(
             "UPDATE mako_learning_runs
              SET status = ?1, completed_at = ?2
-             WHERE session_id = ?3 AND through_message_id = ?4",
+             WHERE session_id = ?3
+               AND through_message_id = ?4
+               AND status = 'running'",
             params![
                 if succeeded { "completed" } else { "failed" },
                 Utc::now().to_rfc3339(),
@@ -188,6 +212,25 @@ impl<'a> LearningCandidateStore<'a> {
             .optional()
             .map_err(Into::into)
     }
+}
+
+pub(crate) fn load_candidate_owned_from_connection(
+    conn: &rusqlite::Connection,
+    id: &str,
+    user_id: Option<&str>,
+) -> Result<Option<LearningCandidate>> {
+    conn.query_row(
+        "SELECT id, user_id, project_dir, canonical_key, kind, proposed_content,
+                evidence_session_id, evidence_message_id, evidence_excerpt,
+                explicit, confidence, sensitivity, status, reason, created_at, reviewed_at
+         FROM mako_learning_candidates
+         WHERE id = ?1
+           AND ((?2 IS NULL AND user_id IS NULL) OR user_id = ?2)",
+        params![id, user_id],
+        map_candidate,
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn map_candidate(row: &rusqlite::Row<'_>) -> rusqlite::Result<LearningCandidate> {

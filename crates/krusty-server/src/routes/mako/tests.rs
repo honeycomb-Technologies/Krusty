@@ -5,13 +5,15 @@ use std::sync::Arc;
 use axum::extract::Path;
 use axum::extract::Query;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::Json;
 use tokio::sync::{Mutex, RwLock};
 
 use krusty_core::agent::{
     loop_events::LoopStopReason, AgentCancellation, DelegatedRunStage, LoopEvent, UserHookManager,
 };
-use krusty_core::ai::models::create_model_registry;
+use krusty_core::ai::models::{create_model_registry, ModelMetadata};
+use krusty_core::ai::providers::ProviderId;
 use krusty_core::mcp::McpManager;
 use krusty_core::paths;
 use krusty_core::process::ProcessRegistry;
@@ -20,9 +22,10 @@ use krusty_core::storage::credentials::CredentialStore;
 use krusty_core::storage::reports::CreateReportInput;
 use krusty_core::storage::{
     bootstrap_mako_home, AutonomousTaskStore, Database, DelegatedRunRole, DelegatedRunScope,
-    DelegatedRunStartInput, DelegatedRunStore, MakoRunPriority, MakoRuntimeStateStatus,
-    MakoRuntimeStateStore, MemoryStore, MemoryType, ReportStore, RuntimeTraceEvent,
-    RuntimeTraceStore, SessionType, WorkspaceMode, CURRENT_SNAPSHOT_TITLE,
+    DelegatedRunStartInput, DelegatedRunStore, MakoProfileDocumentKind, MakoProfileOwner,
+    MakoProfileStore, MakoRunPriority, MakoRuntimeStateStatus, MakoRuntimeStateStore, MemoryStore,
+    MemoryType, Preferences, ReportStore, RuntimeTraceEvent, RuntimeTraceStore, SessionType,
+    WorkspaceMode, CURRENT_SNAPSHOT_TITLE,
 };
 use krusty_core::tools::registry::ToolRegistry;
 use krusty_core::SessionManager;
@@ -52,6 +55,9 @@ fn create_test_state() -> (AppState, PathBuf) {
     let working_dir = temp_dir.join("workspace");
     std::fs::create_dir_all(&working_dir).expect("workspace should exist");
 
+    let mut credential_store = CredentialStore::default();
+    credential_store.set(ProviderId::OpenAI, "test-openai-key".to_string());
+
     (
         AppState {
             server_port: 3000,
@@ -61,7 +67,7 @@ fn create_test_state() -> (AppState, PathBuf) {
             tool_registry: Arc::new(ToolRegistry::new()),
             process_registry: Arc::new(ProcessRegistry::new()),
             model_registry: create_model_registry(),
-            credential_store: Arc::new(RwLock::new(CredentialStore::default())),
+            credential_store: Arc::new(RwLock::new(credential_store)),
             mcp_manager: Arc::new(McpManager::new(working_dir.clone())),
             hook_manager: Arc::new(RwLock::new(UserHookManager::new())),
             skills_manager: Arc::new(RwLock::new(SkillsManager::with_defaults(&working_dir))),
@@ -94,6 +100,12 @@ fn create_test_user(state: &AppState, user_id: &str) {
             (user_id, format!("{user_id}@example.com"), "free"),
         )
         .expect("user should insert");
+    Preferences::for_user(
+        Database::new(&state.db_path).expect("database should open"),
+        user_id,
+    )
+    .set_current_model("gpt-5.5")
+    .expect("test model preference should persist");
 }
 
 fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
@@ -103,25 +115,49 @@ fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
     })
 }
 
+fn app_error_description(error: AppError) -> String {
+    match error {
+        AppError::NotFound(message) => format!("not found: {message}"),
+        AppError::BadRequest(message) => format!("bad request: {message}"),
+        AppError::Conflict(message) => format!("conflict: {message}"),
+        AppError::ServiceUnavailable(message) => format!("service unavailable: {message}"),
+        AppError::BadGateway(message) => format!("bad gateway: {message}"),
+        AppError::Internal(message) => format!("internal: {message}"),
+    }
+}
+
+async fn configure_test_model(state: &AppState) {
+    state
+        .model_registry
+        .upsert_model(ModelMetadata::new(
+            "gpt-5.5",
+            "GPT-5.5 Test",
+            ProviderId::OpenAI,
+        ))
+        .await;
+}
+
 #[tokio::test]
 async fn dispatch_normalizes_model_before_persisting_session() {
     let (state, _temp_dir) = create_test_state();
     create_test_user(&state, "alice");
+    configure_test_model(&state).await;
 
     let (_, Json(response)) = dispatch(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
+        HeaderMap::new(),
         Json(DispatchRequest {
             task: "Investigate issue".to_string(),
             project_dir: None,
-            model: Some("  openai/gpt-5  ".to_string()),
+            model: Some("  gpt-5.5  ".to_string()),
             start_at: None,
             priority: None,
             crew_slug: None,
         }),
     )
     .await
-    .unwrap_or_else(|_| panic!("dispatch should succeed"));
+    .unwrap_or_else(|error| panic!("dispatch should succeed: {}", app_error_description(error)));
 
     let session_manager =
         SessionManager::new(Database::new(&state.db_path).expect("database should open"));
@@ -129,7 +165,7 @@ async fn dispatch_normalizes_model_before_persisting_session() {
         .get_session(&response.session_id)
         .expect("session lookup should succeed")
         .expect("session should exist");
-    assert_eq!(session.model.as_deref(), Some("openai/gpt-5"));
+    assert_eq!(session.model.as_deref(), Some("gpt-5.5"));
 }
 
 #[test]
@@ -223,27 +259,35 @@ async fn mako_channels_response_surfaces_runtime_delivery_state() {
 }
 
 #[tokio::test]
-async fn update_home_document_writes_to_user_scoped_mako_home() {
+async fn update_home_document_writes_to_user_scoped_database_profile() {
     let (state, temp_dir) = create_test_state();
     create_test_user(&state, "alice");
     let user_home = temp_dir.join("alice-home");
     std::fs::create_dir_all(&user_home).expect("user home should exist");
 
     let Json(response) = update_home_document(
-        State(state),
+        State(state.clone()),
         Some(current_user("alice", &user_home)),
         Path("soul".to_string()),
         Json(DocumentWriteRequest {
             content: "Stay watchful.".to_string(),
+            expected_revision: None,
         }),
     )
     .await
     .unwrap_or_else(|_| panic!("document update should succeed"));
 
-    let expected = paths::mako_dir_for_home(&user_home).join(paths::MAKO_SOUL_FILE);
+    let owner = MakoProfileOwner::user("alice").expect("owner should be valid");
+    let stored =
+        MakoProfileStore::new(Database::new(&state.db_path).expect("database should open"))
+            .load(&owner)
+            .expect("profile should load")
+            .expect("profile should exist");
     assert_eq!(
-        std::fs::read_to_string(expected).expect("scoped mako soul should exist"),
-        "Stay watchful."
+        stored
+            .document(MakoProfileDocumentKind::Soul)
+            .map(|document| document.content.as_str()),
+        Some("Stay watchful.")
     );
     assert_eq!(
         response
@@ -267,6 +311,7 @@ async fn update_crew_document_rejects_invalid_slug() {
         Path(("../oops".to_string(), "soul".to_string())),
         Json(DocumentWriteRequest {
             content: "Nope".to_string(),
+            expected_revision: None,
         }),
     )
     .await;
@@ -361,12 +406,14 @@ fn user_scoped_mako_home_dir_prefers_current_user_home() {
 async fn dispatch_resolves_relative_project_dir_against_user_home() {
     let (state, temp_dir) = create_test_state();
     create_test_user(&state, "alice");
+    configure_test_model(&state).await;
     let user_root = temp_dir.join("alice-home");
     std::fs::create_dir_all(&user_root).expect("user root should exist");
 
     let (_, Json(response)) = dispatch(
         State(state.clone()),
         Some(current_user("alice", &user_root)),
+        HeaderMap::new(),
         Json(DispatchRequest {
             task: "Investigate issue".to_string(),
             project_dir: Some("repo".to_string()),
@@ -398,6 +445,7 @@ async fn dispatch_rejects_blank_task() {
     let result = dispatch(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
+        HeaderMap::new(),
         Json(DispatchRequest {
             task: "   ".to_string(),
             project_dir: None,
@@ -428,6 +476,7 @@ async fn dispatch_rejects_project_dir_outside_user_root() {
     let result = dispatch(
         State(state),
         Some(current_user("alice", &user_root)),
+        HeaderMap::new(),
         Json(DispatchRequest {
             task: "Investigate issue".to_string(),
             project_dir: Some(outside_root.to_string_lossy().to_string()),
@@ -446,11 +495,13 @@ async fn dispatch_rejects_project_dir_outside_user_root() {
 async fn dispatch_can_schedule_future_run() {
     let (state, _temp_dir) = create_test_state();
     create_test_user(&state, "alice");
+    configure_test_model(&state).await;
     let wake_at = chrono::Utc::now() + chrono::Duration::minutes(30);
 
     let (_, Json(response)) = dispatch(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
+        HeaderMap::new(),
         Json(DispatchRequest {
             task: "Check CI later".to_string(),
             project_dir: None,
@@ -494,10 +545,12 @@ async fn dispatch_can_schedule_future_run() {
 async fn dispatch_persists_requested_priority() {
     let (state, _temp_dir) = create_test_state();
     create_test_user(&state, "alice");
+    configure_test_model(&state).await;
 
     let (_, Json(response)) = dispatch(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
+        HeaderMap::new(),
         Json(DispatchRequest {
             task: "Escalate production fix".to_string(),
             project_dir: None,
@@ -523,10 +576,12 @@ async fn dispatch_persists_requested_priority() {
 async fn schedule_session_can_reschedule_existing_run() {
     let (state, _temp_dir) = create_test_state();
     create_test_user(&state, "alice");
+    configure_test_model(&state).await;
 
     let (_, Json(response)) = dispatch(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
+        HeaderMap::new(),
         Json(DispatchRequest {
             task: "Investigate issue".to_string(),
             project_dir: None,
@@ -544,6 +599,7 @@ async fn schedule_session_can_reschedule_existing_run() {
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
         Path(response.session_id.clone()),
+        HeaderMap::new(),
         Json(ScheduleRequest {
             start_at: wake_at.to_rfc3339(),
         }),
@@ -778,16 +834,60 @@ async fn current_surfaces_pending_tool_approvals() {
             None,
             Some("approval"),
             None,
-            None,
+            Some("durable-run-1"),
             Some("user"),
             MakoRunPriority::High,
         )
         .expect("waiting state should persist");
 
+    let now = chrono::Utc::now().to_rfc3339();
+    let durable_db = Database::new(&state.db_path).expect("database should open");
+    durable_db
+        .conn()
+        .execute_batch(&format!(
+            "INSERT INTO mako_controllers (
+                id, scope_key, user_id, session_id, status, timezone,
+                max_concurrent_runs, created_at, updated_at
+             ) VALUES (
+                'controller-approval', 'session:{session_id}', 'alice', '{session_id}',
+                'active', 'UTC', 1, '{now}', '{now}'
+             );
+             INSERT INTO mako_runs (
+                id, controller_id, session_id, kind, objective, config_json, status,
+                priority, available_at, attempt_count, max_attempts, created_at, updated_at
+             ) VALUES (
+                'durable-run-1', 'controller-approval', '{session_id}', 'dispatch', 'work',
+                '{{}}', 'running',
+                0, '{now}', 1, 3, '{now}', '{now}'
+             );"
+        ))
+        .expect("durable approval run should insert");
+    durable_db
+        .conn()
+        .execute(
+            "INSERT INTO mako_controller_events (
+                controller_id, sequence, event_type, run_id, payload_json, created_at
+             ) VALUES ('controller-approval', 1, 'agentic_event', 'durable-run-1', ?1, ?2)",
+            (
+                serde_json::json!({
+                    "type": "tool_approval_required",
+                    "id": "tool-1",
+                    "name": "bash",
+                    "arguments": {
+                        "command": "git push",
+                        "cwd": "/workspace"
+                    }
+                })
+                .to_string(),
+                now.as_str(),
+            ),
+        )
+        .expect("durable approval event should persist");
+
     let trace_db = Database::new(&state.db_path).expect("database should open");
     let trace_store = RuntimeTraceStore::new(&trace_db);
     let approval_event = RuntimeTraceEvent::from_loop_event(
-        "run-1",
+        "trace-run-deliberately-different",
         1,
         0,
         &LoopEvent::ToolApprovalRequired {
@@ -813,6 +913,7 @@ async fn current_surfaces_pending_tool_approvals() {
     assert_eq!(summary.status.pending_approvals_count, 1);
     assert_eq!(summary.approvals.len(), 1);
     assert_eq!(summary.approvals[0].session_id, session_id);
+    assert_eq!(summary.approvals[0].run_id, "durable-run-1");
     assert_eq!(summary.approvals[0].tool_call_id, "tool-1");
     assert_eq!(summary.approvals[0].tool_name, "bash");
     assert_eq!(summary.approvals[0].priority, MakoRunPriority::High);
@@ -1221,13 +1322,14 @@ async fn recover_daemon_only_recovers_owned_sessions() {
     let (state, _temp_dir) = create_test_state();
     create_test_user(&state, "alice");
     create_test_user(&state, "bob");
+    configure_test_model(&state).await;
 
     let session_manager =
         SessionManager::new(Database::new(&state.db_path).expect("database should open"));
     let alice_session_id = session_manager
         .create_session_for_user_with_config(
             "Alice Sleeping",
-            None,
+            Some("gpt-5.5"),
             Some(state.working_dir.to_string_lossy().as_ref()),
             Some(state.working_dir.to_string_lossy().as_ref()),
             WorkspaceMode::Selected,
@@ -1239,7 +1341,7 @@ async fn recover_daemon_only_recovers_owned_sessions() {
     let bob_session_id = session_manager
         .create_session_for_user_with_config(
             "Bob Sleeping",
-            None,
+            Some("gpt-5.5"),
             Some(state.working_dir.to_string_lossy().as_ref()),
             Some(state.working_dir.to_string_lossy().as_ref()),
             WorkspaceMode::Selected,
@@ -1280,6 +1382,7 @@ async fn recover_daemon_only_recovers_owned_sessions() {
     let Json(response) = recover_daemon(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
+        HeaderMap::new(),
     )
     .await
     .unwrap_or_else(|_| panic!("recover should succeed"));
@@ -1372,6 +1475,7 @@ async fn set_priority_updates_runtime_state_and_current_ordering() {
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
         Path(second_session_id.clone()),
+        HeaderMap::new(),
         Json(PriorityRequest {
             priority: MakoRunPriority::High,
         }),
