@@ -62,13 +62,14 @@ The four ways users interact with Krusty.
 | [ACP Editor Integration](interfaces/acp-editor-integration.md) | How editors (Zed, Neovim, JetBrains) connect via the Agent Client Protocol |
 | [Mako Autonomous Mode](interfaces/mako-autonomous-mode.md) | Background autonomous agent: tick engine, swarm execution, CLI controls |
 
-## Mako Specs
+## Mako Engineering
 
-Extra product and implementation notes for the Mako surface.
+Implemented runtime architecture, operations, and data-handling guidance for
+the Mako surface. Superseded product plans live in the documentation archive.
 
 | Document | Description |
 |----------|-------------|
-| [Mako Specs Index](mako/README.md) | Product model, IA, screen maps, roadmap, and implementation notes for the Mako UI/runtime surface |
+| [Mako Engineering Index](mako/README.md) | Current runtime architecture, autonomous-mode behavior, operations, and privacy guidance |
 
 ## Frontends
 
@@ -107,4 +108,4 @@ Historical audit, roadmap, tracker, and closure documents that are preserved for
 
 | Document | Description |
 |----------|-------------|
-| [Documentation Archive](archive/README.md) | Historical KRUSTY_* planning, audit, tracker, and closure documents |
+| [Documentation Archive](archive/README.md) | Historical planning, audit, competitive research, tracker, and closure documents |

@@ -1,15 +1,16 @@
-# Mako Specs
+# Mako Engineering Documentation
 
-Product, IA, roadmap, and implementation notes for the Mako surface live here.
+Current Mako documentation is intentionally limited to implemented runtime and
+operational behavior:
 
-## Key Docs
+- [Backend Architecture](./MAKO_BACKEND_ARCHITECTURE_V2.md)
+- [Mako Autonomous Mode](../interfaces/mako-autonomous-mode.md)
+- [Build and Deployment](../operations/build-and-deploy.md)
 
-- [MAKO_BACKEND_ARCHITECTURE_V2.md](./MAKO_BACKEND_ARCHITECTURE_V2.md)
-- [COMPETITOR_SOURCE_REVIEW_2026-07-17.md](./COMPETITOR_SOURCE_REVIEW_2026-07-17.md)
-- [KRUSTY_MAKO_PRODUCT_MODEL_V3.md](./KRUSTY_MAKO_PRODUCT_MODEL_V3.md)
-- [KRUSTY_MAKO_REPLACEMENT_IA.md](./KRUSTY_MAKO_REPLACEMENT_IA.md)
-- [KRUSTY_MAKO_SCREEN_MAP_V2.md](./KRUSTY_MAKO_SCREEN_MAP_V2.md)
-- [KRUSTY_MAKO_IMPLEMENTATION_PLAN_V2.md](./KRUSTY_MAKO_IMPLEMENTATION_PLAN_V2.md)
+Historical product models, competitive reviews, roadmaps, screen maps, and
+implementation plans are preserved in the
+[Mako Product History](../archive/mako-product-history/README.md). They are not
+the current product contract.
 
 ## Durable data privacy
 
@@ -27,13 +28,3 @@ their retention policy. Treat every pre-v43 backup as potentially containing
 model reasoning, provider signatures, tool arguments/output, web content, and
 raw execution errors. Restoring one requires running the current migration
 before it is exposed to clients or copied into a new backup set.
-
-## Supporting Specs
-
-- [KRUSTY_MAKO_ATTENTION_SPEC_V1.md](./KRUSTY_MAKO_ATTENTION_SPEC_V1.md)
-- [KRUSTY_MAKO_DRAWER_TRANSITION_V1.md](./KRUSTY_MAKO_DRAWER_TRANSITION_V1.md)
-- [KRUSTY_MAKO_HYBRID_DESIGN.md](./KRUSTY_MAKO_HYBRID_DESIGN.md)
-- [KRUSTY_MAKO_PHASE1_IMPLEMENTATION_SPEC.md](./KRUSTY_MAKO_PHASE1_IMPLEMENTATION_SPEC.md)
-- [KRUSTY_MAKO_ROADMAP.md](./KRUSTY_MAKO_ROADMAP.md)
-- [KRUSTY_MAKO_SCHEDULE_SPEC_V1.md](./KRUSTY_MAKO_SCHEDULE_SPEC_V1.md)
-- [KRUSTY_MAKO_TAB_SPEC_V1.md](./KRUSTY_MAKO_TAB_SPEC_V1.md)
