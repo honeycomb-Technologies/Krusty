@@ -504,14 +504,10 @@ export function createStreamCallbacks(
 							const combinedAttachments = queued.flatMap(
 								(message) => message.attachments,
 							);
-							const queuedResearchEnabled = queued.some(
-								(message) => message.researchEnabled,
-							);
-							void get().sendMessage(
-								combinedContent,
-								combinedAttachments,
-								queuedResearchEnabled,
-							);
+								void get().sendMessage(
+									combinedContent,
+									combinedAttachments,
+								);
 						}
 					})();
 				}
@@ -537,14 +533,10 @@ export function createStreamCallbacks(
 						const combinedAttachments = queued.flatMap(
 							(message) => message.attachments,
 						);
-						const queuedResearchEnabled = queued.some(
-							(message) => message.researchEnabled,
-						);
-						void get().sendMessage(
-							combinedContent,
-							combinedAttachments,
-							queuedResearchEnabled,
-						);
+							void get().sendMessage(
+								combinedContent,
+								combinedAttachments,
+							);
 					}
 				})();
 				return;
@@ -560,16 +552,12 @@ export function createStreamCallbacks(
 				const combinedAttachments = queued.flatMap(
 					(message) => message.attachments,
 				);
-				const queuedResearchEnabled = queued.some(
-					(message) => message.researchEnabled,
-				);
-				setTimeout(
-					() =>
-						get().sendMessage(
-							combinedContent,
-							combinedAttachments,
-							queuedResearchEnabled,
-						),
+					setTimeout(
+						() =>
+							get().sendMessage(
+								combinedContent,
+								combinedAttachments,
+							),
 					50,
 				);
 			}

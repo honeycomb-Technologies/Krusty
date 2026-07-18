@@ -132,6 +132,7 @@ pub struct ChatRequest {
     pub fast_mode: bool,
     /// Enable research tools (agent, reports) in Chat sessions
     #[serde(default)]
+    /// Deprecated compatibility field. Chat research is automatic and this value is ignored.
     pub research_enabled: Option<bool>,
 }
 

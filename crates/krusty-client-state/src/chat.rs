@@ -13,28 +13,17 @@ pub enum MobileSurface {
     #[default]
     Chat,
     Folder,
-    Research,
-    Paper,
     Terminal,
     Browser,
 }
 
 impl MobileSurface {
-    pub const ALL: [Self; 6] = [
-        Self::Chat,
-        Self::Folder,
-        Self::Research,
-        Self::Paper,
-        Self::Terminal,
-        Self::Browser,
-    ];
+    pub const ALL: [Self; 4] = [Self::Chat, Self::Folder, Self::Terminal, Self::Browser];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Chat => "Chat",
             Self::Folder => "Folder",
-            Self::Research => "Research",
-            Self::Paper => "Paper",
             Self::Terminal => "Terminal",
             Self::Browser => "Browser",
         }
@@ -43,14 +32,8 @@ impl MobileSurface {
     pub fn session_type(self) -> SessionType {
         match self {
             Self::Folder => SessionType::Code,
-            Self::Chat | Self::Research | Self::Paper | Self::Terminal | Self::Browser => {
-                SessionType::Chat
-            }
+            Self::Chat | Self::Terminal | Self::Browser => SessionType::Chat,
         }
-    }
-
-    pub fn research_enabled(self) -> bool {
-        matches!(self, Self::Research | Self::Paper)
     }
 }
 
@@ -60,7 +43,6 @@ pub struct ChatControls {
     pub permission_mode: PermissionMode,
     pub fast_mode: bool,
     pub work_mode: WorkMode,
-    pub research_enabled: bool,
     pub selected_model: Option<String>,
 }
 
@@ -71,7 +53,6 @@ impl Default for ChatControls {
             permission_mode: PermissionMode::Autonomous,
             fast_mode: false,
             work_mode: WorkMode::Build,
-            research_enabled: false,
             selected_model: None,
         }
     }
@@ -247,9 +228,6 @@ impl ChatStore {
             return;
         }
         self.state.surface = surface;
-        if surface.research_enabled() {
-            self.state.controls.research_enabled = true;
-        }
         match surface {
             MobileSurface::Terminal => self.shell_actions.push_back(ShellAction::OpenTerminal {
                 session_id: self.state.session_id.clone(),
@@ -387,10 +365,6 @@ impl ChatStore {
         self.state.controls.work_mode = self.state.controls.work_mode.toggle();
     }
 
-    pub fn toggle_research(&mut self) {
-        self.state.controls.research_enabled = !self.state.controls.research_enabled;
-    }
-
     fn selected_model_info(&self) -> Option<&ModelInfo> {
         let selected = self.state.controls.selected_model.as_deref()?;
         self.state.models.iter().find(|model| model.id == selected)
@@ -464,10 +438,8 @@ impl ChatStore {
                 .map(str::to_owned),
             fast_mode: self.state.controls.fast_mode.then_some(true),
             permission_mode: Some(self.state.controls.permission_mode),
-            mode: Some(self.state.controls.work_mode),
-            research_enabled: Some(
-                self.state.controls.research_enabled || self.state.surface.research_enabled(),
-            ),
+            mode: folder_surface.then_some(self.state.controls.work_mode),
+            research_enabled: None,
         }
     }
 
@@ -1007,7 +979,7 @@ mod tests {
         store.state.controls.thinking_level = ThinkingLevel::High;
         store.state.controls.permission_mode = PermissionMode::Supervised;
         store.state.controls.selected_model = Some("model-a".to_owned());
-        store.set_surface(MobileSurface::Research);
+        store.set_surface(MobileSurface::Chat);
 
         let request = store.chat_request_for("research this".to_owned());
 
@@ -1016,7 +988,8 @@ mod tests {
         assert_eq!(request.fast_mode, Some(true));
         assert_eq!(request.permission_mode, Some(PermissionMode::Supervised));
         assert_eq!(request.session_type, Some(SessionType::Chat));
-        assert_eq!(request.research_enabled, Some(true));
+        assert_eq!(request.mode, None);
+        assert_eq!(request.research_enabled, None);
     }
 
     #[test]

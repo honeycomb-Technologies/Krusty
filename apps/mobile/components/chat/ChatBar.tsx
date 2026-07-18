@@ -15,7 +15,7 @@ import {
 } from 'react-native';
 import { BlurView } from '../../platform/blur';
 import { LinearGradient } from '../../platform/linear-gradient';
-import { ArrowUp, X, Mic, FlaskConical } from 'lucide-react-native';
+import { ArrowUp, X, Mic } from 'lucide-react-native';
 import * as Haptics from '../../platform/haptics';
 import * as ImagePicker from '../../platform/image-picker';
 import * as DocumentPicker from '../../platform/document-picker';
@@ -69,8 +69,6 @@ interface ChatBarProps {
   model: string | null;
   models: ModelInfo[];
   sessionType?: SessionType;
-  researchEnabled?: boolean;
-  onResearchToggle?: () => void;
   tokenCount?: number;
   onOverlayOpenChange?: (open: boolean) => void;
   /**
@@ -481,7 +479,7 @@ export function ChatBar(props: ChatBarProps) {
     permissionMode, onPermissionModeToggle,
     fastModeEnabled, fastModeSupported, onFastModeToggle,
     mode, onModeToggle, onModelSelect, model, models,
-    sessionType, researchEnabled, onResearchToggle, tokenCount, onOverlayOpenChange,
+    sessionType, tokenCount, onOverlayOpenChange,
     contentMaxWidth,
   } = props;
 
@@ -968,9 +966,16 @@ export function ChatBar(props: ChatBarProps) {
   );
   const modelPopoverTopInset = Math.max(insets.top, 0) + 12;
 
-  // Accordion stack above the crab: thinking → … → bot+filters (top).
-  const ACCORDION_PILL_COUNT = 6;
-  const pillsBelowBot = ACCORDION_PILL_COUNT - 1;
+  // Chat and Mako share a five-control stack. Code adds Build/Plan as the
+  // sixth control. Derive picker geometry from the surface profile rather than
+  // keeping a six-row offset that overlaps the provider filters on shorter FABs.
+  const hasWorkMode = sessionType === 'code';
+  const accordionPillCount = hasWorkMode ? 6 : 5;
+  const pillsBelowBot = accordionPillCount - 1;
+  const surfaceModelPopoverMaxHeight = Math.max(
+    PILL * 2,
+    MODEL_POPOVER_MAX_HEIGHT - (hasWorkMode ? 0 : PILL + GAP),
+  );
   // Bottom edge of the bot/filter row, from the root bottom.
   const botRowBottom =
     controlsLayerBottom + pillsBelowBot * (PILL + GAP);
@@ -982,8 +987,8 @@ export function ChatBar(props: ChatBarProps) {
     botRowBottom - listTopGap - overlayBottom,
   );
   const desktopModelListHeight = Math.min(
-    MODEL_POPOVER_MAX_HEIGHT,
-    Math.max(PILL * 2, desktopModelListMaxHeight),
+    surfaceModelPopoverMaxHeight,
+    desktopModelListMaxHeight,
   );
   // top = botRowBottom - listTopGap  ⇒  bottom = top - height
   const desktopModelListBottom =
@@ -992,7 +997,7 @@ export function ChatBar(props: ChatBarProps) {
   const modelPopoverHeight = isDesktop
     ? desktopModelListHeight
     : Math.min(
-        MODEL_POPOVER_MAX_HEIGHT,
+        surfaceModelPopoverMaxHeight,
         Math.max(0, viewportHeight - overlayBottom - modelPopoverTopInset),
       );
   // Match desktop filter row: n×56px pills with 8px gaps (no trailing gap).
@@ -1263,8 +1268,6 @@ export function ChatBar(props: ChatBarProps) {
             isOpen={accordionOpen}
             onToggle={toggleAccordion}
             sessionType={sessionType}
-            researchEnabled={researchEnabled}
-            onResearchToggle={onResearchToggle}
           />
         </View>
       ) : null}
@@ -1377,9 +1380,9 @@ export function ChatBar(props: ChatBarProps) {
               </Text>
             </View>
           )}
-          {mode === 'plan' && (
+          {sessionType === 'code' && (
             <Text style={[styles.metaMode, { color: t.thinking }]} numberOfLines={1}>
-              Plan
+              {mode === 'plan' ? 'Plan' : 'Build'}
             </Text>
           )}
         </View>

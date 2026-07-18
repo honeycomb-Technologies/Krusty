@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import { Alert } from "react-native";
 
-import type { ModelInfo, SessionResponse } from "@krusty/api";
+import type { ModelInfo, SessionResponse, SessionType } from "@krusty/api";
 import type { Attachment as SessionAttachment } from "@krusty/state";
 import type { useConnection } from "../../../hooks/useConnection";
 import type { useStores } from "../../../hooks/useStores";
@@ -35,7 +35,6 @@ interface UseSessionActionsArgs {
   setActiveTab: (value: number) => void;
   setDrawerOpen: (value: boolean) => void;
   ensureModelReady: () => Promise<string | null>;
-  researchEnabled: boolean;
   sessionStore: SessionStoreApi;
   sessionsStore: SessionsStoreApi;
   workspace: WorkspaceStoreApi;
@@ -52,7 +51,6 @@ export function useSessionActions({
   setActiveTab,
   setDrawerOpen,
   ensureModelReady,
-  researchEnabled,
   sessionStore,
   sessionsStore,
   workspace,
@@ -81,7 +79,12 @@ export function useSessionActions({
 
       sessionStore
         .getState()
-        .initSession(session.id, session.title || "", session.permission_mode);
+        .initSession(
+          session.id,
+          session.title || "",
+          session.permission_mode,
+          session.session_type,
+        );
       workspace
         .getState()
         .initFromSession(
@@ -105,7 +108,11 @@ export function useSessionActions({
   );
 
   const createSessionForCurrentTab = useCallback(
-    async (directory?: string, targetBranch?: string | null) => {
+    async (
+      directory?: string,
+      targetBranch?: string | null,
+      requestedType?: SessionType,
+    ) => {
       if (!client) {
         return null;
       }
@@ -119,10 +126,11 @@ export function useSessionActions({
           directory,
           targetBranch ?? undefined,
           directory ? "selected" : "neutral",
-          sessionTypeForTab(activeTab),
+          requestedType ?? sessionTypeForTab(activeTab),
           sessionStore.getState().permissionMode,
         );
         await bootstrapSession(session);
+        setActiveTab(tabForSessionType(session.session_type));
         setActiveToolCallId(null);
         setDrawerOpen(false);
         void Haptics.notificationAsync(
@@ -141,6 +149,7 @@ export function useSessionActions({
       sessionStore,
       setActiveToolCallId,
       setDrawerOpen,
+      setActiveTab,
       stopCurrentStream,
     ],
   );
@@ -254,13 +263,13 @@ export function useSessionActions({
     ],
   );
 
-  const handleNewSession = useCallback(async () => {
-    await createSessionForCurrentTab();
+  const handleNewSession = useCallback(async (sessionType?: SessionType) => {
+    await createSessionForCurrentTab(undefined, undefined, sessionType);
   }, [createSessionForCurrentTab]);
 
   const handleDirectorySelected = useCallback(
     async (path: string) => {
-      await createSessionForCurrentTab(path);
+      await createSessionForCurrentTab(path, undefined, "code");
     },
     [createSessionForCurrentTab],
   );
@@ -353,7 +362,6 @@ export function useSessionActions({
           .sendMessage(
             trimmed,
             attachments,
-            researchEnabled,
             sendIntent.sendOptions,
           );
       } catch (err) {
@@ -370,7 +378,6 @@ export function useSessionActions({
       client,
       ensureModelReady,
       ensureSessionForSend,
-      researchEnabled,
       sessionStore,
       workspace,
     ],

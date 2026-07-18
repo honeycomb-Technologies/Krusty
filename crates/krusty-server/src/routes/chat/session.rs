@@ -397,7 +397,6 @@ pub(super) async fn setup_chat_session(
     requested_model: RequestedModel<'_>,
     thinking_level: ThinkingLevel,
     fast_mode: bool,
-    research_enabled: bool,
     requires_vision: bool,
 ) -> Result<ChatSessionContext, AppError> {
     let user_id = current_user_id(user).map(ToOwned::to_owned);
@@ -491,7 +490,7 @@ pub(super) async fn setup_chat_session(
         .filter(all_tools)
     } else {
         let disabled_tools = project_settings.disabled_tools.unwrap_or_default();
-        filter_tools_for_session_type(all_tools, session.session_type, research_enabled)
+        filter_tools_for_session_type(all_tools, session.session_type)
             .into_iter()
             .filter(|tool| !disabled_tools.iter().any(|name| name == &tool.name))
             .collect()
@@ -522,7 +521,7 @@ pub(super) async fn setup_chat_session(
         fast_mode: fast_mode && fast_mode_format.is_some(),
         fast_mode_format,
         system_prompt: match session.session_type {
-            SessionType::Chat => Some(chat_system_prompt(research_enabled)),
+            SessionType::Chat => Some(chat_system_prompt()),
             SessionType::Mako => system_prompt_for_session(SessionType::Mako),
             SessionType::Code => None, // uses default Krusty coding assistant prompt
         },

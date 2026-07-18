@@ -665,6 +665,7 @@ pub struct ChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<WorkMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Deprecated compatibility field. Chat research is automatic and this value is ignored.
     pub research_enabled: Option<bool>,
 }
 

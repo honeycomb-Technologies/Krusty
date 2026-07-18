@@ -138,6 +138,11 @@ export const styles = StyleSheet.create({
   menuBtn: {
     padding: 4,
   },
+  topBarActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
   /** Flush top-right toolbox control (true corner hit target). */
   toolboxCornerBtn: {
     width: 40,

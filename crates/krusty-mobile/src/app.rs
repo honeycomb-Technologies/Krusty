@@ -326,8 +326,6 @@ impl KrustyMobile {
             .id(match surface {
                 MobileSurface::Chat => "surface-chat",
                 MobileSurface::Folder => "surface-folder",
-                MobileSurface::Research => "surface-research",
-                MobileSurface::Paper => "surface-paper",
                 MobileSurface::Terminal => "surface-terminal",
                 MobileSurface::Browser => "surface-browser",
             })
@@ -586,26 +584,18 @@ impl KrustyMobile {
                         cx.notify();
                     }),
                 )
-                .child(self.control_pill(
-                    "research-pill",
-                    "Lab",
-                    self.store.state.controls.research_enabled,
-                    cx,
-                    |app, cx| {
-                        app.store.toggle_research();
-                        cx.notify();
-                    },
-                ))
-                .child(self.control_pill(
-                    "mode-pill",
-                    self.store.state.controls.work_mode.label(),
-                    self.store.state.controls.work_mode == krusty_client::WorkMode::Plan,
-                    cx,
-                    |app, cx| {
-                        app.store.toggle_work_mode();
-                        cx.notify();
-                    },
-                ))
+                .when(self.store.state.surface == MobileSurface::Folder, |this| {
+                    this.child(self.control_pill(
+                        "mode-pill",
+                        self.store.state.controls.work_mode.label(),
+                        self.store.state.controls.work_mode == krusty_client::WorkMode::Plan,
+                        cx,
+                        |app, cx| {
+                            app.store.toggle_work_mode();
+                            cx.notify();
+                        },
+                    ))
+                })
                 .child(self.control_pill(
                     "permission-pill",
                     self.store.state.controls.permission_mode.label(),

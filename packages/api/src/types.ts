@@ -202,6 +202,7 @@ export interface ChatRequest {
 	target_branch?: string | null;
 	targetBranch?: string | null;
 	session_type?: SessionType;
+	/** @deprecated Research is automatic in Chat; this compatibility field is ignored. */
 	research_enabled?: boolean;
 	model?: string;
 	thinking_enabled?: boolean | string;

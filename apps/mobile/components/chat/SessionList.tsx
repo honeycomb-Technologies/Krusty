@@ -10,9 +10,7 @@ import { Folder, FolderOpen, ChevronRight, ChevronDown, ChevronLeft, Check } fro
 import * as Haptics from '../../platform/haptics';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
-import { SegmentControl } from '../ui/SegmentControl';
 import type { SessionResponse } from '@krusty/api';
-import { MAKO_DRAWER_ITEMS } from './makoDrawerItems';
 import type { MakoTopLevelView } from '../mako/types';
 
 interface DirEntry { name: string; path: string }
@@ -67,7 +65,6 @@ export function SessionList({
   const { client } = useConnection();
   const t = theme.colors;
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
-  const [makoAttentionBadge, setMakoAttentionBadge] = useState(0);
 
   // Directory picker state
   const [pickerPath, setPickerPath] = useState('');
@@ -77,7 +74,7 @@ export function SessionList({
   const dirCache = useRef<Map<string, DirCache>>(new Map());
 
   useEffect(() => {
-    if (client && activeTab === 1 && !pickerReady) {
+    if (client && showPicker && !pickerReady) {
       client.browseDirectories().then(result => {
         const entry: DirCache = { current: result.current, parent: result.parent, directories: result.directories };
         dirCache.current.set('', entry);
@@ -88,37 +85,7 @@ export function SessionList({
         setPickerReady(true);
       }).catch(() => {});
     }
-  }, [client, activeTab, pickerReady]);
-
-  useEffect(() => {
-    if (!client || activeTab !== 2) {
-      return;
-    }
-
-    let cancelled = false;
-    const loadAttention = async () => {
-      try {
-        const response = await client.getMakoAttention();
-        if (!cancelled) {
-          setMakoAttentionBadge(response.badge_count);
-        }
-      } catch {
-        if (!cancelled) {
-          setMakoAttentionBadge(0);
-        }
-      }
-    };
-
-    void loadAttention();
-    const intervalId = setInterval(() => {
-      void loadAttention();
-    }, 30000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(intervalId);
-    };
-  }, [activeTab, client]);
+  }, [client, pickerReady, showPicker]);
 
   const navigatePicker = useCallback(async (path: string) => {
     if (!client) return;
@@ -222,71 +189,19 @@ export function SessionList({
           );
         });
 
-  const renderMakoList = () => (
-    <View>
-      {MAKO_DRAWER_ITEMS.map((item) => {
-        const isActive = activeMakoView === item.id;
-        const badgeCount = item.id === "attention" ? makoAttentionBadge : 0;
-        return (
-          <Pressable
-            key={item.id}
-            onPress={() => {
-              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-              onSelectMakoView?.(item.id);
-            }}
-            style={[
-              styles.makoItem,
-              isActive && { backgroundColor: t.userMessage + '12' },
-            ]}
-            >
-              <View style={styles.makoCopy}>
-                <Text
-                style={[
-                  styles.makoTitle,
-                  { color: isActive ? t.userMessage : t.foreground },
-                ]}
-              >
-                {item.label}
-              </Text>
-                <Text style={[styles.makoDetail, { color: t.mutedForeground }]}>
-                  {item.detail}
-                </Text>
-              </View>
-              {badgeCount > 0 ? (
-                <View
-                  style={[
-                    styles.makoBadge,
-                    { backgroundColor: t.userMessage },
-                  ]}
-                >
-                  <Text style={styles.makoBadgeText}>{badgeCount}</Text>
-                </View>
-              ) : null}
-              <ChevronRight size={16} color={t.mutedForeground} />
-            </Pressable>
-          );
-        })}
-    </View>
-  );
-
   return (
     <View style={styles.container}>
-      <View style={styles.segmentWrap}>
-        <SegmentControl segments={['Chat', 'Code', 'Mako']} selected={activeTab} onSelect={onTabChange} />
-      </View>
-
       <ScrollView style={styles.listArea} showsVerticalScrollIndicator={false}>
-        {activeTab === 0 && (
-          chatSessions.length === 0
-            ? <Text style={[styles.emptyText, { color: t.mutedForeground }]}>No chat sessions</Text>
-            : chatSessions.map(renderSessionItem)
-        )}
-        {activeTab === 1 && renderDirAccordion(codeDirGroups, t.thinking)}
-        {activeTab === 2 && renderMakoList()}
+        <Text style={[styles.sectionLabel, { color: t.mutedForeground }]}>Conversations</Text>
+        {chatSessions.length === 0
+          ? <Text style={[styles.sectionEmpty, { color: t.mutedForeground }]}>No conversations</Text>
+          : chatSessions.map(renderSessionItem)}
+        <Text style={[styles.sectionLabel, styles.codeSection, { color: t.mutedForeground }]}>Code</Text>
+        {renderDirAccordion(codeDirGroups, t.thinking)}
       </ScrollView>
 
       {/* Inline directory picker */}
-      {activeTab === 1 && showPicker && pickerReady && (
+      {showPicker && pickerReady && (
         <View style={[styles.pickerContainer, { borderTopColor: t.border, backgroundColor: t.background }]}>
           <View style={styles.pickerHeader}>
             <View>
@@ -329,8 +244,10 @@ export function SessionList({
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  segmentWrap: { paddingHorizontal: 16, marginBottom: 12 },
   listArea: { flex: 1, paddingHorizontal: 12 },
+  sectionLabel: { fontSize: 12, fontWeight: '700', letterSpacing: 0.7, textTransform: 'uppercase', paddingHorizontal: 8, marginBottom: 6 },
+  codeSection: { marginTop: 18 },
+  sectionEmpty: { fontSize: 13, paddingHorizontal: 8, paddingVertical: 8 },
   emptyText: { fontSize: 15, textAlign: 'center', marginTop: 40 },
   dirHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 10, paddingHorizontal: 8 },
   dirName: { flex: 1, fontSize: 14, fontWeight: '600' },
