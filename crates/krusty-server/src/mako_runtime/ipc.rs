@@ -1,20 +1,25 @@
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use krusty_core::storage::RuntimeTraceEvent;
+#[cfg(unix)]
+use krusty_mako_protocol::MakoIpcClientConfig;
 use krusty_mako_protocol::{
-    AckResponse, Actor, ClientError, Command, DaemonStats, DispatchCommand, EventEnvelope,
-    EventSubscription, MakoEvent, MakoIpcClient, MakoIpcClientConfig, MessageCommand,
-    RecoverCommand, RequestEnvelope, ResponsePayload, ScheduleCommand, SessionCommand,
-    SetCrewCommand, SetPriorityCommand, SteerCommand, SubscribeCommand, ToolApprovalCommand,
-    UserResponseCommand,
+    AckResponse, Actor, ClientError, Command, CreateScheduleCommand, DaemonStats, DispatchCommand,
+    EventEnvelope, EventSubscription, MakoEvent, MakoIpcClient, MessageCommand, RecoverCommand,
+    ReplaceScheduleCommand, RequestEnvelope, ResponsePayload, ScheduleCommand, ScheduleDefinition,
+    ScheduleResponse, SessionCommand, SetCrewCommand, SetPriorityCommand, SetScheduleStatusCommand,
+    SteerCommand, SubscribeCommand, ToolApprovalCommand, UserResponseCommand,
 };
 
 use super::MakoRuntimeStats;
 use crate::types::AgenticEvent;
 
 const CLIENT_ID: &str = "krusty-server";
+#[cfg(unix)]
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
@@ -49,19 +54,33 @@ pub(super) struct MakoDaemonControl {
 }
 
 impl MakoDaemonControl {
+    #[cfg(unix)]
     pub(super) async fn connect_discovered() -> Result<Self> {
-        let socket_path = discover_socket_path()?;
-        let key_path = discover_key_path();
+        Self::connect_paths(discover_socket_path(), discover_key_path()).await
+    }
+
+    #[cfg(unix)]
+    async fn connect_paths(socket_path: PathBuf, key_path: PathBuf) -> Result<Self> {
         let mut config = MakoIpcClientConfig::new(socket_path.clone(), CLIENT_ID);
         config.request_timeout = DEFAULT_REQUEST_TIMEOUT;
-        let client = MakoIpcClient::from_key_path(config, &key_path)
-            .with_context(|| format!("loading Mako daemon IPC key from {}", key_path.display()))?;
+        let client =
+            MakoIpcClient::from_key_path_or_create(config, &key_path).with_context(|| {
+                format!(
+                    "loading or initializing Mako daemon IPC key at {}",
+                    key_path.display()
+                )
+            })?;
         let control = Self { client };
         control
             .healthcheck()
             .await
             .with_context(|| format!("Mako daemon unavailable at {}", socket_path.display()))?;
         Ok(control)
+    }
+
+    #[cfg(not(unix))]
+    pub(super) async fn connect_discovered() -> Result<Self> {
+        bail!("Mako daemon IPC is unavailable: this platform has no Unix-domain socket support")
     }
 
     #[cfg(test)]
@@ -73,10 +92,20 @@ impl MakoDaemonControl {
 
     async fn healthcheck(&self) -> Result<()> {
         match self
-            .command(None, Command::Ping, Some(unique_key("healthcheck")))
+            .command(None, Command::Stats, Some(unique_key("healthcheck")))
             .await?
         {
-            ResponsePayload::Pong(_) => Ok(()),
+            ResponsePayload::Stats(stats) => {
+                let pump_alive = stats.runtime.pump_alive;
+                let scheduler_ready = stats.runtime.scheduler_ready;
+                if pump_alive && scheduler_ready {
+                    Ok(())
+                } else {
+                    bail!(
+                        "Mako scheduler is not ready (pump_alive={pump_alive}, scheduler_ready={scheduler_ready})"
+                    )
+                }
+            }
             payload => bail!("Mako healthcheck returned unexpected response {payload:?}"),
         }
     }
@@ -86,11 +115,15 @@ impl MakoDaemonControl {
         user_id: Option<&str>,
         session_id: &str,
         wake_reason: &str,
+        idempotency_key: Option<&str>,
     ) -> Result<()> {
         self.expect_ack(
             user_id,
             start_command(session_id),
-            unique_key(&format!("start:{session_id}:{wake_reason}")),
+            request_key(
+                idempotency_key,
+                unique_key(&format!("start:{session_id}:{wake_reason}")),
+            ),
             "start session",
         )
         .await
@@ -107,6 +140,7 @@ impl MakoDaemonControl {
         start_at_unix_ms: Option<i64>,
         priority: Option<&str>,
         crew_slug: Option<&str>,
+        idempotency_key: Option<&str>,
     ) -> Result<(String, String)> {
         let command = dispatch_command(
             task,
@@ -118,7 +152,11 @@ impl MakoDaemonControl {
             crew_slug,
         );
         match self
-            .command(user_id, command, Some(unique_key("dispatch")))
+            .command(
+                user_id,
+                command,
+                Some(request_key(idempotency_key, unique_key("dispatch"))),
+            )
             .await?
         {
             ResponsePayload::Dispatch(response) => Ok((response.session_id, response.status)),
@@ -126,21 +164,96 @@ impl MakoDaemonControl {
         }
     }
 
-    pub(super) async fn resume(&self, user_id: Option<&str>, session_id: &str) -> Result<()> {
+    pub(super) async fn create_schedule(
+        &self,
+        user_id: Option<&str>,
+        session_id: &str,
+        definition: ScheduleDefinition,
+        idempotency_key: Option<&str>,
+    ) -> Result<ScheduleResponse> {
+        self.expect_schedule(
+            user_id,
+            Command::CreateSchedule(CreateScheduleCommand {
+                session_id: session_id.to_string(),
+                definition,
+            }),
+            request_key(idempotency_key, unique_key("create-schedule")),
+            "create schedule",
+        )
+        .await
+    }
+
+    pub(super) async fn replace_schedule(
+        &self,
+        user_id: Option<&str>,
+        session_id: &str,
+        schedule_id: &str,
+        expected_revision: u64,
+        definition: ScheduleDefinition,
+        idempotency_key: Option<&str>,
+    ) -> Result<ScheduleResponse> {
+        self.expect_schedule(
+            user_id,
+            Command::ReplaceSchedule(ReplaceScheduleCommand {
+                session_id: session_id.to_string(),
+                schedule_id: schedule_id.to_string(),
+                expected_revision,
+                definition,
+            }),
+            request_key(idempotency_key, unique_key("replace-schedule")),
+            "replace schedule",
+        )
+        .await
+    }
+
+    pub(super) async fn set_schedule_status(
+        &self,
+        user_id: Option<&str>,
+        session_id: &str,
+        schedule_id: &str,
+        expected_revision: u64,
+        status: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<ScheduleResponse> {
+        self.expect_schedule(
+            user_id,
+            Command::SetScheduleStatus(SetScheduleStatusCommand {
+                session_id: session_id.to_string(),
+                schedule_id: schedule_id.to_string(),
+                expected_revision,
+                status: status.to_string(),
+            }),
+            request_key(idempotency_key, unique_key("schedule-status")),
+            "set schedule status",
+        )
+        .await
+    }
+
+    pub(super) async fn resume(
+        &self,
+        user_id: Option<&str>,
+        session_id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<()> {
         self.expect_ack(
             user_id,
             resume_command(session_id),
-            unique_key(&format!("resume:{session_id}")),
+            request_key(idempotency_key, unique_key(&format!("resume:{session_id}"))),
             "resume session",
         )
         .await
     }
 
-    pub(super) async fn pause(&self, user_id: Option<&str>, session_id: &str) -> Result<()> {
+    pub(super) async fn pause(
+        &self,
+        user_id: Option<&str>,
+        session_id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<()> {
         self.expect_ack(
             user_id,
             pause_command(session_id),
-            unique_key(&format!("pause:{session_id}")),
+            request_key(idempotency_key, unique_key(&format!("pause:{session_id}"))),
             "pause session",
         )
         .await
@@ -152,31 +265,45 @@ impl MakoDaemonControl {
         session_id: &str,
         wake_at_unix_ms: i64,
         reason: &str,
+        idempotency_key: Option<&str>,
     ) -> Result<()> {
         self.expect_ack(
             user_id,
             schedule_command(session_id, wake_at_unix_ms, reason),
-            unique_key(&format!("schedule:{session_id}:{wake_at_unix_ms}")),
+            request_key(
+                idempotency_key,
+                unique_key(&format!("schedule:{session_id}:{wake_at_unix_ms}")),
+            ),
             "schedule session",
         )
         .await
     }
 
-    pub(super) async fn cancel(&self, user_id: Option<&str>, session_id: &str) -> Result<()> {
+    pub(super) async fn cancel(
+        &self,
+        user_id: Option<&str>,
+        session_id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<()> {
         self.expect_ack(
             user_id,
             cancel_command(session_id),
-            unique_key(&format!("cancel:{session_id}")),
+            request_key(idempotency_key, unique_key(&format!("cancel:{session_id}"))),
             "cancel session",
         )
         .await
     }
 
-    pub(super) async fn delete(&self, user_id: Option<&str>, session_id: &str) -> Result<()> {
+    pub(super) async fn delete(
+        &self,
+        user_id: Option<&str>,
+        session_id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<()> {
         self.expect_ack(
             user_id,
             delete_command(session_id),
-            stable_key("delete", session_id),
+            request_key(idempotency_key, stable_key("delete", session_id)),
             "delete session",
         )
         .await
@@ -187,11 +314,15 @@ impl MakoDaemonControl {
         user_id: Option<&str>,
         session_id: &str,
         message: &str,
+        idempotency_key: Option<&str>,
     ) -> Result<()> {
         self.expect_ack(
             user_id,
             message_command(session_id, message),
-            unique_key(&format!("message:{session_id}")),
+            request_key(
+                idempotency_key,
+                unique_key(&format!("message:{session_id}")),
+            ),
             "send message",
         )
         .await
@@ -202,11 +333,15 @@ impl MakoDaemonControl {
         user_id: Option<&str>,
         session_id: &str,
         priority: &str,
+        idempotency_key: Option<&str>,
     ) -> Result<()> {
         self.expect_ack(
             user_id,
             priority_command(session_id, priority),
-            unique_key(&format!("priority:{session_id}:{priority}")),
+            request_key(
+                idempotency_key,
+                unique_key(&format!("priority:{session_id}:{priority}")),
+            ),
             "set priority",
         )
         .await
@@ -217,14 +352,18 @@ impl MakoDaemonControl {
         user_id: Option<&str>,
         session_id: &str,
         crew_slug: Option<&str>,
+        idempotency_key: Option<&str>,
     ) -> Result<()> {
         self.expect_ack(
             user_id,
             crew_command(session_id, crew_slug),
-            unique_key(&format!(
-                "crew:{session_id}:{}",
-                crew_slug.unwrap_or("none")
-            )),
+            request_key(
+                idempotency_key,
+                unique_key(&format!(
+                    "crew:{session_id}:{}",
+                    crew_slug.unwrap_or("none")
+                )),
+            ),
             "set crew",
         )
         .await
@@ -234,8 +373,12 @@ impl MakoDaemonControl {
         &self,
         user_id: Option<&str>,
         session_id: Option<&str>,
+        idempotency_key: Option<&str>,
     ) -> Result<usize> {
-        let key = unique_key(&format!("recover:{}", session_id.unwrap_or("all")));
+        let key = request_key(
+            idempotency_key,
+            unique_key(&format!("recover:{}", session_id.unwrap_or("all"))),
+        );
         match self
             .command(user_id, recover_command(session_id), Some(key))
             .await?
@@ -265,11 +408,16 @@ impl MakoDaemonControl {
         let command = subscribe_command(session_id, after_sequence, replay_limit);
         let mut request = RequestEnvelope::new(actor(user_id), command, 30_000);
         request.idempotency_key = unique_key(&format!("subscribe:{session_id}"));
-        self.client
+        let subscription = self
+            .client
             .subscribe(request)
             .await
             .map_err(MakoDaemonError::from)
-            .context("subscribing to Mako daemon events")
+            .context("subscribing to Mako daemon events")?;
+        if subscription.accepted.session_id != session_id {
+            bail!("Mako daemon accepted an event subscription for an unexpected session");
+        }
+        Ok(subscription)
     }
 
     pub(super) async fn steer(
@@ -278,12 +426,16 @@ impl MakoDaemonControl {
         session_id: &str,
         pending_id: &str,
         content: serde_json::Value,
+        idempotency_key: Option<&str>,
     ) -> Result<AckResponse> {
         match self
             .command(
                 user_id,
                 steer_command(session_id, pending_id, content),
-                Some(stable_key("steer", pending_id)),
+                Some(request_key(
+                    idempotency_key,
+                    stable_key("steer", pending_id),
+                )),
             )
             .await?
         {
@@ -296,13 +448,18 @@ impl MakoDaemonControl {
         &self,
         user_id: Option<&str>,
         session_id: &str,
+        run_id: &str,
         tool_call_id: &str,
         approved: bool,
+        idempotency_key: Option<&str>,
     ) -> Result<()> {
         self.expect_ack(
             user_id,
-            tool_approval_command(session_id, tool_call_id, approved),
-            stable_key("approval", &format!("{session_id}:{tool_call_id}")),
+            tool_approval_command(session_id, run_id, tool_call_id, approved),
+            request_key(
+                idempotency_key,
+                stable_key("approval", &format!("{session_id}:{run_id}:{tool_call_id}")),
+            ),
             "submit tool approval",
         )
         .await
@@ -312,13 +469,18 @@ impl MakoDaemonControl {
         &self,
         user_id: Option<&str>,
         session_id: &str,
+        run_id: &str,
         tool_call_id: &str,
         response: &str,
+        idempotency_key: Option<&str>,
     ) -> Result<()> {
         self.expect_ack(
             user_id,
-            user_response_command(session_id, tool_call_id, response),
-            stable_key("response", &format!("{session_id}:{tool_call_id}")),
+            user_response_command(session_id, run_id, tool_call_id, response),
+            request_key(
+                idempotency_key,
+                stable_key("response", &format!("{session_id}:{run_id}:{tool_call_id}")),
+            ),
             "submit user response",
         )
         .await
@@ -345,6 +507,22 @@ impl MakoDaemonControl {
                 ),
             }
             .into()),
+            payload => bail!("Mako {operation} returned unexpected response {payload:?}"),
+        }
+    }
+
+    async fn expect_schedule(
+        &self,
+        user_id: Option<&str>,
+        command: Command,
+        idempotency_key: String,
+        operation: &str,
+    ) -> Result<ScheduleResponse> {
+        match self
+            .command(user_id, command, Some(idempotency_key))
+            .await?
+        {
+            ResponsePayload::Schedule(schedule) => Ok(schedule),
             payload => bail!("Mako {operation} returned unexpected response {payload:?}"),
         }
     }
@@ -476,17 +654,29 @@ fn steer_command(session_id: &str, pending_id: &str, content: serde_json::Value)
     })
 }
 
-fn tool_approval_command(session_id: &str, tool_call_id: &str, approved: bool) -> Command {
+fn tool_approval_command(
+    session_id: &str,
+    run_id: &str,
+    tool_call_id: &str,
+    approved: bool,
+) -> Command {
     Command::ToolApproval(ToolApprovalCommand {
         session_id: session_id.to_string(),
+        run_id: run_id.to_string(),
         tool_call_id: tool_call_id.to_string(),
         approved,
     })
 }
 
-fn user_response_command(session_id: &str, tool_call_id: &str, response: &str) -> Command {
+fn user_response_command(
+    session_id: &str,
+    run_id: &str,
+    tool_call_id: &str,
+    response: &str,
+) -> Command {
     Command::UserResponse(UserResponseCommand {
         session_id: session_id.to_string(),
+        run_id: run_id.to_string(),
         tool_call_id: tool_call_id.to_string(),
         response: response.to_string(),
     })
@@ -505,21 +695,23 @@ fn unique_key(operation: &str) -> String {
     format!("{operation}:{}", uuid::Uuid::new_v4())
 }
 
-fn map_stats(stats: DaemonStats) -> MakoRuntimeStats {
-    MakoRuntimeStats {
-        active_runtime_count: runtime_usize(&stats.runtime, "active_runtime_count"),
-        scheduled_wake_count: runtime_usize(&stats.runtime, "scheduled_wake_count"),
-        event_stream_count: runtime_usize(&stats.runtime, "event_stream_count"),
-        uptime_secs: stats.uptime_secs,
-    }
+fn request_key(provided: Option<&str>, fallback: String) -> String {
+    provided.map(ToOwned::to_owned).unwrap_or(fallback)
 }
 
-fn runtime_usize(runtime: &serde_json::Value, key: &str) -> usize {
-    runtime
-        .get(key)
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or_default()
+fn map_stats(stats: DaemonStats) -> MakoRuntimeStats {
+    let runtime = stats.runtime;
+    MakoRuntimeStats {
+        active_controller_count: runtime.active_controllers,
+        active_run_count: runtime.active_runs,
+        queued_run_count: runtime.queued_runs,
+        recovery_required_run_count: runtime.recovery_required,
+        active_runtime_count: runtime.active_runs,
+        scheduled_wake_count: runtime.queued_runs,
+        // The daemon cannot observe HTTP/TUI subscribers owned by this server.
+        event_stream_count: 0,
+        uptime_secs: stats.uptime_secs,
+    }
 }
 
 pub(super) fn map_daemon_event(envelope: EventEnvelope) -> AgenticEvent {
@@ -614,30 +806,27 @@ pub(super) fn map_daemon_event(envelope: EventEnvelope) -> AgenticEvent {
     }
 }
 
-fn discover_socket_path() -> Result<PathBuf> {
+#[cfg(unix)]
+fn discover_socket_path() -> PathBuf {
     if let Some(path) = env_path("KRUSTY_MAKO_SOCKET") {
-        return Ok(path);
+        return path;
     }
     if let Some(runtime_dir) = env_path("XDG_RUNTIME_DIR") {
-        return Ok(runtime_dir.join("krusty").join("mako.sock"));
+        return runtime_dir.join("krusty").join("mako.sock");
     }
     #[cfg(target_os = "macos")]
     if let Some(cache_dir) = dirs::cache_dir() {
-        return Ok(cache_dir.join("krusty").join("run").join("mako.sock"));
+        return cache_dir.join("krusty").join("run").join("mako.sock");
     }
-    #[cfg(unix)]
-    {
-        return Ok(std::env::temp_dir()
-            .join(format!(
-                "krusty-{}",
-                krusty_mako_protocol::current_effective_uid()
-            ))
-            .join("mako.sock"));
-    }
-    #[cfg(not(unix))]
-    bail!("Mako daemon IPC requires Unix-domain sockets")
+    std::env::temp_dir()
+        .join(format!(
+            "krusty-{}",
+            krusty_mako_protocol::current_effective_uid()
+        ))
+        .join("mako.sock")
 }
 
+#[cfg(unix)]
 fn discover_key_path() -> PathBuf {
     env_path("KRUSTY_MAKO_KEY").unwrap_or_else(|| {
         krusty_core::paths::config_dir()
@@ -646,6 +835,7 @@ fn discover_key_path() -> PathBuf {
     })
 }
 
+#[cfg(unix)]
 fn env_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
         .filter(|value| !value.is_empty())
@@ -656,9 +846,9 @@ fn env_path(name: &str) -> Option<PathBuf> {
 mod tests {
     #[cfg(unix)]
     use krusty_mako_protocol::{
-        read_frame, unix_time_millis, write_frame, AuthPolicy, ClientFrame, PongResponse,
-        ProtocolErrorPayload, RecoverResponse, ResponseEnvelope, RuntimeEvent, ServerFrame,
-        SubscriptionAccepted,
+        read_frame, unix_time_millis, write_frame, AuthPolicy, ClientFrame, DaemonRuntimeStats,
+        ProtocolErrorPayload, ProtocolVersion, RecoverResponse, ResponseEnvelope, RuntimeEvent,
+        ServerFrame, SubscriptionAccepted,
     };
     use krusty_mako_protocol::{IpcKey, MakoIpcClientConfig};
     #[cfg(unix)]
@@ -716,13 +906,167 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn pong() -> ResponsePayload {
-        ResponsePayload::Pong(PongResponse {
+    async fn send_runtime_event(stream: &mut UnixStream, session_id: &str, sequence: i64) {
+        write_frame(
+            stream,
+            &ServerFrame::Event(EventEnvelope {
+                version: ProtocolVersion::CURRENT,
+                session_id: Some(session_id.to_string()),
+                run_id: Some("run-1".to_string()),
+                sequence: Some(sequence),
+                emitted_at_unix_ms: unix_time_millis(),
+                event: MakoEvent::Runtime(RuntimeEvent {
+                    event_type: "run_started".to_string(),
+                    payload: serde_json::json!({"run_id": "run-1"}),
+                }),
+            }),
+        )
+        .await
+        .expect("runtime event should write");
+    }
+
+    #[cfg(unix)]
+    fn scheduler_stats(pump_alive: bool, scheduler_ready: bool) -> ResponsePayload {
+        ResponsePayload::Stats(DaemonStats {
             instance_id: "test-daemon-instance".to_string(),
             daemon_version: "test-daemon-version".to_string(),
+            protocol: ProtocolVersion::CURRENT,
             uptime_secs: 1,
-            server_time_unix_ms: unix_time_millis(),
+            active_connections: 1,
+            handled_requests: 1,
+            runtime: DaemonRuntimeStats {
+                pump_alive,
+                scheduler_ready,
+                ..DaemonRuntimeStats::default()
+            },
         })
+    }
+
+    #[cfg(unix)]
+    fn ready_stats() -> ResponsePayload {
+        scheduler_stats(true, true)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_stats_mapping_preserves_authoritative_scheduler_counts() {
+        let mapped = map_stats(DaemonStats {
+            instance_id: "daemon".to_string(),
+            daemon_version: "test".to_string(),
+            protocol: ProtocolVersion::CURRENT,
+            uptime_secs: 99,
+            active_connections: 17,
+            handled_requests: 23,
+            runtime: DaemonRuntimeStats {
+                active_controllers: 11,
+                active_runs: 7,
+                queued_runs: 5,
+                recovery_required: 3,
+                pump_alive: true,
+                scheduler_ready: true,
+            },
+        });
+
+        assert_eq!(mapped.active_controller_count, 11);
+        assert_eq!(mapped.active_run_count, 7);
+        assert_eq!(mapped.queued_run_count, 5);
+        assert_eq!(mapped.recovery_required_run_count, 3);
+        assert_eq!(mapped.active_runtime_count, 7);
+        assert_eq!(mapped.scheduled_wake_count, 5);
+        assert_eq!(mapped.event_stream_count, 0);
+        assert_eq!(mapped.uptime_secs, 99);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn missing_control_key_bootstraps_before_first_socket_activation_connection() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp directory should exist");
+        let socket_path = temp.path().join("mako.sock");
+        let key_directory = temp.path().join("config").join("run");
+        let key_path = key_directory.join("mako-ipc.key");
+        assert!(!key_path.exists());
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let server_key_path = key_path.clone();
+        let server = tokio::spawn(async move {
+            // Accepting the first connection models systemd socket activation:
+            // the daemon starts only after the trusted client has connected.
+            let (mut stream, _) = listener.accept().await.expect("test daemon should accept");
+            let key = IpcKey::load(&server_key_path)
+                .expect("client must initialize authority before connecting");
+            let frame: ClientFrame = read_frame(&mut stream)
+                .await
+                .expect("hello frame should decode")
+                .expect("hello frame should exist");
+            let ClientFrame::Hello(hello) = frame else {
+                panic!("first client frame was not hello");
+            };
+            let version = key
+                .verify_hello(&hello, AuthPolicy::default(), unix_time_millis())
+                .expect("bootstrapped key should authenticate the activating client");
+            let acknowledgement = key.hello_ack(
+                version,
+                "test-daemon-instance",
+                "test-daemon-version",
+                hello.nonce,
+            );
+            write_frame(&mut stream, &ServerFrame::HelloAck(acknowledgement))
+                .await
+                .expect("hello acknowledgement should write");
+            let frame: ClientFrame = read_frame(&mut stream)
+                .await
+                .expect("request frame should decode")
+                .expect("request frame should exist");
+            let ClientFrame::Request(request) = frame else {
+                panic!("second client frame was not a request");
+            };
+            assert!(matches!(request.command, Command::Stats));
+            respond(&mut stream, &request, ready_stats()).await;
+        });
+
+        let control = MakoDaemonControl::connect_paths(socket_path, key_path.clone())
+            .await
+            .expect("fresh trusted control client should bootstrap and authenticate");
+        assert_eq!(
+            std::fs::metadata(&key_directory)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        IpcKey::load(&key_path).expect("persisted key should remain securely loadable");
+        drop(control);
+        server.await.expect("test daemon should finish");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn healthcheck_requires_scheduler_readiness_not_transport_only() {
+        let temp = tempfile::tempdir().expect("temp directory should exist");
+        let socket_path = temp.path().join("mako.sock");
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let key = IpcKey::generate();
+        let server_key = key.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, request) = accept_authenticated_request(&listener, &server_key).await;
+            assert!(matches!(request.command, Command::Stats));
+            respond(&mut stream, &request, scheduler_stats(true, false)).await;
+        });
+
+        let error = MakoDaemonControl::connect_client(MakoIpcClient::new(
+            MakoIpcClientConfig::new(socket_path, "health-test"),
+            key,
+        ))
+        .await
+        .expect_err("a live transport without the scheduler lease is not healthy");
+        assert!(error.to_string().contains("scheduler_ready=false"));
+        server.await.expect("test daemon should finish");
     }
 
     #[cfg(unix)]
@@ -782,11 +1126,11 @@ mod tests {
             Command::Steer(_)
         ));
         assert!(matches!(
-            tool_approval_command("s", "t", true),
+            tool_approval_command("s", "r", "t", true),
             Command::ToolApproval(_)
         ));
         assert!(matches!(
-            user_response_command("s", "t", "yes"),
+            user_response_command("s", "r", "t", "yes"),
             Command::UserResponse(_)
         ));
     }
@@ -811,7 +1155,7 @@ mod tests {
                 let (mut stream, request) =
                     accept_authenticated_request(&listener, &server_key).await;
                 let payload = match &request.command {
-                    Command::Ping => pong(),
+                    Command::Stats => ready_stats(),
                     Command::Recover(_) => {
                         ResponsePayload::Recover(RecoverResponse { recovered_count: 1 })
                     }
@@ -830,47 +1174,47 @@ mod tests {
         .await
         .expect("healthcheck should succeed");
         control
-            .pause(Some("alice"), "session-1")
+            .pause(Some("alice"), "session-1", None)
             .await
             .expect("first pause should succeed");
         control
-            .resume(Some("alice"), "session-1")
+            .resume(Some("alice"), "session-1", None)
             .await
             .expect("resume should succeed");
         control
-            .pause(Some("alice"), "session-1")
+            .pause(Some("alice"), "session-1", None)
             .await
             .expect("second pause should succeed");
         control
-            .set_priority(Some("alice"), "session-1", "high")
+            .set_priority(Some("alice"), "session-1", "high", None)
             .await
             .expect("first high priority should succeed");
         control
-            .set_priority(Some("alice"), "session-1", "normal")
+            .set_priority(Some("alice"), "session-1", "normal", None)
             .await
             .expect("normal priority should succeed");
         control
-            .set_priority(Some("alice"), "session-1", "high")
+            .set_priority(Some("alice"), "session-1", "high", None)
             .await
             .expect("second high priority should succeed");
         control
-            .cancel(Some("alice"), "session-1")
+            .cancel(Some("alice"), "session-1", None)
             .await
             .expect("first cancel should succeed");
         control
-            .resume(Some("alice"), "session-1")
+            .resume(Some("alice"), "session-1", None)
             .await
             .expect("second resume should succeed");
         control
-            .cancel(Some("alice"), "session-1")
+            .cancel(Some("alice"), "session-1", None)
             .await
             .expect("second cancel should succeed");
         control
-            .recover(Some("alice"), Some("session-1"))
+            .recover(Some("alice"), Some("session-1"), None)
             .await
             .expect("first recovery should succeed");
         control
-            .recover(Some("alice"), Some("session-1"))
+            .recover(Some("alice"), Some("session-1"), None)
             .await
             .expect("second recovery should succeed");
 
@@ -910,7 +1254,7 @@ mod tests {
                 let (mut stream, request) =
                     accept_authenticated_request(&listener, &server_key).await;
                 if index == 0 {
-                    respond(&mut stream, &request, pong()).await;
+                    respond(&mut stream, &request, ready_stats()).await;
                 } else {
                     respond(
                         &mut stream,
@@ -1029,6 +1373,285 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn manager_reconnects_quiet_eof_from_last_delivered_cursor_without_duplicates() {
+        let temp = tempfile::tempdir().expect("temp directory should exist");
+        let socket_path = temp.path().join("mako.sock");
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let key = IpcKey::generate();
+        let server_key = key.clone();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+
+            let (mut health_stream, health_request) =
+                accept_authenticated_request(&listener, &server_key).await;
+            respond(&mut health_stream, &health_request, ready_stats()).await;
+            requests.push(health_request);
+            drop(health_stream);
+
+            let (mut first_stream, first_request) =
+                accept_authenticated_request(&listener, &server_key).await;
+            respond(
+                &mut first_stream,
+                &first_request,
+                ResponsePayload::SubscriptionAccepted(SubscriptionAccepted {
+                    session_id: "session-1".to_string(),
+                    high_water_sequence: Some(5),
+                }),
+            )
+            .await;
+            send_runtime_event(&mut first_stream, "session-1", 5).await;
+            requests.push(first_request);
+            // A clean socket close is still an unexpected outage for a live
+            // subscription and must trigger cursor-aware recovery.
+            drop(first_stream);
+
+            let (mut second_stream, second_request) =
+                accept_authenticated_request(&listener, &server_key).await;
+            respond(
+                &mut second_stream,
+                &second_request,
+                ResponsePayload::SubscriptionAccepted(SubscriptionAccepted {
+                    session_id: "session-1".to_string(),
+                    high_water_sequence: Some(6),
+                }),
+            )
+            .await;
+            // Repeat the boundary event to prove the server bridge filters a
+            // replay duplicate before forwarding the new durable event.
+            send_runtime_event(&mut second_stream, "session-1", 5).await;
+            send_runtime_event(&mut second_stream, "session-1", 6).await;
+            requests.push(second_request);
+            let _ = release_rx.await;
+            drop(second_stream);
+            requests
+        });
+
+        let control = MakoDaemonControl::connect_client(MakoIpcClient::new(
+            MakoIpcClientConfig::new(socket_path, "reconnect-test"),
+            key,
+        ))
+        .await
+        .expect("healthcheck should succeed");
+        let manager = super::super::MakoRuntimeManager::build(Some(control), false);
+        let mut receiver = manager
+            .subscribe_for_user_from("session-1", Some("alice"), Some(0), Some(256))
+            .await
+            .expect("initial subscription should succeed");
+
+        let first = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("initial event should arrive")
+            .expect("initial event channel should remain open");
+        assert!(matches!(
+            first,
+            AgenticEvent::MakoControllerEvent {
+                sequence: Some(5),
+                ..
+            }
+        ));
+        let resumed = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("resumed event should arrive")
+            .expect("resumed event channel should remain open");
+        assert!(matches!(
+            resumed,
+            AgenticEvent::MakoControllerEvent {
+                sequence: Some(6),
+                ..
+            }
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), receiver.recv())
+                .await
+                .is_err()
+        );
+
+        drop(receiver);
+        let _ = release_tx.send(());
+        let requests = server.await.expect("test daemon should finish");
+        assert_eq!(requests.len(), 3);
+        for request in &requests[1..] {
+            assert_eq!(request.actor.user_id.as_deref(), Some("alice"));
+            let Command::Subscribe(command) = &request.command else {
+                panic!("request was not subscribe");
+            };
+            assert_eq!(command.session_id, "session-1");
+        }
+        let Command::Subscribe(initial) = &requests[1].command else {
+            unreachable!();
+        };
+        let Command::Subscribe(reconnected) = &requests[2].command else {
+            unreachable!();
+        };
+        assert_eq!(initial.after_sequence, Some(0));
+        assert_eq!(reconnected.after_sequence, Some(5));
+        assert_eq!(reconnected.replay_limit, Some(256));
+        drop(manager);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn manager_surfaces_daemon_unavailable_after_reconnect_budget_is_exhausted() {
+        let temp = tempfile::tempdir().expect("temp directory should exist");
+        let socket_path = temp.path().join("mako.sock");
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let key = IpcKey::generate();
+        let server_key = key.clone();
+        let server = tokio::spawn(async move {
+            let (mut health_stream, health_request) =
+                accept_authenticated_request(&listener, &server_key).await;
+            respond(&mut health_stream, &health_request, ready_stats()).await;
+            drop(health_stream);
+
+            let (mut stream, request) = accept_authenticated_request(&listener, &server_key).await;
+            respond(
+                &mut stream,
+                &request,
+                ResponsePayload::SubscriptionAccepted(SubscriptionAccepted {
+                    session_id: "session-1".to_string(),
+                    high_water_sequence: Some(11),
+                }),
+            )
+            .await;
+            assert_eq!(request.actor.user_id.as_deref(), Some("alice"));
+            drop(stream);
+            // Dropping the only listener makes every reconnect a transport
+            // failure rather than another accepted-but-empty stream.
+            drop(listener);
+        });
+
+        let control = MakoDaemonControl::connect_client(MakoIpcClient::new(
+            MakoIpcClientConfig::new(socket_path, "outage-reconnect-test"),
+            key,
+        ))
+        .await
+        .expect("healthcheck should succeed");
+        let manager = super::super::MakoRuntimeManager::build(Some(control), false);
+        let mut receiver = manager
+            .subscribe_for_user("session-1", Some("alice"))
+            .await
+            .expect("initial subscription should succeed");
+        server.await.expect("test daemon should finish");
+
+        let terminal = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("terminal outage event should arrive")
+            .expect("terminal outage event should be readable");
+        let AgenticEvent::Error { error } = terminal else {
+            panic!("expected explicit terminal error, got {terminal:?}");
+        };
+        assert!(error.contains("Mako daemon event stream unavailable"));
+        assert!(matches!(
+            receiver.recv().await,
+            Err(tokio::sync::broadcast::error::RecvError::Closed)
+        ));
+        drop(manager);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn manager_closes_subscription_when_client_receiver_is_dropped() {
+        let temp = tempfile::tempdir().expect("temp directory should exist");
+        let socket_path = temp.path().join("mako.sock");
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let key = IpcKey::generate();
+        let server_key = key.clone();
+        let server = tokio::spawn(async move {
+            let (mut health_stream, health_request) =
+                accept_authenticated_request(&listener, &server_key).await;
+            respond(&mut health_stream, &health_request, ready_stats()).await;
+            drop(health_stream);
+
+            let (mut stream, request) = accept_authenticated_request(&listener, &server_key).await;
+            respond(
+                &mut stream,
+                &request,
+                ResponsePayload::SubscriptionAccepted(SubscriptionAccepted {
+                    session_id: "session-1".to_string(),
+                    high_water_sequence: None,
+                }),
+            )
+            .await;
+            let closed = tokio::time::timeout(
+                Duration::from_secs(1),
+                read_frame::<_, ClientFrame>(&mut stream),
+            )
+            .await
+            .expect("client drop should close the IPC stream");
+            assert!(matches!(closed, Ok(None) | Err(_)));
+        });
+
+        let control = MakoDaemonControl::connect_client(MakoIpcClient::new(
+            MakoIpcClientConfig::new(socket_path, "client-cancel-test"),
+            key,
+        ))
+        .await
+        .expect("healthcheck should succeed");
+        let manager = super::super::MakoRuntimeManager::build(Some(control), false);
+        let receiver = manager
+            .subscribe_for_user("session-1", Some("alice"))
+            .await
+            .expect("subscription should succeed");
+        drop(receiver);
+        server.await.expect("test daemon should observe EOF");
+        drop(manager);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_manager_cancels_subscription_even_while_client_receiver_remains() {
+        let temp = tempfile::tempdir().expect("temp directory should exist");
+        let socket_path = temp.path().join("mako.sock");
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let key = IpcKey::generate();
+        let server_key = key.clone();
+        let server = tokio::spawn(async move {
+            let (mut health_stream, health_request) =
+                accept_authenticated_request(&listener, &server_key).await;
+            respond(&mut health_stream, &health_request, ready_stats()).await;
+            drop(health_stream);
+
+            let (mut stream, request) = accept_authenticated_request(&listener, &server_key).await;
+            respond(
+                &mut stream,
+                &request,
+                ResponsePayload::SubscriptionAccepted(SubscriptionAccepted {
+                    session_id: "session-1".to_string(),
+                    high_water_sequence: None,
+                }),
+            )
+            .await;
+            let closed = tokio::time::timeout(
+                Duration::from_secs(1),
+                read_frame::<_, ClientFrame>(&mut stream),
+            )
+            .await
+            .expect("manager drop should close the IPC stream");
+            assert!(matches!(closed, Ok(None) | Err(_)));
+        });
+
+        let control = MakoDaemonControl::connect_client(MakoIpcClient::new(
+            MakoIpcClientConfig::new(socket_path, "manager-cancel-test"),
+            key,
+        ))
+        .await
+        .expect("healthcheck should succeed");
+        let manager = super::super::MakoRuntimeManager::build(Some(control), false);
+        let mut receiver = manager
+            .subscribe_for_user("session-1", Some("alice"))
+            .await
+            .expect("subscription should succeed");
+        drop(manager);
+        server.await.expect("test daemon should observe EOF");
+        assert!(matches!(
+            receiver.recv().await,
+            Err(tokio::sync::broadcast::error::RecvError::Closed)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn manager_reauthenticates_each_subscriber_instead_of_reusing_owner_bridge() {
         let temp = tempfile::tempdir().expect("temp directory should exist");
         let socket_path = temp.path().join("mako.sock");
@@ -1042,7 +1665,7 @@ mod tests {
                 let (mut stream, request) =
                     accept_authenticated_request(&listener, &server_key).await;
                 if index == 0 {
-                    respond(&mut stream, &request, pong()).await;
+                    respond(&mut stream, &request, ready_stats()).await;
                 } else if request.actor.user_id.as_deref() == Some("alice") {
                     respond(
                         &mut stream,
@@ -1081,7 +1704,7 @@ mod tests {
         ))
         .await
         .expect("healthcheck should succeed");
-        let manager = super::super::MakoRuntimeManager::build(Some(control));
+        let manager = super::super::MakoRuntimeManager::build(Some(control), false);
         let _alice = manager
             .subscribe_for_user("session-1", Some("alice"))
             .await
@@ -1093,7 +1716,10 @@ mod tests {
         .await
         .expect("Bob subscription must reach the daemon")
         .expect_err("non-owner subscription must fail");
-        assert!(bob.to_string().contains("ownership_mismatch"));
+        assert!(
+            format!("{bob:#}").contains("ownership_mismatch"),
+            "unexpected non-owner subscription error: {bob:#}"
+        );
 
         let requests = server.await.expect("test daemon should finish");
         assert_eq!(requests[1].actor.user_id.as_deref(), Some("alice"));
@@ -1114,7 +1740,7 @@ mod tests {
                 let (mut stream, request) =
                     accept_authenticated_request(&listener, &server_key).await;
                 match &request.command {
-                    Command::Ping => respond(&mut stream, &request, pong()).await,
+                    Command::Stats => respond(&mut stream, &request, ready_stats()).await,
                     Command::Subscribe(_) => {
                         respond(
                             &mut stream,
@@ -1155,9 +1781,9 @@ mod tests {
         ))
         .await
         .expect("healthcheck should succeed");
-        let manager = super::super::MakoRuntimeManager::build(Some(control));
+        let manager = super::super::MakoRuntimeManager::build(Some(control), false);
         let mut receiver = manager
-            .begin_daemon_chat_turn_for_user("session-1", "hello", Some("alice"), true)
+            .begin_daemon_chat_turn_for_user("session-1", "hello", Some("alice"), true, None)
             .await
             .expect("first chat turn should be accepted");
         let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())

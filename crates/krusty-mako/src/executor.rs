@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -7,16 +9,65 @@ use krusty_core::ai::types::Content;
 use krusty_server::mako_execution_host::MakoExecutionHost;
 use krusty_server::types::AgenticEvent;
 use serde_json::{json, Value};
+use tokio::sync::{oneshot, Mutex};
 
 use crate::{ExecutionBackend, ExecutionControl, ExecutionOutcome, ExecutionRequest};
 
 pub struct KrustyExecutionBackend {
     host: Arc<MakoExecutionHost>,
+    approval_waiters: Mutex<HashMap<ApprovalKey, oneshot::Sender<bool>>>,
+    approval_ack_timeout: Duration,
+}
+
+const DEFAULT_APPROVAL_ACK_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ApprovalKey {
+    session_id: String,
+    run_id: String,
+    tool_call_id: String,
 }
 
 impl KrustyExecutionBackend {
     pub fn new(host: Arc<MakoExecutionHost>) -> Self {
-        Self { host }
+        Self {
+            host,
+            approval_waiters: Mutex::new(HashMap::new()),
+            approval_ack_timeout: DEFAULT_APPROVAL_ACK_TIMEOUT,
+        }
+    }
+
+    async fn register_approval_waiter(&self, key: ApprovalKey) -> oneshot::Receiver<bool> {
+        let (sender, receiver) = oneshot::channel();
+        // Delivery is scheduler-serialized. Replacing a prior sender closes a
+        // stale attempt rather than allowing two callers to claim one ack.
+        self.approval_waiters.lock().await.insert(key, sender);
+        receiver
+    }
+
+    async fn remove_approval_waiter(&self, key: &ApprovalKey) {
+        self.approval_waiters.lock().await.remove(key);
+    }
+
+    async fn acknowledge_approval_event(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        event: &AgenticEvent,
+    ) {
+        let (tool_call_id, approved) = match event {
+            AgenticEvent::ToolApproved { id } => (id, true),
+            AgenticEvent::ToolDenied { id } => (id, false),
+            _ => return,
+        };
+        let key = ApprovalKey {
+            session_id: session_id.to_string(),
+            run_id: run_id.to_string(),
+            tool_call_id: tool_call_id.clone(),
+        };
+        if let Some(waiter) = self.approval_waiters.lock().await.remove(&key) {
+            let _ = waiter.send(approved);
+        }
     }
 }
 
@@ -26,10 +77,12 @@ struct TerminalState {
     error: Option<String>,
     sleeping: Option<(chrono::DateTime<Utc>, String)>,
     awaiting_input: Option<Value>,
+    observed_event: bool,
 }
 
 impl TerminalState {
     fn observe(&mut self, event: &AgenticEvent) {
+        self.observed_event = true;
         match event {
             AgenticEvent::AgentSleeping {
                 duration_secs,
@@ -65,6 +118,16 @@ impl TerminalState {
             };
         }
         if let Err(error) = completion {
+            if self.finish_reason.is_none()
+                && (self.observed_event
+                    || error.contains("event stream ended before LoopEvent::Finished"))
+            {
+                return ExecutionOutcome::RecoveryRequired {
+                    reason: format!(
+                        "agent execution ended without a terminal event; external side effects are uncertain: {error}"
+                    ),
+                };
+            }
             let error = self.error.unwrap_or(error);
             return ExecutionOutcome::Failed {
                 retryable: transient_execution_error(&error),
@@ -105,12 +168,11 @@ impl TerminalState {
                 retryable: false,
                 retry_after: None,
             },
-            None => ExecutionOutcome::Failed {
-                error: self
-                    .error
-                    .unwrap_or_else(|| "agent event stream ended without a terminal event".into()),
-                retryable: true,
-                retry_after: None,
+            None => ExecutionOutcome::RecoveryRequired {
+                reason: self.error.unwrap_or_else(|| {
+                    "agent event stream ended without a terminal event; external side effects are uncertain"
+                        .into()
+                }),
             },
         }
     }
@@ -118,10 +180,48 @@ impl TerminalState {
 
 fn transient_execution_error(error: &str) -> bool {
     let normalized = error.to_ascii_lowercase();
-    !normalized.contains("no ai credentials configured")
-        && !normalized.contains("session not found")
-        && !normalized.contains("not a mako session")
-        && !normalized.contains("event payload is")
+    const DETERMINISTIC: &[&str] = &[
+        "no ai credentials configured",
+        "session not found",
+        "not a mako session",
+        "event payload is",
+        "invalid steering content",
+        "invalid mako execution claim",
+        "claimed mako run",
+        "claimed mako workspace",
+        "claimed mako permission_mode",
+        "mako execution fence",
+        "execution spec does not match",
+        "credential snapshot could not be reloaded",
+    ];
+    if DETERMINISTIC
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        return false;
+    }
+
+    // Unknown failures are not automatically retryable. Retrying only known
+    // transient classes prevents deterministic configuration/invariant bugs
+    // from silently consuming every durable attempt.
+    const TRANSIENT: &[&str] = &[
+        "session is busy",
+        "already executing",
+        "connection reset",
+        "connection refused",
+        "temporarily unavailable",
+        "service unavailable",
+        "transport error",
+        "network error",
+        "rate limit",
+        "timed out",
+        "timeout",
+        "http 429",
+        "http 502",
+        "http 503",
+        "http 504",
+    ];
+    TRANSIENT.iter().any(|marker| normalized.contains(marker))
 }
 
 #[async_trait]
@@ -135,17 +235,22 @@ impl ExecutionBackend for KrustyExecutionBackend {
             };
         };
         let run_id = request.claim.run.id.clone();
-        let wake_reason = request.claim.run.kind.clone();
+        let wake_reason = request.claim.run.kind.to_string();
         let run = match self
             .host
-            .start(session_id.clone(), run_id, wake_reason)
+            .start(
+                request.claim.clone(),
+                request.daemon_instance_id.clone(),
+                wake_reason,
+            )
             .await
         {
             Ok(run) => run,
             Err(error) => {
+                let retryable = error.is_retryable();
                 let error = error.to_string();
                 return ExecutionOutcome::Failed {
-                    retryable: transient_execution_error(&error),
+                    retryable,
                     error,
                     retry_after: None,
                 };
@@ -162,23 +267,30 @@ impl ExecutionBackend for KrustyExecutionBackend {
                     match event {
                         Some(event) => {
                             terminal.observe(&event);
+                            // An approval outbox entry is acknowledged only
+                            // after the agent's canonical inbox consumed the
+                            // decision and emitted ToolApproved/ToolDenied.
+                            // This happens before event persistence so the
+                            // scheduler's mutation gate cannot deadlock the
+                            // bounded event sink.
+                            self.acknowledge_approval_event(&session_id, &run_id, &event).await;
                             let payload = match serde_json::to_value(event) {
                                 Ok(payload) => payload,
                                 Err(error) => {
-                                    self.host.abort(&session_id).await;
-                                    return ExecutionOutcome::Failed {
-                                        error: format!("could not encode agent event: {error}"),
-                                        retryable: false,
-                                        retry_after: None,
+                                    self.host.abort(&session_id, Some(&run_id)).await;
+                                    return ExecutionOutcome::RecoveryRequired {
+                                        reason: format!(
+                                            "agent event could not be durably encoded; side effects are uncertain: {error}"
+                                        ),
                                     };
                                 }
                             };
                             if let Err(error) = request.events.agentic(payload).await {
-                                self.host.abort(&session_id).await;
-                                return ExecutionOutcome::Failed {
-                                    error: format!("could not durably emit agent event: {error}"),
-                                    retryable: false,
-                                    retry_after: None,
+                                self.host.abort(&session_id, Some(&run_id)).await;
+                                return ExecutionOutcome::RecoveryRequired {
+                                    reason: format!(
+                                        "agent event could not be durably emitted; side effects are uncertain: {error}"
+                                    ),
                                 };
                             }
                         }
@@ -232,37 +344,140 @@ impl ExecutionBackend for KrustyExecutionBackend {
                     .await
             }
             ExecutionControl::ToolApproval {
+                run_id,
                 tool_call_id,
                 approved,
             } => {
-                self.host
-                    .send_input(
+                let key = ApprovalKey {
+                    session_id: session_id.to_string(),
+                    run_id: run_id.clone(),
+                    tool_call_id: tool_call_id.clone(),
+                };
+                let acknowledgement = self.register_approval_waiter(key.clone()).await;
+                if let Err(error) = self
+                    .host
+                    .send_input_for_run(
                         session_id,
+                        &run_id,
                         LoopInput::ToolApproval {
                             tool_call_id,
                             approved,
                         },
                     )
                     .await
+                {
+                    self.remove_approval_waiter(&key).await;
+                    return Err(error);
+                }
+                match tokio::time::timeout(self.approval_ack_timeout, acknowledgement).await {
+                    Ok(Ok(observed)) if observed == approved => Ok(()),
+                    Ok(Ok(_)) => {
+                        self.remove_approval_waiter(&key).await;
+                        anyhow::bail!("Mako agent consumed the opposite approval decision")
+                    }
+                    Ok(Err(_)) => anyhow::bail!("Mako approval acknowledgement channel closed"),
+                    Err(_) => {
+                        self.remove_approval_waiter(&key).await;
+                        anyhow::bail!("Mako agent did not consume the approval before timeout")
+                    }
+                }
             }
             ExecutionControl::UserResponse {
+                run_id,
+                pending_id,
                 tool_call_id,
                 response,
             } => {
                 self.host
-                    .send_input(
+                    .send_input_for_run(
                         session_id,
-                        LoopInput::UserResponse {
-                            tool_call_id,
-                            response,
+                        &run_id,
+                        LoopInput::Steer {
+                            pending_id: Some(pending_id),
+                            content: vec![Content::Text {
+                                text: format!("Response to {tool_call_id}:\n{response}"),
+                            }],
                         },
                     )
                     .await
             }
             ExecutionControl::Cancel { reason } => {
                 tracing::info!(session_id, reason, "Cancelling hosted Mako execution");
-                self.host.cancel(session_id).await
+                self.host.cancel(session_id, None).await
             }
+            ExecutionControl::CancelRun { run_id, reason } => {
+                tracing::info!(
+                    session_id,
+                    run_id,
+                    reason,
+                    "Cancelling exact hosted Mako execution"
+                );
+                self.host.cancel(session_id, Some(&run_id)).await
+            }
+            ExecutionControl::AbortRun { run_id, reason } => {
+                tracing::warn!(
+                    session_id,
+                    run_id,
+                    reason,
+                    "Aborting exact hosted Mako execution after cancellation grace elapsed"
+                );
+                self.host.abort(session_id, Some(&run_id)).await;
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use krusty_server::types::AgenticEvent;
+
+    use crate::ExecutionOutcome;
+
+    use super::{transient_execution_error, TerminalState};
+
+    #[test]
+    fn deterministic_execution_errors_do_not_retry() {
+        for error in [
+            "invalid Mako execution claim: claimed Mako run has no explicit model",
+            "invalid Mako execution claim: every claimed Mako workspace path must be absolute",
+            "Mako execution fence rejected: Mako execution fence is no longer current",
+            "invalid steering content: expected a sequence",
+            "No AI credentials configured",
+            "Mako credential snapshot could not be reloaded: malformed credentials file",
+        ] {
+            assert!(
+                !transient_execution_error(error),
+                "unexpected retry: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn dropped_stream_after_tool_event_requires_manual_recovery() {
+        let mut terminal = TerminalState::default();
+        terminal.observe(&AgenticEvent::ToolResult {
+            id: "tool-1".into(),
+            output: "side effect may have committed".into(),
+            is_error: false,
+        });
+
+        let outcome = terminal.into_outcome(Err(
+            "agent event stream ended before LoopEvent::Finished; external side effects are uncertain"
+                .into(),
+        ));
+        assert!(matches!(outcome, ExecutionOutcome::RecoveryRequired { .. }));
+    }
+
+    #[test]
+    fn recognized_transient_execution_errors_retry() {
+        for error in [
+            "provider connection reset by peer",
+            "provider request timed out",
+            "HTTP 503 service unavailable",
+            "session is busy",
+        ] {
+            assert!(transient_execution_error(error), "expected retry: {error}");
         }
     }
 }

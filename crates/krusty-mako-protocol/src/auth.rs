@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -62,24 +62,34 @@ impl IpcKey {
         })?;
         ensure_private_dir(parent)?;
 
-        let key = Self::generate();
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+        match Self::load(path) {
+            Ok(key) => return Ok(key),
+            Err(AuthError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
 
-        match options.open(path) {
-            Ok(mut file) => {
-                file.write_all(&key.0)?;
-                file.sync_all()?;
+        // Never expose the final pathname until all key bytes are durable.
+        // `hard_link` publishes the already-synced inode without overwriting a
+        // winner, unlike opening the final path with `create_new` and then
+        // allowing another process to observe a partial file.
+        let (key, temporary) = create_private_key_candidate(parent)?;
+        match fs::hard_link(temporary.path(), path) {
+            Ok(()) => {
+                sync_private_directory(parent)?;
+                temporary.remove()?;
+                sync_private_directory(parent)?;
                 validate_key_metadata(path)?;
                 Ok(key)
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Self::load(path),
-            Err(error) => Err(AuthError::Io(error)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                temporary.remove()?;
+                sync_private_directory(parent)?;
+                Self::load(path)
+            }
+            Err(error) => {
+                temporary.remove()?;
+                Err(AuthError::Io(error))
+            }
         }
     }
 
@@ -200,6 +210,92 @@ impl IpcKey {
         mac.verify_slice(&decoded)
             .map_err(|_| AuthError::InvalidMac)
     }
+}
+
+struct TemporaryKeyPath {
+    path: Option<PathBuf>,
+}
+
+impl TemporaryKeyPath {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn path(&self) -> &Path {
+        self.path.as_deref().expect("temporary key path is armed")
+    }
+
+    fn remove(mut self) -> Result<(), AuthError> {
+        let path = self.path.take().expect("temporary key path is armed");
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => {
+                self.path = Some(path);
+                Err(AuthError::Io(error))
+            }
+        }
+    }
+}
+
+impl Drop for TemporaryKeyPath {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn create_private_key_candidate(parent: &Path) -> Result<(IpcKey, TemporaryKeyPath), AuthError> {
+    const MAX_TEMP_ATTEMPTS: usize = 16;
+
+    for _ in 0..MAX_TEMP_ATTEMPTS {
+        let key = IpcKey::generate();
+        let mut suffix = [0_u8; 16];
+        OsRng.fill_bytes(&mut suffix);
+        let path = parent.join(format!(".mako-ipc-key-{}.tmp", encode_hex(&suffix)));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = match options.open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(AuthError::Io(error)),
+        };
+        let persisted = file.write_all(&key.0).and_then(|()| file.sync_all());
+        drop(file);
+        let temporary = TemporaryKeyPath::new(path);
+        persisted.map_err(AuthError::Io)?;
+        validate_key_metadata(temporary.path())?;
+        return Ok((key, temporary));
+    }
+
+    Err(AuthError::Io(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique temporary IPC key path",
+    )))
+}
+
+fn sync_private_directory(path: &Path) -> Result<(), AuthError> {
+    #[cfg(unix)]
+    {
+        let directory = fs::File::open(path)?;
+        if let Err(error) = directory.sync_all() {
+            // Some Unix filesystems do not implement directory fsync. The key
+            // inode was still synced before atomic publication; tolerate only
+            // that explicit platform capability error.
+            if error.kind() != std::io::ErrorKind::InvalidInput {
+                return Err(AuthError::Io(error));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -462,6 +558,56 @@ mod tests {
             0o600
         );
         IpcKey::load(&key_path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_key_bootstrap_converges_on_one_private_authority() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Barrier};
+
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("private");
+        let key_path = directory.join("mako.ipc.key");
+        let barrier = Arc::new(Barrier::new(8));
+        let creators = (0..8)
+            .map(|_| {
+                let key_path = key_path.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    IpcKey::load_or_create(&key_path).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let created = creators
+            .into_iter()
+            .map(|creator| creator.join().unwrap())
+            .collect::<Vec<_>>();
+        let persisted = IpcKey::load(&key_path).unwrap();
+
+        for (index, candidate) in created.into_iter().enumerate() {
+            let hello = candidate.hello(format!("racing-client-{index}"));
+            persisted
+                .verify_hello(&hello, AuthPolicy::default(), unix_time_millis())
+                .expect("every racing creator must receive the persisted authority");
+        }
+        assert_eq!(
+            fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&key_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            fs::read_dir(&directory).unwrap().all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".mako-ipc-key-")),
+            "atomic publication must not leave temporary key files"
+        );
     }
 
     #[cfg(unix)]

@@ -3,7 +3,7 @@
 use anyhow::Result;
 use reqwest::Client;
 use serde::Deserialize;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 use crate::ai::models::{ApiFormat, ModelMetadata};
 use crate::ai::providers::{ProviderId, ReasoningControl, ReasoningFormat};
@@ -71,15 +71,10 @@ pub async fn fetch_models_with_client(
         .send()
         .await?;
 
-    let status = response.status();
-    if !status.is_success() {
-        let error_text = response.text().await.unwrap_or_default();
-        error!("Grok models API error: {} - {}", status, error_text);
-        return Err(anyhow::anyhow!(
-            "Grok models API error: {} - {}",
-            status,
-            error_text
-        ));
+    if !response.status().is_success() {
+        let error = crate::ai::retry::provider_http_error(response, "Grok models API error").await;
+        error.log();
+        return Err(error.into());
     }
 
     let mut models: Vec<ModelMetadata> = response

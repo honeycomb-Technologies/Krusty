@@ -2,12 +2,13 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use url::Url;
 
 use super::callback_server::{open_browser, run_callback_server, CallbackResult};
 use super::DEFAULT_CALLBACK_PORT;
 use crate::auth::extract_openai_account_id;
+use crate::auth::http::{read_auth_response, safe_oauth_callback_error};
 use crate::auth::pkce::PkceVerifier;
 use crate::auth::types::{OAuthConfig, OAuthTokenData};
 
@@ -84,20 +85,15 @@ impl BrowserOAuthFlow {
             .send()
             .await
             .context("Failed to send token request")?;
+        let response = read_auth_response(response)
+            .await
+            .context("Failed to read token exchange response")?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(anyhow!("Token exchange failed ({}): {}", status, body));
+            return Err(response.safe_error("Token exchange failed"));
         }
 
-        let token_response: TokenResponse = response
-            .json()
-            .await
-            .context("Failed to parse token response")?;
+        let token_response: TokenResponse = response.parse_json("OAuth token response")?;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -147,9 +143,11 @@ impl BrowserOAuthFlow {
 
         match callback_result {
             CallbackResult::Success { code } => self.exchange_code(&code, &verifier).await,
-            CallbackResult::Error { error, description } => {
-                Err(anyhow!("OAuth error: {} - {}", error, description))
-            }
+            CallbackResult::Error { error, description } => Err(safe_oauth_callback_error(
+                "OAuth callback failed",
+                Some(&error),
+                Some(&description),
+            )),
         }
     }
 
@@ -242,24 +240,15 @@ impl PasteCodeOAuthFlow {
             .send()
             .await
             .context("Failed to send Anthropic token request")?;
+        let response = read_auth_response(response)
+            .await
+            .context("Failed to read Anthropic token response")?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(anyhow!(
-                "Anthropic token exchange failed ({}): {}",
-                status,
-                body
-            ));
+            return Err(response.safe_error("Anthropic token exchange failed"));
         }
 
-        let token_response: TokenResponse = response
-            .json()
-            .await
-            .context("Failed to parse Anthropic token response")?;
+        let token_response: TokenResponse = response.parse_json("Anthropic token response")?;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

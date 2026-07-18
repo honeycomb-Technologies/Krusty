@@ -53,15 +53,25 @@ jobs:
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
 
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Build (Unix)
+        if: matrix.os != 'windows-latest'
+        run: cargo build --release --target ${{ matrix.target }} -p krusty -p krusty-mako
+
+      - name: Build (Windows)
+        if: matrix.os == 'windows-latest'
+        run: cargo build --release --target ${{ matrix.target }} -p krusty
 
       - name: Package (Unix)
         if: matrix.os != 'windows-latest'
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../krusty-${{ matrix.target }}.tar.gz krusty
-          cd ../../..
+          package_dir="krusty-${{ matrix.target }}"
+          mkdir -p "$package_dir/systemd"
+          cp "target/${{ matrix.target }}/release/krusty" "$package_dir/"
+          cp "target/${{ matrix.target }}/release/krusty-mako" "$package_dir/"
+          cp deploy/systemd/krusty-mako.service "$package_dir/systemd/"
+          cp deploy/systemd/krusty-mako.socket "$package_dir/systemd/"
+          cp deploy/systemd/krusty-serve.service "$package_dir/systemd/"
+          tar czf "krusty-${{ matrix.target }}.tar.gz" -C "$package_dir" .
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum krusty-${{ matrix.target }}.tar.gz > krusty-${{ matrix.target }}.tar.gz.sha256
           else

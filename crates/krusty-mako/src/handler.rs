@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use krusty_mako_protocol::{
-    Actor, Command, EventEnvelope, PeerIdentity, ProtocolErrorPayload, ResponsePayload,
-    SubscriptionAccepted,
+    Actor, Command, DaemonRuntimeStats, EventEnvelope, PeerIdentity, ProtocolErrorPayload,
+    ResponsePayload, SubscriptionAccepted,
 };
 use tokio::sync::mpsc;
 
@@ -44,9 +44,9 @@ pub trait CommandHandler: Send + Sync + 'static {
     /// daemon-owned so they continue working while runtime recovery is degraded.
     async fn handle(&self, context: CommandContext, command: Command) -> HandlerResult;
 
-    /// Runtime-specific stats merged into the daemon's stable transport stats.
-    async fn runtime_stats(&self) -> serde_json::Value {
-        serde_json::Value::Null
+    /// Runtime-specific stats carried by the daemon's stable transport contract.
+    async fn runtime_stats(&self, _actor: &Actor) -> DaemonRuntimeStats {
+        DaemonRuntimeStats::default()
     }
 }
 

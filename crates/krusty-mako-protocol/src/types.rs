@@ -142,6 +142,9 @@ pub enum Command {
     Stats,
     Shutdown(ShutdownCommand),
     Dispatch(DispatchCommand),
+    CreateSchedule(CreateScheduleCommand),
+    ReplaceSchedule(ReplaceScheduleCommand),
+    SetScheduleStatus(SetScheduleStatusCommand),
     StartSession(SessionCommand),
     ScheduleSession(ScheduleCommand),
     PauseSession(SessionCommand),
@@ -168,6 +171,9 @@ impl Command {
             Self::Stats => "stats",
             Self::Shutdown(_) => "shutdown",
             Self::Dispatch(_) => "dispatch",
+            Self::CreateSchedule(_) => "create_schedule",
+            Self::ReplaceSchedule(_) => "replace_schedule",
+            Self::SetScheduleStatus(_) => "set_schedule_status",
             Self::StartSession(_) => "start_session",
             Self::ScheduleSession(_) => "schedule_session",
             Self::PauseSession(_) => "pause_session",
@@ -208,6 +214,48 @@ pub struct DispatchCommand {
     pub crew_slug: Option<String>,
 }
 
+/// Complete, versioned schedule definition accepted by the daemon. Complex
+/// policy fields remain JSON at the transport boundary and are deserialized
+/// into the core's strongly typed recurrence/policy models before commit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ScheduleDefinition {
+    pub title: String,
+    pub summary: String,
+    pub objective: String,
+    pub recurrence: serde_json::Value,
+    pub timezone: String,
+    pub dst_policy: serde_json::Value,
+    pub priority: i32,
+    pub project_dir: Option<String>,
+    pub model: Option<String>,
+    pub crew_slug: Option<String>,
+    pub misfire: serde_json::Value,
+    pub overlap_policy: String,
+    pub retry: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CreateScheduleCommand {
+    pub session_id: String,
+    pub definition: ScheduleDefinition,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReplaceScheduleCommand {
+    pub session_id: String,
+    pub schedule_id: String,
+    pub expected_revision: u64,
+    pub definition: ScheduleDefinition,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetScheduleStatusCommand {
+    pub session_id: String,
+    pub schedule_id: String,
+    pub expected_revision: u64,
+    pub status: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScheduleCommand {
     pub session_id: String,
@@ -231,6 +279,7 @@ pub struct SteerCommand {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolApprovalCommand {
     pub session_id: String,
+    pub run_id: String,
     pub tool_call_id: String,
     pub approved: bool,
 }
@@ -238,6 +287,7 @@ pub struct ToolApprovalCommand {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UserResponseCommand {
     pub session_id: String,
+    pub run_id: String,
     pub tool_call_id: String,
     pub response: String,
 }
@@ -311,6 +361,7 @@ pub enum ResponsePayload {
     Stats(DaemonStats),
     Ack(AckResponse),
     Dispatch(DispatchResponse),
+    Schedule(ScheduleResponse),
     Session(SessionResponse),
     Recover(RecoverResponse),
     SubscriptionAccepted(SubscriptionAccepted),
@@ -333,7 +384,32 @@ pub struct DaemonStats {
     pub uptime_secs: u64,
     pub active_connections: usize,
     pub handled_requests: u64,
-    pub runtime: serde_json::Value,
+    #[serde(default, deserialize_with = "deserialize_daemon_runtime_stats")]
+    pub runtime: DaemonRuntimeStats,
+}
+
+/// Stable scheduler counters and readiness signals exported by the daemon.
+///
+/// This deliberately remains a concrete protocol type instead of an open JSON
+/// object so independently shipped clients cannot silently drift onto keys the
+/// daemon never emits. `serde(default)` keeps additive evolution and older
+/// partial v1 payloads readable while unknown future fields remain harmless.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DaemonRuntimeStats {
+    pub active_controllers: usize,
+    pub active_runs: usize,
+    pub queued_runs: usize,
+    pub recovery_required: usize,
+    pub pump_alive: bool,
+    pub scheduler_ready: bool,
+}
+
+fn deserialize_daemon_runtime_stats<'de, D>(deserializer: D) -> Result<DaemonRuntimeStats, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<DaemonRuntimeStats>::deserialize(deserializer).map(Option::unwrap_or_default)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -345,6 +421,13 @@ pub struct AckResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DispatchResponse {
     pub session_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScheduleResponse {
+    pub schedule_id: String,
+    pub revision: u64,
     pub status: String,
 }
 
@@ -502,6 +585,119 @@ mod tests {
             .unwrap(),
             ProtocolVersion::CURRENT
         );
+    }
+
+    #[test]
+    fn older_minor_remains_compatible_for_foundation_commands() {
+        assert_eq!(
+            ProtocolVersion {
+                major: PROTOCOL_MAJOR,
+                minor: 0
+            }
+            .negotiate()
+            .unwrap(),
+            ProtocolVersion {
+                major: PROTOCOL_MAJOR,
+                minor: 0
+            }
+        );
+    }
+
+    #[test]
+    fn schedule_commands_round_trip_on_minor_one() {
+        let command = Command::CreateSchedule(CreateScheduleCommand {
+            session_id: "session-1".into(),
+            definition: ScheduleDefinition {
+                title: "Daily check".into(),
+                summary: "Check health".into(),
+                objective: "Run health checks".into(),
+                recurrence: serde_json::json!({
+                    "kind": "daily",
+                    "start_date": "2026-07-17",
+                    "time": "09:30:00"
+                }),
+                timezone: "America/Los_Angeles".into(),
+                dst_policy: serde_json::json!({
+                    "gap": "shift_forward",
+                    "fold": "first"
+                }),
+                priority: 0,
+                project_dir: Some("/work/repo".into()),
+                model: None,
+                crew_slug: None,
+                misfire: serde_json::json!({
+                    "policy": "fire_once",
+                    "grace_secs": 300,
+                    "catch_up_limit": 3
+                }),
+                overlap_policy: "queue_one".into(),
+                retry: serde_json::json!({
+                    "max_attempts": 5,
+                    "base_delay_secs": 15,
+                    "max_delay_secs": 900,
+                    "jitter": "full"
+                }),
+            },
+        });
+        let encoded = serde_json::to_vec(&command).unwrap();
+        let decoded: Command = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, command);
+        assert!(encoded.len() < crate::MAX_FRAME_BYTES);
+    }
+
+    #[test]
+    fn daemon_runtime_stats_round_trip_without_key_drift() {
+        let stats = DaemonRuntimeStats {
+            active_controllers: 7,
+            active_runs: 5,
+            queued_runs: 3,
+            recovery_required: 2,
+            pump_alive: true,
+            scheduler_ready: true,
+        };
+
+        let encoded = serde_json::to_value(stats).unwrap();
+        assert_eq!(encoded["active_controllers"], 7);
+        assert_eq!(encoded["active_runs"], 5);
+        assert_eq!(encoded["queued_runs"], 3);
+        assert_eq!(encoded["recovery_required"], 2);
+        assert_eq!(
+            serde_json::from_value::<DaemonRuntimeStats>(encoded).unwrap(),
+            stats
+        );
+    }
+
+    #[test]
+    fn daemon_runtime_stats_accept_older_partial_payloads() {
+        let stats: DaemonRuntimeStats = serde_json::from_value(serde_json::json!({
+            "pump_alive": true,
+            "scheduler_ready": true,
+            "future_additive_field": 42
+        }))
+        .unwrap();
+
+        assert!(stats.pump_alive);
+        assert!(stats.scheduler_ready);
+        assert_eq!(stats.active_controllers, 0);
+        assert_eq!(stats.active_runs, 0);
+        assert_eq!(stats.queued_runs, 0);
+        assert_eq!(stats.recovery_required, 0);
+    }
+
+    #[test]
+    fn daemon_stats_accept_legacy_null_runtime() {
+        let stats: DaemonStats = serde_json::from_value(serde_json::json!({
+            "instance_id": "legacy-daemon",
+            "daemon_version": "0.1.0",
+            "protocol": { "major": 1, "minor": 0 },
+            "uptime_secs": 1,
+            "active_connections": 1,
+            "handled_requests": 1,
+            "runtime": null
+        }))
+        .unwrap();
+
+        assert_eq!(stats.runtime, DaemonRuntimeStats::default());
     }
 
     #[test]

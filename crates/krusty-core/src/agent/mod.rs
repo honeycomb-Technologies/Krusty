@@ -46,6 +46,7 @@ pub mod executor;
 pub mod failure;
 pub mod history_policy;
 pub mod hooks;
+pub mod learning;
 pub mod loop_events;
 pub mod learning;
 mod observability;

@@ -15,6 +15,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::extract_openai_account_id;
+use super::http::{read_auth_response, OAuthControlCode};
 use super::types::{OAuthConfig, OAuthTokenData};
 
 /// Response from the device authorization endpoint
@@ -72,20 +73,15 @@ impl DeviceCodeFlow {
             .send()
             .await
             .context("Failed to send device code request")?;
+        let response = read_auth_response(response)
+            .await
+            .context("Failed to read device code response")?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(anyhow!("Device code request failed ({}): {}", status, body));
+            return Err(response.safe_error("Device code request failed"));
         }
 
-        let device_response: DeviceCodeResponse = response
-            .json()
-            .await
-            .context("Failed to parse device code response")?;
+        let device_response = response.parse_json("Device code response")?;
 
         Ok(device_response)
     }
@@ -115,14 +111,15 @@ impl DeviceCodeFlow {
                 .send()
                 .await
                 .context("Failed to send token poll request")?;
+            let response = read_auth_response(response)
+                .await
+                .context("Failed to read token poll response")?;
 
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
 
             // Try to parse as token response first
             if status.is_success() {
-                let token_response: TokenResponse =
-                    serde_json::from_str(&body).context("Failed to parse token response")?;
+                let token_response: TokenResponse = response.parse_json("OAuth token response")?;
 
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -149,41 +146,25 @@ impl DeviceCodeFlow {
                 });
             }
 
-            // Parse error response
-            let error_response: ErrorResponse =
-                serde_json::from_str(&body).unwrap_or_else(|_| ErrorResponse {
-                    error: "unknown_error".to_string(),
-                    error_description: Some(body),
-                });
-
-            match error_response.error.as_str() {
-                "authorization_pending" => {
+            match response.oauth_control_code() {
+                Some(OAuthControlCode::AuthorizationPending) => {
                     // User hasn't completed authorization yet, continue polling
                     continue;
                 }
-                "slow_down" => {
+                Some(OAuthControlCode::SlowDown) => {
                     // We're polling too fast, wait an extra interval
                     tokio::time::sleep(poll_interval).await;
                     continue;
                 }
-                "expired_token" => {
+                Some(OAuthControlCode::ExpiredToken) => {
                     return Err(anyhow!(
                         "Device code expired. Please restart the authorization process."
                     ));
                 }
-                "access_denied" => {
+                Some(OAuthControlCode::AccessDenied) => {
                     return Err(anyhow!("Authorization was denied by the user."));
                 }
-                _ => {
-                    let desc = error_response
-                        .error_description
-                        .unwrap_or_else(|| "Unknown error".to_string());
-                    return Err(anyhow!(
-                        "Authorization failed: {} - {}",
-                        error_response.error,
-                        desc
-                    ));
-                }
+                None => return Err(response.safe_error("Authorization failed")),
             }
         }
     }
@@ -220,14 +201,6 @@ struct TokenResponse {
     expires_in: Option<u64>,
     #[serde(rename = "token_type", default)]
     _token_type: Option<String>,
-}
-
-/// Error response from the OAuth server
-#[derive(Debug, Deserialize)]
-struct ErrorResponse {
-    error: String,
-    #[serde(default)]
-    error_description: Option<String>,
 }
 
 #[cfg(test)]

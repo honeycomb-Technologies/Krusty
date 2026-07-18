@@ -9,10 +9,7 @@ use serde::Deserialize;
 
 use krusty_core::storage::{SessionType, WorkspaceMode};
 
-use super::{
-    current_user_id, ensure_owned_session, load_owned_session, open_session_manager,
-    request_workspace_scope,
-};
+use super::{current_user_id, load_owned_session, open_session_manager, request_workspace_scope};
 use crate::ai_bootstrap::persist_current_model_selection;
 use crate::auth::CurrentUser;
 use crate::error::AppError;
@@ -84,6 +81,12 @@ pub(super) async fn create_session(
     user: Option<CurrentUser>,
     Json(req): Json<CreateSessionRequest>,
 ) -> Result<(StatusCode, Json<SessionResponse>), AppError> {
+    let session_type = req.session_type.unwrap_or(SessionType::Code);
+    if session_type == SessionType::Mako {
+        return Err(AppError::Conflict(
+            "Mako sessions must be created through POST /mako/dispatch so the daemon owns the durable controller".into(),
+        ));
+    }
     let session_manager = open_session_manager(&state)?;
     let workspace_scope = request_workspace_scope(&state, user.as_ref());
 
@@ -125,7 +128,7 @@ pub(super) async fn create_session(
         workspace.workspace_mode,
         current_user_id(user.as_ref()),
         target_branch,
-        req.session_type.unwrap_or(SessionType::Code),
+        session_type,
         req.permission_mode.unwrap_or_default(),
     )?;
 
@@ -193,7 +196,12 @@ pub(super) async fn update_session(
     Json(req): Json<UpdateSessionRequest>,
 ) -> Result<Json<SessionResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
-    ensure_owned_session(&session_manager, &id, user.as_ref())?;
+    let session = load_owned_session(&session_manager, &id, user.as_ref())?;
+    if session.session_type == SessionType::Mako {
+        return Err(AppError::Conflict(
+            "Mako session metadata is daemon-owned and cannot be changed through /sessions".into(),
+        ));
+    }
     let workspace_scope = request_workspace_scope(&state, user.as_ref());
 
     if req.title.is_none()
@@ -287,7 +295,7 @@ pub(super) async fn delete_session(
     if session.session_type == SessionType::Mako {
         state
             .mako_runtime
-            .delete_session_for_user(&state, &id, current_user_id(user.as_ref()))
+            .delete_session_for_user(&state, &id, current_user_id(user.as_ref()), None)
             .await
             .map_err(crate::mako_runtime::control_plane_app_error)?;
         return Ok(StatusCode::NO_CONTENT);

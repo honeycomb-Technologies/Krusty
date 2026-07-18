@@ -91,7 +91,7 @@ pub use mako_profiles::{
 };
 pub use mako_runs::{
     ClaimRunRequest, ClaimedMakoRun, DaemonFence, LeaseReconciliation, MakoRun, MakoRunAttempt,
-    MakoRunAttemptOutcome, MakoRunKind, MakoRunStore, RunCompletion,
+    MakoRunAttemptOutcome, MakoRunKind, MakoRunStore, ReconciledRun, RunCompletion,
 };
 pub use mako_runtime_state::{
     MakoRunPriority, MakoRuntimeState, MakoRuntimeStateStatus, MakoRuntimeStateStore,

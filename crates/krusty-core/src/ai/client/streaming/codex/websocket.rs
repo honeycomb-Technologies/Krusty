@@ -13,6 +13,7 @@ use super::super::shared::{ensure_success_stream_response, log_request_metrics, 
 use crate::ai::format::openai::OpenAIFormat;
 use crate::ai::model_profile::SystemPromptSections;
 use crate::ai::parsers::OpenAIParser;
+use crate::ai::retry::safe_provider_event_error;
 use crate::ai::sse::{create_streaming_channels, SseStreamProcessor};
 use crate::ai::streaming::StreamPart;
 use crate::ai::types::ModelMessage;
@@ -55,16 +56,19 @@ async fn process_codex_ws_payload(
         let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
         if matches!(event_type, "error" | "response.failed") || event_type.contains("error") {
             let detail = AiClient::codex_ws_error_message(&json)
-                .unwrap_or_else(|| "unknown websocket error".to_string());
-            let _ = tx_err.send(StreamPart::Error {
-                error: format!("Codex websocket API error: {}", detail),
-            });
+                .unwrap_or_else(|| "Codex websocket API error [metadata=unavailable]".to_string());
+            let _ = tx_err.send(StreamPart::Error { error: detail });
             return CodexPayloadState::Error;
         }
         if matches!(event_type, "response.done" | "response.completed") {
             if let Err(e) = processor.process_sse_data(payload, parser).await {
                 let _ = tx_err.send(StreamPart::Error {
-                    error: format!("Codex websocket parsing error: {}", e),
+                    error: safe_provider_event_error(
+                        "Codex websocket parsing error",
+                        None,
+                        Some("invalid_request_error"),
+                        Some(&e.to_string()),
+                    ),
                 });
                 return CodexPayloadState::Error;
             }
@@ -81,7 +85,12 @@ async fn process_codex_ws_payload(
 
     if let Err(e) = processor.process_sse_data(payload, parser).await {
         let _ = tx_err.send(StreamPart::Error {
-            error: format!("Codex websocket parsing error: {}", e),
+            error: safe_provider_event_error(
+                "Codex websocket parsing error",
+                None,
+                Some("invalid_request_error"),
+                Some(&e.to_string()),
+            ),
         });
         return CodexPayloadState::Error;
     }
@@ -170,9 +179,15 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
                 );
             }
             Err(e) => {
+                let safe_error = safe_provider_event_error(
+                    "ChatGPT Codex websocket connect failed",
+                    None,
+                    Some("server_error"),
+                    Some(&e.to_string()),
+                );
                 warn!(
-                    "ChatGPT Codex websocket connect failed ({}), falling back to HTTP streaming",
-                    e
+                    error = %safe_error,
+                    "ChatGPT Codex websocket connect failed; falling back to HTTP streaming"
                 );
                 let full_body = prepared.full_body;
                 drop(state);
@@ -191,9 +206,15 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
         .await;
 
     if let Err(error) = send_result {
+        let safe_error = safe_provider_event_error(
+            "ChatGPT Codex websocket send failed",
+            None,
+            Some("server_error"),
+            Some(&error.to_string()),
+        );
         warn!(
-            "ChatGPT Codex websocket send failed ({}); reconnecting with full context",
-            error
+            error = %safe_error,
+            "ChatGPT Codex websocket send failed; reconnecting with full context"
         );
         state.reset();
         match connect_codex_websocket(client, &ws_url, options).await {
@@ -203,9 +224,15 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
                     .send(Message::Text(create_payload.to_string()))
                     .await
                 {
+                    let safe_error = safe_provider_event_error(
+                        "ChatGPT Codex websocket retry failed",
+                        None,
+                        Some("server_error"),
+                        Some(&retry_error.to_string()),
+                    );
                     warn!(
-                        "ChatGPT Codex websocket retry failed ({}), falling back to HTTP streaming",
-                        retry_error
+                        error = %safe_error,
+                        "ChatGPT Codex websocket retry failed; falling back to HTTP streaming"
                     );
                     let full_body = prepared.full_body;
                     drop(state);
@@ -216,9 +243,15 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
                 sent_delta = false;
             }
             Err(reconnect_error) => {
+                let safe_error = safe_provider_event_error(
+                    "ChatGPT Codex websocket reconnect failed",
+                    None,
+                    Some("server_error"),
+                    Some(&reconnect_error.to_string()),
+                );
                 warn!(
-                    "ChatGPT Codex websocket reconnect failed ({}), falling back to HTTP streaming",
-                    reconnect_error
+                    error = %safe_error,
+                    "ChatGPT Codex websocket reconnect failed; falling back to HTTP streaming"
                 );
                 let full_body = prepared.full_body;
                 drop(state);
@@ -322,10 +355,13 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
                             .send(Message::Text(full_payload.to_string()))
                             .await;
                         if let Err(error) = retry {
+                            let detail = error.to_string();
                             let _ = tx_err.send(StreamPart::Error {
-                                error: format!(
-                                    "Codex websocket full-context retry failed: {}",
-                                    error
+                                error: safe_provider_event_error(
+                                    "Codex websocket full-context retry failed",
+                                    None,
+                                    Some("server_error"),
+                                    Some(&detail),
                                 ),
                             });
                             break;
@@ -388,13 +424,13 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
                     let (code, reason) = frame
                         .as_ref()
                         .map(|f| (f.code.to_string(), f.reason.to_string()))
-                        .unwrap_or_else(|| {
-                            ("no close code".to_string(), "no close reason".to_string())
-                        });
+                        .unzip();
                     let _ = tx_err.send(StreamPart::Error {
-                        error: format!(
-                            "Codex websocket closed before completion (websocket-only mode): code={}, reason={}",
-                            code, reason
+                        error: safe_provider_event_error(
+                            "Codex websocket closed before completion",
+                            code.as_deref(),
+                            Some("server_error"),
+                            reason.as_deref(),
                         ),
                     });
                     break;
@@ -402,8 +438,14 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
                 Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
                 Ok(Message::Frame(_)) => {}
                 Err(e) => {
+                    let detail = e.to_string();
                     let _ = tx_err.send(StreamPart::Error {
-                        error: format!("Codex websocket stream error: {}", e),
+                        error: safe_provider_event_error(
+                            "Codex websocket stream error",
+                            None,
+                            Some("server_error"),
+                            Some(&detail),
+                        ),
                     });
                     break;
                 }
@@ -424,29 +466,46 @@ async fn connect_codex_websocket(
     ws_url: &Url,
     options: &CallOptions,
 ) -> Result<CodexWebSocket> {
-    let mut request = client.build_websocket_request(
-        ws_url.as_str(),
-        &[
-            ("OpenAI-Beta", "responses_websockets=2026-02-06"),
-            ("originator", "krusty"),
-        ],
-    )?;
+    let mut request = client
+        .build_websocket_request(
+            ws_url.as_str(),
+            &[
+                ("OpenAI-Beta", "responses_websockets=2026-02-06"),
+                ("originator", "krusty"),
+            ],
+        )
+        .map_err(|error| {
+            anyhow::Error::msg(safe_provider_event_error(
+                "ChatGPT Codex websocket request build failed",
+                None,
+                Some("invalid_request_error"),
+                Some(&error.to_string()),
+            ))
+        })?;
     if let Some(session_id) = &options.session_id {
         match session_id.parse::<tokio_tungstenite::tungstenite::http::HeaderValue>() {
             Ok(value) => {
                 request.headers_mut().insert("session_id", value);
             }
-            Err(error) => {
+            Err(_) => {
                 warn!(
-                    "Invalid Codex session_id header '{}': {}",
-                    session_id, error
+                    session_id_bytes = session_id.len(),
+                    error_category = "invalid_header_value",
+                    "Invalid Codex session_id header"
                 );
             }
         }
     }
 
-    info!("Connecting ChatGPT Codex websocket: {}", ws_url);
-    let (connection, _) = connect_async(request).await?;
+    info!("Connecting ChatGPT Codex websocket");
+    let (connection, _) = connect_async(request).await.map_err(|error| {
+        anyhow::Error::msg(safe_provider_event_error(
+            "ChatGPT Codex websocket connection failed",
+            None,
+            Some("server_error"),
+            Some(&error.to_string()),
+        ))
+    })?;
     Ok(connection)
 }
 
@@ -480,11 +539,24 @@ async fn call_streaming_chatgpt_codex_http(
 }
 
 fn resolve_codex_ws_url(api_url: &str) -> Result<Url> {
-    let mut url = Url::parse(api_url)
-        .map_err(|e| anyhow::anyhow!("Invalid Codex API URL '{}': {}", api_url, e))?;
+    let mut url = Url::parse(api_url).map_err(|_| {
+        anyhow::Error::msg(safe_provider_event_error(
+            "Invalid Codex API URL",
+            None,
+            Some("invalid_request_error"),
+            Some(api_url),
+        ))
+    })?;
 
     url.set_scheme(if url.scheme() == "https" { "wss" } else { "ws" })
-        .map_err(|_| anyhow::anyhow!("Failed to set websocket scheme for '{}'", api_url))?;
+        .map_err(|_| {
+            anyhow::Error::msg(safe_provider_event_error(
+                "Failed to set Codex websocket scheme",
+                None,
+                Some("invalid_request_error"),
+                Some(api_url),
+            ))
+        })?;
 
     Ok(url)
 }

@@ -11,6 +11,7 @@ use std::convert::Infallible;
 
 use axum::{
     extract::State,
+    http::HeaderMap,
     response::sse::{Event, Sse},
     routing::post,
     Json, Router,
@@ -57,13 +58,34 @@ pub fn router() -> Router<AppState> {
 async fn chat(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
+    headers: HeaderMap,
     Json(req): Json<ChatRequest>,
 ) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, AppError> {
     validate_content_blocks(&req.content)?;
 
     let user_id = current_user_id(user.as_ref()).map(ToOwned::to_owned);
+    let idempotency_key = super::mako::idempotency_key_from_headers(&headers)?;
     let requested_model = RequestedModel::from_request(req.model.as_deref());
     let requested_session_type = req.session_type.unwrap_or(SessionType::Code);
+    if req.session_id.is_none() && requested_session_type == SessionType::Mako {
+        return Err(AppError::Conflict(
+            "Create Mako sessions through POST /mako/dispatch before sending chat messages".into(),
+        ));
+    }
+    if let Some(session_id) = req.session_id.as_deref() {
+        let manager = SessionManager::new(Database::new(&state.db_path)?);
+        let existing = load_owned_session(&manager, session_id, user.as_ref())?;
+        if existing.session_type == SessionType::Mako
+            && (req.model.is_some()
+                || req.target_branch.is_some()
+                || req.mode.is_some()
+                || req.permission_mode.is_some())
+        {
+            return Err(AppError::Conflict(
+                "Mako model, branch, work mode, and permission mode are daemon-owned; send the message without mutation overrides".into(),
+            ));
+        }
+    }
     let requires_vision = content_blocks_include_images(&req.content);
     let prepared = prepare_chat_route_session(
         &state,
@@ -92,23 +114,6 @@ async fn chat(
                 "A Mako message cannot be empty".to_string(),
             ));
         }
-        if let Some(model_override) = pending_model_update {
-            session_manager.update_session_model(&session_id, model_override.as_deref())?;
-            if let Some(model) = model_override.as_deref() {
-                persist_current_model_selection(
-                    &state.model_registry,
-                    state.db_path.as_ref().as_path(),
-                    user_id.as_deref(),
-                    model,
-                )
-                .await?;
-            }
-        }
-        if let Some(requested_mode) = req.mode {
-            session_manager.update_session_work_mode(&session_id, requested_mode)?;
-        }
-        session_manager.update_session_permission_mode(&session_id, PermissionMode::Autonomous)?;
-
         let receiver = if state.mako_runtime.is_daemon_backed() {
             state
                 .mako_runtime
@@ -117,6 +122,7 @@ async fn chat(
                     message,
                     user_id.as_deref(),
                     is_first_message,
+                    idempotency_key.as_deref(),
                 )
                 .await
                 .map_err(mako_control_error)?
@@ -130,7 +136,13 @@ async fn chat(
                 .map_err(mako_control_error)?;
             state
                 .mako_runtime
-                .send_message_for_user(state.clone(), session_id, message, user_id.as_deref())
+                .send_message_for_user(
+                    state.clone(),
+                    session_id,
+                    message,
+                    user_id.as_deref(),
+                    idempotency_key.as_deref(),
+                )
                 .await
                 .map_err(mako_control_error)?;
             receiver

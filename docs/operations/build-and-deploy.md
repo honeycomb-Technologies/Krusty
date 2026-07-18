@@ -102,19 +102,45 @@ VERSION=v0.7.3 curl -fsSL ... | sh
 
 ## Self-hosted systemd service
 
-The checked-in user service runs the release binary from the standard
-`~/Work/krusty` checkout on port 3000. Build the embedded Expo web bundle and
-release binary before installing or restarting it:
+The checked-in user services run the HTTP control plane and the independent
+Mako autonomous backend from binaries on `PATH`. The HTTP server requires
+Mako's private socket and fails closed if it cannot complete an authenticated
+daemon handshake. Build both release binaries before installing or restarting
+the units:
 
 ```bash
 cd apps/mobile && bun install --frozen-lockfile && bun run web:build && cd ../..
-cargo build --release -p krusty
-install -Dm644 deploy/systemd/krusty-serve.service \
-  ~/.config/systemd/user/krusty-serve.service
+cargo build --release -p krusty -p krusty-mako
+install -d -m755 ~/.config/systemd/user
+install -m644 deploy/systemd/krusty-mako.socket deploy/systemd/krusty-mako.service \
+  deploy/systemd/krusty-serve.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now krusty-serve.service
+systemctl --user enable --now krusty-mako.socket krusty-serve.service
+systemctl --user is-active krusty-mako.socket krusty-mako.service krusty-serve.service
 curl --fail http://127.0.0.1:3000/health
 ```
+
+`krusty-mako.socket` starts the daemon on demand. Do not run a second manual
+daemon against the same database and socket. For deployment verification,
+confirm the three tracked unit states, an authenticated Mako diagnostics/API
+request through the server, and a restart-recovery test; a successful Cargo
+build alone is not proof that autonomous work is live.
+
+Release archives include these user units, the shell installer places them in
+`~/.config/systemd/user`, and the AUR package places them in
+`/usr/lib/systemd/user`. The default hardening grants writes under `~/Work` and
+Krusty's state/cache directories; add a user-service drop-in with an additional
+`ReadWritePaths=` entry when autonomous sessions use another project root.
+Homebrew exposes `krusty-mako` through `brew services`; the HTTP server remains
+an explicitly configured self-host service.
+
+Mako resolves `.krusty/skills` independently for each run's frozen project
+root. Autonomous daemon runs intentionally do not load project `.mcp.json`
+servers yet, and MCP connections made through the HTTP `/mcp` API do not cross
+the process boundary into the daemon. This is fail-closed: project MCP will be
+enabled only with durable project/config trust and explicit MCP process
+lifecycle ownership, rather than accidentally exposing the daemon launch
+directory's tools to every project.
 
 ### Homebrew tap
 
@@ -128,7 +154,29 @@ The formula (`.github/homebrew/krusty.rb`) selects the correct binary archive ba
 
 ### AUR package
 
-Arch Linux users can install from the AUR. The `PKGBUILD` (`aur/PKGBUILD`) downloads the source tarball for a given release tag, builds from source using Cargo with the stable toolchain, runs the test suite during the `check()` phase, and installs the binary to `/usr/bin/krusty` along with the license file. It supports both `x86_64` and `aarch64` architectures. Runtime dependencies are `gcc-libs` and `openssl`; the only build dependency is `cargo`.
+Arch Linux users can install from the AUR. The `PKGBUILD` (`aur/PKGBUILD`)
+downloads the source tarball for a given release tag, verifies its pinned SHA-256
+checksum, builds from source using Cargo with the stable toolchain, runs the test
+suite during the `check()` phase, and installs the Krusty and Mako binaries,
+their systemd user units, and the license. It supports both `x86_64` and
+`aarch64` architectures. Runtime dependencies are `gcc-libs` and `openssl`; the
+only build dependency is `cargo`.
+
+GitHub does not publish the versioned source archive until its tag exists, so
+AUR metadata is updated after the protected release tag is published. Run:
+
+```bash
+./aur/update-release.sh 0.8.0
+cd aur
+makepkg --verifysource -f
+makepkg --printsrcinfo | diff -u .SRCINFO -
+```
+
+The updater downloads over HTTPS, validates the archive's top-level directory,
+computes SHA-256 locally, and updates both `PKGBUILD` and `.SRCINFO`. Review and
+publish those two files to the AUR repository. Never replace the checksum with
+`SKIP`; if a release tag or its archive changes, checksum verification must fail
+until a maintainer explicitly reviews and updates the package metadata.
 
 ## Cross-compilation
 

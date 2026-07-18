@@ -1,10 +1,12 @@
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
+use rusqlite::{Transaction, TransactionBehavior};
 use tracing::{debug, info};
 
 use super::{Database, SCHEMA_VERSION};
 
 impl Database {
     /// Get the current schema version from database
+    #[cfg(test)]
     pub(crate) fn get_schema_version(&self) -> i32 {
         // Create version table if it doesn't exist
         if let Err(e) = self.conn.execute(
@@ -53,20 +55,119 @@ impl Database {
         .is_ok()
     }
 
+    fn checkpoint_wal_without_busy_readers(&self, phase: &str) -> Result<()> {
+        let (busy, log_frames, checkpointed_frames) = self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .with_context(|| format!("{phase} Mako privacy WAL checkpoint"))?;
+        ensure!(
+            busy == 0,
+            "{phase} Mako privacy WAL checkpoint was busy (log_frames={log_frames}, checkpointed_frames={checkpointed_frames})"
+        );
+        Ok(())
+    }
+
+    /// Return a privacy-migration connection to normal WAL locking and force
+    /// one database access so SQLite actually releases the exclusive lock.
+    /// Merely changing `locking_mode` updates the requested mode; the lock is
+    /// retained until the connection performs a subsequent database access.
+    fn restore_normal_locking_after_privacy_migration(&self) -> Result<()> {
+        self.conn
+            .pragma_update(None, "locking_mode", "NORMAL")
+            .context("restoring normal SQLite locking after Mako privacy migration")?;
+        self.conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .context("releasing exclusive SQLite lock after Mako privacy migration")?;
+        Ok(())
+    }
+
     /// Run database migrations incrementally
     pub(crate) fn run_migrations(&self) -> Result<()> {
-        let current_version = self.get_schema_version();
+        // The steady-state path is read-only. Runtime stores open short-lived
+        // connections frequently, so do not acquire the global SQLite writer
+        // lock once this process has observed the target schema.
+        let observed_version = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .ok();
+        if observed_version.is_some_and(|version| version >= SCHEMA_VERSION) {
+            return Ok(());
+        }
+
+        // Migration 43 rewrites secret-bearing legacy journal pages. Schema
+        // 44 is committed only after the post-transaction checkpoint/VACUUM
+        // completes, so a crash at any point before physical erasure resumes
+        // cleanup on the next open instead of treating redaction as finished.
+        let privacy_cleanup_requested = match observed_version {
+            Some(0) => false,
+            Some(version) => version < 44,
+            // A missing table and a transient preflight read failure are
+            // indistinguishable here. Enter the conservative mode; the
+            // authoritative transaction below still skips VACUUM for a truly
+            // fresh version-0 database.
+            None => true,
+        };
+        if privacy_cleanup_requested {
+            self.conn
+                .pragma_update(None, "secure_delete", "ON")
+                .context("enabling secure deletion for Mako privacy migration")?;
+            self.conn
+                .pragma_update(None, "locking_mode", "EXCLUSIVE")
+                .context("reserving exclusive access for Mako privacy migration")?;
+        }
+
+        // The HTTP process and the independently supervised Mako daemon can
+        // open the same database at the same time. Acquire the SQLite write
+        // reservation before reading the version so a waiter observes every
+        // migration committed by the process that won the startup race.
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+            .context("acquiring database migration lock")?;
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )
+        .context("ensuring database schema version table")?;
+        let current_version: i32 = tx
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .context("reading database schema version under migration lock")?;
         debug!(
             "Database schema version: {} (target: {})",
             current_version, SCHEMA_VERSION
         );
 
         if current_version >= SCHEMA_VERSION {
+            tx.commit()?;
+            if privacy_cleanup_requested {
+                self.restore_normal_locking_after_privacy_migration()?;
+            }
             return Ok(());
         }
-
-        // Wrap migrations in a transaction for atomicity
-        let tx = self.conn.unchecked_transaction()?;
+        // The optimistic version read above may have failed while another
+        // process held SQLite's migration lock. The value read under this
+        // transaction is authoritative for deciding whether physical cleanup
+        // is required; never publish 44 merely because preflight assumed 0.
+        let privacy_cleanup_required = current_version > 0 && current_version < 44;
 
         // Migration 1: Initial schema
         if current_version < 1 {
@@ -1535,8 +1636,15 @@ impl Database {
         // event from this journal.
         if current_version < 40 {
             info!("Running migration 40: Atomic Mako run transition journal");
-            tx.execute_batch(
-                r#"
+            // Some legacy/specialized databases advance the shared schema
+            // version without materializing the optional Mako tables. Keep
+            // their upgrade valid; any database with the Mako contract gets
+            // the trigger atomically with the version bump.
+            if Self::table_exists(&tx, "mako_runs")
+                && Self::table_exists(&tx, "mako_controller_events")
+            {
+                tx.execute_batch(
+                    r#"
                 CREATE TRIGGER mako_runs_transition_event
                 AFTER UPDATE OF status ON mako_runs
                 WHEN OLD.status <> NEW.status
@@ -1580,14 +1688,514 @@ impl Database {
                     WHERE controller_id = NEW.controller_id;
                 END;
                 "#,
-            )
-            .context("Migration 40: atomic Mako run transition journal")?;
+                )
+                .context("Migration 40: atomic Mako run transition journal")?;
+            }
             self.set_schema_version_tx(&tx, 40)?;
+        }
+
+        // Migration 41: Durable controller-to-runner controls and exact-once
+        // scheduled objective delivery. Tool approval decisions must survive
+        // daemon restarts and host registration races; the scheduler delivers
+        // this outbox only while holding its current process-generation fence.
+        if current_version < 41 {
+            info!("Running migration 41: Durable Mako control outbox");
+            if Self::table_exists(&tx, "mako_controllers")
+                && Self::table_exists(&tx, "sessions")
+                && Self::table_exists(&tx, "mako_runs")
+            {
+                tx.execute_batch(
+                    r#"
+                ALTER TABLE mako_runs
+                    ADD COLUMN objective_message_id INTEGER
+                    REFERENCES messages(id) ON DELETE SET NULL;
+
+                CREATE TABLE mako_control_outbox (
+                    id TEXT PRIMARY KEY,
+                    controller_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    control_kind TEXT NOT NULL
+                        CHECK (control_kind IN ('tool_approval')),
+                    dedupe_key TEXT NOT NULL,
+                    payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+                    status TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'delivered', 'discarded')),
+                    attempt_count INTEGER NOT NULL DEFAULT 0
+                        CHECK (attempt_count >= 0),
+                    available_at TEXT NOT NULL,
+                    delivered_at TEXT,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (controller_id, control_kind, dedupe_key),
+                    FOREIGN KEY (controller_id) REFERENCES mako_controllers(id) ON DELETE CASCADE,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                    FOREIGN KEY (run_id) REFERENCES mako_runs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX idx_mako_control_outbox_pending
+                    ON mako_control_outbox(status, available_at, created_at);
+                "#,
+                )
+                .context("Migration 41: durable Mako control outbox")?;
+            }
+            self.set_schema_version_tx(&tx, 41)?;
+        }
+
+        // Migration 42: Repair the atomic Mako transition journal for
+        // controllers whose event stream is still empty. The original
+        // trigger selected its next sequence from existing event rows, which
+        // produced no INSERT candidate at all when there was no prior row.
+        // Use a scalar subquery instead so the first status transition is
+        // journaled in the same transaction as the run update.
+        if current_version < 42 {
+            info!("Running migration 42: Complete atomic Mako transition journal");
+            if Self::table_exists(&tx, "mako_runs")
+                && Self::table_exists(&tx, "mako_controller_events")
+            {
+                tx.execute_batch(
+                    r#"
+                DROP TRIGGER IF EXISTS mako_runs_transition_event;
+                CREATE TRIGGER mako_runs_transition_event
+                AFTER UPDATE OF status ON mako_runs
+                WHEN OLD.status <> NEW.status
+                BEGIN
+                    INSERT OR IGNORE INTO mako_controller_events (
+                        controller_id, sequence, event_type, run_id, schedule_id,
+                        dedupe_key, payload_json, created_at
+                    ) VALUES (
+                        NEW.controller_id,
+                        (SELECT COALESCE(MAX(sequence), 0) + 1
+                         FROM mako_controller_events
+                         WHERE controller_id = NEW.controller_id),
+                        CASE
+                            WHEN NEW.status = 'queued' AND OLD.status = 'leased'
+                                THEN 'run_lease_requeued'
+                            WHEN NEW.status = 'queued' THEN 'run_requeued'
+                            WHEN NEW.status = 'leased' THEN 'run_leased'
+                            WHEN NEW.status = 'running' THEN 'run_started'
+                            WHEN NEW.status = 'sleeping' THEN 'run_sleeping'
+                            WHEN NEW.status = 'retry_wait' THEN 'run_retry_scheduled'
+                            WHEN NEW.status = 'awaiting_input' THEN 'run_awaiting_input'
+                            WHEN NEW.status = 'recovery_required' THEN 'recovery_required'
+                            WHEN NEW.status = 'succeeded' THEN 'run_completed'
+                            WHEN NEW.status = 'failed' THEN 'run_failed'
+                            WHEN NEW.status = 'cancelled' THEN 'run_cancelled'
+                            WHEN NEW.status = 'dead_letter' THEN 'run_dead_lettered'
+                            ELSE 'run_state_changed'
+                        END,
+                        NEW.id,
+                        NEW.schedule_id,
+                        'transition:' || NEW.id || ':' || NEW.attempt_count || ':' || NEW.status,
+                        json_object(
+                            'run_id', NEW.id,
+                            'status', NEW.status,
+                            'previous_status', OLD.status,
+                            'attempt', NEW.attempt_count,
+                            'stop_reason', NEW.last_stop_reason,
+                            'error', NEW.last_error
+                        ),
+                        NEW.updated_at
+                    );
+                END;
+                "#,
+                )
+                .context("Migration 42: complete atomic Mako transition journal")?;
+            }
+            self.set_schema_version_tx(&tx, 42)?;
+        }
+
+        // Migration 43: Replace legacy Mako execution payloads with a
+        // minimal allow-listed replay form. Earlier builds journaled raw
+        // reasoning, provider signatures, tool arguments/results, web
+        // bodies, and error copies. Those values are not a durable contract.
+        if current_version < 43 {
+            info!("Running migration 43: Redact legacy Mako execution journal");
+            if Self::table_exists(&tx, "mako_controller_events")
+                && Self::column_exists(&tx, "mako_controller_events", "payload_json")
+            {
+                tx.execute_batch(
+                    r#"
+                    UPDATE mako_controller_events
+                       SET payload_json = CASE
+                         WHEN NOT json_valid(payload_json) THEN
+                           json_object(
+                             'type', 'redacted_invalid_legacy_event',
+                             'redacted', json('true')
+                           )
+                         WHEN event_type = 'agentic_event' THEN
+                           json_object(
+                             'type', CASE
+                               WHEN json_type(payload_json, '$.type') = 'text'
+                                 THEN json_extract(payload_json, '$.type')
+                               ELSE 'redacted_legacy_event'
+                             END,
+                             'id', CASE
+                               WHEN json_type(payload_json, '$.id') = 'text'
+                                 THEN json_extract(payload_json, '$.id')
+                             END,
+                             'name', CASE
+                               WHEN json_type(payload_json, '$.name') = 'text'
+                                 THEN json_extract(payload_json, '$.name')
+                             END,
+                             'tool_call_id', CASE
+                               WHEN json_type(payload_json, '$.tool_call_id') = 'text'
+                                 THEN json_extract(payload_json, '$.tool_call_id')
+                             END,
+                             'tool_name', CASE
+                               WHEN json_type(payload_json, '$.tool_name') = 'text'
+                                 THEN json_extract(payload_json, '$.tool_name')
+                             END,
+                             'session_id', CASE
+                               WHEN json_type(payload_json, '$.session_id') = 'text'
+                                 THEN json_extract(payload_json, '$.session_id')
+                             END,
+                             'status', CASE
+                               WHEN json_type(payload_json, '$.status') = 'text'
+                                 THEN json_extract(payload_json, '$.status')
+                             END,
+                             'is_error', CASE
+                               WHEN json_type(payload_json, '$.is_error') IN (
+                                 'true', 'false', 'integer'
+                               ) THEN json_extract(payload_json, '$.is_error')
+                             END,
+                             'arguments', CASE
+                               WHEN json_type(payload_json, '$.arguments') IS NOT NULL THEN
+                                 json_object(
+                                   'type', json_type(payload_json, '$.arguments'),
+                                   'redacted', json('true')
+                                 )
+                             END,
+                             'arguments_redacted', CASE
+                               WHEN json_type(payload_json, '$.arguments') IS NOT NULL
+                                 THEN json('true')
+                               ELSE json('false')
+                             END,
+                             'redacted', json('true')
+                           )
+                         ELSE
+                           json_object(
+                             'run_id', COALESCE(
+                               run_id,
+                               CASE WHEN json_type(payload_json, '$.run_id') = 'text'
+                                 THEN json_extract(payload_json, '$.run_id') END
+                             ),
+                             'schedule_id', COALESCE(
+                               schedule_id,
+                               CASE WHEN json_type(payload_json, '$.schedule_id') = 'text'
+                                 THEN json_extract(payload_json, '$.schedule_id') END
+                             ),
+                             'tool_call_id', CASE
+                               WHEN json_type(payload_json, '$.tool_call_id') = 'text'
+                                 THEN json_extract(payload_json, '$.tool_call_id')
+                             END,
+                             'pending_id', CASE
+                               WHEN json_type(payload_json, '$.pending_id') = 'text'
+                                 THEN json_extract(payload_json, '$.pending_id')
+                             END,
+                             'kind', CASE
+                               WHEN json_type(payload_json, '$.kind') = 'text'
+                                 THEN json_extract(payload_json, '$.kind')
+                             END,
+                             'status', CASE
+                               WHEN json_type(payload_json, '$.status') = 'text'
+                                 THEN json_extract(payload_json, '$.status')
+                             END,
+                             'previous_status', CASE
+                               WHEN json_type(payload_json, '$.previous_status') = 'text'
+                                 THEN json_extract(payload_json, '$.previous_status')
+                             END,
+                             'previous', CASE
+                               WHEN json_type(payload_json, '$.previous') = 'text'
+                                 THEN json_extract(payload_json, '$.previous')
+                             END,
+                             'current', CASE
+                               WHEN json_type(payload_json, '$.current') = 'text'
+                                 THEN json_extract(payload_json, '$.current')
+                             END,
+                             'attempt', CASE
+                               WHEN json_type(payload_json, '$.attempt') = 'integer'
+                                 THEN json_extract(payload_json, '$.attempt')
+                             END,
+                             'attempt_no', CASE
+                               WHEN json_type(payload_json, '$.attempt_no') = 'integer'
+                                 THEN json_extract(payload_json, '$.attempt_no')
+                             END,
+                             'revision', CASE
+                               WHEN json_type(payload_json, '$.revision') = 'integer'
+                                 THEN json_extract(payload_json, '$.revision')
+                             END,
+                             'approved', CASE
+                               WHEN json_type(payload_json, '$.approved') IN (
+                                 'true', 'false', 'integer'
+                               ) THEN json_extract(payload_json, '$.approved')
+                             END,
+                             'redacted', json('true')
+                           )
+                       END;
+                    "#,
+                )
+                .context("Migration 43: redact legacy Mako controller events")?;
+            }
+
+            if Self::table_exists(&tx, "mako_runs") {
+                if Self::column_exists(&tx, "mako_runs", "last_error") {
+                    tx.execute(
+                        "UPDATE mako_runs
+                            SET last_error = '[redacted legacy execution error]'
+                          WHERE last_error IS NOT NULL",
+                        [],
+                    )?;
+                }
+                if Self::column_exists(&tx, "mako_runs", "last_stop_reason") {
+                    tx.execute(
+                        "UPDATE mako_runs
+                            SET last_stop_reason = CASE
+                              WHEN last_stop_reason IN (
+                                'completed', 'failed', 'transient_failure',
+                                'invalid_retry_policy', 'retry_schedule_unavailable',
+                                'awaiting_input', 'recovery_required',
+                                'execution cancelled'
+                              ) THEN last_stop_reason
+                              ELSE 'redacted_legacy'
+                            END
+                          WHERE last_stop_reason IS NOT NULL",
+                        [],
+                    )?;
+                }
+                if Self::column_exists(&tx, "mako_runs", "outcome_json") {
+                    tx.execute_batch(
+                        r#"
+                        UPDATE mako_runs
+                           SET outcome_json = json_object(
+                             'kind', CASE
+                               WHEN json_valid(outcome_json)
+                                AND json_extract(outcome_json, '$.kind') IN (
+                                  'succeeded', 'failed', 'retry_scheduled',
+                                  'sleeping', 'awaiting_input',
+                                  'recovery_required', 'cancelled'
+                                ) THEN json_extract(outcome_json, '$.kind')
+                               ELSE 'redacted_legacy'
+                             END,
+                             'redacted', json('true')
+                           )
+                         WHERE outcome_json IS NOT NULL;
+                        "#,
+                    )?;
+                }
+            }
+            if Self::table_exists(&tx, "mako_run_attempts") {
+                if Self::column_exists(&tx, "mako_run_attempts", "error") {
+                    tx.execute(
+                        "UPDATE mako_run_attempts
+                            SET error = '[redacted legacy execution error]'
+                          WHERE error IS NOT NULL",
+                        [],
+                    )?;
+                }
+                if Self::column_exists(&tx, "mako_run_attempts", "stop_reason") {
+                    tx.execute(
+                        "UPDATE mako_run_attempts
+                            SET stop_reason = CASE
+                              WHEN stop_reason IN (
+                                'completed', 'failed', 'transient_failure',
+                                'invalid_retry_policy', 'retry_schedule_unavailable',
+                                'awaiting_input', 'recovery_required',
+                                'execution cancelled'
+                              ) THEN stop_reason
+                              ELSE 'redacted_legacy'
+                            END
+                          WHERE stop_reason IS NOT NULL",
+                        [],
+                    )?;
+                }
+            }
+            if Self::table_exists(&tx, "mako_runtime_state")
+                && Self::column_exists(&tx, "mako_runtime_state", "last_error")
+            {
+                tx.execute(
+                    "UPDATE mako_runtime_state
+                        SET last_error = '[redacted legacy execution error]'
+                      WHERE last_error IS NOT NULL",
+                    [],
+                )?;
+            }
+            if Self::table_exists(&tx, "mako_control_outbox") {
+                if Self::column_exists(&tx, "mako_control_outbox", "last_error") {
+                    tx.execute(
+                        "UPDATE mako_control_outbox
+                            SET last_error = '[redacted legacy delivery error]'
+                          WHERE last_error IS NOT NULL",
+                        [],
+                    )?;
+                }
+                if Self::column_exists(&tx, "mako_control_outbox", "payload_json") {
+                    tx.execute_batch(
+                        r#"
+                        UPDATE mako_control_outbox
+                           SET payload_json = CASE
+                             WHEN json_valid(payload_json) THEN json_object(
+                               'tool_call_id', CASE
+                                 WHEN json_type(payload_json, '$.tool_call_id') = 'text'
+                                   THEN json_extract(payload_json, '$.tool_call_id')
+                               END,
+                               'approved', CASE
+                                 WHEN json_type(payload_json, '$.approved') IN (
+                                   'true', 'false', 'integer'
+                                 ) THEN json_extract(payload_json, '$.approved')
+                               END,
+                               'redacted', json('true')
+                             )
+                             ELSE json_object('redacted', json('true'))
+                           END;
+                        "#,
+                    )?;
+                }
+            }
+
+            // Keep every future transition event on the same privacy contract
+            // as the explicit append boundary. Raw stop reasons and errors
+            // remain on the run projection only in their already-redacted
+            // scheduler form and never enter replay payloads.
+            if Self::table_exists(&tx, "mako_runs")
+                && Self::table_exists(&tx, "mako_controller_events")
+            {
+                tx.execute_batch(
+                    r#"
+                    DROP TRIGGER IF EXISTS mako_runs_transition_event;
+                    CREATE TRIGGER mako_runs_transition_event
+                    AFTER UPDATE OF status ON mako_runs
+                    WHEN OLD.status <> NEW.status
+                    BEGIN
+                        INSERT OR IGNORE INTO mako_controller_events (
+                            controller_id, sequence, event_type, run_id, schedule_id,
+                            dedupe_key, payload_json, created_at
+                        ) VALUES (
+                            NEW.controller_id,
+                            (SELECT COALESCE(MAX(sequence), 0) + 1
+                             FROM mako_controller_events
+                             WHERE controller_id = NEW.controller_id),
+                            CASE
+                                WHEN NEW.status = 'queued' AND OLD.status = 'leased'
+                                    THEN 'run_lease_requeued'
+                                WHEN NEW.status = 'queued' THEN 'run_requeued'
+                                WHEN NEW.status = 'leased' THEN 'run_leased'
+                                WHEN NEW.status = 'running' THEN 'run_started'
+                                WHEN NEW.status = 'sleeping' THEN 'run_sleeping'
+                                WHEN NEW.status = 'retry_wait' THEN 'run_retry_scheduled'
+                                WHEN NEW.status = 'awaiting_input' THEN 'run_awaiting_input'
+                                WHEN NEW.status = 'recovery_required' THEN 'recovery_required'
+                                WHEN NEW.status = 'succeeded' THEN 'run_completed'
+                                WHEN NEW.status = 'failed' THEN 'run_failed'
+                                WHEN NEW.status = 'cancelled' THEN 'run_cancelled'
+                                WHEN NEW.status = 'dead_letter' THEN 'run_dead_lettered'
+                                ELSE 'run_state_changed'
+                            END,
+                            NEW.id,
+                            NEW.schedule_id,
+                            'transition:' || NEW.id || ':' || NEW.attempt_count || ':' || NEW.status,
+                            json_object(
+                                'run_id', NEW.id,
+                                'status', NEW.status,
+                                'previous_status', OLD.status,
+                                'attempt', NEW.attempt_count,
+                                'has_stop_reason', NEW.last_stop_reason IS NOT NULL,
+                                'has_error', NEW.last_error IS NOT NULL,
+                                'redacted', json('true')
+                            ),
+                            NEW.updated_at
+                        );
+                    END;
+                    "#,
+                )
+                .context("Migration 43: install privacy-safe Mako transition journal")?;
+            }
+            self.set_schema_version_tx(&tx, 43)?;
         }
 
         tx.commit()?;
 
+        if privacy_cleanup_required {
+            // UPDATE redaction alone does not remove prior values from WAL or
+            // free pages. Checkpoint, rebuild, and checkpoint again before
+            // publishing schema 44 as the durable cleanup-complete marker.
+            self.checkpoint_wal_without_busy_readers("pre-VACUUM")?;
+            self.conn
+                .execute_batch("VACUUM;")
+                .context("physically erasing legacy Mako journal payloads")?;
+            self.checkpoint_wal_without_busy_readers("post-VACUUM")?;
+        }
+
+        // Migration 44: crash-safe physical privacy-cleanup checkpoint. A
+        // process that dies after migration 43 commits but before this insert
+        // leaves the database at 43; the next opener repeats the idempotent
+        // checkpoint/VACUUM and only then advances to 44.
+        let finalize_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+            .context("acquiring Mako privacy-cleanup checkpoint lock")?;
+        finalize_tx
+            .execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (44)",
+                [],
+            )
+            .context("recording completed Mako privacy cleanup")?;
+        finalize_tx.commit()?;
+
+        if privacy_cleanup_requested {
+            self.restore_normal_locking_after_privacy_migration()?;
+        }
+
         info!("Migrations complete");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod privacy_checkpoint_tests {
+    use super::*;
+    use rusqlite::Connection;
+    use tempfile::TempDir;
+
+    #[test]
+    fn privacy_checkpoint_rejects_a_pinned_wal_reader() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path().join("privacy-checkpoint-busy.db");
+        let writer = Connection::open(&db_path).expect("open writer");
+        writer
+            .pragma_update(None, "journal_mode", "WAL")
+            .expect("enable WAL");
+        writer
+            .execute_batch(
+                "CREATE TABLE probe (value INTEGER NOT NULL); INSERT INTO probe VALUES (1);",
+            )
+            .expect("seed probe");
+        let database = Database { conn: writer };
+        database
+            .checkpoint_wal_without_busy_readers("fixture")
+            .expect("clear fixture WAL");
+
+        let reader = Connection::open(&db_path).expect("open reader");
+        reader.execute_batch("BEGIN").expect("begin read snapshot");
+        let count: i64 = reader
+            .query_row("SELECT COUNT(*) FROM probe", [], |row| row.get(0))
+            .expect("pin read snapshot");
+        assert_eq!(count, 1);
+
+        database
+            .conn
+            .execute("INSERT INTO probe VALUES (2)", [])
+            .expect("append newer WAL frame");
+        let error = database
+            .checkpoint_wal_without_busy_readers("pinned-reader")
+            .expect_err("privacy checkpoint must fail while a reader pins the WAL");
+        assert!(
+            error.to_string().contains("was busy"),
+            "unexpected checkpoint error: {error:#}"
+        );
+
+        reader.execute_batch("ROLLBACK").expect("release snapshot");
+        drop(reader);
+        database
+            .checkpoint_wal_without_busy_readers("released-reader")
+            .expect("checkpoint should succeed after reader release");
     }
 }

@@ -33,7 +33,10 @@ fn test_parse_finish_reason_tool_use() {
 #[test]
 fn test_parse_finish_reason_unknown() {
     match parse_finish_reason("something_else") {
-        FinishReason::Other(s) => assert_eq!(s, "something_else"),
+        FinishReason::Other(s) => {
+            assert!(s.starts_with("unknown:sha256:"));
+            assert!(!s.contains("something_else"));
+        }
         _ => panic!("Expected FinishReason::Other"),
     }
 }

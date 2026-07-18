@@ -14,6 +14,7 @@ pub mod auth;
 pub mod constants;
 pub mod extensions;
 pub mod git;
+pub mod mako;
 pub mod mcp;
 pub mod mako;
 pub mod paths;

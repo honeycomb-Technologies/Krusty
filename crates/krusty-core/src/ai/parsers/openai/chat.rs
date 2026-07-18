@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 use super::OpenAIParser;
+use crate::ai::retry::safe_provider_code;
 use crate::ai::sse::SseEvent;
 use crate::ai::types::FinishReason;
 use crate::ai::usage::parse_openai_chat_usage;
@@ -28,7 +29,7 @@ impl OpenAIParser {
                         "stop" | "end_turn" => FinishReason::Stop,
                         "length" | "max_tokens" => FinishReason::Length,
                         "content_filter" => FinishReason::ContentFilter,
-                        other => FinishReason::Other(other.to_string()),
+                        other => FinishReason::Other(safe_provider_code(other)),
                     };
                     return Ok(SseEvent::Finish { reason, usage });
                 }

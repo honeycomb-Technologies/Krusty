@@ -8,13 +8,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use futures::StreamExt;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-use reqwest::Client;
+use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-use krusty_core::storage::{ApnsDevice, ApnsDeviceStore, Database};
+use krusty_core::storage::{hash_request_bytes, ApnsDevice, ApnsDeviceStore, Database};
 
 const APNS_PRODUCTION_URL: &str = "https://api.push.apple.com";
 const APNS_SANDBOX_URL: &str = "https://api.sandbox.push.apple.com";
@@ -26,6 +27,8 @@ const JWT_REFRESH_INTERVAL: Duration = Duration::from_secs(50 * 60);
 const MAX_APNS_ATTEMPTS: usize = 3;
 const APNS_RETRY_BASE_DELAY_MS: u64 = 300;
 const MAX_STALE_FAILURES: i64 = 10;
+const MAX_APNS_ERROR_BODY_BYTES: usize = 4 * 1024;
+const APNS_ERROR_BODY_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ApnsPayload {
@@ -241,11 +244,14 @@ impl ApnsService {
 
         let status = resp.status();
         if status.is_success() {
-            debug!(device_token, "APNs delivery succeeded");
+            debug!(
+                device_token_hash = %device_token_fingerprint(device_token),
+                "APNs delivery succeeded"
+            );
             Ok(())
         } else {
-            let body = resp.text().await.unwrap_or_default();
-            Err(anyhow::anyhow!("APNs returned {status}: {body}"))
+            let summary = summarize_apns_failure(status, resp).await;
+            Err(anyhow::anyhow!("{summary}"))
         }
     }
 
@@ -324,7 +330,7 @@ impl ApnsService {
                             tokio::time::sleep(Duration::from_millis(delay)).await;
                         } else {
                             warn!(
-                                device_token = device.device_token,
+                                device_token_hash = %device_token_fingerprint(&device.device_token),
                                 error = %e,
                                 "APNs delivery failed after {MAX_APNS_ATTEMPTS} attempts"
                             );
@@ -346,6 +352,114 @@ impl ApnsService {
 
         stats
     }
+}
+
+async fn summarize_apns_failure(status: StatusCode, response: Response) -> String {
+    match tokio::time::timeout(APNS_ERROR_BODY_TIMEOUT, read_capped_apns_body(response)).await {
+        Ok(Ok(body)) => summarize_apns_failure_body(status, &body.bytes, body.truncated),
+        Ok(Err(())) => format!(
+            "APNs rejected request (status={}, reason=unknown, body_state=read_failed)",
+            status.as_u16()
+        ),
+        Err(_) => format!(
+            "APNs rejected request (status={}, reason=unknown, body_state=timeout)",
+            status.as_u16()
+        ),
+    }
+}
+
+struct CappedApnsBody {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+async fn read_capped_apns_body(response: Response) -> std::result::Result<CappedApnsBody, ()> {
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::with_capacity(MAX_APNS_ERROR_BODY_BYTES.min(512));
+    let mut truncated = false;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| ())?;
+        let remaining = MAX_APNS_ERROR_BODY_BYTES.saturating_sub(bytes.len());
+        if chunk.len() > remaining {
+            bytes.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() == MAX_APNS_ERROR_BODY_BYTES {
+            // Read at most one subsequent frame to distinguish an exact-size
+            // response from a truncated one. The outer timeout bounds a peer
+            // that stalls instead of ending the body.
+            if let Some(next) = stream.next().await {
+                let next = next.map_err(|_| ())?;
+                truncated = !next.is_empty();
+            }
+            break;
+        }
+    }
+    Ok(CappedApnsBody { bytes, truncated })
+}
+
+fn summarize_apns_failure_body(status: StatusCode, body: &[u8], truncated: bool) -> String {
+    let known_reason = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|payload| {
+            payload
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .and_then(allowlisted_apns_reason)
+        });
+    if let Some(reason) = known_reason {
+        return format!(
+            "APNs rejected request (status={}, reason={reason})",
+            status.as_u16()
+        );
+    }
+
+    format!(
+        "APNs rejected request (status={}, reason=unknown, body_sha256={}, body_truncated={truncated})",
+        status.as_u16(),
+        hash_request_bytes(body),
+    )
+}
+
+fn allowlisted_apns_reason(reason: &str) -> Option<&'static str> {
+    Some(match reason {
+        "BadCollapseId" => "BadCollapseId",
+        "BadDeviceToken" => "BadDeviceToken",
+        "BadExpirationDate" => "BadExpirationDate",
+        "BadMessageId" => "BadMessageId",
+        "BadPriority" => "BadPriority",
+        "BadTopic" => "BadTopic",
+        "DeviceTokenNotForTopic" => "DeviceTokenNotForTopic",
+        "DuplicateHeaders" => "DuplicateHeaders",
+        "IdleTimeout" => "IdleTimeout",
+        "InvalidPushType" => "InvalidPushType",
+        "MissingDeviceToken" => "MissingDeviceToken",
+        "MissingTopic" => "MissingTopic",
+        "PayloadEmpty" => "PayloadEmpty",
+        "TopicDisallowed" => "TopicDisallowed",
+        "BadCertificate" => "BadCertificate",
+        "BadCertificateEnvironment" => "BadCertificateEnvironment",
+        "ExpiredProviderToken" => "ExpiredProviderToken",
+        "Forbidden" => "Forbidden",
+        "InvalidProviderToken" => "InvalidProviderToken",
+        "MissingProviderToken" => "MissingProviderToken",
+        "BadPath" => "BadPath",
+        "MethodNotAllowed" => "MethodNotAllowed",
+        "Unregistered" => "Unregistered",
+        "PayloadTooLarge" => "PayloadTooLarge",
+        "TooManyProviderTokenUpdates" => "TooManyProviderTokenUpdates",
+        "TooManyRequests" => "TooManyRequests",
+        "InternalServerError" => "InternalServerError",
+        "ServiceUnavailable" => "ServiceUnavailable",
+        "Shutdown" => "Shutdown",
+        _ => return None,
+    })
+}
+
+fn device_token_fingerprint(device_token: &str) -> String {
+    hash_request_bytes(device_token.as_bytes())[..12].to_string()
 }
 
 fn apns_topic(bundle_id: &str, event_type: ApnsEventType) -> String {
@@ -398,7 +512,13 @@ fn build_apns_json(
 
 #[cfg(test)]
 mod tests {
-    use super::{apns_push_type, apns_topic, ApnsEventType, DEFAULT_APNS_BUNDLE_ID};
+    use super::{
+        apns_push_type, apns_topic, summarize_apns_failure_body, ApnsEventType,
+        DEFAULT_APNS_BUNDLE_ID,
+    };
+    use krusty_core::storage::{hash_request_bytes, ApnsDeviceStore, Database};
+    use reqwest::StatusCode;
+    use tempfile::TempDir;
 
     #[test]
     fn live_activity_events_use_liveactivity_contract() {
@@ -421,5 +541,48 @@ mod tests {
             DEFAULT_APNS_BUNDLE_ID
         );
         assert_eq!(apns_push_type(ApnsEventType::AwaitingInput), "alert");
+    }
+
+    #[test]
+    fn apns_failure_body_is_bounded_to_allowlisted_reason_or_hash_before_persistence() {
+        const SENTINEL: &str = "APNS_PRIVATE_FAILURE_SENTINEL";
+        let unknown_body = serde_json::json!({
+            "reason": SENTINEL,
+            "debug": SENTINEL,
+        })
+        .to_string();
+        let unknown =
+            summarize_apns_failure_body(StatusCode::BAD_REQUEST, unknown_body.as_bytes(), true);
+        assert!(!unknown.contains(SENTINEL));
+        assert!(unknown.contains(&hash_request_bytes(unknown_body.as_bytes())));
+        assert!(unknown.contains("body_truncated=true"));
+
+        let known_body = serde_json::json!({
+            "reason": "BadDeviceToken",
+            "debug": SENTINEL,
+        })
+        .to_string();
+        let known =
+            summarize_apns_failure_body(StatusCode::BAD_REQUEST, known_body.as_bytes(), false);
+        assert_eq!(
+            known,
+            "APNs rejected request (status=400, reason=BadDeviceToken)"
+        );
+        assert!(!known.contains(SENTINEL));
+
+        let temp = TempDir::new().unwrap();
+        let db = Database::new(&temp.path().join("apns-failure.db")).unwrap();
+        let store = ApnsDeviceStore::new(&db);
+        store
+            .upsert(None, "private-device-token", DEFAULT_APNS_BUNDLE_ID)
+            .unwrap();
+        store
+            .mark_failure("private-device-token", &unknown)
+            .unwrap();
+        let mut devices = store.get_for_user(None).unwrap();
+        let persisted = devices.remove(0);
+        let persisted_reason = persisted.last_failure_reason.unwrap();
+        assert_eq!(persisted_reason, unknown);
+        assert!(!persisted_reason.contains(SENTINEL));
     }
 }

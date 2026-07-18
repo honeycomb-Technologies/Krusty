@@ -161,6 +161,40 @@ impl ReportStore {
             .context("listing reports for user")
     }
 
+    /// List reports whose source session belongs to the exact owner.
+    ///
+    /// This deliberately differs from the legacy `None` semantics of
+    /// [`Self::list_reports_for_user`]: local Mako (`None`) sees only reports
+    /// from local sessions, never every tenant's reports.
+    pub fn list_reports_for_exact_owner(
+        &self,
+        project_dir: Option<&str>,
+        user_id: Option<&str>,
+    ) -> Result<Vec<Report>> {
+        let mut sql = "SELECT reports.id, reports.title, reports.session_id, reports.project_dir,
+                    reports.content, reports.summary, reports.tags, reports.sources,
+                    reports.created_at
+             FROM reports
+             INNER JOIN sessions ON sessions.id = reports.session_id
+             WHERE sessions.user_id IS ?1"
+            .to_string();
+        let mut bound = vec![user_id.map(ToOwned::to_owned)];
+        if let Some(project_dir) = project_dir {
+            bound.push(Some(project_dir.to_string()));
+            sql.push_str(" AND reports.project_dir = ?2");
+        }
+        sql.push_str(" ORDER BY reports.created_at DESC");
+
+        let mut stmt = self.db.conn().prepare(&sql)?;
+        let params = bound
+            .iter()
+            .map(|value| value as &dyn rusqlite::types::ToSql)
+            .collect::<Vec<_>>();
+        let rows = stmt.query_map(params.as_slice(), row_to_report)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("listing reports for exact owner")
+    }
+
     pub fn search_reports(&self, query: &str, project_dir: Option<&str>) -> Result<Vec<Report>> {
         let pattern = report_search_pattern(query);
 

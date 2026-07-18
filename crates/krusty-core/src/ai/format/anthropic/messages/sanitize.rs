@@ -44,7 +44,10 @@ pub(super) fn sanitize_tool_results(messages: &mut Vec<Value>) {
                                 result_ids.insert(id.to_string());
                                 filtered.push(block);
                             } else {
-                                debug!("Stripping orphaned tool_result for tool_use_id={}", id);
+                                debug!(
+                                    tool_use_id_bytes = id.len(),
+                                    "Stripping orphaned tool_result"
+                                );
                             }
                         } else {
                             filtered.push(block);
@@ -53,7 +56,10 @@ pub(super) fn sanitize_tool_results(messages: &mut Vec<Value>) {
 
                     for id in &tool_use_ids {
                         if !result_ids.contains(id) {
-                            debug!("Injecting stub tool_result for missing tool_use_id={}", id);
+                            debug!(
+                                tool_use_id_bytes = id.len(),
+                                "Injecting stub tool_result for missing tool_use_id"
+                            );
                             filtered.push(stub_tool_result(id));
                         }
                     }

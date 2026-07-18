@@ -363,6 +363,42 @@ impl MemoryStore {
         self.query_memories(&sql, &bound)
     }
 
+    /// List active memories for one exact owner while retaining the existing
+    /// project visibility rule (project-specific plus owner-global rows).
+    ///
+    /// This is the Mako prompt/snapshot boundary. Unlike [`Self::list`], an
+    /// authenticated owner never inherits legacy `user_id IS NULL` memories,
+    /// and local mode never sees authenticated users' rows.
+    pub fn list_for_exact_owner(
+        &self,
+        project_dir: Option<&str>,
+        user_id: Option<&str>,
+    ) -> Vec<AgentMemory> {
+        let mut sql =
+            format!("SELECT {MEMORY_SELECT_COLUMNS} FROM agent_memories WHERE status = 'active'");
+        let mut bound = Vec::new();
+
+        if let Some(project_dir) = project_dir {
+            bound.push(project_dir.to_string());
+            sql.push_str(&format!(
+                " AND (project_dir = ?{} OR project_dir IS NULL)",
+                bound.len()
+            ));
+        } else {
+            sql.push_str(" AND project_dir IS NULL");
+        }
+
+        if let Some(user_id) = user_id {
+            bound.push(user_id.to_string());
+            sql.push_str(&format!(" AND user_id = ?{}", bound.len()));
+        } else {
+            sql.push_str(" AND user_id IS NULL");
+        }
+
+        sql.push_str(" ORDER BY updated_at DESC");
+        self.query_memories(&sql, &bound)
+    }
+
     /// List active memories of a specific type.
     pub fn list_by_type(
         &self,

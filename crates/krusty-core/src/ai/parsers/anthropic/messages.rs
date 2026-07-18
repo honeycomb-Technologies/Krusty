@@ -2,6 +2,7 @@ use serde_json::Value;
 use tracing::info;
 
 use super::AnthropicParser;
+use crate::ai::retry::safe_provider_event_error;
 use crate::ai::sse::{parse_finish_reason, SseEvent};
 use crate::ai::types::{ContextEditingMetrics, FinishReason};
 use crate::ai::usage::parse_anthropic_usage;
@@ -71,12 +72,23 @@ impl AnthropicParser {
     }
 
     pub(super) fn parse_error_event(&self, json: &Value) -> anyhow::Result<SseEvent> {
-        let error_msg = json
-            .get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(|m| m.as_str())
-            .unwrap_or("Unknown error");
-        Err(anyhow::anyhow!("API error: {}", error_msg))
+        let error = json.get("error");
+        let message = error
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .or_else(|| error.and_then(Value::as_str));
+        let category = error
+            .and_then(|error| error.get("type"))
+            .and_then(Value::as_str);
+        let code = error
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str);
+        Err(anyhow::Error::msg(safe_provider_event_error(
+            "Anthropic API error",
+            code,
+            category,
+            message,
+        )))
     }
 }
 
@@ -85,6 +97,31 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn provider_error_event_never_reflects_message_type_or_code() {
+        const MESSAGE_SENTINEL: &str = "ANTHROPIC_MESSAGE_SENTINEL_4dc7";
+        const TYPE_SENTINEL: &str = "ANTHROPIC_TYPE_SENTINEL_e71b";
+        const CODE_SENTINEL: &str = "ANTHROPIC_CODE_SENTINEL_20a9";
+        let result = AnthropicParser::new().parse_error_event(&json!({
+            "type": "error",
+            "error": {
+                "message": MESSAGE_SENTINEL,
+                "type": TYPE_SENTINEL,
+                "code": CODE_SENTINEL
+            }
+        }));
+        let error = match result {
+            Ok(_) => panic!("provider error event should fail"),
+            Err(error) => error.to_string(),
+        };
+        for sentinel in [MESSAGE_SENTINEL, TYPE_SENTINEL, CODE_SENTINEL] {
+            assert!(!error.contains(sentinel));
+        }
+        assert!(error.contains("message_fingerprint=sha256:"));
+        assert!(error.contains("category_fingerprint=sha256:"));
+        assert!(error.contains("code_fingerprint=sha256:"));
+    }
 
     #[test]
     fn message_delta_preserves_usage_and_max_tokens_finish() {

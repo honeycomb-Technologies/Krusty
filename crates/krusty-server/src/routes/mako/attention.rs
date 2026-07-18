@@ -314,7 +314,7 @@ fn build_attention_items(
                 cleared: false,
                 active: true,
                 session_id: Some(approval.session_id.clone()),
-                run_id: Some(approval.session_id.clone()),
+                run_id: Some(approval.run_id.clone()),
                 project_dir: approval.project_dir.clone(),
                 target_branch: approval.target_branch.clone(),
                 tool_call_id: Some(approval.tool_call_id.clone()),
@@ -411,7 +411,11 @@ fn build_run_action_attention_item(
     run: &MakoCurrentRunSummary,
     thread_context: Option<&AttentionThreadContext>,
 ) -> Option<MakoAttentionItemSummary> {
-    let run_id = run.session_id.clone();
+    let session_id = run.session_id.clone();
+    let durable_run_id = run
+        .runtime
+        .as_ref()
+        .and_then(|runtime| runtime.current_run_id.clone());
     let project_dir = run.project_dir.clone();
     let target_branch = run.target_branch.clone();
     let thread_session_id = thread_context.map(|context| context.session_id.clone());
@@ -438,7 +442,7 @@ fn build_run_action_attention_item(
     };
 
     Some(MakoAttentionItemSummary {
-        id: format!("run:{run_id}:{kind}"),
+        id: format!("run:{session_id}:{kind}"),
         kind: kind.to_string(),
         section: "needs_action".to_string(),
         title: title.to_string(),
@@ -448,8 +452,8 @@ fn build_run_action_attention_item(
         read: false,
         cleared: false,
         active: true,
-        session_id: Some(run_id.clone()),
-        run_id: Some(run_id),
+        session_id: Some(session_id),
+        run_id: durable_run_id,
         project_dir,
         target_branch,
         tool_call_id: None,
@@ -484,7 +488,10 @@ fn build_scheduled_started_attention_item(
         cleared: false,
         active: false,
         session_id: Some(run.session_id.clone()),
-        run_id: Some(run.session_id.clone()),
+        run_id: run
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.current_run_id.clone()),
         project_dir: run.project_dir.clone(),
         target_branch: run.target_branch.clone(),
         tool_call_id: None,
@@ -541,7 +548,10 @@ fn build_delegated_completion_attention_item(
         cleared: false,
         active: false,
         session_id: Some(run.session_id.clone()),
-        run_id: Some(run.session_id.clone()),
+        run_id: run
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.current_run_id.clone()),
         project_dir: run.project_dir.clone(),
         target_branch: run.target_branch.clone(),
         tool_call_id: delegated.parent_tool_call_id.clone(),
@@ -611,7 +621,10 @@ fn build_run_completion_attention_item(
         cleared: false,
         active: false,
         session_id: Some(run.session_id.clone()),
-        run_id: Some(run.session_id.clone()),
+        run_id: run
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.current_run_id.clone()),
         project_dir: run.project_dir.clone(),
         target_branch: run.target_branch.clone(),
         tool_call_id: None,

@@ -22,7 +22,7 @@ pub(super) async fn cancel_session(
     if session.session_type == krusty_core::storage::SessionType::Mako {
         state
             .mako_runtime
-            .cancel_session_for_user(&state, &session_id, current_user_id(user.as_ref()))
+            .cancel_session_for_user(&state, &session_id, current_user_id(user.as_ref()), None)
             .await
             .map_err(crate::mako_runtime::control_plane_app_error)?;
         return Ok(Json(SimpleOkResponse { ok: true }));

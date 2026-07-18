@@ -8,7 +8,9 @@ use super::openai::extract_openai_text;
 use super::shared::trim_or_empty;
 use super::SimpleCallResult;
 use crate::ai::format::openai::OpenAIFormat;
+use crate::ai::model_profile::SystemPromptSections;
 use crate::ai::models::ApiFormat;
+use crate::ai::retry::safe_provider_event_error;
 use crate::ai::types::{Content, ModelMessage, Role, Usage};
 use crate::ai::usage::parse_openai_responses_usage;
 
@@ -34,6 +36,34 @@ impl AiClient {
         self.send_simple_codex_body(model, body).await
     }
 
+    fn build_conversation_codex_body(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        messages: &[ModelMessage],
+        max_tokens: usize,
+        options: &CallOptions,
+    ) -> Value {
+        let prompt_sections = self.system_prompt_sections(
+            model,
+            messages,
+            Some(system_prompt),
+            options.tools.as_deref(),
+        );
+        let stable_instructions = codex_cache_stable_instructions(&prompt_sections);
+        let volatile_context = (!prompt_sections.session_context.trim().is_empty())
+            .then_some(prompt_sections.session_context.as_str());
+        let format_handler = OpenAIFormat::new(ApiFormat::OpenAIResponses);
+        self.build_chatgpt_codex_body(
+            messages,
+            &stable_instructions,
+            volatile_context,
+            max_tokens,
+            options,
+            &format_handler,
+        )
+    }
+
     pub(super) async fn call_conversation_chatgpt_codex(
         &self,
         model: &str,
@@ -50,7 +80,13 @@ impl AiClient {
                 text: appended_user_message.to_string(),
             }],
         });
-        let body = self.build_simple_codex_body(system_prompt, &messages, max_tokens, options);
+        let body = self.build_conversation_codex_body(
+            model,
+            system_prompt,
+            &messages,
+            max_tokens,
+            options,
+        );
         self.send_simple_codex_body(model, body).await
     }
 
@@ -124,6 +160,18 @@ impl AiClient {
     }
 }
 
+fn codex_cache_stable_instructions(prompt_sections: &SystemPromptSections) -> String {
+    [
+        prompt_sections.base_prompt.as_str(),
+        prompt_sections.identity_context.as_str(),
+        prompt_sections.project_context.as_str(),
+    ]
+    .into_iter()
+    .filter(|section| !section.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n\n---\n\n")
+}
+
 fn process_codex_sse_line(
     line: &[u8],
     collected_text: &mut String,
@@ -143,16 +191,32 @@ fn process_codex_sse_line(
         return Ok(());
     }
 
-    let json: Value = serde_json::from_str(data)?;
+    let json: Value = serde_json::from_str(data).map_err(|_| {
+        anyhow::Error::msg(safe_provider_event_error(
+            "ChatGPT Codex simple response was invalid JSON",
+            None,
+            Some("invalid_request_error"),
+            Some(data),
+        ))
+    })?;
     let event_type = json.get("type").and_then(Value::as_str).unwrap_or_default();
     if event_type == "error" || event_type.contains(".failed") {
         let message = json
             .get("error")
             .and_then(|error| error.get("message").or(Some(error)))
             .and_then(Value::as_str)
-            .or_else(|| json.get("message").and_then(Value::as_str))
-            .unwrap_or("ChatGPT Codex simple call failed");
-        anyhow::bail!(message.to_string());
+            .or_else(|| json.get("message").and_then(Value::as_str));
+        let code = json.pointer("/error/code").and_then(Value::as_str);
+        let category = json
+            .pointer("/error/type")
+            .and_then(Value::as_str)
+            .or(Some(event_type));
+        anyhow::bail!(safe_provider_event_error(
+            "ChatGPT Codex simple call failed",
+            code,
+            category,
+            message,
+        ));
     }
 
     if event_type == "response.output_text.delta" {
@@ -231,6 +295,69 @@ mod tests {
     }
 
     #[test]
+    fn conversation_body_preserves_stable_identity_and_volatile_session_layers() {
+        let client = AiClient::new(
+            AiClientConfig {
+                model: "gpt-5.5".to_string(),
+                provider_id: ProviderId::OpenAI,
+                api_format: ApiFormat::OpenAIResponses,
+                base_url: Some("https://chatgpt.com/backend-api/codex/responses".to_string()),
+                ..Default::default()
+            },
+            "test-key".to_string(),
+        );
+        let messages = vec![
+            ModelMessage {
+                role: Role::System,
+                content: vec![Content::Text {
+                    text: "[MAKO SOUL - MAKO_SOUL.md]\nidentity-layer".into(),
+                }],
+            },
+            ModelMessage {
+                role: Role::System,
+                content: vec![Content::Text {
+                    text: "[PROJECT INSTRUCTIONS - AGENTS.md]\nproject-layer".into(),
+                }],
+            },
+            ModelMessage {
+                role: Role::System,
+                content: vec![Content::Text {
+                    text: "[MAKO HEARTBEAT]\nsession-layer".into(),
+                }],
+            },
+            ModelMessage {
+                role: Role::User,
+                content: vec![Content::Text {
+                    text: "continue".into(),
+                }],
+            },
+        ];
+
+        let body = client.build_conversation_codex_body(
+            "gpt-5.5",
+            "base-layer",
+            &messages,
+            1_024,
+            &CallOptions::default(),
+        );
+        let instructions = body["instructions"].as_str().expect("instructions");
+        let base = instructions.find("base-layer").expect("base layer");
+        let identity = instructions.find("identity-layer").expect("identity layer");
+        let project = instructions.find("project-layer").expect("project layer");
+        assert!(base < identity && identity < project);
+        assert!(!instructions.contains("session-layer"));
+
+        let input = body["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 2, "system messages must not leak into input");
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[1]["role"], "developer");
+        assert!(input[1]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("session-layer"));
+    }
+
+    #[test]
     fn completed_event_preserves_text_and_usage() {
         let mut text = String::new();
         let mut final_text = None;
@@ -269,5 +396,57 @@ mod tests {
         )
         .expect("event");
         assert_eq!(text, "hi");
+    }
+
+    #[test]
+    fn error_event_never_reflects_message_type_or_code() {
+        const MESSAGE_SENTINEL: &str = "CODEX_SIMPLE_MESSAGE_SENTINEL_148b";
+        const TYPE_SENTINEL: &str = "CODEX_SIMPLE_TYPE_SENTINEL_55cb";
+        const CODE_SENTINEL: &str = "CODEX_SIMPLE_CODE_SENTINEL_210e";
+        let line = format!(
+            "data: {{\"type\":\"response.failed\",\"error\":{{\"message\":\"{MESSAGE_SENTINEL}\",\"type\":\"{TYPE_SENTINEL}\",\"code\":\"{CODE_SENTINEL}\"}}}}\n"
+        );
+        let mut text = String::new();
+        let mut final_text = None;
+        let mut usage = Usage::default();
+        let mut usage_available = false;
+        let error = process_codex_sse_line(
+            line.as_bytes(),
+            &mut text,
+            &mut final_text,
+            &mut usage,
+            &mut usage_available,
+        )
+        .expect_err("provider error event should fail")
+        .to_string();
+
+        for sentinel in [MESSAGE_SENTINEL, TYPE_SENTINEL, CODE_SENTINEL] {
+            assert!(!error.contains(sentinel));
+        }
+        assert!(error.contains("message_fingerprint=sha256:"));
+        assert!(error.contains("category_fingerprint=sha256:"));
+        assert!(error.contains("code_fingerprint=sha256:"));
+    }
+
+    #[test]
+    fn invalid_json_event_never_reflects_response_content() {
+        const SENTINEL: &str = "CODEX_SIMPLE_JSON_SENTINEL_79af";
+        let line = format!("data: {{\"message\":\"{SENTINEL}\"\n");
+        let mut text = String::new();
+        let mut final_text = None;
+        let mut usage = Usage::default();
+        let mut usage_available = false;
+        let error = process_codex_sse_line(
+            line.as_bytes(),
+            &mut text,
+            &mut final_text,
+            &mut usage,
+            &mut usage_available,
+        )
+        .expect_err("invalid provider JSON should fail")
+        .to_string();
+
+        assert!(!error.contains(SENTINEL));
+        assert!(error.contains("message_fingerprint=sha256:"));
     }
 }

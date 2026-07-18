@@ -51,8 +51,15 @@ pub(super) fn load_snapshot_activity(
     let task_store = AutonomousTaskStore::new(Database::new(db_path)?);
     let trace_db = Database::new(db_path)?;
     let trace_store = RuntimeTraceStore::new(&trace_db);
-    let sessions =
-        session_manager.list_sessions_for_user_by_type(project_dir, user_id, SessionType::Mako)?;
+    // The legacy session listing API treats `None` as an administrator-style
+    // wildcard. Snapshot generation is a prompt boundary, so narrow the result
+    // back to the exact owner (including local `None`) and exact project.
+    let sessions = session_manager
+        .list_sessions_for_user_by_type(None, user_id, SessionType::Mako)?
+        .into_iter()
+        .filter(|session| session.user_id.as_deref() == user_id)
+        .filter(|session| project_dir.is_none() || session.project_dir.as_deref() == project_dir)
+        .collect::<Vec<_>>();
 
     let mut recent_runs = Vec::new();
     let mut task_outcomes = Vec::new();

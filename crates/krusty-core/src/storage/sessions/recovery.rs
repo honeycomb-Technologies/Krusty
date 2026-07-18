@@ -80,14 +80,17 @@ impl SessionManager {
             .map_err(Into::into)
     }
 
-    /// Reset any non-idle agent execution state after an unclean shutdown.
+    /// Reset non-idle HTTP-owned agent execution state after an unclean
+    /// shutdown. Mako session recovery belongs to the standalone daemon and
+    /// must not be rewritten by an HTTP-server restart.
     pub fn reset_transient_agent_states(&self) -> Result<usize> {
         let repaired = self.db.conn().execute(
             "UPDATE sessions
              SET agent_state = 'idle',
                  agent_started_at = NULL,
                  agent_last_event_at = NULL
-             WHERE agent_state != 'idle'",
+             WHERE agent_state != 'idle'
+               AND session_type != 'mako'",
             [],
         )?;
         Ok(repaired)
@@ -95,12 +98,14 @@ impl SessionManager {
 
     /// Clear persisted non-resumable recovery snapshots that should not survive
     /// a fresh server start. Actionable pending human interactions are preserved
-    /// so reload/restart can surface them without resuming tool execution.
+    /// so reload/restart can surface them without resuming tool execution. Mako
+    /// snapshots are daemon-owned and are never cleared by this HTTP repair.
     pub fn clear_stale_transient_recovery_states(&self) -> Result<usize> {
         let mut stmt = self.db.conn().prepare(
             "SELECT id, recovery_json
              FROM sessions
-             WHERE recovery_json IS NOT NULL",
+             WHERE recovery_json IS NOT NULL
+               AND session_type != 'mako'",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))

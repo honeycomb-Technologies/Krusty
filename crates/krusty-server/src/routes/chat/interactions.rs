@@ -2,6 +2,7 @@ use std::convert::Infallible;
 
 use axum::{
     extract::State,
+    http::HeaderMap,
     response::sse::{Event, KeepAlive, Sse},
     Json,
 };
@@ -13,7 +14,10 @@ use krusty_core::agent::plan_handler::parse_plan_confirm_choice;
 use krusty_core::agent::LoopInput;
 use krusty_core::ai::types::{Content, ModelMessage, Role};
 use krusty_core::plan::PlanManager;
-use krusty_core::storage::{Database, PendingInteractionSnapshot, SessionType, WorkMode};
+use krusty_core::storage::{
+    Database, MakoControllerEventStore, MakoControllerStore, PendingInteractionSnapshot,
+    SessionType, WorkMode,
+};
 use krusty_core::tools::registry::PermissionMode;
 use krusty_core::SessionManager;
 
@@ -32,6 +36,7 @@ use crate::AppState;
 pub(super) async fn steer(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
+    headers: HeaderMap,
     Json(req): Json<SteerRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     validate_content_blocks(&req.content)?;
@@ -47,6 +52,7 @@ pub(super) async fn steer(
     let content = build_user_content(&req.message, &req.content)?;
     let pending_id = uuid::Uuid::new_v4().to_string();
     if session.session_type == SessionType::Mako {
+        let idempotency_key = super::super::mako::idempotency_key_from_headers(&headers)?;
         let status = state
             .mako_runtime
             .steer_for_user(
@@ -55,6 +61,7 @@ pub(super) async fn steer(
                 &pending_id,
                 content,
                 current_user_id(user.as_ref()),
+                idempotency_key.as_deref(),
             )
             .await
             .map_err(mako_control_error)?;
@@ -124,19 +131,30 @@ pub(super) async fn deliver_steering_with_rollover(
 pub(super) async fn tool_result(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
+    headers: HeaderMap,
     Json(req): Json<ToolResultRequest>,
 ) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, AppError> {
     let session_manager = SessionManager::new(Database::new(&state.db_path)?);
     let session = load_owned_session(&session_manager, &req.session_id, user.as_ref())?;
     if session.session_type == SessionType::Mako {
+        let run_id = resolve_pending_mako_run(
+            &state,
+            &req.session_id,
+            &req.tool_call_id,
+            req.run_id.as_deref(),
+            PendingMakoInteraction::UserResponse,
+        )?;
+        let idempotency_key = super::super::mako::idempotency_key_from_headers(&headers)?;
         let receiver = state
             .mako_runtime
             .user_response_and_subscribe_for_user(
                 &state,
                 &req.session_id,
+                &run_id,
                 &req.tool_call_id,
                 &req.result,
                 current_user_id(user.as_ref()),
+                idempotency_key.as_deref(),
             )
             .await
             .map_err(mako_control_error)?;
@@ -291,28 +309,40 @@ fn resumed_permission_mode(
 pub(super) async fn tool_approval(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
+    headers: HeaderMap,
     Json(req): Json<ToolApprovalRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    submit_tool_approval(&state, user.as_ref(), req).await
+    let idempotency_key = super::super::mako::idempotency_key_from_headers(&headers)?;
+    submit_tool_approval(&state, user.as_ref(), req, idempotency_key.as_deref()).await
 }
 
 pub(crate) async fn submit_tool_approval(
     state: &AppState,
     user: Option<&CurrentUser>,
     req: ToolApprovalRequest,
+    idempotency_key: Option<&str>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let session_manager = SessionManager::new(Database::new(&state.db_path)?);
     let session = load_owned_session(&session_manager, &req.session_id, user)?;
 
     if session.session_type == SessionType::Mako {
+        let run_id = resolve_pending_mako_run(
+            state,
+            &req.session_id,
+            &req.tool_call_id,
+            req.run_id.as_deref(),
+            PendingMakoInteraction::ToolApproval,
+        )?;
         state
             .mako_runtime
             .tool_approval_for_user(
                 state,
                 &req.session_id,
+                &run_id,
                 &req.tool_call_id,
                 req.approved,
                 current_user_id(user),
+                idempotency_key,
             )
             .await
             .map_err(mako_control_error)?;
@@ -345,6 +375,57 @@ pub(crate) async fn submit_tool_approval(
             ))
         })?;
     Ok(Json(json!({"status": "ok"})))
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum PendingMakoInteraction {
+    ToolApproval,
+    UserResponse,
+}
+
+pub(super) fn resolve_pending_mako_run(
+    state: &AppState,
+    session_id: &str,
+    tool_call_id: &str,
+    requested_run_id: Option<&str>,
+    interaction: PendingMakoInteraction,
+) -> Result<String, AppError> {
+    let controller = MakoControllerStore::new(Database::new(&state.db_path)?)
+        .get_by_session(session_id)?
+        .ok_or_else(|| AppError::Conflict("Mako session has no durable controller".into()))?;
+    let event_store = MakoControllerEventStore::new(Database::new(&state.db_path)?);
+    let pending = match interaction {
+        PendingMakoInteraction::ToolApproval => event_store
+            .list_pending_tool_approvals(&controller.id)?
+            .into_iter()
+            .filter(|event| {
+                event.payload.get("id").and_then(serde_json::Value::as_str) == Some(tool_call_id)
+            })
+            .filter_map(|event| event.run_id)
+            .collect::<std::collections::BTreeSet<_>>(),
+        PendingMakoInteraction::UserResponse => event_store
+            .list_pending_user_response_runs(&controller.id, tool_call_id)?
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+    };
+
+    if let Some(requested_run_id) = requested_run_id {
+        if pending.contains(requested_run_id) {
+            return Ok(requested_run_id.to_string());
+        }
+        return Err(AppError::Conflict(format!(
+            "Run {requested_run_id} is not awaiting this interaction"
+        )));
+    }
+
+    if pending.len() != 1 {
+        return Err(AppError::Conflict(if pending.is_empty() {
+            "No exact pending Mako run matches this interaction".into()
+        } else {
+            "Multiple Mako runs match this interaction; run_id is required".into()
+        }));
+    }
+    Ok(pending.into_iter().next().expect("one pending run"))
 }
 
 pub(super) fn mako_response_sse(

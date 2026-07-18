@@ -46,10 +46,10 @@ impl MakoRunOutcome {
 
         if allow_embedded_wakes {
             if let LoopEvent::AgentSleeping { duration_secs, .. } = event {
-            let wake_at = chrono::Utc::now() + chrono::Duration::seconds(*duration_secs as i64);
-            manager
-                .schedule_wake_at(state.clone(), session_id.to_string(), wake_at, "sleep")
-                .await;
+                let wake_at = chrono::Utc::now() + chrono::Duration::seconds(*duration_secs as i64);
+                manager
+                    .schedule_wake_at(state.clone(), session_id.to_string(), wake_at, "sleep")
+                    .await;
             }
         }
 
@@ -119,12 +119,12 @@ impl MakoRunOutcome {
 
         if allow_embedded_wakes {
             if let Some(new_session_id) = self.pinched_session_id {
-            let _ = manager.wake_tx.send(WakeCommand {
-                state: state.clone(),
-                session_id: new_session_id,
-                wake_reason: "pinch".to_string(),
-            });
-            return Ok(());
+                let _ = manager.wake_tx.send(WakeCommand {
+                    state: state.clone(),
+                    session_id: new_session_id,
+                    wake_reason: "pinch".to_string(),
+                });
+                return Ok(());
             }
         }
 

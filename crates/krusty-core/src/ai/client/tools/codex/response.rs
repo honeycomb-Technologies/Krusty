@@ -6,6 +6,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::debug;
 
 use super::super::super::core::AiClient;
+use crate::ai::retry::safe_provider_event_error;
 
 impl AiClient {
     pub(super) async fn collect_codex_websocket_response<S>(
@@ -26,7 +27,19 @@ impl AiClient {
         let mut finish_reason = "end_turn";
 
         while let Some(msg) = stream.next().await {
-            let payload = match msg? {
+            let message = match msg {
+                Ok(message) => message,
+                Err(error) => {
+                    let detail = error.to_string();
+                    return Err(anyhow::Error::msg(safe_provider_event_error(
+                        "Sub-agent Codex websocket stream error",
+                        None,
+                        Some("server_error"),
+                        Some(&detail),
+                    )));
+                }
+            };
+            let payload = match message {
                 Message::Text(text) => text.to_string(),
                 Message::Binary(bytes) => String::from_utf8_lossy(&bytes).to_string(),
                 Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
@@ -35,13 +48,13 @@ impl AiClient {
                         let (code, reason) = frame
                             .as_ref()
                             .map(|f| (f.code.to_string(), f.reason.to_string()))
-                            .unwrap_or_else(|| {
-                                ("no close code".to_string(), "no close reason".to_string())
-                            });
-                        return Err(anyhow::anyhow!(
-                            "Sub-agent Codex websocket closed before completion (websocket-only mode): code={}, reason={}",
-                            code, reason
-                        ));
+                            .unzip();
+                        return Err(anyhow::Error::msg(safe_provider_event_error(
+                            "Sub-agent Codex websocket closed before completion",
+                            code.as_deref(),
+                            Some("server_error"),
+                            reason.as_deref(),
+                        )));
                     }
                     break;
                 }
@@ -54,12 +67,10 @@ impl AiClient {
             let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match event_type {
                 "error" | "response.failed" => {
-                    let message = Self::codex_ws_error_message(&json)
-                        .unwrap_or_else(|| "unknown websocket error".to_string());
-                    return Err(anyhow::anyhow!(
-                        "Sub-agent Codex websocket API error: {}",
-                        message
-                    ));
+                    let message = Self::codex_ws_error_message(&json).unwrap_or_else(|| {
+                        "Codex websocket API error [metadata=unavailable]".to_string()
+                    });
+                    return Err(anyhow::Error::msg(format!("Sub-agent {message}")));
                 }
                 "response.output_text.delta" => {
                     if let Some(delta) = json.get("delta").and_then(|d| d.as_str()) {
@@ -96,7 +107,11 @@ impl AiClient {
                         if !pending_tools.contains_key(&call_id) {
                             tool_order.push(call_id.clone());
                             pending_tools.insert(call_id.clone(), (name.clone(), String::new()));
-                            debug!("Sub-agent Codex tool call start: {} ({})", name, call_id);
+                            debug!(
+                                tool_name_bytes = name.len(),
+                                tool_call_id_bytes = call_id.len(),
+                                "Sub-agent Codex tool call started"
+                            );
                         }
 
                         if let Some(arguments) = item.get("arguments").and_then(|a| a.as_str()) {

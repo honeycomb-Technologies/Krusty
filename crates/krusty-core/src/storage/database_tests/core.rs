@@ -1,4 +1,5 @@
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
+use std::sync::{Arc, Barrier};
 use tempfile::TempDir;
 
 use crate::storage::database::Database;
@@ -9,7 +10,7 @@ use super::create_test_db;
 fn test_database_creation() {
     let (db, _temp) = create_test_db();
     let version = db.get_schema_version();
-    assert_eq!(version, 40, "Expected current schema version to be 40");
+    assert_eq!(version, 44, "Expected current schema version to be 44");
 }
 
 #[test]
@@ -56,7 +57,7 @@ fn test_schema_version_increments() {
     let db = Database::new(&db_path).expect("Failed to create database");
     let version = db.get_schema_version();
 
-    assert_eq!(version, 40, "Expected final schema version");
+    assert_eq!(version, 44, "Expected final schema version");
 }
 
 #[test]
@@ -68,6 +69,114 @@ fn test_migration_idempotency() {
     let version2 = db.get_schema_version();
 
     assert_eq!(version1, version2, "Schema version should not change");
+}
+
+#[test]
+fn concurrent_process_initialization_serializes_migrations() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("concurrent-startup.db");
+    let barrier = Arc::new(Barrier::new(4));
+    let handles = (0..4)
+        .map(|_| {
+            let db_path = db_path.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                Database::new(&db_path).map(|db| db.get_schema_version())
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for handle in handles {
+        let version = handle
+            .join()
+            .expect("database initializer thread should not panic")
+            .expect("concurrent database initialization should succeed");
+        assert_eq!(version, 44);
+    }
+}
+
+#[test]
+fn privacy_migration_releases_exclusive_lock_while_first_handle_stays_open() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("privacy-lock-release.db");
+
+    let seed = Database::new(&db_path).expect("create current database");
+    seed.conn()
+        .execute("DELETE FROM schema_version WHERE version = 44", [])
+        .expect("rewind to physical privacy checkpoint");
+    drop(seed);
+
+    let first = Database::new(&db_path).expect("complete privacy migration");
+    assert_eq!(first.get_schema_version(), 44);
+
+    // Keep the migration-winning handle alive. A locking-mode restore without
+    // a subsequent database access retains SQLite's exclusive lock and makes
+    // this second independently supervised process time out.
+    let second = Database::new(&db_path)
+        .expect("second process should open while migration winner remains alive");
+    assert_eq!(second.get_schema_version(), 44);
+    assert_eq!(first.get_schema_version(), 44);
+}
+
+#[test]
+fn privacy_migration_never_publishes_completion_while_a_peer_pins_wal() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("privacy-busy-peer.db");
+
+    let seed = Database::new(&db_path).expect("create current database");
+    seed.conn()
+        .execute_batch(
+            "CREATE TABLE privacy_busy_probe (value INTEGER NOT NULL);
+             INSERT INTO privacy_busy_probe VALUES (1);
+             DELETE FROM schema_version WHERE version = 44;
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .expect("rewind and checkpoint fixture");
+    drop(seed);
+
+    let reader = Connection::open(&db_path).expect("open external reader");
+    reader.execute_batch("BEGIN").expect("begin read snapshot");
+    let version: i32 = reader
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .expect("pin schema snapshot");
+    assert_eq!(version, 43);
+
+    let writer = Connection::open(&db_path).expect("open fixture writer");
+    writer
+        .execute("INSERT INTO privacy_busy_probe VALUES (2)", [])
+        .expect("append a WAL frame newer than the reader snapshot");
+    drop(writer);
+
+    // EXCLUSIVE privacy cleanup may fail while reserving the migration lock or
+    // at its mandatory truncate checkpoint. Either is deliberately fail-closed:
+    // schema 44 must never claim physical erasure completed while a peer can
+    // retain pre-cleanup WAL pages.
+    assert!(
+        Database::new(&db_path).is_err(),
+        "privacy migration must not complete while another process pins WAL"
+    );
+    let observer = Connection::open(&db_path).expect("open completion observer");
+    let durable_version: i32 = observer
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read durable schema version");
+    assert_eq!(durable_version, 43);
+    drop(observer);
+
+    reader
+        .execute_batch("ROLLBACK")
+        .expect("release peer snapshot");
+    drop(reader);
+    let recovered = Database::new(&db_path).expect("retry privacy migration after peer release");
+    assert_eq!(recovered.get_schema_version(), 44);
 }
 
 #[test]
@@ -115,7 +224,7 @@ fn migration_33_removes_legacy_compaction_memory_and_duplicate_history() {
     drop(conn);
 
     let db = Database::new(&db_path).expect("migrate db");
-    assert_eq!(db.get_schema_version(), 40);
+    assert_eq!(db.get_schema_version(), 44);
 
     let flush_count: i64 = db
         .conn()
@@ -184,7 +293,7 @@ fn migration_34_backfills_provider_call_classification() {
     drop(conn);
 
     let db = Database::new(&db_path).expect("migrate db");
-    assert_eq!(db.get_schema_version(), 40);
+    assert_eq!(db.get_schema_version(), 44);
     let (call_kind, operation): (Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -198,7 +307,7 @@ fn migration_34_backfills_provider_call_classification() {
 }
 
 #[test]
-fn migrations_35_through_39_create_mako_backend_contracts() {
+fn migrations_35_through_44_create_mako_backend_contracts() {
     let (db, _temp) = create_test_db();
     let expected_tables = [
         "mako_profiles",
@@ -211,6 +320,7 @@ fn migrations_35_through_39_create_mako_backend_contracts() {
         "mako_daemon_leases",
         "mako_idempotency_keys",
         "mako_controller_events",
+        "mako_control_outbox",
         "conversation_episodes",
         "mako_learning_runs",
         "mako_learning_candidates",
@@ -261,7 +371,7 @@ fn migration_39_upgrades_legacy_memories_and_separates_generated_snapshot() {
     drop(conn);
 
     let db = Database::new(&db_path).expect("migrate legacy memories");
-    assert_eq!(db.get_schema_version(), 40);
+    assert_eq!(db.get_schema_version(), 44);
 
     let fact_metadata: (String, String, f64) = db
         .conn()
@@ -302,4 +412,260 @@ fn migration_39_upgrades_legacy_memories_and_separates_generated_snapshot() {
         )
         .expect("legacy revision seed");
     assert_eq!(revision_count, 1);
+}
+
+#[test]
+fn migration_43_redacts_legacy_mako_payloads_and_physically_erases_secrets() {
+    const SENTINEL: &str = "MAKO_LEGACY_SECRET_SENTINEL_43";
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path().join("legacy-mako-privacy.db");
+    let db = Database::new(&db_path).expect("create current database");
+    db.conn()
+        .execute_batch(
+            "INSERT INTO sessions (
+                 id, title, created_at, updated_at, model, session_type
+             ) VALUES (
+                 'session-privacy', 'Mako', '2026-07-17T00:00:00.000000Z',
+                 '2026-07-17T00:00:00.000000Z', 'test:model', 'mako'
+             );
+             INSERT INTO mako_controllers (
+                 id, scope_key, session_id, status, timezone,
+                 max_concurrent_runs, created_at, updated_at
+             ) VALUES (
+                 'controller-privacy', 'session:session-privacy', 'session-privacy',
+                 'active', 'UTC', 1, '2026-07-17T00:00:00.000000Z',
+                 '2026-07-17T00:00:00.000000Z'
+             );",
+        )
+        .expect("seed ownership rows");
+    db.conn()
+        .execute(
+            "INSERT INTO mako_runs (
+                 id, controller_id, session_id, kind, objective, config_json,
+                 status, available_at, attempt_count, max_attempts,
+                 last_stop_reason, last_error, outcome_json, created_at, updated_at
+             ) VALUES (
+                 'run-privacy', 'controller-privacy', 'session-privacy', 'dispatch',
+                 'safe objective', '{}', 'recovery_required',
+                 '2026-07-17T00:00:00.000000Z', 1, 3, ?1, ?1, ?2,
+                 '2026-07-17T00:00:00.000000Z', '2026-07-17T00:00:00.000000Z'
+             )",
+            params![SENTINEL, serde_json::json!({"error": SENTINEL}).to_string()],
+        )
+        .expect("seed raw run copies");
+    db.conn()
+        .execute(
+            "INSERT INTO mako_run_attempts (
+                 id, run_id, attempt_no, worker_id, lease_token, lease_epoch,
+                 started_at, outcome, stop_reason, error
+             ) VALUES (
+                 'attempt-privacy', 'run-privacy', 1, 'legacy-worker',
+                 'legacy-token', 1, '2026-07-17T00:00:00.000000Z',
+                 'recovery_required', ?1, ?1
+             )",
+            [SENTINEL],
+        )
+        .expect("seed raw attempt copies");
+    for (sequence, payload) in [
+        (
+            1_i64,
+            serde_json::json!({
+                "type": "thinking_complete",
+                "thinking": SENTINEL,
+                "signature": SENTINEL,
+            }),
+        ),
+        (
+            2_i64,
+            serde_json::json!({
+                "type": "tool_approval_required",
+                "id": "tool-call-privacy",
+                "name": "bash",
+                "arguments": {"command": SENTINEL},
+            }),
+        ),
+    ] {
+        db.conn()
+            .execute(
+                "INSERT INTO mako_controller_events (
+                     controller_id, sequence, event_type, run_id, payload_json, created_at
+                 ) VALUES (
+                     'controller-privacy', ?1, 'agentic_event', 'run-privacy', ?2,
+                     '2026-07-17T00:00:00.000000Z'
+                 )",
+                params![sequence, payload.to_string()],
+            )
+            .expect("seed raw legacy event");
+    }
+    db.conn()
+        .execute(
+            "INSERT INTO mako_runtime_state (
+                 session_id, status, last_error, current_run_id, updated_at
+             ) VALUES (
+                 'session-privacy', 'error', ?1, 'run-privacy',
+                 '2026-07-17T00:00:00.000000Z'
+             )",
+            [SENTINEL],
+        )
+        .expect("seed raw runtime error");
+    db.conn()
+        .execute(
+            "INSERT INTO mako_control_outbox (
+                 id, controller_id, session_id, run_id, control_kind, dedupe_key,
+                 payload_json, status, available_at, last_error, created_at, updated_at
+             ) VALUES (
+                 'outbox-privacy', 'controller-privacy', 'session-privacy',
+                 'run-privacy', 'tool_approval', 'approval-privacy', ?1,
+                 'pending', '2026-07-17T00:00:00.000000Z', ?2,
+                 '2026-07-17T00:00:00.000000Z', '2026-07-17T00:00:00.000000Z'
+             )",
+            params![
+                serde_json::json!({
+                    "tool_call_id": "tool-call-privacy",
+                    "approved": true,
+                    "raw": SENTINEL,
+                })
+                .to_string(),
+                SENTINEL,
+            ],
+        )
+        .expect("seed raw outbox copies");
+    db.conn()
+        .execute("DELETE FROM schema_version WHERE version >= 43", [])
+        .expect("rewind to migration 42");
+    drop(db);
+
+    let raw_fixture_contains_secret = [
+        db_path.clone(),
+        db_path.with_extension("db-wal"),
+        db_path.with_extension("db-shm"),
+    ]
+    .into_iter()
+    .filter_map(|path| std::fs::read(path).ok())
+    .any(|bytes| {
+        bytes
+            .windows(SENTINEL.len())
+            .any(|window| window == SENTINEL.as_bytes())
+    });
+    assert!(
+        raw_fixture_contains_secret,
+        "privacy migration fixture must contain the raw sentinel before cleanup"
+    );
+
+    let migrated = Database::new(&db_path).expect("apply privacy migration");
+    assert_eq!(migrated.get_schema_version(), 44);
+    let event_payloads: String = migrated
+        .conn()
+        .query_row(
+            "SELECT group_concat(payload_json, '|')
+               FROM mako_controller_events
+              WHERE controller_id = 'controller-privacy'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read migrated events");
+    assert!(!event_payloads.contains(SENTINEL));
+    let approval_payload: String = migrated
+        .conn()
+        .query_row(
+            "SELECT payload_json FROM mako_controller_events
+              WHERE controller_id = 'controller-privacy' AND sequence = 2",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read migrated approval");
+    let approval_payload: serde_json::Value =
+        serde_json::from_str(&approval_payload).expect("valid approval summary");
+    assert_eq!(approval_payload["id"], "tool-call-privacy");
+    assert_eq!(approval_payload["name"], "bash");
+    assert_eq!(approval_payload["arguments_redacted"], true);
+
+    for sql in [
+        "SELECT COALESCE(last_error, '') || COALESCE(last_stop_reason, '') || COALESCE(outcome_json, '') FROM mako_runs WHERE id = 'run-privacy'",
+        "SELECT COALESCE(error, '') || COALESCE(stop_reason, '') FROM mako_run_attempts WHERE id = 'attempt-privacy'",
+        "SELECT COALESCE(last_error, '') FROM mako_runtime_state WHERE session_id = 'session-privacy'",
+        "SELECT COALESCE(last_error, '') || payload_json FROM mako_control_outbox WHERE id = 'outbox-privacy'",
+    ] {
+        let durable_copy: String = migrated
+            .conn()
+            .query_row(sql, [], |row| row.get(0))
+            .expect("read migrated durable copy");
+        assert!(!durable_copy.contains(SENTINEL), "secret remains in {sql}");
+    }
+    drop(migrated);
+
+    for path in [
+        db_path.clone(),
+        db_path.with_extension("db-wal"),
+        db_path.with_extension("db-shm"),
+    ] {
+        if let Ok(bytes) = std::fs::read(&path) {
+            assert!(
+                !bytes
+                    .windows(SENTINEL.len())
+                    .any(|window| window == SENTINEL.as_bytes()),
+                "secret remains in raw SQLite file {}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn migration_44_resumes_physical_privacy_cleanup_after_a_crash_checkpoint() {
+    const SENTINEL: &str = "MAKO_CRASH_WINDOW_SECRET_SENTINEL_44";
+    let temp_dir = TempDir::new().expect("temp dir");
+    let db_path = temp_dir.path().join("mako-privacy-crash-window.db");
+    let db = Database::new(&db_path).expect("create current database");
+
+    // Model a process that committed migration 43's logical redaction and
+    // then died before VACUUM and the schema-44 completion checkpoint. A
+    // dropped scratch table leaves the sentinel only in reclaimable pages.
+    db.conn()
+        .execute_batch(
+            "PRAGMA secure_delete = OFF; CREATE TABLE privacy_crash_probe (payload TEXT);",
+        )
+        .expect("create crash probe");
+    db.conn()
+        .execute(
+            "INSERT INTO privacy_crash_probe (payload) VALUES (?1)",
+            [SENTINEL.repeat(2_048)],
+        )
+        .expect("write crash probe");
+    db.conn()
+        .execute_batch(
+            "DROP TABLE privacy_crash_probe;
+             DELETE FROM schema_version WHERE version = 44;
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .expect("leave logical migration checkpoint at 43");
+    drop(db);
+
+    let raw_before = std::fs::read(&db_path).expect("read pre-recovery database");
+    assert!(
+        raw_before
+            .windows(SENTINEL.len())
+            .any(|window| window == SENTINEL.as_bytes()),
+        "crash fixture must contain the stale sentinel before recovery"
+    );
+
+    let recovered = Database::new(&db_path).expect("resume physical privacy cleanup");
+    assert_eq!(recovered.get_schema_version(), 44);
+    drop(recovered);
+
+    for path in [
+        db_path.clone(),
+        db_path.with_extension("db-wal"),
+        db_path.with_extension("db-shm"),
+    ] {
+        if let Ok(bytes) = std::fs::read(&path) {
+            assert!(
+                !bytes
+                    .windows(SENTINEL.len())
+                    .any(|window| window == SENTINEL.as_bytes()),
+                "secret remains after resumed cleanup in {}",
+                path.display()
+            );
+        }
+    }
 }

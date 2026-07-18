@@ -2,7 +2,7 @@ use std::convert::Infallible;
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::sse::{Event, KeepAlive, Sse},
     Json,
 };
@@ -20,7 +20,8 @@ use super::super::session_access::{
     current_user_id, ensure_owned_session_of_type, load_agent_state_or_idle,
     load_owned_session_of_type, request_workspace_scope, session_visible_to_user,
 };
-use super::{current, open_session_manager, OkResponse};
+use super::{current, idempotency_key_from_headers, open_session_manager, OkResponse};
+use crate::ai_bootstrap::resolve_preferred_model;
 use crate::auth::CurrentUser;
 use crate::error::AppError;
 use crate::types::AgenticEvent;
@@ -105,9 +106,11 @@ pub(super) struct RecoverDaemonResponse {
 pub(super) async fn dispatch(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
+    headers: HeaderMap,
     Json(req): Json<DispatchRequest>,
 ) -> Result<(StatusCode, Json<DispatchResponse>), AppError> {
     let session_manager = open_session_manager(&state)?;
+    let idempotency_key = idempotency_key_from_headers(&headers)?;
     let user_id = current_user_id(user.as_ref());
     let workspace_scope = request_workspace_scope(&state, user.as_ref());
     let task = req.task.trim();
@@ -122,7 +125,21 @@ pub(super) async fn dispatch(
     )?
     .unwrap_or_else(|| workspace_scope.base_dir.to_string_lossy().into_owned());
     let start_at = parse_requested_wake_at(req.start_at.as_deref())?;
-    let model = trimmed_nonempty(req.model.as_deref());
+    let requested_model = trimmed_nonempty(req.model.as_deref())
+        .map(ToOwned::to_owned)
+        .or_else(|| resolve_preferred_model(state.db_path.as_ref().as_path(), user_id))
+        .ok_or_else(|| {
+            AppError::BadRequest("No model selected. Choose a model and try again.".into())
+        })?;
+    let model = state
+        .resolve_ai_client_for_user(Some(&requested_model), user_id)
+        .await
+        .ok_or_else(|| {
+            AppError::BadRequest("The selected model has no usable provider credentials.".into())
+        })?
+        .config()
+        .model
+        .clone();
     let priority = req.priority.unwrap_or(MakoRunPriority::Normal);
     let crew_slug = req
         .crew_slug
@@ -144,10 +161,11 @@ pub(super) async fn dispatch(
                 task,
                 &working_dir,
                 Some(&working_dir),
-                model,
+                Some(model.as_str()),
                 start_at,
                 priority,
                 crew_slug.as_deref(),
+                idempotency_key.as_deref(),
             )
             .await
             .map_err(mako_control_error)?;
@@ -164,7 +182,7 @@ pub(super) async fn dispatch(
     // router construction is fail-closed and always takes the daemon branch.
     let session_id = session_manager.create_session_for_user_with_config(
         task,
-        model,
+        Some(model.as_str()),
         Some(working_dir.as_str()),
         Some(working_dir.as_str()),
         WorkspaceMode::Selected,
@@ -188,6 +206,7 @@ pub(super) async fn dispatch(
                 "scheduled_dispatch",
                 "scheduled",
                 user_id,
+                idempotency_key.as_deref(),
             )
             .await
             .map_err(mako_control_error)?;
@@ -200,6 +219,7 @@ pub(super) async fn dispatch(
                 session_id.clone(),
                 "dispatch",
                 user_id,
+                idempotency_key.as_deref(),
             )
             .await
             .map_err(mako_control_error)?;
@@ -257,7 +277,9 @@ pub(super) async fn list_sessions(
 pub(super) async fn recover_daemon(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
+    headers: HeaderMap,
 ) -> Result<Json<RecoverDaemonResponse>, AppError> {
+    let idempotency_key = idempotency_key_from_headers(&headers)?;
     let user_id = user.as_ref().and_then(|u| u.0.user_id.as_deref());
     let recoverable_states = {
         let session_manager = open_session_manager(&state)?;
@@ -277,6 +299,20 @@ pub(super) async fn recover_daemon(
         }
         states
     };
+    for runtime_state in &recoverable_states {
+        bind_frozen_session_model(&state, user.as_ref(), &runtime_state.session_id).await?;
+    }
+    if state.mako_runtime.is_daemon_backed() {
+        let recovered_count = state
+            .mako_runtime
+            .recover_all_for_user(user_id, idempotency_key.as_deref())
+            .await
+            .map_err(mako_control_error)?;
+        return Ok(Json(RecoverDaemonResponse {
+            ok: true,
+            recovered_count,
+        }));
+    }
     let mut recovered_count = 0usize;
 
     for runtime_state in recoverable_states {
@@ -287,6 +323,7 @@ pub(super) async fn recover_daemon(
                 &runtime_state,
                 "manual_recover",
                 user_id,
+                idempotency_key.as_deref(),
             )
             .await
             .map_err(mako_control_error)?;
@@ -423,6 +460,7 @@ pub(super) async fn send_message(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(req): Json<MessageRequest>,
 ) -> Result<Json<OkResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
@@ -441,10 +479,18 @@ pub(super) async fn send_message(
         ));
     }
 
+    bind_frozen_session_model(&state, user.as_ref(), &id).await?;
     let user_id = current_user_id(user.as_ref());
+    let idempotency_key = idempotency_key_from_headers(&headers)?;
     state
         .mako_runtime
-        .send_message_for_user(state.clone(), id.clone(), message, user_id)
+        .send_message_for_user(
+            state.clone(),
+            id.clone(),
+            message,
+            user_id,
+            idempotency_key.as_deref(),
+        )
         .await
         .map_err(mako_control_error)?;
 
@@ -455,6 +501,7 @@ pub(super) async fn pause_session(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<OkResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
     ensure_owned_session_of_type(
@@ -464,9 +511,15 @@ pub(super) async fn pause_session(
         "Mako",
         user.as_ref(),
     )?;
+    let idempotency_key = idempotency_key_from_headers(&headers)?;
     state
         .mako_runtime
-        .pause_session_for_user(&state, &id, current_user_id(user.as_ref()))
+        .pause_session_for_user(
+            &state,
+            &id,
+            current_user_id(user.as_ref()),
+            idempotency_key.as_deref(),
+        )
         .await
         .map_err(mako_control_error)?;
     Ok(Json(OkResponse { ok: true }))
@@ -476,6 +529,7 @@ pub(super) async fn schedule_session(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(req): Json<ScheduleRequest>,
 ) -> Result<Json<OkResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
@@ -488,6 +542,8 @@ pub(super) async fn schedule_session(
     )?;
     let wake_at = parse_requested_wake_at(Some(req.start_at.as_str()))?
         .ok_or_else(|| AppError::BadRequest("start_at must be provided".to_string()))?;
+    bind_frozen_session_model(&state, user.as_ref(), &id).await?;
+    let idempotency_key = idempotency_key_from_headers(&headers)?;
     state
         .mako_runtime
         .schedule_session_for_user(
@@ -497,6 +553,7 @@ pub(super) async fn schedule_session(
             "manual_schedule",
             "scheduled",
             current_user_id(user.as_ref()),
+            idempotency_key.as_deref(),
         )
         .await
         .map_err(mako_control_error)?;
@@ -507,6 +564,7 @@ pub(super) async fn set_priority(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(req): Json<PriorityRequest>,
 ) -> Result<Json<OkResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
@@ -517,9 +575,16 @@ pub(super) async fn set_priority(
         "Mako",
         user.as_ref(),
     )?;
+    let idempotency_key = idempotency_key_from_headers(&headers)?;
     state
         .mako_runtime
-        .set_priority_for_user(&state, &id, req.priority, current_user_id(user.as_ref()))
+        .set_priority_for_user(
+            &state,
+            &id,
+            req.priority,
+            current_user_id(user.as_ref()),
+            idempotency_key.as_deref(),
+        )
         .await
         .map_err(mako_control_error)?;
     Ok(Json(OkResponse { ok: true }))
@@ -529,6 +594,7 @@ pub(super) async fn set_crew(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(req): Json<CrewRequest>,
 ) -> Result<Json<OkResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
@@ -552,6 +618,7 @@ pub(super) async fn set_crew(
         }
     }
 
+    let idempotency_key = idempotency_key_from_headers(&headers)?;
     state
         .mako_runtime
         .set_crew_for_user(
@@ -559,6 +626,7 @@ pub(super) async fn set_crew(
             &id,
             crew_slug.as_deref(),
             current_user_id(user.as_ref()),
+            idempotency_key.as_deref(),
         )
         .await
         .map_err(mako_control_error)?;
@@ -569,6 +637,7 @@ pub(super) async fn resume_session(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<OkResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
     ensure_owned_session_of_type(
@@ -578,9 +647,16 @@ pub(super) async fn resume_session(
         "Mako",
         user.as_ref(),
     )?;
+    bind_frozen_session_model(&state, user.as_ref(), &id).await?;
+    let idempotency_key = idempotency_key_from_headers(&headers)?;
     state
         .mako_runtime
-        .resume_session_for_user(state.clone(), id.clone(), current_user_id(user.as_ref()))
+        .resume_session_for_user(
+            state.clone(),
+            id.clone(),
+            current_user_id(user.as_ref()),
+            idempotency_key.as_deref(),
+        )
         .await
         .map_err(mako_control_error)?;
     Ok(Json(OkResponse { ok: true }))
@@ -590,6 +666,7 @@ pub(super) async fn cancel_session(
     State(state): State<AppState>,
     user: Option<CurrentUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<StatusCode, AppError> {
     let session_manager = open_session_manager(&state)?;
     ensure_owned_session_of_type(
@@ -600,9 +677,15 @@ pub(super) async fn cancel_session(
         user.as_ref(),
     )?;
 
+    let idempotency_key = idempotency_key_from_headers(&headers)?;
     state
         .mako_runtime
-        .delete_session_for_user(&state, &id, current_user_id(user.as_ref()))
+        .delete_session_for_user(
+            &state,
+            &id,
+            current_user_id(user.as_ref()),
+            idempotency_key.as_deref(),
+        )
         .await
         .map_err(mako_control_error)?;
 
@@ -611,6 +694,44 @@ pub(super) async fn cancel_session(
 
 fn mako_control_error(error: anyhow::Error) -> AppError {
     crate::mako_runtime::control_plane_app_error(error)
+}
+
+async fn bind_frozen_session_model(
+    state: &AppState,
+    user: Option<&CurrentUser>,
+    session_id: &str,
+) -> Result<(), AppError> {
+    let session_manager = open_session_manager(state)?;
+    let session = load_owned_session_of_type(
+        &session_manager,
+        session_id,
+        SessionType::Mako,
+        "Mako",
+        user,
+    )?;
+    let requested_model = trimmed_nonempty(session.model.as_deref())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            AppError::Conflict(
+                "Mako session has no daemon-frozen model; dispatch a new Mako session".into(),
+            )
+        })?;
+    let resolved_model = state
+        .resolve_ai_client_for_user(Some(&requested_model), current_user_id(user))
+        .await
+        .ok_or_else(|| {
+            AppError::Conflict("The Mako session model has no usable provider credentials".into())
+        })?
+        .config()
+        .model
+        .clone();
+    if requested_model != resolved_model {
+        return Err(AppError::Conflict(
+            "Mako session model is not a canonical frozen provider model; dispatch a new Mako session"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 fn load_mako_replay_events(

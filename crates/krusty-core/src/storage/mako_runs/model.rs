@@ -183,6 +183,12 @@ pub struct RunCompletion {
 pub struct LeaseReconciliation {
     pub requeued_unstarted: usize,
     pub recovery_required: usize,
-    pub requeued_run_ids: Vec<String>,
-    pub recovery_required_run_ids: Vec<String>,
+    pub requeued_runs: Vec<ReconciledRun>,
+    pub recovery_required_runs: Vec<ReconciledRun>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciledRun {
+    pub run_id: String,
+    pub attempt_no: u32,
 }

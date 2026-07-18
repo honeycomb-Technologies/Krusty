@@ -5,19 +5,42 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use thiserror::Error;
 
-/// Resolved Mako cadence settings after project overrides are applied.
+pub const DEFAULT_MAKO_TICK_INTERVAL_SECS: u64 = 30;
+pub const MIN_MAKO_TICK_INTERVAL_SECS: u64 = 5;
+pub const MAX_MAKO_TICK_INTERVAL_SECS: u64 = 86_400;
+pub const DEFAULT_MAKO_MAX_TICKS: usize = 1_000;
+pub const MAX_MAKO_MAX_TICKS: usize = 10_000;
+pub const DEFAULT_MAKO_MAX_TURNS_PER_TICK: usize = 32;
+pub const MAX_MAKO_MAX_TURNS_PER_TICK: usize = 128;
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum MakoSettingsError {
+    #[error("Mako {field} must be between {minimum} and {maximum}, got {actual}")]
+    OutOfRange {
+        field: &'static str,
+        minimum: u64,
+        maximum: u64,
+        actual: u64,
+    },
+}
+
+/// Resolved Mako runtime settings after project overrides are applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MakoSettings {
     pub tick_interval_secs: u64,
     pub max_ticks: usize,
+    /// Hard parent-loop budget applied independently to every autonomous tick.
+    pub max_turns_per_tick: usize,
 }
 
 impl Default for MakoSettings {
     fn default() -> Self {
         Self {
-            tick_interval_secs: 30,
-            max_ticks: 1000,
+            tick_interval_secs: DEFAULT_MAKO_TICK_INTERVAL_SECS,
+            max_ticks: DEFAULT_MAKO_MAX_TICKS,
+            max_turns_per_tick: DEFAULT_MAKO_MAX_TURNS_PER_TICK,
         }
     }
 }
@@ -31,6 +54,10 @@ pub struct ProjectMakoSettings {
 
     /// Maximum autonomous wake ticks to execute before stopping.
     pub max_ticks: Option<usize>,
+
+    /// Maximum parent-agent model turns allowed within each autonomous tick.
+    /// Subagents retain their own inherited, independently enforced budgets.
+    pub max_turns_per_tick: Option<usize>,
 }
 
 /// Repository-owned restrictions for executable agent extensions after a
@@ -80,7 +107,9 @@ fn extension_pattern_matches(pattern: &str, extension_id: &str) -> bool {
 
 impl ProjectMakoSettings {
     fn is_empty(&self) -> bool {
-        self.tick_interval_secs.is_none() && self.max_ticks.is_none()
+        self.tick_interval_secs.is_none()
+            && self.max_ticks.is_none()
+            && self.max_turns_per_tick.is_none()
     }
 }
 
@@ -147,20 +176,53 @@ impl ProjectSettings {
                 .is_none_or(ProjectAgentExtensionSettings::is_empty)
     }
 
-    /// Resolve Mako cadence settings with defaults and basic zero-value rejection.
+    /// Resolve Mako settings for read-only/status surfaces.
+    ///
+    /// Invalid explicit overrides never escape as unbounded work. They are
+    /// surfaced in logs and replaced wholesale with the finite safe defaults.
     pub fn mako_settings(&self) -> MakoSettings {
-        let mut resolved = MakoSettings::default();
-
-        if let Some(mako) = &self.mako {
-            if let Some(tick_interval_secs) = mako.tick_interval_secs.filter(|secs| *secs > 0) {
-                resolved.tick_interval_secs = tick_interval_secs;
-            }
-            if let Some(max_ticks) = mako.max_ticks.filter(|max_ticks| *max_ticks > 0) {
-                resolved.max_ticks = max_ticks;
+        match self.mako_settings_checked() {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::warn!(error = %error, "Rejecting invalid project Mako settings");
+                MakoSettings::default()
             }
         }
+    }
 
-        resolved
+    /// Resolve Mako settings for execution. Explicit invalid or oversized
+    /// values fail closed instead of being ignored, clamped, or made unbounded.
+    pub fn mako_settings_checked(&self) -> Result<MakoSettings, MakoSettingsError> {
+        let Some(mako) = &self.mako else {
+            return Ok(MakoSettings::default());
+        };
+
+        let tick_interval_secs = checked_u64(
+            "tick_interval_secs",
+            mako.tick_interval_secs
+                .unwrap_or(DEFAULT_MAKO_TICK_INTERVAL_SECS),
+            MIN_MAKO_TICK_INTERVAL_SECS,
+            MAX_MAKO_TICK_INTERVAL_SECS,
+        )?;
+        let max_ticks = checked_usize(
+            "max_ticks",
+            mako.max_ticks.unwrap_or(DEFAULT_MAKO_MAX_TICKS),
+            1,
+            MAX_MAKO_MAX_TICKS,
+        )?;
+        let max_turns_per_tick = checked_usize(
+            "max_turns_per_tick",
+            mako.max_turns_per_tick
+                .unwrap_or(DEFAULT_MAKO_MAX_TURNS_PER_TICK),
+            1,
+            MAX_MAKO_MAX_TURNS_PER_TICK,
+        )?;
+
+        Ok(MakoSettings {
+            tick_interval_secs,
+            max_ticks,
+            max_turns_per_tick,
+        })
     }
 
     /// Load resolved Mako cadence settings directly from the active project directory.
@@ -175,6 +237,53 @@ impl ProjectSettings {
         self.agent_extensions
             .as_ref()
             .is_none_or(|settings| settings.allows(extension_id))
+    }
+
+    /// Load Mako settings for an execution boundary. Unlike the status helper,
+    /// this preserves validation failure so the caller can refuse the run.
+    pub fn load_mako_settings_checked(
+        project_dir: Option<&Path>,
+    ) -> Result<MakoSettings, MakoSettingsError> {
+        project_dir
+            .map(Self::load)
+            .unwrap_or_default()
+            .mako_settings_checked()
+    }
+}
+
+fn checked_u64(
+    field: &'static str,
+    actual: u64,
+    minimum: u64,
+    maximum: u64,
+) -> Result<u64, MakoSettingsError> {
+    if (minimum..=maximum).contains(&actual) {
+        Ok(actual)
+    } else {
+        Err(MakoSettingsError::OutOfRange {
+            field,
+            minimum,
+            maximum,
+            actual,
+        })
+    }
+}
+
+fn checked_usize(
+    field: &'static str,
+    actual: usize,
+    minimum: usize,
+    maximum: usize,
+) -> Result<usize, MakoSettingsError> {
+    if (minimum..=maximum).contains(&actual) {
+        Ok(actual)
+    } else {
+        Err(MakoSettingsError::OutOfRange {
+            field,
+            minimum: minimum as u64,
+            maximum: maximum as u64,
+            actual: u64::try_from(actual).unwrap_or(u64::MAX),
+        })
     }
 }
 
@@ -258,7 +367,8 @@ mod tests {
                 "disabled_tools": ["bash"],
                 "mako": {
                     "tick_interval_secs": 20,
-                    "max_ticks": 200
+                    "max_ticks": 200,
+                    "max_turns_per_tick": 24
                 }
             }"#,
         )
@@ -282,6 +392,7 @@ mod tests {
         );
         assert_eq!(settings.mako_settings().tick_interval_secs, 20);
         assert_eq!(settings.mako_settings().max_ticks, 200);
+        assert_eq!(settings.mako_settings().max_turns_per_tick, 24);
     }
 
     #[test]
@@ -292,16 +403,83 @@ mod tests {
     }
 
     #[test]
-    fn mako_settings_ignore_zero_values() {
+    fn mako_execution_settings_reject_zero_values() {
+        for mako in [
+            ProjectMakoSettings {
+                tick_interval_secs: Some(0),
+                ..Default::default()
+            },
+            ProjectMakoSettings {
+                max_ticks: Some(0),
+                ..Default::default()
+            },
+            ProjectMakoSettings {
+                max_turns_per_tick: Some(0),
+                ..Default::default()
+            },
+        ] {
+            let settings = ProjectSettings {
+                mako: Some(mako),
+                ..Default::default()
+            };
+            assert!(settings.mako_settings_checked().is_err());
+            assert_eq!(settings.mako_settings(), MakoSettings::default());
+        }
+    }
+
+    #[test]
+    fn mako_execution_settings_accept_hard_upper_bounds() {
         let settings = ProjectSettings {
             mako: Some(ProjectMakoSettings {
-                tick_interval_secs: Some(0),
-                max_ticks: Some(0),
+                tick_interval_secs: Some(MAX_MAKO_TICK_INTERVAL_SECS),
+                max_ticks: Some(MAX_MAKO_MAX_TICKS),
+                max_turns_per_tick: Some(MAX_MAKO_MAX_TURNS_PER_TICK),
             }),
             ..Default::default()
         };
 
-        assert_eq!(settings.mako_settings(), MakoSettings::default());
+        assert_eq!(
+            settings.mako_settings_checked().unwrap(),
+            MakoSettings {
+                tick_interval_secs: MAX_MAKO_TICK_INTERVAL_SECS,
+                max_ticks: MAX_MAKO_MAX_TICKS,
+                max_turns_per_tick: MAX_MAKO_MAX_TURNS_PER_TICK,
+            }
+        );
+    }
+
+    #[test]
+    fn mako_execution_settings_reject_values_above_hard_bounds() {
+        for mako in [
+            ProjectMakoSettings {
+                tick_interval_secs: Some(MAX_MAKO_TICK_INTERVAL_SECS + 1),
+                ..Default::default()
+            },
+            ProjectMakoSettings {
+                max_ticks: Some(MAX_MAKO_MAX_TICKS + 1),
+                ..Default::default()
+            },
+            ProjectMakoSettings {
+                max_turns_per_tick: Some(MAX_MAKO_MAX_TURNS_PER_TICK + 1),
+                ..Default::default()
+            },
+        ] {
+            let settings = ProjectSettings {
+                mako: Some(mako),
+                ..Default::default()
+            };
+            assert!(settings.mako_settings_checked().is_err());
+            assert_eq!(settings.mako_settings(), MakoSettings::default());
+        }
+    }
+
+    #[test]
+    fn mako_default_parent_turn_budget_is_finite_and_bounded() {
+        let settings = MakoSettings::default();
+        assert!(settings.max_turns_per_tick > 0);
+        assert!(settings.max_turns_per_tick <= MAX_MAKO_MAX_TURNS_PER_TICK);
+        assert!(settings.max_ticks <= MAX_MAKO_MAX_TICKS);
+        assert!(settings.tick_interval_secs <= MAX_MAKO_TICK_INTERVAL_SECS);
     }
 
     #[test]

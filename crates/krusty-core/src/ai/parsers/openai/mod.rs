@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::ai::retry::safe_provider_event_error;
 use crate::ai::sse::{SseEvent, SseParser, ToolCallAccumulator};
 
 /// OpenAI-compatible SSE parser for chat/completions format
@@ -53,16 +54,15 @@ impl SseParser for OpenAIParser {
             let message = error
                 .get("message")
                 .and_then(|m| m.as_str())
-                .unwrap_or("Unknown error");
-            let error_type = error
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or("unknown");
-            return Err(anyhow::anyhow!(
-                "OpenAI API error ({}): {}",
+                .or_else(|| error.as_str());
+            let error_type = error.get("type").and_then(|t| t.as_str());
+            let error_code = error.get("code").and_then(Value::as_str);
+            return Err(anyhow::Error::msg(safe_provider_event_error(
+                "OpenAI API error",
+                error_code,
                 error_type,
-                message
-            ));
+                message,
+            )));
         }
 
         if let Some(event_type) = json.get("type").and_then(|t| t.as_str()) {
@@ -71,8 +71,18 @@ impl SseParser for OpenAIParser {
                     .get("message")
                     .and_then(|m| m.as_str())
                     .or_else(|| json.get("error").and_then(|e| e.as_str()))
-                    .unwrap_or("Unknown error");
-                return Err(anyhow::anyhow!("OpenAI Responses API error: {}", message));
+                    .or_else(|| json.pointer("/error/message").and_then(Value::as_str));
+                let error_code = json.pointer("/error/code").and_then(Value::as_str);
+                let error_type = json
+                    .pointer("/error/type")
+                    .and_then(Value::as_str)
+                    .or(Some(event_type));
+                return Err(anyhow::Error::msg(safe_provider_event_error(
+                    "OpenAI Responses API error",
+                    error_code,
+                    error_type,
+                    message,
+                )));
             }
             return self.parse_responses_api_event(json, event_type);
         }
@@ -105,6 +115,32 @@ mod tests {
 
     use super::OpenAIParser;
     use crate::ai::sse::{SseEvent, SseParser};
+
+    #[tokio::test]
+    async fn provider_error_event_never_reflects_message_type_or_code() {
+        const MESSAGE_SENTINEL: &str = "OPENAI_MESSAGE_SENTINEL_624a";
+        const TYPE_SENTINEL: &str = "OPENAI_TYPE_SENTINEL_288d";
+        const CODE_SENTINEL: &str = "OPENAI_CODE_SENTINEL_99fe";
+        let result = OpenAIParser::new()
+            .parse_event(&json!({
+                "error": {
+                    "message": MESSAGE_SENTINEL,
+                    "type": TYPE_SENTINEL,
+                    "code": CODE_SENTINEL
+                }
+            }))
+            .await;
+        let error = match result {
+            Ok(_) => panic!("provider error event should fail"),
+            Err(error) => error.to_string(),
+        };
+        for sentinel in [MESSAGE_SENTINEL, TYPE_SENTINEL, CODE_SENTINEL] {
+            assert!(!error.contains(sentinel));
+        }
+        assert!(error.contains("message_fingerprint=sha256:"));
+        assert!(error.contains("category_fingerprint=sha256:"));
+        assert!(error.contains("code_fingerprint=sha256:"));
+    }
 
     #[tokio::test]
     async fn responses_final_snapshot_recovers_text_when_deltas_are_absent() {

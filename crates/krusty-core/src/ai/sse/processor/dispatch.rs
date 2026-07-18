@@ -3,6 +3,7 @@ use tracing::{debug, info, warn};
 
 use super::super::events::{SseEvent, SseParser};
 use super::SseStreamProcessor;
+use crate::ai::retry::{safe_provider_code, safe_provider_event_error};
 use crate::ai::streaming::StreamPart;
 use crate::ai::types::FinishReason;
 
@@ -29,13 +30,15 @@ impl SseStreamProcessor {
         }
 
         if let Ok(json) = serde_json::from_str::<Value>(data) {
-            let event_type = json
+            let event_type_bytes = json
                 .get("type")
                 .and_then(|t| t.as_str())
-                .unwrap_or("unknown");
+                .map_or(0, str::len);
             debug!(
-                "SSE event #{} at {:?}: type={}",
-                self.event_count, elapsed, event_type
+                event_number = self.event_count,
+                ?elapsed,
+                event_type_bytes,
+                "SSE event received"
             );
 
             for event in parser.parse_events(&json).await? {
@@ -57,37 +60,53 @@ impl SseStreamProcessor {
                     }
                     SseEvent::ToolCallStart { id, name } => {
                         info!(
-                            "SSE ToolCallStart: id={}, name={} at {:?}",
-                            id, name, elapsed
+                            tool_call_id_bytes = id.len(),
+                            tool_name_bytes = name.len(),
+                            ?elapsed,
+                            "SSE tool call started"
                         );
                         self.dispatch_part(StreamPart::ToolCallStart { id, name });
                     }
                     SseEvent::ToolCallDelta { id, delta } => {
-                        debug!("  -> ToolCallDelta: id={}, {} chars", id, delta.len());
+                        debug!(
+                            tool_call_id_bytes = id.len(),
+                            delta_bytes = delta.len(),
+                            "SSE tool call delta received"
+                        );
                         self.dispatch_part(StreamPart::ToolCallDelta { id, delta });
                     }
                     SseEvent::ToolCallComplete(tool_call) => {
                         info!(
-                            "SSE ToolCallComplete: id={}, name={} at {:?}",
-                            tool_call.id, tool_call.name, elapsed
+                            tool_call_id_bytes = tool_call.id.len(),
+                            tool_name_bytes = tool_call.name.len(),
+                            ?elapsed,
+                            "SSE tool call completed"
                         );
                         self.dispatch_part(StreamPart::ToolCallComplete { tool_call });
                     }
                     SseEvent::ServerToolStart { id, name } => {
                         info!(
-                            "SSE ServerToolStart: id={}, name={} at {:?}",
-                            id, name, elapsed
+                            tool_call_id_bytes = id.len(),
+                            tool_name_bytes = name.len(),
+                            ?elapsed,
+                            "SSE server tool started"
                         );
                         self.dispatch_part(StreamPart::ServerToolStart { id, name });
                     }
                     SseEvent::ServerToolDelta { id, delta } => {
-                        debug!("  -> ServerToolDelta: id={}, {} chars", id, delta.len());
+                        debug!(
+                            tool_call_id_bytes = id.len(),
+                            delta_bytes = delta.len(),
+                            "SSE server tool delta received"
+                        );
                         self.dispatch_part(StreamPart::ServerToolDelta { id, delta });
                     }
                     SseEvent::ServerToolComplete { id, name, input } => {
                         info!(
-                            "SSE ServerToolComplete: id={}, name={} at {:?}",
-                            id, name, elapsed
+                            tool_call_id_bytes = id.len(),
+                            tool_name_bytes = name.len(),
+                            ?elapsed,
+                            "SSE server tool completed"
                         );
                         self.dispatch_part(StreamPart::ServerToolComplete { id, name, input });
                     }
@@ -96,10 +115,10 @@ impl SseStreamProcessor {
                         results,
                     } => {
                         info!(
-                            "SSE WebSearchResults: {} results for {} at {:?}",
-                            results.len(),
-                            tool_use_id,
-                            elapsed
+                            result_count = results.len(),
+                            tool_call_id_bytes = tool_use_id.len(),
+                            ?elapsed,
+                            "SSE web search results received"
                         );
                         self.dispatch_part(StreamPart::WebSearchResults {
                             tool_use_id,
@@ -111,8 +130,10 @@ impl SseStreamProcessor {
                         content,
                     } => {
                         info!(
-                            "SSE WebFetchResult: url={} for {} at {:?}",
-                            content.url, tool_use_id, elapsed
+                            url_bytes = content.url.len(),
+                            tool_call_id_bytes = tool_use_id.len(),
+                            ?elapsed,
+                            "SSE web fetch result received"
                         );
                         self.dispatch_part(StreamPart::WebFetchResult {
                             tool_use_id,
@@ -124,12 +145,14 @@ impl SseStreamProcessor {
                         error_code,
                     } => {
                         warn!(
-                            "SSE ServerToolError: {} for {} at {:?}",
-                            error_code, tool_use_id, elapsed
+                            error_code_bytes = error_code.len(),
+                            tool_call_id_bytes = tool_use_id.len(),
+                            ?elapsed,
+                            "SSE server tool error received"
                         );
                         self.dispatch_part(StreamPart::ServerToolError {
                             tool_use_id,
-                            error_code,
+                            error_code: safe_provider_code(&error_code),
                         });
                     }
                     SseEvent::ThinkingStart { index } => {
@@ -171,9 +194,19 @@ impl SseStreamProcessor {
                         });
                     }
                     SseEvent::Finish { reason, usage } => {
+                        let reason_kind = match &reason {
+                            FinishReason::Stop => "stop",
+                            FinishReason::Length => "length",
+                            FinishReason::ToolCalls => "tool_calls",
+                            FinishReason::ContentFilter => "content_filter",
+                            FinishReason::Other(_) => "other",
+                        };
                         info!(
-                            "SSE Finish: reason={:?} at {:?} ({} events, {} bytes)",
-                            reason, elapsed, self.event_count, self.bytes_received
+                            reason_kind,
+                            ?elapsed,
+                            event_count = self.event_count,
+                            bytes_received = self.bytes_received,
+                            "SSE stream finished"
                         );
                         self.stream_buffer.flush().await;
                         if let Some(usage) = usage {
@@ -192,8 +225,9 @@ impl SseStreamProcessor {
                         self.stream_buffer.flush().await;
                         for tool_call in tool_calls {
                             info!(
-                                "  -> Completing tool call: id={}, name={}",
-                                tool_call.id, tool_call.name
+                                tool_call_id_bytes = tool_call.id.len(),
+                                tool_name_bytes = tool_call.name.len(),
+                                "Completing SSE tool call"
                             );
                             self.dispatch_part(StreamPart::ToolCallComplete { tool_call });
                         }
@@ -222,9 +256,17 @@ impl SseStreamProcessor {
                 }
             }
         } else if !data.is_empty() && !data.trim().is_empty() {
+            let safe_error = safe_provider_event_error(
+                "Failed to parse SSE JSON",
+                None,
+                Some("invalid_request_error"),
+                Some(data),
+            );
             warn!(
-                "Failed to parse SSE JSON (event #{}): {}",
-                self.event_count, data
+                event_number = self.event_count,
+                data_bytes = data.len(),
+                error = %safe_error,
+                "Failed to parse SSE JSON"
             );
         }
 

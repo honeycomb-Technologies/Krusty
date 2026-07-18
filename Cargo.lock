@@ -5009,6 +5009,7 @@ dependencies = [
  "base64ct",
  "chrono",
  "dirs 6.0.0",
+ "fs2",
  "futures",
  "jsonwebtoken",
  "krusty-core",

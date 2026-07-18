@@ -11,4 +11,6 @@ pub use backoff::{
     extract_http_status, is_retryable_error_message, is_retryable_status, with_retry, IsRetryable,
     RetryConfig,
 };
-pub(crate) use backoff::{parse_retry_after, ProviderHttpError};
+pub(crate) use backoff::{
+    provider_http_error, safe_provider_code, safe_provider_event_error, ProviderHttpError,
+};

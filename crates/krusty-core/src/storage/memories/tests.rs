@@ -63,6 +63,53 @@ fn list_without_user_id_excludes_user_scoped_memories() {
 }
 
 #[test]
+fn exact_owner_listing_never_inherits_local_or_foreign_memory() {
+    let (store, _tmp) = create_store();
+    for (title, content, project_dir, user_id) in [
+        ("Local global", "local-global", None, None),
+        ("Local project", "local-project", Some("/repo"), None),
+        ("Alice global", "alice-global", None, Some("alice")),
+        (
+            "Alice project",
+            "alice-project",
+            Some("/repo"),
+            Some("alice"),
+        ),
+        ("Bob project", "bob-project", Some("/repo"), Some("bob")),
+    ] {
+        store
+            .save(MemoryType::Project, title, content, project_dir, user_id)
+            .unwrap();
+    }
+
+    let alice = store.list_for_exact_owner(Some("/repo"), Some("alice"));
+    assert_eq!(alice.len(), 2);
+    assert!(alice
+        .iter()
+        .all(|memory| memory.user_id.as_deref() == Some("alice")));
+    assert!(alice.iter().any(|memory| memory.content == "alice-global"));
+    assert!(alice.iter().any(|memory| memory.content == "alice-project"));
+    assert!(alice
+        .iter()
+        .all(|memory| !memory.content.starts_with("local-")));
+    assert!(alice
+        .iter()
+        .all(|memory| !memory.content.starts_with("bob-")));
+
+    let local = store.list_for_exact_owner(Some("/repo"), None);
+    assert_eq!(local.len(), 2);
+    assert!(local.iter().all(|memory| memory.user_id.is_none()));
+    assert!(local.iter().any(|memory| memory.content == "local-global"));
+    assert!(local.iter().any(|memory| memory.content == "local-project"));
+    assert!(local
+        .iter()
+        .all(|memory| !memory.content.starts_with("alice-")));
+    assert!(local
+        .iter()
+        .all(|memory| !memory.content.starts_with("bob-")));
+}
+
+#[test]
 fn update_memory() {
     let (store, _tmp) = create_store();
     let mem = store

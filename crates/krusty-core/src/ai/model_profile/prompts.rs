@@ -67,9 +67,7 @@ pub fn partition_system_messages(messages: &[ModelMessage]) -> (String, String) 
     (project, session)
 }
 
-fn partition_system_messages_by_stability(
-    messages: &[ModelMessage],
-) -> (String, String, String) {
+fn partition_system_messages_by_stability(messages: &[ModelMessage]) -> (String, String, String) {
     let mut identity_context = String::new();
     let mut project_context = String::new();
     let mut session_context = String::new();
@@ -78,7 +76,7 @@ fn partition_system_messages_by_stability(
         if let Some(text) = first_text_block(&message.content) {
             if is_stable_identity_context(text) {
                 append_context(&mut identity_context, text);
-            } else if text.starts_with("[PROJECT INSTRUCTIONS") {
+            } else if is_stable_project_context(text) {
                 if !project_context.is_empty() {
                     project_context.push_str("\n\n");
                 }
@@ -110,6 +108,16 @@ fn is_stable_identity_context(text: &str) -> bool {
         "[MAKO USER",
         "[MAKO CREW IDENTITY",
         "[MAKO CREW SOUL",
+    ]
+    .iter()
+    .any(|prefix| text.starts_with(prefix))
+}
+
+fn is_stable_project_context(text: &str) -> bool {
+    [
+        "[PROJECT INSTRUCTIONS",
+        "[PROJECT SETTINGS]",
+        "[MAKO PROJECT OVERLAY",
     ]
     .iter()
     .any(|prefix| text.starts_with(prefix))
@@ -176,5 +184,73 @@ mod tests {
         assert!(sections.identity_context.contains("Warm and exact"));
         assert!(!sections.identity_context.contains("Check work"));
         assert!(sections.session_context.contains("Check work"));
+    }
+
+    #[test]
+    fn mako_prompt_tiers_keep_persona_and_project_stable_but_operations_volatile() {
+        use crate::ai::types::{Content, ModelMessage, Role};
+
+        let system = |text: &str| ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text {
+                text: text.to_string(),
+            }],
+        };
+        let first = vec![
+            system("[MAKO COORDINATOR]\nCoordinate deliberately."),
+            system("[MAKO SOUL - profile:local]\nWarm and candid."),
+            system("[MAKO IDENTITY - profile:local]\nName: Mako"),
+            system("[MAKO USER - profile:local]\nUse concise updates."),
+            system("[MAKO CREW SOUL - reviewer]\nEvidence first."),
+            system("[PROJECT INSTRUCTIONS - AGENTS.md]\nValidate changes."),
+            system("[MAKO PROJECT OVERLAY - MAKO.md]\nProject cadence."),
+            system("[PROJECT SETTINGS]\nAutonomous mode."),
+            system("[MAKO HEARTBEAT - snapshot-revision:4]\nCheck queue A."),
+            system("[MAKO CHANNELS - snapshot-revision:4]\nMain thread."),
+            system("[RECALLED CONVERSATION EPISODES]\nFallible evidence."),
+        ];
+        let mut second = first.clone();
+        second[8] = system("[MAKO HEARTBEAT - snapshot-revision:5]\nCheck queue B.");
+        second[9] = system("[MAKO CHANNELS - snapshot-revision:5]\nMobile push.");
+
+        let first = build_system_prompt_sections(
+            ProviderId::Anthropic,
+            ApiFormat::Anthropic,
+            "claude-sonnet-4-5",
+            &first,
+            None,
+            &[],
+        );
+        let second = build_system_prompt_sections(
+            ProviderId::Anthropic,
+            ApiFormat::Anthropic,
+            "claude-sonnet-4-5",
+            &second,
+            None,
+            &[],
+        );
+
+        assert_eq!(first.identity_context, second.identity_context);
+        assert_eq!(first.project_context, second.project_context);
+        assert_ne!(first.session_context, second.session_context);
+        for marker in [
+            "MAKO COORDINATOR",
+            "MAKO SOUL",
+            "MAKO IDENTITY",
+            "MAKO USER",
+            "MAKO CREW SOUL",
+        ] {
+            assert!(first.identity_context.contains(marker));
+        }
+        assert!(first.project_context.contains("PROJECT INSTRUCTIONS"));
+        assert!(first.project_context.contains("MAKO PROJECT OVERLAY"));
+        assert!(first.project_context.contains("PROJECT SETTINGS"));
+        assert!(first.session_context.contains("MAKO HEARTBEAT"));
+        assert!(first.session_context.contains("MAKO CHANNELS"));
+        assert!(first
+            .session_context
+            .contains("RECALLED CONVERSATION EPISODES"));
+        assert!(!first.identity_context.contains("MAKO HEARTBEAT"));
+        assert!(!first.project_context.contains("MAKO CHANNELS"));
     }
 }

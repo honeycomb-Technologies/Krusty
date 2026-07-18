@@ -1,19 +1,24 @@
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use krusty_core::mako::{canonical_timestamp, RecurrenceV1, RetryPolicy};
-use krusty_core::storage::{hash_request_bytes, is_valid_crew_slug};
+use krusty_core::mako::{
+    canonical_timestamp, parse_timezone, DstPolicy, MisfireConfig, RecurrenceV1, RetryPolicy,
+};
+use krusty_core::storage::{hash_request_bytes, is_valid_crew_slug, OverlapPolicy};
 use krusty_core::Content;
 use krusty_mako_protocol::{
-    unix_time_millis, AckResponse, Actor, Command, DispatchCommand, DispatchResponse,
-    EventEnvelope, ExtensionResponse, LaggedEvent, MakoEvent, ProtocolErrorPayload,
-    ProtocolVersion, RecoverResponse, ReplayGapEvent, ResponsePayload, SessionResponse,
-    SubscribeCommand, SubscriptionAccepted,
+    unix_time_millis, AckResponse, Actor, Command, CreateScheduleCommand, DaemonRuntimeStats,
+    DispatchCommand, DispatchResponse, EventEnvelope, ExtensionResponse, LaggedEvent, MakoEvent,
+    ProtocolErrorPayload, ProtocolVersion, RecoverResponse, ReplaceScheduleCommand, ReplayGapEvent,
+    ResponsePayload, ScheduleDefinition, ScheduleResponse, SessionResponse,
+    SetScheduleStatusCommand, SubscribeCommand, SubscriptionAccepted,
 };
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::Value;
-use tokio::sync::{broadcast, mpsc, watch, Mutex};
+use tokio::sync::{broadcast, mpsc, watch, Mutex, Notify};
 use tokio::task::JoinHandle;
 
 use crate::{CommandContext, CommandHandler, HandlerReply, HandlerResult};
@@ -28,13 +33,79 @@ use super::persistence::{
 };
 use super::pump;
 
+pub(crate) const DAEMON_LEASE_NAME: &str = "mako-scheduler";
+pub(crate) const MAX_RETRY_ATTEMPTS: u32 = 100;
+pub(crate) const MAX_RETRY_DELAY_SECS: u64 = 7 * 24 * 60 * 60;
+
+const PUMP_STARTING: u8 = 0;
+const PUMP_RUNNING: u8 = 1;
+const PUMP_STOPPED: u8 = 2;
+const CANCELLATION_SIGNAL_CAPACITY: usize = 64;
+
+#[derive(Debug, Clone)]
+pub(crate) struct CommittedCancellation {
+    pub(crate) session_id: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct RuntimeHealth {
+    pump_state: AtomicU8,
+    scheduler_activated: AtomicBool,
+    pump_stopped: Notify,
+}
+
+impl RuntimeHealth {
+    fn new() -> Self {
+        Self {
+            pump_state: AtomicU8::new(PUMP_STARTING),
+            scheduler_activated: AtomicBool::new(false),
+            pump_stopped: Notify::new(),
+        }
+    }
+
+    pub(crate) fn mark_pump_running(&self) {
+        self.pump_state.store(PUMP_RUNNING, Ordering::Release);
+    }
+
+    pub(crate) fn mark_pump_stopped(&self) {
+        self.scheduler_activated.store(false, Ordering::Release);
+        self.pump_state.store(PUMP_STOPPED, Ordering::Release);
+        self.pump_stopped.notify_waiters();
+    }
+
+    pub(crate) fn set_scheduler_activated(&self, activated: bool) {
+        self.scheduler_activated.store(activated, Ordering::Release);
+    }
+
+    fn pump_alive(&self) -> bool {
+        self.pump_state.load(Ordering::Acquire) == PUMP_RUNNING
+    }
+
+    fn scheduler_activated(&self) -> bool {
+        self.scheduler_activated.load(Ordering::Acquire)
+    }
+
+    async fn wait_for_pump_stop(&self) {
+        loop {
+            let stopped = self.pump_stopped.notified();
+            if self.pump_state.load(Ordering::Acquire) == PUMP_STOPPED {
+                return;
+            }
+            stopped.await;
+        }
+    }
+}
+
 pub(crate) struct RuntimeShared {
     pub(crate) config: MakoRuntimeConfig,
     pub(crate) instance_id: String,
     pub(crate) persistence: RuntimePersistence,
     pub(crate) backend: Arc<dyn ExecutionBackend>,
     pub(crate) events: EventHub,
+    pub(crate) cancellation_tx: broadcast::Sender<CommittedCancellation>,
     pub(crate) mutation_gate: Mutex<()>,
+    pub(crate) control_gate: Mutex<()>,
+    pub(crate) health: RuntimeHealth,
 }
 
 pub struct DurableMakoCommandHandler {
@@ -56,6 +127,31 @@ impl MakoRuntimeHandle {
         self.shutdown_tx.send_replace(true);
         if let Some(task) = self.task.take() {
             let _ = task.await;
+        }
+    }
+
+    /// Wait for an unrequested scheduler-pump exit. The task is not removed
+    /// until its liveness guard has reported a stop, so cancelling this future
+    /// (for example because the IPC server shut down first) leaves graceful
+    /// shutdown ownership intact.
+    pub async fn wait_for_scheduler_failure(&mut self) -> anyhow::Error {
+        self.handler.shared.health.wait_for_pump_stop().await;
+        match self.task.take() {
+            Some(task) => match task.await {
+                Ok(()) => anyhow::anyhow!("Mako scheduler pump exited unexpectedly"),
+                Err(error) if error.is_panic() => {
+                    anyhow::anyhow!("Mako scheduler pump panicked: {error}")
+                }
+                Err(error) => anyhow::anyhow!("Mako scheduler pump stopped: {error}"),
+            },
+            None => anyhow::anyhow!("Mako scheduler pump stopped without a task handle"),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_pump_exit_for_test(&self) {
+        if let Some(task) = &self.task {
+            task.abort();
         }
     }
 }
@@ -81,12 +177,16 @@ pub async fn start_runtime(
         .await
         .map_err(|error| anyhow::anyhow!(error.protocol().message))?;
     let instance_label = daemon_instance_id.into();
+    let (cancellation_tx, _) = broadcast::channel(CANCELLATION_SIGNAL_CAPACITY);
     let shared = Arc::new(RuntimeShared {
         instance_id: format!("{instance_label}:boot:{}", uuid::Uuid::new_v4()),
         events: EventHub::new(config.live_event_capacity),
         persistence,
         backend,
         mutation_gate: Mutex::new(()),
+        control_gate: Mutex::new(()),
+        cancellation_tx,
+        health: RuntimeHealth::new(),
         config,
     });
     let handler = Arc::new(DurableMakoCommandHandler {
@@ -123,6 +223,12 @@ impl CommandHandler for DurableMakoCommandHandler {
         let actor = context.actor.clone();
         let idempotency_key = context.idempotency_key.clone();
         let control = control_after_commit(&command, &actor, &idempotency_key);
+        let committed_cancellation = match &command {
+            Command::CancelSession(command) => Some(CommittedCancellation {
+                session_id: command.session_id.clone(),
+            }),
+            _ => None,
+        };
         let _gate = self.shared.mutation_gate.lock().await;
         let mut outcome = self
             .mutate(actor, idempotency_key, operation, hash, command)
@@ -132,24 +238,63 @@ impl CommandHandler for DurableMakoCommandHandler {
         for event in &outcome.events {
             self.shared.events.publish(event.envelope());
         }
+        // Reserve control-delivery order before releasing mutation order. A
+        // later Resume/Start must not reach the backend before an earlier
+        // Pause/Cancel, and steering must follow durable commit order.
+        let control_guard = if !outcome.replayed && control.is_some() {
+            Some(self.shared.control_gate.lock().await)
+        } else {
+            None
+        };
         drop(_gate);
 
         if !outcome.replayed {
+            // Wake every scheduler-owned execution only after the exact-owner
+            // cancellation transaction has committed. Receivers subscribe
+            // before entering the durable running boundary, so this closes
+            // the mark-running/control-delivery race without treating a
+            // best-effort host acknowledgement as the source of truth.
+            if let Some(cancellation) = committed_cancellation {
+                let _ = self.shared.cancellation_tx.send(cancellation);
+            }
             if let Some((session_id, control)) = control {
                 if let Err(error) = self.shared.backend.control(&session_id, control).await {
                     tracing::warn!(session_id, error = %error, "Mako backend control delivery failed after durable acceptance");
                 }
             }
         }
+        drop(control_guard);
         Ok(HandlerReply::Response(outcome.response))
     }
 
-    async fn runtime_stats(&self) -> Value {
-        self.shared
-            .persistence
-            .stats()
-            .await
-            .unwrap_or_else(|error| serde_json::json!({"error": error.protocol().code}))
+    async fn runtime_stats(&self, actor: &Actor) -> DaemonRuntimeStats {
+        let pump_alive = self.shared.health.pump_alive();
+        let mut stats = match self.shared.persistence.stats(actor).await {
+            Ok(stats) => stats,
+            Err(error) => {
+                let failure = error.protocol();
+                tracing::warn!(
+                    error_code = %failure.code,
+                    "Mako runtime stats are unavailable; reporting scheduler not ready"
+                );
+                return DaemonRuntimeStats {
+                    pump_alive,
+                    ..DaemonRuntimeStats::default()
+                };
+            }
+        };
+        let scheduler_ready = if pump_alive && self.shared.health.scheduler_activated() {
+            self.shared
+                .persistence
+                .daemon_lease_is_current(DAEMON_LEASE_NAME, &self.shared.instance_id)
+                .await
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        stats.pump_alive = pump_alive;
+        stats.scheduler_ready = scheduler_ready;
+        stats
     }
 }
 
@@ -172,6 +317,15 @@ impl DurableMakoCommandHandler {
                 hash,
                 move |tx, actor, now| match command {
                     Command::Dispatch(command) => dispatch(tx, actor, now, command),
+                    Command::CreateSchedule(command) => {
+                        create_recurring_schedule(tx, actor, now, command)
+                    }
+                    Command::ReplaceSchedule(command) => {
+                        replace_recurring_schedule(tx, actor, now, command)
+                    }
+                    Command::SetScheduleStatus(command) => {
+                        set_schedule_status(tx, actor, now, command)
+                    }
                     Command::StartSession(command) => {
                         start_session(tx, actor, now, &command.session_id)
                     }
@@ -210,42 +364,48 @@ impl DurableMakoCommandHandler {
                             &pending_id,
                         )
                     }
-                    Command::Steer(command) => control_event(
+                    Command::Steer(command) => {
+                        let pending_id = steer_pending_id(
+                            actor,
+                            &command.session_id,
+                            &mutation_idempotency_key,
+                            command.pending_id.as_deref(),
+                        );
+                        stage_steer(
+                            tx,
+                            actor,
+                            now,
+                            &command.session_id,
+                            &pending_id,
+                            command.content,
+                        )
+                    }
+                    Command::ToolApproval(command) => stage_tool_approval(
                         tx,
                         actor,
                         now,
                         &command.session_id,
-                        "steer_received",
-                        serde_json::json!({
-                            "pending_id": command.pending_id,
-                            "content": command.content,
-                        }),
-                        false,
+                        &command.run_id,
+                        &command.tool_call_id,
+                        command.approved,
                     ),
-                    Command::ToolApproval(command) => control_event(
-                        tx,
-                        actor,
-                        now,
-                        &command.session_id,
-                        "tool_approval_received",
-                        serde_json::json!({
-                            "tool_call_id": command.tool_call_id,
-                            "approved": command.approved,
-                        }),
-                        false,
-                    ),
-                    Command::UserResponse(command) => control_event(
-                        tx,
-                        actor,
-                        now,
-                        &command.session_id,
-                        "user_response_received",
-                        serde_json::json!({
-                            "tool_call_id": command.tool_call_id,
-                            "response": command.response,
-                        }),
-                        true,
-                    ),
+                    Command::UserResponse(command) => {
+                        let pending_id = pending_message_id(
+                            actor,
+                            &command.session_id,
+                            &mutation_idempotency_key,
+                        );
+                        user_response(
+                            tx,
+                            actor,
+                            now,
+                            &command.session_id,
+                            &command.run_id,
+                            &command.tool_call_id,
+                            &command.response,
+                            &pending_id,
+                        )
+                    }
                     Command::SetPriority(command) => {
                         set_priority(tx, actor, now, &command.session_id, &command.priority)
                     }
@@ -320,16 +480,37 @@ impl DurableMakoCommandHandler {
                     return;
                 }
             }
+            let mut previous_replay_sequence = None::<i64>;
             for event in snapshot.events {
+                if previous_replay_sequence
+                    .is_some_and(|previous| event.sequence > previous.saturating_add(1))
+                {
+                    let previous = previous_replay_sequence.unwrap_or(snapshot.requested_after);
+                    if sender
+                        .send(replay_gap_event(&session_id, previous, event.sequence))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                previous_replay_sequence = Some(event.sequence);
                 if sender.send(event.envelope()).await.is_err() {
                     return;
                 }
             }
             let mut last_sequence = snapshot.high_water.unwrap_or(requested_after);
             loop {
-                match live.recv().await {
+                let received = tokio::select! {
+                    _ = sender.closed() => return,
+                    received = live.recv() => received,
+                };
+                match received {
                     Ok(event) => {
                         let Some(sequence) = event.sequence else {
+                            if sender.send(event).await.is_err() {
+                                return;
+                            }
                             continue;
                         };
                         if sequence <= last_sequence {
@@ -369,6 +550,18 @@ impl DurableMakoCommandHandler {
                         {
                             Ok(catchup) => {
                                 for event in catchup.events {
+                                    if event.sequence > last_sequence.saturating_add(1)
+                                        && sender
+                                            .send(replay_gap_event(
+                                                &session_id,
+                                                last_sequence,
+                                                event.sequence,
+                                            ))
+                                            .await
+                                            .is_err()
+                                    {
+                                        return;
+                                    }
                                     last_sequence = last_sequence.max(event.sequence);
                                     if sender.send(event.envelope()).await.is_err() {
                                         return;
@@ -403,6 +596,64 @@ fn dispatch(
         return Err(RuntimeStoreError::Invalid(
             "dispatch requires a task and working directory".into(),
         ));
+    }
+    if command
+        .model
+        .as_deref()
+        .is_none_or(|model| model.trim().is_empty())
+    {
+        return Err(RuntimeStoreError::Invalid(
+            "dispatch requires a frozen model id".into(),
+        ));
+    }
+    if command.task.len() > 64 * 1024 {
+        return Err(RuntimeStoreError::Invalid(
+            "dispatch task exceeds 65536 bytes".into(),
+        ));
+    }
+    if command.working_dir.len() > 4096 || command.working_dir.as_bytes().contains(&0) {
+        return Err(RuntimeStoreError::Invalid(
+            "dispatch working directory is invalid or too long".into(),
+        ));
+    }
+    if !Path::new(&command.working_dir).is_absolute() {
+        return Err(RuntimeStoreError::Invalid(
+            "dispatch working directory must be absolute".into(),
+        ));
+    }
+    if command
+        .project_dir
+        .as_deref()
+        .is_some_and(|path| path.len() > 4096 || path.as_bytes().contains(&0))
+    {
+        return Err(RuntimeStoreError::Invalid(
+            "dispatch project directory is invalid or too long".into(),
+        ));
+    }
+    if command
+        .project_dir
+        .as_deref()
+        .is_some_and(|path| !Path::new(path).is_absolute())
+    {
+        return Err(RuntimeStoreError::Invalid(
+            "dispatch project directory must be absolute".into(),
+        ));
+    }
+    if command
+        .model
+        .as_deref()
+        .is_some_and(|model| model.len() > 512)
+    {
+        return Err(RuntimeStoreError::Invalid(
+            "dispatch model exceeds 512 bytes".into(),
+        ));
+    }
+    if command
+        .crew_slug
+        .as_deref()
+        .is_some_and(|slug| !is_valid_crew_slug(slug))
+    {
+        return Err(RuntimeStoreError::Invalid("crew slug is invalid".into()));
     }
     if let Some(user_id) = actor.user_id.as_deref() {
         let exists = tx
@@ -474,6 +725,7 @@ fn dispatch(
             "working_dir": command.working_dir,
             "project_dir": project_dir,
             "model": command.model,
+            "permission_mode": "autonomous",
             "crew_slug": command.crew_slug,
             "retry": RetryPolicy::default(),
         }),
@@ -514,6 +766,19 @@ fn dispatch(
     })
 }
 
+fn validate_bounded_field(
+    value: &str,
+    field: &str,
+    max_bytes: usize,
+) -> Result<(), RuntimeStoreError> {
+    if value.trim().is_empty() || value.len() > max_bytes || value.as_bytes().contains(&0) {
+        return Err(RuntimeStoreError::Invalid(format!(
+            "{field} is invalid or exceeds {max_bytes} bytes"
+        )));
+    }
+    Ok(())
+}
+
 fn start_session(
     tx: &Transaction<'_>,
     actor: &Actor,
@@ -521,7 +786,46 @@ fn start_session(
     session_id: &str,
 ) -> Result<Mutation, RuntimeStoreError> {
     let session = require_owned_session(tx, actor, session_id)?;
+    freeze_session_model_into_open_runs(tx, &session, now)?;
     let controller = get_or_create_controller(tx, &session, now)?;
+    if let Some((run_id, attempt_count)) = recovery_required_run(tx, &controller.id)? {
+        // Never create or wake sibling work while a prior attempt has
+        // uncertain side effects. Cancellation is the explicit abandon path;
+        // until then the controller remains fenced and the projection stays
+        // visibly in error.
+        tx.execute(
+            "UPDATE mako_controllers SET status = 'paused', updated_at = ?2 WHERE id = ?1",
+            params![controller.id, now],
+        )?;
+        tx.execute(
+            "INSERT INTO mako_runtime_state (session_id, status, current_run_id, updated_at)
+             VALUES (?1, 'error', ?2, ?3)
+             ON CONFLICT(session_id) DO UPDATE SET status = 'error',
+                 current_run_id = excluded.current_run_id,
+                 updated_at = excluded.updated_at",
+            params![session_id, run_id, now],
+        )?;
+        let event = append_event(
+            tx,
+            &controller,
+            "start_blocked_recovery_required",
+            Some(&run_id),
+            None,
+            Some(&format!("recovery_block:{run_id}:{attempt_count}:start")),
+            serde_json::json!({
+                "run_id": run_id,
+                "attempt_no": attempt_count,
+                "resolution": "cancel the uncertain run to abandon it before starting new work"
+            }),
+            now,
+        )?;
+        return Ok(session_mutation(
+            session_id,
+            "recovery_required",
+            Some(run_id),
+            vec![event],
+        ));
+    }
     tx.execute(
         "UPDATE mako_controllers SET status = 'active', updated_at = ?2 WHERE id = ?1",
         params![controller.id, now],
@@ -549,6 +853,7 @@ fn start_session(
                  WHERE id = ?1 AND status IN ('sleeping', 'retry_wait', 'awaiting_input')",
                 params![existing, now],
             )?;
+            align_run_projection(tx, &existing, "queued", now)?;
             let dedupe_key = format!("transition:{existing}:{attempt_count}:queued");
             (existing, "run_requeued", Some(dedupe_key))
         } else {
@@ -579,6 +884,7 @@ fn start_session(
                 "working_dir": session.working_dir,
                 "project_dir": session.project_dir,
                 "model": session.model,
+                "permission_mode": require_frozen_session_permission_mode(&session)?,
                 "retry": RetryPolicy::default(),
             }),
             0,
@@ -615,12 +921,9 @@ fn schedule_session(
     wake_at_unix_ms: i64,
     reason: &str,
 ) -> Result<Mutation, RuntimeStoreError> {
-    if reason.trim().is_empty() {
-        return Err(RuntimeStoreError::Invalid(
-            "schedule reason is empty".into(),
-        ));
-    }
+    validate_bounded_field(reason, "schedule reason", 8 * 1024)?;
     let session = require_owned_session(tx, actor, session_id)?;
+    let _ = require_frozen_session_model(&session)?;
     let controller = get_or_create_controller(tx, &session, now)?;
     let wake_at = unix_millis_to_utc(wake_at_unix_ms)?;
     let schedule_id = uuid::Uuid::new_v4().to_string();
@@ -680,8 +983,50 @@ fn set_controller_status(
     status: &str,
 ) -> Result<Mutation, RuntimeStoreError> {
     let session = require_owned_session(tx, actor, session_id)?;
+    if status == "active" {
+        freeze_session_model_into_open_runs(tx, &session, now)?;
+    }
     let mut controller = get_or_create_controller(tx, &session, now)?;
     let previous = controller.status.clone();
+    if status == "active" {
+        if let Some((run_id, attempt_count)) = recovery_required_run(tx, &controller.id)? {
+            tx.execute(
+                "UPDATE mako_controllers SET status = 'paused', updated_at = ?2 WHERE id = ?1",
+                params![controller.id, now],
+            )?;
+            controller.status = "paused".into();
+            tx.execute(
+                "INSERT INTO mako_runtime_state (session_id, status, current_run_id, updated_at)
+                 VALUES (?1, 'error', ?2, ?3)
+                 ON CONFLICT(session_id) DO UPDATE SET status = 'error',
+                     current_run_id = excluded.current_run_id,
+                     updated_at = excluded.updated_at",
+                params![session_id, run_id, now],
+            )?;
+            let event = append_event(
+                tx,
+                &controller,
+                "resume_blocked_recovery_required",
+                Some(&run_id),
+                None,
+                Some(&format!("recovery_block:{run_id}:{attempt_count}:resume")),
+                serde_json::json!({
+                    "run_id": run_id,
+                    "attempt_no": attempt_count,
+                    "previous": previous,
+                    "current": "paused",
+                    "resolution": "cancel the uncertain run to abandon it before resuming"
+                }),
+                now,
+            )?;
+            return Ok(session_mutation(
+                session_id,
+                "recovery_required",
+                Some(run_id),
+                vec![event],
+            ));
+        }
+    }
     tx.execute(
         "UPDATE mako_controllers SET status = ?2, updated_at = ?3 WHERE id = ?1",
         params![controller.id, status, now],
@@ -735,6 +1080,14 @@ fn set_controller_status(
             )?;
         }
         if target == "recovery_required" {
+            tx.execute(
+                "UPDATE mako_control_outbox
+                 SET status = 'discarded',
+                     last_error = 'run entered recovery before control delivery',
+                     updated_at = ?2
+                 WHERE run_id = ?1 AND status = 'pending'",
+                params![run_id, now],
+            )?;
             tx.execute(
                 "UPDATE mako_schedule_occurrences SET status = 'failed',
                      decision_reason = ?2, updated_at = ?3
@@ -804,7 +1157,7 @@ fn cancel_session(
     let controller = get_or_create_controller(tx, &session, now)?;
     let cancellable = {
         let mut statement = tx.prepare(
-            "SELECT id, attempt_count, schedule_id FROM mako_runs
+            "SELECT id, attempt_count, schedule_id, status, lease_token FROM mako_runs
              WHERE controller_id = ?1
                AND status IN ('queued', 'leased', 'running', 'sleeping', 'retry_wait', 'awaiting_input', 'recovery_required')",
         )?;
@@ -814,18 +1167,26 @@ fn cancel_session(
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
     tx.execute(
-        "UPDATE mako_run_attempts
-         SET finished_at = ?2, outcome = 'cancelled', stop_reason = 'cancelled by user'
+        "UPDATE mako_control_outbox
+         SET status = 'discarded', last_error = 'session cancelled', updated_at = ?2
+         WHERE controller_id = ?1 AND status = 'pending'",
+        params![controller.id, now],
+    )?;
+    tx.execute(
+        "UPDATE mako_schedule_occurrences
+         SET status = 'cancelled', decision_reason = 'cancelled by user', updated_at = ?2
          WHERE run_id IN (
              SELECT id FROM mako_runs WHERE controller_id = ?1
-               AND status IN ('leased', 'running')
-         ) AND finished_at IS NULL",
+               AND status IN ('queued', 'leased', 'sleeping', 'retry_wait', 'awaiting_input', 'recovery_required')
+         ) AND status IN ('pending', 'queued', 'running')",
         params![controller.id, now],
     )?;
     tx.execute(
@@ -835,7 +1196,7 @@ fn cancel_session(
              wake_at = NULL, last_stop_reason = 'cancelled by user',
              finished_at = ?2, updated_at = ?2
          WHERE controller_id = ?1
-           AND status IN ('queued', 'leased', 'running', 'sleeping', 'retry_wait', 'awaiting_input', 'recovery_required')",
+           AND status IN ('queued', 'leased', 'sleeping', 'retry_wait', 'awaiting_input', 'recovery_required')",
         params![controller.id, now],
     )?;
     tx.execute(
@@ -845,7 +1206,7 @@ fn cancel_session(
         params![controller.id, now],
     )?;
     tx.execute(
-        "UPDATE mako_controllers SET status = 'paused', updated_at = ?2 WHERE id = ?1",
+        "UPDATE mako_controllers SET status = 'disabled', updated_at = ?2 WHERE id = ?1",
         params![controller.id, now],
     )?;
     tx.execute(
@@ -855,18 +1216,43 @@ fn cancel_session(
         params![session_id, now],
     )?;
     let mut events = Vec::with_capacity(cancellable.len() + 1);
-    for (run_id, attempt_count, schedule_id) in cancellable {
-        let dedupe_key = format!("transition:{run_id}:{attempt_count}:cancelled");
-        events.push(append_event(
-            tx,
-            &controller,
-            "run_cancelled",
-            Some(&run_id),
-            schedule_id.as_deref(),
-            Some(&dedupe_key),
-            serde_json::json!({"run_id": run_id, "reason": "cancelled by user"}),
-            now,
-        )?);
+    for (run_id, attempt_count, schedule_id, status, lease_token) in cancellable {
+        if status == "leased" {
+            if let Some(lease_token) = lease_token {
+                tx.execute(
+                    "UPDATE mako_run_attempts
+                     SET finished_at = ?4, outcome = 'cancelled',
+                         stop_reason = 'cancelled by user'
+                     WHERE run_id = ?1 AND attempt_no = ?2 AND lease_token = ?3
+                       AND finished_at IS NULL",
+                    params![run_id, attempt_count, lease_token, now],
+                )?;
+            }
+        }
+        if status == "running" {
+            events.push(append_event(
+                tx,
+                &controller,
+                "cancellation_requested",
+                Some(&run_id),
+                schedule_id.as_deref(),
+                Some(&format!("cancel_requested:{run_id}:{attempt_count}")),
+                serde_json::json!({"run_id": run_id, "attempt": attempt_count}),
+                now,
+            )?);
+        } else {
+            let dedupe_key = format!("transition:{run_id}:{attempt_count}:cancelled");
+            events.push(append_event(
+                tx,
+                &controller,
+                "run_cancelled",
+                Some(&run_id),
+                schedule_id.as_deref(),
+                Some(&dedupe_key),
+                serde_json::json!({"run_id": run_id, "reason": "cancelled by user"}),
+                now,
+            )?);
+        }
     }
     events.push(append_event(
         tx,
@@ -889,6 +1275,19 @@ fn delete_session(
 ) -> Result<Mutation, RuntimeStoreError> {
     let session = require_owned_session(tx, actor, session_id)?;
     let controller = get_or_create_controller(tx, &session, now)?;
+    let has_active_run = tx.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM mako_runs
+             WHERE controller_id = ?1 AND status IN ('leased', 'running', 'recovery_required')
+         )",
+        [&controller.id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if has_active_run {
+        return Err(RuntimeStoreError::StateConflict(
+            "session has an active run; cancel it and wait for quiescence before deleting".into(),
+        ));
+    }
     let event = append_event(
         tx,
         &controller,
@@ -896,7 +1295,7 @@ fn delete_session(
         None,
         None,
         None,
-        serde_json::json!({"session_id": session_id}),
+        serde_json::json!({"deleted": true}),
         now,
     )?;
     tx.execute("DELETE FROM sessions WHERE id = ?1", [session_id])?;
@@ -918,7 +1317,13 @@ fn send_message(
     if message.trim().is_empty() {
         return Err(RuntimeStoreError::Invalid("message is empty".into()));
     }
+    if message.len() > 64 * 1024 {
+        return Err(RuntimeStoreError::Invalid(
+            "message exceeds 65536 bytes".into(),
+        ));
+    }
     let session = require_owned_session(tx, actor, session_id)?;
+    freeze_session_model_into_open_runs(tx, &session, now)?;
     let controller = get_or_create_controller(tx, &session, now)?;
     let active_run_id = tx
         .query_row(
@@ -958,7 +1363,10 @@ fn send_message(
         None,
         None,
         None,
-        serde_json::json!({"message": message}),
+        serde_json::json!({
+            "message_bytes": message.len(),
+            "message_chars": message.chars().count(),
+        }),
         now,
     )?;
     let mut events = vec![event];
@@ -990,20 +1398,58 @@ fn send_message(
     })
 }
 
-fn control_event(
+fn stage_steer(
     tx: &Transaction<'_>,
     actor: &Actor,
     now: &str,
     session_id: &str,
-    event_type: &str,
-    payload: Value,
-    resume_waiting: bool,
+    pending_id: &str,
+    content: Value,
 ) -> Result<Mutation, RuntimeStoreError> {
+    validate_bounded_field(pending_id, "pending id", 256)?;
+    let content = serde_json::from_value::<Vec<Content>>(content).map_err(|error| {
+        RuntimeStoreError::Invalid(format!("invalid steering content: {error}"))
+    })?;
+    if content.is_empty() {
+        return Err(RuntimeStoreError::Invalid(
+            "steering content is empty".into(),
+        ));
+    }
+    let content_json = serde_json::to_string(&content)
+        .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
+    if content_json.len() > 256 * 1024 {
+        return Err(RuntimeStoreError::Invalid(
+            "steering content exceeds 262144 bytes".into(),
+        ));
+    }
     let session = require_owned_session(tx, actor, session_id)?;
+    freeze_session_model_into_open_runs(tx, &session, now)?;
     let controller = get_or_create_controller(tx, &session, now)?;
-    let event = append_event(tx, &controller, event_type, None, None, None, payload, now)?;
-    let mut events = vec![event];
-    if resume_waiting {
+    insert_pending_user_content(tx, session_id, pending_id, &content_json, now)?;
+    let active_run_id = tx
+        .query_row(
+            "SELECT id FROM mako_runs
+             WHERE controller_id = ?1 AND status IN ('leased', 'running')
+             ORDER BY updated_at DESC LIMIT 1",
+            [&controller.id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let run_id = active_run_id.as_deref();
+    let mut events = vec![append_event(
+        tx,
+        &controller,
+        "steer_staged",
+        run_id,
+        None,
+        Some(&format!("pending_steer:{pending_id}")),
+        serde_json::json!({
+            "run_id": run_id,
+            "pending_id": pending_id,
+        }),
+        now,
+    )?];
+    if active_run_id.is_none() {
         if let Some((run_id, previous_status, attempt_count)) =
             resume_waiting_run(tx, &controller, now)?
         {
@@ -1018,14 +1464,321 @@ fn control_event(
                 serde_json::json!({
                     "run_id": run_id,
                     "previous_status": previous_status,
-                    "reason": "user response received"
+                    "reason": "durable steering received"
                 }),
                 now,
             )?);
+        } else {
+            let objective = steering_objective(&content);
+            if let Some(event) =
+                queue_message_turn_if_idle(tx, &session, &controller, &objective, now)?
+            {
+                events.push(event);
+            }
         }
     }
     Ok(Mutation {
-        response: ack("control accepted"),
+        response: ack("steering durably staged"),
+        resource_id: Some(session_id.to_string()),
+        events,
+    })
+}
+
+fn steering_objective(content: &[Content]) -> String {
+    let text = content
+        .iter()
+        .filter_map(|item| match item {
+            Content::Text { text } if !text.trim().is_empty() => Some(text.trim()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if text.is_empty() {
+        "Process the durable user steering attached to this session".into()
+    } else {
+        text
+    }
+}
+
+fn stage_tool_approval(
+    tx: &Transaction<'_>,
+    actor: &Actor,
+    now: &str,
+    session_id: &str,
+    requested_run_id: &str,
+    tool_call_id: &str,
+    approved: bool,
+) -> Result<Mutation, RuntimeStoreError> {
+    validate_bounded_field(requested_run_id, "run id", 256)?;
+    validate_bounded_field(tool_call_id, "tool call id", 512)?;
+    let session = require_owned_session(tx, actor, session_id)?;
+    let controller = get_or_create_controller(tx, &session, now)?;
+    let run_id = tx
+        .query_row(
+            "SELECT id FROM mako_runs
+             WHERE controller_id = ?1 AND id = ?2 AND status IN ('leased', 'running')",
+            params![controller.id, requested_run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            RuntimeStoreError::Invalid("the exact run is no longer accepting tool approvals".into())
+        })?;
+    let pending_event_type = tx
+        .query_row(
+            "SELECT json_extract(payload_json, '$.type')
+             FROM mako_controller_events
+             WHERE controller_id = ?1 AND run_id = ?2 AND event_type = 'agentic_event'
+               AND json_extract(payload_json, '$.id') = ?3
+               AND json_extract(payload_json, '$.type') IN (
+                   'tool_approval_required', 'tool_approved', 'tool_denied', 'tool_result'
+               )
+             ORDER BY sequence DESC LIMIT 1",
+            params![controller.id, run_id, tool_call_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if pending_event_type.as_deref() != Some("tool_approval_required") {
+        return Err(RuntimeStoreError::StateConflict(format!(
+            "tool call {tool_call_id} is not awaiting approval on run {run_id}"
+        )));
+    }
+    let existing = tx
+        .query_row(
+            "SELECT payload_json FROM mako_control_outbox
+             WHERE controller_id = ?1 AND control_kind = 'tool_approval'
+               AND dedupe_key = ?2",
+            params![controller.id, format!("{run_id}:{tool_call_id}")],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(existing) = existing {
+        let existing = serde_json::from_str::<Value>(&existing)
+            .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
+        if existing.get("approved").and_then(Value::as_bool) != Some(approved) {
+            return Err(RuntimeStoreError::Invalid(format!(
+                "tool call {tool_call_id} already has a different approval decision"
+            )));
+        }
+    } else {
+        let id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_URL,
+            format!(
+                "krusty:mako:tool-approval:{}:{}:{}",
+                controller.id, run_id, tool_call_id
+            )
+            .as_bytes(),
+        )
+        .to_string();
+        let payload = serde_json::to_string(&serde_json::json!({
+            "tool_call_id": tool_call_id,
+            "approved": approved,
+        }))
+        .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
+        tx.execute(
+            "INSERT INTO mako_control_outbox (
+                id, controller_id, session_id, run_id, control_kind, dedupe_key,
+                payload_json, status, attempt_count, available_at, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, 'tool_approval', ?5, ?6, 'pending', 0, ?7, ?7, ?7)",
+            params![
+                id,
+                controller.id,
+                session_id,
+                run_id,
+                format!("{run_id}:{tool_call_id}"),
+                payload,
+                now
+            ],
+        )?;
+    }
+    let event = append_event(
+        tx,
+        &controller,
+        "tool_approval_queued",
+        Some(&run_id),
+        None,
+        Some(&format!("tool_approval:{run_id}:{tool_call_id}")),
+        serde_json::json!({
+            "run_id": run_id,
+            "tool_call_id": tool_call_id,
+            "approved": approved,
+        }),
+        now,
+    )?;
+    Ok(Mutation {
+        response: ack("tool approval durably queued"),
+        resource_id: Some(session_id.to_string()),
+        events: vec![event],
+    })
+}
+
+fn user_response(
+    tx: &Transaction<'_>,
+    actor: &Actor,
+    now: &str,
+    session_id: &str,
+    requested_run_id: &str,
+    tool_call_id: &str,
+    response: &str,
+    pending_id: &str,
+) -> Result<Mutation, RuntimeStoreError> {
+    validate_bounded_field(requested_run_id, "run id", 256)?;
+    validate_bounded_field(tool_call_id, "tool call id", 512)?;
+    validate_bounded_field(response, "user response", 64 * 1024)?;
+    validate_bounded_field(pending_id, "pending id", 256)?;
+    let session = require_owned_session(tx, actor, session_id)?;
+    let controller = get_or_create_controller(tx, &session, now)?;
+    let exact_run_status = tx
+        .query_row(
+            "SELECT status FROM mako_runs WHERE controller_id = ?1 AND id = ?2
+             AND status IN ('leased', 'running', 'awaiting_input')",
+            params![controller.id, requested_run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            RuntimeStoreError::StateConflict(
+                "the exact run is no longer accepting a user response".into(),
+            )
+        })?;
+    let pending_event_type = tx
+        .query_row(
+            "SELECT CASE
+                 WHEN event_type = 'agentic_event'
+                   THEN json_extract(payload_json, '$.type')
+                 ELSE event_type
+             END
+             FROM mako_controller_events
+             WHERE controller_id = ?1 AND run_id = ?2
+               AND (
+                   (event_type = 'agentic_event'
+                    AND json_extract(payload_json, '$.type') = 'awaiting_input'
+                    AND json_extract(payload_json, '$.tool_call_id') = ?3)
+                   OR
+                   (event_type IN ('user_response_received', 'user_response_staged')
+                    AND json_extract(payload_json, '$.tool_call_id') = ?3)
+               )
+             ORDER BY sequence DESC LIMIT 1",
+            params![controller.id, requested_run_id, tool_call_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if pending_event_type.as_deref() != Some("awaiting_input") {
+        return Err(RuntimeStoreError::StateConflict(format!(
+            "tool call {tool_call_id} is not awaiting a response on run {requested_run_id}"
+        )));
+    }
+    let durable_response = format!("Response to {tool_call_id}:\n{response}");
+    let active_run_id = tx
+        .query_row(
+            "SELECT id FROM mako_runs
+             WHERE controller_id = ?1 AND status IN ('leased', 'running')
+             ORDER BY updated_at DESC LIMIT 1",
+            [&controller.id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if active_run_id
+        .as_deref()
+        .is_some_and(|run_id| run_id != requested_run_id)
+    {
+        return Err(RuntimeStoreError::StateConflict(
+            "a replacement run is active; refusing to redirect the response".into(),
+        ));
+    }
+    if exact_run_status == "awaiting_input" && active_run_id.is_some() {
+        return Err(RuntimeStoreError::StateConflict(
+            "persisted run state disagrees with the active execution".into(),
+        ));
+    }
+
+    // Ask-user completion and the durable run transition are not one atomic
+    // operation. If the answer arrives while the run is still active, stage
+    // it under an idempotent non-canonical role. A live loop can promote it at
+    // its next boundary; otherwise finish_execution observes the staging row,
+    // yields immediately, and the replacement run promotes it before loading
+    // history. This prevents an answer from being stranded behind a just-
+    // committed awaiting_input transition.
+    if let Some(run_id) = active_run_id {
+        insert_pending_user_message(tx, session_id, pending_id, &durable_response, now)?;
+        let event = append_event(
+            tx,
+            &controller,
+            "user_response_staged",
+            Some(&run_id),
+            None,
+            Some(&format!("pending_response:{pending_id}")),
+            serde_json::json!({
+                "run_id": run_id,
+                "pending_id": pending_id,
+                "tool_call_id": tool_call_id,
+            }),
+            now,
+        )?;
+        return Ok(Mutation {
+            response: ack("user response staged for the active run"),
+            resource_id: Some(session_id.to_string()),
+            events: vec![event],
+        });
+    }
+
+    insert_canonical_user_message(tx, session_id, &durable_response, now)?;
+    let mut events = vec![append_event(
+        tx,
+        &controller,
+        "user_response_received",
+        Some(requested_run_id),
+        None,
+        None,
+        serde_json::json!({
+            "tool_call_id": tool_call_id,
+            "response_bytes": response.len(),
+            "response_chars": response.chars().count(),
+        }),
+        now,
+    )?];
+    let attempt_count = tx
+        .query_row(
+            "SELECT attempt_count FROM mako_runs
+             WHERE id = ?1 AND controller_id = ?2 AND status = 'awaiting_input'",
+            params![requested_run_id, controller.id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            RuntimeStoreError::StateConflict(
+                "the exact run is no longer awaiting the requested response".into(),
+            )
+        })?;
+    let changed = tx.execute(
+        "UPDATE mako_runs
+         SET status = 'queued', available_at = ?3, wake_at = NULL, updated_at = ?3
+         WHERE id = ?1 AND controller_id = ?2 AND status = 'awaiting_input'",
+        params![requested_run_id, controller.id, now],
+    )?;
+    if changed != 1 {
+        return Err(RuntimeStoreError::StateConflict(
+            "the exact run changed state before its response could be resumed".into(),
+        ));
+    }
+    align_run_projection(tx, requested_run_id, "queued", now)?;
+    let dedupe_key = format!("transition:{requested_run_id}:{attempt_count}:queued");
+    events.push(append_event(
+        tx,
+        &controller,
+        "run_requeued",
+        Some(requested_run_id),
+        None,
+        Some(&dedupe_key),
+        serde_json::json!({
+            "run_id": requested_run_id,
+            "previous_status": "awaiting_input",
+            "reason": "user response received"
+        }),
+        now,
+    )?);
+    Ok(Mutation {
+        response: ack("user response accepted"),
         resource_id: Some(session_id.to_string()),
         events,
     })
@@ -1036,22 +1789,29 @@ fn resume_waiting_run(
     controller: &ControllerRecord,
     now: &str,
 ) -> Result<Option<(String, String, i64)>, RuntimeStoreError> {
-    let waiting = tx
-        .query_row(
+    let waiting = {
+        let mut statement = tx.prepare(
             "SELECT id, status, attempt_count FROM mako_runs
              WHERE controller_id = ?1 AND status IN ('sleeping', 'awaiting_input')
-             ORDER BY updated_at DESC, created_at DESC LIMIT 1",
-            [&controller.id],
-            |row| {
+             ORDER BY updated_at DESC, created_at DESC LIMIT 2",
+        )?;
+        let waiting = statement
+            .query_map([&controller.id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, i64>(2)?,
                 ))
-            },
-        )
-        .optional()?;
-    let Some((run_id, previous_status, attempt_count)) = waiting else {
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        waiting
+    };
+    if waiting.len() > 1 {
+        return Err(RuntimeStoreError::StateConflict(
+            "multiple runs are waiting; an exact run id is required to resume one".into(),
+        ));
+    }
+    let Some((run_id, previous_status, attempt_count)) = waiting.into_iter().next() else {
         return Ok(None);
     };
     let changed = tx.execute(
@@ -1064,18 +1824,7 @@ fn resume_waiting_run(
     if changed != 1 {
         return Ok(None);
     }
-    tx.execute(
-        "UPDATE mako_schedule_occurrences SET status = 'queued', updated_at = ?2
-         WHERE run_id = ?1 AND status = 'running'",
-        params![run_id, now],
-    )?;
-    tx.execute(
-        "INSERT INTO mako_runtime_state (session_id, status, current_run_id, updated_at)
-         VALUES (?1, 'idle', ?2, ?3)
-         ON CONFLICT(session_id) DO UPDATE SET status = 'idle',
-             current_run_id = excluded.current_run_id, updated_at = excluded.updated_at",
-        params![controller.session_id, run_id, now],
-    )?;
+    align_run_projection(tx, &run_id, "queued", now)?;
     Ok(Some((run_id, previous_status, attempt_count)))
 }
 
@@ -1086,6 +1835,7 @@ fn queue_message_turn_if_idle(
     message: &str,
     now: &str,
 ) -> Result<Option<PersistedEvent>, RuntimeStoreError> {
+    let _ = require_frozen_session_model(session)?;
     let unfinished: i64 = tx.query_row(
         "SELECT COUNT(*) FROM mako_runs
          WHERE controller_id = ?1
@@ -1119,6 +1869,7 @@ fn queue_message_turn_if_idle(
             "working_dir": session.working_dir,
             "project_dir": session.project_dir,
             "model": session.model,
+            "permission_mode": require_frozen_session_permission_mode(session)?,
             "crew_slug": crew_slug,
             "retry": RetryPolicy::default(),
         }),
@@ -1154,6 +1905,178 @@ fn queue_message_turn_if_idle(
         now,
     )?;
     Ok(Some(event))
+}
+
+fn require_frozen_session_model(
+    session: &super::persistence::OwnedSession,
+) -> Result<&str, RuntimeStoreError> {
+    session
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| {
+            RuntimeStoreError::StateConflict(
+                "Mako session has no frozen model; select a model before starting it".into(),
+            )
+        })
+}
+
+fn require_frozen_session_permission_mode(
+    session: &super::persistence::OwnedSession,
+) -> Result<&str, RuntimeStoreError> {
+    match session.permission_mode.as_str() {
+        "supervised" | "autonomous" => Ok(session.permission_mode.as_str()),
+        _ => Err(RuntimeStoreError::StateConflict(
+            "Mako session has an invalid permission mode".into(),
+        )),
+    }
+}
+
+fn freeze_session_model_into_open_runs(
+    tx: &Transaction<'_>,
+    session: &super::persistence::OwnedSession,
+    now: &str,
+) -> Result<(), RuntimeStoreError> {
+    let model = require_frozen_session_model(session)?;
+    let permission_mode = require_frozen_session_permission_mode(session)?;
+    tx.execute(
+        "UPDATE mako_runs SET config_json = json_set(
+                 json_set(config_json, '$.model',
+                     CASE WHEN json_type(config_json, '$.model') IS NULL
+                               OR json_extract(config_json, '$.model') = ''
+                          THEN ?2 ELSE json_extract(config_json, '$.model') END),
+                 '$.permission_mode',
+                     CASE WHEN json_type(config_json, '$.permission_mode') IS NULL
+                          THEN ?3 ELSE json_extract(config_json, '$.permission_mode') END),
+             updated_at = ?4
+         WHERE session_id = ?1
+           AND status IN ('queued', 'sleeping', 'retry_wait', 'awaiting_input')
+           AND ((json_type(config_json, '$.model') IS NULL
+                 OR json_extract(config_json, '$.model') = '')
+                OR json_type(config_json, '$.permission_mode') IS NULL)",
+        params![session.id, model, permission_mode, now],
+    )?;
+    Ok(())
+}
+
+fn recovery_required_run(
+    tx: &Transaction<'_>,
+    controller_id: &str,
+) -> Result<Option<(String, i64)>, RuntimeStoreError> {
+    tx.query_row(
+        "SELECT id, attempt_count FROM mako_runs
+         WHERE controller_id = ?1 AND status = 'recovery_required'
+         ORDER BY updated_at DESC, id ASC LIMIT 1",
+        [controller_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(RuntimeStoreError::from)
+}
+
+fn align_run_projection(
+    tx: &Transaction<'_>,
+    run_id: &str,
+    status: &str,
+    now: &str,
+) -> Result<(), RuntimeStoreError> {
+    let (controller_id, session_id, occurrence_id) = tx.query_row(
+        "SELECT controller_id, session_id, occurrence_id FROM mako_runs WHERE id = ?1",
+        [run_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        },
+    )?;
+    if status == "recovery_required" {
+        tx.execute(
+            "UPDATE mako_controllers SET status = 'paused', updated_at = ?2 WHERE id = ?1",
+            params![controller_id, now],
+        )?;
+    }
+    if let Some(occurrence_id) = occurrence_id {
+        let occurrence_status = match status {
+            "queued" | "leased" => "queued",
+            "succeeded" => "succeeded",
+            "cancelled" => "cancelled",
+            "failed" | "dead_letter" | "recovery_required" => "failed",
+            _ => "running",
+        };
+        tx.execute(
+            "UPDATE mako_schedule_occurrences
+             SET status = ?2, updated_at = ?3 WHERE id = ?1",
+            params![occurrence_id, occurrence_status, now],
+        )?;
+    }
+    if let Some(session_id) = session_id {
+        let recovery_run_id = tx
+            .query_row(
+                "SELECT id FROM mako_runs
+                 WHERE controller_id = ?1 AND status = 'recovery_required'
+                 ORDER BY updated_at DESC, id ASC LIMIT 1",
+                [&controller_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let controller_status = tx.query_row(
+            "SELECT status FROM mako_controllers WHERE id = ?1",
+            [&controller_id],
+            |row| row.get::<_, String>(0),
+        )?;
+        let active = tx
+            .query_row(
+                "SELECT id, status FROM mako_runs
+                 WHERE controller_id = ?1
+                   AND status IN ('queued', 'leased', 'running', 'sleeping', 'retry_wait', 'awaiting_input', 'recovery_required')
+                 ORDER BY CASE status
+                     WHEN 'running' THEN 0 WHEN 'leased' THEN 1
+                     WHEN 'recovery_required' THEN 2 WHEN 'awaiting_input' THEN 3
+                     WHEN 'sleeping' THEN 4 WHEN 'queued' THEN 5 ELSE 6 END,
+                     updated_at DESC, id ASC LIMIT 1",
+                [&controller_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let (runtime_status, current_run_id) = if let Some(recovery_run_id) = recovery_run_id {
+            ("error", recovery_run_id)
+        } else if controller_status == "paused" {
+            (
+                "paused",
+                active
+                    .map(|(active_run_id, _)| active_run_id)
+                    .unwrap_or_else(|| run_id.to_string()),
+            )
+        } else if let Some((active_run_id, active_status)) = active {
+            let runtime_status = match active_status.as_str() {
+                "running" | "leased" => "running",
+                "recovery_required" => "error",
+                "awaiting_input" => "awaiting_input",
+                "sleeping" => "sleeping",
+                _ => "idle",
+            };
+            (runtime_status, active_run_id)
+        } else {
+            let runtime_status = match status {
+                "cancelled" => "cancelled",
+                "failed" | "dead_letter" | "recovery_required" => "error",
+                _ => "idle",
+            };
+            (runtime_status, run_id.to_string())
+        };
+        tx.execute(
+            "INSERT INTO mako_runtime_state (session_id, status, current_run_id, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(session_id) DO UPDATE SET status = excluded.status,
+                 current_run_id = excluded.current_run_id,
+                 updated_at = excluded.updated_at",
+            params![session_id, runtime_status, current_run_id, now],
+        )?;
+    }
+    Ok(())
 }
 
 fn set_priority(
@@ -1281,6 +2204,10 @@ fn recover(
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(statement);
         for (run_id, previous_status, attempt_no, lease_token) in expired {
+            if previous_status == "leased" {
+                let session = require_owned_session(tx, actor, &controller.session_id)?;
+                freeze_session_model_into_open_runs(tx, &session, now)?;
+            }
             let (target_status, reason, event_type) = if previous_status == "leased" {
                 (
                     "queued",
@@ -1301,6 +2228,15 @@ fn recover(
                      updated_at = ?4 WHERE id = ?1 AND status = ?5",
                 params![run_id, target_status, reason, now, previous_status],
             )?;
+            if target_status == "recovery_required" {
+                tx.execute(
+                    "UPDATE mako_control_outbox
+                     SET status = 'discarded', last_error = ?2, updated_at = ?3
+                     WHERE run_id = ?1 AND status = 'pending'",
+                    params![run_id, reason, now],
+                )?;
+            }
+            align_run_projection(tx, &run_id, target_status, now)?;
             if let Some(lease_token) = lease_token {
                 tx.execute(
                     "UPDATE mako_run_attempts SET finished_at = ?4, outcome = 'abandoned',
@@ -1333,12 +2269,499 @@ fn recover(
     })
 }
 
+struct ParsedScheduleDefinition {
+    title: String,
+    summary: String,
+    objective: String,
+    recurrence: RecurrenceV1,
+    timezone: String,
+    dst_policy: DstPolicy,
+    next_fire_at: String,
+    priority: i32,
+    project_dir: Option<String>,
+    model: Option<String>,
+    crew_slug: Option<String>,
+    misfire: MisfireConfig,
+    overlap_policy: OverlapPolicy,
+    retry: RetryPolicy,
+}
+
+fn parse_schedule_definition(
+    definition: ScheduleDefinition,
+    now: &str,
+) -> Result<ParsedScheduleDefinition, RuntimeStoreError> {
+    fn required(value: String, field: &str, max_bytes: usize) -> Result<String, RuntimeStoreError> {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(RuntimeStoreError::Invalid(format!(
+                "schedule {field} must not be empty"
+            )));
+        }
+        if value.len() > max_bytes {
+            return Err(RuntimeStoreError::Invalid(format!(
+                "schedule {field} exceeds {max_bytes} bytes"
+            )));
+        }
+        Ok(value.to_string())
+    }
+
+    let title = required(definition.title, "title", 512)?;
+    let objective = required(definition.objective, "objective", 64 * 1024)?;
+    let summary = definition.summary.trim().to_string();
+    if summary.len() > 8 * 1024 {
+        return Err(RuntimeStoreError::Invalid(
+            "schedule summary exceeds 8192 bytes".into(),
+        ));
+    }
+    let timezone = required(definition.timezone, "timezone", 128)?;
+    let timezone_parsed =
+        parse_timezone(&timezone).map_err(|error| RuntimeStoreError::Invalid(error.to_string()))?;
+    let recurrence: RecurrenceV1 = serde_json::from_value(definition.recurrence)
+        .map_err(|error| RuntimeStoreError::Invalid(format!("invalid recurrence: {error}")))?;
+    recurrence
+        .validate()
+        .map_err(|error| RuntimeStoreError::Invalid(error.to_string()))?;
+    let dst_policy: DstPolicy = serde_json::from_value(definition.dst_policy)
+        .map_err(|error| RuntimeStoreError::Invalid(format!("invalid DST policy: {error}")))?;
+    let now_instant = krusty_core::mako::parse_utc_timestamp(now)
+        .map_err(|error| RuntimeStoreError::Invalid(error.to_string()))?;
+    let next_fire_at = recurrence
+        .next_after(timezone_parsed, now_instant, dst_policy)
+        .map_err(|error| RuntimeStoreError::Invalid(error.to_string()))?
+        .ok_or_else(|| {
+            RuntimeStoreError::Invalid("schedule has no occurrence after the current time".into())
+        })?;
+    let misfire: MisfireConfig = serde_json::from_value(definition.misfire)
+        .map_err(|error| RuntimeStoreError::Invalid(format!("invalid misfire policy: {error}")))?;
+    if misfire.catch_up_limit > 10_000 {
+        return Err(RuntimeStoreError::Invalid(
+            "misfire catch_up_limit exceeds 10000".into(),
+        ));
+    }
+    let overlap_policy = match definition.overlap_policy.as_str() {
+        "skip" => OverlapPolicy::Skip,
+        "queue_one" => OverlapPolicy::QueueOne,
+        "allow" => OverlapPolicy::Allow,
+        _ => {
+            return Err(RuntimeStoreError::Invalid(
+                "overlap_policy must be skip, queue_one, or allow".into(),
+            ));
+        }
+    };
+    let retry: RetryPolicy = serde_json::from_value(definition.retry)
+        .map_err(|error| RuntimeStoreError::Invalid(format!("invalid retry policy: {error}")))?;
+    if retry.max_attempts == 0
+        || retry.max_attempts > MAX_RETRY_ATTEMPTS
+        || retry.base_delay_secs == 0
+        || retry.max_delay_secs < retry.base_delay_secs
+        || retry.max_delay_secs > MAX_RETRY_DELAY_SECS
+    {
+        return Err(RuntimeStoreError::Invalid(
+            format!(
+                "retry policy requires 1..={MAX_RETRY_ATTEMPTS} attempts, a nonzero base delay, and base <= max <= {MAX_RETRY_DELAY_SECS} seconds"
+            ),
+        ));
+    }
+    let crew_slug = definition
+        .crew_slug
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if crew_slug
+        .as_deref()
+        .is_some_and(|slug| !is_valid_crew_slug(slug))
+    {
+        return Err(RuntimeStoreError::Invalid("crew slug is invalid".into()));
+    }
+
+    let project_dir = definition
+        .project_dir
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if project_dir
+        .as_deref()
+        .is_some_and(|value| value.len() > 4096 || value.as_bytes().contains(&0))
+    {
+        return Err(RuntimeStoreError::Invalid(
+            "schedule project_dir is invalid or too long".into(),
+        ));
+    }
+    if project_dir
+        .as_deref()
+        .is_some_and(|value| !Path::new(value).is_absolute())
+    {
+        return Err(RuntimeStoreError::Invalid(
+            "schedule project_dir must be absolute".into(),
+        ));
+    }
+    let model = definition
+        .model
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if model.as_deref().is_some_and(|value| value.len() > 512) {
+        return Err(RuntimeStoreError::Invalid(
+            "schedule model exceeds 512 bytes".into(),
+        ));
+    }
+
+    Ok(ParsedScheduleDefinition {
+        title,
+        summary,
+        objective,
+        recurrence,
+        timezone,
+        dst_policy,
+        next_fire_at: canonical_timestamp(next_fire_at),
+        priority: definition.priority,
+        project_dir,
+        model,
+        crew_slug,
+        misfire,
+        overlap_policy,
+        retry,
+    })
+}
+
+fn create_recurring_schedule(
+    tx: &Transaction<'_>,
+    actor: &Actor,
+    now: &str,
+    command: CreateScheduleCommand,
+) -> Result<Mutation, RuntimeStoreError> {
+    let session = require_owned_session(tx, actor, &command.session_id)?;
+    let controller = get_or_create_controller(tx, &session, now)?;
+    let mut definition = parse_schedule_definition(command.definition, now)?;
+    definition.project_dir = definition
+        .project_dir
+        .or_else(|| session.project_dir.clone())
+        .or_else(|| session.working_dir.clone());
+    definition.model = definition.model.or_else(|| session.model.clone());
+    if definition.crew_slug.is_none() {
+        definition.crew_slug = tx
+            .query_row(
+                "SELECT crew_slug FROM mako_runtime_state WHERE session_id = ?1",
+                [&session.id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+    }
+    if definition.project_dir.is_none() {
+        return Err(RuntimeStoreError::Invalid(
+            "schedule requires an explicit or session-owned workspace".into(),
+        ));
+    }
+    if definition
+        .project_dir
+        .as_deref()
+        .is_some_and(|path| !Path::new(path).is_absolute())
+    {
+        return Err(RuntimeStoreError::Invalid(
+            "schedule project_dir must be absolute".into(),
+        ));
+    }
+    if definition.model.is_none() {
+        return Err(RuntimeStoreError::Invalid(
+            "schedule requires an explicit or session-persisted model".into(),
+        ));
+    }
+    let schedule_id = uuid::Uuid::new_v4().to_string();
+    let recurrence_json = serde_json::to_string(&definition.recurrence)
+        .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
+    tx.execute(
+        "INSERT INTO mako_schedules (
+            id, controller_id, title, summary, objective, recurrence_kind,
+            recurrence_json, timezone, gap_policy, fold_policy, next_fire_at,
+            last_scheduled_for, status, priority, project_dir, model, crew_slug,
+            misfire_policy, misfire_grace_secs, catch_up_limit, overlap_policy,
+            max_attempts, retry_base_secs, retry_max_secs, retry_jitter,
+            revision, created_by, created_at, updated_at
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL,
+            'enabled', ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
+            ?21, ?22, ?23, 0, ?24, ?25, ?25
+         )",
+        params![
+            schedule_id,
+            controller.id,
+            definition.title,
+            definition.summary,
+            definition.objective,
+            definition.recurrence.kind_name(),
+            recurrence_json,
+            definition.timezone,
+            definition.dst_policy.gap.as_str(),
+            definition.dst_policy.fold.as_str(),
+            definition.next_fire_at,
+            definition.priority,
+            definition.project_dir,
+            definition.model,
+            definition.crew_slug,
+            definition.misfire.policy.as_str(),
+            definition.misfire.grace_secs,
+            definition.misfire.catch_up_limit as u64,
+            definition.overlap_policy.as_str(),
+            definition.retry.max_attempts,
+            definition.retry.base_delay_secs,
+            definition.retry.max_delay_secs,
+            definition.retry.jitter.as_str(),
+            actor.user_id.as_deref().unwrap_or("local"),
+            now,
+        ],
+    )?;
+    let event = append_event(
+        tx,
+        &controller,
+        "schedule_created",
+        None,
+        Some(&schedule_id),
+        Some(&format!("schedule:{schedule_id}:revision:0")),
+        serde_json::json!({"schedule_id": schedule_id, "revision": 0}),
+        now,
+    )?;
+    Ok(Mutation {
+        response: ResponsePayload::Schedule(ScheduleResponse {
+            schedule_id: schedule_id.clone(),
+            revision: 0,
+            status: "enabled".into(),
+        }),
+        resource_id: Some(schedule_id),
+        events: vec![event],
+    })
+}
+
+fn replace_recurring_schedule(
+    tx: &Transaction<'_>,
+    actor: &Actor,
+    now: &str,
+    command: ReplaceScheduleCommand,
+) -> Result<Mutation, RuntimeStoreError> {
+    validate_bounded_field(&command.schedule_id, "schedule id", 256)?;
+    let session = require_owned_session(tx, actor, &command.session_id)?;
+    let controller = get_or_create_controller(tx, &session, now)?;
+    let mut definition = parse_schedule_definition(command.definition, now)?;
+    definition.project_dir = definition
+        .project_dir
+        .or_else(|| session.project_dir.clone())
+        .or_else(|| session.working_dir.clone());
+    definition.model = definition.model.or_else(|| session.model.clone());
+    if definition.project_dir.is_none() {
+        return Err(RuntimeStoreError::Invalid(
+            "schedule requires an explicit or session-owned workspace".into(),
+        ));
+    }
+    if definition
+        .project_dir
+        .as_deref()
+        .is_some_and(|path| !Path::new(path).is_absolute())
+    {
+        return Err(RuntimeStoreError::Invalid(
+            "schedule project_dir must be absolute".into(),
+        ));
+    }
+    if definition.model.is_none() {
+        return Err(RuntimeStoreError::Invalid(
+            "schedule requires an explicit or session-persisted model".into(),
+        ));
+    }
+    let current = tx
+        .query_row(
+            "SELECT status, revision FROM mako_schedules
+             WHERE id = ?1 AND controller_id = ?2",
+            params![command.schedule_id, controller.id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    let Some((status, revision)) = current else {
+        return Err(RuntimeStoreError::NotFound("schedule not found".into()));
+    };
+    if revision < 0 || revision as u64 != command.expected_revision {
+        return Err(RuntimeStoreError::RevisionConflict(format!(
+            "schedule revision is {revision}, not {}",
+            command.expected_revision
+        )));
+    }
+    if matches!(status.as_str(), "completed" | "cancelled") {
+        return Err(RuntimeStoreError::StateConflict(format!(
+            "{status} schedules cannot be replaced"
+        )));
+    }
+    let recurrence_json = serde_json::to_string(&definition.recurrence)
+        .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
+    let changed = tx.execute(
+        "UPDATE mako_schedules SET
+            title = ?3, summary = ?4, objective = ?5, recurrence_kind = ?6,
+            recurrence_json = ?7, timezone = ?8, gap_policy = ?9,
+            fold_policy = ?10, next_fire_at = ?11, priority = ?12,
+            project_dir = ?13, model = ?14, crew_slug = ?15,
+            misfire_policy = ?16, misfire_grace_secs = ?17,
+            catch_up_limit = ?18, overlap_policy = ?19, max_attempts = ?20,
+            retry_base_secs = ?21, retry_max_secs = ?22, retry_jitter = ?23,
+            revision = revision + 1, updated_at = ?24
+         WHERE id = ?1 AND controller_id = ?2 AND revision = ?25",
+        params![
+            command.schedule_id,
+            controller.id,
+            definition.title,
+            definition.summary,
+            definition.objective,
+            definition.recurrence.kind_name(),
+            recurrence_json,
+            definition.timezone,
+            definition.dst_policy.gap.as_str(),
+            definition.dst_policy.fold.as_str(),
+            definition.next_fire_at,
+            definition.priority,
+            definition.project_dir,
+            definition.model,
+            definition.crew_slug,
+            definition.misfire.policy.as_str(),
+            definition.misfire.grace_secs,
+            definition.misfire.catch_up_limit as u64,
+            definition.overlap_policy.as_str(),
+            definition.retry.max_attempts,
+            definition.retry.base_delay_secs,
+            definition.retry.max_delay_secs,
+            definition.retry.jitter.as_str(),
+            now,
+            command.expected_revision,
+        ],
+    )?;
+    if changed != 1 {
+        return Err(RuntimeStoreError::RevisionConflict(
+            "schedule changed concurrently".into(),
+        ));
+    }
+    let revision = command.expected_revision.saturating_add(1);
+    let event = append_event(
+        tx,
+        &controller,
+        "schedule_updated",
+        None,
+        Some(&command.schedule_id),
+        Some(&format!(
+            "schedule:{}:revision:{revision}",
+            command.schedule_id
+        )),
+        serde_json::json!({"schedule_id": command.schedule_id, "revision": revision}),
+        now,
+    )?;
+    Ok(Mutation {
+        response: ResponsePayload::Schedule(ScheduleResponse {
+            schedule_id: command.schedule_id.clone(),
+            revision,
+            status,
+        }),
+        resource_id: Some(command.schedule_id),
+        events: vec![event],
+    })
+}
+
+fn set_schedule_status(
+    tx: &Transaction<'_>,
+    actor: &Actor,
+    now: &str,
+    command: SetScheduleStatusCommand,
+) -> Result<Mutation, RuntimeStoreError> {
+    validate_bounded_field(&command.schedule_id, "schedule id", 256)?;
+    let session = require_owned_session(tx, actor, &command.session_id)?;
+    let controller = get_or_create_controller(tx, &session, now)?;
+    let current = tx
+        .query_row(
+            "SELECT status, revision FROM mako_schedules
+             WHERE id = ?1 AND controller_id = ?2",
+            params![command.schedule_id, controller.id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    let Some((current_status, revision)) = current else {
+        return Err(RuntimeStoreError::NotFound("schedule not found".into()));
+    };
+    if revision < 0 || revision as u64 != command.expected_revision {
+        return Err(RuntimeStoreError::RevisionConflict(format!(
+            "schedule revision is {revision}, not {}",
+            command.expected_revision
+        )));
+    }
+    let allowed = current_status == command.status
+        || matches!(
+            (current_status.as_str(), command.status.as_str()),
+            ("enabled", "paused" | "completed" | "cancelled") | ("paused", "enabled" | "cancelled")
+        );
+    if !allowed {
+        return Err(RuntimeStoreError::StateConflict(format!(
+            "illegal schedule transition from {current_status} to {}",
+            command.status
+        )));
+    }
+    if !matches!(
+        command.status.as_str(),
+        "enabled" | "paused" | "completed" | "cancelled"
+    ) {
+        return Err(RuntimeStoreError::Invalid("invalid schedule status".into()));
+    }
+    let changed = tx.execute(
+        "UPDATE mako_schedules SET status = ?3, revision = revision + 1,
+             updated_at = ?4
+         WHERE id = ?1 AND controller_id = ?2 AND revision = ?5 AND status = ?6",
+        params![
+            command.schedule_id,
+            controller.id,
+            command.status,
+            now,
+            command.expected_revision,
+            current_status,
+        ],
+    )?;
+    if changed != 1 {
+        return Err(RuntimeStoreError::RevisionConflict(
+            "schedule changed concurrently".into(),
+        ));
+    }
+    let revision = command.expected_revision.saturating_add(1);
+    let event = append_event(
+        tx,
+        &controller,
+        "schedule_status_changed",
+        None,
+        Some(&command.schedule_id),
+        Some(&format!(
+            "schedule:{}:revision:{revision}",
+            command.schedule_id
+        )),
+        serde_json::json!({
+            "schedule_id": command.schedule_id,
+            "previous": current_status,
+            "current": command.status,
+            "revision": revision,
+        }),
+        now,
+    )?;
+    Ok(Mutation {
+        response: ResponsePayload::Schedule(ScheduleResponse {
+            schedule_id: command.schedule_id.clone(),
+            revision,
+            status: command.status,
+        }),
+        resource_id: Some(command.schedule_id),
+        events: vec![event],
+    })
+}
+
 fn extension(
     tx: &Transaction<'_>,
     actor: &Actor,
     now: &str,
     command: krusty_mako_protocol::ExtensionCommand,
 ) -> Result<Mutation, RuntimeStoreError> {
+    validate_bounded_field(&command.name, "extension name", 256)?;
+    let payload_bytes = serde_json::to_vec(&command.payload).map_err(|error| {
+        RuntimeStoreError::Invalid(format!("invalid extension payload: {error}"))
+    })?;
+    if payload_bytes.len() > 256 * 1024 {
+        return Err(RuntimeStoreError::Invalid(
+            "extension payload exceeds 262144 bytes".into(),
+        ));
+    }
     let session_id = command
         .payload
         .get("session_id")
@@ -1354,7 +2777,12 @@ fn extension(
         None,
         None,
         None,
-        serde_json::json!({"name": &command.name, "payload": &command.payload}),
+        serde_json::json!({
+            "name": &command.name,
+            "payload_kind": json_value_kind(&command.payload),
+            "payload_bytes": payload_bytes.len(),
+            "top_level_fields": command.payload.as_object().map_or(0, serde_json::Map::len),
+        }),
         now,
     )?;
     Ok(Mutation {
@@ -1365,6 +2793,17 @@ fn extension(
         resource_id: Some(session_id),
         events: vec![event],
     })
+}
+
+fn json_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1467,18 +2906,28 @@ fn insert_pending_user_message(
     message: &str,
     now: &str,
 ) -> Result<(), RuntimeStoreError> {
-    let role = format!("pending_user:{pending_id}");
     let content = serde_json::to_string(&vec![Content::Text {
         text: message.to_string(),
     }])
     .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
+    insert_pending_user_content(tx, session_id, pending_id, &content, now)
+}
+
+fn insert_pending_user_content(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    pending_id: &str,
+    content_json: &str,
+    now: &str,
+) -> Result<(), RuntimeStoreError> {
+    let role = format!("pending_user:{pending_id}");
     tx.execute(
         "INSERT INTO messages (session_id, role, content, created_at)
          SELECT ?1, ?2, ?3, ?4
          WHERE NOT EXISTS (
              SELECT 1 FROM messages WHERE session_id = ?1 AND role = ?2
          )",
-        params![session_id, role, content, now],
+        params![session_id, role, content_json, now],
     )?;
     tx.execute(
         "UPDATE sessions SET updated_at = ?2 WHERE id = ?1",
@@ -1577,6 +3026,19 @@ fn pending_message_id(actor: &Actor, session_id: &str, idempotency_key: &str) ->
     .to_string()
 }
 
+fn steer_pending_id(
+    actor: &Actor,
+    session_id: &str,
+    idempotency_key: &str,
+    requested: Option<&str>,
+) -> String {
+    requested
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| pending_message_id(actor, session_id, idempotency_key))
+}
+
 fn control_after_commit(
     command: &Command,
     actor: &Actor,
@@ -1609,20 +3071,24 @@ fn control_after_commit(
         Command::Steer(command) => Some((
             command.session_id.clone(),
             ExecutionControl::Steer {
-                pending_id: command.pending_id.clone(),
+                pending_id: Some(steer_pending_id(
+                    actor,
+                    &command.session_id,
+                    idempotency_key,
+                    command.pending_id.as_deref(),
+                )),
                 content: command.content.clone(),
             },
         )),
-        Command::ToolApproval(command) => Some((
-            command.session_id.clone(),
-            ExecutionControl::ToolApproval {
-                tool_call_id: command.tool_call_id.clone(),
-                approved: command.approved,
-            },
-        )),
+        // Tool approvals are scheduler-delivered from mako_control_outbox.
+        // Returning success means the decision is durable, even if the host
+        // input channel is between registrations at commit time.
+        Command::ToolApproval(_) => None,
         Command::UserResponse(command) => Some((
             command.session_id.clone(),
             ExecutionControl::UserResponse {
+                run_id: command.run_id.clone(),
+                pending_id: pending_message_id(actor, &command.session_id, idempotency_key),
                 tool_call_id: command.tool_call_id.clone(),
                 response: command.response.clone(),
             },
@@ -1633,6 +3099,9 @@ fn control_after_commit(
                 reason: "cancelled by user".into(),
             },
         )),
+        // Delete is accepted only after active workers are quiescent, so no
+        // best-effort post-commit cancellation is necessary or safe.
+        Command::DeleteSession(_) => None,
         _ => None,
     }
 }
@@ -1666,5 +3135,38 @@ fn lagged_event(
             skipped,
             resume_after_sequence,
         }),
+    }
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+    use krusty_mako_protocol::UserResponseCommand;
+
+    #[test]
+    fn user_response_control_preserves_exact_run_and_pending_identity() {
+        let actor = Actor::local("test");
+        let command = Command::UserResponse(UserResponseCommand {
+            session_id: "session-1".into(),
+            run_id: "run-a".into(),
+            tool_call_id: "question-1".into(),
+            response: "continue".into(),
+        });
+
+        let (session_id, control) =
+            control_after_commit(&command, &actor, "response-key").expect("control");
+        assert_eq!(session_id, "session-1");
+        assert!(matches!(
+            control,
+            ExecutionControl::UserResponse {
+                run_id,
+                pending_id,
+                tool_call_id,
+                response,
+            } if run_id == "run-a"
+                && !pending_id.trim().is_empty()
+                && tool_call_id == "question-1"
+                && response == "continue"
+        ));
     }
 }

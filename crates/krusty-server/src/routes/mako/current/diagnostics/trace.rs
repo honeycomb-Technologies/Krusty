@@ -1,10 +1,8 @@
-use std::collections::BTreeMap;
-
 use serde_json::Value;
 
 use krusty_core::agent::loop_events::LoopStopReason;
 use krusty_core::storage::{
-    MakoRunPriority, RuntimeTraceEvent, RuntimeTraceStore, RuntimeTraceSummary,
+    MakoControllerEvent, MakoRunPriority, RuntimeTraceEvent, RuntimeTraceStore, RuntimeTraceSummary,
 };
 
 use crate::error::AppError;
@@ -22,24 +20,12 @@ pub(in super::super) struct RunTraceDiagnostics {
 pub(in super::super) fn load_run_trace_diagnostics(
     trace_store: &RuntimeTraceStore<'_>,
     session_id: &str,
-    session_title: &str,
-    project_dir: Option<&str>,
-    target_branch: Option<&str>,
-    priority: MakoRunPriority,
+    pending_approvals: Vec<MakoPendingApprovalSummary>,
 ) -> Result<RunTraceDiagnostics, AppError> {
     let events = trace_store.list_events(session_id, Some(200))?;
     let latest_trace_at = events.last().map(|event| event.created_at.clone());
     let latest_run_summary = summarize_latest_run_from_events(&events);
     let failure_streak = recent_failure_streak(&events);
-    let pending_approvals = load_pending_approvals_from_events(
-        &events,
-        session_id,
-        session_title,
-        project_dir,
-        target_branch,
-        priority,
-    );
-
     Ok(RunTraceDiagnostics {
         latest_trace_at,
         latest_run_summary,
@@ -65,56 +51,38 @@ pub(super) fn run_summary_failed(summary: &RuntimeTraceSummary) -> bool {
         )
 }
 
-fn load_pending_approvals_from_events(
-    events: &[RuntimeTraceEvent],
+pub(in super::super) fn pending_approval_summaries_from_durable_events(
+    events: &[MakoControllerEvent],
     session_id: &str,
     session_title: &str,
     project_dir: Option<&str>,
     target_branch: Option<&str>,
     priority: MakoRunPriority,
 ) -> Vec<MakoPendingApprovalSummary> {
-    let mut pending = BTreeMap::new();
-
-    for event in events {
-        match event.event_type.as_str() {
-            "tool_approval_required" => {
-                let Some(tool_call_id) = event.payload.get("id").and_then(Value::as_str) else {
-                    continue;
-                };
-                let Some(tool_name) = event.payload.get("name").and_then(Value::as_str) else {
-                    continue;
-                };
-                let arguments = event
+    events
+        .iter()
+        .filter_map(|event| {
+            let run_id = event.run_id.as_ref()?;
+            let tool_call_id = event.payload.get("id").and_then(Value::as_str)?;
+            let tool_name = event.payload.get("name").and_then(Value::as_str)?;
+            Some(MakoPendingApprovalSummary {
+                session_id: session_id.to_string(),
+                run_id: run_id.clone(),
+                session_title: session_title.to_string(),
+                project_dir: project_dir.map(str::to_string),
+                target_branch: target_branch.map(str::to_string),
+                tool_call_id: tool_call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                arguments: event
                     .payload
                     .get("arguments")
                     .cloned()
-                    .unwrap_or(Value::Null);
-
-                pending.insert(
-                    tool_call_id.to_string(),
-                    MakoPendingApprovalSummary {
-                        session_id: session_id.to_string(),
-                        session_title: session_title.to_string(),
-                        project_dir: project_dir.map(str::to_string),
-                        target_branch: target_branch.map(str::to_string),
-                        tool_call_id: tool_call_id.to_string(),
-                        tool_name: tool_name.to_string(),
-                        arguments,
-                        requested_at: event.created_at.clone(),
-                        priority,
-                    },
-                );
-            }
-            "tool_approved" | "tool_denied" | "tool_result" => {
-                if let Some(tool_call_id) = event.payload.get("id").and_then(Value::as_str) {
-                    pending.remove(tool_call_id);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    pending.into_values().collect()
+                    .unwrap_or(Value::Null),
+                requested_at: event.created_at.clone(),
+                priority,
+            })
+        })
+        .collect()
 }
 
 fn summarize_latest_run_from_events(events: &[RuntimeTraceEvent]) -> RuntimeTraceSummary {

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::Json;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, Mutex, RwLock};
@@ -24,6 +25,7 @@ use krusty_core::storage::{
 use krusty_core::tools::registry::ToolRegistry;
 use krusty_core::SessionManager;
 
+use super::interactions::{resolve_pending_mako_run, PendingMakoInteraction};
 use super::{
     build_user_content, chat, deliver_steering_with_rollover, forward_loop_event,
     prepare_chat_contract_for_test, run_orchestrator_event_bridge, select_model_for_chat_request,
@@ -92,6 +94,185 @@ fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
         user_id: Some(user_id.to_string()),
         home_dir: Some(home_dir.to_path_buf()),
     })
+}
+
+#[tokio::test]
+async fn pending_mako_resolution_uses_durable_run_ids_not_trace_run_ids() {
+    let (state, _temp_dir) = create_test_state();
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user_with_config(
+            "Mako pending identity",
+            Some("test:model"),
+            Some("/work"),
+            Some("/work"),
+            WorkspaceMode::Selected,
+            None,
+            None,
+            SessionType::Mako,
+        )
+        .expect("session should create");
+    let now = chrono::Utc::now().to_rfc3339();
+    let db = Database::new(&state.db_path).expect("database should open");
+    db.conn()
+        .execute_batch(&format!(
+            "INSERT INTO mako_controllers (
+                id, scope_key, session_id, status, timezone, max_concurrent_runs,
+                created_at, updated_at
+             ) VALUES (
+                'controller-1', 'session:{session_id}', '{session_id}', 'active', 'UTC', 1,
+                '{now}', '{now}'
+             );
+             INSERT INTO mako_runs (
+                id, controller_id, session_id, kind, objective, config_json, status,
+                priority, available_at, attempt_count, max_attempts, created_at, updated_at
+             ) VALUES (
+                'durable-run-1', 'controller-1', '{session_id}', 'dispatch', 'work',
+                '{{}}', 'running',
+                0, '{now}', 1, 3, '{now}', '{now}'
+             );"
+        ))
+        .expect("durable run should insert");
+    db.conn()
+        .execute(
+            "INSERT INTO mako_controller_events (
+                controller_id, sequence, event_type, run_id, payload_json, created_at
+             ) VALUES ('controller-1', 1, 'agentic_event', 'durable-run-1', ?1, ?2)",
+            (
+                serde_json::json!({
+                    "type": "tool_approval_required",
+                    "id": "tool-1",
+                    "name": "edit",
+                    "arguments": {},
+                })
+                .to_string(),
+                now.as_str(),
+            ),
+        )
+        .expect("durable approval event should insert");
+    db.conn()
+        .execute(
+            "INSERT INTO runtime_traces (
+                session_id, run_id, sequence, turn, event_type, payload_json, created_at
+             ) VALUES (?1, 'trace-run-deliberately-different', 1, 1,
+                       'tool_approval_required', ?2, ?3)",
+            (
+                session_id.as_str(),
+                serde_json::json!({"id": "tool-1"}).to_string(),
+                now.as_str(),
+            ),
+        )
+        .expect("diagnostic trace should insert");
+
+    assert!(matches!(
+        resolve_pending_mako_run(
+            &state,
+            &session_id,
+            "tool-1",
+            None,
+            PendingMakoInteraction::ToolApproval,
+        ),
+        Ok(run_id) if run_id == "durable-run-1"
+    ));
+
+    db.conn()
+        .execute(
+            "INSERT INTO mako_controller_events (
+                controller_id, sequence, event_type, run_id, payload_json, created_at
+             ) VALUES ('controller-1', 2, 'tool_approval_queued', 'durable-run-1', ?1, ?2)",
+            (
+                serde_json::json!({"tool_call_id": "tool-1"}).to_string(),
+                now.as_str(),
+            ),
+        )
+        .expect("durable settlement should insert");
+    assert!(matches!(
+        resolve_pending_mako_run(
+            &state,
+            &session_id,
+            "tool-1",
+            None,
+            PendingMakoInteraction::ToolApproval,
+        ),
+        Err(AppError::Conflict(_))
+    ));
+}
+
+#[tokio::test]
+async fn chat_rejects_mako_creation_and_daemon_owned_metadata_overrides() {
+    let (state, _temp_dir) = create_test_state();
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user_with_config(
+            "Daemon Mako",
+            Some("test:model"),
+            Some("/work"),
+            Some("/work"),
+            WorkspaceMode::Selected,
+            None,
+            None,
+            SessionType::Mako,
+        )
+        .expect("session should create");
+
+    let new_mako = chat(
+        State(state.clone()),
+        None,
+        HeaderMap::new(),
+        Json(ChatRequest {
+            session_id: None,
+            message: "start".into(),
+            content: Vec::new(),
+            project_dir: Some("/work".into()),
+            working_dir: None,
+            workspace_mode: Some(WorkspaceMode::Selected),
+            target_branch: None,
+            session_type: Some(SessionType::Mako),
+            model: Some("test:model".into()),
+            thinking_enabled: crate::types::ThinkingLevel::Off,
+            mode: None,
+            permission_mode: None,
+            fast_mode: false,
+            research_enabled: None,
+        }),
+    )
+    .await;
+    assert!(matches!(new_mako, Err(AppError::Conflict(_))));
+
+    let override_attempt = chat(
+        State(state),
+        None,
+        HeaderMap::new(),
+        Json(ChatRequest {
+            session_id: Some(session_id.clone()),
+            message: "continue".into(),
+            content: Vec::new(),
+            project_dir: None,
+            working_dir: None,
+            workspace_mode: None,
+            target_branch: None,
+            session_type: None,
+            model: Some("test:other-model".into()),
+            thinking_enabled: crate::types::ThinkingLevel::Off,
+            mode: None,
+            permission_mode: None,
+            fast_mode: false,
+            research_enabled: None,
+        }),
+    )
+    .await;
+    assert!(matches!(override_attempt, Err(AppError::Conflict(_))));
+    assert_eq!(
+        session_manager
+            .get_session(&session_id)
+            .expect("session should load")
+            .expect("session should exist")
+            .model
+            .as_deref(),
+        Some("test:model")
+    );
 }
 
 #[tokio::test]
@@ -534,8 +715,10 @@ async fn tool_approval_rejects_foreign_owner() {
     let result = tool_approval(
         State(state),
         Some(current_user("bob", std::path::Path::new("/tmp"))),
+        HeaderMap::new(),
         Json(ToolApprovalRequest {
             session_id,
+            run_id: None,
             tool_call_id: "tool-1".to_string(),
             approved: true,
         }),
@@ -598,6 +781,7 @@ async fn live_steering_is_owner_checked_and_hidden_until_core_injection() {
     let foreign = steer(
         State(state.clone()),
         Some(current_user("bob", state.working_dir.as_ref())),
+        HeaderMap::new(),
         Json(SteerRequest {
             session_id: session_id.clone(),
             message: "foreign".into(),
@@ -611,6 +795,7 @@ async fn live_steering_is_owner_checked_and_hidden_until_core_injection() {
     let accepted = steer(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
+        HeaderMap::new(),
         Json(SteerRequest {
             session_id: session_id.clone(),
             message: "change direction".into(),
@@ -661,8 +846,10 @@ async fn tool_approval_rejects_closed_session_channel() {
     let result = tool_approval(
         State(state),
         Some(current_user("alice", std::path::Path::new("/tmp"))),
+        HeaderMap::new(),
         Json(ToolApprovalRequest {
             session_id,
+            run_id: None,
             tool_call_id: "tool-1".to_string(),
             approved: true,
         }),
@@ -704,8 +891,10 @@ async fn submit_tool_approval_returns_recoverable_pending_approval_error_when_ch
     let result = tool_approval(
         State(state),
         Some(current_user("alice", std::path::Path::new("/tmp"))),
+        HeaderMap::new(),
         Json(ToolApprovalRequest {
             session_id: session_id.clone(),
+            run_id: None,
             tool_call_id: "tool-1".to_string(),
             approved: true,
         }),
@@ -777,8 +966,10 @@ async fn tool_approval_survives_sse_disconnect_until_run_finishes() {
     let approval = tool_approval(
         State(state.clone()),
         Some(current_user("alice", std::path::Path::new("/tmp"))),
+        HeaderMap::new(),
         Json(ToolApprovalRequest {
             session_id: session_id.clone(),
+            run_id: None,
             tool_call_id: "tool-1".to_string(),
             approved: true,
         }),
@@ -828,6 +1019,7 @@ async fn chat_does_not_persist_model_override_when_setup_fails() {
     let result = chat(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
+        HeaderMap::new(),
         Json(ChatRequest {
             session_id: Some(session_id.clone()),
             message: "hello".to_string(),
@@ -874,6 +1066,7 @@ async fn chat_rejects_missing_model_before_creating_session() {
     let result = chat(
         State(state.clone()),
         Some(current_user("alice", &user_root)),
+        HeaderMap::new(),
         Json(ChatRequest {
             session_id: None,
             message: "scan this workspace".to_string(),
@@ -919,6 +1112,7 @@ async fn chat_rejects_unsupported_image_before_creating_session() {
     let result = chat(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
+        HeaderMap::new(),
         Json(ChatRequest {
             session_id: None,
             message: "what is this?".to_string(),

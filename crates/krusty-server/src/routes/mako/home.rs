@@ -16,7 +16,7 @@ use krusty_core::storage::{
     MakoProfileStore, MakoProfileStoreError, MakoRuntimeState, SessionInfo, SessionType,
 };
 
-use super::super::session_access::current_user_id;
+use super::super::session_access::{current_user_id, session_visible_to_user};
 use super::open_session_manager;
 use crate::auth::CurrentUser;
 use crate::error::AppError;
@@ -217,8 +217,11 @@ pub(super) async fn crew(
     let user_id = current_user_id(user.as_ref());
     let (sessions, runtime_states) = {
         let session_manager = open_session_manager(&state)?;
-        let sessions =
-            session_manager.list_sessions_for_user_by_type(None, user_id, SessionType::Mako)?;
+        let sessions = session_manager
+            .list_sessions_for_user_by_type(None, user_id, SessionType::Mako)?
+            .into_iter()
+            .filter(|session| session_visible_to_user(session, user_id))
+            .collect::<Vec<_>>();
         let runtime_states =
             krusty_core::storage::MakoRuntimeStateStore::new(Database::new(&state.db_path)?)
                 .list_states_for_sessions(

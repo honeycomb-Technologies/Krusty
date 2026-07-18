@@ -90,14 +90,18 @@ pub(super) fn build_mako_knowledge_context(
     session_id: &str,
     conversation: &[ModelMessage],
 ) -> String {
-    if let Err(error) = refresh_current_snapshot(db_path, project_dir, user_id) {
-        warn!(project_dir = ?project_dir, error = %error, "Failed to refresh Mako snapshot context");
-    }
+    let generated_snapshot = match refresh_current_snapshot(db_path, project_dir, user_id) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            warn!(project_dir = ?project_dir, error = %error, "Failed to refresh Mako snapshot context");
+            None
+        }
+    };
 
     let mut memories =
         if let Some(memory_db) = open_context_database(db_path, "building mako memory context") {
             let memory_store = MemoryStore::new(memory_db);
-            memory_store.list(project_dir, user_id)
+            memory_store.list_for_exact_owner(project_dir, user_id)
         } else {
             Vec::new()
         };
@@ -116,7 +120,7 @@ pub(super) fn build_mako_knowledge_context(
         open_context_database(db_path, "building mako report context")
     {
         let report_store = ReportStore::new(report_db);
-        match report_store.list_reports(project_dir) {
+        match report_store.list_reports_for_exact_owner(project_dir, user_id) {
             Ok(reports) => reports,
             Err(error) => {
                 warn!(project_dir = ?project_dir, error = %error, "Failed to load Mako reports for context");
@@ -127,7 +131,7 @@ pub(super) fn build_mako_knowledge_context(
         Vec::new()
     };
 
-    if memories.is_empty() && reports.is_empty() {
+    if memories.is_empty() && reports.is_empty() && generated_snapshot.is_none() {
         return String::new();
     }
 
@@ -137,7 +141,11 @@ pub(super) fn build_mako_knowledge_context(
         MAX_MAKO_REPORT_ITEMS,
     );
 
-    let current_snapshot = memories.iter().find(|memory| is_current_snapshot(memory));
+    // `knowledge_snapshots` is the canonical generated-state store. The
+    // memory lookup remains only as a compatibility fallback for pre-migration
+    // snapshot rows and is never preferred over the exact-owner materialized
+    // snapshot returned above.
+    let legacy_current_snapshot = memories.iter().find(|memory| is_current_snapshot(memory));
     let carry_forward_memories = memories
         .iter()
         .filter(|memory| !is_current_snapshot(memory))
@@ -148,10 +156,14 @@ pub(super) fn build_mako_knowledge_context(
         "Carry forward durable facts from memory and recent outcomes from reports. Prefer promoted memory for stable decisions; use deferred `report` execution through `tool_search` when full detail matters.".to_string(),
     ];
 
-    if let Some(snapshot) = current_snapshot {
+    if let Some(snapshot_content) = generated_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.content.as_str())
+        .or_else(|| legacy_current_snapshot.map(|snapshot| snapshot.content.as_str()))
+    {
         sections.push("## Current Snapshot".to_string());
         sections.push(truncate_utf8_bytes(
-            &snapshot.content,
+            snapshot_content,
             MAX_MAKO_SNAPSHOT_BYTES,
         ));
     }

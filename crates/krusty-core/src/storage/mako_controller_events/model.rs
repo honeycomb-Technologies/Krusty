@@ -55,34 +55,6 @@ impl MakoControllerEventType {
             Self::RecoveryRequired => "recovery_required",
         }
     }
-
-    pub(crate) fn parse(value: &str) -> Option<Self> {
-        match value {
-            "controller_created" => Some(Self::ControllerCreated),
-            "controller_started" => Some(Self::ControllerStarted),
-            "controller_paused" => Some(Self::ControllerPaused),
-            "controller_disabled" => Some(Self::ControllerDisabled),
-            "schedule_created" => Some(Self::ScheduleCreated),
-            "schedule_updated" => Some(Self::ScheduleUpdated),
-            "schedule_paused" => Some(Self::SchedulePaused),
-            "schedule_resumed" => Some(Self::ScheduleResumed),
-            "schedule_cancelled" => Some(Self::ScheduleCancelled),
-            "occurrence_materialized" => Some(Self::OccurrenceMaterialized),
-            "occurrence_skipped" => Some(Self::OccurrenceSkipped),
-            "run_queued" => Some(Self::RunQueued),
-            "run_leased" => Some(Self::RunLeased),
-            "run_started" => Some(Self::RunStarted),
-            "run_sleeping" => Some(Self::RunSleeping),
-            "run_retry_scheduled" => Some(Self::RunRetryScheduled),
-            "run_awaiting_input" => Some(Self::RunAwaitingInput),
-            "run_completed" => Some(Self::RunCompleted),
-            "run_failed" => Some(Self::RunFailed),
-            "run_cancelled" => Some(Self::RunCancelled),
-            "run_dead_lettered" => Some(Self::RunDeadLettered),
-            "recovery_required" => Some(Self::RecoveryRequired),
-            _ => None,
-        }
-    }
 }
 
 impl std::fmt::Display for MakoControllerEventType {
@@ -107,7 +79,10 @@ pub struct MakoControllerEvent {
     pub id: i64,
     pub controller_id: String,
     pub sequence: u64,
-    pub event_type: MakoControllerEventType,
+    /// Durable runtime event name. Unlike write-side controller lifecycle
+    /// events, execution extensions are intentionally open-ended, so reads
+    /// must preserve unknown names instead of failing deserialization.
+    pub event_type: String,
     pub run_id: Option<String>,
     pub schedule_id: Option<String>,
     pub dedupe_key: Option<String>,

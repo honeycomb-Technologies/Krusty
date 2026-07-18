@@ -31,6 +31,7 @@ fn search_is_user_and_project_scoped() {
     let alice = create_session(&db, Some("alice"), "/work/alpha");
     let bob = create_session(&db, Some("bob"), "/work/alpha");
     let alice_other = create_session(&db, Some("alice"), "/work/beta");
+    let local = create_session(&db, None, "/work/alpha");
     let store = EpisodeStore::new(&db);
     let now = Utc::now().to_rfc3339();
 
@@ -38,6 +39,7 @@ fn search_is_user_and_project_scoped() {
         (1, &alice, "the mako scheduler uses leases"),
         (2, &bob, "the mako scheduler belongs to bob"),
         (3, &alice_other, "the beta scheduler is separate"),
+        (4, &local, "the local scheduler is unowned"),
     ] {
         store
             .record_message(
@@ -55,6 +57,12 @@ fn search_is_user_and_project_scoped() {
     let results = store.search(&query).expect("search");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].session_id, alice);
+
+    let mut local_query = EpisodeSearch::new("scheduler", None);
+    local_query.project_dir = Some("/work/alpha");
+    let local_results = store.search(&local_query).expect("local search");
+    assert_eq!(local_results.len(), 1);
+    assert_eq!(local_results[0].session_id, local);
 }
 
 #[test]
