@@ -6,7 +6,8 @@ use serde_json::Value;
 use crate::tools::registry::{authorize_tool_call, ToolContext, ToolResult};
 
 use super::shell_policy::{
-    classify_bash_command, BashCommandClassification, BashFileOperationKind,
+    classify_bash_command, is_write_capable_in_plan_mode, BashCommandClassification,
+    BashFileOperationKind,
 };
 use super::{HookResult, PostToolHook, PreToolHook};
 
@@ -131,7 +132,7 @@ impl PlanModeHook {
     }
 
     fn is_modifying_bash(&self, command: &str) -> bool {
-        classify_bash_command(command).modifies_filesystem_or_process
+        is_write_capable_in_plan_mode(command)
     }
 }
 
@@ -152,7 +153,7 @@ impl PreToolHook for PlanModeHook {
                     "Plan mode blocked modifying bash command"
                 );
                 return HookResult::Block {
-                    reason: "Modifying bash commands are blocked in plan mode. Use Ctrl+B to exit plan mode first.".to_string(),
+                    reason: "Modifying bash commands are blocked in Plan mode. Call set_work_mode with mode='build' before implementation.".to_string(),
                 };
             }
 
@@ -163,7 +164,7 @@ impl PreToolHook for PlanModeHook {
             tracing::info!(tool = name, "Plan mode blocked write tool");
             return HookResult::Block {
                 reason: format!(
-                    "Tool '{}' is blocked in plan mode. Use Ctrl+B to exit plan mode first.",
+                    "Tool '{}' is blocked in Plan mode. Call set_work_mode with mode='build' before implementation.",
                     name
                 ),
             };
@@ -242,7 +243,11 @@ mod tests {
         let ctx = plan_mode_context();
 
         let result = hook.before_execute("apply_patch", &json!({}), &ctx).await;
-        assert!(matches!(result, HookResult::Block { .. }));
+        let HookResult::Block { reason } = result else {
+            panic!("expected Plan mode to block apply_patch");
+        };
+        assert!(reason.contains("set_work_mode"));
+        assert!(reason.contains("mode='build'"));
     }
 
     #[tokio::test]
@@ -280,6 +285,24 @@ mod tests {
         let result = hook
             .before_execute("bash", &json!({ "command": "mkdir test-dir" }), &ctx)
             .await;
+        let HookResult::Block { reason } = result else {
+            panic!("expected Plan mode to block modifying bash");
+        };
+        assert!(reason.contains("set_work_mode"));
+        assert!(reason.contains("mode='build'"));
+    }
+
+    #[tokio::test]
+    async fn plan_mode_blocks_interpreter_based_file_writes() {
+        let hook = PlanModeHook::new();
+        let ctx = plan_mode_context();
+        let command =
+            "python3 - <<'PY'\nfrom pathlib import Path\nPath('server.py').write_text('ok')\nPY";
+
+        let result = hook
+            .before_execute("bash", &json!({ "command": command }), &ctx)
+            .await;
+
         assert!(matches!(result, HookResult::Block { .. }));
     }
 

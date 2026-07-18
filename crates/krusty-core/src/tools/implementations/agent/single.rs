@@ -119,7 +119,12 @@ impl AgentTool {
             .with_working_dir(working_dir)
             .with_sandbox_root(inherited_sandbox)
             .with_delegated_run_id(delegated_run_id.clone())
-            .with_delegation_policy(delegation_policy.clone());
+            .with_delegation_policy(delegation_policy.clone())
+            .with_process_context(
+                ctx.process_registry.clone(),
+                ctx.user_id.clone(),
+                ctx.session_id.clone(),
+            );
         if let Some(max_turns) = ctx.subagent_max_turns {
             task = task.with_max_turns(max_turns);
         }
@@ -288,7 +293,12 @@ impl AgentTool {
                     .unwrap_or_else(|| ctx.working_dir.clone()),
             )
             .with_delegated_run_id(delegated_run_id.clone())
-            .with_delegation_policy(delegation_policy.clone());
+            .with_delegation_policy(delegation_policy.clone())
+            .with_process_context(
+                ctx.process_registry.clone(),
+                ctx.user_id.clone(),
+                ctx.session_id.clone(),
+            );
         if let Some(max_turns) = ctx.subagent_max_turns {
             task = task.with_max_turns(max_turns);
         }
@@ -448,7 +458,12 @@ impl AgentTool {
                     .unwrap_or_else(|| ctx.working_dir.clone()),
             )
             .with_delegated_run_id(delegated_run_id.clone())
-            .with_delegation_policy(delegation_policy.clone());
+            .with_delegation_policy(delegation_policy.clone())
+            .with_process_context(
+                ctx.process_registry.clone(),
+                ctx.user_id.clone(),
+                ctx.session_id.clone(),
+            );
         if let Some(max_turns) = ctx.subagent_max_turns {
             task = task.with_max_turns(max_turns);
         }

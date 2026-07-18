@@ -136,17 +136,7 @@ pub(super) async fn oauth_callback(
 
     match exchange_result {
         Ok(token_data) => {
-            let mut store = match OAuthTokenStore::load() {
-                Ok(store) => store,
-                Err(error) => {
-                    return callback_error_page(
-                        provider_id.storage_key().to_string(),
-                        format!("Failed to load token storage: {}", error),
-                    );
-                }
-            };
-            store.set(provider_id, token_data);
-            if let Err(error) = store.save() {
+            if let Err(error) = OAuthTokenStore::set_persisted(provider_id, token_data) {
                 return callback_error_page(
                     provider_id.storage_key().to_string(),
                     format!("Failed to save your sign-in: {}", error),

@@ -41,7 +41,8 @@ use self::build_context::SharedBuildContext;
 // Re-export public types
 pub use tools::BuilderTools;
 pub use types::{
-    AgentProgress, AgentProgressStatus, SubAgentApiError, SubAgentResult, SubAgentTask,
+    AgentProgress, AgentProgressStatus, DelegatedProcessArtifact, SubAgentApiError, SubAgentResult,
+    SubAgentTask,
 };
 
 // Re-export single agent entry points
@@ -164,6 +165,7 @@ impl SubAgentPool {
                             turns_used: 0,
                             error: Some(format!("Semaphore error: {}", e)),
                             policy_violations: vec![],
+                            background_processes: vec![],
                         });
                     }
                     Err(_) => {
@@ -182,6 +184,7 @@ impl SubAgentPool {
                                 SEMAPHORE_TIMEOUT
                             )),
                             policy_violations: vec![],
+                            background_processes: vec![],
                         });
                     }
                 };
@@ -198,6 +201,7 @@ impl SubAgentPool {
                         turns_used: 0,
                         error: Some("Cancelled".to_string()),
                         policy_violations: vec![],
+                        background_processes: vec![],
                     });
                 }
 
@@ -234,6 +238,7 @@ impl SubAgentPool {
                         turns_used: 0,
                         error: Some(format!("Task panicked: {}", e)),
                         policy_violations: vec![],
+                        background_processes: vec![],
                     });
                 }
             }
@@ -307,6 +312,7 @@ impl SubAgentPool {
                             turns_used: 0,
                             error: Some(format!("Semaphore error: {}", e)),
                             policy_violations: vec![],
+                            background_processes: vec![],
                         });
                     }
                     Err(_) => {
@@ -325,6 +331,7 @@ impl SubAgentPool {
                                 SEMAPHORE_TIMEOUT
                             )),
                             policy_violations: vec![],
+                            background_processes: vec![],
                         });
                     }
                 };
@@ -341,6 +348,7 @@ impl SubAgentPool {
                         turns_used: 0,
                         error: Some("Cancelled".to_string()),
                         policy_violations: vec![],
+                        background_processes: vec![],
                     });
                 }
 
@@ -377,6 +385,7 @@ impl SubAgentPool {
                         turns_used: 0,
                         error: Some(format!("Task panicked: {}", e)),
                         policy_violations: vec![],
+                        background_processes: vec![],
                     });
                 }
             }

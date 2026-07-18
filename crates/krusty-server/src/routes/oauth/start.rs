@@ -155,14 +155,11 @@ async fn start_openai_local_browser_oauth(
         let result = BrowserOAuthFlow::new(openai_oauth_config()).run().await;
         match result {
             Ok(token_data) => {
-                if let Ok(mut store) = OAuthTokenStore::load() {
-                    store.set(provider_id, token_data);
-                    if let Err(error) = store.save() {
-                        tracing::error!("Failed to save OpenAI OAuth token: {}", error);
-                    } else {
-                        tracing::info!("OpenAI browser OAuth token stored successfully");
-                        refresh_openai_models(model_registry.clone()).await;
-                    }
+                if let Err(error) = OAuthTokenStore::set_persisted(provider_id, token_data) {
+                    tracing::error!("Failed to save OpenAI OAuth token: {}", error);
+                } else {
+                    tracing::info!("OpenAI browser OAuth token stored successfully");
+                    refresh_openai_models(model_registry.clone()).await;
                 }
             }
             Err(error) => tracing::warn!("OpenAI browser OAuth failed: {}", error),
@@ -191,13 +188,13 @@ async fn start_grok_browser_oauth(
         let result = force_grok_browser_login().await;
         match result {
             Ok(token) => {
-                if let Ok(mut store) = OAuthTokenStore::load() {
-                    store.set(provider_id, grok_auth_token_to_oauth_data(&token));
-                    if let Err(error) = store.save() {
-                        tracing::error!("Failed to save xAI/Grok OAuth token: {}", error);
-                    } else {
-                        tracing::info!("xAI/Grok browser OAuth token stored successfully");
-                    }
+                if let Err(error) = OAuthTokenStore::set_persisted(
+                    provider_id,
+                    grok_auth_token_to_oauth_data(&token),
+                ) {
+                    tracing::error!("Failed to save xAI/Grok OAuth token: {}", error);
+                } else {
+                    tracing::info!("xAI/Grok browser OAuth token stored successfully");
                 }
             }
             Err(error) => tracing::warn!("xAI/Grok browser OAuth failed: {}", error),
@@ -275,14 +272,11 @@ async fn start_openai_device_oauth(
                     return;
                 }
 
-                if let Ok(mut store) = OAuthTokenStore::load() {
-                    store.set(provider_id, token_data);
-                    if let Err(error) = store.save() {
-                        tracing::error!("Failed to save OAuth token: {}", error);
-                    } else {
-                        tracing::info!("OpenAI OAuth token stored successfully");
-                        refresh_openai_models(model_registry.clone()).await;
-                    }
+                if let Err(error) = OAuthTokenStore::set_persisted(provider_id, token_data) {
+                    tracing::error!("Failed to save OAuth token: {}", error);
+                } else {
+                    tracing::info!("OpenAI OAuth token stored successfully");
+                    refresh_openai_models(model_registry.clone()).await;
                 }
             }
             Err(error) => {

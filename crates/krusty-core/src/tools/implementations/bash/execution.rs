@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -488,37 +487,5 @@ pub(super) async fn execute_foreground(
             Some(json!({ "output": processed })),
             metadata,
         )
-    }
-}
-
-pub(super) async fn execute_background(mut cmd: Command, warnings: Vec<String>) -> ToolResult {
-    let shell_id = uuid::Uuid::new_v4().to_string();
-
-    cmd.stdout(Stdio::null()).stderr(Stdio::null());
-
-    match cmd.spawn() {
-        Ok(child) => {
-            let pid = child.id().unwrap_or(0);
-            tracing::info!(shell_id = %shell_id, pid = pid, "Started background process");
-
-            tokio::spawn(async move {
-                let _ = child.wait_with_output().await;
-            });
-
-            ToolResult::success_data_with(
-                json!({
-                    "message": "Process started in background",
-                    "shell_id": shell_id,
-                    "status": "running"
-                }),
-                warnings,
-                None,
-                Some(json!({
-                    "exit_code": 0,
-                    "killed": false
-                })),
-            )
-        }
-        Err(e) => ToolResult::error(format!("Failed to start background process: {}", e)),
     }
 }
