@@ -273,7 +273,9 @@ async fn run_scheduler(
                 let Some(command) = command else { return; };
                 match command {
                     Command::Acquire { request, response } => {
-                        state.pending.push_back(Pending { request, response });
+                        state
+                            .pending
+                            .push_back(self::Pending { request, response });
                         if state.active.len() >= state.target_limit {
                             state.demand_observed = true;
                         }
