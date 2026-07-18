@@ -135,9 +135,8 @@ For simple file lookups, use Glob/Grep/Read directly — agent is for deeper mul
                 },
                 "max_concurrency": {
                     "type": "integer",
-                    "description": "Parallel builder limit",
-                    "minimum": 1,
-                    "maximum": 20
+                    "description": "Optional parallel builder ceiling",
+                    "minimum": 1
                 },
                 "run_in_background": {
                     "type": "boolean",

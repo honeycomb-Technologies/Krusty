@@ -8,11 +8,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::agent::subagent::{
-    execute_single_agent, AgentProgress, AgentProgressStatus, SingleExplorerConfig, SubAgentTask,
+    execute_single_agent, AgentIdentity, AgentProgress, AgentProgressStatus, SingleExplorerConfig,
+    SubAgentTask,
 };
 use crate::ai::client::AiClient;
 use crate::process::ProcessRegistry;
-use crate::tools::registry::{DelegationPolicy, ToolRegistry};
+use crate::tools::registry::{DelegationPolicy, PermissionMode, ToolRegistry};
 
 use super::super::teammate::{TeammateConfig, TeammateStatus};
 use super::task_store::{poll_next_task, record_task_complete, record_task_failed};
@@ -37,8 +38,12 @@ pub(super) async fn run_teammate_loop(
     db_path: PathBuf,
     process_registry: Option<Arc<ProcessRegistry>>,
     process_owner_id: Option<String>,
+    permission_mode: PermissionMode,
+    identity: AgentIdentity,
 ) {
-    let policy = config.role.delegation_policy(config.max_turns);
+    let policy = config
+        .role
+        .delegation_policy(permission_mode, config.max_turns);
     let model = ai_client.config().model.clone();
 
     info!(
@@ -111,7 +116,8 @@ pub(super) async fn run_teammate_loop(
             let mut current = progress.write().await;
             *current = AgentProgress {
                 task_id: task_id.clone(),
-                name: config.name.clone(),
+                name: identity.display_name(),
+                identity: Some(identity.clone()),
                 status: AgentProgressStatus::Running,
                 ..Default::default()
             };
@@ -126,6 +132,7 @@ pub(super) async fn run_teammate_loop(
             process_registry.clone(),
             process_owner_id.clone(),
             &session_id,
+            identity.clone(),
         );
 
         let agent_config =
@@ -205,10 +212,12 @@ fn build_teammate_subagent_task(
     process_registry: Option<Arc<ProcessRegistry>>,
     process_owner_id: Option<String>,
     session_id: &str,
+    identity: AgentIdentity,
 ) -> SubAgentTask {
     let parent_session_id = (!session_id.trim().is_empty()).then(|| session_id.to_string());
     SubAgentTask::new(task_id, task_description)
         .with_name(teammate_name)
+        .with_identity(identity)
         .with_working_dir(working_dir)
         .with_delegation_policy(policy)
         .with_process_context(process_registry, process_owner_id, parent_session_id)
@@ -231,7 +240,9 @@ mod tests {
 
     use super::{build_teammate_subagent_task, truncate};
     use crate::agent::autonomy::team::TeammateRole;
+    use crate::agent::subagent::AgentIdentity;
     use crate::process::ProcessRegistry;
+    use crate::tools::registry::PermissionMode;
 
     #[test]
     fn truncate_respects_char_boundaries() {
@@ -257,10 +268,11 @@ mod tests {
             "verify the preview",
             "tester-1",
             std::path::PathBuf::from("/workspace"),
-            TeammateRole::Tester.delegation_policy(Some(10)),
+            TeammateRole::Tester.delegation_policy(PermissionMode::Autonomous, Some(10)),
             Some(Arc::clone(&registry)),
             Some("owner-1".to_string()),
             "session-1",
+            AgentIdentity::child("tester-1", "/root/team", "tester-1", "tester", 0),
         );
 
         assert!(Arc::ptr_eq(
@@ -278,10 +290,11 @@ mod tests {
             "review files",
             "reviewer-1",
             std::path::PathBuf::from("/workspace"),
-            TeammateRole::Reviewer.delegation_policy(None),
+            TeammateRole::Reviewer.delegation_policy(PermissionMode::Autonomous, None),
             None,
             None,
             "",
+            AgentIdentity::child("reviewer-1", "/root/team", "reviewer-1", "reviewer", 0),
         );
 
         assert!(task.process_registry.is_none());

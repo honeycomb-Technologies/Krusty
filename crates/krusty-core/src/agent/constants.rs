@@ -12,12 +12,6 @@ pub mod token_limits {
     pub const LARGE: u32 = 16384;
 }
 
-/// Concurrency limits
-pub mod concurrency {
-    /// Maximum parallel tool executions
-    pub const MAX_PARALLEL_TOOLS: usize = 100;
-}
-
 /// Timeout configurations
 pub mod timeouts {
     use std::time::Duration;

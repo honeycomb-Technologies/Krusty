@@ -16,18 +16,17 @@
 
 pub mod build_context;
 mod execution;
+mod identity;
+mod scheduler;
 mod tools;
 mod types;
 
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 use tracing::{info, warn};
-
-/// Timeout for acquiring semaphore permit (prevents deadlock on hung agents)
-const SEMAPHORE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Default stagger delay between spawning agents (prevents rate limit storms)
 /// Same for all providers - users can override with with_stagger_delay() if needed
@@ -39,6 +38,11 @@ use crate::ai::client::AiClient;
 use self::build_context::SharedBuildContext;
 
 // Re-export public types
+pub use identity::AgentIdentity;
+pub use scheduler::{
+    AdaptiveConcurrencyPolicy, AgentScheduler, BackpressureSignal, ScheduleRequest,
+    SchedulerSnapshot, SchedulingClass,
+};
 pub use tools::BuilderTools;
 pub use types::{
     AgentProgress, AgentProgressStatus, DelegatedProcessArtifact, SubAgentApiError, SubAgentResult,
@@ -56,7 +60,9 @@ use execution::execute_builder_with_progress;
 pub struct SubAgentPool {
     client: Arc<AiClient>,
     cancellation: AgentCancellation,
-    max_concurrency: usize,
+    /// Optional user ceiling. The default scheduler limit is derived from host
+    /// capacity and adapts to observed provider health.
+    concurrency_ceiling: Option<usize>,
     /// Override model for non-Anthropic providers (uses user's selected model)
     override_model: Option<String>,
     /// Delay between spawning agents (prevents rate limit storms)
@@ -65,19 +71,17 @@ pub struct SubAgentPool {
 
 impl SubAgentPool {
     pub fn new(client: Arc<AiClient>, cancellation: AgentCancellation) -> Self {
-        use crate::agent::constants::concurrency;
-
         Self {
             client,
             cancellation,
-            max_concurrency: concurrency::MAX_PARALLEL_TOOLS,
+            concurrency_ceiling: None,
             override_model: None,
             stagger_delay: Duration::from_millis(DEFAULT_STAGGER_MS),
         }
     }
 
     pub fn with_concurrency(mut self, max: usize) -> Self {
-        self.max_concurrency = max;
+        self.concurrency_ceiling = Some(max.max(1));
         self
     }
 
@@ -107,6 +111,15 @@ impl SubAgentPool {
             .unwrap_or_else(|| self.client.config().model.clone())
     }
 
+    fn scheduler(&self) -> AgentScheduler {
+        let policy = self
+            .concurrency_ceiling
+            .map_or_else(AdaptiveConcurrencyPolicy::default, |ceiling| {
+                AdaptiveConcurrencyPolicy::default().with_ceiling(ceiling)
+            });
+        AgentScheduler::new(policy)
+    }
+
     /// Execute exploration tasks concurrently using the single-agent model
     ///
     /// Each task runs as an independent single explorer agent with read-only tools.
@@ -122,25 +135,26 @@ impl SubAgentPool {
         let task_count = tasks.len();
         let stagger = self.stagger_delay;
 
+        let scheduler = self.scheduler();
         info!(
             count = task_count,
-            concurrency = self.max_concurrency,
+            concurrency_ceiling = ?self.concurrency_ceiling,
             stagger_ms = stagger.as_millis() as u64,
             "SubAgentPool: Spawning explorer agents with stagger"
         );
 
-        let semaphore = Arc::new(Semaphore::new(self.max_concurrency));
         // JoinSet aborts every still-running child when this foreground pool
         // future is dropped (for example by LoopInput::Cancel). Plain detached
         // JoinHandles would allow delegated work to keep mutating afterward.
         let mut task_set = JoinSet::new();
 
-        for (idx, task) in tasks.into_iter().enumerate() {
+        for (idx, mut task) in tasks.into_iter().enumerate() {
             if idx > 0 && !stagger.is_zero() {
                 sleep(stagger).await;
             }
 
-            let sem = semaphore.clone();
+            task.ensure_identity("/root", "explorer", idx);
+            let scheduler = scheduler.clone();
             let client = self.client.clone();
             let cancel = self.cancellation.child_token();
             let resolved_model = self.resolve_model();
@@ -150,59 +164,20 @@ impl SubAgentPool {
             let progress_tx = progress_tx.clone();
 
             task_set.spawn(async move {
-                let _permit = match timeout(SEMAPHORE_TIMEOUT, sem.acquire()).await {
-                    Ok(Ok(p)) => p,
-                    Ok(Err(e)) => {
-                        warn!(task_id = %task_id, error = %e, "Explorer: Failed to acquire semaphore");
-                        return (idx, SubAgentResult {
-                            task_id,
-                            agent_name: task.name.clone(),
-                            delegated_run_id: task.delegated_run_id.clone(),
-                            success: false,
-                            output: String::new(),
-                            files_examined: vec![],
-                            duration_ms: 0,
-                            turns_used: 0,
-                            error: Some(format!("Semaphore error: {}", e)),
-                            policy_violations: vec![],
-                            background_processes: vec![],
-                        });
-                    }
-                    Err(_) => {
-                        warn!(task_id = %task_id, "Explorer: Semaphore acquire timed out");
-                        return (idx, SubAgentResult {
-                            task_id,
-                            agent_name: task.name.clone(),
-                            delegated_run_id: task.delegated_run_id.clone(),
-                            success: false,
-                            output: String::new(),
-                            files_examined: vec![],
-                            duration_ms: 0,
-                            turns_used: 0,
-                            error: Some(format!(
-                                "Semaphore acquire timed out after {:?}",
-                                SEMAPHORE_TIMEOUT
-                            )),
-                            policy_violations: vec![],
-                            background_processes: vec![],
-                        });
-                    }
+                let request = ScheduleRequest::new(
+                    task.parent_session_id
+                        .clone()
+                        .or_else(|| task.delegated_run_id.clone())
+                        .unwrap_or_else(|| task_id.clone()),
+                    resolved_model.clone(),
+                    SchedulingClass::ReadOnly,
+                );
+                let Some(permit) = scheduler.acquire(request, &cancel).await else {
+                    return (idx, cancelled_result(&task));
                 };
 
                 if cancel.is_cancelled() {
-                    return (idx, SubAgentResult {
-                        task_id,
-                        agent_name: task.name.clone(),
-                        delegated_run_id: task.delegated_run_id.clone(),
-                        success: false,
-                        output: String::new(),
-                        files_examined: vec![],
-                        duration_ms: 0,
-                        turns_used: 0,
-                        error: Some("Cancelled".to_string()),
-                        policy_violations: vec![],
-                        background_processes: vec![],
-                    });
+                    return (idx, cancelled_result(&task));
                 }
 
                 let result = execute_single_explorer(
@@ -216,6 +191,7 @@ impl SubAgentPool {
                     Some(progress_tx),
                 )
                 .await;
+                permit.complete(BackpressureSignal::from_error(result.error.as_deref()));
                 (idx, result)
             });
         }
@@ -264,7 +240,7 @@ impl SubAgentPool {
         context: Arc<SharedBuildContext>,
         progress_tx: mpsc::UnboundedSender<AgentProgress>,
     ) -> Vec<SubAgentResult> {
-        let semaphore = Arc::new(Semaphore::new(self.max_concurrency));
+        let scheduler = self.scheduler();
         let client = self.client.clone();
         let cancellation = self.cancellation.clone();
         let task_count = tasks.len();
@@ -272,7 +248,7 @@ impl SubAgentPool {
 
         info!(
             count = task_count,
-            concurrency = self.max_concurrency,
+            concurrency_ceiling = ?self.concurrency_ceiling,
             stagger_ms = stagger.as_millis() as u64,
             "SubAgentPool: Spawning builder agents with stagger"
         );
@@ -282,13 +258,14 @@ impl SubAgentPool {
         // independently-owned JoinSet. Background pools keep owning their set.
         let mut task_set = JoinSet::new();
 
-        for (idx, task) in tasks.into_iter().enumerate() {
+        for (idx, mut task) in tasks.into_iter().enumerate() {
             // Stagger delay between spawns (skip first)
             if idx > 0 && !stagger.is_zero() {
                 sleep(stagger).await;
             }
 
-            let sem = semaphore.clone();
+            task.ensure_identity("/root", "builder", idx);
+            let scheduler = scheduler.clone();
             let client = client.clone();
             let cancel = cancellation.child_token();
             let context = context.clone();
@@ -297,59 +274,20 @@ impl SubAgentPool {
             let resolved_model = self.resolve_model();
 
             task_set.spawn(async move {
-                let _permit = match timeout(SEMAPHORE_TIMEOUT, sem.acquire()).await {
-                    Ok(Ok(p)) => p,
-                    Ok(Err(e)) => {
-                        warn!(task_id = %task_id, error = %e, "Builder: Failed to acquire semaphore");
-                        return (idx, SubAgentResult {
-                            task_id,
-                            agent_name: task.name.clone(),
-                            delegated_run_id: task.delegated_run_id.clone(),
-                            success: false,
-                            output: String::new(),
-                            files_examined: vec![],
-                            duration_ms: 0,
-                            turns_used: 0,
-                            error: Some(format!("Semaphore error: {}", e)),
-                            policy_violations: vec![],
-                            background_processes: vec![],
-                        });
-                    }
-                    Err(_) => {
-                        warn!(task_id = %task_id, "Builder: Semaphore acquire timed out after {:?}", SEMAPHORE_TIMEOUT);
-                        return (idx, SubAgentResult {
-                            task_id,
-                            agent_name: task.name.clone(),
-                            delegated_run_id: task.delegated_run_id.clone(),
-                            success: false,
-                            output: String::new(),
-                            files_examined: vec![],
-                            duration_ms: 0,
-                            turns_used: 0,
-                            error: Some(format!(
-                                "Semaphore acquire timed out after {:?}",
-                                SEMAPHORE_TIMEOUT
-                            )),
-                            policy_violations: vec![],
-                            background_processes: vec![],
-                        });
-                    }
+                let request = ScheduleRequest::new(
+                    task.parent_session_id
+                        .clone()
+                        .or_else(|| task.delegated_run_id.clone())
+                        .unwrap_or_else(|| task_id.clone()),
+                    format!("{}:{}", resolved_model, task_id),
+                    SchedulingClass::WriteShared,
+                );
+                let Some(permit) = scheduler.acquire(request, &cancel).await else {
+                    return (idx, cancelled_result(&task));
                 };
 
                 if cancel.is_cancelled() {
-                    return (idx, SubAgentResult {
-                        task_id,
-                        agent_name: task.name.clone(),
-                        delegated_run_id: task.delegated_run_id.clone(),
-                        success: false,
-                        output: String::new(),
-                        files_examined: vec![],
-                        duration_ms: 0,
-                        turns_used: 0,
-                        error: Some("Cancelled".to_string()),
-                        policy_violations: vec![],
-                        background_processes: vec![],
-                    });
+                    return (idx, cancelled_result(&task));
                 }
 
                 let result = execute_builder_with_progress(
@@ -361,6 +299,7 @@ impl SubAgentPool {
                     progress_tx,
                 )
                 .await;
+                permit.complete(BackpressureSignal::from_error(result.error.as_deref()));
                 (idx, result)
             });
         }
@@ -400,6 +339,22 @@ impl SubAgentPool {
         let stats = context.stats();
         info!("SubAgentPool: Builders complete | {}", stats);
         results
+    }
+}
+
+fn cancelled_result(task: &SubAgentTask) -> SubAgentResult {
+    SubAgentResult {
+        task_id: task.id.clone(),
+        agent_name: task.name.clone(),
+        delegated_run_id: task.delegated_run_id.clone(),
+        success: false,
+        output: String::new(),
+        files_examined: vec![],
+        duration_ms: 0,
+        turns_used: 0,
+        error: Some("Cancelled".to_string()),
+        policy_violations: vec![],
+        background_processes: vec![],
     }
 }
 

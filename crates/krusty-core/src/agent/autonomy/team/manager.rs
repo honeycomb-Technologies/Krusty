@@ -3,16 +3,17 @@ mod task_store;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 use tracing::info;
 
-use crate::agent::subagent::AgentProgress;
+use crate::agent::subagent::{AgentIdentity, AgentProgress};
 use crate::ai::client::AiClient;
 use crate::process::ProcessRegistry;
-use crate::tools::registry::ToolRegistry;
+use crate::tools::registry::{PermissionMode, ToolRegistry};
 
 use super::teammate::{Teammate, TeammateConfig, TeammateStatus};
 
@@ -28,6 +29,9 @@ pub struct TeamManager {
     db_path: PathBuf,
     process_registry: Option<Arc<ProcessRegistry>>,
     process_owner_id: Option<String>,
+    permission_mode: PermissionMode,
+    subagent_max_turns: Option<usize>,
+    next_ordinal: AtomicUsize,
 }
 
 impl TeamManager {
@@ -38,6 +42,8 @@ impl TeamManager {
         project_dir: Option<PathBuf>,
         session_id: String,
         db_path: PathBuf,
+        permission_mode: PermissionMode,
+        subagent_max_turns: Option<usize>,
     ) -> Self {
         Self {
             teammates: Arc::new(RwLock::new(HashMap::new())),
@@ -49,6 +55,9 @@ impl TeamManager {
             db_path,
             process_registry: None,
             process_owner_id: None,
+            permission_mode,
+            subagent_max_turns,
+            next_ordinal: AtomicUsize::new(0),
         }
     }
 
@@ -66,8 +75,18 @@ impl TeamManager {
     }
 
     pub async fn spawn_teammate(&self, config: TeammateConfig) -> Result<String> {
+        let mut config = config;
+        config.max_turns = restrictive_turn_budget(config.max_turns, self.subagent_max_turns);
         let name = config.name.clone();
-        let mut teammate = Teammate::new(config.clone());
+        let ordinal = self.next_ordinal.fetch_add(1, Ordering::Relaxed);
+        let identity = AgentIdentity::child(
+            format!("{}:{}", self.session_id, name),
+            "/root/team",
+            name.clone(),
+            config.role.label(),
+            ordinal,
+        );
+        let mut teammate = Teammate::new(config.clone(), identity.clone());
         {
             let teammates = self.teammates.read().await;
             if teammates.contains_key(&name) {
@@ -86,6 +105,7 @@ impl TeamManager {
         let db_path = self.db_path.clone();
         let process_registry = self.process_registry.clone();
         let process_owner_id = self.process_owner_id.clone();
+        let permission_mode = self.permission_mode;
 
         let handle = tokio::spawn(async move {
             run_teammate_loop(
@@ -100,6 +120,8 @@ impl TeamManager {
                 db_path,
                 process_registry,
                 process_owner_id,
+                permission_mode,
+                identity,
             )
             .await;
         });
@@ -157,6 +179,25 @@ impl TeamManager {
             info!(teammate = %name, "cancelling teammate (cancel_all)");
             teammate.shutdown().await;
         }
+    }
+}
+
+fn restrictive_turn_budget(requested: Option<usize>, inherited: Option<usize>) -> Option<usize> {
+    match (requested, inherited) {
+        (Some(requested), Some(inherited)) => Some(requested.min(inherited)),
+        (requested, inherited) => requested.or(inherited),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restrictive_turn_budget;
+
+    #[test]
+    fn teammate_turn_budget_can_tighten_but_never_relax_parent() {
+        assert_eq!(restrictive_turn_budget(Some(10), Some(20)), Some(10));
+        assert_eq!(restrictive_turn_budget(Some(40), Some(20)), Some(20));
+        assert_eq!(restrictive_turn_budget(None, Some(20)), Some(20));
     }
 }
 

@@ -158,6 +158,7 @@ pub(super) fn emit_single_agent_completion(
                 delegated_run_id: Some(delegated_run_id.to_string()),
                 task_id: result.task_id.clone(),
                 name: agent_type.to_string(),
+                identity: None,
                 status,
                 tool_count: 0,
                 tokens: 0,

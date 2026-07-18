@@ -3,6 +3,7 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::agent::subagent::AgentIdentity;
 use crate::agent::subagent::AgentProgress;
 use crate::tools::registry::{DelegationPolicy, DelegationSurface, PermissionMode};
 
@@ -21,19 +22,22 @@ pub enum TeammateRole {
 }
 
 impl TeammateRole {
-    pub fn delegation_policy(&self, max_turns: Option<usize>) -> DelegationPolicy {
-        let permission_mode = PermissionMode::Autonomous;
+    pub fn delegation_policy(
+        &self,
+        inherited_permission_mode: PermissionMode,
+        max_turns: Option<usize>,
+    ) -> DelegationPolicy {
         match self {
             Self::Builder => DelegationPolicy {
                 surface: DelegationSurface::SubagentBuild,
-                inherited_permission_mode: permission_mode,
+                inherited_permission_mode,
                 max_turns,
                 read_only_only: false,
                 bash_allowed: false,
             },
             Self::Reviewer | Self::Tester => DelegationPolicy {
                 surface: DelegationSurface::SubagentVerify,
-                inherited_permission_mode: permission_mode,
+                inherited_permission_mode,
                 max_turns,
                 read_only_only: true,
                 bash_allowed: true,
@@ -91,6 +95,7 @@ impl std::fmt::Display for TeammateStatus {
 
 pub struct Teammate {
     pub config: TeammateConfig,
+    pub identity: AgentIdentity,
     pub status: Arc<RwLock<TeammateStatus>>,
     pub cancel_token: CancellationToken,
     pub progress: Arc<RwLock<AgentProgress>>,
@@ -98,12 +103,13 @@ pub struct Teammate {
 }
 
 impl Teammate {
-    pub fn new(config: TeammateConfig) -> Self {
+    pub fn new(config: TeammateConfig, identity: AgentIdentity) -> Self {
         Self {
             status: Arc::new(RwLock::new(TeammateStatus::Idle)),
             cancel_token: CancellationToken::new(),
             progress: Arc::new(RwLock::new(AgentProgress::default())),
             config,
+            identity,
             task_handle: None,
         }
     }
@@ -130,7 +136,7 @@ mod tests {
 
     #[test]
     fn builder_policy_allows_writes() {
-        let policy = TeammateRole::Builder.delegation_policy(Some(30));
+        let policy = TeammateRole::Builder.delegation_policy(PermissionMode::Autonomous, Some(30));
         assert!(!policy.read_only_only);
         assert!(!policy.bash_allowed);
         assert_eq!(policy.surface, DelegationSurface::SubagentBuild);
@@ -139,7 +145,7 @@ mod tests {
 
     #[test]
     fn reviewer_policy_is_read_only_with_bash() {
-        let policy = TeammateRole::Reviewer.delegation_policy(None);
+        let policy = TeammateRole::Reviewer.delegation_policy(PermissionMode::Autonomous, None);
         assert!(policy.read_only_only);
         assert!(policy.bash_allowed);
         assert_eq!(policy.surface, DelegationSurface::SubagentVerify);
@@ -147,11 +153,24 @@ mod tests {
 
     #[test]
     fn tester_policy_matches_reviewer() {
-        let tester = TeammateRole::Tester.delegation_policy(Some(20));
-        let reviewer = TeammateRole::Reviewer.delegation_policy(Some(20));
+        let tester = TeammateRole::Tester.delegation_policy(PermissionMode::Autonomous, Some(20));
+        let reviewer =
+            TeammateRole::Reviewer.delegation_policy(PermissionMode::Autonomous, Some(20));
         assert_eq!(tester.read_only_only, reviewer.read_only_only);
         assert_eq!(tester.bash_allowed, reviewer.bash_allowed);
         assert_eq!(tester.surface, reviewer.surface);
+    }
+
+    #[test]
+    fn supervised_parent_cannot_create_autonomous_teammate() {
+        for role in [
+            TeammateRole::Builder,
+            TeammateRole::Reviewer,
+            TeammateRole::Tester,
+        ] {
+            let policy = role.delegation_policy(PermissionMode::Supervised, Some(12));
+            assert_eq!(policy.inherited_permission_mode, PermissionMode::Supervised);
+        }
     }
 
     #[test]

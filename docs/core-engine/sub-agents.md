@@ -10,11 +10,11 @@ Sub-agents solve both problems. For exploration, Krusty fans out multiple read-o
 
 ## The Sub-Agent System
 
-At the core of delegation is `SubAgentPool`, defined in `crates/krusty-core/src/agent/subagent/mod.rs`. A pool manages concurrent execution of multiple sub-agent tasks. It takes an AI client, a cancellation token, and configuration for concurrency limits and stagger delays, then spawns tasks as independent tokio tasks.
+At the core of delegation is `SubAgentPool`, defined in `crates/krusty-core/src/agent/subagent/mod.rs`. A pool manages concurrent execution of multiple sub-agent tasks through `AgentScheduler`, an actor-owned adaptive queue. It takes an AI client, a cancellation token, an optional user concurrency ceiling, and a stagger delay, then spawns tasks as independent tokio tasks. There is no product-wide fixed four-agent limit: the scheduler derives an initial target from host parallelism, grows under healthy backlog, and backs off under provider pressure.
 
 Each sub-agent gets its own conversation with the AI model. It receives a system prompt, a task prompt, and a filtered set of tools. It runs the same agentic loop as the main agent -- call the model, execute any tool requests, feed results back, repeat -- but in a governed scope. The loop lives in `crates/krusty-core/src/agent/subagent/execution/runtime.rs` as `execute_agent_loop`, a generic function parameterized over an `AgentConfig` trait that abstracts the differences between agent types.
 
-A sub-agent task is described by `SubAgentTask`: a struct carrying an ID, a display name, the task prompt, a working directory, an optional delegation policy, and an optional turn budget. The task does not specify which model to use -- that's resolved by the pool based on the user's current model selection, making the system provider-agnostic.
+A sub-agent task is described by `SubAgentTask`: a struct carrying a semantic task ID and name, an optional `AgentIdentity`, the task prompt, a working directory, an optional delegation policy, and an optional turn budget. Identity deliberately separates the canonical runtime path from the playful display name. The root is `Krusty the Krab`; children receive deterministic creature names such as `Horseshoe Crab`, `Mantis Shrimp`, or `Nautilus` while retaining task labels such as `Honey audit`. The task does not specify which model to use -- that's resolved by the pool based on the user's current model selection, making the system provider-agnostic.
 
 Results come back as `SubAgentResult`, which includes whether the task succeeded, the agent's final output, a list of files it examined, how many turns it took, wall-clock duration, any errors, and any policy violations it triggered.
 
@@ -46,19 +46,19 @@ Builders share a `SharedBuildContext` that provides three coordination mechanism
 
 3. **Line tracking.** The build context records lines added and removed across all builders, providing aggregate statistics when the build completes.
 
-Concurrency for build agents defaults to the number of components, clamped between 2 and 10. You can override this with `max_concurrency` -- lower values (2-3) for tightly coupled code, higher values (5-10) for independent modules.
+Build agents are submitted eagerly to the adaptive scheduler. `max_concurrency` is an optional user ceiling, not a hidden default cap. Omitting it lets the scheduler choose a host-aware starting target, grow when queued work completes healthily, and reduce pressure when the provider returns rate-limit, overload, service-unavailable, or timeout signals.
 
 ## The Team System
 
 Beyond the agent tool's one-shot delegation, Krusty has a persistent team system for longer-running coordination. The `TeamManager` (`crates/krusty-core/src/agent/autonomy/team/manager.rs`) maintains a pool of named teammates that run as background loops, polling a SQLite task queue for work.
 
-Each teammate is defined by a `TeammateConfig` with a name, a role, and an optional turn budget. There are three roles:
+Each teammate is defined by a `TeammateConfig` with a semantic name, a role, and an optional turn budget. `TeamManager` assigns a deterministic creature identity for display and keeps the semantic name for task ownership and cancellation. There are three roles:
 
 - **Builder** -- Can write files but cannot run shell commands. Gets `SubagentBuild` delegation surface.
 - **Reviewer** -- Read-only file access with bash enabled. Gets `SubagentVerify` delegation surface. Intended for code review.
 - **Tester** -- Same permissions as Reviewer. Intended for running test suites and validation.
 
-Teammates operate autonomously. The manager spawns them with `spawn_teammate`, and each one starts a background loop that polls the `autonomous_tasks` SQLite table every 5 seconds for unclaimed work. When a task appears, the teammate claims it atomically (using a SQL UPDATE ... RETURNING pattern to avoid races), executes it through the standard sub-agent loop, and records the result back to the database. If no tasks arrive for 30 seconds, the teammate exits gracefully.
+Teammates run according to the parent session's permission mode. The manager spawns them with `spawn_teammate`, and each one starts a background loop that polls the `autonomous_tasks` SQLite table every 5 seconds for unclaimed work. When a task appears, the teammate claims it atomically (using a SQL UPDATE ... RETURNING pattern to avoid races), executes it through the standard sub-agent loop, and records the result back to the database. A teammate may tighten the inherited turn budget but cannot relax it, and a supervised parent can never produce an autonomous child. If no tasks arrive for 30 seconds, the teammate exits gracefully.
 
 The manager provides lifecycle controls: `list_teammates` to check status, `cancel_teammate` to stop one, and `cancel_all` to shut everything down. Teammates carry their own `CancellationToken`, so cancellation is cooperative and immediate. The `Drop` implementation on `TeamManager` ensures all teammates are cancelled if the manager is dropped unexpectedly.
 
@@ -92,7 +92,7 @@ The policy is enforced at tool execution time. Before a sub-agent runs any tool,
 
 Concurrent agents are bounded at multiple levels:
 
-**Semaphore-based concurrency.** The `SubAgentPool` uses a tokio `Semaphore` to enforce its concurrency limit. Each agent must acquire a permit before starting. If the semaphore is full, the agent waits. To prevent deadlocks from hung agents, permit acquisition has a 5-minute timeout -- if an agent can't get a slot in that time, it fails with an error rather than blocking forever.
+**Adaptive queued concurrency.** `AgentScheduler` owns admission state and queues excess work. The default target is based on host parallelism and begins above four on ordinary development machines. Sustained healthy backlog ramps the target gradually. HTTP 429/503/529, overload, timeout, and `Retry-After` signals halve the target, pause new starts for a bounded cooldown, and then permit gradual recovery. A reserved control lane keeps the root coordinator responsive, weighted session selection prevents one swarm from monopolizing starts, shared-write partitions avoid conflicting admission, and cancellation immediately releases capacity. An explicit `max_concurrency` remains available as a user safety ceiling.
 
 **Staggered spawning.** Agents are not all launched simultaneously. There is a configurable delay between spawns (default 100ms, higher for rate-sensitive providers like MiniMax at 600ms). This prevents burst traffic that could trigger provider rate limits.
 
@@ -106,4 +106,4 @@ Concurrent agents are bounded at multiple levels:
 
 **Cleanup hooks.** The `AgentConfig` trait includes a `cleanup()` method called when any agent exits, whether normally or due to cancellation. For builders, this releases all file locks held by that agent, ensuring no stale locks persist.
 
-Together, these mechanisms ensure that sub-agents are bounded in concurrency, bounded in duration, bounded in context size, and cleaned up reliably when they finish or fail.
+Together, these mechanisms ensure that sub-agents are adaptively bounded by current capacity, bounded in duration and context size, governed by their parent, and cleaned up reliably when they finish or fail.

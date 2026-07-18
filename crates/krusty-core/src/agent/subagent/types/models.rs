@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::agent::subagent::AgentIdentity;
 use crate::process::ProcessRegistry;
 use crate::tools::registry::DelegationPolicy;
 
@@ -14,6 +15,9 @@ pub struct AgentProgress {
     pub task_id: String,
     /// Display name (derived from task context).
     pub name: String,
+    /// Stable runtime identity. `name` remains the semantic task label while
+    /// the identity carries the creature-themed display name.
+    pub identity: Option<AgentIdentity>,
     /// Current status.
     pub status: AgentProgressStatus,
     /// Number of tool calls made.
@@ -54,6 +58,8 @@ pub struct SubAgentTask {
     pub id: String,
     /// Display name for the agent (e.g. "tui", "agent", "main").
     pub name: String,
+    /// Stable runtime identity kept separate from semantic task fields.
+    pub identity: Option<AgentIdentity>,
     pub prompt: String,
     pub working_dir: PathBuf,
     /// Filesystem sandbox root inherited from the parent tool context.
@@ -85,6 +91,7 @@ impl SubAgentTask {
         Self {
             id,
             name,
+            identity: None,
             prompt: prompt.into(),
             working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             sandbox_root: None,
@@ -102,6 +109,29 @@ impl SubAgentTask {
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
         self
+    }
+
+    pub fn with_identity(mut self, identity: AgentIdentity) -> Self {
+        self.identity = Some(identity);
+        self
+    }
+
+    pub fn ensure_identity(&mut self, parent_path: &str, role: &str, ordinal: usize) {
+        if self.identity.is_none() {
+            self.identity = Some(AgentIdentity::child(
+                self.id.clone(),
+                parent_path,
+                self.name.clone(),
+                role,
+                ordinal,
+            ));
+        }
+    }
+
+    pub fn display_name(&self) -> String {
+        self.identity
+            .as_ref()
+            .map_or_else(|| self.name.clone(), AgentIdentity::display_name)
     }
 
     pub fn with_working_dir(mut self, dir: PathBuf) -> Self {

@@ -104,7 +104,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
 ) -> SubAgentResult {
     let start = Instant::now();
     let task_id = task.id.clone();
-    let task_name = task.name.clone();
+    let task_name = task.display_name();
     let plan_task_id = task.plan_task_id.clone();
     let cache_session_id = task
         .delegated_run_id
@@ -150,6 +150,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 delegated_run_id: task.delegated_run_id.clone(),
                 task_id: task_id.clone(),
                 name: task_name.clone(),
+                identity: task.identity.clone(),
                 status,
                 tool_count,
                 tokens,

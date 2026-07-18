@@ -72,9 +72,8 @@ impl App {
         self.runtime.channels.init_progress = Some(progress_rx);
 
         tokio::spawn(async move {
-            let pool = SubAgentPool::new(client, cancellation)
-                .with_concurrency(4)
-                .with_override_model(Some(current_model));
+            let pool =
+                SubAgentPool::new(client, cancellation).with_override_model(Some(current_model));
 
             let tasks = vec![
                 SubAgentTask::new(

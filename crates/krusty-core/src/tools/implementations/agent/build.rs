@@ -172,12 +172,10 @@ impl AgentTool {
             context.set_conventions(conventions);
         }
 
-        // Smart concurrency default: match component count, clamped to reasonable range
+        // Adaptive scheduling starts every component eagerly. An explicit value
+        // is a user ceiling, not a hidden product cap.
         let num_components = params.components.as_ref().map(|c| c.len()).unwrap_or(1);
-        let concurrency = params.max_concurrency.unwrap_or_else(|| {
-            // Default: match component count, capped at reasonable limit
-            num_components.clamp(2, 10)
-        });
+        let concurrency = params.max_concurrency;
 
         // Build tasks - all use Opus for high-quality code generation
         let mut tasks: Vec<SubAgentTask> = Vec::new();
@@ -306,12 +304,14 @@ impl AgentTool {
         }
 
         // Create pool and execute with build context
-        let pool = SubAgentPool::new(client, self.cancellation.clone())
-            .with_concurrency(concurrency)
+        let mut pool = SubAgentPool::new(client, self.cancellation.clone())
             .with_override_model(ctx.current_model.clone());
+        if let Some(ceiling) = concurrency {
+            pool = pool.with_concurrency(ceiling);
+        }
 
         info!(
-            "Agent tool (build): Starting builder pool with max_concurrency={} (components={}), background={}",
+            "Agent tool (build): Starting adaptive builder pool with concurrency_ceiling={:?} (components={}), background={}",
             concurrency, num_components, params.run_in_background.unwrap_or(false)
         );
 
@@ -478,6 +478,7 @@ impl AgentTool {
                             delegated_run_id: Some(bg_delegated_run_id.clone()),
                             task_id: "build".to_string(),
                             name: "build".to_string(),
+                            identity: None,
                             status,
                             tool_count: 0,
                             tokens: 0,
