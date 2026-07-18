@@ -6,6 +6,7 @@ const MAX_SUBSCRIBER_CAPACITY: usize = 32;
 const MAX_EXECUTION_EVENT_CAPACITY: usize = 64;
 const MAX_EXECUTION_EVENT_BYTES: usize = 64 * 1024;
 const MAX_SINGLE_PIPELINE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const MAX_ABORT_DELIVERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct MakoRuntimeConfig {
@@ -76,13 +77,17 @@ impl MakoRuntimeConfig {
             self.cancellation_grace_period < self.worker_lease_duration,
             "cancellation grace period must be shorter than the worker lease"
         );
-        let cancellation_terminalization_budget = self
+        let abort_delivery_budget = self
             .cancellation_grace_period
-            .checked_mul(2)
+            .min(MAX_ABORT_DELIVERY_TIMEOUT);
+        let cancellation_terminalization_budget = self
+            .worker_heartbeat_interval
+            .checked_add(self.cancellation_grace_period)
+            .and_then(|budget| budget.checked_add(abort_delivery_budget))
             .ok_or_else(|| anyhow::anyhow!("cancellation terminalization budget overflow"))?;
         anyhow::ensure!(
             cancellation_terminalization_budget < self.worker_lease_duration,
-            "cancellation grace plus abort delivery must fit inside the worker lease"
+            "worker heartbeat age plus cancellation grace and abort delivery must fit inside the worker lease"
         );
         anyhow::ensure!(
             self.global_concurrency_limit > 0,
@@ -154,11 +159,23 @@ mod tests {
     fn cancellation_grace_and_abort_delivery_fit_inside_the_worker_lease() {
         let mut config = MakoRuntimeConfig::for_database("runtime.db");
         config.worker_lease_duration = Duration::from_secs(4);
+        config.worker_heartbeat_interval = Duration::from_secs(1);
         config.cancellation_grace_period = Duration::from_secs(2);
         assert!(config.validate().is_err());
 
-        config.worker_heartbeat_interval = Duration::from_secs(1);
         config.cancellation_grace_period = Duration::from_millis(500);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn cancellation_budget_includes_the_age_of_the_last_worker_heartbeat() {
+        let mut config = MakoRuntimeConfig::for_database("runtime.db");
+        config.worker_lease_duration = Duration::from_secs(4);
+        config.worker_heartbeat_interval = Duration::from_secs(1);
+        config.cancellation_grace_period = Duration::from_millis(1_500);
+        assert!(config.validate().is_err());
+
+        config.cancellation_grace_period = Duration::from_millis(1_400);
         assert!(config.validate().is_ok());
     }
 

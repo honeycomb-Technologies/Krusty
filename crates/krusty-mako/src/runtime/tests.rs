@@ -447,10 +447,14 @@ impl ExecutionBackend for JournalExhaustionBackend {
 fn config(temp: &TempDir) -> MakoRuntimeConfig {
     let mut config = MakoRuntimeConfig::for_database(temp.path().join("runtime.db"));
     config.scheduler_poll_interval = Duration::from_millis(20);
-    config.daemon_lease_duration = Duration::from_millis(500);
-    config.worker_lease_duration = Duration::from_millis(200);
-    config.worker_heartbeat_interval = Duration::from_millis(40);
-    config.cancellation_grace_period = Duration::from_millis(80);
+    // Keep the shared integration-test leases short enough for fast feedback,
+    // but long enough that normal CI scheduling and SQLite retention work do
+    // not impersonate a crashed daemon. Tests that exercise real expiry use
+    // explicit, tighter durations below.
+    config.daemon_lease_duration = Duration::from_secs(2);
+    config.worker_lease_duration = Duration::from_secs(2);
+    config.worker_heartbeat_interval = Duration::from_millis(100);
+    config.cancellation_grace_period = Duration::from_millis(200);
     config.live_event_capacity = 8;
     config.subscriber_capacity = 8;
     config
@@ -3304,8 +3308,13 @@ async fn durable_runtime_stats_count_each_scheduler_state_exactly() {
     assert_eq!(alice.recovery_required, 0);
 }
 
-#[test]
-fn old_recovery_run_cannot_defeat_the_hard_event_retention_cap() {
+#[tokio::test]
+async fn old_recovery_run_cannot_defeat_the_hard_event_retention_cap() {
+    // This test deliberately performs thousands of SQLite retention passes.
+    // Keep it behind the same guard as the lease-sensitive runtime tests so
+    // the test harness cannot manufacture worker lease expiry through local
+    // I/O contention on slower CI hosts.
+    let _test_guard = runtime_test_guard().await;
     let temp = TempDir::new().unwrap();
     let db = Database::new(&temp.path().join("retention-recovery.db")).unwrap();
     let controller = seed_retention_controller(&db, "old-recovery", Some("recovery_required"));
@@ -3372,8 +3381,11 @@ fn old_recovery_run_cannot_defeat_the_hard_event_retention_cap() {
     );
 }
 
-#[test]
-fn unresolved_interaction_spam_is_rejected_without_losing_pending_truth() {
+#[tokio::test]
+async fn unresolved_interaction_spam_is_rejected_without_losing_pending_truth() {
+    // See the retention-cap test above: this intentionally expensive fixture
+    // shares the runtime serialization guard to avoid cross-test lease races.
+    let _test_guard = runtime_test_guard().await;
     const SENTINEL: &str = "MAKO_RETENTION_ARGUMENT_SENTINEL";
     let temp = TempDir::new().unwrap();
     let db = Database::new(&temp.path().join("retention-pending.db")).unwrap();

@@ -22,6 +22,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use super::backend::{ExecutionEvent, ExecutionEventSink, ExecutionOutcome, ExecutionRequest};
+use super::config::MAX_ABORT_DELIVERY_TIMEOUT;
 use super::handler::{
     CommittedCancellation, RuntimeShared, DAEMON_LEASE_NAME, MAX_RETRY_ATTEMPTS,
     MAX_RETRY_DELAY_SECS,
@@ -34,8 +35,6 @@ const EVENT_JOURNAL_EXHAUSTED_REASON: &str =
 const FORCED_CANCELLATION_STOP_REASON: &str = "cancellation grace elapsed";
 const FORCED_CANCELLATION_ERROR: &str =
     "execution host did not acknowledge cancellation before the deadline; side effects may be uncertain";
-const MAX_ABORT_DELIVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-
 struct PumpLivenessGuard(Arc<RuntimeShared>);
 
 impl Drop for PumpLivenessGuard {
