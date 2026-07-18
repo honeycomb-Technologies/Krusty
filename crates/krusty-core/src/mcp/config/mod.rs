@@ -10,4 +10,7 @@ mod loader;
 mod tests;
 mod types;
 
-pub use types::{McpConfig, McpServerConfig, RemoteMcpServer};
+pub use types::{
+    McpConfig, McpConfigSource, McpConnectionAuthority, McpOAuthConfig, McpPackageConfig,
+    McpServerConfig, McpServerOptions, McpToolApproval, McpToolRules, RemoteMcpServer,
+};

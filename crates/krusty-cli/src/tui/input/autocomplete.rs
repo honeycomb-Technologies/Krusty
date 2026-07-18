@@ -12,9 +12,10 @@ use crate::tui::themes::Theme;
 
 #[derive(Debug, Clone)]
 pub struct CommandSuggestion {
-    pub primary: &'static str,
-    pub aliases: Vec<&'static str>,
-    pub description: &'static str,
+    pub primary: String,
+    pub aliases: Vec<String>,
+    pub description: String,
+    extension: bool,
 }
 
 /// Autocomplete popup for slash commands
@@ -62,6 +63,36 @@ impl AutocompletePopup {
         self.filter();
         if self.selected >= self.filtered.len() {
             self.selected = 0;
+        }
+    }
+
+    /// Replace commands contributed by the executable extension runtime while
+    /// retaining Krusty's built-in command catalog.
+    pub fn set_extension_commands<I>(&mut self, commands: I)
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        self.suggestions.retain(|suggestion| !suggestion.extension);
+        for (name, description) in commands {
+            let primary = format!("/{}", name.trim_start_matches('/'));
+            if self
+                .suggestions
+                .iter()
+                .any(|suggestion| suggestion.primary == primary)
+            {
+                continue;
+            }
+            self.suggestions.push(CommandSuggestion {
+                primary,
+                aliases: Vec::new(),
+                description,
+                extension: true,
+            });
+        }
+        self.suggestions
+            .sort_by(|left, right| left.primary.cmp(&right.primary));
+        if self.visible {
+            self.filter();
         }
     }
 
@@ -155,14 +186,14 @@ impl AutocompletePopup {
                 }
 
                 spans.push(Span::styled(
-                    cmd.primary,
+                    cmd.primary.as_str(),
                     Style::default()
                         .fg(theme.accent_color)
                         .add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::raw("  "));
                 spans.push(Span::styled(
-                    cmd.description,
+                    cmd.description.as_str(),
                     Style::default().fg(theme.text_color),
                 ));
 
@@ -234,97 +265,43 @@ fn fuzzy_match(text: &str, pattern: &str) -> Option<i32> {
 /// All available slash commands
 pub fn get_all_commands() -> Vec<CommandSuggestion> {
     vec![
-        CommandSuggestion {
-            primary: "/home",
-            aliases: vec![],
-            description: "Return to start menu",
-        },
-        CommandSuggestion {
-            primary: "/load",
-            aliases: vec![],
-            description: "Load previous session",
-        },
-        CommandSuggestion {
-            primary: "/model",
-            aliases: vec![],
-            description: "Select AI model",
-        },
-        CommandSuggestion {
-            primary: "/fast",
-            aliases: vec![],
-            description: "Toggle fast service tier",
-        },
-        CommandSuggestion {
-            primary: "/auth",
-            aliases: vec![],
-            description: "Manage API providers",
-        },
-        CommandSuggestion {
-            primary: "/init",
-            aliases: vec![],
-            description: "Initialize project (create KRAB.md)",
-        },
-        CommandSuggestion {
-            primary: "/theme",
-            aliases: vec![],
-            description: "Change color theme",
-        },
-        CommandSuggestion {
-            primary: "/clear",
-            aliases: vec![],
-            description: "Clear chat messages",
-        },
-        CommandSuggestion {
-            primary: "/pinch",
-            aliases: vec![],
-            description: "Compact this session in place",
-        },
-        CommandSuggestion {
-            primary: "/cmd",
-            aliases: vec![],
-            description: "Show all controls",
-        },
-        CommandSuggestion {
-            primary: "/terminal",
-            aliases: vec!["term", "shell"],
-            description: "Open interactive terminal",
-        },
-        CommandSuggestion {
-            primary: "/ps",
-            aliases: vec!["processes"],
-            description: "View background processes",
-        },
-        CommandSuggestion {
-            primary: "/skills",
-            aliases: vec![],
-            description: "Browse and manage skills",
-        },
-        CommandSuggestion {
-            primary: "/plugins",
-            aliases: vec![],
-            description: "Browse and manage installable plugins",
-        },
-        CommandSuggestion {
-            primary: "/plan",
-            aliases: vec![],
-            description: "View or manage active plan",
-        },
-        CommandSuggestion {
-            primary: "/mcp",
-            aliases: vec![],
-            description: "Browse and manage MCP servers",
-        },
-        CommandSuggestion {
-            primary: "/hooks",
-            aliases: vec![],
-            description: "Configure tool execution hooks",
-        },
-        CommandSuggestion {
-            primary: "/permissions",
-            aliases: vec!["perm"],
-            description: "Toggle supervised/autonomous mode",
-        },
+        command("/home", &[], "Return to start menu"),
+        command("/load", &[], "Load previous session"),
+        command("/model", &[], "Select AI model"),
+        command("/fast", &[], "Toggle fast service tier"),
+        command("/auth", &[], "Manage API providers"),
+        command("/init", &[], "Initialize project (create KRAB.md)"),
+        command("/theme", &[], "Change color theme"),
+        command("/clear", &[], "Clear chat messages"),
+        command("/pinch", &[], "Compact this session in place"),
+        command("/cmd", &[], "Show all controls"),
+        command("/terminal", &["term", "shell"], "Open interactive terminal"),
+        command("/ps", &["processes"], "View background processes"),
+        command("/skills", &[], "Browse and manage skills"),
+        command("/plugins", &[], "Browse and manage installable plugins"),
+        command(
+            "/extensions",
+            &[],
+            "Manage executable project extension trust",
+        ),
+        command("/plan", &[], "View or manage active plan"),
+        command("/mcp", &[], "Browse and manage MCP servers"),
+        command("/hooks", &[], "Configure tool execution hooks"),
+        command(
+            "/permissions",
+            &["perm"],
+            "Toggle supervised/autonomous mode",
+        ),
     ]
+}
+
+fn command(primary: &str, aliases: &[&str], description: &str) -> CommandSuggestion {
+    CommandSuggestion {
+        primary: primary.to_string(),
+        aliases: aliases.iter().map(|alias| (*alias).to_string()).collect(),
+        description: description.to_string(),
+        extension: false,
+    }
 }
 
 #[cfg(test)]
@@ -346,5 +323,25 @@ mod tests {
         assert!(!ac.filtered.is_empty());
         let first = ac.get_selected().unwrap();
         assert_eq!(first.primary, "/model");
+    }
+
+    #[test]
+    fn extension_commands_are_replaced_and_deduplicated() {
+        let mut ac = AutocompletePopup::new();
+        ac.set_extension_commands([
+            ("release".to_string(), "Prepare a release".to_string()),
+            ("model".to_string(), "Cannot replace built-in".to_string()),
+        ]);
+        assert!(ac.suggestions.iter().any(|item| item.primary == "/release"));
+        assert_eq!(
+            ac.suggestions
+                .iter()
+                .filter(|item| item.primary == "/model")
+                .count(),
+            1
+        );
+
+        ac.set_extension_commands(std::iter::empty());
+        assert!(!ac.suggestions.iter().any(|item| item.primary == "/release"));
     }
 }

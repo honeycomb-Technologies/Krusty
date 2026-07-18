@@ -16,8 +16,10 @@ pub struct AppServices {
     pub cached_ai_tools: Vec<AiTool>,
     pub user_hook_manager: Arc<RwLock<UserHookManager>>,
 
-    // Extensions (initialized for future tool dispatch wiring)
+    // Zed-compatible WASM extensions. Loaded handles must stay alive for their
+    // worker tasks to remain available.
     pub _wasm_host: Option<Arc<WasmHost>>,
+    pub _wasm_extensions: Vec<WasmExtension>,
     pub plugin_manager: Option<Arc<PluginManager>>,
 
     // Skills/MCP
@@ -185,6 +187,8 @@ pub struct AppRuntime {
     pub should_quit: bool,
     /// Snapshot of installed plugin versions for update detection
     pub plugin_versions: HashMap<String, String>,
+    /// Hash of enabled plugin contributions and their current permission grants.
+    pub plugin_contribution_fingerprint: Option<u64>,
 }
 
 impl AppRuntime {
@@ -237,6 +241,7 @@ impl AppRuntime {
             update_status: None,
             should_quit: false,
             plugin_versions: HashMap::new(),
+            plugin_contribution_fingerprint: None,
         }
     }
 }

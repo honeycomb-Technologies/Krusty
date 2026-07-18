@@ -16,7 +16,7 @@ use super::common::{
 };
 use crate::tui::themes::Theme;
 use crate::tui::utils::truncate_ellipsis;
-use krusty_core::skills::{SkillInfo, SkillSource};
+use krusty_core::skills::{SkillInfo, SkillPermission, SkillSource};
 
 /// Skills browser popup state
 pub struct SkillsBrowserPopup {
@@ -49,6 +49,26 @@ impl SkillsBrowserPopup {
         self.skills = skills;
         self.selected_index = 0;
         self.scroll_offset = 0;
+    }
+
+    /// Replace the list while keeping the same selected skill when possible.
+    pub fn set_skills_preserving(&mut self, skills: Vec<SkillInfo>, selected: Option<&str>) {
+        self.skills = skills;
+        self.selected_index = selected
+            .and_then(|name| {
+                self.filtered_skills()
+                    .iter()
+                    .position(|(_, skill)| skill.name == name)
+            })
+            .unwrap_or(0);
+        self.scroll_offset = 0;
+        self.ensure_visible();
+    }
+
+    pub fn selected_skill(&self) -> Option<&SkillInfo> {
+        self.filtered_skills()
+            .get(self.selected_index)
+            .map(|(_, skill)| *skill)
     }
 
     /// Navigate to next skill
@@ -118,6 +138,11 @@ impl SkillsBrowserPopup {
                 .filter(|(_, skill)| {
                     skill.name.to_lowercase().contains(&query)
                         || skill.description.to_lowercase().contains(&query)
+                        || skill.origin.to_lowercase().contains(&query)
+                        || skill
+                            .tags
+                            .iter()
+                            .any(|tag| tag.to_lowercase().contains(&query))
                 })
                 .collect()
         }
@@ -195,6 +220,10 @@ impl SkillsBrowserPopup {
                 "  • .krusty/skills/<name>/SKILL.md (project)",
                 Style::default().fg(theme.dim_color),
             )]));
+            lines.push(Line::from(vec![Span::styled(
+                "  • .agents/skills/<name>/SKILL.md (compatible)",
+                Style::default().fg(theme.dim_color),
+            )]));
         } else if filtered.is_empty() {
             lines.push(Line::from(vec![Span::styled(
                 "  No skills match your search.",
@@ -220,10 +249,13 @@ impl SkillsBrowserPopup {
                 let (source_icon, source_color) = match skill.source {
                     SkillSource::Global => ("○", theme.text_color),
                     SkillSource::Project => ("●", theme.success_color),
+                    SkillSource::Package => ("◆", theme.accent_color),
                 };
 
                 let prefix = if is_selected { " › " } else { "   " };
-                let name_style = if is_selected {
+                let name_style = if !skill.enabled || skill.permission == SkillPermission::Deny {
+                    Style::default().fg(theme.dim_color)
+                } else if is_selected {
                     Style::default()
                         .fg(theme.accent_color)
                         .add_modifier(Modifier::BOLD)
@@ -234,6 +266,12 @@ impl SkillsBrowserPopup {
                 let source_label = match skill.source {
                     SkillSource::Global => "global",
                     SkillSource::Project => "project",
+                    SkillSource::Package => "package",
+                };
+                let status = if !skill.enabled {
+                    "disabled"
+                } else {
+                    skill.permission.as_str()
                 };
 
                 lines.push(Line::from(vec![
@@ -242,13 +280,13 @@ impl SkillsBrowserPopup {
                     Span::raw(" "),
                     Span::styled(skill.name.clone(), name_style),
                     Span::styled(
-                        format!(" [{}]", source_label),
+                        format!(" [{}:{} · {}]", source_label, skill.origin, status),
                         Style::default().fg(theme.dim_color),
                     ),
                 ]));
 
                 // Description line
-                let desc = truncate_ellipsis(&skill.description, 55);
+                let desc = truncate_ellipsis(&skill.description, 70);
                 lines.push(Line::from(vec![
                     Span::raw("      "),
                     Span::styled(desc, Style::default().fg(theme.dim_color)),
@@ -294,6 +332,27 @@ impl SkillsBrowserPopup {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(": nav  ", Style::default().fg(theme.text_color)),
+                Span::styled(
+                    "Enter",
+                    Style::default()
+                        .fg(theme.accent_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(": invoke  ", Style::default().fg(theme.text_color)),
+                Span::styled(
+                    "e",
+                    Style::default()
+                        .fg(theme.accent_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(": enable  ", Style::default().fg(theme.text_color)),
+                Span::styled(
+                    "p",
+                    Style::default()
+                        .fg(theme.accent_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(": policy  ", Style::default().fg(theme.text_color)),
                 Span::styled(
                     "r",
                     Style::default()

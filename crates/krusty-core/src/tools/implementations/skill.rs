@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::tools::registry::{DelegationPolicy, DelegationSurface, Tool};
+use crate::skills::SkillPermission;
+use crate::tools::registry::{DelegationPolicy, DelegationSurface, PermissionMode, Tool};
 use crate::tools::{parse_params, ToolContext, ToolResult};
 
 pub struct SkillTool;
@@ -25,7 +26,7 @@ impl Tool for SkillTool {
     }
 
     fn description(&self) -> &str {
-        "Invoke a skill to get specialized instructions and guidance. Skills are loaded from ~/.krusty/skills/ or .krusty/skills/ in the project. Use this when a task matches an available skill's description. Returns error if skill not found - check skill name spelling."
+        "Load an Agent Skills-compatible instruction package on demand. Compatible global, project, and package roots are discovered automatically. Skill enablement and allow/ask/deny policy are enforced without relaxing inherited tool governance."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -52,9 +53,14 @@ impl Tool for SkillTool {
             Err(e) => return e,
         };
 
-        let governance = json!({
+        let inherited_permission_mode = ctx
+            .delegation_policy
+            .as_ref()
+            .map(|policy| policy.inherited_permission_mode)
+            .unwrap_or(ctx.permission_mode);
+        let mut governance = json!({
             "surface": DelegationSurface::Skill,
-            "permission_mode": ctx.permission_mode,
+            "permission_mode": inherited_permission_mode,
             "delegation_policy": ctx
                 .delegation_policy
                 .as_ref()
@@ -71,6 +77,52 @@ impl Tool for SkillTool {
         };
 
         let mut manager = skills_manager.write().await;
+        let Some(skill) = manager.get_skill(&params.skill).cloned() else {
+            return ToolResult::error_with_details(
+                "skill_not_found",
+                format!("Skill '{}' was not discovered", params.skill),
+                None,
+                Some(governance),
+            );
+        };
+        governance["skill"] = json!({
+            "name": &skill.name,
+            "source": skill.source,
+            "origin": &skill.origin,
+            "path": &skill.definition_path,
+            "enabled": skill.enabled,
+            "permission": skill.permission,
+        });
+
+        if !skill.enabled {
+            return ToolResult::error_with_details(
+                "skill_disabled",
+                format!("Skill '{}' is disabled by local policy", params.skill),
+                None,
+                Some(governance),
+            );
+        }
+        if skill.permission == SkillPermission::Deny {
+            return ToolResult::error_with_details(
+                "skill_permission_denied",
+                format!("Skill '{}' is denied by local policy", params.skill),
+                None,
+                Some(governance),
+            );
+        }
+        if skill.permission == SkillPermission::Ask
+            && inherited_permission_mode != PermissionMode::Supervised
+        {
+            return ToolResult::error_with_details(
+                "skill_approval_required",
+                format!(
+                    "Skill '{}' has ask policy and requires a supervised parent session or explicit user invocation",
+                    params.skill
+                ),
+                None,
+                Some(governance),
+            );
+        }
 
         // If a specific file is requested, load that
         if let Some(ref file) = params.file {
@@ -80,6 +132,8 @@ impl Tool for SkillTool {
                         "skill": params.skill,
                         "file": file,
                         "content": content,
+                        "base_path": &skill.path,
+                        "permission": skill.permission,
                     }),
                     Vec::new(),
                     None,
@@ -100,6 +154,13 @@ impl Tool for SkillTool {
                 json!({
                     "skill": params.skill,
                     "content": content,
+                    "base_path": &skill.path,
+                    "definition_path": &skill.definition_path,
+                    "origin": &skill.origin,
+                    "compatibility": &skill.compatibility,
+                    "license": &skill.license,
+                    "allowed_tools_advisory": &skill.allowed_tools,
+                    "permission": skill.permission,
                 }),
                 Vec::new(),
                 None,
@@ -118,28 +179,31 @@ impl Tool for SkillTool {
 #[cfg(test)]
 mod tests {
     use super::SkillTool;
-    use crate::skills::SkillsManager;
+    use crate::skills::{SkillPermission, SkillsManager};
     use crate::tools::registry::{PermissionMode, Tool, ToolContext};
     use std::sync::Arc;
-    use tempfile::tempdir;
+    use tempfile::{tempdir, TempDir};
     use tokio::sync::RwLock;
 
-    #[tokio::test]
-    async fn skill_tool_returns_governance_metadata() {
-        let global = tempdir().unwrap();
-        let project = tempdir().unwrap();
-        let skill_dir = global.path().join("demo-skill");
+    fn manager_with_demo_skill() -> (TempDir, Arc<RwLock<SkillsManager>>) {
+        let root = tempdir().unwrap();
+        let global = root.path().join("global");
+        let skill_dir = global.join("demo-skill");
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
             skill_dir.join("SKILL.md"),
             "---\nname: demo-skill\ndescription: Demo skill\n---\n\nUse this skill.\n",
         )
         .unwrap();
+        (
+            root,
+            Arc::new(RwLock::new(SkillsManager::new(global, None))),
+        )
+    }
 
-        let manager = Arc::new(RwLock::new(SkillsManager::new(
-            global.path().to_path_buf(),
-            Some(project.path().to_path_buf()),
-        )));
+    #[tokio::test]
+    async fn skill_tool_returns_governance_metadata() {
+        let (_root, manager) = manager_with_demo_skill();
         let ctx = ToolContext::default()
             .with_skills_manager(manager)
             .with_permission_mode(PermissionMode::Autonomous);
@@ -153,5 +217,66 @@ mod tests {
         assert_eq!(parsed["metadata"]["surface"], "skill");
         assert_eq!(parsed["metadata"]["permission_mode"], "autonomous");
         assert_eq!(parsed["data"]["skill"], "demo-skill");
+    }
+
+    #[tokio::test]
+    async fn ask_policy_requires_supervised_parent_but_then_loads() {
+        let (_root, manager) = manager_with_demo_skill();
+        manager
+            .write()
+            .await
+            .set_skill_permission("demo-skill", SkillPermission::Ask)
+            .unwrap();
+        let autonomous = ToolContext::default()
+            .with_skills_manager(Arc::clone(&manager))
+            .with_permission_mode(PermissionMode::Autonomous);
+        let rejected = SkillTool
+            .execute(serde_json::json!({"skill": "demo-skill"}), &autonomous)
+            .await;
+        assert!(rejected.is_error);
+        let parsed: serde_json::Value = serde_json::from_str(&rejected.output).unwrap();
+        assert_eq!(parsed["error"]["code"], "skill_approval_required");
+
+        let supervised = ToolContext::default()
+            .with_skills_manager(manager)
+            .with_permission_mode(PermissionMode::Supervised);
+        let accepted = SkillTool
+            .execute(serde_json::json!({"skill": "demo-skill"}), &supervised)
+            .await;
+        assert!(!accepted.is_error);
+    }
+
+    #[tokio::test]
+    async fn deny_and_disabled_policies_are_hard_blocks() {
+        let (_root, manager) = manager_with_demo_skill();
+        manager
+            .write()
+            .await
+            .set_skill_permission("demo-skill", SkillPermission::Deny)
+            .unwrap();
+        let ctx = ToolContext::default()
+            .with_skills_manager(Arc::clone(&manager))
+            .with_permission_mode(PermissionMode::Supervised);
+        let denied = SkillTool
+            .execute(serde_json::json!({"skill": "demo-skill"}), &ctx)
+            .await;
+        let parsed: serde_json::Value = serde_json::from_str(&denied.output).unwrap();
+        assert_eq!(parsed["error"]["code"], "skill_permission_denied");
+
+        manager
+            .write()
+            .await
+            .set_skill_permission("demo-skill", SkillPermission::Allow)
+            .unwrap();
+        manager
+            .write()
+            .await
+            .set_skill_enabled("demo-skill", false)
+            .unwrap();
+        let disabled = SkillTool
+            .execute(serde_json::json!({"skill": "demo-skill"}), &ctx)
+            .await;
+        let parsed: serde_json::Value = serde_json::from_str(&disabled.output).unwrap();
+        assert_eq!(parsed["error"]["code"], "skill_disabled");
     }
 }

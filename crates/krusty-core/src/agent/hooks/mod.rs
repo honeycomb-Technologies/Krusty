@@ -55,5 +55,6 @@ pub trait PostToolHook: Send + Sync {
         params: &Value,
         result: &ToolResult,
         duration: Duration,
+        ctx: &ToolContext,
     ) -> HookResult;
 }

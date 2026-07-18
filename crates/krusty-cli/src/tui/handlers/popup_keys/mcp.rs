@@ -56,7 +56,7 @@ impl App {
             tokio::spawn(async move {
                 // Disconnect first if already connected (makes this a reconnect)
                 mcp.disconnect(&name).await;
-                match mcp.connect(&name).await {
+                match mcp.connect_explicit(&name).await {
                     Ok(()) => {
                         register_mcp_tools(mcp.clone(), &registry).await;
                         let tool_count = if let Some(client) = mcp.get_client(&name).await {

@@ -69,7 +69,7 @@ pub use memories::{
 pub use messages::{MessageStore, StoredMessageRecord};
 pub use plans::{PlanStore, PlanSummary};
 pub use preferences::Preferences;
-pub use project_settings::ProjectSettings;
+pub use project_settings::{ProjectAgentExtensionSettings, ProjectSettings};
 pub use push_delivery_attempts::{
     PushDeliveryAttempt, PushDeliveryAttemptInput, PushDeliveryAttemptStore, PushDeliverySummary,
 };

@@ -3,7 +3,7 @@
 //! Self-hosted API server for chat, tools, sessions, and local workspace access.
 //! This is a library crate — the server is started via `start_server()`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -28,12 +28,12 @@ use tower_http::{
 };
 
 use krusty_core::agent::{
-    AgentCancellation, LoggingHook, PlanModeHook, SafetyHook, UserHookManager, UserPostToolHook,
-    UserPreToolHook,
+    AgentCancellation, LoggingHook, PackageHookConfig, PlanModeHook, SafetyHook, UserHookManager,
+    UserPostToolHook, UserPreToolHook,
 };
 use krusty_core::ai::client::AiClient;
 use krusty_core::ai::models::{create_model_registry, SharedModelRegistry};
-use krusty_core::mcp::McpManager;
+use krusty_core::mcp::{McpConnectionAuthority, McpManager, McpPackageConfig};
 use krusty_core::paths;
 use krusty_core::process::ProcessRegistry;
 use krusty_core::skills::SkillsManager;
@@ -281,11 +281,89 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
     let process_registry = Arc::new(ProcessRegistry::new());
     let cancellation = AgentCancellation::new();
 
+    let plugin_manager = routes::plugins::plugin_manager();
+    let installed_plugins = match plugin_manager.ensure_layout().await {
+        Ok(()) => match plugin_manager.list_installed_plugins().await {
+            Ok(plugins) => plugins
+                .into_iter()
+                .filter(|plugin| plugin.enabled)
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                tracing::warn!(error = %error, "Failed to resolve installed plugin contributions");
+                Vec::new()
+            }
+        },
+        Err(error) => {
+            tracing::warn!(error = %error, "Failed to initialize plugin layout");
+            Vec::new()
+        }
+    };
+    let mut executable_plugin_ids = HashSet::new();
+    let mut mcp_plugin_authorities = HashMap::new();
+    for plugin in &installed_plugins {
+        if !plugin.agent_extension_paths.is_empty() || !plugin.hook_paths.is_empty() {
+            match plugin_manager
+                .ensure_installed_plugin_permission(
+                    plugin,
+                    krusty_core::plugins::PluginPermission::Process,
+                )
+                .await
+            {
+                Ok(()) => {
+                    executable_plugin_ids.insert(plugin.id.clone());
+                }
+                Err(error) => tracing::warn!(
+                    plugin_id = %plugin.id,
+                    error = %error,
+                    "Executable plugin contribution remains disabled until process permission is granted"
+                ),
+            }
+        }
+        if plugin.mcp_servers_path.is_some() {
+            match plugin_manager.permission_status_for_installed(plugin).await {
+                Ok(status) if status.grant_is_current => {
+                    let authority =
+                        McpConnectionAuthority::new(status.granted.process, status.granted.network);
+                    if !authority.is_empty() {
+                        mcp_plugin_authorities.insert(plugin.id.clone(), authority);
+                    }
+                }
+                Ok(_) => tracing::warn!(
+                    plugin_id = %plugin.id,
+                    "Plugin MCP contribution remains disabled until process or network authority is granted"
+                ),
+                Err(error) => {
+                    tracing::warn!(plugin_id = %plugin.id, error = %error, "Failed to resolve plugin MCP permissions")
+                }
+            }
+        }
+    }
+
     // Load user hooks from database
     let mut hook_manager_inner = UserHookManager::new();
     if let Ok(db) = Database::new(&db_path) {
         if let Err(e) = hook_manager_inner.load(&db) {
             tracing::warn!("Failed to load hooks: {}", e);
+        }
+    }
+    let package_hook_configs = installed_plugins
+        .iter()
+        .filter(|plugin| executable_plugin_ids.contains(&plugin.id))
+        .flat_map(|plugin| {
+            plugin.hook_paths.iter().map(|path| {
+                PackageHookConfig::new(plugin.id.clone(), path.clone(), plugin.install_path.clone())
+            })
+        })
+        .collect();
+    match hook_manager_inner.replace_package_hooks(package_hook_configs) {
+        Ok(report) if report.hook_count > 0 => tracing::info!(
+            config_count = report.config_count,
+            hook_count = report.hook_count,
+            "Loaded declarative package hooks"
+        ),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(error = %error, "Failed to initialize declarative package hooks")
         }
     }
     let hook_manager = Arc::new(RwLock::new(hook_manager_inner));
@@ -305,6 +383,38 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
     register_all_tools(&tool_registry).await;
     register_mako_tools(&tool_registry).await;
 
+    let agent_extensions = krusty_core::extensions::AgentExtensionManager::new(&config.working_dir);
+    for plugin in &installed_plugins {
+        if !executable_plugin_ids.contains(&plugin.id) {
+            continue;
+        }
+        for path in &plugin.agent_extension_paths {
+            agent_extensions
+                .register_root(krusty_core::extensions::AgentExtensionRoot::new(
+                    path,
+                    krusty_core::extensions::AgentExtensionScope::Package,
+                ))
+                .await;
+        }
+    }
+    tool_registry.set_agent_extension_manager(agent_extensions.clone());
+    if let Err(error) = agent_extensions.refresh_and_register(&tool_registry).await {
+        tracing::warn!(error = %error, "Failed to initialize agent extensions");
+    } else {
+        let loaded = agent_extensions.loaded_ids().await;
+        if !loaded.is_empty() {
+            tracing::info!(extensions = ?loaded, "Loaded executable agent extensions");
+        }
+        for diagnostic in agent_extensions.diagnostics().await {
+            tracing::warn!(
+                path = %diagnostic.path.display(),
+                extension_id = ?diagnostic.extension_id,
+                message = %diagnostic.message,
+                "Agent extension diagnostic"
+            );
+        }
+    }
+
     // Register unified agent tool (explore, plan, verify, build) if AI client is available
     if let Some(ref client) = ai_client {
         register_agent_tool(&tool_registry, client.clone(), cancellation.clone()).await;
@@ -313,6 +423,18 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
 
     // MCP server connections + tool registration
     let mcp_manager = Arc::new(McpManager::new(config.working_dir.clone()));
+    mcp_manager
+        .set_package_configs(
+            installed_plugins
+                .iter()
+                .filter_map(|plugin| {
+                    let path = plugin.mcp_servers_path.clone()?;
+                    let authority = mcp_plugin_authorities.get(&plugin.id).copied()?;
+                    Some(McpPackageConfig::new(path, authority))
+                })
+                .collect(),
+        )
+        .await;
     if let Err(e) = mcp_manager.load_config().await {
         tracing::warn!("Failed to load MCP config: {}", e);
     } else if let Err(e) = mcp_manager.connect_all().await {
@@ -342,6 +464,14 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
         remote_access::RemoteAccessConfig::load_or_create(&db_path)?,
     ));
 
+    let mut skills = SkillsManager::with_defaults(&config.working_dir);
+    for plugin in &installed_plugins {
+        for path in &plugin.skill_paths {
+            skills.register_package_root(&plugin.id, path.clone());
+        }
+    }
+    skills.refresh();
+
     let state = AppState {
         server_port: config.port,
         db_path: Arc::new(db_path),
@@ -353,9 +483,7 @@ pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppS
         credential_store,
         mcp_manager,
         hook_manager,
-        skills_manager: Arc::new(RwLock::new(SkillsManager::with_defaults(
-            &config.working_dir,
-        ))),
+        skills_manager: Arc::new(RwLock::new(skills)),
         cancellation,
         session_locks: Arc::new(RwLock::new(HashMap::new())),
         session_inputs: Arc::new(RwLock::new(HashMap::new())),

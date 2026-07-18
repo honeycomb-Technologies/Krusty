@@ -88,7 +88,10 @@ How Krusty is extended beyond its built-in capabilities.
 | Document | Description |
 |----------|-------------|
 | [WASM Extensions](extensions/wasm-extensions.md) | Zed-compatible WebAssembly extension system, WIT contracts, runtime hosting |
-| [MCP, Plugins, Plans & Skills](extensions/mcp-and-plugins.md) | Four extensibility layers: MCP tool discovery, plugin system, planning, and skills |
+| [Agent Extensions](extensions/agent-extensions.md) | JavaScript/TypeScript agent tools, slash commands, lifecycle events, and turn context |
+| [MCP, Plugins, Plans & Skills](extensions/mcp-and-plugins.md) | Five cooperating layers: MCP, packages, agent extensions, planning, and skills |
+| [Plugin Packages](extensions/plugin-packages.md) | Unified bundles, lifecycle, trust, permissions, and package contributions |
+| [Extensibility Parity](extensions/extensibility-parity.md) | Evidence-based OpenCode, Pi, Codex, and Krusty comparison with the 10-point completion rubric |
 
 ## Operations
 

@@ -8,5 +8,8 @@ runtime = "native"
 entry_component = "dist/linux-x64/libkrusty_native_rust_demo.so"
 render_capabilities = ["text"]
 
+[requested_permissions]
+process = true
+
 [compat]
 krusty_min = "0.7.0"

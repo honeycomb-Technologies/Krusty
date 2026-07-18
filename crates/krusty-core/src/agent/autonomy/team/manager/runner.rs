@@ -11,7 +11,8 @@ use crate::agent::subagent::{
     execute_single_agent, AgentProgress, AgentProgressStatus, SingleExplorerConfig, SubAgentTask,
 };
 use crate::ai::client::AiClient;
-use crate::tools::registry::ToolRegistry;
+use crate::process::ProcessRegistry;
+use crate::tools::registry::{DelegationPolicy, ToolRegistry};
 
 use super::super::teammate::{TeammateConfig, TeammateStatus};
 use super::task_store::{poll_next_task, record_task_complete, record_task_failed};
@@ -34,6 +35,8 @@ pub(super) async fn run_teammate_loop(
     working_dir: PathBuf,
     session_id: String,
     db_path: PathBuf,
+    process_registry: Option<Arc<ProcessRegistry>>,
+    process_owner_id: Option<String>,
 ) {
     let policy = config.role.delegation_policy(config.max_turns);
     let model = ai_client.config().model.clone();
@@ -114,10 +117,16 @@ pub(super) async fn run_teammate_loop(
             };
         }
 
-        let subagent_task = SubAgentTask::new(&task_id, &task_description)
-            .with_name(&config.name)
-            .with_working_dir(working_dir.clone())
-            .with_delegation_policy(policy.clone());
+        let subagent_task = build_teammate_subagent_task(
+            &task_id,
+            &task_description,
+            &config.name,
+            working_dir.clone(),
+            policy.clone(),
+            process_registry.clone(),
+            process_owner_id.clone(),
+            &session_id,
+        );
 
         let agent_config =
             SingleExplorerConfig::new(tool_registry.clone(), policy.clone(), String::new()).await;
@@ -186,6 +195,25 @@ pub(super) async fn run_teammate_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_teammate_subagent_task(
+    task_id: &str,
+    task_description: &str,
+    teammate_name: &str,
+    working_dir: PathBuf,
+    policy: DelegationPolicy,
+    process_registry: Option<Arc<ProcessRegistry>>,
+    process_owner_id: Option<String>,
+    session_id: &str,
+) -> SubAgentTask {
+    let parent_session_id = (!session_id.trim().is_empty()).then(|| session_id.to_string());
+    SubAgentTask::new(task_id, task_description)
+        .with_name(teammate_name)
+        .with_working_dir(working_dir)
+        .with_delegation_policy(policy)
+        .with_process_context(process_registry, process_owner_id, parent_session_id)
+}
+
 fn truncate(text: &str, max_chars: usize) -> String {
     if text.len() <= max_chars {
         return text.to_string();
@@ -199,7 +227,11 @@ fn truncate(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate;
+    use std::sync::Arc;
+
+    use super::{build_teammate_subagent_task, truncate};
+    use crate::agent::autonomy::team::TeammateRole;
+    use crate::process::ProcessRegistry;
 
     #[test]
     fn truncate_respects_char_boundaries() {
@@ -215,5 +247,45 @@ mod tests {
     #[test]
     fn truncate_returns_full_string_when_short() {
         assert_eq!(truncate("hi", 100), "hi");
+    }
+
+    #[test]
+    fn teammate_task_inherits_available_process_context() {
+        let registry = Arc::new(ProcessRegistry::new());
+        let task = build_teammate_subagent_task(
+            "task-1",
+            "verify the preview",
+            "tester-1",
+            std::path::PathBuf::from("/workspace"),
+            TeammateRole::Tester.delegation_policy(Some(10)),
+            Some(Arc::clone(&registry)),
+            Some("owner-1".to_string()),
+            "session-1",
+        );
+
+        assert!(Arc::ptr_eq(
+            task.process_registry.as_ref().expect("shared registry"),
+            &registry
+        ));
+        assert_eq!(task.process_owner_id.as_deref(), Some("owner-1"));
+        assert_eq!(task.parent_session_id.as_deref(), Some("session-1"));
+    }
+
+    #[test]
+    fn teammate_task_does_not_invent_process_or_session_context() {
+        let task = build_teammate_subagent_task(
+            "task-1",
+            "review files",
+            "reviewer-1",
+            std::path::PathBuf::from("/workspace"),
+            TeammateRole::Reviewer.delegation_policy(None),
+            None,
+            None,
+            "",
+        );
+
+        assert!(task.process_registry.is_none());
+        assert!(task.process_owner_id.is_none());
+        assert!(task.parent_session_id.is_none());
     }
 }

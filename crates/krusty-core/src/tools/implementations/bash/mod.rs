@@ -13,12 +13,12 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use crate::process::{ProcessRegistry, ProcessStatus};
+use crate::process::{ProcessInfo, ProcessRegistry, ProcessStatus};
 use crate::tools::registry::Tool;
 use crate::tools::truncation;
 use crate::tools::{parse_params, ToolContext, ToolResult};
 
-use execution::{execute_background, execute_foreground, StreamContext};
+use execution::{execute_foreground, StreamContext};
 use shell::{
     build_shell_command, configure_foreground_process_group, strip_ansi,
     strip_shell_background_suffix,
@@ -43,6 +43,7 @@ async fn background_start_result(
     registry: &ProcessRegistry,
     user_id: Option<&str>,
     process_id: String,
+    endpoint_hints: Vec<String>,
     warnings: Vec<String>,
 ) -> ToolResult {
     tokio::time::sleep(Duration::from_millis(BACKGROUND_STARTUP_GRACE_MS)).await;
@@ -65,6 +66,7 @@ async fn background_start_result(
                 "message": "Process started in background",
                 "process_id": process_id,
                 "status": "running",
+                "endpoint_hints": endpoint_hints,
                 "next_action": "The process remains tracked after this turn. Use processes status/control when needed, and probe the advertised endpoint to verify service readiness."
             }),
             warnings,
@@ -75,7 +77,8 @@ async fn background_start_result(
             json!({
                 "message": "Process started but is suspended",
                 "process_id": process_id,
-                "status": "suspended"
+                "status": "suspended",
+                "endpoint_hints": endpoint_hints
             }),
             warnings,
             None,
@@ -118,6 +121,155 @@ async fn background_start_result(
             None,
         ),
     }
+}
+
+fn clean_shell_token(token: &str) -> &str {
+    token.trim_matches(|character| matches!(character, '\'' | '"' | '`' | ',' | ';' | '(' | ')'))
+}
+
+fn parse_port(value: &str) -> Option<u16> {
+    clean_shell_token(value)
+        .trim_start_matches(':')
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port > 0)
+}
+
+fn background_endpoint_hints(command: &str) -> Vec<String> {
+    let tokens = command.split_whitespace().collect::<Vec<_>>();
+    let mut host = None;
+    let mut port = None;
+
+    for (index, raw_token) in tokens.iter().enumerate() {
+        let token = clean_shell_token(raw_token);
+        if matches!(token, "--host" | "--bind") {
+            host = tokens
+                .get(index + 1)
+                .map(|value| clean_shell_token(value).to_string());
+            continue;
+        }
+        if let Some(value) = token
+            .strip_prefix("--host=")
+            .or_else(|| token.strip_prefix("--bind="))
+        {
+            host = Some(clean_shell_token(value).to_string());
+            continue;
+        }
+        if matches!(token, "--port" | "-p") {
+            port = tokens.get(index + 1).and_then(|value| parse_port(value));
+            continue;
+        }
+        if let Some(value) = token
+            .strip_prefix("--port=")
+            .or_else(|| token.strip_prefix("-p="))
+        {
+            port = parse_port(value);
+            continue;
+        }
+        if token == "http.server" {
+            port = tokens.get(index + 1).and_then(|value| parse_port(value));
+            continue;
+        }
+        if let Some((candidate_host, candidate_port)) = token.rsplit_once(':') {
+            if matches!(candidate_host, "127.0.0.1" | "localhost" | "::1") {
+                if let Some(candidate_port) = parse_port(candidate_port) {
+                    host = Some(candidate_host.to_string());
+                    port = Some(candidate_port);
+                }
+            }
+        }
+    }
+
+    match port {
+        Some(port) => vec![format!(
+            "{}:{}",
+            host.filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "127.0.0.1".to_string()),
+            port
+        )],
+        None => Vec::new(),
+    }
+}
+
+fn normalized_working_dir(path: &std::path::Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn launch_signature(command: &str, working_dir: &std::path::Path) -> (PathBuf, String) {
+    let mut effective_dir = normalized_working_dir(working_dir);
+    let mut effective_command = command.trim();
+
+    if let Some((directory_segment, remainder)) = effective_command.split_once("&&") {
+        let directory_segment = directory_segment.trim();
+        if let Some(directory) = directory_segment.strip_prefix("cd ") {
+            let directory = clean_shell_token(directory.trim());
+            let directory = PathBuf::from(directory);
+            let resolved_directory = if directory.is_absolute() {
+                directory
+            } else {
+                working_dir.join(directory)
+            };
+            effective_dir = normalized_working_dir(&resolved_directory);
+            effective_command = remainder.trim();
+        }
+    }
+
+    (
+        effective_dir,
+        effective_command
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn same_background_launch(
+    process: &ProcessInfo,
+    command: &str,
+    working_dir: &std::path::Path,
+) -> bool {
+    if !process.is_active() {
+        return false;
+    }
+
+    let requested_endpoints = background_endpoint_hints(command);
+    if requested_endpoints.is_empty() {
+        return false;
+    }
+    let existing_endpoints = background_endpoint_hints(&process.command);
+    if !requested_endpoints
+        .iter()
+        .any(|endpoint| existing_endpoints.contains(endpoint))
+    {
+        return false;
+    }
+
+    launch_signature(command, working_dir)
+        == launch_signature(&process.command, &process._working_dir)
+}
+
+fn existing_background_result(
+    process: ProcessInfo,
+    endpoint_hints: Vec<String>,
+    mut warnings: Vec<String>,
+) -> ToolResult {
+    warnings.push(
+        "An equivalent owner-scoped background process is already active; reused its existing process_id instead of launching a duplicate."
+            .to_string(),
+    );
+    ToolResult::success_data_with(
+        json!({
+            "message": "Equivalent background process already running",
+            "process_id": process.id,
+            "status": process.display_status(),
+            "endpoint_hints": endpoint_hints,
+            "reused_existing": true,
+            "next_action": "Use processes status/control with this process_id and probe the endpoint before continuing."
+        }),
+        warnings,
+        None,
+        None,
+    )
 }
 
 fn output_spool_path(ctx: &ToolContext) -> PathBuf {
@@ -261,33 +413,52 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
             };
 
             if let Some(ref registry) = ctx.process_registry {
+                let endpoint_hints = background_endpoint_hints(&clean_command);
                 let spawn_result = match ctx.user_id.as_deref() {
                     Some(uid) => {
                         registry
-                            .spawn_for_user(
+                            .spawn_or_reuse_matching_for_user(
                                 uid,
                                 clean_command.clone(),
                                 ctx.working_dir.clone(),
                                 params.description.clone(),
+                                |process| {
+                                    same_background_launch(
+                                        process,
+                                        &clean_command,
+                                        &ctx.working_dir,
+                                    )
+                                },
                             )
                             .await
                     }
                     None => {
                         registry
-                            .spawn(
+                            .spawn_or_reuse_matching(
                                 clean_command.clone(),
                                 ctx.working_dir.clone(),
                                 params.description.clone(),
+                                |process| {
+                                    same_background_launch(
+                                        process,
+                                        &clean_command,
+                                        &ctx.working_dir,
+                                    )
+                                },
                             )
                             .await
                     }
                 };
                 match spawn_result {
-                    Ok(process_id) => {
+                    Ok((process, true)) => {
+                        return existing_background_result(process, endpoint_hints, warnings);
+                    }
+                    Ok((process, false)) => {
                         return background_start_result(
                             registry,
                             ctx.user_id.as_deref(),
-                            process_id,
+                            process.id,
+                            endpoint_hints,
                             warnings,
                         )
                         .await;
@@ -297,8 +468,15 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
                     }
                 }
             } else {
-                let background_cmd = build_shell_command(&clean_command, ctx);
-                return execute_background(background_cmd, warnings).await;
+                return ToolResult::error_with_details(
+                    "background_registry_unavailable",
+                    "Background execution requires the shared process registry; refusing to start an untracked detached process",
+                    Some(json!({
+                        "status": "not_started",
+                        "endpoint_hints": background_endpoint_hints(&clean_command)
+                    })),
+                    None,
+                );
             }
         }
 

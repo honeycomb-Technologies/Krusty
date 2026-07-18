@@ -116,10 +116,9 @@ impl PluginWindowState {
             // If no plugin is active, load preferred or first available
             if self.active_plugin.is_none() {
                 let plugin_id = preferred_plugin_id.map(String::from).or_else(|| {
-                    crate::tui::plugins::builtin_plugins()
+                    crate::tui::plugins::available_plugin_ids()
                         .into_iter()
                         .next()
-                        .map(|p| p.id().to_string())
                 });
 
                 if let Some(id) = plugin_id {
@@ -181,42 +180,42 @@ impl PluginWindowState {
 
     /// Switch to next available plugin
     pub fn next_plugin(&mut self) {
-        let plugins = crate::tui::plugins::builtin_plugins();
-        if plugins.is_empty() {
+        let plugin_ids = crate::tui::plugins::available_plugin_ids();
+        if plugin_ids.is_empty() {
             return;
         }
 
         let current_idx = self
             .active_plugin_id
             .as_ref()
-            .and_then(|id| plugins.iter().position(|p| p.id() == id))
+            .and_then(|id| plugin_ids.iter().position(|candidate| candidate == id))
             .unwrap_or(0);
 
-        let next_idx = (current_idx + 1) % plugins.len();
-        let next_id = plugins[next_idx].id().to_string();
+        let next_idx = (current_idx + 1) % plugin_ids.len();
+        let next_id = plugin_ids[next_idx].clone();
 
         self.set_plugin(crate::tui::plugins::get_plugin_by_id(&next_id));
     }
 
     /// Switch to previous available plugin
     pub fn prev_plugin(&mut self) {
-        let plugins = crate::tui::plugins::builtin_plugins();
-        if plugins.is_empty() {
+        let plugin_ids = crate::tui::plugins::available_plugin_ids();
+        if plugin_ids.is_empty() {
             return;
         }
 
         let current_idx = self
             .active_plugin_id
             .as_ref()
-            .and_then(|id| plugins.iter().position(|p| p.id() == id))
+            .and_then(|id| plugin_ids.iter().position(|candidate| candidate == id))
             .unwrap_or(0);
 
         let prev_idx = if current_idx == 0 {
-            plugins.len() - 1
+            plugin_ids.len() - 1
         } else {
             current_idx - 1
         };
-        let prev_id = plugins[prev_idx].id().to_string();
+        let prev_id = plugin_ids[prev_idx].clone();
 
         self.set_plugin(crate::tui::plugins::get_plugin_by_id(&prev_id));
     }
@@ -513,8 +512,8 @@ fn render_graphics_placeholder(buf: &mut Buffer, area: Rect, theme: &Theme, mess
 
 /// Render plugin switcher indicator at bottom of window
 fn render_plugin_switcher(buf: &mut Buffer, area: Rect, theme: &Theme, state: &PluginWindowState) {
-    let plugins = crate::tui::plugins::builtin_plugins();
-    if plugins.is_empty() {
+    let plugin_ids = crate::tui::plugins::available_plugin_ids();
+    if plugin_ids.is_empty() {
         return;
     }
 
@@ -522,26 +521,26 @@ fn render_plugin_switcher(buf: &mut Buffer, area: Rect, theme: &Theme, state: &P
     let current_idx = state
         .active_plugin_id
         .as_ref()
-        .and_then(|id| plugins.iter().position(|p| p.id() == id))
+        .and_then(|id| plugin_ids.iter().position(|candidate| candidate == id))
         .unwrap_or(0);
 
     // Build indicator: "◀ ● ○ ▶" for dots, or "◀ 1/5 ▶" for many plugins
-    let indicator = if plugins.len() <= 3 {
+    let indicator = if plugin_ids.len() <= 3 {
         // Show dots
         let mut dots = String::new();
-        for (i, _) in plugins.iter().enumerate() {
+        for (i, _) in plugin_ids.iter().enumerate() {
             if i == current_idx {
                 dots.push('●');
             } else {
                 dots.push('○');
             }
-            if i < plugins.len() - 1 {
+            if i < plugin_ids.len() - 1 {
                 dots.push(' ');
             }
         }
         format!("◀ {} ▶", dots)
     } else {
-        format!("◀ {}/{} ▶", current_idx + 1, plugins.len())
+        format!("◀ {}/{} ▶", current_idx + 1, plugin_ids.len())
     };
 
     // Position at bottom center, inside border

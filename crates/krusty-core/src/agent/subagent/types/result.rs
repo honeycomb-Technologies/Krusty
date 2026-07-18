@@ -3,6 +3,21 @@ use serde_json::{json, Value};
 
 use super::report::{parse_explore_report, summary_looks_non_substantive};
 
+/// Canonical background process handoff produced by a delegated agent tool
+/// call. This is collected from the successful Bash result itself rather than
+/// trusting the delegated model to repeat the handle in its prose summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegatedProcessArtifact {
+    pub process_id: String,
+    pub status: String,
+    pub command: String,
+    pub working_dir: String,
+    #[serde(default)]
+    pub endpoint_hints: Vec<String>,
+    #[serde(default)]
+    pub reused_existing: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExploreEvidenceArtifact {
     pub agent: String,
@@ -31,6 +46,8 @@ pub struct ExploreEvidenceArtifact {
     pub duration_ms: u64,
     pub error: Option<String>,
     pub policy_violations: Vec<String>,
+    #[serde(default)]
+    pub background_processes: Vec<DelegatedProcessArtifact>,
 }
 
 /// Result from a sub-agent execution.
@@ -46,6 +63,8 @@ pub struct SubAgentResult {
     pub turns_used: usize,
     pub error: Option<String>,
     pub policy_violations: Vec<String>,
+    #[serde(default)]
+    pub background_processes: Vec<DelegatedProcessArtifact>,
 }
 
 impl SubAgentResult {
@@ -174,6 +193,7 @@ impl SubAgentResult {
             duration_ms: self.duration_ms,
             error: self.error.clone(),
             policy_violations: self.policy_violations.clone(),
+            background_processes: self.background_processes.clone(),
         }
     }
 
@@ -210,6 +230,7 @@ impl SubAgentResult {
                 "duration_ms": self.duration_ms,
                 "error": self.error,
                 "policy_violations": self.policy_violations,
+                "background_processes": self.background_processes,
             })
         })
     }
@@ -217,6 +238,10 @@ impl SubAgentResult {
     pub fn has_usable_evidence(&self) -> bool {
         if !self.success || self.error.is_some() {
             return false;
+        }
+
+        if !self.background_processes.is_empty() {
+            return true;
         }
 
         if let Some(report) = parse_explore_report(&self.output) {
@@ -319,7 +344,9 @@ fn truncate_preview(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::SubAgentResult;
+    use serde_json::json;
+
+    use super::{DelegatedProcessArtifact, SubAgentResult};
 
     fn base_result() -> SubAgentResult {
         SubAgentResult {
@@ -333,6 +360,7 @@ mod tests {
             turns_used: 0,
             error: None,
             policy_violations: Vec::new(),
+            background_processes: Vec::new(),
         }
     }
 
@@ -451,5 +479,31 @@ mod tests {
         result.error = Some("Misread successful tool output after correction".to_string());
 
         assert_eq!(result.outcome_reason(), "misread_tool_output");
+    }
+
+    #[test]
+    fn evidence_artifact_preserves_canonical_background_process_handoff() {
+        let mut result = base_result();
+        result.output = "Server started successfully.".to_string();
+        result.background_processes = vec![DelegatedProcessArtifact {
+            process_id: "process-123".to_string(),
+            status: "running".to_string(),
+            command: "python3 server.py --host 127.0.0.1 --port 5940".to_string(),
+            working_dir: "/workspace/demo".to_string(),
+            endpoint_hints: vec!["127.0.0.1:5940".to_string()],
+            reused_existing: false,
+        }];
+
+        let artifact = result.evidence_json();
+        assert_eq!(
+            artifact["background_processes"][0]["process_id"],
+            "process-123"
+        );
+        assert_eq!(
+            artifact["background_processes"][0]["endpoint_hints"],
+            json!(["127.0.0.1:5940"])
+        );
+        assert_eq!(artifact["usable_evidence"], true);
+        assert_eq!(artifact["outcome_reason"], "usable_evidence");
     }
 }

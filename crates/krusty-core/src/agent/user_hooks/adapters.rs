@@ -28,14 +28,15 @@ impl PreToolHook for UserPreToolHook {
         &self,
         name: &str,
         params: &serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> HookResult {
         let mut manager = self.manager.write().await;
-        let result = UserHookExecutor::execute_matching(
+        let result = UserHookExecutor::execute_matching_for_user(
             &mut manager,
             UserHookType::PreToolUse,
             name,
             params,
+            ctx.user_id.as_deref(),
         )
         .await;
 
@@ -69,13 +70,15 @@ impl PostToolHook for UserPostToolHook {
         params: &serde_json::Value,
         _result: &ToolResult,
         _duration: Duration,
+        ctx: &ToolContext,
     ) -> HookResult {
         let mut manager = self.manager.write().await;
-        let _ = UserHookExecutor::execute_matching(
+        let _ = UserHookExecutor::execute_matching_for_user(
             &mut manager,
             UserHookType::PostToolUse,
             name,
             params,
+            ctx.user_id.as_deref(),
         )
         .await;
 

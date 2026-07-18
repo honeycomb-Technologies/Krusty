@@ -8,5 +8,8 @@ runtime = "js"
 entry_component = "src/index.ts"
 render_capabilities = ["text"]
 
+[requested_permissions]
+process = true
+
 [compat]
 krusty_min = "0.7.0"

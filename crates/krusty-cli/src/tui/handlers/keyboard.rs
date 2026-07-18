@@ -146,8 +146,13 @@ impl App {
                     if has_arguments {
                         self.ui.autocomplete.hide();
                     } else {
-                        if let Some(cmd) = self.ui.autocomplete.get_selected() {
-                            self.handle_slash_command(cmd.primary);
+                        if let Some(command) = self
+                            .ui
+                            .autocomplete
+                            .get_selected()
+                            .map(|suggestion| suggestion.primary.clone())
+                        {
+                            self.handle_slash_command(&command);
                             self.ui.input.clear();
                             self.ui.autocomplete.hide();
                         }

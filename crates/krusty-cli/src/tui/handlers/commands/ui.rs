@@ -137,6 +137,12 @@ impl App {
 
     /// Refresh skills in the browser.
     pub fn refresh_skills_browser(&mut self) {
+        let selected = self
+            .ui
+            .popups
+            .skills
+            .selected_skill()
+            .map(|skill| skill.name.clone());
         let skills = match self.services.skills_manager.try_write() {
             Ok(mut guard) => {
                 guard.refresh();
@@ -144,7 +150,10 @@ impl App {
             }
             Err(_) => return,
         };
-        self.ui.popups.skills.set_skills(skills);
+        self.ui
+            .popups
+            .skills
+            .set_skills_preserving(skills, selected.as_deref());
     }
 
     /// Open MCP server browser popup.

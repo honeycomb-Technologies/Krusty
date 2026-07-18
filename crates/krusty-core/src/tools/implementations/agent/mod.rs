@@ -99,7 +99,7 @@ impl Tool for AgentTool {
 - **verify**: Run tests, builds, linters and validate changes. Outputs VERDICT: PASS|FAIL|PARTIAL. Fresh context.
 - **build**: Parallel code implementation. Pass 'components' array and optionally 'conventions'. Fresh context.
 
-**Background mode:** Pass `run_in_background: true` to spawn the agent asynchronously. You get back a `delegated_run_id` immediately and can continue working. The agent writes its result to the delegated run store when finished — you will see it in your delegated context on the next turn. Use this for long-running tasks where you don't need the result right away.
+**Background mode:** Pass `run_in_background: true` to spawn the agent asynchronously. You get back a `delegated_run_id` immediately and can continue working. The agent writes its result to the delegated run store when finished; completed results appear in delegated context on a later turn. Use this for long-running tasks where you don't need the result right away.
 
 **Named background agents:** Pass `name` to give a background run a stable label in status/progress views. Use with `run_in_background: true`. Example: `agent(agent_type: "build", prompt: "Implement task T-12", name: "builder-1", run_in_background: true)`.
 

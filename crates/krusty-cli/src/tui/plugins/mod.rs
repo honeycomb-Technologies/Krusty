@@ -48,10 +48,19 @@ pub struct InstalledPluginDescriptor {
     pub entry_component_path: PathBuf,
     pub enabled: bool,
     pub render_mode: PluginRenderMode,
+    process_granted: bool,
 }
 
 impl InstalledPluginDescriptor {
-    pub fn from_installed(plugin: &crate::plugins::InstalledPlugin) -> Self {
+    /// Build a TUI runtime descriptor when the package contributes a renderable
+    /// entry component. Bundle-only packages still remain visible in the plugin
+    /// catalog; they simply have no TUI runtime to instantiate. Callers must
+    /// supply a freshly resolved process grant for native and JS runtimes.
+    pub(crate) fn from_installed(
+        plugin: &crate::plugins::InstalledPlugin,
+        process_granted: bool,
+    ) -> Option<Self> {
+        let entry_component_path = plugin.entry_component_path.clone()?;
         let render_mode = if plugin
             .render_capabilities
             .iter()
@@ -62,7 +71,7 @@ impl InstalledPluginDescriptor {
             PluginRenderMode::Text
         };
 
-        Self {
+        Some(Self {
             id: plugin.id.clone(),
             name: plugin.name.clone(),
             version: plugin.version.clone(),
@@ -70,10 +79,15 @@ impl InstalledPluginDescriptor {
             description: plugin.description.clone(),
             runtime: plugin.runtime,
             install_path: plugin.install_path.clone(),
-            entry_component_path: plugin.entry_component_path.clone(),
+            entry_component_path,
             enabled: plugin.enabled,
             render_mode,
-        }
+            process_granted,
+        })
+    }
+
+    fn can_instantiate(&self) -> bool {
+        !self.runtime.requires_process_permission() || self.process_granted
     }
 }
 
@@ -178,15 +192,25 @@ pub trait Plugin: Send + Sync {
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
-/// List of available built-in plugins
-pub fn builtin_plugins() -> Vec<Box<dyn Plugin>> {
-    let mut plugins: Vec<Box<dyn Plugin>> = vec![];
+/// List available plugin IDs without loading or evaluating plugin code.
+/// Runtime instantiation happens only when the user selects one ID.
+pub fn available_plugin_ids() -> Vec<String> {
+    let mut ids = Vec::new();
     #[cfg(unix)]
-    plugins.insert(0, Box::new(RetroArchPlugin::new()));
-    for descriptor in installed_plugins().into_iter().filter(|d| d.enabled) {
-        plugins.push(plugin_from_descriptor(descriptor));
-    }
-    plugins
+    ids.push(GAME_BOY_COLOR_PLUGIN_ID.to_string());
+    ids.extend(
+        installed_plugins()
+            .into_iter()
+            .filter(|descriptor| descriptor.enabled && descriptor.can_instantiate())
+            .map(|descriptor| descriptor.id),
+    );
+    ids
+}
+
+pub fn is_plugin_available(id: &str) -> bool {
+    available_plugin_ids()
+        .iter()
+        .any(|candidate| candidate == id)
 }
 
 /// Get a plugin by ID
@@ -198,19 +222,24 @@ pub fn get_plugin_by_id(id: &str) -> Option<Box<dyn Plugin>> {
 
     installed_plugin_by_id(id).and_then(|descriptor| {
         if descriptor.enabled {
-            Some(plugin_from_descriptor(descriptor))
+            plugin_from_descriptor(descriptor)
         } else {
             None
         }
     })
 }
 
-fn plugin_from_descriptor(descriptor: InstalledPluginDescriptor) -> Box<dyn Plugin> {
-    match descriptor.runtime {
+fn plugin_from_descriptor(descriptor: InstalledPluginDescriptor) -> Option<Box<dyn Plugin>> {
+    if !descriptor.can_instantiate() {
+        return None;
+    }
+
+    let plugin: Box<dyn Plugin> = match descriptor.runtime {
         crate::plugins::PluginRuntime::Native => Box::new(NativePluginHost::new(descriptor)),
         crate::plugins::PluginRuntime::Js => Box::new(JsPluginHost::new(descriptor)),
         crate::plugins::PluginRuntime::Wasm => Box::new(ManagedPlugin::new(descriptor)),
-    }
+    };
+    Some(plugin)
 }
 
 pub fn set_installed_plugins(mut descriptors: Vec<InstalledPluginDescriptor>) {
@@ -243,4 +272,47 @@ pub fn installed_plugin_version_map() -> std::collections::HashMap<String, Strin
 
 pub fn plugin_descriptor_by_id(id: &str) -> Option<InstalledPluginDescriptor> {
     installed_plugin_by_id(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn descriptor(
+        runtime: crate::plugins::PluginRuntime,
+        process_granted: bool,
+    ) -> InstalledPluginDescriptor {
+        InstalledPluginDescriptor {
+            id: format!("test-{runtime:?}"),
+            name: "Test Plugin".to_string(),
+            version: "1.0.0".to_string(),
+            publisher: "test.publisher".to_string(),
+            description: None,
+            runtime,
+            install_path: PathBuf::from("/nonexistent/plugin"),
+            entry_component_path: PathBuf::from("/nonexistent/plugin/entry"),
+            enabled: true,
+            render_mode: PluginRenderMode::Text,
+            process_granted,
+        }
+    }
+
+    #[test]
+    fn native_and_js_hosts_are_not_instantiated_without_process_grant() {
+        for runtime in [
+            crate::plugins::PluginRuntime::Native,
+            crate::plugins::PluginRuntime::Js,
+        ] {
+            let descriptor = descriptor(runtime, false);
+            assert!(!descriptor.can_instantiate());
+            assert!(plugin_from_descriptor(descriptor).is_none());
+        }
+    }
+
+    #[test]
+    fn wasm_host_remains_available_without_process_grant() {
+        let descriptor = descriptor(crate::plugins::PluginRuntime::Wasm, false);
+        assert!(descriptor.can_instantiate());
+        assert!(plugin_from_descriptor(descriptor).is_some());
+    }
 }

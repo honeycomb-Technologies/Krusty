@@ -31,10 +31,23 @@ impl App {
             }
         };
 
+        let previous_descriptors = crate::tui::plugins::installed_plugins();
         let descriptors: Vec<_> = installed
             .iter()
-            .map(crate::tui::plugins::InstalledPluginDescriptor::from_installed)
+            .filter_map(|plugin| {
+                let process_granted = plugin.runtime.requires_process_permission()
+                    && futures::executor::block_on(manager.ensure_installed_plugin_permission(
+                        plugin,
+                        crate::plugins::PluginPermission::Process,
+                    ))
+                    .is_ok();
+                crate::tui::plugins::InstalledPluginDescriptor::from_installed(
+                    plugin,
+                    process_granted,
+                )
+            })
             .collect();
+        let descriptors_changed = descriptors != previous_descriptors;
         crate::tui::plugins::set_installed_plugins(descriptors);
         self.ui.popups.plugins.set_plugins(installed);
         self.ui.popups.plugins.set_catalog(catalog);
@@ -42,7 +55,7 @@ impl App {
         let previous_versions = self.runtime.plugin_versions.clone();
         self.runtime.plugin_versions = crate::tui::plugins::installed_plugin_version_map();
 
-        let changed = self.runtime.plugin_versions != previous_versions;
+        let changed = self.runtime.plugin_versions != previous_versions || descriptors_changed;
 
         if notify_active_updates {
             if let Some(active_id) = self.ui.plugin_window.active_plugin_id.clone() {
@@ -68,10 +81,12 @@ impl App {
         }
 
         if let Some(active_id) = self.ui.plugin_window.active_plugin_id.clone() {
-            if crate::tui::plugins::get_plugin_by_id(&active_id).is_none() {
+            if !crate::tui::plugins::is_plugin_available(&active_id) {
                 self.ui.plugin_window.set_plugin(None);
             }
         }
+
+        self.reload_plugin_contributions();
 
         changed
     }

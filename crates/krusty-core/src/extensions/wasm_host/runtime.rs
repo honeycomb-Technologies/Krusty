@@ -90,6 +90,52 @@ impl WasmHost {
         extension_work_dir.join(normalized)
     }
 
+    /// Discover and load every valid Zed-compatible extension directory under
+    /// `root`. One broken extension is isolated and reported without preventing
+    /// the remaining extensions from starting.
+    pub async fn load_extensions_from_root(
+        self: &Arc<Self>,
+        root: &Path,
+    ) -> (Vec<WasmExtension>, Vec<(PathBuf, String)>) {
+        if !root.is_dir() {
+            return (Vec::new(), Vec::new());
+        }
+
+        let mut directories = Vec::new();
+        let mut diagnostics = Vec::new();
+        match tokio::fs::read_dir(root).await {
+            Ok(mut entries) => loop {
+                match entries.next_entry().await {
+                    Ok(Some(entry)) => {
+                        let path = entry.path();
+                        if path.is_dir() && path.join("extension.toml").is_file() {
+                            directories.push(path);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        diagnostics.push((root.to_path_buf(), error.to_string()));
+                        break;
+                    }
+                }
+            },
+            Err(error) => {
+                diagnostics.push((root.to_path_buf(), error.to_string()));
+                return (Vec::new(), diagnostics);
+            }
+        }
+        directories.sort();
+
+        let mut loaded = Vec::new();
+        for directory in directories {
+            match self.load_extension_from_dir(&directory).await {
+                Ok(extension) => loaded.push(extension),
+                Err(error) => diagnostics.push((directory, format!("{error:#}"))),
+            }
+        }
+        (loaded, diagnostics)
+    }
+
     /// Load an extension from a directory containing extension.toml and *.wasm
     pub async fn load_extension_from_dir(
         self: &Arc<Self>,

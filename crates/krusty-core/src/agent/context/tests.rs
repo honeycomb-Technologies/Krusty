@@ -300,7 +300,7 @@ fn inject_context_skips_project_instructions_without_explicit_project_dir() {
         None,
     );
 
-    assert_eq!(injected.len(), 3);
+    assert!(injected.len() >= 3);
     assert_eq!(injected[0].role, Role::System);
     assert!(matches!(
         &injected[0].content[0],
@@ -311,7 +311,15 @@ fn inject_context_skips_project_instructions_without_explicit_project_dir() {
         &injected[1].content[0],
         Content::Text { text } if text.contains("[ENVIRONMENT]")
     ));
-    assert_eq!(injected[2].role, Role::User);
+    assert!(matches!(
+        injected.last(),
+        Some(message) if message.role == Role::User
+    ));
+    assert!(injected.iter().all(|message| {
+        message.content.iter().all(|content| {
+            !matches!(content, Content::Text { text } if text.contains("repo instructions"))
+        })
+    }));
 }
 
 #[test]
