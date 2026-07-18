@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -88,6 +88,10 @@ pub struct ToolRegistry {
     pre_hooks: Vec<Arc<dyn PreToolHook>>,
     /// Post-execution hooks (run after each tool)
     post_hooks: Vec<Arc<dyn PostToolHook>>,
+    /// Executable agent-extension host shared by every caller of this registry.
+    /// A standard lock keeps lookup available from the synchronous orchestrator
+    /// startup boundary; extension work itself remains fully async.
+    agent_extension_manager: StdRwLock<Option<Arc<crate::extensions::AgentExtensionManager>>>,
 }
 
 impl Default for ToolRegistry {
@@ -103,6 +107,7 @@ impl ToolRegistry {
             default_timeout: DEFAULT_TOOL_TIMEOUT,
             pre_hooks: Vec::new(),
             post_hooks: Vec::new(),
+            agent_extension_manager: StdRwLock::new(None),
         }
     }
 
@@ -119,6 +124,30 @@ impl ToolRegistry {
         let name = tool.name().to_string();
         let mut tools = self.tools.write().await;
         tools.insert(name, tool);
+    }
+
+    /// Remove one exact tool name. Runtime extension and MCP refresh paths use
+    /// this to avoid stale registrations without touching unrelated tools.
+    pub async fn unregister(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.write().await.remove(name)
+    }
+
+    pub fn set_agent_extension_manager(
+        &self,
+        manager: Arc<crate::extensions::AgentExtensionManager>,
+    ) {
+        let mut current = self
+            .agent_extension_manager
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *current = Some(manager);
+    }
+
+    pub fn agent_extension_manager(&self) -> Option<Arc<crate::extensions::AgentExtensionManager>> {
+        self.agent_extension_manager
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Add a pre-execution hook
@@ -220,9 +249,45 @@ impl ToolRegistry {
         params: Value,
         ctx: &ToolContext,
     ) -> Option<ToolResult> {
+        self.execute_inner(name, params, ctx, true).await
+    }
+
+    /// Execute an agent-loop call whose extension interception already ran
+    /// before the canonical authorization prompt. This prevents a second
+    /// rewrite after the user approved the effective arguments.
+    pub(crate) async fn execute_prepared(
+        &self,
+        name: &str,
+        params: Value,
+        ctx: &ToolContext,
+    ) -> Option<ToolResult> {
+        self.execute_inner(name, params, ctx, false).await
+    }
+
+    async fn execute_inner(
+        &self,
+        name: &str,
+        params: Value,
+        ctx: &ToolContext,
+        run_extension_intercept: bool,
+    ) -> Option<ToolResult> {
         tracing::info!(tool = name, "ToolRegistry: execute called");
         let tool = self.get(name).await?;
         tracing::info!(tool = name, "ToolRegistry: tool found, executing");
+        let mut params = params;
+        let extension_manager = if run_extension_intercept {
+            self.agent_extension_manager()
+        } else {
+            None
+        };
+        if let Some(manager) = extension_manager {
+            let intercept = manager.before_tool(name, params, ctx).await;
+            if let Some(reason) = intercept.block_reason {
+                tracing::info!(tool = name, reason = %reason, "Agent extension blocked execution");
+                return Some(ToolResult::error_with_code("blocked_by_extension", reason));
+            }
+            params = intercept.params;
+        }
         let timeout = execution_timeout_for_call(
             name,
             &params,
@@ -264,7 +329,13 @@ impl ToolRegistry {
         let duration = start.elapsed();
 
         for hook in &self.post_hooks {
-            let _ = hook.after_execute(name, &params, &result, duration).await;
+            let _ = hook
+                .after_execute(name, &params, &result, duration, ctx)
+                .await;
+        }
+
+        if let Some(manager) = self.agent_extension_manager() {
+            manager.after_tool(name, &params, &result, ctx).await;
         }
 
         Some(result)

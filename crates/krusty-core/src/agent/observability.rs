@@ -178,6 +178,10 @@ pub(crate) async fn forward_runtime_traces(
     mut source_rx: mpsc::UnboundedReceiver<LoopEvent>,
     mut provider_call_rx: mpsc::UnboundedReceiver<ProviderCallTrace>,
     sink_tx: mpsc::UnboundedSender<LoopEvent>,
+    extension_dispatch: Option<(
+        std::sync::Arc<crate::extensions::AgentExtensionManager>,
+        crate::extensions::ExtensionCallContext,
+    )>,
 ) {
     let (writer_tx, writer_rx) = std_mpsc::channel();
     let writer_db_path = db_path.clone();
@@ -202,6 +206,17 @@ pub(crate) async fn forward_runtime_traces(
                 // UI/SSE delivery comes first and never waits for trace I/O.
                 if sink_open && sink_tx.send(event.clone()).is_err() {
                     sink_open = false;
+                }
+
+                if let Some((manager, context)) = extension_dispatch.as_ref() {
+                    if manager.observes_loop_event(&event) {
+                        let manager = manager.clone();
+                        let context = context.clone();
+                        let extension_event = event.clone();
+                        tokio::spawn(async move {
+                            manager.dispatch_event(extension_event, context).await;
+                        });
+                    }
                 }
 
                 let mut trace_event =
@@ -468,6 +483,7 @@ mod tests {
             source_rx,
             provider_call_rx,
             sink_tx,
+            None,
         ));
 
         source_tx
@@ -520,6 +536,7 @@ mod tests {
             source_rx,
             provider_call_rx,
             sink_tx,
+            None,
         ));
 
         let input_snapshot = LoopEvent::Usage {

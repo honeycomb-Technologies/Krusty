@@ -31,7 +31,7 @@ pub struct JsPluginHost {
 }
 
 impl JsPluginHost {
-    pub fn new(descriptor: InstalledPluginDescriptor) -> Self {
+    pub(super) fn new(descriptor: InstalledPluginDescriptor) -> Self {
         let render_file = std::env::temp_dir().join(format!(
             "krusty-js-plugin-{}-{}.json",
             sanitize_for_file(&descriptor.id),
@@ -345,6 +345,7 @@ let ticks = 0;
             entry_component_path: entry,
             enabled: true,
             render_mode: PluginRenderMode::Text,
+            process_granted: true,
         };
 
         let mut host = JsPluginHost::new(descriptor);

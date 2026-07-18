@@ -9,9 +9,11 @@ use crate::agent::constants::subagent;
 use crate::agent::history_policy::build_history_tool_result;
 use crate::ai::client::AiClient;
 use crate::ai::types::{Content, ModelMessage, Role};
+use crate::tools::ToolResult;
 
 use super::super::types::{
-    parse_explore_report, AgentProgress, AgentProgressStatus, SubAgentResult, SubAgentTask,
+    parse_explore_report, AgentProgress, AgentProgressStatus, DelegatedProcessArtifact,
+    SubAgentResult, SubAgentTask,
 };
 use super::api::{call_subagent_api, parse_response};
 use super::config::AgentConfig;
@@ -25,6 +27,71 @@ use super::governance::{build_subagent_tool_context, delegated_is_explore, deleg
 const MAX_DELEGATED_POLICY_VIOLATIONS: usize = 3;
 const EXPLORER_STALE_SEQUENCE_THRESHOLD: usize = 3;
 const EXPLORER_SYNTHESIS_FILE_THRESHOLD: usize = 8;
+
+fn delegated_process_artifact(
+    tool_name: &str,
+    input: &serde_json::Value,
+    result: &ToolResult,
+    working_dir: &std::path::Path,
+) -> Option<DelegatedProcessArtifact> {
+    if tool_name != "bash" || result.is_error {
+        return None;
+    }
+
+    let parsed = serde_json::from_str::<serde_json::Value>(&result.output).ok()?;
+    let payload = parsed.get("data").unwrap_or(&parsed);
+    let process_id = payload.get("process_id")?.as_str()?.trim();
+    if process_id.is_empty() {
+        return None;
+    }
+    let status = payload
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let command = input
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let endpoint_hints = payload
+        .get("endpoint_hints")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Some(DelegatedProcessArtifact {
+        process_id: process_id.to_string(),
+        status,
+        command,
+        working_dir: working_dir.display().to_string(),
+        endpoint_hints,
+        reused_existing: payload
+            .get("reused_existing")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn record_delegated_process(
+    processes: &mut Vec<DelegatedProcessArtifact>,
+    process: DelegatedProcessArtifact,
+) {
+    if let Some(existing) = processes
+        .iter_mut()
+        .find(|existing| existing.process_id == process.process_id)
+    {
+        *existing = process;
+    } else {
+        processes.push(process);
+    }
+}
 
 /// Unified agentic loop that replaces separate explorer/builder implementations.
 pub(crate) async fn execute_agent_loop<C: AgentConfig>(
@@ -69,6 +136,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     let mut tool_truth_corrections = 0usize;
     let mut forced_read_before_completion = false;
     let mut structured_report_repair_requested = false;
+    let mut background_processes = Vec::new();
 
     let send_progress = |status: AgentProgressStatus,
                          action: &str,
@@ -131,6 +199,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 turns_used: turns,
                 error: Some("Cancelled".to_string()),
                 policy_violations,
+                background_processes: background_processes.clone(),
             };
         }
 
@@ -168,6 +237,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                         max_turns
                     )),
                     policy_violations,
+                    background_processes: background_processes.clone(),
                 };
             }
         }
@@ -222,6 +292,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     turns_used: turns,
                     error: Some(e.to_string()),
                     policy_violations,
+                    background_processes: background_processes.clone(),
                 };
             }
             Err(_) => {
@@ -270,6 +341,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                         ))
                     },
                     policy_violations,
+                    background_processes: background_processes.clone(),
                 };
             }
         };
@@ -318,6 +390,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                             .to_string(),
                     ),
                     policy_violations,
+                    background_processes: background_processes.clone(),
                 };
             }
 
@@ -393,6 +466,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 turns_used: turns,
                 error: None,
                 policy_violations,
+                background_processes: background_processes.clone(),
             };
             let result = if config.use_explorer_heuristics() {
                 normalize_explorer_result(raw_result, task)
@@ -451,6 +525,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     turns_used: turns,
                     error: None,
                     policy_violations,
+                    background_processes: background_processes.clone(),
                 },
                 task,
             );
@@ -544,6 +619,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                                     .to_string(),
                             ),
                             policy_violations,
+                            background_processes: background_processes.clone(),
                         };
                     }
                     continue;
@@ -563,7 +639,14 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             let result = config.execute_tool(&tc.name, tc.input.clone(), &ctx).await;
 
             let (output, is_error) = match result {
-                Some(r) => (r.output, r.is_error),
+                Some(r) => {
+                    if let Some(process) =
+                        delegated_process_artifact(&tc.name, &tc.input, &r, &task.working_dir)
+                    {
+                        record_delegated_process(&mut background_processes, process);
+                    }
+                    (r.output, r.is_error)
+                }
                 None => (format!("Unknown tool: {}", tc.name), true),
             };
 
@@ -647,6 +730,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                         turns_used: turns,
                         error: None,
                         policy_violations,
+                        background_processes: background_processes.clone(),
                     },
                     task,
                 );

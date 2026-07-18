@@ -61,18 +61,15 @@ pub(super) async fn revoke_oauth(
 ) -> Result<Json<OAuthStatusResponse>, AppError> {
     let provider_id = parse_provider(&provider)?;
 
-    let mut store =
-        OAuthTokenStore::load().map_err(|error| AppError::Internal(error.to_string()))?;
-    store.remove(&provider_id);
-    store
-        .save()
-        .map_err(|error| AppError::Internal(error.to_string()))?;
-
     if provider_id == ProviderId::Grok {
-        if let Err(error) = clear_grok_cli_auth() {
+        clear_grok_cli_auth().map_err(|error| {
             tracing::warn!(error = %error, "Failed to clear Grok CLI auth file during OAuth revoke");
-        }
+            AppError::Internal(error.to_string())
+        })?;
     }
+
+    OAuthTokenStore::remove_persisted(&provider_id)
+        .map_err(|error| AppError::Internal(error.to_string()))?;
 
     state
         .oauth_flows

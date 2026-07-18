@@ -2,11 +2,12 @@
 //!
 //! Breaks up the 300+ line App::new() constructor into focused helper functions.
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::agent::{UserHookManager, UserPostToolHook, UserPreToolHook};
+use crate::agent::{PackageHookConfig, UserHookManager, UserPostToolHook, UserPreToolHook};
 use crate::ai::models::{create_model_registry, ModelMetadata, SharedModelRegistry};
 use crate::ai::providers::{builtin_providers, ProviderId};
 use crate::extensions::WasmHost;
@@ -19,6 +20,7 @@ use crate::tools::{register_all_tools, ToolRegistry};
 use crate::tui::app::AppServices;
 use crate::tui::themes::{Theme, THEME_REGISTRY};
 use crate::tui::utils::{AsyncChannels, McpStatusUpdate};
+use krusty_core::mcp::{McpConnectionAuthority, McpPackageConfig};
 use krusty_core::skills::SkillsManager;
 
 /// Initialize core services (tools, extensions, etc.)
@@ -39,7 +41,19 @@ pub async fn init_services(
     let extensions_dir = paths::extensions_dir();
     let http_client = reqwest::Client::new();
     let wasm_host = Some(WasmHost::new(http_client, extensions_dir.clone()));
-    tracing::info!("WASM extension host initialized at {:?}", extensions_dir);
+    let (wasm_extensions, wasm_diagnostics) = if let Some(host) = &wasm_host {
+        host.load_extensions_from_root(&extensions_dir).await
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    tracing::info!(
+        loaded = wasm_extensions.len(),
+        path = %extensions_dir.display(),
+        "Zed-compatible WASM extension host initialized"
+    );
+    for (path, error) in wasm_diagnostics {
+        tracing::warn!(path = %path.display(), error = %error, "Failed to load WASM extension");
+    }
 
     // Installable plugin manager
     let plugins_dir = paths::plugins_dir();
@@ -61,15 +75,129 @@ pub async fn init_services(
             );
         }
     }
+    let installed_plugins = if let Some(manager) = &plugin_manager {
+        match manager.list_installed_plugins().await {
+            Ok(plugins) => plugins
+                .into_iter()
+                .filter(|plugin| plugin.enabled)
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                tracing::warn!(error = %error, "Failed to resolve installed plugin contributions");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let mut executable_plugin_ids = HashSet::new();
+    let mut mcp_plugin_authorities = HashMap::new();
+    if let Some(manager) = &plugin_manager {
+        for plugin in &installed_plugins {
+            if !plugin.agent_extension_paths.is_empty() || !plugin.hook_paths.is_empty() {
+                match manager
+                    .ensure_installed_plugin_permission(
+                        plugin,
+                        krusty_core::plugins::PluginPermission::Process,
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        executable_plugin_ids.insert(plugin.id.clone());
+                    }
+                    Err(error) => tracing::warn!(
+                        plugin_id = %plugin.id,
+                        error = %error,
+                        "Executable plugin contribution remains disabled until process permission is granted"
+                    ),
+                }
+            }
+            if plugin.mcp_servers_path.is_some() {
+                match manager.permission_status_for_installed(plugin).await {
+                    Ok(status) if status.grant_is_current => {
+                        let authority = McpConnectionAuthority::new(
+                            status.granted.process,
+                            status.granted.network,
+                        );
+                        if !authority.is_empty() {
+                            mcp_plugin_authorities.insert(plugin.id.clone(), authority);
+                        }
+                    }
+                    Ok(_) => tracing::warn!(
+                        plugin_id = %plugin.id,
+                        "Plugin MCP contribution remains disabled until process or network authority is granted"
+                    ),
+                    Err(error) => {
+                        tracing::warn!(plugin_id = %plugin.id, error = %error, "Failed to resolve plugin MCP permissions")
+                    }
+                }
+            }
+        }
+    }
 
     // Database path
     let db_path = paths::config_dir().join("krusty.db");
 
     // User hook manager
     let user_hook_manager = init_user_hooks(&db_path).await;
+    let package_hook_configs = installed_plugins
+        .iter()
+        .filter(|plugin| executable_plugin_ids.contains(&plugin.id))
+        .flat_map(|plugin| {
+            plugin
+                .hook_paths
+                .iter()
+                .map(|path| PackageHookConfig::new(&plugin.id, path, &plugin.install_path))
+        })
+        .collect();
+    match user_hook_manager
+        .write()
+        .await
+        .replace_package_hooks(package_hook_configs)
+    {
+        Ok(report) if report.hook_count > 0 => tracing::info!(
+            configs = report.config_count,
+            hooks = report.hook_count,
+            "Loaded package command hooks"
+        ),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, "Package hooks were disabled after a load failure")
+        }
+    }
 
     // Tool registry with hooks
     let tool_registry = init_tool_registry(&user_hook_manager).await;
+    let agent_extensions = krusty_core::extensions::AgentExtensionManager::new(working_dir);
+    for plugin in &installed_plugins {
+        if !executable_plugin_ids.contains(&plugin.id) {
+            continue;
+        }
+        for path in &plugin.agent_extension_paths {
+            agent_extensions
+                .register_root(krusty_core::extensions::AgentExtensionRoot::new(
+                    path,
+                    krusty_core::extensions::AgentExtensionScope::Package,
+                ))
+                .await;
+        }
+    }
+    tool_registry.set_agent_extension_manager(agent_extensions.clone());
+    if let Err(error) = agent_extensions.refresh_and_register(&tool_registry).await {
+        tracing::warn!(error = %error, "Failed to initialize agent extensions");
+    } else {
+        let loaded = agent_extensions.loaded_ids().await;
+        if !loaded.is_empty() {
+            tracing::info!(extensions = ?loaded, "Loaded executable agent extensions");
+        }
+        for diagnostic in agent_extensions.diagnostics().await {
+            tracing::warn!(
+                path = %diagnostic.path.display(),
+                extension_id = ?diagnostic.extension_id,
+                message = %diagnostic.message,
+                "Agent extension diagnostic"
+            );
+        }
+    }
     // Cache the complete catalog locally; request-time policy selects the
     // compact wire surface for each turn.
     let cached_ai_tools = tool_registry.get_ai_tools_all().await;
@@ -111,13 +239,29 @@ pub async fn init_services(
     // Skills manager
     let global_skills_dir = paths::config_dir().join("skills");
     let project_skills_dir = Some(working_dir.join(".krusty").join("skills"));
-    let skills_manager = Arc::new(RwLock::new(SkillsManager::new(
-        global_skills_dir,
-        project_skills_dir,
-    )));
+    let mut skills = SkillsManager::new(global_skills_dir, project_skills_dir);
+    for plugin in &installed_plugins {
+        for path in &plugin.skill_paths {
+            skills.register_package_root(&plugin.id, path.clone());
+        }
+    }
+    skills.refresh();
+    let skills_manager = Arc::new(RwLock::new(skills));
 
     // MCP manager and channels
     let mcp_manager = Arc::new(krusty_core::mcp::McpManager::new(working_dir.to_path_buf()));
+    mcp_manager
+        .set_package_configs(
+            installed_plugins
+                .iter()
+                .filter_map(|plugin| {
+                    let path = plugin.mcp_servers_path.clone()?;
+                    let authority = mcp_plugin_authorities.get(&plugin.id).copied()?;
+                    Some(McpPackageConfig::new(path, authority))
+                })
+                .collect(),
+        )
+        .await;
     let (mcp_status_tx, mcp_status_rx) = tokio::sync::mpsc::unbounded_channel();
     let (oauth_status_tx, oauth_status_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -139,6 +283,7 @@ pub async fn init_services(
         cached_ai_tools,
         user_hook_manager,
         _wasm_host: wasm_host,
+        _wasm_extensions: wasm_extensions,
         plugin_manager,
         skills_manager,
         mcp_manager,

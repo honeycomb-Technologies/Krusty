@@ -1,6 +1,10 @@
 # MCP, Plugins, Plans & Skills
 
-Krusty has four extensibility layers, each solving a different problem. MCP connects the agent to external tool servers. Plugins add dynamic capabilities to the TUI. Plans structure complex work into phased task decomposition. Skills inject domain-specific knowledge into the agent's context. They're independent systems -- you can use any combination of them, or none at all.
+Krusty has five cooperating extensibility layers. MCP connects the agent to
+external capability servers. Plugin packages install and govern bundles. Agent
+extensions add tools, slash commands, lifecycle events, and turn context. Plans
+structure complex work. Skills provide deferred domain instructions. They can
+be used independently or distributed together in one package.
 
 This document explains what each one does, how it works internally, and how to configure it.
 
@@ -14,15 +18,20 @@ The implementation lives in `crates/krusty-core/src/mcp/`, built on the `rmcp` S
 
 Krusty supports two transport modes for MCP servers.
 
-**Stdio (local)** servers run as child processes on your machine. Krusty spawns the process, and communication happens over stdin/stdout using JSON-RPC. This is the most common setup -- you point Krusty at a command like `npx @modelcontextprotocol/server-filesystem` and it handles the rest. The working directory, arguments, and environment variables are all configurable per server.
+**Stdio (local)** servers run as child processes on your machine. Krusty spawns the process, and communication happens over stdin/stdout using newline-delimited JSON-RPC. This is the most common setup -- you point Krusty at a command like `npx @modelcontextprotocol/server-filesystem` and it handles the rest. The working directory, arguments, and environment variables are all configurable per server. Child processes start from a cleared environment: only host `PATH`/`HOME` plus values explicitly resolved from the server declaration are supplied, so package/project servers do not inherit ambient credentials. Each inbound JSON-RPC record is limited to 8 MiB; an invalid or oversized record closes the connection and terminates the server's process tree rather than allowing unbounded buffering or leaving descendants behind.
 
-**HTTP/SSE (remote)** servers run somewhere else -- a cloud service, a team server, a SaaS tool. Krusty connects via Streamable HTTP transport, with optional Bearer token authentication. Remote servers can also be passed through to the Anthropic API's MCP Connector feature, letting the API call the server directly rather than routing every call through Krusty.
+**Streamable HTTP (remote)** servers run somewhere else -- a cloud service, a
+team server, or a SaaS tool. Krusty requires HTTPS, with a narrow HTTP exception
+for loopback development endpoints, and supports optional Bearer or OAuth
+authentication. Krusty retains connector-ready remote descriptors for future
+provider integrations, but current MCP calls are routed through Krusty; no
+provider request path consumes those descriptors today.
 
-The HTTP transport is a custom `StreamableHttpClient` implementation handling POST/GET/DELETE operations, SSE event streams, session management, and content-type negotiation.
+The HTTP transport is a custom `StreamableHttpClient` implementation handling POST/GET/DELETE operations, SSE event streams, session management, and content-type negotiation. Redirects are disabled so credentials cannot be forwarded to a redirect target. Decompressed JSON responses and individual SSE events have hard byte limits and fail closed when exceeded.
 
 ### Configuration
 
-MCP servers are declared in a `.mcp.json` file at the project root. The format uses `mcpServers` as the top-level key, with each server defined by name:
+MCP configuration is layered. Package-provided fragments are defaults, `~/.krusty/mcp.json` overrides packages, and `<project>/.mcp.json` has the highest precedence. The format uses `mcpServers` as the top-level key, with each server defined by name:
 
 ```json
 {
@@ -30,40 +39,103 @@ MCP servers are declared in a `.mcp.json` file at the project root. The format u
     "filesystem": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
-      "env": {}
+      "env": {},
+      "cwd": "./tools",
+      "enabled": true,
+      "required": false,
+      "startupTimeoutMs": 15000,
+      "toolTimeoutMs": 60000,
+      "tools": {
+        "allow": ["read_*", "search"],
+        "deny": ["read_private"],
+        "approval": { "search": "allow", "read_*": "inherit" }
+      }
     },
     "remote-api": {
       "type": "url",
-      "url": "https://mcp.example.com/sse",
-      "authorization_token": "${MY_API_KEY}"
+      "url": "https://mcp.example.com/mcp",
+      "oauth": {
+        "scopes": ["repo:read", "repo:write"],
+        "clientName": "Krusty"
+      },
+      "headers": { "X-Client": "krusty" },
+      "envHeaders": { "X-Team-Key": "MY_TEAM_KEY" }
     }
   }
 }
 ```
 
-Local servers need a `command` and optional `args` and `env`. Remote servers need `type: "url"` and a `url`, with an optional `authorization_token`. Environment variables in the config support `${VAR}` expansion -- Krusty checks the process environment first, then falls back to its internal credential store at `~/.krusty/tokens/credentials.json`.
+Local servers need a `command` and accept optional `args`, `env`, and `cwd`.
+Remote servers need `type: "url"` and a `url`; they support static headers,
+environment-backed headers, interactive `oauth`, `bearerTokenEnvVar`, and the
+backward-compatible `authorization_token` field. Host-environment expansion,
+environment-backed headers, and credential-store fallback are available only
+for user-owned global declarations. Project and package references remain
+literal and cannot read host secrets. An explicit bearer token takes precedence
+over OAuth, which makes externally managed service tokens a deterministic
+override.
 
-Krusty does not start any MCP servers unless they are explicitly declared in the project's `.mcp.json`. This keeps local MCP subprocess execution opt-in and project-controlled.
+Remote OAuth follows MCP's OAuth 2.1 flow: Krusty discovers protected-resource and authorization-server metadata, uses S256 PKCE and one-time CSRF state, and dynamically registers a public client. Servers without dynamic registration can set `oauth.clientId`; servers implementing URL-based client metadata can set `oauth.clientMetadataUrl`. Explicit `oauth.scopes` are requested as written, while an empty list lets server metadata choose. Resource and redirect URLs require HTTPS, except for localhost/loopback HTTP callbacks during local development.
+
+Discovered authorization, registration, and token endpoints are independently validated with the same HTTPS/loopback rule before client registration, authorization URL generation, token exchange, or refresh. OAuth and MCP HTTP clients do not follow redirects.
+
+`enabled: false` keeps a server visible without connecting it. A failed
+`required: true` server makes startup/reload report an error. User-global stdio
+and remote servers auto-connect by default. Package and project declarations,
+including remote URLs, always require an explicit connect so installing a
+package or opening a repository cannot silently launch a process or make a
+network request; setting `autoConnect: true` in untrusted configuration cannot
+override this boundary.
+
+Authority is transport-specific. A package stdio declaration is connectable only when the exact installed plugin descriptor has a current `process` grant; a remote declaration requires its current `network` grant. A network-only grant never enables stdio. Project declarations receive no ambient authority and the explicit connect/OAuth action grants only the configured transport. Internal reconnects reuse an already recorded project decision but cannot create one.
+
+Tool rules use shell-style globs. Deny always wins; a non-empty allow list becomes an allowlist. Approval classifications are `inherit`, `prompt`, and `allow`. `prompt` blocks autonomous execution and requires a supervised, approved call. `allow` is metadata for the central policy layer and does not weaken Krusty's conservative treatment of unknown remote tools.
 
 ### Tool Registration
 
-When Krusty starts, the `McpManager` loads the configuration, connects to all declared servers in parallel, and queries each one for its available tools via `list_tools()`. Each MCP tool is then wrapped in an `McpTool` struct that implements Krusty's standard `Tool` trait, making it indistinguishable from built-in tools as far as the agent is concerned.
+When Krusty starts, the `McpManager` loads the configuration, connects all
+enabled auto-connect-eligible servers in parallel, and queries each connected
+server for its available tools via `list_tools()`. Each MCP tool is then wrapped
+in an `McpTool` struct that implements Krusty's standard `Tool` trait, making it
+indistinguishable from built-in tools as far as the agent is concerned.
 
 MCP tools are registered in the global `ToolRegistry` with a namespaced name: `mcp__{server}_{tool}`. So a tool called `search` on a server named `filesystem` becomes `mcp__filesystem_search`. The tool's JSON Schema is sanitized during registration to ensure it conforms to the strict schema requirements that AI providers expect -- adding missing `properties` and `additionalProperties` fields, filtering invalid `required` entries, and normalizing nested schemas.
 
-When the agent calls an MCP tool, the `McpTool` wrapper routes the call through the `McpManager` to the correct server, converts the result (which can be text, images, or embedded resources), and returns it as a standard `ToolResult`. If the session is running in sandboxed mode, a warning is logged because MCP tools execute on external servers and bypass Krusty's local sandbox restrictions.
+When the agent calls an MCP tool, the `McpTool` wrapper routes the call through the `McpManager` to the correct server and returns a structured `ToolResult`. Text, image, audio, embedded text/blob resources, resource links, annotations, result metadata, and `structuredContent` are preserved. If the session has a scoped local access root, the result warns that the remote server applies its own access policy.
 
 ### Lifecycle
 
-The `McpManager` holds connections to all servers behind `RwLock<HashMap<String, Arc<McpClient>>>`, supporting concurrent access from the agent loop. Each `McpClient` wraps an rmcp `RunningService` and maintains a tool cache. Liveness is checked by sending a lightweight `list_tools` probe -- if the connection has died, the status flips to `Error` and the UI reflects this.
+The `McpManager` holds connections behind concurrent locks, applies bounded startup/request timeouts, and serializes reconnects per server. Configuration reload/revocation takes an exclusive lifecycle guard while connection startup holds a shared guard, and a generation/config check occurs immediately before client insertion. A stale in-flight client therefore cannot become live after reload, disable, revoke, or uninstall. Streamable HTTP transparently reinitializes expired sessions. A failed read-only resource/prompt request reconnects and retries once. A failed tool call reconnects for future work but is never replayed automatically because its side effects may already have occurred.
 
-Servers can be connected and disconnected individually. The manager also exposes server information for the UI: name, transport type, connection status, tool count, and the full tool list with descriptions and schemas.
+Tool, resource, resource-template, and prompt discovery uses bounded pagination. Each catalog has hard item, page, cursor, and aggregate serialized-byte limits; repeated cursors and over-limit pages fail closed instead of growing memory indefinitely.
 
-Beyond tools, MCP servers can also expose resources (data the agent can read) and prompts (parameterized prompt templates). Krusty supports both through `list_resources`, `read_resource`, `list_prompts`, and `get_prompt` methods on the client.
+Servers can be connected and disconnected individually. Server instructions, implementation/capability metadata, configuration source, required/enabled state, tool schemas, annotations, and approval classification are exposed through the server API. `tools/list_changed` notifications invalidate the cache and the API refresh path re-synchronizes the AI tool registry.
+
+Beyond server-specific tools, the agent receives `mcp__list_tools` plus a conservative `mcp__call_tool` dispatcher, so a catalog change is usable before every UI has re-registered named wrappers. Read-only `mcp__list_resources`, `mcp__list_resource_templates`, `mcp__read_resource`, `mcp__list_prompts`, and `mcp__get_prompt` wrappers expose the rest of the protocol. Equivalent server endpoints expose tools, resources, resource templates, and prompts to web/mobile clients.
+
+Krusty supports both externally provisioned Bearer tokens and interactive OAuth without placing secrets in project config. OAuth credentials, refresh tokens, and dynamically registered client identity are serialized by rmcp inside Krusty's shared atomic owner-only credential store; status and server responses never contain token material. The live HTTP transport asks rmcp for a token on every request, so near-expiry access tokens are refreshed before use. Tokens are keyed by a SHA-256 fingerprint of the normalized MCP resource URL, preventing a same-named server from receiving credentials issued for a different audience.
+
+Web/mobile authorization uses the MCP management API:
+
+- `GET /api/mcp/:name/oauth/status` returns `disabled`, `authorization-required`, `pending`, or `authenticated` plus scopes, never secrets.
+- `POST /api/mcp/:name/oauth/start` with `{ "redirectUri": "..." }` returns the authorization URL and flow expiry.
+- `GET` or `POST /api/mcp/:name/oauth/callback` validates `code` and `state`, stores credentials, and connects the server.
+- `POST /api/mcp/:name/oauth/logout` atomically removes credentials and disconnects the server.
+
+MCP configuration and OAuth credentials belong to the process-wide local
+administrator. The MCP, plugin, extension, and skill management route groups
+reject tenant-scoped requests until Krusty has per-tenant manager instances;
+they never silently reuse a tenant identity against the shared credential
+store.
+
+Pending browser state expires after ten minutes and is intentionally process-local; durable tokens survive restarts, while an interrupted pre-token browser flow must be started again.
 
 ## Plugins
 
-Plugins are installable, signed packages that extend the TUI with dynamic capabilities. Where MCP extends the agent's tool access, plugins extend the user interface -- adding visual components, interactive modes, or integrations that the terminal client renders. Think gamepad input overlays, image rendering via the Kitty graphics protocol, or retro-style terminal effects.
+Plugins are installable bundles that can contribute TUI components, agent
+extensions, skills, MCP configuration, hooks, and assets. Standalone release
+artifacts are publisher-signed; npm and explicitly selected local packages have
+separate, visible unsigned trust levels.
 
 The plugin system lives in `crates/krusty-core/src/plugins/`.
 
@@ -78,16 +150,39 @@ name = "My Plugin"
 version = "1.2.0"
 publisher = "example-team"
 description = "Does something useful in the TUI"
-entry_component = "plugin.wasm"
+runtime = "js"
+entry_component = "plugin.js" # omit for bundle-only packages
+skills = ["skills/example/SKILL.md"]
+agent_extensions = ["extensions/example.ts"]
+mcp_servers = "mcp/servers.json"
+hooks = ["hooks/hooks.json"]
+assets = "assets"
 
-[release]
-url = "https://example.com/releases/my-plugin-1.2.0.wasm"
-sha256 = "abc123..."
-signature = "base64-encoded-ed25519-signature"
-signing_key_id = "publisher-key-2024"
+[requested_permissions]
+network = true
+process = true
+
 ```
 
-The manifest carries the entry component path (what to load), render capabilities (text or frame-based rendering), requested permissions (filesystem read/write, network, process spawning), and compatibility constraints (minimum/maximum Krusty versions). Permissions are declared upfront and enforced at runtime -- a plugin can't access the network unless it declared `network = true` in its manifest and the user granted that permission.
+All component paths are containment-checked inside an immutable installed
+snapshot. Host-mediated capabilities are declared upfront and enforced through
+durable, request-bound grants. Granting `process` to a native or JavaScript
+component authorizes trusted local code with the user's OS authority; the
+`fs_*` and `network` declarations are auditable host permissions, not a kernel
+sandbox around that code. Installable WASM TUI entries are currently managed
+descriptors and do not execute package code. Krusty's isolated
+Zed-compatible WASM editor/language host uses a separate ABI and is not a
+drop-in sandbox for package TUI or agent-extension code.
+Bundles can be distributed through npm, an explicitly selected local package,
+or a publisher-signed ZIP release. A signed single-component artifact declares
+its `entry_component`; a signed ZIP can declare any combination of the bundle
+resources above and may omit `entry_component`. Both use `[release]` metadata
+containing `url`, `sha256`, `signature`, `signing_key_id`, and the mandatory
+`signature_scheme = "manifest-envelope-v1"`; ZIP releases additionally set
+`artifact_kind = "zip-bundle"`. The artifact kind and every component path are
+inside the signature envelope. Legacy artifact-only signatures are never
+inferred: publishers must select the scheme and re-sign, while unknown schemes
+fail closed.
 
 ### Signature Verification
 
@@ -95,9 +190,21 @@ Plugin trust is enforced through ed25519 cryptographic signatures. Before a plug
 
 1. **Publisher allowlist.** The plugin's publisher must appear in the trust policy (`~/.krusty/plugins/trust/allowlist.toml`). If the publisher isn't trusted, installation is rejected with a message to add them first.
 
-2. **Artifact integrity.** The downloaded artifact's SHA-256 hash must match the manifest declaration, and the artifact's ed25519 signature must verify against a trusted public key registered in the trust policy. The signing key ID from the manifest is looked up in the policy's key map, and the signature is verified against the raw artifact bytes.
+2. **Artifact integrity and release-envelope binding.** The downloaded
+   artifact's SHA-256 hash must match the manifest declaration. Its Ed25519
+   signature covers a domain-separated canonical envelope containing the full
+   immutable manifest: identity, version, publisher, runtime, component paths,
+   requested permissions, compatibility bounds, release URL, artifact digest,
+   and signing-key ID. That key ID must also be explicitly bound to the declared
+   publisher.
 
-This chain of trust means you control exactly which publishers can ship plugins to your system, and every artifact is verified as both untampered (hash check) and authentically signed (signature check).
+This chain of trust means you control exactly which publishers can ship plugins
+to your system, and every signed single-component or ZIP artifact is verified at
+installation as both untampered (hash check) and authentically signed (signature check). The
+installed manifest and canonical source retain the inputs for later
+activation-time verification. Persisted `source_trust` is provenance, not proof
+that current on-disk bytes were rechecked, so it does not alone produce a
+`cryptographically_verified` API claim.
 
 ### Installation and Lifecycle
 
@@ -105,21 +212,46 @@ The `PluginManager` manages the full plugin lifecycle under `~/.krusty/plugins/`
 
 ```
 ~/.krusty/plugins/
-  installed/     # Plugin files, organized by id/version
+  installed/
+    .staging/     # Incomplete transactions; safe to reconcile
+    .managed/     # Immutable, manager-owned package snapshots
   active/        # Currently active plugin state
   state/         # Persistent plugin state
   index/         # Plugin source registries
-  trust/         # Publisher allowlists and signing keys
+  trust/         # Publisher keys, allowlists, and permission grants
   plugins.lock   # Lockfile pinning installed versions
 ```
 
-Installation starts from a manifest reference -- a URL, a local file path, or a `file://` URI. The manager fetches the manifest, validates it, checks the trust policy, downloads the artifact, verifies its integrity and signature, unpacks it into the install directory, and writes a lock entry. The lockfile tracks every installed plugin's ID, version, enabled status, and pin status.
+Installation stages and validates a complete snapshot before publishing it and
+atomically swapping the lockfile. Remote manifests, artifacts, and catalogs
+must use HTTPS. npm lifecycle and build scripts are blocked unless the user
+passes an explicit script-consent option. The lockfile records source, trust
+boundary, script consent, pinning, and the manager-owned root.
 
-Plugins can be enabled or disabled without uninstalling them. The lockfile records this state, and the TUI checks it when deciding what to load. Sources (registries where plugin manifests are published) are managed separately in `index/sources.toml`, allowing you to add third-party plugin repositories.
+Plugins can be enabled, disabled, pinned, unpinned, updated, reconciled, and
+uninstalled. Uninstall revokes permission grants before removing lock state and
+only recursively deletes a validated manager-owned root after its final
+reference is gone. Sources are managed separately in `index/sources.toml` and
+may be HTTPS URLs or explicit local paths.
 
 ### Render Capabilities
 
-Plugins declare whether they render as `text` (standard terminal output) or `frame` (full screen region, like a canvas). If no capability is declared, text is the default. This lets the TUI allocate the right kind of rendering surface for each plugin.
+Plugin manifests accept `text` and `frame` render-capability metadata, with
+`text` as the default. Current installable native-v1 and JavaScript hosts
+execute text rendering only; installable WASM and frame rendering are not wired
+to an executable package host yet.
+
+## Agent Extensions
+
+JavaScript and TypeScript agent extensions run in persistent Bun workers and
+can register tools, slash commands, canonical loop-event observers, persistent
+state, and bounded per-turn context. Project definitions are disabled until a
+user-owned project trust grant is recorded; repository settings can only narrow
+that grant. Trusted project definitions override global and package definitions,
+failed reloads keep the last-known-good worker, and before-tool argument rewrites
+are classified and displayed for approval before execution. See
+[Agent Extensions](agent-extensions.md) for the manifest, API, policy, and
+security boundary.
 
 ## Plans
 
@@ -218,26 +350,45 @@ tags:
 Always use `anyhow::Result` with `.context()` for functions that can fail...
 ```
 
-The frontmatter requires `name` and `description`. Names must be lowercase letters, numbers, and hyphens only. Version, author, and tags are optional. Everything after the closing `---` is the skill's content, which gets injected into the agent's context verbatim when the skill is activated.
+The frontmatter follows the [Agent Skills](https://agentskills.io) contract. `name` and `description` are required. Names are 1–64 lowercase ASCII characters with single hyphen separators, cannot start/end with a hyphen, and must exactly match the directory name. Descriptions are 1–1024 characters. Standard optional fields (`license`, `compatibility`, `metadata`, `allowed-tools`, and `disable-model-invocation`) are supported; Krusty's existing `version`, `author`, and `tags` catalog fields remain compatible. `allowed-tools` is advisory and never bypasses Krusty's runtime tool governance.
 
 Skills can include additional files beyond `SKILL.md`. The `load_skill_file` function lets you load any file within a skill's directory, with path traversal protection to prevent reading outside the skill boundary.
 
 ### Discovery and Loading
 
-The `SkillsManager` scans two directories:
+The `SkillsManager` scans compatible user roots (`~/.krusty/skills`, `~/.agents/skills`, `~/.pi/agent/skills`, `~/.claude/skills`, `~/.codex/skills`, and `~/.config/opencode/skills`) plus matching project roots (`.krusty`, `.agents`, `.pi`, `.claude`, `.codex`, and `.opencode`). Project discovery walks upward from the working directory through the git worktree boundary (or filesystem root outside a worktree). Pi roots additionally accept direct Markdown skills; package roots are scanned recursively. Package lifecycle code supplies its complete enabled snapshot through `set_package_roots`, so disable, update, and uninstall remove stale contributions immediately.
 
-1. **Global skills** at `~/.krusty/skills/` -- available in every session, every project.
-2. **Project skills** at `.krusty/skills/` relative to the working directory -- scoped to a specific project.
+Precedence is deterministic: nearest project definitions override farther project definitions, project overrides user roots, user roots override packages, and native Krusty roots win ties within the same scope. Every rejected definition, invalid policy, and shadowed duplicate appears in the diagnostics catalog instead of disappearing into debug logs.
 
-Project skills take precedence over global skills with the same name. If you have a global `rust-patterns` skill and a project-specific one, the project version wins. This lets teams ship project-specific skills in version control that override your personal defaults.
+The manager keeps an in-memory catalog but fingerprints definitions and policy files on normal reads. Edits, additions, removals, and policy changes are detected without requiring a restart; `refresh()` remains available as an explicit force-rescan.
 
-The manager uses lazy loading with an in-memory cache. Skills are loaded on first access and cached until explicitly refreshed. The `refresh()` method rescans both directories, and `reload_skill()` reloads a single skill after editing without clearing the full cache.
+Per-skill policy is stored in `.krusty/skills-policy.json`. The nearest project
+file wins field-by-field among project files, but project policy composes
+monotonically with the user policy: a repository may change `allow` to `ask` or
+`deny`, and may disable a skill, but it cannot re-enable or loosen a user-level
+restriction:
+
+```json
+{
+  "skills": {
+    "rust-patterns": { "enabled": true, "permission": "allow" },
+    "production-deploy": { "permission": "ask" }
+  }
+}
+```
+
+`allow` permits normal on-demand loading, `ask` permits model loading only in a supervised parent session (or direct user `/skill:name` invocation), and `deny` blocks loading. Disabled/denied skills remain visible in management UIs but are not advertised to the model. Loading a skill never changes the inherited permission mode for tools used afterward.
 
 ### Context Injection
 
-When skills are available, their metadata (name, description, tags) is included in the agent's system prompt on every turn, so the agent always knows what skills exist. The `/skills` browser in the TUI lets you browse available skills, see their descriptions, and activate them for the current session.
+When skills are available, bounded metadata (name, description, tags, origin, and policy) is included in the agent's system prompt. Full instructions remain deferred. The `/skills` TUI browser supports search, refresh, persistent enable/disable, policy cycling, and Enter-to-prepare an explicit `/skill:name` invocation. `/skill:name [request]` loads the selected instructions as an explicit user action, including user-only skills marked `disable-model-invocation`.
 
-When a skill is activated, `load_skill_content()` returns the SKILL.md body (with frontmatter stripped), and this content is injected into the agent's context. The agent then follows the skill's instructions as if they were part of its base system prompt. This is how you teach Krusty project-specific workflows, coding standards, deployment procedures, or domain knowledge without modifying any code.
+When a skill is model-activated, the governed skill tool returns the full
+SKILL.md instructions as tool output. An explicit `/skill:name` invocation
+embeds those instructions in the user's invocation. Only bounded skill metadata
+is advertised in the system prompt. This is how you teach Krusty
+project-specific workflows, coding standards, deployment procedures, or domain
+knowledge without loading every instruction body up front.
 
 ### Creating Skills
 
@@ -251,10 +402,11 @@ This scaffolds a new skill directory with a template `SKILL.md` containing the f
 
 ## How They Fit Together
 
-These four layers serve different audiences and different moments in a Krusty session:
+These five layers serve different audiences and different moments in a Krusty session:
 
 - **MCP** extends what tools the agent can call. It's about capability -- connecting to databases, APIs, file systems, or any service that speaks the MCP protocol.
-- **Plugins** extend what the TUI can render and interact with. They're about the user interface -- adding visual capabilities that the terminal client wouldn't have otherwise.
+- **Plugin packages** install, verify, update, permission, and remove complete bundles of capabilities.
+- **Agent extensions** add worker-hosted agent behavior: tools, commands, events, and bounded context.
 - **Plans** extend how work is organized. They're about structure -- breaking large tasks into trackable phases and tasks so nothing gets lost in a long session.
 - **Skills** extend what the agent knows. They're about knowledge -- injecting domain expertise, coding standards, and workflows so the agent works the way you want it to.
 

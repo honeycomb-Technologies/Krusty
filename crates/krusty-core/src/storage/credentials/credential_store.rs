@@ -16,7 +16,7 @@ pub struct CredentialStore {
 }
 
 impl CredentialStore {
-    fn path() -> PathBuf {
+    pub(crate) fn path() -> PathBuf {
         paths::config_dir().join("tokens").join("credentials.json")
     }
 
@@ -117,6 +117,34 @@ impl CredentialStore {
 
     pub fn remove(&mut self, provider: &ProviderId) {
         self.keys.remove(provider.storage_key());
+    }
+
+    /// Read a secret owned by another core subsystem from the shared
+    /// credential boundary. Callers must use a collision-resistant,
+    /// namespaced key and must never surface the value in diagnostics.
+    pub(crate) fn get_scoped_secret(&self, key: &str) -> Option<&String> {
+        self.keys.get(key)
+    }
+
+    /// Store a secret owned by another core subsystem in the same atomic,
+    /// owner-only credential file used for provider credentials.
+    pub(crate) fn set_scoped_secret(&mut self, key: String, value: String) {
+        self.keys.insert(key, value);
+    }
+
+    pub(crate) fn remove_scoped_secret(&mut self, key: &str) {
+        self.keys.remove(key);
+    }
+
+    /// Enumerate opaque subsystem-owned keys without exposing their values.
+    /// This lets a subsystem garbage-collect credentials for resources that
+    /// were removed from configuration while preserving other providers.
+    pub(crate) fn scoped_secret_keys_with_prefix(&self, prefix: &str) -> Vec<String> {
+        self.keys
+            .keys()
+            .filter(|key| key.starts_with(prefix))
+            .cloned()
+            .collect()
     }
 
     /// This checks API keys first, then falls back to OAuth tokens.

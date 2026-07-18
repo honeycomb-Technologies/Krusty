@@ -1,8 +1,8 @@
 //! MCP Manager - manages MCP server connections.
 //!
-//! Manages both local stdio servers and remote HTTP/SSE servers using
-//! the rmcp SDK. Remote servers can also be passed to the Anthropic
-//! API's MCP Connector.
+//! Manages both local stdio servers and remote HTTP/SSE servers using the rmcp
+//! SDK. Connector-shaped remote descriptors remain available to callers, but
+//! no provider request path consumes them today.
 
 mod runtime;
 mod types;

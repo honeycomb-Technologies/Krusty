@@ -159,10 +159,23 @@ Open an interactive terminal session with `/terminal` for direct shell access wi
 Use `/pinch` to compress long conversations into a new session with summarized context, preserving essential information while reducing token usage.
 
 ### Skills
-Modular instruction sets for domain-specific tasks. Add custom skills in `~/.krusty/skills/` or project `.krusty/skills/`. Browse with `/skills`.
+Agent Skills-compatible, progressively disclosed instruction sets. Krusty
+discovers native, Agent Skills, Pi, OpenCode, Claude, Codex, project, and plugin
+package roots with deterministic precedence and local allow/ask/deny policy.
+Browse and manage them with `/skills`.
 
 ### Plugins
-Extensible plugin system with install, enable/disable, and reload support. Manage with `/plugins`.
+Transactional plugin bundles can contribute TUI components, agent extensions,
+skills, MCP configuration, hooks, and assets. Installs distinguish signed,
+npm-unsigned, and local-unsigned trust; lifecycle scripts are off by default;
+permissions, pinning, updates, reconciliation, and uninstall are explicit.
+Manage them with `/plugins`.
+
+### Agent Extensions
+Trusted local JavaScript/TypeScript workers can register tools, slash commands,
+canonical lifecycle observers, persistent state, and bounded turn context.
+Global, project, and permissioned package roots hot-reload with last-known-good
+recovery.
 
 ### Hooks
 Pre and post-tool execution hooks for custom workflows. Configure with `/hooks`.
@@ -190,7 +203,8 @@ Data stored in `~/.krusty/`:
 ~/.krusty/
 ├── credentials.json  # API keys (encrypted)
 ├── preferences.json  # Settings (theme, model, recent models)
-├── extensions/       # Zed WASM LSP extensions
+├── extensions/       # Zed WASM plus executable agent extensions
+├── plugins/          # Immutable package snapshots, lockfile, trust, grants
 ├── bin/              # Auto-downloaded LSP binaries
 ├── skills/           # Custom global skills
 ├── plans/            # Markdown plan files
@@ -214,7 +228,7 @@ Detailed project documentation lives in [`docs/`](docs/README.md):
 - **[Storage](docs/storage/)** - SQLite persistence layer
 - **[Interfaces](docs/interfaces/)** - TUI, web server/API, ACP editor integration, Mako autonomous mode
 - **[Frontends](docs/frontends/)** - Mobile app (Expo), desktop app (Tauri), shared packages
-- **[Extensions](docs/extensions/)** - WASM extension system, MCP, plugins, plans, skills
+- **[Extensions](docs/extensions/)** - Plugin packages, agent extensions, WASM, MCP, plans, and skills
 - **[Operations](docs/operations/)** - Build, CI/CD, packaging, and deployment
 
 ## Tech Stack
@@ -228,7 +242,7 @@ Detailed project documentation lives in [`docs/`](docs/README.md):
 | **Shared Frontend** | TypeScript, React 19, Zustand |
 | **Package Manager** | Cargo (Rust), Bun (TypeScript) |
 | **Database** | SQLite (embedded, local-first) |
-| **Extensions** | WebAssembly (Wasmtime, Zed-compatible WIT) |
+| **Extensions** | Signed/npm/local bundles; Bun agent workers; WebAssembly (Wasmtime, Zed-compatible WIT) |
 | **Protocols** | ACP (editor integration), MCP (tool discovery) |
 
 ## Development

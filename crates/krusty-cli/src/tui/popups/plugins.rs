@@ -12,7 +12,7 @@ use super::common::{
     center_content, center_rect, popup_block, popup_title, render_popup_background,
     scroll_indicator, PopupSize,
 };
-use crate::plugins::{InstalledPlugin, PluginCatalogEntry, PluginRuntime};
+use crate::plugins::{InstalledPlugin, PluginCatalogEntry, PluginRuntime, PluginSourceTrust};
 use crate::tui::themes::Theme;
 use crate::tui::utils::truncate_ellipsis;
 
@@ -380,7 +380,9 @@ impl PluginsBrowserPopup {
                 } else {
                     ("installed/disabled", theme.warning_color)
                 };
-                let mode = if plugin
+                let mode = if plugin.entry_component_path.is_none() {
+                    "bundle"
+                } else if plugin
                     .render_capabilities
                     .iter()
                     .any(|cap| matches!(cap, crate::plugins::PluginRenderCapability::Frame))
@@ -388,6 +390,12 @@ impl PluginsBrowserPopup {
                     "frame"
                 } else {
                     "text"
+                };
+                let trust = match plugin.source_trust {
+                    PluginSourceTrust::SignedPublisher => "signed",
+                    PluginSourceTrust::NpmUnsigned => "npm/unsigned",
+                    PluginSourceTrust::LocalUnsigned => "local/unsigned",
+                    PluginSourceTrust::LegacyUnknown => "unverified",
                 };
                 lines.push(Line::from(vec![
                     Span::styled(prefix.to_string(), name_style),
@@ -400,16 +408,54 @@ impl PluginsBrowserPopup {
                         format!(" [{}]", mode),
                         Style::default().fg(theme.mode_view_color),
                     ),
-                    Span::styled(format!(" ({})", status.0), Style::default().fg(status.1)),
+                    Span::styled(
+                        format!(
+                            " ({}, {}, {})",
+                            status.0,
+                            if plugin.pinned { "pinned" } else { "updatable" },
+                            trust
+                        ),
+                        Style::default().fg(status.1),
+                    ),
                 ]));
                 let desc = plugin
                     .description
                     .as_ref()
                     .map(|text| truncate_ellipsis(text, 56).into_owned())
                     .unwrap_or_else(|| "No description".to_string());
+                let permission_count = [
+                    plugin.requested_permissions.fs_read,
+                    plugin.requested_permissions.fs_write,
+                    plugin.requested_permissions.network,
+                    plugin.requested_permissions.process,
+                ]
+                .into_iter()
+                .filter(|requested| *requested)
+                .count();
+                let bundle_count = plugin.skill_paths.len()
+                    + plugin.agent_extension_paths.len()
+                    + plugin.hook_paths.len()
+                    + usize::from(plugin.mcp_servers_path.is_some())
+                    + usize::from(plugin.assets_path.is_some());
                 lines.push(Line::from(vec![
                     Span::raw("      "),
-                    Span::styled(desc, Style::default().fg(theme.dim_color)),
+                    Span::styled(
+                        format!(
+                            "{}{}{}",
+                            desc,
+                            if bundle_count > 0 {
+                                format!(" · {} bundle component(s)", bundle_count)
+                            } else {
+                                String::new()
+                            },
+                            if permission_count > 0 {
+                                format!(" · {} permission request(s)", permission_count)
+                            } else {
+                                String::new()
+                            }
+                        ),
+                        Style::default().fg(theme.dim_color),
+                    ),
                 ]));
             }
             PluginBrowserItem::Catalog(index) => {

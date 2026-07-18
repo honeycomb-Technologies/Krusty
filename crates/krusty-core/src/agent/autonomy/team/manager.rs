@@ -11,6 +11,7 @@ use tracing::info;
 
 use crate::agent::subagent::AgentProgress;
 use crate::ai::client::AiClient;
+use crate::process::ProcessRegistry;
 use crate::tools::registry::ToolRegistry;
 
 use super::teammate::{Teammate, TeammateConfig, TeammateStatus};
@@ -25,6 +26,8 @@ pub struct TeamManager {
     project_dir: Option<PathBuf>,
     session_id: String,
     db_path: PathBuf,
+    process_registry: Option<Arc<ProcessRegistry>>,
+    process_owner_id: Option<String>,
 }
 
 impl TeamManager {
@@ -44,7 +47,22 @@ impl TeamManager {
             project_dir,
             session_id,
             db_path,
+            process_registry: None,
+            process_owner_id: None,
         }
+    }
+
+    /// Attach the originating runtime's process registry and optional owner.
+    /// Teammates otherwise keep process context absent rather than creating a
+    /// detached or process-local registry that the parent cannot control.
+    pub fn with_process_context(
+        mut self,
+        process_registry: Arc<ProcessRegistry>,
+        process_owner_id: Option<String>,
+    ) -> Self {
+        self.process_registry = Some(process_registry);
+        self.process_owner_id = process_owner_id.filter(|owner| !owner.trim().is_empty());
+        self
     }
 
     pub async fn spawn_teammate(&self, config: TeammateConfig) -> Result<String> {
@@ -66,6 +84,8 @@ impl TeamManager {
         let _project_dir = self.project_dir.clone();
         let session_id = self.session_id.clone();
         let db_path = self.db_path.clone();
+        let process_registry = self.process_registry.clone();
+        let process_owner_id = self.process_owner_id.clone();
 
         let handle = tokio::spawn(async move {
             run_teammate_loop(
@@ -78,6 +98,8 @@ impl TeamManager {
                 working_dir,
                 session_id,
                 db_path,
+                process_registry,
+                process_owner_id,
             )
             .await;
         });

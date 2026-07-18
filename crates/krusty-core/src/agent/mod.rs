@@ -89,8 +89,8 @@ pub use subagent::build_context;
 pub use subagent::build_context::SharedBuildContext;
 pub use summarizer::{generate_summary, SummarizationResult};
 pub use user_hooks::{
-    UserHook, UserHookExecutor, UserHookManager, UserHookResult, UserHookType, UserPostToolHook,
-    UserPreToolHook,
+    PackageHookConfig, PackageHookLoadReport, UserHook, UserHookExecutor, UserHookManager,
+    UserHookResult, UserHookSource, UserHookType, UserPostToolHook, UserPreToolHook,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

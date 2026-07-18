@@ -26,23 +26,21 @@ pub fn build_skills_context(
         }
     };
 
-    let skills = if include_project_skills {
-        guard.list_skills()
-    } else {
-        guard.list_global_skills()
-    };
+    let skills = guard.list_model_skills(include_project_skills);
     if skills.is_empty() {
         return String::new();
     }
 
     let total_skills = skills.len();
     let mut context = String::from(
-        "[AVAILABLE SKILLS]\n\nInvoke a skill through `tool_search` with action=execute, tool=skill, and arguments={\"skill\":\"name\"}.\n\n",
+        "[AVAILABLE SKILLS]\n\nSkills follow the Agent Skills standard and are loaded on demand. Invoke one through `tool_search` with action=execute, tool=skill, and arguments={\"skill\":\"name\"}. Loading instructions never relaxes the parent tool permission policy.\n\n",
     );
     for info in skills.into_iter().take(MAX_SKILL_ITEMS) {
         context.push_str(&format!(
-            "- **{}**: {}\n",
+            "- **{}** ({}; {}): {}\n",
             info.name,
+            info.origin,
+            info.permission,
             truncate_utf8(&info.description, MAX_SKILL_DESCRIPTION_CHARS)
         ));
         if !info.tags.is_empty() {
@@ -64,7 +62,7 @@ pub fn build_skills_context(
         ));
     }
     context.push_str(
-        "\nTo use: `tool_search(action: \"execute\", tool: \"skill\", arguments: {\"skill\": \"name\"})`\n",
+        "\nPolicies: allow loads normally; ask is available only in a supervised parent session. Denied, disabled, and user-only skills are not advertised.\nTo use: `tool_search(action: \"execute\", tool: \"skill\", arguments: {\"skill\": \"name\"})`\n",
     );
 
     if context.len() <= MAX_SKILLS_CONTEXT_BYTES {
@@ -85,7 +83,7 @@ mod tests {
     use tokio::sync::RwLock;
 
     use super::{build_skills_context, MAX_SKILLS_CONTEXT_BYTES};
-    use crate::skills::SkillsManager;
+    use crate::skills::{SkillPermission, SkillsManager};
 
     #[test]
     fn skills_context_is_bounded_and_limits_catalog_entries() {
@@ -111,5 +109,36 @@ mod tests {
         assert!(context.len() <= MAX_SKILLS_CONTEXT_BYTES);
         assert!(context.contains("more skills omitted"));
         assert!(!context.contains("skill-39"));
+    }
+
+    #[test]
+    fn skills_context_excludes_disabled_denied_and_user_only_skills() {
+        let temp = TempDir::new().expect("temp dir");
+        let global = temp.path().join("skills");
+        for (name, extra) in [
+            ("visible-skill", ""),
+            ("disabled-skill", ""),
+            ("denied-skill", ""),
+            ("user-only-skill", "disable-model-invocation: true\n"),
+        ] {
+            let dir = global.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {name} description\n{extra}---\nbody"),
+            )
+            .unwrap();
+        }
+        let mut manager = SkillsManager::new(global, None);
+        manager.set_skill_enabled("disabled-skill", false).unwrap();
+        manager
+            .set_skill_permission("denied-skill", SkillPermission::Deny)
+            .unwrap();
+        let context = build_skills_context(&RwLock::new(manager), true);
+
+        assert!(context.contains("visible-skill"));
+        assert!(!context.contains("disabled-skill"));
+        assert!(!context.contains("denied-skill"));
+        assert!(!context.contains("user-only-skill"));
     }
 }

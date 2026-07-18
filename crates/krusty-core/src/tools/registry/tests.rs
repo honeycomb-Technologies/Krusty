@@ -699,3 +699,21 @@ fn bash_timeout_resolution_clamps_provider_float_and_preserves_explicit_longer_g
 
     assert_eq!(timeout, std::time::Duration::from_secs(700));
 }
+
+#[test]
+fn mcp_capability_discovery_tools_are_read_only_but_dynamic_tools_remain_conservative() {
+    for name in [
+        "mcp__list_resources",
+        "mcp__list_resource_templates",
+        "mcp__read_resource",
+        "mcp__list_prompts",
+        "mcp__get_prompt",
+        "mcp__list_tools",
+    ] {
+        assert_eq!(tool_category(name), ToolCategory::ReadOnly, "{name}");
+    }
+    assert_eq!(
+        tool_category("mcp__github__create_issue"),
+        ToolCategory::Write
+    );
+}

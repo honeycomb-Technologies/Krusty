@@ -53,12 +53,7 @@ pub(super) async fn exchange_code(
             AppError::Internal(error.to_string())
         })?;
 
-    let mut store = OAuthTokenStore::load().map_err(|error| {
-        tracing::error!("Failed to load OAuth token store: {}", error);
-        AppError::Internal(error.to_string())
-    })?;
-    store.set(provider_id, token_data);
-    store.save().map_err(|error| {
+    OAuthTokenStore::set_persisted(provider_id, token_data).map_err(|error| {
         tracing::error!("Failed to save OAuth token: {}", error);
         AppError::Internal(error.to_string())
     })?;

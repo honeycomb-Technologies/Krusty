@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use http::{HeaderName, HeaderValue};
@@ -16,6 +17,9 @@ use rmcp::transport::streamable_http_client::{
     StreamableHttpClient, StreamableHttpError, StreamableHttpPostResponse,
 };
 use sse_stream::{Error as SseError, Sse, SseStream};
+
+const MAX_MCP_HTTP_JSON_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_MCP_SSE_EVENT_BYTES: usize = 1024 * 1024;
 
 /// A reqwest 0.12 based implementation of rmcp's `StreamableHttpClient` trait.
 #[derive(Debug, Clone)]
@@ -32,7 +36,10 @@ impl Default for ReqwestStreamableHttpClient {
 impl ReqwestStreamableHttpClient {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("static MCP HTTP client configuration must be valid"),
         }
     }
 
@@ -64,6 +71,14 @@ impl ReqwestStreamableHttpClient {
 #[derive(Debug, thiserror::Error)]
 #[error("reqwest error: {0}")]
 pub struct ReqwestError(#[from] reqwest::Error);
+
+#[derive(Debug, thiserror::Error)]
+enum BoundedSseBodyError {
+    #[error("reqwest error: {0}")]
+    Reqwest(#[from] reqwest::Error),
+    #[error("MCP SSE event exceeds the {limit} byte decompressed limit")]
+    EventTooLarge { limit: usize },
+}
 
 impl StreamableHttpClient for ReqwestStreamableHttpClient {
     type Error = ReqwestError;
@@ -123,18 +138,15 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
 
         match content_type.as_deref() {
             Some(ct) if ct.contains("text/event-stream") => {
-                let byte_stream = response.bytes_stream();
+                let byte_stream = bounded_sse_byte_stream(response);
                 let sse_stream = SseStream::from_byte_stream(byte_stream);
                 let boxed: BoxStream<'static, Result<Sse, SseError>> = sse_stream.boxed();
                 Ok(StreamableHttpPostResponse::Sse(boxed, session_id))
             }
             Some(ct) if ct.contains("application/json") => {
-                let text = response
-                    .text()
-                    .await
-                    .map_err(|e| StreamableHttpError::Client(ReqwestError(e)))?;
+                let body = read_bounded_json_body(response).await?;
                 let message: ServerJsonRpcMessage =
-                    serde_json::from_str(&text).map_err(StreamableHttpError::Deserialize)?;
+                    serde_json::from_slice(&body).map_err(StreamableHttpError::Deserialize)?;
                 Ok(StreamableHttpPostResponse::Json(message, session_id))
             }
             other => Err(StreamableHttpError::UnexpectedContentType(
@@ -211,8 +223,191 @@ impl StreamableHttpClient for ReqwestStreamableHttpClient {
             ));
         }
 
-        let byte_stream = response.bytes_stream();
+        let byte_stream = bounded_sse_byte_stream(response);
         let sse_stream = SseStream::from_byte_stream(byte_stream);
         Ok(sse_stream.boxed())
+    }
+}
+
+async fn read_bounded_json_body(
+    response: reqwest::Response,
+) -> Result<Bytes, StreamableHttpError<ReqwestError>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_MCP_HTTP_JSON_RESPONSE_BYTES as u64)
+    {
+        return Err(response_limit_error(
+            "JSON response",
+            MAX_MCP_HTTP_JSON_RESPONSE_BYTES,
+        ));
+    }
+
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| StreamableHttpError::Client(ReqwestError(error)))?;
+        if !extend_bounded(&mut bytes, &chunk, MAX_MCP_HTTP_JSON_RESPONSE_BYTES) {
+            return Err(response_limit_error(
+                "JSON response",
+                MAX_MCP_HTTP_JSON_RESPONSE_BYTES,
+            ));
+        }
+    }
+    Ok(Bytes::from(bytes))
+}
+
+fn extend_bounded(buffer: &mut Vec<u8>, chunk: &[u8], limit: usize) -> bool {
+    if chunk.len() > limit.saturating_sub(buffer.len()) {
+        return false;
+    }
+    buffer.extend_from_slice(chunk);
+    true
+}
+
+fn response_limit_error(
+    response_kind: &'static str,
+    limit: usize,
+) -> StreamableHttpError<ReqwestError> {
+    StreamableHttpError::UnexpectedServerResponse(
+        format!("MCP {response_kind} exceeds the {limit} byte decompressed limit").into(),
+    )
+}
+
+fn bounded_sse_byte_stream(
+    response: reqwest::Response,
+) -> BoxStream<'static, Result<Bytes, BoundedSseBodyError>> {
+    response
+        .bytes_stream()
+        .scan(SseEventLimit::default(), |state, chunk| {
+            let next = if state.failed {
+                None
+            } else {
+                Some(match chunk {
+                    Ok(bytes) => match state.observe(&bytes) {
+                        Ok(()) => Ok(bytes),
+                        Err(error) => {
+                            state.failed = true;
+                            Err(error)
+                        }
+                    },
+                    Err(error) => {
+                        state.failed = true;
+                        Err(BoundedSseBodyError::Reqwest(error))
+                    }
+                })
+            };
+            futures::future::ready(next)
+        })
+        .boxed()
+}
+
+#[derive(Debug, Default)]
+struct SseEventLimit {
+    event_bytes: usize,
+    line_has_content: bool,
+    previous_was_cr: bool,
+    failed: bool,
+}
+
+impl SseEventLimit {
+    fn observe(&mut self, bytes: &[u8]) -> Result<(), BoundedSseBodyError> {
+        self.observe_with_limit(bytes, MAX_MCP_SSE_EVENT_BYTES)
+    }
+
+    fn observe_with_limit(
+        &mut self,
+        bytes: &[u8],
+        limit: usize,
+    ) -> Result<(), BoundedSseBodyError> {
+        for byte in bytes {
+            // CRLF is one line ending. The CR was already accounted for and
+            // finalized the line, so the following LF is not a blank line.
+            if self.previous_was_cr && *byte == b'\n' {
+                self.previous_was_cr = false;
+                continue;
+            }
+            self.previous_was_cr = false;
+            self.event_bytes = self
+                .event_bytes
+                .checked_add(1)
+                .ok_or(BoundedSseBodyError::EventTooLarge { limit })?;
+
+            match byte {
+                b'\r' => {
+                    self.finish_line();
+                    self.previous_was_cr = true;
+                }
+                b'\n' => self.finish_line(),
+                _ => self.line_has_content = true,
+            }
+            if self.event_bytes > limit {
+                return Err(BoundedSseBodyError::EventTooLarge { limit });
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_line(&mut self) {
+        if !self.line_has_content {
+            self.event_bytes = 0;
+        }
+        self.line_has_content = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sse_limit_is_per_event_and_handles_split_crlf() {
+        let mut limit = SseEventLimit::default();
+        limit.observe_with_limit(b"data: 1\r", 16).unwrap();
+        limit.observe_with_limit(b"\n\r", 16).unwrap();
+        limit.observe_with_limit(b"\ndata: 2\n\n", 16).unwrap();
+        assert!(limit
+            .observe_with_limit(b"data: this event is too large", 8)
+            .is_err());
+    }
+
+    #[test]
+    fn json_body_limit_is_aggregate_and_does_not_append_overflow_chunk() {
+        let mut body = Vec::new();
+        assert!(extend_bounded(&mut body, b"1234", 6));
+        assert!(!extend_bounded(&mut body, b"789", 6));
+        assert_eq!(body, b"1234");
+        assert!(extend_bounded(&mut body, b"56", 6));
+        assert_eq!(body, b"123456");
+    }
+
+    #[tokio::test]
+    async fn mcp_http_client_does_not_follow_redirects() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let address = server.server_addr().to_ip().unwrap();
+        let server_thread = std::thread::spawn(move || {
+            let request = server
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+                .expect("redirect test request");
+            let location = tiny_http::Header::from_bytes("Location", "/redirected").unwrap();
+            request
+                .respond(tiny_http::Response::empty(302).with_header(location))
+                .unwrap();
+        });
+
+        let client = ReqwestStreamableHttpClient::new();
+        let response = client
+            .build_request(
+                reqwest::Method::GET,
+                &format!("http://{address}/origin"),
+                None,
+                None,
+                &HashMap::new(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        server_thread.join().unwrap();
     }
 }

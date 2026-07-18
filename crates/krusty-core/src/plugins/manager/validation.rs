@@ -34,20 +34,24 @@ pub(super) fn parse_toml_or_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T>
 }
 
 pub(super) fn validate_relative_path(path: &str) -> Result<PathBuf> {
+    validate_relative_path_for(path, "entry_component")
+}
+
+pub(super) fn validate_relative_path_for(path: &str, label: &str) -> Result<PathBuf> {
     let candidate = PathBuf::from(path);
 
     if candidate.as_os_str().is_empty() {
-        bail!("entry_component cannot be empty");
+        bail!("{} cannot be empty", label);
     }
 
     if candidate.is_absolute() {
-        bail!("entry_component must be a relative path");
+        bail!("{} must be a relative path", label);
     }
 
     for component in candidate.components() {
         match component {
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                bail!("entry_component cannot contain path traversal")
+                bail!("{} cannot contain path traversal", label)
             }
             _ => {}
         }

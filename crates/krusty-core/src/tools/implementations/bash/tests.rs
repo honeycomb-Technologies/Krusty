@@ -4,7 +4,7 @@ use super::execution::{join_reader_with_timeout, BoundedOutputBuffer};
 use super::shell::strip_shell_background_suffix;
 #[cfg(unix)]
 use super::shell::{build_shell_command, configure_foreground_process_group};
-use super::{output_spool_path, BashTool};
+use super::{background_endpoint_hints, output_spool_path, BashTool};
 use crate::process::ProcessRegistry;
 use crate::tools::registry::Tool;
 use crate::tools::ToolContext;
@@ -138,6 +138,22 @@ fn strip_shell_background_suffix_rejects_escaped_ampersand() {
 fn strip_shell_background_suffix_rejects_double_ampersand() {
     let parsed = strip_shell_background_suffix("echo hi &&");
     assert!(parsed.is_none());
+}
+
+#[test]
+fn background_endpoint_hints_extract_common_loopback_forms() {
+    assert_eq!(
+        background_endpoint_hints("python3 server.py --host 127.0.0.1 --port 5940"),
+        vec!["127.0.0.1:5940"]
+    );
+    assert_eq!(
+        background_endpoint_hints("python3 -m http.server 5180 --bind localhost"),
+        vec!["localhost:5180"]
+    );
+    assert_eq!(
+        background_endpoint_hints("vite --host=127.0.0.1 --port=5173"),
+        vec!["127.0.0.1:5173"]
+    );
 }
 
 #[test]
@@ -284,6 +300,195 @@ async fn background_start_returns_trackable_running_process() {
         .is_some_and(|guidance| guidance.contains("processes")));
 
     registry.kill(process_id).await.expect("kill test process");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn background_start_without_registry_refuses_untracked_process() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let ctx = ToolContext {
+        working_dir: temp.path().canonicalize().expect("canonical tempdir"),
+        ..Default::default()
+    };
+
+    let result = BashTool
+        .execute(
+            json!({
+                "command": "sleep 30 # --host 127.0.0.1 --port 45941",
+                "run_in_background": true
+            }),
+            &ctx,
+        )
+        .await;
+
+    assert!(result.is_error, "{}", result.output);
+    let envelope: serde_json::Value = serde_json::from_str(&result.output).expect("tool JSON");
+    assert_eq!(
+        envelope["error"]["code"].as_str(),
+        Some("background_registry_unavailable")
+    );
+    assert_eq!(envelope["data"]["status"].as_str(), Some("not_started"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn equivalent_background_launch_reuses_owner_scoped_process() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let working_dir = temp.path().canonicalize().expect("canonical tempdir");
+    let registry = Arc::new(ProcessRegistry::new());
+    let owner_a = ToolContext::with_process_registry(working_dir.clone(), Arc::clone(&registry))
+        .with_user_id("owner-a".to_string());
+    let command = "sleep 30 # --host 127.0.0.1 --port 45940";
+
+    let first = BashTool
+        .execute(
+            json!({"command": command, "run_in_background": true}),
+            &owner_a,
+        )
+        .await;
+    assert!(!first.is_error, "{}", first.output);
+    let first_envelope: serde_json::Value =
+        serde_json::from_str(&first.output).expect("first tool JSON");
+    let process_id = first_envelope["data"]["process_id"]
+        .as_str()
+        .expect("first process id")
+        .to_string();
+    assert_eq!(
+        first_envelope["data"]["endpoint_hints"],
+        json!(["127.0.0.1:45940"])
+    );
+
+    let repeated_command = format!("cd {} && {command}", working_dir.display());
+    let repeated = BashTool
+        .execute(
+            json!({"command": repeated_command, "run_in_background": true}),
+            &owner_a,
+        )
+        .await;
+    assert!(!repeated.is_error, "{}", repeated.output);
+    let repeated_envelope: serde_json::Value =
+        serde_json::from_str(&repeated.output).expect("repeated tool JSON");
+    assert_eq!(
+        repeated_envelope["data"]["process_id"].as_str(),
+        Some(process_id.as_str())
+    );
+    assert_eq!(
+        repeated_envelope["data"]["reused_existing"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(registry.list_for_user("owner-a").await.len(), 1);
+
+    let owner_b = ToolContext::with_process_registry(working_dir.clone(), Arc::clone(&registry))
+        .with_user_id("owner-b".to_string());
+    let other_owner = BashTool
+        .execute(
+            json!({"command": command, "run_in_background": true}),
+            &owner_b,
+        )
+        .await;
+    assert!(!other_owner.is_error, "{}", other_owner.output);
+    let other_envelope: serde_json::Value =
+        serde_json::from_str(&other_owner.output).expect("other-owner tool JSON");
+    let other_process_id = other_envelope["data"]["process_id"]
+        .as_str()
+        .expect("other-owner process id")
+        .to_string();
+    assert_ne!(other_process_id, process_id);
+    assert_eq!(registry.list_for_user("owner-b").await.len(), 1);
+
+    let default_owner = ToolContext::with_process_registry(working_dir, Arc::clone(&registry));
+    let unscoped = BashTool
+        .execute(
+            json!({"command": command, "run_in_background": true}),
+            &default_owner,
+        )
+        .await;
+    assert!(!unscoped.is_error, "{}", unscoped.output);
+    let unscoped_envelope: serde_json::Value =
+        serde_json::from_str(&unscoped.output).expect("default-owner tool JSON");
+    let unscoped_process_id = unscoped_envelope["data"]["process_id"]
+        .as_str()
+        .expect("default-owner process id")
+        .to_string();
+    assert_ne!(unscoped_process_id, process_id);
+    assert_ne!(unscoped_process_id, other_process_id);
+    assert_eq!(registry.list().await.len(), 1);
+
+    registry
+        .kill_for_user("owner-a", &process_id)
+        .await
+        .expect("kill owner-a process");
+    registry
+        .kill_for_user("owner-b", &other_process_id)
+        .await
+        .expect("kill owner-b process");
+    registry
+        .kill(&unscoped_process_id)
+        .await
+        .expect("kill default-owner process");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_equivalent_background_launches_spawn_exactly_once() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let working_dir = temp.path().canonicalize().expect("canonical tempdir");
+    let registry = Arc::new(ProcessRegistry::new());
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let command =
+        "printf 'started\\n' >> concurrent-launches.txt; sleep 30 # --host 127.0.0.1 --port 45942";
+
+    let launch = |barrier: Arc<tokio::sync::Barrier>, registry: Arc<ProcessRegistry>| {
+        let working_dir = working_dir.clone();
+        async move {
+            let ctx = ToolContext::with_process_registry(working_dir, registry)
+                .with_user_id("concurrent-owner".to_string());
+            barrier.wait().await;
+            BashTool
+                .execute(json!({"command": command, "run_in_background": true}), &ctx)
+                .await
+        }
+    };
+
+    let first = tokio::spawn(launch(Arc::clone(&barrier), Arc::clone(&registry)));
+    let second = tokio::spawn(launch(barrier, Arc::clone(&registry)));
+    let (first, second) = tokio::join!(first, second);
+    let results = [
+        first.expect("first concurrent launch task"),
+        second.expect("second concurrent launch task"),
+    ];
+    assert!(results.iter().all(|result| !result.is_error));
+
+    let envelopes = results
+        .iter()
+        .map(|result| serde_json::from_str::<serde_json::Value>(&result.output).expect("tool JSON"))
+        .collect::<Vec<_>>();
+    let process_ids = envelopes
+        .iter()
+        .map(|envelope| envelope["data"]["process_id"].as_str().expect("process id"))
+        .collect::<Vec<_>>();
+    assert_eq!(process_ids[0], process_ids[1]);
+    assert_eq!(
+        envelopes
+            .iter()
+            .filter(|envelope| envelope["data"]["reused_existing"] == json!(true))
+            .count(),
+        1
+    );
+    assert_eq!(registry.list_for_user("concurrent-owner").await.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(working_dir.join("concurrent-launches.txt"))
+            .expect("launch marker")
+            .lines()
+            .count(),
+        1,
+        "only one OS process should have crossed the atomic launch boundary"
+    );
+
+    registry
+        .kill_for_user("concurrent-owner", process_ids[0])
+        .await
+        .expect("kill concurrent test process");
 }
 
 #[cfg(unix)]

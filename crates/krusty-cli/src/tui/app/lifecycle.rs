@@ -173,6 +173,7 @@ impl App {
             self.poll_dynamic_model_fetch();
             self.poll_title_generation();
             self.poll_compaction();
+            self.poll_agent_extension_commands();
 
             // Update menu animations (only when on start menu for efficiency)
             if self.ui.view == View::StartMenu {

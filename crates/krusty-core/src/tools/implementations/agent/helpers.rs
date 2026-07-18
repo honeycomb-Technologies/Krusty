@@ -22,15 +22,14 @@ pub(super) fn background_started_result(
         "delegated_run_id": delegated_run_id,
         "agent_type": agent_type,
         "message": format!(
-            "{} agent started in background. You will see the result in your delegated context on the next turn. \
-             Use delegated_run_id '{}' to track status.",
+            "{} agent started in background. Continue other work; after it completes, its result will appear in delegated context on a later turn. delegated_run_id: '{}'.",
             agent_type, delegated_run_id
         ),
     });
     if let Some(name) = name {
         result["name"] = json!(name);
         result["message"] = json!(format!(
-            "Named agent '{}' ({}) started in background. Track it via delegated progress and delegated_run_id '{}'.",
+            "Named agent '{}' ({}) started in background. Continue other work; after it completes, its result will appear in delegated context on a later turn. delegated_run_id: '{}'.",
             name, agent_type, delegated_run_id
         ));
     }
@@ -71,6 +70,7 @@ pub(super) fn build_single_agent_artifact(
         "degraded_agents": 0,
         "failed_agents": if result.success { 0 } else { 1 },
         "agents": [agent],
+        "background_processes": result.background_processes,
         "delegation_policy": delegation_policy.audit_json(),
     });
 

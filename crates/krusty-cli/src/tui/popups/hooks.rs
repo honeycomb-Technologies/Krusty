@@ -406,7 +406,7 @@ impl HooksPopup {
                     Style::default().fg(theme.text_color)
                 };
 
-                lines.push(Line::from(vec![
+                let mut hook_line = vec![
                     Span::styled(prefix, style),
                     Span::styled(format!("{} ", status), Style::default().fg(status_color)),
                     Span::styled(format!("{} ", hook.hook_type), style),
@@ -414,7 +414,14 @@ impl HooksPopup {
                         format!("[{}]", hook.tool_pattern),
                         Style::default().fg(theme.dim_color),
                     ),
-                ]));
+                ];
+                if let Some(plugin_id) = hook.source.plugin_id() {
+                    hook_line.push(Span::styled(
+                        format!("  package:{plugin_id}"),
+                        Style::default().fg(theme.warning_color),
+                    ));
+                }
+                lines.push(Line::from(hook_line));
 
                 // Show command on second line (truncated)
                 lines.push(Line::from(vec![

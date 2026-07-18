@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use crate::process::ProcessRegistry;
 use crate::tools::registry::DelegationPolicy;
 
 /// Real-time progress update from a sub-agent.
@@ -66,6 +68,14 @@ pub struct SubAgentTask {
     pub delegation_policy: Option<DelegationPolicy>,
     /// Optional per-task turn budget inherited from parent.
     pub max_turns_override: Option<usize>,
+    /// Shared process registry inherited from the parent runtime. Delegated
+    /// background commands must remain visible and controllable from the
+    /// originating session instead of falling back to detached shell handles.
+    pub process_registry: Option<Arc<ProcessRegistry>>,
+    /// Parent owner key used to preserve multi-tenant process isolation.
+    pub process_owner_id: Option<String>,
+    /// Parent session used for tool-output scoping and delegated provenance.
+    pub parent_session_id: Option<String>,
 }
 
 impl SubAgentTask {
@@ -83,6 +93,9 @@ impl SubAgentTask {
             thinking_enabled: false,
             delegation_policy: None,
             max_turns_override: None,
+            process_registry: None,
+            process_owner_id: None,
+            parent_session_id: None,
         }
     }
 
@@ -123,6 +136,18 @@ impl SubAgentTask {
 
     pub fn with_max_turns(mut self, max_turns: usize) -> Self {
         self.max_turns_override = Some(max_turns);
+        self
+    }
+
+    pub fn with_process_context(
+        mut self,
+        process_registry: Option<Arc<ProcessRegistry>>,
+        process_owner_id: Option<String>,
+        parent_session_id: Option<String>,
+    ) -> Self {
+        self.process_registry = process_registry;
+        self.process_owner_id = process_owner_id;
+        self.parent_session_id = parent_session_id;
         self
     }
 }

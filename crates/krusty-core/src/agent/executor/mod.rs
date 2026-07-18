@@ -23,10 +23,11 @@ use crate::skills::SkillsManager;
 use crate::storage::{
     Database, PartialAssistantState, PendingInteractionSnapshot, RecoveryDecision,
     RecoveryNonResumableReason, RecoveryStatus, SessionManager, SessionRecoveryState, WorkMode,
+    WorkspaceMode,
 };
 use crate::tools::registry::{
-    tool_policy_for_call, FileObservationTracker, PermissionMode, ToolCategory, ToolRegistry,
-    ToolResult,
+    tool_policy_for_call, FileObservationTracker, PermissionMode, ToolCategory, ToolContext,
+    ToolRegistry, ToolResult,
 };
 
 #[cfg(test)]
@@ -76,14 +77,62 @@ pub(crate) async fn execute_tools(
     let mut results = Vec::new();
     let tool_control = ToolControl::new(permission_mode);
     let mut parallel_calls_to_skip = 0usize;
+    let configured_extension_manager = tool_registry.agent_extension_manager();
+    let extension_snapshot_prepared = configured_extension_manager.is_some();
+    let extension_manager =
+        configured_extension_manager.filter(|manager| manager.has_tool_interceptors());
 
-    for (call_index, call) in tool_calls.iter().enumerate() {
+    for (call_index, original_call) in tool_calls.iter().enumerate() {
         if parallel_calls_to_skip > 0 {
             parallel_calls_to_skip -= 1;
             continue;
         }
 
-        if is_parallel_safe_call(call, disabled_tools, &tool_control) {
+        // Extension rewrites are part of call preparation, not execution. The
+        // effective call below is what policy classifies, recovery persists,
+        // and the approval UI displays. ToolRegistry is told not to intercept
+        // it again after approval.
+        let intercepted_call;
+        let call = if let Some(manager) = &extension_manager {
+            let intercept_context = ToolContext {
+                working_dir: working_dir.to_path_buf(),
+                project_dir: project_dir.map(Path::to_path_buf),
+                workspace_mode: if project_dir.is_some() {
+                    WorkspaceMode::Selected
+                } else {
+                    WorkspaceMode::Neutral
+                },
+                session_id: Some(session_id.to_string()),
+                db_path: Some(db_path.to_path_buf()),
+                plan_mode: work_mode == WorkMode::Plan,
+                current_model: Some(ai_client.config().model.clone()),
+                permission_mode,
+                ..Default::default()
+            };
+            let intercept = manager
+                .before_tool(
+                    &original_call.name,
+                    original_call.arguments.clone(),
+                    &intercept_context,
+                )
+                .await;
+            intercepted_call = AiToolCall {
+                id: original_call.id.clone(),
+                name: original_call.name.clone(),
+                arguments: intercept.params,
+            };
+            if let Some(reason) = intercept.block_reason {
+                let blocked = ToolResult::error_with_code("blocked_by_extension", reason);
+                results.push(tool_control.publish_result(&intercepted_call, &blocked, event_tx));
+                continue;
+            }
+            &intercepted_call
+        } else {
+            original_call
+        };
+
+        if extension_manager.is_none() && is_parallel_safe_call(call, disabled_tools, &tool_control)
+        {
             let parallel_calls = tool_calls[call_index..]
                 .iter()
                 .take_while(|candidate| {
@@ -120,6 +169,7 @@ pub(crate) async fn execute_tools(
                             provider_call_trace,
                             subagent_max_turns_override,
                             Arc::clone(&file_observations),
+                            extension_snapshot_prepared,
                         )
                         .await;
 
@@ -301,6 +351,7 @@ pub(crate) async fn execute_tools(
                 provider_call_trace,
                 subagent_max_turns_override,
                 Arc::clone(&file_observations),
+                extension_snapshot_prepared,
             );
             tokio::pin!(execution);
 
@@ -457,7 +508,9 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::json;
     use serde_json::Value;
+    use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
     use tempfile::TempDir;
 
     struct ConcurrentReadTool {
@@ -467,6 +520,33 @@ mod tests {
 
     struct DelayedDelegatedWriteTool {
         started_tx: mpsc::UnboundedSender<String>,
+    }
+
+    struct CapturingAgentTool {
+        calls: Arc<StdMutex<Vec<Value>>>,
+    }
+
+    #[async_trait]
+    impl Tool for CapturingAgentTool {
+        fn name(&self) -> &str {
+            "agent"
+        }
+
+        fn description(&self) -> &str {
+            "capture effective delegated-agent arguments"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        async fn execute(&self, params: Value, _ctx: &ToolContext) -> ToolResult {
+            self.calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(params);
+            ToolResult::success("captured")
+        }
     }
 
     #[async_trait]
@@ -606,6 +686,156 @@ mod tests {
             &batch.results[1],
             Content::ToolResult { tool_use_id, .. } if tool_use_id == "read-2"
         ));
+    }
+
+    #[tokio::test]
+    async fn extension_rewrite_is_authorized_then_executed_once_without_reinterception() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let registry = Arc::new(ToolRegistry::new());
+        let captured_calls = Arc::new(StdMutex::new(Vec::new()));
+        registry
+            .register(Arc::new(CapturingAgentTool {
+                calls: Arc::clone(&captured_calls),
+            }))
+            .await;
+
+        let intercept_count = Arc::new(AtomicUsize::new(0));
+        let manager = crate::extensions::AgentExtensionManager::new_with_paths(
+            temp_dir.path(),
+            temp_dir.path().join("extension-runtime"),
+            temp_dir.path().join("global-extensions"),
+        );
+        registry.set_agent_extension_manager(manager.clone());
+        let bun_available = which::which("bun").is_ok();
+        if bun_available {
+            let extension_dir = temp_dir
+                .path()
+                .join(".krusty")
+                .join("extensions")
+                .join("approval-rewrite");
+            fs::create_dir_all(&extension_dir).expect("extension directory should be created");
+            fs::write(
+                extension_dir.join("krusty-extension.json"),
+                r#"{"id":"approval-rewrite","name":"Approval Rewrite","entry":"index.ts"}"#,
+            )
+            .expect("extension manifest should be written");
+            fs::write(
+                extension_dir.join("index.ts"),
+                r#"
+export default (krusty) => {
+  let rewriteCount = 0;
+  krusty.on("tool.execute.before", (input, output) => {
+    if (input.tool !== "agent") return;
+    rewriteCount += 1;
+    output.args.agent_type = "build";
+    output.args.rewrite_count = rewriteCount;
+  });
+};
+"#,
+            )
+            .expect("extension entry should be written");
+            manager
+                .set_project_trusted(true)
+                .await
+                .expect("test project should be explicitly trusted");
+            manager
+                .refresh_and_register(&registry)
+                .await
+                .expect("Bun extension should load");
+        } else {
+            manager.set_test_tool_interceptor({
+                let intercept_count = Arc::clone(&intercept_count);
+                move |name, mut params| {
+                    assert_eq!(name, "agent");
+                    let invocation = intercept_count.fetch_add(1, Ordering::SeqCst) + 1;
+                    params["agent_type"] = Value::String("build".to_string());
+                    params["rewrite_count"] = json!(invocation);
+                    crate::extensions::AgentExtensionToolIntercept {
+                        params,
+                        block_reason: None,
+                    }
+                }
+            });
+        }
+        assert!(manager.has_tool_interceptors());
+
+        let original_call = AiToolCall {
+            id: "rewritten-agent".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({"agent_type": "explore", "prompt": "inspect only"}),
+        };
+        assert!(!ToolControl::new(PermissionMode::Supervised).requires_approval(&original_call));
+
+        let ai_client = Arc::new(AiClient::new(Default::default(), String::new()));
+        let process_registry = Arc::new(ProcessRegistry::new());
+        let skills_manager = Arc::new(tokio::sync::RwLock::new(SkillsManager::new(
+            temp_dir.path().join("skills"),
+            None,
+        )));
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        input_tx
+            .send(LoopInput::ToolApproval {
+                tool_call_id: original_call.id.clone(),
+                approved: true,
+            })
+            .expect("approval input should be queued");
+        let mut input_inbox = LoopInputInbox::new(input_rx);
+
+        let batch = execute_tools(
+            &[original_call],
+            &registry,
+            &ai_client,
+            temp_dir.path(),
+            Some(temp_dir.path()),
+            &process_registry,
+            &skills_manager,
+            "session",
+            &temp_dir.path().join("db"),
+            None,
+            PermissionMode::Supervised,
+            WorkMode::Build,
+            None,
+            None,
+            &event_tx,
+            None,
+            &mut input_inbox,
+            None,
+            None,
+            Arc::new(FileObservationTracker::new()),
+        )
+        .await;
+
+        assert!(!batch.cancelled);
+        assert_eq!(batch.results.len(), 1);
+        if !bun_available {
+            assert_eq!(intercept_count.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(
+            captured_calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            &[json!({
+                "agent_type": "build",
+                "prompt": "inspect only",
+                "rewrite_count": 1
+            })]
+        );
+
+        let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            LoopEvent::ToolApprovalRequired { id, name, arguments }
+                if id == "rewritten-agent"
+                    && name == "agent"
+                    && arguments["agent_type"] == "build"
+                    && arguments["rewrite_count"] == 1
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            LoopEvent::ToolApproved { id } if id == "rewritten-agent"
+        )));
     }
 
     async fn run_delayed_delegated_write(

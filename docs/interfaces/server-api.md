@@ -21,6 +21,8 @@ The route tree is assembled in `routes/mod.rs`, which nests each API group under
 - `/api/credentials` -- provider API key management
 - `/api/mako` -- autonomous agent dispatch
 - `/api/mcp` -- MCP server management
+- `/api/plugins` -- installable plugin lifecycle and contribution refresh
+- `/api/extensions` -- agent-extension status, trust, and reload
 - `/api/processes` -- user-scoped background process tracking and lifecycle status
 - `/api/processes/:id/output` -- bounded recent stdout/stderr replay for a tracked process
 - `/api/push` -- Web Push subscriptions
@@ -29,6 +31,14 @@ The route tree is assembled in `routes/mod.rs`, which nests each API group under
 - `/api/server` -- server status and remote access config
 - `/api/skills` -- skill registration and listing
 - `/api/auth/oauth` -- OAuth flow management
+
+Extension, MCP, plugin, and skill managers are process-wide administration
+surfaces. Their API groups accept only the local single-tenant administrator;
+a request carrying `X-User-Id` receives `403 Forbidden` until those managers
+have per-tenant storage and runtime instances. Operator-installed contributions
+may still form part of the server-wide tool/runtime policy, so public
+multi-tenant deployments must isolate the Krusty process per trust domain in
+the same way they must isolate host tool execution.
 
 ## The Embedded Web Frontend
 

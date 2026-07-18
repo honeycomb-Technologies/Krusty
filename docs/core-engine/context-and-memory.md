@@ -103,13 +103,13 @@ Legacy session-forking helpers (`PinchContext`, linked child sessions) remain in
 
 ## Skills Injection
 
-Skills are domain-specific instruction sets packaged as directories with a `SKILL.md` file containing YAML frontmatter (name, description, version, author, tags) followed by markdown content. They live in two locations: `~/.krusty/skills/` for global skills and `.krusty/skills/` within a project for project-specific skills. Project skills override global skills with the same name.
+Skills are Agent Skills-compatible instruction packages built around `SKILL.md`. Krusty discovers its native roots plus `.agents`, Pi, OpenCode, Claude, Codex, and registered package roots. Project roots are discovered upward through the worktree, with nearest-project definitions taking precedence over user and package definitions. Strict validation enforces the standard name/description limits and directory-name match; structured diagnostics explain invalid and shadowed definitions.
 
-The `SkillsManager` in `manager.rs` handles discovery and caching. On first access, it scans both directories, parses each `SKILL.md`, and builds a name-keyed cache. The `build_skills_context` function in `context.rs` reads this cache and formats a bounded listing of available skills for injection into the system context. The listing includes each skill's name, description, and tags, plus instructions for invoking the deferred `skill` target through `tool_search`.
+The `SkillsManager` in `manager.rs` handles discovery, precedence, policy, diagnostics, package-root registration, and cache fingerprints. The `build_skills_context` function reads only enabled, model-invocable metadata and formats a bounded listing for the system context. Per-skill `allow`/`ask`/`deny` policy is persisted in `.krusty/skills-policy.json`; `ask` requires a supervised parent for model-driven loading, while `deny` is a hard block. Nearest-project policy wins among project files, but can only narrow user policy, never re-enable or loosen it.
 
 When the model executes the deferred `skill` target through `tool_search`, the manager loads the full markdown content of the requested skill and injects it into the conversation. This lazy loading means skill content doesn't consume context budget until it's actually needed. The listing in the system prompt is lightweight and capped -- just names, descriptions, and bounded tags -- so the model knows what's available without paying the token cost of every skill's full instructions.
 
-Skills are loaded from the filesystem and cached in memory. The cache can be invalidated (when skills are created or deleted) and individual skills can be reloaded (when edited). Path traversal attacks are blocked: loading files from within a skill directory verifies that the resolved path stays within the skill's directory boundary.
+Skills are cached in memory, but content fingerprints make normal catalog reads notice filesystem and policy changes automatically. Path traversal, absolute paths, and symlink escapes are blocked when loading bundled resources. An `allowed-tools` frontmatter hint never grants permission: downstream tools continue through the canonical parent `ToolContext` governance contract.
 
 ## Shared Build Context
 

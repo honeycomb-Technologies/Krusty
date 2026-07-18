@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{bail, Context, Result};
 use tracing::warn;
@@ -13,10 +16,14 @@ mod catalog;
 mod install;
 mod io;
 mod layout;
+mod lifecycle;
+mod locking;
 mod package;
+mod permissions;
 mod storage;
 #[cfg(test)]
 mod tests;
+mod transaction;
 mod trust;
 mod validation;
 
@@ -25,11 +32,16 @@ mod validation;
 pub struct PluginManager {
     root: PathBuf,
     http_client: reqwest::Client,
+    pub(super) mutation_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl PluginManager {
     pub fn new(http_client: reqwest::Client, root: PathBuf) -> Self {
-        Self { root, http_client }
+        Self {
+            root,
+            http_client,
+            mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -38,6 +50,14 @@ impl PluginManager {
 
     pub fn installed_root(&self) -> PathBuf {
         self.root.join("installed")
+    }
+
+    pub(super) fn staging_root(&self) -> PathBuf {
+        self.installed_root().join(".staging")
+    }
+
+    pub(super) fn managed_root(&self) -> PathBuf {
+        self.installed_root().join(".managed")
     }
 
     pub fn active_root(&self) -> PathBuf {
@@ -64,6 +84,10 @@ impl PluginManager {
         self.trust_root().join("allowlist.toml")
     }
 
+    pub(super) fn permissions_file_path(&self) -> PathBuf {
+        self.trust_root().join("permissions.toml")
+    }
+
     pub(super) fn sources_file_path(&self) -> PathBuf {
         self.index_root().join("sources.toml")
     }
@@ -73,6 +97,8 @@ impl PluginManager {
     }
 
     pub async fn add_source(&self, name: Option<&str>, manifest_url: &str) -> Result<PluginSource> {
+        let _guard = self.acquire_mutation().await?;
+        self.validate_catalog_source_ref(manifest_url)?;
         let mut sources = load_sources(self).await?;
         let resolved_name = match name {
             Some(explicit) if !explicit.trim().is_empty() => explicit.trim().to_string(),
@@ -94,7 +120,19 @@ impl PluginManager {
         Ok(source)
     }
 
+    pub async fn remove_source(&self, name: &str) -> Result<()> {
+        let _guard = self.acquire_mutation().await?;
+        let mut sources = load_sources(self).await?;
+        let previous_len = sources.sources.len();
+        sources.sources.retain(|source| source.name != name);
+        if sources.sources.len() == previous_len {
+            bail!("plugin source '{}' is not configured", name);
+        }
+        save_sources(self, &sources).await
+    }
+
     pub async fn set_plugin_enabled(&self, plugin_id: &str, enabled: bool) -> Result<()> {
+        let _guard = self.acquire_mutation().await?;
         let mut lock = load_lockfile(self).await?;
         let entry = lock
             .plugins

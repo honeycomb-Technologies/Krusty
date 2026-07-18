@@ -577,8 +577,20 @@ fn agent_tool_policy(params: &Value) -> ToolPolicy {
 pub fn tool_policy(name: &str) -> ToolPolicy {
     match name {
         "agent" => ToolPolicy::read_only_with_timeout(DELEGATED_TOOL_TIMEOUT),
-        "read" | "glob" | "grep" | "list" | "web_search" | "web_fetch" | "skill"
-        | "tool_search" => ToolPolicy::read_only(),
+        "read"
+        | "glob"
+        | "grep"
+        | "list"
+        | "web_search"
+        | "web_fetch"
+        | "skill"
+        | "tool_search"
+        | "mcp__list_resources"
+        | "mcp__list_resource_templates"
+        | "mcp__read_resource"
+        | "mcp__list_prompts"
+        | "mcp__get_prompt"
+        | "mcp__list_tools" => ToolPolicy::read_only(),
         "AskUserQuestion" | "PlanConfirm" | "enter_plan_mode" | "memory" | "set_work_mode"
         | "task_start" | "task_complete" | "add_subtask" | "set_dependency"
         | "send_user_message" | "sleep" | "autonomous_task" | "report" => ToolPolicy::interactive(),

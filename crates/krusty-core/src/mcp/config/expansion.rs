@@ -1,7 +1,20 @@
 use std::collections::HashMap;
 
-/// Expand ${VAR} environment variables, with fallback to credentials store
-pub(super) async fn expand_env_var(s: &str, allow_credential_store: bool) -> String {
+/// Expand `${VAR}` references only for user-owned global MCP configuration.
+///
+/// Project and package configuration is repository/package-controlled input.
+/// It must never be able to probe or exfiltrate the host process environment,
+/// so disallowed references are preserved literally instead of being expanded.
+pub(super) async fn expand_env_var(s: &str, allow_host_secrets: bool) -> String {
+    if !allow_host_secrets {
+        if s.contains("${") {
+            tracing::warn!(
+                "Leaving environment reference unexpanded in untrusted MCP configuration"
+            );
+        }
+        return s.to_string();
+    }
+
     let mut result = s.to_string();
 
     while let Some(start) = result.find("${") {
@@ -16,36 +29,28 @@ pub(super) async fn expand_env_var(s: &str, allow_credential_store: bool) -> Str
                     v
                 }
                 Err(_) => {
-                    if allow_credential_store {
-                        if let Some(cred_key) = credential_key_for_env(var_name) {
-                            tracing::debug!(
-                                "Looking up {} in credential store as '{}'",
-                                var_name,
-                                cred_key
-                            );
-                            match get_credential(cred_key).await {
-                                Some(v) => {
-                                    tracing::debug!(
-                                        "Found {} in credential store (len={})",
-                                        var_name,
-                                        v.len()
-                                    );
-                                    v
-                                }
-                                None => {
-                                    tracing::warn!("Credential '{}' not found in store", cred_key);
-                                    String::new()
-                                }
+                    if let Some(cred_key) = credential_key_for_env(var_name) {
+                        tracing::debug!(
+                            "Looking up {} in credential store as '{}'",
+                            var_name,
+                            cred_key
+                        );
+                        match get_credential(cred_key).await {
+                            Some(v) => {
+                                tracing::debug!(
+                                    "Found {} in credential store (len={})",
+                                    var_name,
+                                    v.len()
+                                );
+                                v
                             }
-                        } else {
-                            tracing::warn!("No credential mapping for {}", var_name);
-                            String::new()
+                            None => {
+                                tracing::warn!("Credential '{}' not found in store", cred_key);
+                                String::new()
+                            }
                         }
                     } else {
-                        tracing::warn!(
-                            "Skipping credential-store lookup for {} in untrusted MCP config",
-                            var_name
-                        );
+                        tracing::warn!("No credential mapping for {}", var_name);
                         String::new()
                     }
                 }

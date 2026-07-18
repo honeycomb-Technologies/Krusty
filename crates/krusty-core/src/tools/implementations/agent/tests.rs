@@ -26,6 +26,7 @@ fn sample_result(success: bool, error: Option<&str>) -> SubAgentResult {
         turns_used: 3,
         error: error.map(ToString::to_string),
         policy_violations: vec![],
+        background_processes: vec![],
     }
 }
 
