@@ -8,13 +8,12 @@ use async_trait::async_trait;
 
 use crate::ai::client::{AiClient, SimpleCallResult};
 use crate::storage::{
-    CanonicalMemoryInput, Database, LearningCandidate, LearningCandidateInput,
-    LearningCandidateStatus, LearningCandidateStore, LearningKind, LearningSensitivity,
-    MemoryNamespace, MemorySensitivity, MemorySource, MemoryStore, MemoryType, MessageStore,
-    SessionManager, SessionType,
+    Database, LearningCandidateInput, LearningCandidateStatus, LearningCandidateStore,
+    MemoryNamespace, MemoryStore, MessageStore, SessionManager, SessionType,
 };
 
 use super::policy::auto_promotion_key_allowed;
+use super::promotion::canonical_input_for_candidate;
 use super::transcript::LearningTranscript;
 use super::{
     LearningDecision, LearningPolicy, LearningProposal, LearningReviewerOutput, LearningScope,
@@ -313,7 +312,13 @@ fn persist_proposals(
 
         match candidate.status {
             LearningCandidateStatus::AutoAccepted => {
-                promote_candidate(&memory_store, &candidate)?;
+                if candidate.project_dir.is_some()
+                    || !candidate.explicit
+                    || !auto_promotion_key_allowed(candidate.kind, &candidate.canonical_key)
+                {
+                    bail!("unsafe learning candidate reached auto-promotion boundary");
+                }
+                memory_store.save_canonical(&canonical_input_for_candidate(&candidate)?)?;
                 outcome.auto_promoted += 1;
             }
             LearningCandidateStatus::Tombstoned => {
@@ -338,56 +343,6 @@ fn persist_proposals(
     }
 
     Ok(outcome)
-}
-
-fn promote_candidate(memory_store: &MemoryStore, candidate: &LearningCandidate) -> Result<()> {
-    if candidate.project_dir.is_some()
-        || candidate.sensitivity != LearningSensitivity::Normal
-        || !candidate.explicit
-        || !auto_promotion_key_allowed(candidate.kind, &candidate.canonical_key)
-    {
-        bail!("unsafe learning candidate reached auto-promotion boundary");
-    }
-    let memory_type = match candidate.kind {
-        LearningKind::UserPreference => MemoryType::User,
-        LearningKind::UserCorrection => MemoryType::Feedback,
-        LearningKind::ProjectFact
-        | LearningKind::Procedure
-        | LearningKind::RelationshipContext
-        | LearningKind::Forget => bail!("learning kind is not auto-promotable"),
-    };
-    let title_kind = match candidate.kind {
-        LearningKind::UserPreference => "Preference",
-        LearningKind::UserCorrection => "Correction",
-        _ => unreachable!(),
-    };
-    let mut input = CanonicalMemoryInput::new(
-        memory_type,
-        candidate.canonical_key.clone(),
-        format!("{title_kind}: {}", readable_key(&candidate.canonical_key)),
-        candidate.proposed_content.clone(),
-    );
-    input.user_id = candidate.user_id.clone();
-    input.namespace = MemoryNamespace::Shared;
-    input.source = MemorySource::User;
-    input.source_session_id = Some(candidate.evidence_session_id.clone());
-    input.source_message_id = Some(candidate.evidence_message_id.to_string());
-    input.confidence = candidate.confidence;
-    input.sensitivity = MemorySensitivity::Normal;
-    memory_store.save_canonical(&input)?;
-    Ok(())
-}
-
-fn readable_key(key: &str) -> String {
-    key.chars()
-        .map(|character| {
-            if matches!(character, '.' | '_' | '-') {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@ mod model;
 mod store;
 
 pub use model::{
-    ClaimRunRequest, ClaimedMakoRun, LeaseReconciliation, MakoRun, MakoRunAttempt,
+    ClaimRunRequest, ClaimedMakoRun, DaemonFence, LeaseReconciliation, MakoRun, MakoRunAttempt,
     MakoRunAttemptOutcome, MakoRunKind, RunCompletion,
 };
 pub use store::MakoRunStore;

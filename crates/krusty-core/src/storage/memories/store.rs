@@ -118,65 +118,8 @@ impl MemoryStore {
     /// points it at the prior row with `supersedes_id`, marks the prior row
     /// superseded, and records both lifecycle events in the revision ledger.
     pub fn save_canonical(&self, input: &CanonicalMemoryInput) -> Result<AgentMemory> {
-        let input = NormalizedCanonicalInput::new(input)?;
         let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
-        let existing = find_active_canonical(&tx, &input)?;
-
-        if let Some(existing) = existing.as_ref() {
-            if canonical_matches(existing, &input) {
-                tx.commit()?;
-                return Ok(existing.clone());
-            }
-        }
-
-        let supersedes_id = if let Some(existing) = existing {
-            tx.execute(
-                "UPDATE agent_memories
-                 SET status = 'superseded', updated_at = datetime('now')
-                 WHERE id = ?1 AND status = 'active'",
-                [&existing.id],
-            )?;
-            let superseded = load_memory_by_id(&tx, &existing.id, false)?
-                .ok_or_else(|| anyhow::anyhow!("superseded memory disappeared"))?;
-            write_revision(&tx, &superseded, MemoryRevisionEvent::Superseded)?;
-            Some(existing.id)
-        } else {
-            None
-        };
-
-        let id = Uuid::new_v4().to_string();
-        tx.execute(
-            "INSERT INTO agent_memories
-                (id, memory_type, title, content, project_dir, user_id,
-                 canonical_key, namespace, namespace_id, status, source,
-                 source_session_id, source_message_id, confidence, sensitivity,
-                 pinned, supersedes_id, access_count)
-             VALUES
-                (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', ?10,
-                 ?11, ?12, ?13, ?14, ?15, ?16, 0)",
-            params![
-                id,
-                input.memory_type.as_str(),
-                input.title,
-                input.content,
-                input.project_dir,
-                input.user_id,
-                input.canonical_key,
-                input.namespace.as_str(),
-                input.namespace_id,
-                input.source.as_str(),
-                input.source_session_id,
-                input.source_message_id,
-                input.confidence,
-                input.sensitivity.as_str(),
-                input.pinned,
-                supersedes_id,
-            ],
-        )?;
-
-        let memory = load_memory_by_id(&tx, &id, true)?
-            .ok_or_else(|| anyhow::anyhow!("canonical memory not found after insert"))?;
-        write_revision(&tx, &memory, MemoryRevisionEvent::Created)?;
+        let memory = save_canonical_in_transaction(&tx, input)?;
         tx.commit()?;
         Ok(memory)
     }
@@ -533,6 +476,115 @@ impl MemoryStore {
         };
         rows.filter_map(|row| row.ok()).collect()
     }
+}
+
+/// Save canonical memory inside an existing immediate transaction.
+///
+/// This is crate-private so higher-level governed workflows can atomically
+/// commit a canonical memory and their own review state without duplicating
+/// the memory invariants or exposing a transaction-bearing API publicly.
+pub(crate) fn save_canonical_in_transaction(
+    tx: &Transaction<'_>,
+    input: &CanonicalMemoryInput,
+) -> Result<AgentMemory> {
+    let input = NormalizedCanonicalInput::new(input)?;
+    let existing = find_active_canonical(tx, &input)?;
+
+    if let Some(existing) = existing.as_ref() {
+        if canonical_matches(existing, &input) {
+            return Ok(existing.clone());
+        }
+    }
+
+    let supersedes_id = if let Some(existing) = existing {
+        tx.execute(
+            "UPDATE agent_memories
+             SET status = 'superseded', updated_at = datetime('now')
+             WHERE id = ?1 AND status = 'active'",
+            [&existing.id],
+        )?;
+        let superseded = load_memory_by_id(tx, &existing.id, false)?
+            .ok_or_else(|| anyhow::anyhow!("superseded memory disappeared"))?;
+        write_revision(tx, &superseded, MemoryRevisionEvent::Superseded)?;
+        Some(existing.id)
+    } else {
+        None
+    };
+
+    let id = Uuid::new_v4().to_string();
+    tx.execute(
+        "INSERT INTO agent_memories
+            (id, memory_type, title, content, project_dir, user_id,
+             canonical_key, namespace, namespace_id, status, source,
+             source_session_id, source_message_id, confidence, sensitivity,
+             pinned, supersedes_id, access_count)
+         VALUES
+            (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', ?10,
+             ?11, ?12, ?13, ?14, ?15, ?16, 0)",
+        params![
+            id,
+            input.memory_type.as_str(),
+            input.title,
+            input.content,
+            input.project_dir,
+            input.user_id,
+            input.canonical_key,
+            input.namespace.as_str(),
+            input.namespace_id,
+            input.source.as_str(),
+            input.source_session_id,
+            input.source_message_id,
+            input.confidence,
+            input.sensitivity.as_str(),
+            input.pinned,
+            supersedes_id,
+        ],
+    )?;
+
+    let memory = load_memory_by_id(tx, &id, true)?
+        .ok_or_else(|| anyhow::anyhow!("canonical memory not found after insert"))?;
+    write_revision(tx, &memory, MemoryRevisionEvent::Created)?;
+    Ok(memory)
+}
+
+pub(crate) fn load_canonical_for_provenance_from_connection(
+    conn: &rusqlite::Connection,
+    input: &CanonicalMemoryInput,
+) -> Result<Option<AgentMemory>> {
+    let input = NormalizedCanonicalInput::new(input)?;
+    if input.source_session_id.is_none() || input.source_message_id.is_none() {
+        bail!("canonical provenance lookup requires session and message ids");
+    }
+    let sql = format!(
+        "SELECT {MEMORY_SELECT_COLUMNS}
+         FROM agent_memories
+         WHERE canonical_key = ?1
+           AND project_dir IS ?2
+           AND user_id IS ?3
+           AND namespace = ?4
+           AND namespace_id IS ?5
+           AND source = ?6
+           AND source_session_id IS ?7
+           AND source_message_id IS ?8
+         ORDER BY created_at ASC
+         LIMIT 1"
+    );
+    Ok(conn
+        .query_row(
+            &sql,
+            params![
+                input.canonical_key,
+                input.project_dir,
+                input.user_id,
+                input.namespace.as_str(),
+                input.namespace_id,
+                input.source.as_str(),
+                input.source_session_id,
+                input.source_message_id,
+            ],
+            |row| Ok(row_to_memory(row)),
+        )
+        .optional()?)
 }
 
 struct NormalizedCanonicalInput<'a> {

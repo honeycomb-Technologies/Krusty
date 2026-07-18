@@ -16,3 +16,6 @@ pub use model::{
     MemoryType, COMPACTION_FLUSH_TITLE_PREFIX,
 };
 pub use store::MemoryStore;
+pub(crate) use store::{
+    load_canonical_for_provenance_from_connection, save_canonical_in_transaction,
+};

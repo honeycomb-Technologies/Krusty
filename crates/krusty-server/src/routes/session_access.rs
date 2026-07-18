@@ -36,10 +36,10 @@ pub(super) fn request_workspace_scope(
 }
 
 pub(super) fn session_visible_to_user(session: &SessionInfo, user_id: Option<&str>) -> bool {
-    match user_id {
-        Some(user_id) => session.user_id.as_deref() == Some(user_id),
-        None => true,
-    }
+    // Local single-user sessions are represented by a NULL owner. Treat that
+    // as an exact ownership scope, never as a wildcard for authenticated
+    // users' sessions.
+    session.user_id.as_deref() == user_id
 }
 
 pub(super) fn ensure_owned_session(

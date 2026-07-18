@@ -435,6 +435,22 @@ async fn load_owned_session_rejects_legacy_userless_session_for_authenticated_us
 }
 
 #[tokio::test]
+async fn load_owned_session_rejects_authenticated_session_for_local_actor() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user("Alice Session", None, None, Some("alice"))
+        .expect("session creation should succeed");
+
+    let result = super::load_owned_session(&session_manager, &session_id, None);
+
+    assert!(matches!(result, Err(AppError::NotFound(_))));
+}
+
+#[tokio::test]
 async fn list_sessions_resolves_relative_working_dir_filter_within_user_root() {
     let (state, temp_dir) = create_test_state();
     create_test_user(&state, "alice");

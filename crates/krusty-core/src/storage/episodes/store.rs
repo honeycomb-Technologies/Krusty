@@ -237,7 +237,10 @@ mod private_tests {
     #[test]
     fn extracts_only_text_content() {
         let json = r#"[{"type":"thinking","thinking":"secret","signature":"x"},{"type":"text","text":"  hello   world  "},{"type":"tool_result","tool_use_id":"1","output":"raw"}]"#;
-        assert_eq!(episode_body("assistant", json).as_deref(), Some("hello world"));
+        assert_eq!(
+            episode_body("assistant", json).as_deref(),
+            Some("hello world")
+        );
         assert!(episode_body("tool", json).is_none());
         assert!(episode_body("pending_user:1", json).is_none());
     }

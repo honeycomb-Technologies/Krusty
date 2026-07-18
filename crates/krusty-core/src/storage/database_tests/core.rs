@@ -9,7 +9,7 @@ use super::create_test_db;
 fn test_database_creation() {
     let (db, _temp) = create_test_db();
     let version = db.get_schema_version();
-    assert_eq!(version, 39, "Expected current schema version to be 39");
+    assert_eq!(version, 40, "Expected current schema version to be 40");
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn test_schema_version_increments() {
     let db = Database::new(&db_path).expect("Failed to create database");
     let version = db.get_schema_version();
 
-    assert_eq!(version, 39, "Expected final schema version");
+    assert_eq!(version, 40, "Expected final schema version");
 }
 
 #[test]
@@ -115,7 +115,7 @@ fn migration_33_removes_legacy_compaction_memory_and_duplicate_history() {
     drop(conn);
 
     let db = Database::new(&db_path).expect("migrate db");
-    assert_eq!(db.get_schema_version(), 39);
+    assert_eq!(db.get_schema_version(), 40);
 
     let flush_count: i64 = db
         .conn()
@@ -184,7 +184,7 @@ fn migration_34_backfills_provider_call_classification() {
     drop(conn);
 
     let db = Database::new(&db_path).expect("migrate db");
-    assert_eq!(db.get_schema_version(), 39);
+    assert_eq!(db.get_schema_version(), 40);
     let (call_kind, operation): (Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -261,7 +261,7 @@ fn migration_39_upgrades_legacy_memories_and_separates_generated_snapshot() {
     drop(conn);
 
     let db = Database::new(&db_path).expect("migrate legacy memories");
-    assert_eq!(db.get_schema_version(), 39);
+    assert_eq!(db.get_schema_version(), 40);
 
     let fact_metadata: (String, String, f64) = db
         .conn()

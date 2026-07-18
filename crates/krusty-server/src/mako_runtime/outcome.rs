@@ -34,6 +34,7 @@ impl MakoRunOutcome {
         session_id: &str,
         user_id: Option<&str>,
         event: &LoopEvent,
+        allow_embedded_wakes: bool,
     ) {
         if let LoopEvent::Finished {
             stop_reason: ref reason,
@@ -43,11 +44,13 @@ impl MakoRunOutcome {
             self.stop_reason = Some(reason.clone());
         }
 
-        if let LoopEvent::AgentSleeping { duration_secs, .. } = event {
+        if allow_embedded_wakes {
+            if let LoopEvent::AgentSleeping { duration_secs, .. } = event {
             let wake_at = chrono::Utc::now() + chrono::Duration::seconds(*duration_secs as i64);
             manager
                 .schedule_wake_at(state.clone(), session_id.to_string(), wake_at, "sleep")
                 .await;
+            }
         }
 
         if matches!(event, LoopEvent::AwaitingInput { .. }) {
@@ -105,6 +108,7 @@ impl MakoRunOutcome {
         session_id: &str,
         user_id: Option<&str>,
         project_scope: Option<&str>,
+        allow_embedded_wakes: bool,
     ) -> Result<()> {
         refresh_snapshot_after_run(
             state.db_path.as_ref(),
@@ -113,13 +117,15 @@ impl MakoRunOutcome {
             self.stop_reason.as_ref(),
         );
 
-        if let Some(new_session_id) = self.pinched_session_id {
+        if allow_embedded_wakes {
+            if let Some(new_session_id) = self.pinched_session_id {
             let _ = manager.wake_tx.send(WakeCommand {
                 state: state.clone(),
                 session_id: new_session_id,
                 wake_reason: "pinch".to_string(),
             });
             return Ok(());
+            }
         }
 
         if !self.awaiting_input {

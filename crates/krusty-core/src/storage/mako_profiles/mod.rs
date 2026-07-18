@@ -17,4 +17,4 @@ pub use model::{
     MakoProfileDocumentKind, MakoProfileMergeResult, MakoProfileOwner, MakoProfileOwnerError,
     MakoProfileSeed, MakoProfileSnapshot,
 };
-pub use store::{MakoProfileStore, MakoProfileStoreError};
+pub use store::{MakoProfileStore, MakoProfileStoreError, MAX_MAKO_PROFILE_DOCUMENT_BYTES};

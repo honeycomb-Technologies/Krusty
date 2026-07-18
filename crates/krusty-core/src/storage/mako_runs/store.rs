@@ -8,7 +8,7 @@ use crate::mako::{canonical_timestamp, normalize_timestamp, MakoRunStatus};
 use crate::storage::Database;
 
 use super::{
-    ClaimRunRequest, ClaimedMakoRun, LeaseReconciliation, MakoRun, MakoRunAttempt,
+    ClaimRunRequest, ClaimedMakoRun, DaemonFence, LeaseReconciliation, MakoRun, MakoRunAttempt,
     MakoRunAttemptOutcome, MakoRunKind, RunCompletion,
 };
 
@@ -129,6 +129,27 @@ impl MakoRunStore {
 
     /// Atomically claims the next runnable item and opens its durable attempt row.
     pub fn claim_next(&self, request: &ClaimRunRequest) -> Result<Option<ClaimedMakoRun>> {
+        self.claim_next_inner(request, None)
+    }
+
+    /// Claim only while the caller still owns the current scheduler generation.
+    pub fn claim_next_fenced(
+        &self,
+        request: &ClaimRunRequest,
+        daemon_fence: &DaemonFence,
+    ) -> Result<Option<ClaimedMakoRun>> {
+        anyhow::ensure!(
+            request.lease_epoch == daemon_fence.fencing_token,
+            "run lease epoch does not match daemon fence"
+        );
+        self.claim_next_inner(request, Some(daemon_fence))
+    }
+
+    fn claim_next_inner(
+        &self,
+        request: &ClaimRunRequest,
+        daemon_fence: Option<&DaemonFence>,
+    ) -> Result<Option<ClaimedMakoRun>> {
         anyhow::ensure!(!request.worker_id.trim().is_empty(), "worker id is empty");
         anyhow::ensure!(
             request.lease_epoch <= i64::MAX as u64,
@@ -147,6 +168,12 @@ impl MakoRunStore {
                 .context("Mako worker lease expiry overflow")?,
         );
         let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        if let Some(daemon_fence) = daemon_fence {
+            if !daemon_fence_is_current(&tx, daemon_fence, &now)? {
+                tx.commit()?;
+                return Ok(None);
+            }
+        }
         let candidate_id = tx
             .query_row(
                 "SELECT r.id
@@ -240,7 +267,25 @@ impl MakoRunStore {
         lease_epoch: u64,
         now: DateTime<Utc>,
     ) -> Result<bool> {
-        self.mark_running_with_trace(run_id, lease_token, lease_epoch, now, None)
+        self.mark_running_inner(run_id, lease_token, lease_epoch, now, None, None)
+    }
+
+    pub fn mark_running_fenced(
+        &self,
+        run_id: &str,
+        lease_token: &str,
+        lease_epoch: u64,
+        now: DateTime<Utc>,
+        daemon_fence: &DaemonFence,
+    ) -> Result<bool> {
+        self.mark_running_inner(
+            run_id,
+            lease_token,
+            lease_epoch,
+            now,
+            None,
+            Some(daemon_fence),
+        )
     }
 
     /// Marks a lease as executing and anchors the attempt to the canonical trace stream.
@@ -252,8 +297,35 @@ impl MakoRunStore {
         now: DateTime<Utc>,
         trace_sequence_start: Option<i64>,
     ) -> Result<bool> {
+        self.mark_running_inner(
+            run_id,
+            lease_token,
+            lease_epoch,
+            now,
+            trace_sequence_start,
+            None,
+        )
+    }
+
+    fn mark_running_inner(
+        &self,
+        run_id: &str,
+        lease_token: &str,
+        lease_epoch: u64,
+        now: DateTime<Utc>,
+        trace_sequence_start: Option<i64>,
+        daemon_fence: Option<&DaemonFence>,
+    ) -> Result<bool> {
         let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
         let now = canonical_timestamp(now);
+        if let Some(daemon_fence) = daemon_fence {
+            if lease_epoch != daemon_fence.fencing_token
+                || !daemon_fence_is_current(&tx, daemon_fence, &now)?
+            {
+                tx.commit()?;
+                return Ok(false);
+            }
+        }
         let changed = tx.execute(
             "UPDATE mako_runs
              SET status = 'running', started_at = COALESCE(started_at, ?4),
@@ -304,6 +376,40 @@ impl MakoRunStore {
         Ok(changed == 1)
     }
 
+    pub fn heartbeat_fenced(
+        &self,
+        run_id: &str,
+        lease_token: &str,
+        lease_epoch: u64,
+        now: DateTime<Utc>,
+        lease_duration: std::time::Duration,
+        daemon_fence: &DaemonFence,
+    ) -> Result<bool> {
+        anyhow::ensure!(!lease_duration.is_zero(), "lease duration is zero");
+        let delta = Duration::from_std(lease_duration).context("lease duration is too large")?;
+        let expires_at = now
+            .checked_add_signed(delta)
+            .context("lease expiry overflow")?;
+        let now = canonical_timestamp(now);
+        let expires_at = canonical_timestamp(expires_at);
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        if lease_epoch != daemon_fence.fencing_token
+            || !daemon_fence_is_current(&tx, daemon_fence, &now)?
+        {
+            tx.commit()?;
+            return Ok(false);
+        }
+        let changed = tx.execute(
+            "UPDATE mako_runs
+             SET heartbeat_at = ?4, lease_expires_at = ?5, updated_at = ?4
+             WHERE id = ?1 AND lease_token = ?2 AND lease_epoch = ?3
+               AND status IN ('leased', 'running') AND lease_expires_at > ?4",
+            params![run_id, lease_token, lease_epoch, now, expires_at],
+        )?;
+        tx.commit()?;
+        Ok(changed == 1)
+    }
+
     /// Finish an attempt using its lease fence. A stale worker receives `None`.
     pub fn finish_claimed(
         &self,
@@ -312,8 +418,44 @@ impl MakoRunStore {
         lease_epoch: u64,
         completion: &RunCompletion,
     ) -> Result<Option<MakoRunStatus>> {
+        self.finish_claimed_inner(run_id, lease_token, lease_epoch, completion, None)
+    }
+
+    pub fn finish_claimed_fenced(
+        &self,
+        run_id: &str,
+        lease_token: &str,
+        lease_epoch: u64,
+        completion: &RunCompletion,
+        daemon_fence: &DaemonFence,
+    ) -> Result<Option<MakoRunStatus>> {
+        self.finish_claimed_inner(
+            run_id,
+            lease_token,
+            lease_epoch,
+            completion,
+            Some(daemon_fence),
+        )
+    }
+
+    fn finish_claimed_inner(
+        &self,
+        run_id: &str,
+        lease_token: &str,
+        lease_epoch: u64,
+        completion: &RunCompletion,
+        daemon_fence: Option<&DaemonFence>,
+    ) -> Result<Option<MakoRunStatus>> {
         let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
         let now = canonical_timestamp(completion.now);
+        if let Some(daemon_fence) = daemon_fence {
+            if lease_epoch != daemon_fence.fencing_token
+                || !daemon_fence_is_current(&tx, daemon_fence, &now)?
+            {
+                tx.commit()?;
+                return Ok(None);
+            }
+        }
         let state = tx
             .query_row(
                 "SELECT status, attempt_count, max_attempts
@@ -415,9 +557,34 @@ impl MakoRunStore {
     }
 
     /// Reconcile expired leases without replaying uncertain mutating work.
+    /// A run that never crossed the durable `running` boundary is safe to put
+    /// back on the queue; a running attempt may have produced external side
+    /// effects and therefore requires an explicit recovery decision.
     pub fn reconcile_expired_leases(&self, now: DateTime<Utc>) -> Result<LeaseReconciliation> {
+        self.reconcile_expired_leases_inner(now, None)
+    }
+
+    pub fn reconcile_expired_leases_fenced(
+        &self,
+        now: DateTime<Utc>,
+        daemon_fence: &DaemonFence,
+    ) -> Result<LeaseReconciliation> {
+        self.reconcile_expired_leases_inner(now, Some(daemon_fence))
+    }
+
+    fn reconcile_expired_leases_inner(
+        &self,
+        now: DateTime<Utc>,
+        daemon_fence: Option<&DaemonFence>,
+    ) -> Result<LeaseReconciliation> {
         let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
         let now = canonical_timestamp(now);
+        if let Some(daemon_fence) = daemon_fence {
+            if !daemon_fence_is_current(&tx, daemon_fence, &now)? {
+                tx.commit()?;
+                return Ok(LeaseReconciliation::default());
+            }
+        }
         let mut statement = tx.prepare(
             "SELECT id, status, attempt_count, lease_token
              FROM mako_runs
@@ -438,22 +605,24 @@ impl MakoRunStore {
 
         let mut result = LeaseReconciliation::default();
         for (run_id, status, attempt_no, lease_token) in expired {
-            let (target, message) = if status == "leased" {
+            let (target, message) = if status == MakoRunStatus::Leased.as_str() {
                 result.requeued_unstarted += 1;
+                result.requeued_run_ids.push(run_id.clone());
                 (
                     MakoRunStatus::Queued,
-                    "worker lease expired before execution started",
+                    "worker lease expired before execution; requeued",
                 )
             } else {
                 result.recovery_required += 1;
+                result.recovery_required_run_ids.push(run_id.clone());
                 (
                     MakoRunStatus::RecoveryRequired,
-                    "worker lease expired during execution; side effects may be uncertain",
+                    "worker lease expired; side effects may be uncertain",
                 )
             };
             tx.execute(
                 "UPDATE mako_runs
-                 SET status = ?2, available_at = CASE WHEN ?2 = 'queued' THEN ?3 ELSE available_at END,
+                 SET status = ?2,
                      lease_owner = NULL, lease_token = NULL, lease_epoch = NULL,
                      lease_expires_at = NULL, heartbeat_at = NULL,
                      last_error = ?4, updated_at = ?3
@@ -482,6 +651,28 @@ impl MakoRunStore {
                 OR (status = 'retry_wait' AND available_at <= ?1)",
             [&now],
         )?;
+        Ok(changed)
+    }
+
+    pub fn promote_due_runs_fenced(
+        &self,
+        now: DateTime<Utc>,
+        daemon_fence: &DaemonFence,
+    ) -> Result<usize> {
+        let now = canonical_timestamp(now);
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
+        if !daemon_fence_is_current(&tx, daemon_fence, &now)? {
+            tx.commit()?;
+            return Ok(0);
+        }
+        let changed = tx.execute(
+            "UPDATE mako_runs
+             SET status = 'queued', wake_at = NULL, updated_at = ?1
+             WHERE (status = 'sleeping' AND wake_at IS NOT NULL AND wake_at <= ?1)
+                OR (status = 'retry_wait' AND available_at <= ?1)",
+            [&now],
+        )?;
+        tx.commit()?;
         Ok(changed)
     }
 
@@ -662,6 +853,31 @@ fn map_attempt(row: &Row<'_>) -> rusqlite::Result<MakoRunAttempt> {
         trace_sequence_start: row.get(12)?,
         trace_sequence_end: row.get(13)?,
     })
+}
+
+fn daemon_fence_is_current(tx: &Transaction<'_>, fence: &DaemonFence, now: &str) -> Result<bool> {
+    anyhow::ensure!(
+        !fence.lease_name.trim().is_empty(),
+        "daemon lease name is empty"
+    );
+    anyhow::ensure!(
+        !fence.owner_id.trim().is_empty(),
+        "daemon owner id is empty"
+    );
+    anyhow::ensure!(
+        fence.fencing_token <= i64::MAX as u64,
+        "daemon fencing token exceeds SQLite integer range"
+    );
+    let current = tx.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM mako_daemon_leases
+             WHERE lease_name = ?1 AND owner_id = ?2 AND fencing_token = ?3
+               AND expires_at > ?4
+         )",
+        params![fence.lease_name, fence.owner_id, fence.fencing_token, now],
+        |row| row.get::<_, bool>(0),
+    )?;
+    Ok(current)
 }
 
 fn normalize_optional_timestamp(value: Option<&str>) -> Result<Option<String>> {

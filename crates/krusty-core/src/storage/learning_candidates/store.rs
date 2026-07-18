@@ -107,20 +107,7 @@ impl<'a> LearningCandidateStore<'a> {
     }
 
     pub fn get_owned(&self, id: &str, user_id: Option<&str>) -> Result<Option<LearningCandidate>> {
-        self.db
-            .conn()
-            .query_row(
-                "SELECT id, user_id, project_dir, canonical_key, kind, proposed_content,
-                        evidence_session_id, evidence_message_id, evidence_excerpt,
-                        explicit, confidence, sensitivity, status, reason, created_at, reviewed_at
-                 FROM mako_learning_candidates
-                 WHERE id = ?1
-                   AND ((?2 IS NULL AND user_id IS NULL) OR user_id = ?2)",
-                params![id, user_id],
-                map_candidate,
-            )
-            .optional()
-            .map_err(Into::into)
+        load_candidate_owned_from_connection(self.db.conn(), id, user_id)
     }
 
     pub fn begin_review(
@@ -225,6 +212,25 @@ impl<'a> LearningCandidateStore<'a> {
             .optional()
             .map_err(Into::into)
     }
+}
+
+pub(crate) fn load_candidate_owned_from_connection(
+    conn: &rusqlite::Connection,
+    id: &str,
+    user_id: Option<&str>,
+) -> Result<Option<LearningCandidate>> {
+    conn.query_row(
+        "SELECT id, user_id, project_dir, canonical_key, kind, proposed_content,
+                evidence_session_id, evidence_message_id, evidence_excerpt,
+                explicit, confidence, sensitivity, status, reason, created_at, reviewed_at
+         FROM mako_learning_candidates
+         WHERE id = ?1
+           AND ((?2 IS NULL AND user_id IS NULL) OR user_id = ?2)",
+        params![id, user_id],
+        map_candidate,
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn map_candidate(row: &rusqlite::Row<'_>) -> rusqlite::Result<LearningCandidate> {

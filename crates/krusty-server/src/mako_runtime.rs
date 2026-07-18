@@ -1,6 +1,7 @@
+mod ipc;
 mod notify;
 mod outcome;
-mod runner;
+pub(crate) mod runner;
 mod state;
 
 use std::collections::HashMap;
@@ -8,7 +9,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::task::JoinHandle;
@@ -17,9 +18,11 @@ use uuid::Uuid;
 
 use krusty_core::agent::LoopInput;
 use krusty_core::storage::{
-    Database, MakoRuntimeStateStatus, MakoRuntimeStateStore, SessionManager, SessionType,
+    Database, MakoRunPriority, MakoRuntimeStateStatus, MakoRuntimeStateStore, SessionManager,
+    SessionType,
 };
 
+use self::ipc::{map_daemon_event, MakoDaemonControl, MakoDaemonError};
 #[cfg(test)]
 use self::notify::mako_notification_title;
 use self::runner::run_mako_session;
@@ -29,6 +32,7 @@ use self::state::{
     with_registered_session_input,
 };
 use self::state::{ensure_runnable_mako_session, parse_wake_at, persist_runtime_state};
+use crate::error::AppError;
 use crate::types::AgenticEvent;
 use crate::AppState;
 
@@ -37,6 +41,7 @@ type SseItem = std::result::Result<Event, Infallible>;
 type MakoSse = Sse<ReceiverStream<SseItem>>;
 
 pub struct MakoRuntimeManager {
+    daemon: Option<MakoDaemonControl>,
     runtimes: RwLock<HashMap<String, ActiveMakoRuntime>>,
     event_streams: RwLock<HashMap<String, broadcast::Sender<AgenticEvent>>>,
     scheduled_wakes: RwLock<HashMap<String, JoinHandle<()>>>,
@@ -63,10 +68,69 @@ pub struct MakoRuntimeStats {
     pub uptime_secs: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MakoDispatchResult {
+    pub session_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MakoSteerStatus {
+    Accepted,
+    Queued,
+}
+
+impl MakoSteerStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Queued => "queued",
+        }
+    }
+}
+
+pub fn control_plane_app_error(error: anyhow::Error) -> AppError {
+    let daemon_error = error
+        .chain()
+        .find_map(|source| source.downcast_ref::<MakoDaemonError>());
+    match daemon_error {
+        Some(MakoDaemonError::Remote { code, message }) => match code.as_str() {
+            "not_found" | "session_not_found" | "ownership_denied" | "ownership_mismatch"
+            | "forbidden" => AppError::NotFound(message.clone()),
+            "conflict"
+            | "inactive"
+            | "no_active_session"
+            | "no_pending_interaction"
+            | "already_running"
+            | "idempotency_conflict"
+            | "request_in_progress" => AppError::Conflict(message.clone()),
+            "invalid_request" | "invalid_command" | "bad_request" => {
+                AppError::BadRequest(message.clone())
+            }
+            _ => AppError::BadGateway(format!("Mako daemon rejected the request: {message}")),
+        },
+        Some(MakoDaemonError::Unavailable(message)) => {
+            AppError::BadGateway(format!("Mako daemon unavailable: {message}"))
+        }
+        None => AppError::BadGateway(format!("Mako daemon request failed: {error}")),
+    }
+}
+
 impl MakoRuntimeManager {
     pub fn new() -> Arc<Self> {
+        Self::build(None)
+    }
+
+    pub async fn daemon_from_discovered() -> Result<Arc<Self>> {
+        let daemon = MakoDaemonControl::connect_discovered().await?;
+        Ok(Self::build(Some(daemon)))
+    }
+
+    fn build(daemon: Option<MakoDaemonControl>) -> Arc<Self> {
         let (wake_tx, mut wake_rx) = mpsc::unbounded_channel();
+        let embedded = daemon.is_none();
         let manager = Arc::new(Self {
+            daemon,
             runtimes: RwLock::new(HashMap::new()),
             event_streams: RwLock::new(HashMap::new()),
             scheduled_wakes: RwLock::new(HashMap::new()),
@@ -74,33 +138,41 @@ impl MakoRuntimeManager {
             started_at: Instant::now(),
         });
 
-        let weak_manager = Arc::downgrade(&manager);
-        tokio::spawn(async move {
-            while let Some(command) = wake_rx.recv().await {
-                let Some(manager) = weak_manager.upgrade() else {
-                    break;
-                };
+        if embedded {
+            let weak_manager = Arc::downgrade(&manager);
+            tokio::spawn(async move {
+                while let Some(command) = wake_rx.recv().await {
+                    let Some(manager) = weak_manager.upgrade() else {
+                        break;
+                    };
 
-                let WakeCommand {
-                    state,
-                    session_id,
-                    wake_reason,
-                } = command;
+                    let WakeCommand {
+                        state,
+                        session_id,
+                        wake_reason,
+                    } = command;
 
-                if let Err(err) = manager
-                    .start_or_restart_session(state, session_id.clone(), &wake_reason)
-                    .await
-                {
-                    tracing::error!(
-                        session_id = %session_id,
-                        error = %err,
-                        "Failed to resume sleeping Mako session"
-                    );
+                    if let Err(err) = manager
+                        .start_or_restart_session(state, session_id.clone(), &wake_reason)
+                        .await
+                    {
+                        tracing::error!(
+                            session_id = %session_id,
+                            error = %err,
+                            "Failed to resume sleeping Mako session"
+                        );
+                    }
                 }
-            }
-        });
+            });
+        } else {
+            drop(wake_rx);
+        }
 
         manager
+    }
+
+    pub fn is_daemon_backed(&self) -> bool {
+        self.daemon.is_some()
     }
 
     async fn event_sender(&self, session_id: &str) -> broadcast::Sender<AgenticEvent> {
@@ -124,6 +196,11 @@ impl MakoRuntimeManager {
     }
 
     pub async fn restore_persisted_sessions(&self, state: AppState) -> Result<()> {
+        if let Some(daemon) = &self.daemon {
+            daemon.recover(None, None).await?;
+            return Ok(());
+        }
+
         let runtime_store = MakoRuntimeStateStore::new(Database::new(&state.db_path)?);
         let session_manager = SessionManager::new(Database::new(&state.db_path)?);
 
@@ -140,6 +217,23 @@ impl MakoRuntimeManager {
         }
 
         Ok(())
+    }
+
+    pub async fn recover_persisted_state_for_user(
+        &self,
+        state: AppState,
+        runtime_state: &krusty_core::storage::MakoRuntimeState,
+        wake_reason: &'static str,
+        user_id: Option<&str>,
+    ) -> Result<()> {
+        if let Some(daemon) = &self.daemon {
+            daemon
+                .recover(user_id, Some(&runtime_state.session_id))
+                .await?;
+            return Ok(());
+        }
+        self.recover_persisted_state(state, runtime_state, wake_reason)
+            .await
     }
 
     pub async fn recover_persisted_state(
@@ -244,6 +338,62 @@ impl MakoRuntimeManager {
         }
     }
 
+    pub async fn stats_for_sessions_for_user(
+        &self,
+        session_ids: &[String],
+        user_id: Option<&str>,
+    ) -> Result<MakoRuntimeStats> {
+        if let Some(daemon) = &self.daemon {
+            return daemon.stats(user_id).await;
+        }
+        Ok(self.stats_for_sessions(session_ids).await)
+    }
+
+    pub async fn start_or_restart_session_for_user(
+        &self,
+        state: AppState,
+        session_id: String,
+        wake_reason: &str,
+        user_id: Option<&str>,
+    ) -> Result<()> {
+        if let Some(daemon) = &self.daemon {
+            return daemon.start(user_id, &session_id, wake_reason).await;
+        }
+        self.start_or_restart_session(state, session_id, wake_reason)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn dispatch_for_user(
+        &self,
+        user_id: Option<&str>,
+        task: &str,
+        working_dir: &str,
+        project_dir: Option<&str>,
+        model: Option<&str>,
+        start_at: Option<chrono::DateTime<chrono::Utc>>,
+        priority: MakoRunPriority,
+        crew_slug: Option<&str>,
+    ) -> Result<MakoDispatchResult> {
+        let daemon = self
+            .daemon
+            .as_ref()
+            .context("Mako dispatch requires the daemon control plane")?;
+        let (session_id, status) = daemon
+            .dispatch(
+                user_id,
+                task,
+                working_dir,
+                project_dir,
+                model,
+                start_at.map(|value| value.timestamp_millis()),
+                Some(priority.as_str()),
+                crew_slug,
+            )
+            .await?;
+        Ok(MakoDispatchResult { session_id, status })
+    }
+
     pub async fn start_or_restart_session(
         &self,
         state: AppState,
@@ -297,6 +447,92 @@ impl MakoRuntimeManager {
         self.event_sender(session_id).await.subscribe()
     }
 
+    pub async fn subscribe_for_user(
+        &self,
+        session_id: &str,
+        user_id: Option<&str>,
+    ) -> Result<broadcast::Receiver<AgenticEvent>> {
+        self.subscribe_for_user_from(session_id, user_id, None, Some(0))
+            .await
+    }
+
+    pub async fn subscribe_for_user_from(
+        &self,
+        session_id: &str,
+        user_id: Option<&str>,
+        after_sequence: Option<i64>,
+        replay_limit: Option<usize>,
+    ) -> Result<broadcast::Receiver<AgenticEvent>> {
+        let Some(daemon) = &self.daemon else {
+            return Ok(self.subscribe(session_id).await);
+        };
+
+        // Every request opens its own authenticated daemon subscription. Sharing
+        // a bridge by session ID would let a later caller inherit the first
+        // caller's ownership check and would also destroy per-client replay
+        // cursor semantics.
+        let mut subscription = daemon
+            .subscribe(user_id, session_id, after_sequence, replay_limit)
+            .await?;
+        let (event_sender, receiver) = broadcast::channel(MAKO_EVENT_BUFFER);
+        let session_id_owned = session_id.to_string();
+        tokio::spawn(async move {
+            loop {
+                match subscription.next_event().await {
+                    Ok(Some(event)) => {
+                        if event_sender.send(map_daemon_event(event)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        let _ = event_sender.send(AgenticEvent::Error {
+                            error: format!("Mako event stream failed: {error}"),
+                        });
+                        tracing::warn!(
+                            session_id = %session_id_owned,
+                            error = %error,
+                            "Mako daemon event subscription ended"
+                        );
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(receiver)
+    }
+
+    pub async fn begin_daemon_chat_turn_for_user(
+        &self,
+        session_id: &str,
+        message: &str,
+        user_id: Option<&str>,
+        is_first_message: bool,
+    ) -> Result<broadcast::Receiver<AgenticEvent>> {
+        let daemon = self
+            .daemon
+            .as_ref()
+            .context("Mako chat requires the daemon control plane")?;
+        if is_first_message {
+            // Send creates the controller for legacy/new-chat sessions. Start
+            // then queues the first run, and sequence-zero replay closes the
+            // race between those durable mutations and subscription.
+            daemon.send_message(user_id, session_id, message).await?;
+            daemon
+                .start(user_id, session_id, "chat_first_message")
+                .await?;
+            return self
+                .subscribe_for_user_from(session_id, user_id, Some(0), Some(256))
+                .await;
+        }
+
+        // Existing interactive controllers can subscribe live before the
+        // message so no response event races past the stream.
+        let receiver = self.subscribe_for_user(session_id, user_id).await?;
+        daemon.send_message(user_id, session_id, message).await?;
+        Ok(receiver)
+    }
+
     pub async fn observe(&self, session_id: &str) -> MakoSse {
         let receiver = self.subscribe(session_id).await;
 
@@ -336,6 +572,18 @@ impl MakoRuntimeManager {
         )
     }
 
+    pub async fn pause_session_for_user(
+        &self,
+        state: &AppState,
+        session_id: &str,
+        user_id: Option<&str>,
+    ) -> Result<()> {
+        if let Some(daemon) = &self.daemon {
+            return daemon.pause(user_id, session_id).await;
+        }
+        self.pause_session(state, session_id).await
+    }
+
     pub async fn schedule_session(
         &self,
         state: &AppState,
@@ -359,6 +607,236 @@ impl MakoRuntimeManager {
         self.schedule_wake_at(state.clone(), session_id, wake_at, wake_reason)
             .await;
         Ok(())
+    }
+
+    pub async fn schedule_session_for_user(
+        &self,
+        state: &AppState,
+        session_id: String,
+        wake_at: chrono::DateTime<chrono::Utc>,
+        wake_reason: &'static str,
+        sleep_reason: &'static str,
+        user_id: Option<&str>,
+    ) -> Result<()> {
+        if let Some(daemon) = &self.daemon {
+            return daemon
+                .schedule(
+                    user_id,
+                    &session_id,
+                    wake_at.timestamp_millis(),
+                    wake_reason,
+                )
+                .await;
+        }
+        self.schedule_session(state, session_id, wake_at, wake_reason, sleep_reason)
+            .await
+    }
+
+    pub async fn resume_session_for_user(
+        &self,
+        state: AppState,
+        session_id: String,
+        user_id: Option<&str>,
+    ) -> Result<()> {
+        if let Some(daemon) = &self.daemon {
+            return daemon.resume(user_id, &session_id).await;
+        }
+        self.start_or_restart_session(state, session_id, "resume")
+            .await
+    }
+
+    pub async fn cancel_session_for_user(
+        &self,
+        state: &AppState,
+        session_id: &str,
+        user_id: Option<&str>,
+    ) -> Result<()> {
+        if let Some(daemon) = &self.daemon {
+            return daemon.cancel(user_id, session_id).await;
+        }
+        self.stop_active_run(state, session_id).await;
+        Ok(())
+    }
+
+    pub async fn delete_session_for_user(
+        &self,
+        state: &AppState,
+        session_id: &str,
+        user_id: Option<&str>,
+    ) -> Result<()> {
+        if let Some(daemon) = &self.daemon {
+            daemon.delete(user_id, session_id).await?;
+            self.forget_session(session_id).await;
+            state.session_locks.write().await.remove(session_id);
+            return Ok(());
+        }
+
+        self.stop_active_run(state, session_id).await;
+        self.forget_session(session_id).await;
+        SessionManager::new(Database::new(&state.db_path)?).delete_session(session_id)?;
+        state.session_locks.write().await.remove(session_id);
+        Ok(())
+    }
+
+    pub async fn send_message_for_user(
+        &self,
+        state: AppState,
+        session_id: String,
+        message: &str,
+        user_id: Option<&str>,
+    ) -> Result<()> {
+        if let Some(daemon) = &self.daemon {
+            return daemon.send_message(user_id, &session_id, message).await;
+        }
+
+        let session_manager = SessionManager::new(Database::new(&state.db_path)?);
+        let content_json = serde_json::json!([{ "type": "text", "text": message }]).to_string();
+        session_manager.save_message(&session_id, "user", &content_json)?;
+        self.start_or_restart_session(state, session_id, "user_message")
+            .await
+    }
+
+    pub async fn set_priority_for_user(
+        &self,
+        state: &AppState,
+        session_id: &str,
+        priority: MakoRunPriority,
+        user_id: Option<&str>,
+    ) -> Result<()> {
+        if let Some(daemon) = &self.daemon {
+            return daemon
+                .set_priority(user_id, session_id, priority.as_str())
+                .await;
+        }
+        MakoRuntimeStateStore::new(Database::new(&state.db_path)?)
+            .set_priority(session_id, priority)?;
+        Ok(())
+    }
+
+    pub async fn set_crew_for_user(
+        &self,
+        state: &AppState,
+        session_id: &str,
+        crew_slug: Option<&str>,
+        user_id: Option<&str>,
+    ) -> Result<()> {
+        if let Some(daemon) = &self.daemon {
+            return daemon.set_crew(user_id, session_id, crew_slug).await;
+        }
+        MakoRuntimeStateStore::new(Database::new(&state.db_path)?)
+            .set_crew_slug(session_id, crew_slug)?;
+        Ok(())
+    }
+
+    pub async fn steer_for_user(
+        &self,
+        state: &AppState,
+        session_id: &str,
+        pending_id: &str,
+        content: Vec<krusty_core::ai::types::Content>,
+        user_id: Option<&str>,
+    ) -> Result<MakoSteerStatus> {
+        if let Some(daemon) = &self.daemon {
+            let content = serde_json::to_value(content)?;
+            let acknowledgement = daemon
+                .steer(user_id, session_id, pending_id, content)
+                .await?;
+            if acknowledgement.accepted {
+                return Ok(MakoSteerStatus::Accepted);
+            }
+            if acknowledgement.message.as_deref() == Some("queued") {
+                return Ok(MakoSteerStatus::Queued);
+            }
+            return Err(MakoDaemonError::Remote {
+                code: "conflict".to_string(),
+                message: format!(
+                    "Mako daemon declined steering: {}",
+                    acknowledgement
+                        .message
+                        .unwrap_or_else(|| "no reason provided".to_string())
+                ),
+            }
+            .into());
+        }
+
+        let content_json = serde_json::to_string(&content)?;
+        SessionManager::new(Database::new(&state.db_path)?).queue_pending_steering(
+            session_id,
+            pending_id,
+            &content_json,
+        )?;
+        let sender = state.session_inputs.read().await.get(session_id).cloned();
+        let Some(sender) = sender else {
+            return Ok(MakoSteerStatus::Queued);
+        };
+        let input = LoopInput::Steer {
+            pending_id: Some(pending_id.to_string()),
+            content,
+        };
+        Ok(if sender.send(input).is_ok() {
+            MakoSteerStatus::Accepted
+        } else {
+            MakoSteerStatus::Queued
+        })
+    }
+
+    pub async fn tool_approval_for_user(
+        &self,
+        state: &AppState,
+        session_id: &str,
+        tool_call_id: &str,
+        approved: bool,
+        user_id: Option<&str>,
+    ) -> Result<()> {
+        if let Some(daemon) = &self.daemon {
+            return daemon
+                .tool_approval(user_id, session_id, tool_call_id, approved)
+                .await;
+        }
+        let sender = state
+            .session_inputs
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .context("No active Mako session")?;
+        sender
+            .send(LoopInput::ToolApproval {
+                tool_call_id: tool_call_id.to_string(),
+                approved,
+            })
+            .context("Mako session is no longer accepting tool approvals")
+    }
+
+    pub async fn user_response_and_subscribe_for_user(
+        &self,
+        state: &AppState,
+        session_id: &str,
+        tool_call_id: &str,
+        response: &str,
+        user_id: Option<&str>,
+    ) -> Result<broadcast::Receiver<AgenticEvent>> {
+        let receiver = self.subscribe_for_user(session_id, user_id).await?;
+        if let Some(daemon) = &self.daemon {
+            daemon
+                .user_response(user_id, session_id, tool_call_id, response)
+                .await?;
+            return Ok(receiver);
+        }
+        let sender = state
+            .session_inputs
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .context("No active Mako session")?;
+        sender
+            .send(LoopInput::UserResponse {
+                tool_call_id: tool_call_id.to_string(),
+                response: response.to_string(),
+            })
+            .context("Mako session is no longer accepting user responses")?;
+        Ok(receiver)
     }
 
     pub async fn stop_active_run(&self, state: &AppState, session_id: &str) {
@@ -477,10 +955,11 @@ mod tests {
     use krusty_core::SessionManager;
 
     use super::{
-        apply_runtime_event_state, mako_notification_title, persist_runtime_state,
-        refresh_snapshot_after_run, resolve_persisted_project_dir, with_registered_session_input,
-        ActiveMakoRuntime, MakoRuntimeManager,
+        apply_runtime_event_state, control_plane_app_error, mako_notification_title,
+        persist_runtime_state, refresh_snapshot_after_run, resolve_persisted_project_dir,
+        with_registered_session_input, ActiveMakoRuntime, MakoDaemonError, MakoRuntimeManager,
     };
+    use crate::error::AppError;
     use crate::AppState;
 
     fn create_test_state() -> (AppState, PathBuf) {
@@ -532,6 +1011,31 @@ mod tests {
             mako_notification_title(Some("Verification complete"), "Auth refactor"),
             "Mako — Verification complete"
         );
+    }
+
+    #[test]
+    fn daemon_protocol_codes_map_to_stable_http_classes() {
+        let mapped = |code: &str| {
+            control_plane_app_error(
+                MakoDaemonError::Remote {
+                    code: code.to_string(),
+                    message: "test".to_string(),
+                }
+                .into(),
+            )
+        };
+
+        assert!(matches!(mapped("ownership_denied"), AppError::NotFound(_)));
+        assert!(matches!(mapped("invalid_command"), AppError::BadRequest(_)));
+        assert!(matches!(
+            mapped("idempotency_conflict"),
+            AppError::Conflict(_)
+        ));
+        assert!(matches!(
+            mapped("request_in_progress"),
+            AppError::Conflict(_)
+        ));
+        assert!(matches!(mapped("internal_error"), AppError::BadGateway(_)));
     }
 
     #[test]

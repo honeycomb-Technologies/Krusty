@@ -292,7 +292,7 @@ fn canonical_save_supersedes_the_same_active_key_transactionally() {
     first_input.source_session_id = Some("session-1".to_string());
     let first = store.save_canonical(&first_input).unwrap();
 
-    let mut replacement_input = first_input.clone();
+    let mut replacement_input = first_input;
     replacement_input.content = "Use the revised boundary.".to_string();
     replacement_input.source_session_id = Some("session-2".to_string());
     let replacement = store.save_canonical(&replacement_input).unwrap();

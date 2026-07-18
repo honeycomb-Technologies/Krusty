@@ -6,18 +6,18 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+use krusty_core::storage::bootstrap_mako_home;
 use krusty_core::storage::{
-    bootstrap_mako_home, is_valid_crew_slug, summarize_channel_bindings, summarize_crew_runtime,
-    write_mako_crew_document, write_mako_home_document, ApnsDeviceStore, AutonomousTaskStore,
-    Database, DelegatedRunStore, MakoChannelBinding, MakoChannelKind, MakoCrewDocumentKind,
-    MakoCrewRuntimeSummary, MakoHomeDocument, MakoHomeDocumentKind, MakoHomeProfile,
-    MakoCrewProfileDocumentKind, MakoProfileDocument, MakoProfileDocumentKind, MakoProfileOwner,
-    MakoProfileSnapshot, MakoProfileStore, MakoProfileStoreError, MakoRuntimeState, SessionInfo,
-    SessionType,
+    is_valid_crew_slug, summarize_channel_bindings, summarize_crew_runtime, ApnsDeviceStore,
+    AutonomousTaskStore, Database, DelegatedRunStore, MakoChannelBinding, MakoChannelKind,
+    MakoCrewProfileDocumentKind, MakoCrewRuntimeSummary, MakoHomeDocument, MakoHomeProfile,
+    MakoProfileDocument, MakoProfileDocumentKind, MakoProfileOwner, MakoProfileSnapshot,
+    MakoProfileStore, MakoProfileStoreError, MakoRuntimeState, SessionInfo, SessionType,
 };
 
 use super::super::session_access::current_user_id;
-use super::{mako_home_dir_for_user, open_session_manager};
+use super::open_session_manager;
 use crate::auth::CurrentUser;
 use crate::error::AppError;
 use crate::utils::text::trimmed_nonempty;
@@ -136,9 +136,12 @@ pub(super) async fn bootstrap_home(
         .iter()
         .map(|kind| kind.preferred_file_name().to_string())
         .collect::<Vec<_>>();
-    created_files.extend(merged.inserted_crew_documents.iter().map(|(slug, kind)| {
-        format!("crew/{slug}/{}", kind.preferred_file_name())
-    }));
+    created_files.extend(
+        merged
+            .inserted_crew_documents
+            .iter()
+            .map(|(slug, kind)| format!("crew/{slug}/{}", kind.preferred_file_name())),
+    );
     Ok(Json(MakoBootstrapResponse {
         ok: true,
         created_files,
@@ -289,6 +292,7 @@ fn map_profile_error(error: MakoProfileStoreError) -> AppError {
     match error {
         MakoProfileStoreError::RevisionConflict { .. } => AppError::Conflict(message),
         MakoProfileStoreError::EmptyContent
+        | MakoProfileStoreError::ContentTooLarge
         | MakoProfileStoreError::InvalidCrewSlug(_)
         | MakoProfileStoreError::InvalidOwner(_) => AppError::BadRequest(message),
         _ => AppError::Internal(message),
@@ -352,7 +356,8 @@ fn build_mako_home_response_from_profile(profile: &MakoProfileSnapshot) -> MakoH
 }
 
 fn legacy_profile_from_snapshot(profile: &MakoProfileSnapshot) -> MakoHomeProfile {
-    let document = |value: &Option<MakoProfileDocument<MakoProfileDocumentKind>>, file_name: &str| {
+    let document = |value: &Option<MakoProfileDocument<MakoProfileDocumentKind>>,
+                    file_name: &str| {
         value.as_ref().map(|document| MakoHomeDocument {
             file_name: file_name.to_string(),
             content: document.content.clone(),
@@ -384,6 +389,7 @@ fn legacy_profile_from_snapshot(profile: &MakoProfileSnapshot) -> MakoHomeProfil
     }
 }
 
+#[cfg(test)]
 pub(super) fn build_mako_bootstrap_response_from_dir(
     mako_home: &std::path::Path,
 ) -> Result<MakoBootstrapResponse, AppError> {
@@ -396,6 +402,7 @@ pub(super) fn build_mako_bootstrap_response_from_dir(
     })
 }
 
+#[cfg(test)]
 pub(super) fn build_mako_home_response_from_dir(mako_home: &std::path::Path) -> MakoHomeResponse {
     let profile = MakoHomeProfile::load_from(mako_home);
 
@@ -422,6 +429,7 @@ pub(super) fn build_mako_home_response_from_dir(mako_home: &std::path::Path) -> 
     }
 }
 
+#[cfg(test)]
 pub(super) fn build_mako_crew_response_from_dir_and_sessions(
     mako_home: &std::path::Path,
     sessions: &[SessionInfo],
@@ -487,6 +495,7 @@ fn build_mako_crew_response_from_loaded_profile(
     })
 }
 
+#[cfg(test)]
 pub(super) fn build_mako_channels_response_from_dir(
     state: &AppState,
     mako_home: &std::path::Path,

@@ -282,7 +282,16 @@ pub(super) async fn delete_session(
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let session_manager = open_session_manager(&state)?;
-    ensure_owned_session(&session_manager, &id, user.as_ref())?;
+    let session = load_owned_session(&session_manager, &id, user.as_ref())?;
+
+    if session.session_type == SessionType::Mako {
+        state
+            .mako_runtime
+            .delete_session_for_user(&state, &id, current_user_id(user.as_ref()))
+            .await
+            .map_err(crate::mako_runtime::control_plane_app_error)?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
 
     session_manager.delete_session(&id)?;
 

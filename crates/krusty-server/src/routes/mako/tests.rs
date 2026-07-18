@@ -235,6 +235,7 @@ async fn update_home_document_writes_to_user_scoped_mako_home() {
         Path("soul".to_string()),
         Json(DocumentWriteRequest {
             content: "Stay watchful.".to_string(),
+            expected_revision: None,
         }),
     )
     .await
@@ -267,6 +268,7 @@ async fn update_crew_document_rejects_invalid_slug() {
         Path(("../oops".to_string(), "soul".to_string())),
         Json(DocumentWriteRequest {
             content: "Nope".to_string(),
+            expected_revision: None,
         }),
     )
     .await;

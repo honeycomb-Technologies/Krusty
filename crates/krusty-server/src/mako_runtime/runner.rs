@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 use krusty_core::agent::learning::{
     review_latest_completed_mako_turn, PostTurnLearningReviewRequest,
@@ -27,6 +27,30 @@ use super::MakoRuntimeManager;
 use crate::types::AgenticEvent;
 use crate::AppState;
 
+#[derive(Clone)]
+pub(crate) enum MakoExecutionEventSink {
+    Broadcast(broadcast::Sender<AgenticEvent>),
+    Bounded(mpsc::Sender<AgenticEvent>),
+}
+
+impl MakoExecutionEventSink {
+    pub(crate) async fn send(&self, event: AgenticEvent) -> Result<()> {
+        match self {
+            // Background embedded runs are valid without an attached observer.
+            Self::Broadcast(sender) => {
+                let _ = sender.send(event);
+                Ok(())
+            }
+            // The daemon path is lossless and bounded. A vanished consumer
+            // must stop the run instead of silently continuing unmanaged.
+            Self::Bounded(sender) => sender
+                .send(event)
+                .await
+                .map_err(|_| anyhow::anyhow!("Mako execution event consumer closed")),
+        }
+    }
+}
+
 pub(super) async fn run_mako_session(
     state: AppState,
     session_id: String,
@@ -40,8 +64,9 @@ pub(super) async fn run_mako_session(
         session_id.clone(),
         run_id.clone(),
         wake_reason,
-        event_tx.clone(),
+        MakoExecutionEventSink::Broadcast(event_tx.clone()),
         manager.clone(),
+        true,
     )
     .await;
 
@@ -64,13 +89,14 @@ pub(super) async fn run_mako_session(
     manager.finish_run(&session_id, &run_id).await;
 }
 
-async fn run_mako_session_inner(
+pub(crate) async fn run_mako_session_inner(
     state: AppState,
     session_id: String,
     run_id: String,
     _wake_reason: String,
-    event_tx: broadcast::Sender<AgenticEvent>,
+    event_sink: MakoExecutionEventSink,
     manager: Arc<MakoRuntimeManager>,
+    allow_embedded_wakes: bool,
 ) -> Result<()> {
     let _guard = state
         .try_lock_session(&session_id)
@@ -182,6 +208,7 @@ async fn run_mako_session_inner(
                     &session_id,
                     user_id.as_deref(),
                     &loop_event,
+                    allow_embedded_wakes,
                 )
                 .await;
 
@@ -218,7 +245,7 @@ async fn run_mako_session_inner(
                 });
             }
             let is_finished = matches!(loop_event, LoopEvent::Finished { .. });
-            let _ = event_tx.send(loop_event.into());
+            event_sink.send(loop_event.into()).await?;
             if is_finished {
                 break;
             }
@@ -231,6 +258,7 @@ async fn run_mako_session_inner(
                 &session_id,
                 user_id.as_deref(),
                 project_scope.as_deref(),
+                allow_embedded_wakes,
             )
             .await
     })

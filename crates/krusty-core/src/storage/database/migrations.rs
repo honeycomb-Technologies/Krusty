@@ -1529,6 +1529,62 @@ impl Database {
             self.set_schema_version_tx(&tx, 39)?;
         }
 
+        // Migration 40: Make every durable Mako run transition produce an
+        // authoritative replay event in the same SQLite transaction. Runtime
+        // publishers may crash after commit; subscribers can still recover the
+        // event from this journal.
+        if current_version < 40 {
+            info!("Running migration 40: Atomic Mako run transition journal");
+            tx.execute_batch(
+                r#"
+                CREATE TRIGGER mako_runs_transition_event
+                AFTER UPDATE OF status ON mako_runs
+                WHEN OLD.status <> NEW.status
+                BEGIN
+                    INSERT OR IGNORE INTO mako_controller_events (
+                        controller_id, sequence, event_type, run_id, schedule_id,
+                        dedupe_key, payload_json, created_at
+                    )
+                    SELECT
+                        NEW.controller_id,
+                        COALESCE(MAX(sequence), 0) + 1,
+                        CASE
+                            WHEN NEW.status = 'queued' AND OLD.status = 'leased'
+                                THEN 'run_lease_requeued'
+                            WHEN NEW.status = 'queued' THEN 'run_requeued'
+                            WHEN NEW.status = 'leased' THEN 'run_leased'
+                            WHEN NEW.status = 'running' THEN 'run_started'
+                            WHEN NEW.status = 'sleeping' THEN 'run_sleeping'
+                            WHEN NEW.status = 'retry_wait' THEN 'run_retry_scheduled'
+                            WHEN NEW.status = 'awaiting_input' THEN 'run_awaiting_input'
+                            WHEN NEW.status = 'recovery_required' THEN 'recovery_required'
+                            WHEN NEW.status = 'succeeded' THEN 'run_completed'
+                            WHEN NEW.status = 'failed' THEN 'run_failed'
+                            WHEN NEW.status = 'cancelled' THEN 'run_cancelled'
+                            WHEN NEW.status = 'dead_letter' THEN 'run_dead_lettered'
+                            ELSE 'run_state_changed'
+                        END,
+                        NEW.id,
+                        NEW.schedule_id,
+                        'transition:' || NEW.id || ':' || NEW.attempt_count || ':' || NEW.status,
+                        json_object(
+                            'run_id', NEW.id,
+                            'status', NEW.status,
+                            'previous_status', OLD.status,
+                            'attempt', NEW.attempt_count,
+                            'stop_reason', NEW.last_stop_reason,
+                            'error', NEW.last_error
+                        ),
+                        NEW.updated_at
+                    FROM mako_controller_events
+                    WHERE controller_id = NEW.controller_id;
+                END;
+                "#,
+            )
+            .context("Migration 40: atomic Mako run transition journal")?;
+            self.set_schema_version_tx(&tx, 40)?;
+        }
+
         tx.commit()?;
 
         info!("Migrations complete");

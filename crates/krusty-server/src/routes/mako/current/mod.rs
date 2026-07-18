@@ -162,7 +162,11 @@ pub(super) async fn build_mako_current_response(
         .iter()
         .map(|session| session.id.clone())
         .collect::<Vec<_>>();
-    let daemon_stats = state.mako_runtime.stats_for_sessions(&session_ids).await;
+    let daemon_stats = state
+        .mako_runtime
+        .stats_for_sessions_for_user(&session_ids, user_id)
+        .await
+        .map_err(crate::mako_runtime::control_plane_app_error)?;
     let session_manager = open_session_manager(state)?;
     let runtime_store = MakoRuntimeStateStore::new(Database::new(&state.db_path)?);
     let task_store = AutonomousTaskStore::new(Database::new(&state.db_path)?);

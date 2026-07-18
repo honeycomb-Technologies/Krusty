@@ -11,6 +11,11 @@ use super::model::{
     MakoProfileSeed, MakoProfileSnapshot,
 };
 
+/// Profile documents are durable prompt inputs and API response fields. Keep
+/// each document independently bounded even though the final prompt renderer
+/// also applies an aggregate budget.
+pub const MAX_MAKO_PROFILE_DOCUMENT_BYTES: usize = 64 * 1024;
+
 pub struct MakoProfileStore {
     db: Database,
 }
@@ -21,6 +26,10 @@ pub enum MakoProfileStoreError {
     InvalidOwner(#[from] MakoProfileOwnerError),
     #[error("Mako profile content must not be empty")]
     EmptyContent,
+    #[error(
+        "Mako profile content exceeds the {MAX_MAKO_PROFILE_DOCUMENT_BYTES}-byte document limit"
+    )]
+    ContentTooLarge,
     #[error("invalid Mako crew slug: {0}")]
     InvalidCrewSlug(String),
     #[error("Mako profile revision conflict: expected {expected}, actual {actual}")]
@@ -225,6 +234,9 @@ fn normalized_content(content: &str) -> Result<&str, MakoProfileStoreError> {
     let content = content.trim();
     if content.is_empty() {
         return Err(MakoProfileStoreError::EmptyContent);
+    }
+    if content.len() > MAX_MAKO_PROFILE_DOCUMENT_BYTES {
+        return Err(MakoProfileStoreError::ContentTooLarge);
     }
     Ok(content)
 }

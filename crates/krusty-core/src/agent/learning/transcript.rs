@@ -108,7 +108,16 @@ fn canonical_text_message(record: &StoredMessageRecord) -> Option<LearningTransc
         "assistant" => "assistant",
         _ => return None,
     };
-    let content = serde_json::from_str::<Vec<Content>>(&record.content_json).ok()?;
+    let text = canonical_text_content(&record.content_json)?;
+    Some(LearningTranscriptMessage {
+        message_id: record.id,
+        role,
+        text,
+    })
+}
+
+pub(super) fn canonical_text_content(content_json: &str) -> Option<String> {
+    let content = serde_json::from_str::<Vec<Content>>(content_json).ok()?;
     let text = content
         .into_iter()
         .filter_map(|content| match content {
@@ -127,11 +136,7 @@ fn canonical_text_message(record: &StoredMessageRecord) -> Option<LearningTransc
     if text.is_empty() {
         return None;
     }
-    Some(LearningTranscriptMessage {
-        message_id: record.id,
-        role,
-        text,
-    })
+    Some(text)
 }
 
 fn bounded_message(
@@ -164,7 +169,7 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
     &value[..end]
 }
 
-fn normalize_whitespace(value: &str) -> String {
+pub(super) fn normalize_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
