@@ -23,12 +23,13 @@ LimitNOFILE=65536
 TasksMax=512
 
 # Mako needs the project tree and its own state, but not arbitrary home writes.
+# It also validates and re-secures the systemd-owned private socket directory.
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=-%h/.krusty -%h/Work -%h/.cargo -%h/.bun -%h/.cache -%h/.npm -%h/.local/share
+ReadWritePaths=-%t/krusty -%h/.krusty -%h/Work -%h/.cargo -%h/.bun -%h/.cache -%h/.npm -%h/.local/share
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true
