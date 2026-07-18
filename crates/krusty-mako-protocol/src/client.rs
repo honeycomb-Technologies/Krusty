@@ -294,7 +294,16 @@ impl EventSubscription {
 }
 
 #[cfg(not(unix))]
-pub struct EventSubscription;
+pub struct EventSubscription {
+    pub accepted: crate::SubscriptionAccepted,
+}
+
+#[cfg(not(unix))]
+impl EventSubscription {
+    pub async fn next_event(&mut self) -> Result<Option<EventEnvelope>, ClientError> {
+        Err(ClientError::UnsupportedPlatform)
+    }
+}
 
 fn request_timeout(
     config: &MakoIpcClientConfig,
