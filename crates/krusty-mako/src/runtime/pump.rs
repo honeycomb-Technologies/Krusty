@@ -1765,7 +1765,7 @@ fn completion_for(
                 ),
             }
         }
-        ExecutionOutcome::Failed { error: _, .. } => (
+        ExecutionOutcome::Failed { .. } => (
             MakoRunStatus::Failed,
             None,
             None,
