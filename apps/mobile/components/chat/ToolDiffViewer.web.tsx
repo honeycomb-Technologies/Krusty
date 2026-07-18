@@ -1,7 +1,12 @@
 import { useMemo } from "react";
 import { FileDiff, MultiFileDiff } from "@pierre/diffs/react";
-import { parsePatchFiles } from "@pierre/diffs";
+import { parsePatchFiles, registerCustomTheme } from "@pierre/diffs";
 import { useThemeContext } from "../../hooks/useTheme";
+import {
+  KRUSTY_DIFF_THEME_NAMES,
+  krustyDarkDiffTheme,
+  krustyLightDiffTheme,
+} from "./krustyDiffThemes";
 import type { ToolDiffPresentation } from "./toolDiffModel";
 
 interface ToolDiffViewerProps {
@@ -27,12 +32,15 @@ const KRUSTY_DIFF_CSS = `
   }
 `;
 
+registerCustomTheme(KRUSTY_DIFF_THEME_NAMES.dark, async () => krustyDarkDiffTheme);
+registerCustomTheme(KRUSTY_DIFF_THEME_NAMES.light, async () => krustyLightDiffTheme);
+
 export function ToolDiffViewer({ presentation }: ToolDiffViewerProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
   const options = useMemo(
     () => ({
-      theme: theme.scheme === "dark" ? "pierre-dark" : "pierre-light",
+      theme: KRUSTY_DIFF_THEME_NAMES[theme.scheme],
       themeType: theme.scheme,
       diffStyle: "unified" as const,
       diffIndicators: "classic" as const,

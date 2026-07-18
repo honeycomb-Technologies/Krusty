@@ -1,4 +1,21 @@
 import type { ToolCall } from "@krusty/api";
+import { diffLines, diffWordsWithSpace } from "diff";
+
+export type ToolDiffRowKind = "addition" | "deletion" | "metadata" | "context";
+
+export interface ToolDiffRange {
+  start: number;
+  end: number;
+}
+
+export interface ToolDiffRow {
+  kind: ToolDiffRowKind;
+  content: string;
+  prefix: string;
+  oldLine?: number;
+  newLine?: number;
+  changedRanges?: ToolDiffRange[];
+}
 
 export type ToolDiffPresentation =
   | {
@@ -47,7 +64,7 @@ export function buildToolDiffPresentation(
     return {
       kind: "patch",
       patch: emittedPatch,
-      filePath,
+      filePath: filePath ?? inferPatchPath(emittedPatch),
       summary: envelope?.summary,
       ...stats,
     };
@@ -60,6 +77,7 @@ export function buildToolDiffPresentation(
     return {
       kind: "patch",
       patch,
+      filePath: inferPatchPath(patch),
       summary: envelope?.summary,
       ...countPatchChanges(patch),
     };
@@ -97,6 +115,147 @@ export function buildToolDiffPresentation(
   }
 
   return null;
+}
+
+function inferPatchPath(patch: string): string | undefined {
+  const target = patch
+    .split("\n")
+    .find((line) => line.startsWith("+++ "))
+    ?.slice(4)
+    .trim();
+  if (!target || target === "/dev/null") return undefined;
+  return target.startsWith("b/") ? target.slice(2) : target;
+}
+
+export function buildToolDiffRows(presentation: ToolDiffPresentation): ToolDiffRow[] {
+  const rows =
+    presentation.kind === "patch"
+      ? patchRows(presentation.patch)
+      : fileRows(presentation.oldFile.contents, presentation.newFile.contents);
+  return addInlineChangeRanges(rows);
+}
+
+function patchRows(patch: string): ToolDiffRow[] {
+  const rows: ToolDiffRow[] = [];
+  let oldLine: number | undefined;
+  let newLine: number | undefined;
+
+  for (const line of patch.trimEnd().split("\n")) {
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    if (hunk) {
+      oldLine = Number(hunk[1]);
+      newLine = Number(hunk[2]);
+      rows.push({ kind: "metadata", content: line, prefix: "" });
+      continue;
+    }
+    if (
+      line.startsWith("---") ||
+      line.startsWith("+++") ||
+      line.startsWith("diff ") ||
+      line.startsWith("index ") ||
+      line.startsWith("\\ No newline")
+    ) {
+      rows.push({ kind: "metadata", content: line, prefix: "" });
+      continue;
+    }
+    if (line.startsWith("-")) {
+      rows.push({ kind: "deletion", content: line.slice(1), prefix: "-", oldLine });
+      if (oldLine !== undefined) oldLine += 1;
+      continue;
+    }
+    if (line.startsWith("+")) {
+      rows.push({ kind: "addition", content: line.slice(1), prefix: "+", newLine });
+      if (newLine !== undefined) newLine += 1;
+      continue;
+    }
+
+    const content = line.startsWith(" ") ? line.slice(1) : line;
+    rows.push({ kind: "context", content, prefix: " ", oldLine, newLine });
+    if (oldLine !== undefined) oldLine += 1;
+    if (newLine !== undefined) newLine += 1;
+  }
+  return rows;
+}
+
+function fileRows(oldContents: string, newContents: string): ToolDiffRow[] {
+  const rows: ToolDiffRow[] = [];
+  let oldLine = 1;
+  let newLine = 1;
+
+  for (const change of diffLines(oldContents, newContents)) {
+    for (const content of splitLines(change.value)) {
+      if (change.removed) {
+        rows.push({ kind: "deletion", content, prefix: "-", oldLine });
+        oldLine += 1;
+      } else if (change.added) {
+        rows.push({ kind: "addition", content, prefix: "+", newLine });
+        newLine += 1;
+      } else {
+        rows.push({ kind: "context", content, prefix: " ", oldLine, newLine });
+        oldLine += 1;
+        newLine += 1;
+      }
+    }
+  }
+  return rows;
+}
+
+function splitLines(value: string): string[] {
+  if (!value) return [];
+  const lines = value.split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
+function addInlineChangeRanges(rows: ToolDiffRow[]): ToolDiffRow[] {
+  const result = rows.map((row) => ({ ...row }));
+  let index = 0;
+
+  while (index < result.length) {
+    if (result[index]?.kind !== "deletion") {
+      index += 1;
+      continue;
+    }
+    const deletions: number[] = [];
+    while (result[index]?.kind === "deletion") deletions.push(index++);
+    const additions: number[] = [];
+    while (result[index]?.kind === "addition") additions.push(index++);
+
+    const pairs = Math.min(deletions.length, additions.length);
+    for (let pair = 0; pair < pairs; pair += 1) {
+      const deletion = result[deletions[pair]!]!;
+      const addition = result[additions[pair]!]!;
+      const ranges = changedRanges(deletion.content, addition.content);
+      deletion.changedRanges = ranges.old;
+      addition.changedRanges = ranges.new;
+    }
+  }
+  return result;
+}
+
+function changedRanges(oldValue: string, newValue: string): {
+  old: ToolDiffRange[];
+  new: ToolDiffRange[];
+} {
+  const oldRanges: ToolDiffRange[] = [];
+  const newRanges: ToolDiffRange[] = [];
+  let oldOffset = 0;
+  let newOffset = 0;
+
+  for (const change of diffWordsWithSpace(oldValue, newValue)) {
+    const length = change.value.length;
+    if (change.removed) {
+      oldRanges.push({ start: oldOffset, end: oldOffset + length });
+      oldOffset += length;
+    } else if (change.added) {
+      newRanges.push({ start: newOffset, end: newOffset + length });
+      newOffset += length;
+    } else {
+      oldOffset += length;
+      newOffset += length;
+    }
+  }
+  return { old: oldRanges, new: newRanges };
 }
 
 function firstString(...values: unknown[]): string | undefined {
@@ -199,4 +358,3 @@ function convertApplyPatchToUnified(patch?: string): string | undefined {
 
   return output.length > 0 ? `${output.join("\n")}\n` : undefined;
 }
-
