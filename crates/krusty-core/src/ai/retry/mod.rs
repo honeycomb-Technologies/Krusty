@@ -12,5 +12,6 @@ pub use backoff::{
     RetryConfig,
 };
 pub(crate) use backoff::{
-    provider_http_error, safe_provider_code, safe_provider_event_error, ProviderHttpError,
+    is_retryable_interactive_stream_error, provider_http_error, safe_provider_code,
+    safe_provider_event_error, ProviderHttpError,
 };

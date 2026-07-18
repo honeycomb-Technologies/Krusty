@@ -568,6 +568,25 @@ impl IsRetryable for anyhow::Error {
     }
 }
 
+/// Classify failures that occur while opening an interactive provider stream.
+///
+/// This boundary is narrower than the general [`IsRetryable`] contract: the
+/// caller has not received a response or exposed provider output yet. Reqwest
+/// can report an HTTP/2 reset or a connection closed during request dispatch as
+/// a request error rather than a connect error. Those failures are safe to
+/// retry here with the same bounded budget used for transient HTTP statuses.
+pub(crate) fn is_retryable_interactive_stream_error(error: &anyhow::Error) -> bool {
+    if error.is_retryable() {
+        return true;
+    }
+
+    error.downcast_ref::<reqwest::Error>().is_some_and(|error| {
+        error.status().is_none()
+            && !error.is_builder()
+            && (error.is_request() || error.is_timeout())
+    })
+}
+
 /// HTTP status codes that should trigger retry
 pub const RETRYABLE_STATUS_CODES: &[u16] = &[
     429, // Too Many Requests
