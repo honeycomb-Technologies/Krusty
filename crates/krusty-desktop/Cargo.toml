@@ -1,6 +1,6 @@
 [package]
 name = "krusty-desktop"
-version = "0.7.3"
+version = "0.8.0"
 edition = "2021"
 description = "Native GPUI desktop workspace for Krusty"
 default-run = "krusty-desktop"
