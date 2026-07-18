@@ -648,6 +648,30 @@ impl AgenticOrchestrator {
             let api_rx = match setup_result {
                 Ok(rx) => rx,
                 Err(e) => {
+                    if let Some(transport_error) = e.downcast_ref::<reqwest::Error>() {
+                        tracing::error!(
+                            session_id = %session_id,
+                            provider = %ai_client.provider_id(),
+                            model = %ai_client.config().model,
+                            is_builder = transport_error.is_builder(),
+                            is_connect = transport_error.is_connect(),
+                            is_request = transport_error.is_request(),
+                            is_timeout = transport_error.is_timeout(),
+                            is_body = transport_error.is_body(),
+                            is_decode = transport_error.is_decode(),
+                            status = transport_error.status().map(|status| status.as_u16()),
+                            error_chain = %format!("{e:#}"),
+                            "Provider streaming setup failed after retries"
+                        );
+                    } else {
+                        tracing::error!(
+                            session_id = %session_id,
+                            provider = %ai_client.provider_id(),
+                            model = %ai_client.config().model,
+                            error_chain = %format!("{e:#}"),
+                            "Provider streaming setup failed after retries"
+                        );
+                    }
                     let _ =
                         provider_call_tx.send(super::observability::ProviderCallTrace::agent_loop(
                             provider_call_id,
@@ -658,7 +682,7 @@ impl AgenticOrchestrator {
                             None,
                             provider_call_started.elapsed(),
                         ));
-                    let error = format!("AI error: {}", e);
+                    let error = format!("AI error: {e:#}");
                     if !overflow_compact_retry_attempted && is_context_overflow_error(&error) {
                         overflow_compact_retry_attempted = true;
                         tracing::warn!(

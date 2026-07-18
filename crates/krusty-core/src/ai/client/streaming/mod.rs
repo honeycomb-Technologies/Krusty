@@ -10,15 +10,39 @@ mod request_options;
 mod shared;
 
 use anyhow::Result;
+use std::fmt;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::info;
 
 use super::config::CallOptions;
 use super::core::AiClient;
-use crate::ai::retry::{with_retry, RetryConfig};
+use crate::ai::retry::{
+    is_retryable_interactive_stream_error, with_retry, IsRetryable, RetryConfig,
+};
 use crate::ai::streaming::StreamPart;
 use crate::ai::types::ModelMessage;
+
+#[derive(Debug)]
+struct InteractiveStreamSetupError(anyhow::Error);
+
+impl fmt::Display for InteractiveStreamSetupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for InteractiveStreamSetupError {}
+
+impl IsRetryable for InteractiveStreamSetupError {
+    fn is_retryable(&self) -> bool {
+        is_retryable_interactive_stream_error(&self.0)
+    }
+
+    fn retry_after(&self) -> Option<std::time::Duration> {
+        self.0.retry_after()
+    }
+}
 
 impl AiClient {
     /// Call the API with streaming response
@@ -33,10 +57,13 @@ impl AiClient {
         // A receiver is returned only after the provider accepts the request,
         // so typed transient HTTP failures and definite connect failures can be
         // retried here without duplicating visible deltas or local tool work.
-        with_retry(&retry_config, || {
+        with_retry(&retry_config, || async {
             self.call_streaming_once(messages.clone(), &canonical_options)
+                .await
+                .map_err(InteractiveStreamSetupError)
         })
         .await
+        .map_err(|error| error.0)
     }
 
     async fn call_streaming_once(
@@ -78,6 +105,8 @@ impl AiClient {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::sync::mpsc as std_mpsc;
     use std::thread;
     use std::time::Duration;
@@ -112,6 +141,48 @@ mod tests {
                 text: "reply with ok".to_string(),
             }],
         }
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout should be set");
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let mut expected_len = None;
+
+        loop {
+            let read = stream
+                .read(&mut buffer)
+                .expect("request should be readable");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+
+            if expected_len.is_none() {
+                if let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or_default();
+                    expected_len = Some(header_end + 4 + content_length);
+                }
+            }
+
+            if expected_len.is_some_and(|length| request.len() >= length) {
+                break;
+            }
+        }
+
+        request
     }
 
     #[tokio::test]
@@ -182,6 +253,87 @@ mod tests {
         let second_body = body_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("second body should be recorded");
+        assert_eq!(first_body, second_body);
+        assert_eq!(text, "ok");
+        assert!(finished);
+    }
+
+    #[tokio::test]
+    async fn dropped_request_connection_retries_before_exposing_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("address should resolve")
+        );
+        let (request_tx, request_rx) = std_mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().expect("connection should arrive");
+                let request = read_http_request(&mut stream);
+                request_tx
+                    .send(request)
+                    .expect("request should be recorded");
+
+                if attempt == 0 {
+                    // Simulate an edge/proxy closing the connection after the
+                    // request was dispatched but before any response arrived.
+                    continue;
+                }
+
+                let payload = concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n\n"
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                )
+                .expect("response should be written");
+                stream.flush().expect("response should be flushed");
+            }
+        });
+
+        let client = openai_test_client(url);
+        let mut stream = client
+            .call_streaming(vec![user_message()], &CallOptions::default())
+            .await
+            .expect("dropped setup request should be retried");
+
+        let mut text = String::new();
+        let mut finished = false;
+        while let Some(part) = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+            .await
+            .expect("stream should not stall")
+        {
+            match part {
+                StreamPart::TextDelta { delta } => text.push_str(&delta),
+                StreamPart::Finish { .. } => {
+                    finished = true;
+                    break;
+                }
+                StreamPart::Error { error } => panic!("unexpected stream error: {error}"),
+                _ => {}
+            }
+        }
+
+        server_thread.join().expect("server thread should finish");
+        let first_request = request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first request should be recorded");
+        let second_request = request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second request should be recorded");
+        let first_body = first_request
+            .split(|byte| *byte == b'\n')
+            .next_back()
+            .expect("request should contain a body");
+        let second_body = second_request
+            .split(|byte| *byte == b'\n')
+            .next_back()
+            .expect("request should contain a body");
         assert_eq!(first_body, second_body);
         assert_eq!(text, "ok");
         assert!(finished);
