@@ -145,11 +145,14 @@ interface UseNotificationsOptions {
 
 export function useNotifications(options?: UseNotificationsOptions) {
   const [pushToken, setPushToken] = useState<string | null>(null);
+  const [nativeDeviceToken, setNativeDeviceToken] = useState<string | null>(null);
   const [notificationLevel, setNotificationLevel] =
     useState<NotificationLevel>("important");
   const responseListenerRef = useRef<any>(null);
   const handledResponseIdRef = useRef<string | null>(null);
   const nativeDeliveryRegisteredRef = useRef(false);
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
 
   useEffect(() => {
     if (!Notifications) return;
@@ -163,16 +166,15 @@ export function useNotifications(options?: UseNotificationsOptions) {
       },
     );
 
-    registerForPushNotifications().then(async ({ displayToken, nativeDeviceToken }) => {
-      if (displayToken) {
-        setPushToken(displayToken);
-        await SecureStore.setItemAsync(PUSH_TOKEN_KEY, displayToken);
-      }
-      if (nativeDeviceToken) {
-        nativeDeliveryRegisteredRef.current =
-          (await options?.onRegisterNativeDevice?.(nativeDeviceToken)) === true;
-      }
-    });
+    registerForPushNotifications().then(
+      async ({ displayToken, nativeDeviceToken: token }) => {
+        if (displayToken) {
+          setPushToken(displayToken);
+          await SecureStore.setItemAsync(PUSH_TOKEN_KEY, displayToken);
+        }
+        if (token) setNativeDeviceToken(token);
+      },
+    );
 
     const handleResponse = (response: NotificationResponseEvent) => {
       const responseId = response.notification.request.identifier;
@@ -188,17 +190,17 @@ export function useNotifications(options?: UseNotificationsOptions) {
       );
 
       if (actionId === "APPROVE" && data.requestId && data.sessionId) {
-        options?.onToolApproval?.(data.sessionId, data.requestId, true);
+        optionsRef.current?.onToolApproval?.(data.sessionId, data.requestId, true);
       } else if (actionId === "DENY" && data.requestId && data.sessionId) {
-        options?.onToolApproval?.(data.sessionId, data.requestId, false);
+        optionsRef.current?.onToolApproval?.(data.sessionId, data.requestId, false);
       } else if (actionId === "VIEW_CHAT" && data.sessionId) {
-        options?.onNavigate?.("/(tabs)", { sessionId: data.sessionId });
+        optionsRef.current?.onNavigate?.("/(tabs)", { sessionId: data.sessionId });
       } else if (actionId === "OPEN_MAKO") {
         const params: Record<string, string> = { focus: "mako" };
         if (data.sessionId) {
           params.sessionId = data.sessionId;
         }
-        options?.onNavigate?.("/(tabs)", params);
+        optionsRef.current?.onNavigate?.("/(tabs)", params);
       } else if (
         actionId === Notifications?.DEFAULT_ACTION_IDENTIFIER &&
         (data.sessionId || data.focus === "mako")
@@ -210,7 +212,7 @@ export function useNotifications(options?: UseNotificationsOptions) {
         if (data.focus) {
           params.focus = data.focus;
         }
-        options?.onNavigate?.("/(tabs)", params);
+        optionsRef.current?.onNavigate?.("/(tabs)", params);
       }
 
       if (responseId) {
@@ -232,7 +234,27 @@ export function useNotifications(options?: UseNotificationsOptions) {
     return () => {
       responseListenerRef.current?.remove();
     };
-  }, [options?.onNavigate, options?.onRegisterNativeDevice, options?.onToolApproval]);
+  }, []);
+
+  useEffect(() => {
+    if (!nativeDeviceToken || !options?.onRegisterNativeDevice) return;
+    let cancelled = false;
+
+    void Promise.resolve()
+      .then(() => options.onRegisterNativeDevice?.(nativeDeviceToken))
+      .then((registered) => {
+        if (!cancelled) {
+          nativeDeliveryRegisteredRef.current = registered === true;
+        }
+      })
+      .catch(() => {
+        if (!cancelled) nativeDeliveryRegisteredRef.current = false;
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [nativeDeviceToken, options?.onRegisterNativeDevice]);
 
   const changeNotificationLevel = useCallback(
     async (level: NotificationLevel) => {

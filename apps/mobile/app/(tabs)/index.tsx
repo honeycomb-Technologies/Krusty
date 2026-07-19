@@ -179,24 +179,33 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const notifiedApprovalIdsRef = useRef<Set<string>>(new Set());
   const suppressCompletionRef = useRef(false);
   const attemptedWorkspaceSessionHydrationRef = useRef<string | null>(null);
+  const sessionsRefreshInFlightRef = useRef(false);
+  const toolActivityRef = useRef<{
+    toolCalls: ReturnType<typeof flattenToolCalls>;
+    awaitingApprovalCalls: ReturnType<typeof flattenToolCalls>;
+    activeToolCall: ReturnType<typeof getActiveToolCall>;
+    activityDiff: { additions: number; deletions: number };
+  } | null>(null);
 
   const lastAssistantMessage = useMemo(
     () => getLastAssistantMessage(messages),
     [messages],
   );
-  const toolCalls = useMemo(() => flattenToolCalls(messages), [messages]);
-  const awaitingApprovalCalls = useMemo(
-    () =>
-      toolCalls.filter((toolCall) => toolCall.status === "awaiting_approval"),
-    [toolCalls],
-  );
-  const activeToolCall = useMemo(
-    () => getActiveToolCall(toolCalls),
-    [toolCalls],
-  );
-  const activityDiff = useMemo(
-    () =>
-      toolCalls.reduce(
+  const toolActivity = useMemo(() => {
+    const toolCalls = flattenToolCalls(messages);
+    const previous = toolActivityRef.current;
+    const unchanged =
+      previous?.toolCalls.length === toolCalls.length &&
+      toolCalls.every((toolCall, index) => previous.toolCalls[index] === toolCall);
+    if (unchanged && previous) return previous;
+
+    const next = {
+      toolCalls,
+      awaitingApprovalCalls: toolCalls.filter(
+        (toolCall) => toolCall.status === "awaiting_approval",
+      ),
+      activeToolCall: getActiveToolCall(toolCalls),
+      activityDiff: toolCalls.reduce(
         (total, toolCall) => {
           const diff = buildToolDiffPresentation(toolCall);
           if (diff) {
@@ -207,8 +216,16 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         },
         { additions: 0, deletions: 0 },
       ),
-    [toolCalls],
-  );
+    };
+    toolActivityRef.current = next;
+    return next;
+  }, [messages]);
+  const {
+    toolCalls,
+    awaitingApprovalCalls,
+    activeToolCall,
+    activityDiff,
+  } = toolActivity;
 
   const lastAssistantSnippet =
     lastAssistantMessage?.content?.slice(0, 200) ?? "";
@@ -306,6 +323,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   });
 
   useWidgetSync({
+    sessionId,
     hasActiveSession: Boolean(sessionId),
     sessionTitle: sessionTitle || "Untitled",
     lastMessage: lastAssistantSnippet,
@@ -420,13 +438,20 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     }
 
     const refreshHandle = setInterval(() => {
-      if (AppState.currentState === "active") {
-        void sessionsStore.getState().loadSessions();
-      }
+      if (
+        AppState.currentState !== "active" ||
+        sessionStore.getState().isStreaming ||
+        sessionsRefreshInFlightRef.current
+      ) return;
+
+      sessionsRefreshInFlightRef.current = true;
+      void sessionsStore.getState().loadSessions().finally(() => {
+        sessionsRefreshInFlightRef.current = false;
+      });
     }, 5000);
 
     return () => clearInterval(refreshHandle);
-  }, [client, isConnected, sessionsStore]);
+  }, [client, isConnected, sessionStore, sessionsStore]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextState) => {
@@ -545,14 +570,11 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
 
     previousStreamingRef.current = isStreaming;
   }, [
-    activeToolCall,
-    activityDiff,
+    activityDiff.additions,
+    activityDiff.deletions,
     awaitingApprovalCalls,
     endActivity,
     isStreaming,
-    isThinking,
-    lastAssistantMessage,
-    model,
     notifyStreamComplete,
     sessionId,
     sessionTitle,
@@ -597,6 +619,30 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       void handleToolApprovalAction(targetSessionId, toolCallId, approved);
     },
     [handleToolApprovalAction],
+  );
+  const handleApproveTranscriptTool = useCallback(
+    (targetSessionId: string, toolCallId: string) => {
+      handleSessionToolApproval(targetSessionId, toolCallId, true);
+    },
+    [handleSessionToolApproval],
+  );
+  const handleDenyTranscriptTool = useCallback(
+    (targetSessionId: string, toolCallId: string) => {
+      handleSessionToolApproval(targetSessionId, toolCallId, false);
+    },
+    [handleSessionToolApproval],
+  );
+  const handleSubmitTranscriptTool = useCallback(
+    (toolCallId: string, result: string) => {
+      void handleInteractiveToolResult(toolCallId, result);
+    },
+    [handleInteractiveToolResult],
+  );
+  const handleTranscriptPlanConfirm = useCallback(
+    (toolCallId: string, choice: "execute" | "abandon") => {
+      void handlePlanConfirm(toolCallId, choice);
+    },
+    [handlePlanConfirm],
   );
 
   const handleStop = useCallback(() => {
@@ -770,18 +816,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           isStreaming={isStreaming}
           isThinking={isThinking}
           activeToolCallId={activeToolCallId}
-          onApproveTool={(targetSessionId, toolCallId) =>
-            handleSessionToolApproval(targetSessionId, toolCallId, true)
-          }
-          onDenyTool={(targetSessionId, toolCallId) =>
-            handleSessionToolApproval(targetSessionId, toolCallId, false)
-          }
-          onSubmitToolResult={(toolCallId, result) =>
-            void handleInteractiveToolResult(toolCallId, result)
-          }
-          onPlanConfirm={(toolCallId, choice) =>
-            void handlePlanConfirm(toolCallId, choice)
-          }
+          onApproveTool={handleApproveTranscriptTool}
+          onDenyTool={handleDenyTranscriptTool}
+          onSubmitToolResult={handleSubmitTranscriptTool}
+          onPlanConfirm={handleTranscriptPlanConfirm}
           emptyState={
             <View style={styles.empty}>
               <KrustyLogo />
@@ -973,14 +1011,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           model,
           models,
           tokenCount,
-          onApproveTool: (targetSessionId, toolCallId) =>
-            handleSessionToolApproval(targetSessionId, toolCallId, true),
-          onDenyTool: (targetSessionId, toolCallId) =>
-            handleSessionToolApproval(targetSessionId, toolCallId, false),
-          onSubmitToolResult: (toolCallId, result) =>
-            void handleInteractiveToolResult(toolCallId, result),
-          onPlanConfirm: (toolCallId, choice) =>
-            void handlePlanConfirm(toolCallId, choice),
+          onApproveTool: handleApproveTranscriptTool,
+          onDenyTool: handleDenyTranscriptTool,
+          onSubmitToolResult: handleSubmitTranscriptTool,
+          onPlanConfirm: handleTranscriptPlanConfirm,
           onSend: handleChatBarSend,
           onStop: handleStop,
           onThinkingChange: (level) =>

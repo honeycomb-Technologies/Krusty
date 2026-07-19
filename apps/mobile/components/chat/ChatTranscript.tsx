@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  memo,
   useMemo,
   useRef,
   useState,
@@ -139,6 +140,7 @@ export function ChatTranscript({
   const pendingAutoScrollRef = useRef(false);
   const pendingAutoScrollAnimatedRef = useRef(false);
   const bottomAnchorTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const bottomAnchorFrameRef = useRef<number | null>(null);
   const isUserDraggingRef = useRef(false);
   const programmaticScrollUntilRef = useRef(0);
   const loadedSessionIdRef = useRef<string | null>(null);
@@ -184,6 +186,10 @@ export function ChatTranscript({
   const clearBottomAnchorTimers = useCallback(() => {
     bottomAnchorTimersRef.current.forEach((timer) => clearTimeout(timer));
     bottomAnchorTimersRef.current = [];
+    if (bottomAnchorFrameRef.current !== null) {
+      cancelAnimationFrame(bottomAnchorFrameRef.current);
+      bottomAnchorFrameRef.current = null;
+    }
   }, []);
 
   const markProgrammaticScroll = useCallback((durationMs = PROGRAMMATIC_SCROLL_SETTLE_MS) => {
@@ -226,16 +232,16 @@ export function ChatTranscript({
         scrollToBottom(useAnimated);
       };
 
-      requestAnimationFrame(() => {
+      bottomAnchorFrameRef.current = requestAnimationFrame(() => {
+        bottomAnchorFrameRef.current = null;
         anchor(animated);
-        requestAnimationFrame(() => {
-          anchor(false);
-        });
       });
 
-      bottomAnchorTimersRef.current = [80, 180, 360].map((delay) =>
-        setTimeout(() => anchor(false), delay),
-      );
+      // One bounded fallback catches delayed Markdown measurement without
+      // issuing a multi-frame scroll storm for every streamed delta.
+      bottomAnchorTimersRef.current = [
+        setTimeout(() => anchor(false), 96),
+      ];
     },
     [clearBottomAnchorTimers, scrollToBottom],
   );
@@ -389,6 +395,37 @@ export function ChatTranscript({
     });
   }, [markProgrammaticScroll, onScrollTargetHandled, scrollToMessageId, turns]);
 
+  const renderTurn = useCallback(
+    ({ item, index }: { item: TranscriptTurn; index: number }) => {
+      const isLastTurn = index === turns.length - 1;
+      return (
+        <TranscriptTurnRow
+          turn={item}
+          isLastTurn={isLastTurn}
+          isStreaming={isStreaming && isLastTurn}
+          isThinking={isThinking && isLastTurn}
+          activeToolCallId={activeToolCallId}
+          sessionId={sessionId}
+          onApproveTool={onApproveTool}
+          onDenyTool={onDenyTool}
+          onSubmitToolResult={onSubmitToolResult}
+          onPlanConfirm={onPlanConfirm}
+        />
+      );
+    },
+    [
+      activeToolCallId,
+      isStreaming,
+      isThinking,
+      onApproveTool,
+      onDenyTool,
+      onPlanConfirm,
+      onSubmitToolResult,
+      sessionId,
+      turns.length,
+    ],
+  );
+
   if (messages.length === 0) {
     return (
       <Pressable style={styles.empty} onPress={Keyboard.dismiss}>
@@ -420,23 +457,7 @@ export function ChatTranscript({
         }}
         onScroll={handleListScroll}
         scrollEventThrottle={16}
-        renderItem={({ item, index }) => {
-          const isLastTurn = index === turns.length - 1;
-          return (
-            <TranscriptTurnRow
-              turn={item}
-              isLastTurn={isLastTurn}
-              isStreaming={isStreaming && isLastTurn}
-              isThinking={isThinking && isLastTurn}
-              activeToolCallId={activeToolCallId}
-              sessionId={sessionId}
-              onApproveTool={onApproveTool}
-              onDenyTool={onDenyTool}
-              onSubmitToolResult={onSubmitToolResult}
-              onPlanConfirm={onPlanConfirm}
-            />
-          );
-        }}
+        renderItem={renderTurn}
         style={styles.flex}
         contentContainerStyle={[
           styles.list,
@@ -588,7 +609,7 @@ interface TranscriptTurnRowProps {
   ) => void | Promise<void>;
 }
 
-function TranscriptTurnRow({
+const TranscriptTurnRow = memo(function TranscriptTurnRow({
   turn,
   isLastTurn,
   isStreaming,
@@ -629,7 +650,18 @@ function TranscriptTurnRow({
       })}
     </View>
   );
-}
+}, (previous, next) => (
+  previous.turn.renderSignature === next.turn.renderSignature &&
+  previous.isLastTurn === next.isLastTurn &&
+  previous.isStreaming === next.isStreaming &&
+  previous.isThinking === next.isThinking &&
+  previous.activeToolCallId === next.activeToolCallId &&
+  previous.sessionId === next.sessionId &&
+  previous.onApproveTool === next.onApproveTool &&
+  previous.onDenyTool === next.onDenyTool &&
+  previous.onSubmitToolResult === next.onSubmitToolResult &&
+  previous.onPlanConfirm === next.onPlanConfirm
+));
 
 const styles = StyleSheet.create({
   flex: {

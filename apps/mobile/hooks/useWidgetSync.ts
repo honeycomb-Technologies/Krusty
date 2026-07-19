@@ -1,5 +1,9 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { Platform } from "react-native";
+import {
+  shouldSyncChatWidget,
+  type ChatWidgetCadenceState,
+} from "./presentationCadence";
 
 // Native-only — widget instances loaded dynamically to avoid crash on web
 let MakoWidgetInstance: any = null;
@@ -15,6 +19,7 @@ if (Platform.OS === "ios") {
 }
 
 interface ChatState {
+  sessionId: string | null;
   hasActiveSession: boolean;
   sessionTitle: string;
   lastMessage: string;
@@ -25,15 +30,23 @@ interface ChatState {
 }
 
 export function useWidgetSync(chatState: ChatState) {
+  const previousStateRef = useRef<ChatWidgetCadenceState | null>(null);
+
   useEffect(() => {
     if (Platform.OS !== "ios") return;
+    const nextState: ChatWidgetCadenceState = chatState;
+    if (!shouldSyncChatWidget(previousStateRef.current, nextState)) return;
+
+    previousStateRef.current = nextState;
+    const { sessionId: _sessionId, ...snapshot } = nextState;
 
     try {
-      ChatWidgetInstance.updateSnapshot(chatState);
+      ChatWidgetInstance.updateSnapshot(snapshot);
     } catch {
       // Widget may not be configured yet
     }
   }, [
+    chatState.sessionId,
     chatState.hasActiveSession,
     chatState.sessionTitle,
     chatState.lastMessage,
