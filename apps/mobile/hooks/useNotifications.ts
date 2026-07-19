@@ -41,12 +41,25 @@ type NotificationResponseEvent = {
   actionIdentifier: string;
   notification: {
     request: {
+      identifier?: string;
       content: {
         data?: unknown;
       };
     };
   };
 };
+
+function notificationResponseData(value: unknown): NotificationResponseData {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const root = value as Record<string, unknown>;
+  const nested =
+    root.data && typeof root.data === "object" && !Array.isArray(root.data)
+      ? (root.data as Record<string, unknown>)
+      : {};
+  return { ...nested, ...root } as NotificationResponseData;
+}
 
 async function registerNotificationCategories() {
   if (!Notifications) return;
@@ -127,7 +140,7 @@ interface UseNotificationsOptions {
     approved: boolean,
   ) => void;
   onNavigate?: (route: string, params?: Record<string, string>) => void;
-  onRegisterNativeDevice?: (deviceToken: string) => void | Promise<void>;
+  onRegisterNativeDevice?: (deviceToken: string) => boolean | Promise<boolean>;
 }
 
 export function useNotifications(options?: UseNotificationsOptions) {
@@ -135,10 +148,12 @@ export function useNotifications(options?: UseNotificationsOptions) {
   const [notificationLevel, setNotificationLevel] =
     useState<NotificationLevel>("important");
   const responseListenerRef = useRef<any>(null);
+  const handledResponseIdRef = useRef<string | null>(null);
+  const nativeDeliveryRegisteredRef = useRef(false);
 
   useEffect(() => {
     if (!Notifications) return;
-    registerNotificationCategories();
+    void registerNotificationCategories().catch(() => {});
 
     SecureStore.getItemAsync(NOTIFICATION_LEVEL_KEY).then(
       (saved: string | null) => {
@@ -154,42 +169,65 @@ export function useNotifications(options?: UseNotificationsOptions) {
         await SecureStore.setItemAsync(PUSH_TOKEN_KEY, displayToken);
       }
       if (nativeDeviceToken) {
-        await options?.onRegisterNativeDevice?.(nativeDeviceToken);
+        nativeDeliveryRegisteredRef.current =
+          (await options?.onRegisterNativeDevice?.(nativeDeviceToken)) === true;
       }
     });
 
-    responseListenerRef.current =
-      Notifications.addNotificationResponseReceivedListener((response: NotificationResponseEvent) => {
-        const actionId = response.actionIdentifier;
-        const data = (response.notification.request.content.data ??
-          {}) as NotificationResponseData;
+    const handleResponse = (response: NotificationResponseEvent) => {
+      const responseId = response.notification.request.identifier;
+      if (responseId && handledResponseIdRef.current === responseId) {
+        return;
+      }
+      if (responseId) {
+        handledResponseIdRef.current = responseId;
+      }
+      const actionId = response.actionIdentifier;
+      const data = notificationResponseData(
+        response.notification.request.content.data,
+      );
 
-        if (actionId === "APPROVE" && data.requestId && data.sessionId) {
-          options?.onToolApproval?.(data.sessionId, data.requestId, true);
-        } else if (actionId === "DENY" && data.requestId && data.sessionId) {
-          options?.onToolApproval?.(data.sessionId, data.requestId, false);
-        } else if (actionId === "VIEW_CHAT" && data.sessionId) {
-          options?.onNavigate?.("/(tabs)", { sessionId: data.sessionId });
-        } else if (actionId === "OPEN_MAKO") {
-          const params: Record<string, string> = { focus: "mako" };
-          if (data.sessionId) {
-            params.sessionId = data.sessionId;
-          }
-          options?.onNavigate?.("/(tabs)", params);
-        } else if (
-          actionId === Notifications?.DEFAULT_ACTION_IDENTIFIER &&
-          (data.sessionId || data.focus === "mako")
-        ) {
-          const params: Record<string, string> = {};
-          if (data.sessionId) {
-            params.sessionId = data.sessionId;
-          }
-          if (data.focus) {
-            params.focus = data.focus;
-          }
-          options?.onNavigate?.("/(tabs)", params);
+      if (actionId === "APPROVE" && data.requestId && data.sessionId) {
+        options?.onToolApproval?.(data.sessionId, data.requestId, true);
+      } else if (actionId === "DENY" && data.requestId && data.sessionId) {
+        options?.onToolApproval?.(data.sessionId, data.requestId, false);
+      } else if (actionId === "VIEW_CHAT" && data.sessionId) {
+        options?.onNavigate?.("/(tabs)", { sessionId: data.sessionId });
+      } else if (actionId === "OPEN_MAKO") {
+        const params: Record<string, string> = { focus: "mako" };
+        if (data.sessionId) {
+          params.sessionId = data.sessionId;
         }
-      });
+        options?.onNavigate?.("/(tabs)", params);
+      } else if (
+        actionId === Notifications?.DEFAULT_ACTION_IDENTIFIER &&
+        (data.sessionId || data.focus === "mako")
+      ) {
+        const params: Record<string, string> = {};
+        if (data.sessionId) {
+          params.sessionId = data.sessionId;
+        }
+        if (data.focus) {
+          params.focus = data.focus;
+        }
+        options?.onNavigate?.("/(tabs)", params);
+      }
+
+      if (responseId) {
+        void Notifications.dismissNotificationAsync(responseId).catch(() => {});
+      }
+    };
+
+    responseListenerRef.current =
+      Notifications.addNotificationResponseReceivedListener(handleResponse);
+    void Notifications.getLastNotificationResponseAsync()
+      .then((response: NotificationResponseEvent | null) => {
+        if (response) {
+          handleResponse(response);
+          return Notifications.clearLastNotificationResponseAsync();
+        }
+      })
+      .catch(() => {});
 
     return () => {
       responseListenerRef.current?.remove();
@@ -208,6 +246,7 @@ export function useNotifications(options?: UseNotificationsOptions) {
     async (requestId: string, toolName: string, sessionId: string) => {
       if (!Notifications || notificationLevel === "silent") return;
       if (AppState.currentState === "active") return;
+      if (Platform.OS === "ios" && nativeDeliveryRegisteredRef.current) return;
 
       await Notifications.scheduleNotificationAsync({
         content: {
@@ -232,6 +271,7 @@ export function useNotifications(options?: UseNotificationsOptions) {
     ) => {
       if (!Notifications || notificationLevel === "silent") return;
       if (AppState.currentState === "active") return;
+      if (Platform.OS === "ios" && nativeDeliveryRegisteredRef.current) return;
 
       const m = Math.floor(elapsedSeconds / 60);
       const s = elapsedSeconds % 60;

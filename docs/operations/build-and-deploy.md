@@ -4,7 +4,7 @@ This document explains how Krusty is built, tested, and distributed across all o
 
 ## Rust workspace
 
-The Rust side of Krusty is organized as a Cargo workspace with ten Krusty crates plus the `grok-auth` support crate. The primary runtime boundaries are:
+The Rust side of Krusty is organized as a Cargo workspace with seven Krusty crates plus the `grok-auth` support crate. The primary runtime boundaries are:
 
 - **krusty-cli** (`crates/krusty-cli`) -- The terminal application with the TUI. This is the default member of the workspace, so a bare `cargo build` compiles it. It depends on both `krusty-core` and `krusty-server`.
 - **krusty-core** (`crates/krusty-core`) -- The core library containing AI provider integrations, tool implementations, the ACP/MCP protocol layers, WASM extension hosting, and local storage. Everything shared between the CLI and the server lives here.
@@ -12,12 +12,11 @@ The Rust side of Krusty is organized as a Cargo workspace with ten Krusty crates
 - **krusty-mako** (`crates/krusty-mako`) -- The independently supervised autonomous execution owner, durable scheduler, recovery loop, and event-log service.
 - **krusty-mako-protocol** (`crates/krusty-mako-protocol`) -- The typed, authenticated local protocol shared by the server, daemon, and control clients.
 - **krusty-client** and **krusty-client-state** -- Typed transport and shared client-state boundaries.
-- **krusty-desktop**, **krusty-mobile**, and **krusty-mobile-ui** -- Native desktop/mobile presentation crates that consume the same core contracts.
 
 The workspace root `Cargo.toml` sets a few important release profile options: link-time optimization (`lto = true`), a single codegen unit (`codegen-units = 1`), and symbol stripping (`strip = true`). These produce smaller, faster release binaries at the cost of longer compile times. The workspace also defines shared lint rules so all workspace crates enforce the same code quality standards through Clippy.
 
 The product-facing Krusty crates and desktop bundle currently share version
-`0.8.0` and edition 2021. The internal Mako daemon/protocol crates have their
+`0.8.1` and edition 2021. The internal Mako daemon/protocol crates have their
 own `0.1.0` package versions; release tags are validated against the `krusty`
 package version.
 
@@ -67,7 +66,7 @@ The preflight is safe for validation: it reads repository metadata, remote refs,
 
 ## Release automation
 
-Releases are triggered by pushing a Git tag that matches `v*` (for example, `v0.8.0`). Before packaging, the release workflow calls `.github/workflows/client-quality.yml`; no release build starts unless the API streaming/error contracts, shared-state type-check/tests, mobile TypeScript check, and Expo web export all pass. The remaining release workflow (`.github/workflows/release.yml`) has three artifact stages:
+Releases are triggered by pushing a Git tag that matches `v*` (for example, `v0.8.1`). Before packaging, the release workflow calls `.github/workflows/client-quality.yml`; no release build starts unless the API streaming/error contracts, shared-state type-check/tests, mobile TypeScript check, and Expo web export all pass. The remaining release workflow (`.github/workflows/release.yml`) has three artifact stages:
 
 **1. Build matrix.** A matrix job compiles release binaries for five targets:
 
@@ -110,7 +109,7 @@ sh install.sh --self-test
 You can pin a specific version by setting `VERSION` before running the script:
 
 ```bash
-curl -fsSL ... | VERSION=v0.8.0 sh
+curl -fsSL ... | VERSION=v0.8.1 sh
 ```
 
 ## Self-hosted systemd service
@@ -186,7 +185,7 @@ GitHub does not publish the versioned source archive until its tag exists, so
 AUR metadata is updated after the protected release tag is published. Run:
 
 ```bash
-./aur/update-release.sh 0.8.0
+./aur/update-release.sh 0.8.1
 cd aur
 makepkg --verifysource -f
 makepkg --printsrcinfo | diff -u .SRCINFO -

@@ -409,7 +409,7 @@ packages should omit `entry_component` and contribute `agent_extensions`,
 
 ### js
 
-`runtime = "js"` runs JavaScript and TypeScript entry files through edon/libnode. This follows the same proof used in Pi's GPUI/libnode workspaces: load libnode dynamically, evaluate JS/TS through edon, and keep npm as the package boundary. Krusty looks for libnode at `KRUSTY_LIBNODE` first, then `EDON_LIBNODE_PATH`.
+`runtime = "js"` runs JavaScript and TypeScript entry files through edon/libnode: load libnode dynamically, evaluate JS/TS through edon, and keep npm as the package boundary. Krusty looks for libnode at `KRUSTY_LIBNODE` first, then `EDON_LIBNODE_PATH`.
 
 JS/TS plugins register a small text-mode TUI object:
 

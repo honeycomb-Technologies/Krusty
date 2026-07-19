@@ -21,12 +21,10 @@ type LiveActivityInteractionEvent = {
 
 interface StreamState {
   chatTitle: string;
-  model: string;
-  status: 'streaming' | 'thinking' | 'tool_call' | 'awaiting_approval' | 'complete';
-  currentText: string;
-  currentTool: string;
-  tokenCount: number;
-  progress: number;
+  status: 'working' | 'needs_input' | 'completed';
+  toolCount: number;
+  filesAdded: number;
+  filesRemoved: number;
   toolApprovalId?: string;
   toolApprovalName?: string;
   toolApprovalSessionId?: string;
@@ -65,6 +63,26 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
   const startTimeRef = useRef<number>(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stateRef = useRef<StreamState | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
+
+  const clearTimer = useCallback(() => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+
+  const closeExistingActivities = useCallback(() => {
+    if (!ChatStreamActivityFactory) return;
+    try {
+      const instances = ChatStreamActivityFactory.getInstances?.() ?? [];
+      for (const instance of instances) {
+        void instance.end('immediate').catch(() => {});
+      }
+    } catch {
+      // ActivityKit is unavailable on unsupported devices and simulators.
+    }
+  }, []);
 
   // Listen for button interactions from the Live Activity (approve/deny)
   useEffect(() => {
@@ -99,28 +117,40 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
     return () => sub.remove();
   }, [options?.onToolApproval]);
 
-  const startActivity = useCallback((chatTitle: string, model: string) => {
-    if (Platform.OS !== 'ios') return;
+  const startActivity = useCallback((sessionId: string, chatTitle: string) => {
+    if (Platform.OS !== 'ios' || !sessionId || !ChatStreamActivityFactory) return;
+
+    if (activityRef.current && sessionIdRef.current === sessionId) {
+      return;
+    }
+
+    clearTimer();
+    if (activityRef.current) {
+      void activityRef.current.end('immediate').catch(() => {});
+      activityRef.current = null;
+    }
+    closeExistingActivities();
 
     startTimeRef.current = Date.now();
+    sessionIdRef.current = sessionId;
     stateRef.current = {
       chatTitle,
-      model,
-      status: 'thinking',
-      currentText: '',
-      currentTool: '',
-      tokenCount: 0,
-      progress: 0,
+      status: 'working',
+      toolCount: 0,
+      filesAdded: 0,
+      filesRemoved: 0,
     };
 
     try {
       activityRef.current = ChatStreamActivityFactory.start({
         ...stateRef.current,
         elapsedSeconds: 0,
-      }, 'krusty://chat');
+      }, `krusty://?sessionId=${encodeURIComponent(sessionId)}`);
     } catch {
       // Live Activities may not be available (simulator, unsupported device)
       activityRef.current = null;
+      stateRef.current = null;
+      sessionIdRef.current = null;
       return;
     }
 
@@ -133,7 +163,7 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
         elapsedSeconds: elapsed,
       }).catch(() => {});
     }, 1000);
-  }, []);
+  }, [clearTimer, closeExistingActivities]);
 
   const updateActivity = useCallback((partial: Partial<StreamState>) => {
     if (!activityRef.current || !stateRef.current) return;
@@ -148,32 +178,29 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
   }, []);
 
   const endActivity = useCallback(() => {
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
+    clearTimer();
 
     if (!activityRef.current || !stateRef.current) return;
 
     const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
 
-    activityRef.current.end('default', {
+    activityRef.current.end({ after: new Date(Date.now() + 60_000) }, {
       ...stateRef.current,
-      status: 'complete',
-      progress: 1,
+      status: 'completed',
       elapsedSeconds: elapsed,
-    }).catch(() => {});
+    }, new Date()).catch(() => {});
 
     activityRef.current = null;
     stateRef.current = null;
-  }, []);
+    sessionIdRef.current = null;
+  }, [clearTimer]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
+      clearTimer();
     };
-  }, []);
+  }, [clearTimer]);
 
   return { startActivity, updateActivity, endActivity };
 }

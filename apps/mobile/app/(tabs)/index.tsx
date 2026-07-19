@@ -8,7 +8,7 @@ import {
   useWindowDimensions,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { router } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 import { Bot, Menu, Toolbox } from "lucide-react-native";
 import * as Haptics from "../../platform/haptics";
 import * as SecureStore from "../../platform/secure-store";
@@ -36,6 +36,7 @@ import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
 import { useLiveActivity } from "../../hooks/useLiveActivity";
 import { useWidgetSync } from "../../hooks/useWidgetSync";
 import { useNotifications } from "../../hooks/useNotifications";
+import { buildToolDiffPresentation } from "../../components/chat/toolDiffModel";
 import Animated from "react-native-reanimated";
 
 import type {
@@ -102,6 +103,10 @@ export default function ChatScreen() {
 }
 
 function ChatScreenContent({ stores }: { stores: LoadedStores }) {
+  const routeParams = useLocalSearchParams<{
+    sessionId?: string | string[];
+    focus?: string | string[];
+  }>();
   const { theme } = useThemeContext();
   const { client, isConnected } = useConnection();
   const { isDesktop } = useBreakpoint();
@@ -189,6 +194,21 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     () => getActiveToolCall(toolCalls),
     [toolCalls],
   );
+  const activityDiff = useMemo(
+    () =>
+      toolCalls.reduce(
+        (total, toolCall) => {
+          const diff = buildToolDiffPresentation(toolCall);
+          if (diff) {
+            total.additions += diff.additions;
+            total.deletions += diff.deletions;
+          }
+          return total;
+        },
+        { additions: 0, deletions: 0 },
+      ),
+    [toolCalls],
+  );
 
   const lastAssistantSnippet =
     lastAssistantMessage?.content?.slice(0, 200) ?? "";
@@ -244,16 +264,33 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     [sessionStore, sessionsStore],
   );
 
+  useEffect(() => {
+    const targetSessionId = Array.isArray(routeParams.sessionId)
+      ? routeParams.sessionId[0]
+      : routeParams.sessionId;
+    const focus = Array.isArray(routeParams.focus)
+      ? routeParams.focus[0]
+      : routeParams.focus;
+    if ((targetSessionId && targetSessionId !== sessionId) || focus === "mako") {
+      void handleNotificationNavigate("/(tabs)", {
+        ...(targetSessionId ? { sessionId: targetSessionId } : {}),
+        ...(focus ? { focus } : {}),
+      });
+    }
+  }, [handleNotificationNavigate, routeParams.focus, routeParams.sessionId, sessionId]);
+
   const handleRegisterNativeDevice = useCallback(
     async (deviceToken: string) => {
       if (!client || !isConnected || !deviceToken) {
-        return;
+        return false;
       }
 
       try {
         await client.registerApnsDevice(deviceToken);
+        return true;
       } catch (error) {
         console.debug("Failed to register APNs device", error);
+        return false;
       }
     },
     [client, isConnected],
@@ -457,27 +494,17 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     }
 
     if (shouldKeepActivity && !liveActivityOpenRef.current) {
-      startActivity(sessionTitle || "Chat", model || "unknown");
+      startActivity(sessionId!, sessionTitle || "Chat");
       liveActivityOpenRef.current = true;
     }
 
     if (shouldKeepActivity) {
       updateActivity({
         chatTitle: sessionTitle || "Chat",
-        model: model || "unknown",
-        status: awaitingApproval
-          ? "awaiting_approval"
-          : isThinking
-            ? "thinking"
-            : activeToolCall
-              ? "tool_call"
-              : "streaming",
-        currentText: isThinking
-          ? "Thinking..."
-          : (lastAssistantMessage?.content?.slice(-200) ?? ""),
-        currentTool: awaitingApproval?.name || activeToolCall?.name || "",
-        tokenCount,
-        progress: awaitingApproval ? 0.85 : isStreaming ? 0.5 : 1,
+        status: awaitingApproval ? "needs_input" : "working",
+        toolCount: toolCalls.length,
+        filesAdded: activityDiff.additions,
+        filesRemoved: activityDiff.deletions,
         toolApprovalId: awaitingApproval?.id,
         toolApprovalName: awaitingApproval?.name,
         toolApprovalSessionId: awaitingApproval ? sessionId ?? undefined : undefined,
@@ -519,6 +546,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     previousStreamingRef.current = isStreaming;
   }, [
     activeToolCall,
+    activityDiff,
     awaitingApprovalCalls,
     endActivity,
     isStreaming,
@@ -530,6 +558,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     sessionTitle,
     startActivity,
     tokenCount,
+    toolCalls.length,
     updateActivity,
   ]);
 

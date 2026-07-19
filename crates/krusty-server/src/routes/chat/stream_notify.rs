@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ pub(super) struct ChatStreamRunOutcome {
     awaiting_input: bool,
     had_error: bool,
     stop_reason: Option<LoopStopReason>,
+    notified_tool_approvals: HashSet<String>,
 }
 
 impl ChatStreamRunOutcome {
@@ -35,7 +37,7 @@ impl ChatStreamRunOutcome {
             self.stop_reason = Some(reason.clone());
         }
 
-        if matches!(event, LoopEvent::AwaitingInput { .. }) {
+        if matches!(event, LoopEvent::AwaitingInput { .. }) && !self.awaiting_input {
             self.awaiting_input = true;
             notify_chat_awaiting_input(push_service, apns_service, user_id, session_id);
         }
@@ -44,7 +46,9 @@ impl ChatStreamRunOutcome {
             ref id, ref name, ..
         } = event
         {
-            notify_chat_tool_approval(apns_service, user_id, session_id, id, name);
+            if self.notified_tool_approvals.insert(id.clone()) {
+                notify_chat_tool_approval(apns_service, user_id, session_id, id, name);
+            }
         }
 
         if matches!(event, LoopEvent::Error { .. }) {

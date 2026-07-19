@@ -16,7 +16,7 @@ Traditional plugin systems face a fundamental tension: give plugins too much acc
 
 ## Zed Compatibility
 
-The extension system is ported from Zed's `crates/extension` and `crates/extension_host` modules, adapted for a tokio async runtime instead of Zed's gpui runtime. The WIT interface definitions, manifest format, and API versioning scheme are all compatible with Zed's extension ecosystem. This means existing Zed extensions that compile to WASM component binaries can be loaded by Krusty without modification, provided the API version they target is supported.
+The extension system is ported from Zed's `crates/extension` and `crates/extension_host` modules and adapted for Krusty's Tokio async runtime. The WIT interface definitions, manifest format, and API versioning scheme are all compatible with Zed's extension ecosystem. This means existing Zed extensions that compile to WASM component binaries can be loaded by Krusty without modification, provided the API version they target is supported.
 
 The WIT files in the `wit/` directory at the project root mirror Zed's public interface. Internally, versioned copies of these WIT files live under `crates/krusty-core/src/extensions/wit/` in directories named by version (e.g., `since_v0.8.0/`).
 
