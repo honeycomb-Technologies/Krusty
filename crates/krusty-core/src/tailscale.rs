@@ -175,17 +175,33 @@ pub fn setup_tailscale_serve(port: u16) -> TailscaleServeSetup {
     }
 }
 
-fn is_permission_denied(detail: &str) -> bool {
+pub(crate) fn is_permission_denied(detail: &str) -> bool {
     let lower = detail.to_ascii_lowercase();
     lower.contains("access denied")
         || lower.contains("serve config denied")
         || lower.contains("--operator")
         || lower.contains("sudo tailscale serve")
+        || lower.contains("must be root, or be an operator")
+        || lower.contains("401 unauthorized")
+}
+
+pub(crate) fn command_contains_serve(command: &str) -> bool {
+    let Ok(tokens) = shell_words::split(&command.to_ascii_lowercase()) else {
+        return false;
+    };
+
+    tokens.iter().enumerate().any(|(index, token)| {
+        std::path::Path::new(token)
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some("tailscale")
+            && tokens.get(index + 1).map(String::as_str) == Some("serve")
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_permission_denied;
+    use super::{command_contains_serve, is_permission_denied};
 
     #[test]
     fn detects_tailscale_permission_denied_messages() {
@@ -195,8 +211,21 @@ mod tests {
         assert!(is_permission_denied(
             "use 'sudo tailscale set --operator=$USER' once"
         ));
+        assert!(is_permission_denied(
+            "sending serve config: 401 Unauthorized: must be root, or be an operator and able to run 'sudo tailscale' to serve a path"
+        ));
         assert!(!is_permission_denied(
             "tailscale serve failed: connection timeout"
         ));
+    }
+
+    #[test]
+    fn detects_tailscale_serve_in_compound_commands() {
+        assert!(command_contains_serve(
+            "echo before; tailscale serve --bg --https=9443 http://127.0.0.1:5180; echo after"
+        ));
+        assert!(command_contains_serve("/usr/bin/tailscale serve status"));
+        assert!(!command_contains_serve("echo 'tailscale serve --bg 3000'"));
+        assert!(!command_contains_serve("tailscale status"));
     }
 }

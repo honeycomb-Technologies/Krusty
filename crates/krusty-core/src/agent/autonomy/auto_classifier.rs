@@ -4,7 +4,10 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tracing::info;
 
-use crate::agent::hooks::{shell_policy::classify_bash_command, HookResult, PreToolHook};
+use crate::agent::hooks::{
+    shell_policy::{classify_bash_command, split_shell_segments},
+    HookResult, PreToolHook,
+};
 use crate::agent::loop_events::LoopEvent;
 use crate::ai::client::AiClient;
 use crate::tools::registry::{PermissionMode, ToolContext};
@@ -39,6 +42,7 @@ const CLASSIFIER_PROMPT: &str = r#"You are a safety classifier for an AI coding 
 - Running tests, builds, linters, formatters, or type checkers
 - Starting a project preview server only when it explicitly binds to 127.0.0.1 or localhost and is tracked as a background process
 - Exposing a loopback service to the user's private tailnet with `tailscale serve`; this is allowed only for `serve`, never public `tailscale funnel`
+- Inspecting Tailscale state with `tailscale status`, `tailscale serve status`, or `tailscale funnel status`; status inspection does not change exposure
 - Git read operations: status, diff, log, show, rev-parse, ls-files
 - Git write operations: add, commit, branch, checkout, merge, rebase, stash
 - Reading environment variables or config files within the project
@@ -126,7 +130,7 @@ impl AutoClassifierHook {
             if Self::contains_credential_or_system_path(&command) {
                 return Some("credential or system path".to_string());
             }
-            if command.contains("tailscale funnel") {
+            if Self::contains_tailscale_funnel_activation(&command) {
                 return Some("public Tailscale Funnel exposure".to_string());
             }
             if Self::is_python_preview_listener(&command)
@@ -208,6 +212,9 @@ impl AutoClassifierHook {
         }
 
         let normalized = command.to_ascii_lowercase();
+        if Self::is_tailscale_status_inspection(command) {
+            return Some("Read-only Tailscale status inspection".into());
+        }
         if Self::is_tailnet_loopback_serve(command) {
             return Some("Tailnet-only Tailscale Serve proxy targets a loopback service".into());
         }
@@ -318,6 +325,55 @@ impl AutoClassifierHook {
             .iter()
             .any(|prefix| token.starts_with(prefix))
         })
+    }
+
+    fn contains_tailscale_funnel_activation(command: &str) -> bool {
+        split_shell_segments(command).iter().any(|segment| {
+            let Ok(tokens) = shell_words::split(&segment.to_ascii_lowercase()) else {
+                // Fail closed when an apparent Funnel segment cannot be parsed.
+                return segment.to_ascii_lowercase().contains("tailscale funnel");
+            };
+
+            tokens.iter().enumerate().any(|(index, token)| {
+                let is_tailscale = std::path::Path::new(token)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    == Some("tailscale");
+                if !is_tailscale || tokens.get(index + 1).map(String::as_str) != Some("funnel") {
+                    return false;
+                }
+
+                !matches!(tokens.get(index + 2).map(String::as_str), Some("status"))
+            })
+        })
+    }
+
+    fn is_tailscale_status_inspection(command: &str) -> bool {
+        let Ok(tokens) = shell_words::split(&command.to_ascii_lowercase()) else {
+            return false;
+        };
+        let Some(executable) = tokens.first() else {
+            return false;
+        };
+        if std::path::Path::new(executable)
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some("tailscale")
+        {
+            return false;
+        }
+
+        matches!(
+            tokens.get(1..).unwrap_or_default(),
+            [action, flags @ ..]
+                if action == "status" && flags.iter().all(|flag| flag.starts_with('-'))
+        ) || matches!(
+            tokens.get(1..).unwrap_or_default(),
+            [surface, action, flags @ ..]
+                if matches!(surface.as_str(), "serve" | "funnel")
+                    && action == "status"
+                    && flags.iter().all(|flag| flag.starts_with('-'))
+        )
     }
 
     fn is_common_workspace_command(command: &str) -> bool {
@@ -820,6 +876,42 @@ mod tests {
             blocked,
             HookResult::Block { reason } if reason.contains("Funnel")
         ));
+
+        let status = hook
+            .before_execute(
+                "bash",
+                &json!({
+                    "command": "tailscale funnel status"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(matches!(status, HookResult::Continue));
+    }
+
+    #[test]
+    fn funnel_status_is_not_confused_with_funnel_activation() {
+        for command in [
+            "tailscale funnel status",
+            "/usr/bin/tailscale funnel status --json",
+            "tailscale funnel status; tailscale serve status",
+        ] {
+            assert!(
+                !AutoClassifierHook::contains_tailscale_funnel_activation(command),
+                "status inspection should be safe: {command}"
+            );
+        }
+
+        for command in [
+            "tailscale funnel --bg http://127.0.0.1:5180",
+            "tailscale funnel 5180",
+            "tailscale funnel status; tailscale funnel --bg 5180",
+        ] {
+            assert!(
+                AutoClassifierHook::contains_tailscale_funnel_activation(command),
+                "Funnel activation should be blocked: {command}"
+            );
+        }
     }
 
     #[tokio::test]

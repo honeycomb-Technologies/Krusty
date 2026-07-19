@@ -530,6 +530,7 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
 
         let result =
             execute_foreground(cmd, timeout_duration, stream, output_spool_path(ctx)).await;
+        let result = normalize_tailscale_serve_result(&effective_command, result);
         if result.is_error {
             return result;
         }

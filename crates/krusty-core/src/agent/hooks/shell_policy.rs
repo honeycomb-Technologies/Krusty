@@ -590,7 +590,7 @@ fn command_basename(command: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn split_shell_segments(command: &str) -> Vec<String> {
+pub(crate) fn split_shell_segments(command: &str) -> Vec<String> {
     let mut segments = Vec::new();
     let mut current = String::new();
     let mut in_single = false;

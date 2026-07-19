@@ -4,10 +4,12 @@ use super::execution::{join_reader_with_timeout, BoundedOutputBuffer};
 #[cfg(unix)]
 use super::shell::{build_shell_command, configure_foreground_process_group};
 use super::shell::{normalize_tracked_background_command, strip_shell_background_suffix};
-use super::{background_endpoint_hints, output_spool_path, BashTool};
+use super::{
+    background_endpoint_hints, normalize_tailscale_serve_result, output_spool_path, BashTool,
+};
 use crate::process::ProcessRegistry;
 use crate::tools::registry::Tool;
-use crate::tools::ToolContext;
+use crate::tools::{ToolContext, ToolResult};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -15,6 +17,42 @@ use std::sync::Arc;
 use std::process::Stdio;
 #[cfg(unix)]
 use std::time::Duration;
+
+#[test]
+fn tailscale_operator_denial_overrides_masked_compound_success() {
+    let result = ToolResult::success_data(json!({
+        "output": "sending serve config: 401 Unauthorized: must be root, or be an operator and able to run 'sudo tailscale' to serve a path\nafter-command-ok"
+    }));
+
+    let normalized = normalize_tailscale_serve_result(
+        "tailscale serve --bg --https=9443 http://127.0.0.1:5180; echo after-command-ok",
+        result,
+    );
+
+    assert!(normalized.is_error, "{}", normalized.output);
+    let envelope: serde_json::Value = serde_json::from_str(&normalized.output).expect("tool JSON");
+    assert_eq!(
+        envelope["error"]["code"].as_str(),
+        Some("tailscale_operator_required")
+    );
+    assert_eq!(
+        envelope["data"]["status"].as_str(),
+        Some("operator_required")
+    );
+    assert!(envelope["data"]["next_action"]
+        .as_str()
+        .is_some_and(|message| message.contains("Do not retry with sudo")));
+}
+
+#[test]
+fn unrelated_permission_text_is_not_reclassified_as_tailscale_serve() {
+    let result = ToolResult::success_data(json!({
+        "output": "401 Unauthorized: must be root, or be an operator"
+    }));
+
+    let normalized = normalize_tailscale_serve_result("curl https://example.com", result);
+    assert!(!normalized.is_error, "{}", normalized.output);
+}
 
 #[cfg(unix)]
 struct TestProcessCleanup {
