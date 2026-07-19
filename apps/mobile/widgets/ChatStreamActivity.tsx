@@ -65,6 +65,12 @@ const ChatStreamActivity: LiveActivityComponent<ChatStreamProps> = (props) => {
   const timerColor = "#ff7a32";
   const statusLabel =
     status === "needs_input" ? "Needs input" : status === "completed" ? "Completed" : "Working";
+  const compactStatusSymbol =
+    status === "needs_input"
+      ? "exclamationmark.circle.fill"
+      : status === "completed"
+        ? "checkmark.circle.fill"
+        : "circle.fill";
   const elapsed = formatElapsed(elapsedSeconds);
   const approvalTarget =
     toolApprovalId && toolApprovalSessionId
@@ -186,9 +192,12 @@ const ChatStreamActivity: LiveActivityComponent<ChatStreamProps> = (props) => {
       </HStack>
     ),
     compactTrailing: (
-      <Text modifiers={[font({ size: 11, weight: "semibold" }), monospacedDigit(), foregroundStyle(timerColor)]}>
-        {elapsed}
-      </Text>
+      <HStack spacing={4}>
+        <Image systemName={compactStatusSymbol} size={7} color={statusColor} />
+        <Text modifiers={[font({ size: 11, weight: "semibold" }), monospacedDigit(), foregroundStyle(timerColor)]}>
+          {elapsed}
+        </Text>
+      </HStack>
     ),
     minimal: compactLogo,
     expandedLeading: logo,
