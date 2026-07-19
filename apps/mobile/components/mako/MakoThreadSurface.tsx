@@ -89,8 +89,6 @@ export function MakoThreadSurface({
         model={chat.model ?? null}
         models={chat.models}
         sessionType="mako"
-        researchEnabled={chat.researchEnabled}
-        onResearchToggle={chat.onResearchToggle}
         tokenCount={chat.tokenCount}
         onOverlayOpenChange={setBottomControlsOpen}
       />

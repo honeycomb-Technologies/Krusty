@@ -7,6 +7,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BlurView } from '../platform/blur';
 import Animated, {
   useSharedValue,
@@ -17,19 +18,17 @@ import Animated, {
   Easing,
   runOnJS,
 } from 'react-native-reanimated';
-import { FileText, Search, TerminalSquare, X } from 'lucide-react-native';
+import { Search, TerminalSquare, X } from 'lucide-react-native';
 import * as Haptics from '../platform/haptics';
 import { useThemeContext } from '../hooks/useTheme';
 import { useBreakpoint } from '../hooks/useBreakpoint';
 import { ToolboxTerminal } from './toolbox/ToolboxTerminal';
 import { ToolboxBrowser } from './toolbox/ToolboxBrowser';
-import { ReportsContent } from './ReportsViewer';
 
 const SPRING = { damping: 22, stiffness: 280, mass: 0.8 };
 const TOOL_TABS = [
   { label: 'Terminal', icon: TerminalSquare },
   { label: 'Browser', icon: Search },
-  { label: 'Papers', icon: FileText },
 ];
 
 interface ToolboxPanelProps {
@@ -57,6 +56,7 @@ export function ToolboxPanel({
   const t = theme.colors;
   const isDark = theme.scheme === 'dark';
   const { height: windowHeight } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const mode = variant ?? (isDesktop ? 'dock' : 'overlay');
   const isDock = mode === 'dock';
 
@@ -143,7 +143,13 @@ export function ToolboxPanel({
   if (!isDock && !mounted) return null;
 
   const header = (
-    <View style={[styles.header, { borderBottomColor: t.border }]}>
+    <View
+      style={[
+        styles.header,
+        !isDock && { paddingTop: Math.max(insets.top, 8) + 8 },
+        { borderBottomColor: t.border },
+      ]}
+    >
       <View
         style={[
           styles.tabRail,
@@ -178,16 +184,14 @@ export function ToolboxPanel({
         })}
       </View>
 
-      {isDock ? (
-        <Pressable
-          onPress={handleClose}
-          accessibilityRole="button"
-          accessibilityLabel="Close toolbox"
-          style={styles.closeBtn}
-        >
-          <X size={18} color={t.mutedForeground} strokeWidth={1.8} />
-        </Pressable>
-      ) : null}
+      <Pressable
+        onPress={handleClose}
+        accessibilityRole="button"
+        accessibilityLabel="Close toolbox"
+        style={[styles.closeBtn, !isDock && { top: Math.max(insets.top, 8) + 9 }]}
+      >
+        <X size={18} color={t.mutedForeground} strokeWidth={1.8} />
+      </Pressable>
     </View>
   );
 
@@ -198,9 +202,6 @@ export function ToolboxPanel({
       </View>
       <View style={[styles.tabContent, activeTab !== 1 && styles.hidden]}>
         <ToolboxBrowser visible={activeTab === 1 && visible} />
-      </View>
-      <View style={[styles.tabContent, activeTab !== 2 && styles.hidden]}>
-        <ReportsContent visible={activeTab === 2 && visible} />
       </View>
     </View>
   );
@@ -248,7 +249,13 @@ export function ToolboxPanel({
         <Pressable style={StyleSheet.absoluteFill} onPress={handleClose} />
       </Animated.View>
 
-      <Animated.View style={[styles.panelMobile, overlayPanelStyle]}>
+      <Animated.View
+        style={[
+          styles.panelMobile,
+          overlayPanelStyle,
+          { paddingBottom: Math.max(insets.bottom, 8) },
+        ]}
+      >
         {surface}
         <GestureDetector gesture={closeHandleGesture}>
           <Animated.View style={styles.handleZoneMobile}>
@@ -266,14 +273,14 @@ const styles = StyleSheet.create({
   backdrop: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0,0,0,0.5)',
-    zIndex: 200,
+    zIndex: 400,
   },
   panelMobile: {
     position: 'absolute',
     left: 0,
     right: 0,
     top: 0,
-    zIndex: 201,
+    zIndex: 401,
     overflow: 'hidden',
   },
   /**

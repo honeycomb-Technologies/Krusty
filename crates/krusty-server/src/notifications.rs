@@ -18,7 +18,14 @@ pub(crate) fn session_title(db_path: &Path, session_id: &str) -> String {
         Ok(db) => {
             let session_manager = SessionManager::new(db);
             match session_manager.get_session(session_id) {
-                Ok(Some(session)) => session.title,
+                Ok(Some(session)) => {
+                    let title = session.title.trim();
+                    if title.is_empty() {
+                        "Session".to_string()
+                    } else {
+                        title.to_string()
+                    }
+                }
                 Ok(None) => {
                     tracing::warn!(
                         session_id = %session_id,

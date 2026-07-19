@@ -229,14 +229,18 @@ impl ApnsService {
         let topic = apns_topic(&self.config.bundle_id, event_type);
         let push_type = apns_push_type(event_type);
 
-        let resp = self
+        let mut request = self
             .client
             .post(&url)
             .header("authorization", format!("bearer {token}"))
             .header("apns-topic", &topic)
             .header("apns-push-type", push_type)
             .header("apns-priority", "10")
-            .header("apns-expiration", "0")
+            .header("apns-expiration", "0");
+        if let Some(collapse_id) = apns_collapse_id(payload) {
+            request = request.header("apns-collapse-id", collapse_id);
+        }
+        let resp = request
             .json(&apns_payload)
             .send()
             .await
@@ -463,26 +467,27 @@ fn device_token_fingerprint(device_token: &str) -> String {
 }
 
 fn apns_topic(bundle_id: &str, event_type: ApnsEventType) -> String {
-    match event_type {
-        ApnsEventType::ToolApproval | ApnsEventType::Completion => {
-            format!("{}.push-type.liveactivity", bundle_id)
-        }
-        _ => bundle_id.to_string(),
-    }
+    let _ = event_type;
+    bundle_id.to_string()
 }
 
 fn apns_push_type(event_type: ApnsEventType) -> &'static str {
-    match event_type {
-        ApnsEventType::ToolApproval | ApnsEventType::Completion => "liveactivity",
-        _ => "alert",
-    }
+    let _ = event_type;
+    "alert"
+}
+
+fn apns_collapse_id(payload: &ApnsPayload) -> Option<String> {
+    payload.session_id.as_ref().map(|session_id| {
+        let digest = hash_request_bytes(session_id.as_bytes());
+        format!("krusty-session-{}", &digest[..32])
+    })
 }
 
 /// Build the APNs JSON payload from our internal payload struct.
 fn build_apns_json(
     payload: &ApnsPayload,
     _bundle_id: &str,
-    _event_type: ApnsEventType,
+    event_type: ApnsEventType,
 ) -> serde_json::Value {
     let mut aps = serde_json::json!({
         "alert": {
@@ -490,7 +495,6 @@ fn build_apns_json(
             "body": payload.body,
         },
         "sound": "default",
-        "mutable-content": 1,
     });
 
     if let Some(ref cat) = payload.category {
@@ -500,12 +504,22 @@ fn build_apns_json(
     let mut root = serde_json::json!({ "aps": aps });
 
     if let Some(ref sid) = payload.session_id {
-        root["session_id"] = serde_json::Value::String(sid.clone());
+        aps["thread-id"] = serde_json::Value::String(sid.clone());
+        root["sessionId"] = serde_json::Value::String(sid.clone());
     }
 
     if let Some(ref data) = payload.data {
-        root["data"] = data.clone();
+        if let Some(fields) = data.as_object() {
+            for (key, value) in fields {
+                root[key] = value.clone();
+            }
+        } else {
+            root["payload"] = data.clone();
+        }
     }
+
+    root["eventType"] = serde_json::Value::String(event_type.as_str().to_string());
+    root["aps"] = aps;
 
     root
 }
@@ -513,25 +527,25 @@ fn build_apns_json(
 #[cfg(test)]
 mod tests {
     use super::{
-        apns_push_type, apns_topic, summarize_apns_failure_body, ApnsEventType,
-        DEFAULT_APNS_BUNDLE_ID,
+        apns_push_type, apns_topic, build_apns_json, summarize_apns_failure_body, ApnsEventType,
+        ApnsPayload, DEFAULT_APNS_BUNDLE_ID,
     };
     use krusty_core::storage::{hash_request_bytes, ApnsDeviceStore, Database};
     use reqwest::StatusCode;
     use tempfile::TempDir;
 
     #[test]
-    fn live_activity_events_use_liveactivity_contract() {
+    fn device_notifications_always_use_alert_contract() {
         assert_eq!(
             apns_topic(DEFAULT_APNS_BUNDLE_ID, ApnsEventType::ToolApproval),
-            format!("{}.push-type.liveactivity", DEFAULT_APNS_BUNDLE_ID)
+            DEFAULT_APNS_BUNDLE_ID
         );
-        assert_eq!(apns_push_type(ApnsEventType::ToolApproval), "liveactivity");
+        assert_eq!(apns_push_type(ApnsEventType::ToolApproval), "alert");
         assert_eq!(
             apns_topic(DEFAULT_APNS_BUNDLE_ID, ApnsEventType::Completion),
-            format!("{}.push-type.liveactivity", DEFAULT_APNS_BUNDLE_ID)
+            DEFAULT_APNS_BUNDLE_ID
         );
-        assert_eq!(apns_push_type(ApnsEventType::Completion), "liveactivity");
+        assert_eq!(apns_push_type(ApnsEventType::Completion), "alert");
     }
 
     #[test]
@@ -541,6 +555,34 @@ mod tests {
             DEFAULT_APNS_BUNDLE_ID
         );
         assert_eq!(apns_push_type(ApnsEventType::AwaitingInput), "alert");
+    }
+
+    #[test]
+    fn alert_payload_exposes_routing_data_at_the_apns_root() {
+        let payload = ApnsPayload {
+            title: "Session complete".into(),
+            body: "Response finished".into(),
+            session_id: Some("session-1".into()),
+            category: Some("CHAT_SESSION".into()),
+            data: Some(serde_json::json!({
+                "type": "chat_update",
+                "kind": "completion",
+                "sessionId": "session-1",
+                "focus": "chat",
+            })),
+        };
+
+        let json = build_apns_json(&payload, DEFAULT_APNS_BUNDLE_ID, ApnsEventType::Completion);
+
+        assert_eq!(json["aps"]["alert"]["title"], "Session complete");
+        assert_eq!(json["aps"]["thread-id"], "session-1");
+        assert_eq!(json["aps"]["category"], "CHAT_SESSION");
+        assert_eq!(json["sessionId"], "session-1");
+        assert_eq!(json["type"], "chat_update");
+        assert_eq!(json["kind"], "completion");
+        assert_eq!(json["focus"], "chat");
+        assert_eq!(json["eventType"], "completion");
+        assert!(json.get("data").is_none());
     }
 
     #[test]

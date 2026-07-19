@@ -18,13 +18,12 @@ import Animated, {
   Easing,
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ArrowLeft, Settings, SquarePlus, FolderPlus, Folder, FolderOpen, ChevronRight, ChevronDown, ChevronLeft, Check, Wifi, WifiOff } from 'lucide-react-native';
 import * as Haptics from '../../platform/haptics';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
-import { SegmentControl } from '../ui/SegmentControl';
 import type { SessionResponse } from '@krusty/api';
-import { MAKO_DRAWER_ITEMS } from './makoDrawerItems';
 import type { MakoTopLevelView } from '../mako/types';
 
 const DRAWER_WIDTH = Dimensions.get('window').width * 0.82;
@@ -72,6 +71,7 @@ export function SessionDrawer({
   onOpenSettings, activeTab, onTabChange, activeMakoView, onSelectMakoView,
 }: SessionDrawerProps) {
   const { theme } = useThemeContext();
+  const insets = useSafeAreaInsets();
   const { client, status } = useConnection();
   const translateX = useSharedValue(-DRAWER_WIDTH);
   const backdropOpacity = useSharedValue(0);
@@ -86,9 +86,9 @@ export function SessionDrawer({
   const dirCache = useRef<Map<string, DirCache>>(new Map());
   const [pickerReady, setPickerReady] = useState(false); // data loaded at least once
 
-  // Pre-fetch home directory when drawer opens on Code tab
+  // Pre-fetch the Code directory picker whenever the unified drawer opens.
   useEffect(() => {
-    if (isOpen && client && activeTab === 1 && !pickerReady) {
+    if (isOpen && client && !pickerReady) {
       client.browseDirectories().then(result => {
         const entry: DirCache = { current: result.current, parent: result.parent, directories: result.directories };
         dirCache.current.set('', entry);
@@ -99,7 +99,7 @@ export function SessionDrawer({
         setPickerReady(true);
       }).catch(() => {});
     }
-  }, [isOpen, client, activeTab, pickerReady]);
+  }, [isOpen, client, pickerReady]);
 
   // Reset picker when drawer closes
   useEffect(() => {
@@ -265,42 +265,6 @@ export function SessionDrawer({
           );
         });
 
-  const renderMakoList = () => (
-    <View>
-      {MAKO_DRAWER_ITEMS.map((item) => {
-        const isActive = activeMakoView === item.id;
-        return (
-          <Pressable
-            key={item.id}
-            onPress={() => {
-              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-              onSelectMakoView?.(item.id);
-            }}
-            style={[
-              styles.makoItem,
-              isActive && { backgroundColor: t.userMessage + '12' },
-            ]}
-          >
-            <View style={styles.makoCopy}>
-              <Text
-                style={[
-                  styles.makoTitle,
-                  { color: isActive ? t.userMessage : t.foreground },
-                ]}
-              >
-                {item.label}
-              </Text>
-              <Text style={[styles.makoDetail, { color: t.mutedForeground }]}>
-                {item.detail}
-              </Text>
-            </View>
-            <ChevronRight size={16} color={t.mutedForeground} />
-          </Pressable>
-        );
-      })}
-    </View>
-  );
-
   return (
     <>
       <Animated.View style={[styles.backdrop, backdropStyle]}>
@@ -318,23 +282,23 @@ export function SessionDrawer({
             backgroundColor: theme.scheme === 'dark' ? 'rgba(11,17,25,0.88)' : 'rgba(255,255,255,0.88)',
           }]} />
 
-          <View style={styles.content}>
-            <View style={styles.segmentWrap}>
-              <SegmentControl segments={['Chat', 'Code', 'Mako']} selected={activeTab} onSelect={onTabChange} />
-            </View>
-
+          <View
+            style={[
+              styles.content,
+              { paddingTop: Math.max(insets.top, 12) + 12, paddingBottom: insets.bottom },
+            ]}
+          >
             <ScrollView style={styles.listArea} showsVerticalScrollIndicator={false}>
-              {activeTab === 0 && (
-                chatSessions.length === 0
-                  ? <Text style={[styles.emptyText, { color: t.mutedForeground }]}>No chat sessions</Text>
-                  : chatSessions.map(renderSessionItem)
-              )}
-              {activeTab === 1 && renderDirAccordion(codeDirGroups, t.thinking)}
-              {activeTab === 2 && renderMakoList()}
+              <Text style={[styles.sectionLabel, { color: t.mutedForeground }]}>Conversations</Text>
+              {chatSessions.length === 0
+                ? <Text style={[styles.sectionEmpty, { color: t.mutedForeground }]}>No conversations</Text>
+                : chatSessions.map(renderSessionItem)}
+              <Text style={[styles.sectionLabel, styles.codeSection, { color: t.mutedForeground }]}>Code</Text>
+              {renderDirAccordion(codeDirGroups, t.thinking)}
             </ScrollView>
 
             {/* Animated picker — slides up from behind bottom bar */}
-            {activeTab === 1 && pickerVisible && (
+            {pickerVisible && (
               <Animated.View style={[styles.pickerContainer, { height: PICKER_HEIGHT, borderTopColor: t.border, backgroundColor: t.background }, pickerAnimStyle]}>
                 <View style={styles.pickerHeader}>
                   <View>
@@ -403,21 +367,23 @@ export function SessionDrawer({
                 <Pressable
                   onPress={() => {
                     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                    if (activeTab === 0) {
-                      onNewSession();
-                    } else if (activeTab === 1) {
-                      showPicker();
-                    } else {
-                      onSelectMakoView?.('mako');
-                      onClose();
-                    }
+                    onTabChange(0);
+                    onNewSession();
                   }}
                   style={styles.iconBtn}
+                  accessibilityRole="button"
+                  accessibilityLabel="New conversation"
                 >
-                  {activeTab === 1
-                    ? <FolderPlus size={22} color={t.mutedForeground} strokeWidth={1.8} />
-                    : <SquarePlus size={22} color={t.mutedForeground} strokeWidth={1.8} />}
-              </Pressable>
+                  <SquarePlus size={22} color={t.mutedForeground} strokeWidth={1.8} />
+                </Pressable>
+                <Pressable
+                  onPress={showPicker}
+                  style={styles.iconBtn}
+                  accessibilityRole="button"
+                  accessibilityLabel="New code conversation"
+                >
+                  <FolderPlus size={22} color={t.mutedForeground} strokeWidth={1.8} />
+                </Pressable>
               </View>
             </View>
           </View>
@@ -443,11 +409,6 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
-    paddingTop: 54,
-  },
-  segmentWrap: {
-    paddingHorizontal: 16,
-    marginBottom: 12,
   },
   listArea: {
     flex: 1,
@@ -458,6 +419,9 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 40,
   },
+  sectionLabel: { fontSize: 12, fontWeight: '700', letterSpacing: 0.7, textTransform: 'uppercase', paddingHorizontal: 8, marginBottom: 6 },
+  codeSection: { marginTop: 18 },
+  sectionEmpty: { fontSize: 13, paddingHorizontal: 8, paddingVertical: 8 },
   dirHeader: {
     flexDirection: 'row',
     alignItems: 'center',

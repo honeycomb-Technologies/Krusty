@@ -45,16 +45,10 @@ export function DesktopShell({
   const bgOverlay = isDark ? 'rgba(11,17,25,0.88)' : 'rgba(255,255,255,0.88)';
   const blurTint = isDark ? 'systemChromeMaterialDark' : 'systemChromeMaterialLight';
 
-  const handleNew = useCallback(() => {
+  const handleNewChat = useCallback(() => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    if (activeTab === 0) {
-      onNewSession();
-    } else if (activeTab === 1) {
-      setPickerVisible(true);
-    } else {
-      onSelectMakoView?.("mako");
-    }
-  }, [activeTab, onNewSession, onSelectMakoView]);
+    onNewSession();
+  }, [onNewSession]);
 
   const toggleSidebar = useCallback(() => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -113,10 +107,21 @@ export function DesktopShell({
 
               {/* Terminal / browser live in Toolbox — do not duplicate them here. */}
 
-              <Pressable onPress={handleNew} style={styles.iconBtn}>
-                {activeTab === 0
-                  ? <SquarePlus size={22} color={t.mutedForeground} strokeWidth={1.8} />
-                  : <FolderPlus size={22} color={t.mutedForeground} strokeWidth={1.8} />}
+              <Pressable
+                onPress={handleNewChat}
+                style={styles.iconBtn}
+                accessibilityRole="button"
+                accessibilityLabel="New conversation"
+              >
+                <SquarePlus size={22} color={t.mutedForeground} strokeWidth={1.8} />
+              </Pressable>
+              <Pressable
+                onPress={() => setPickerVisible(true)}
+                style={styles.iconBtn}
+                accessibilityRole="button"
+                accessibilityLabel="New code conversation"
+              >
+                <FolderPlus size={22} color={t.mutedForeground} strokeWidth={1.8} />
               </Pressable>
             </View>
           </View>

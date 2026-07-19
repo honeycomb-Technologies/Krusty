@@ -5,9 +5,6 @@ use krusty_core::storage::SessionType;
 
 use crate::types::ThinkingLevel;
 
-/// Additional tools unlocked for Chat sessions when research mode is enabled.
-const CHAT_RESEARCH_TOOLS: &[&str] = &["agent", "report"];
-
 /// Tools exclusive to Mako sessions -- excluded from Code sessions.
 const MAKO_ONLY_TOOLS: &[&str] = &["send_user_message", "sleep", "autonomous_task", "report"];
 
@@ -162,17 +159,15 @@ fn is_narrow_casual_greeting(message: &str) -> bool {
 /// Filter tools based on the session type.
 ///
 /// - **Code**: all registered tools except Mako-only tools.
-/// - **Chat**: only the safe chat subset. When `research_enabled` is true,
-///   the agent and report tools are included.
+/// - **Chat**: only the safe conversational web subset.
 /// - **Mako**: all registered tools (Code tools + Mako extensions), executed
 ///   through the autonomous wake-driven runtime.
 pub(super) fn filter_tools_for_session_type(
     tools: Vec<AiTool>,
     session_type: SessionType,
-    research_enabled: bool,
 ) -> Vec<AiTool> {
     let before = tools.len();
-    let result = filter_tools_inner(tools, session_type, research_enabled);
+    let result = filter_tools_inner(tools, session_type);
     tracing::info!(
         session_type = ?session_type,
         before_count = before,
@@ -183,27 +178,17 @@ pub(super) fn filter_tools_for_session_type(
     result
 }
 
-fn filter_tools_inner(
-    tools: Vec<AiTool>,
-    session_type: SessionType,
-    research_enabled: bool,
-) -> Vec<AiTool> {
+fn filter_tools_inner(tools: Vec<AiTool>, session_type: SessionType) -> Vec<AiTool> {
     tools
         .into_iter()
-        .filter(|tool| tool_allowed_for_session(&tool.name, session_type, research_enabled))
+        .filter(|tool| tool_allowed_for_session(&tool.name, session_type))
         .collect()
 }
 
-fn tool_allowed_for_session(
-    tool_name: &str,
-    session_type: SessionType,
-    research_enabled: bool,
-) -> bool {
+fn tool_allowed_for_session(tool_name: &str, session_type: SessionType) -> bool {
     match session_type {
         SessionType::Code => !is_mako_only_tool(tool_name),
-        SessionType::Chat => {
-            is_base_chat_tool(tool_name) || (research_enabled && is_chat_research_tool(tool_name))
-        }
+        SessionType::Chat => is_base_chat_tool(tool_name),
         SessionType::Mako => true,
     }
 }
@@ -212,24 +197,13 @@ fn is_base_chat_tool(tool_name: &str) -> bool {
     matches!(tool_name, "web_search" | "web_fetch")
 }
 
-fn is_chat_research_tool(tool_name: &str) -> bool {
-    CHAT_RESEARCH_TOOLS.contains(&tool_name)
-}
-
 fn is_mako_only_tool(tool_name: &str) -> bool {
     MAKO_ONLY_TOOLS.contains(&tool_name)
 }
 
-pub(super) fn chat_system_prompt(research_enabled: bool) -> String {
-    let tool_clause = if research_enabled {
-        "You may use web_search and web_fetch for web research, and you may also use agent and report when deeper research or synthesis is needed."
-    } else {
-        "You may use web_search and web_fetch for web research when it would help the user."
-    };
-
-    format!(
-        "You are Krusty, a friendly conversational assistant. This is a chat session. {tool_clause} You do not have direct file, shell, git, or local code-editing tools in this session. Do not claim capabilities you do not have. If the user needs hands-on coding or workspace changes, suggest switching to Code mode. Be helpful, natural, and conversational."
-    )
+pub(super) fn chat_system_prompt() -> String {
+    "You are Krusty, a friendly conversational assistant. This is a chat session. You may use web_search and web_fetch for web research whenever they would improve accuracy or usefulness. Present the result directly in the conversation rather than creating a separate report or paper. You do not have direct file, shell, git, or local code-editing tools in this session. Do not claim capabilities you do not have. If the user needs hands-on coding or workspace changes, suggest starting a Code conversation. Be helpful, natural, and conversational."
+        .to_string()
 }
 
 pub(super) fn apply_thinking_config(thinking_level: ThinkingLevel, options: &mut CallOptions) {
@@ -293,11 +267,11 @@ mod tests {
 
     #[test]
     fn chat_system_prompt_matches_default_chat_tool_policy() {
-        let prompt = chat_system_prompt(false);
+        let prompt = chat_system_prompt();
 
         assert!(prompt.contains("web_search and web_fetch"));
-        assert!(!prompt.contains("agent and report when deeper research"));
-        assert!(prompt.contains("switching to Code mode"));
+        assert!(prompt.contains("directly in the conversation"));
+        assert!(prompt.contains("starting a Code conversation"));
     }
 
     #[test]
@@ -358,15 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_system_prompt_mentions_research_tools_when_enabled() {
-        let prompt = chat_system_prompt(true);
-
-        assert!(prompt.contains("web_search and web_fetch"));
-        assert!(prompt.contains("agent and report when deeper research or synthesis is needed"));
-    }
-
-    #[test]
-    fn chat_policy_only_allows_base_tools_by_default() {
+    fn chat_policy_only_allows_conversational_web_tools() {
         let filtered = filter_tools_inner(
             vec![
                 tool("web_search"),
@@ -375,7 +341,6 @@ mod tests {
                 tool("bash"),
             ],
             SessionType::Chat,
-            false,
         );
 
         let names = filtered
@@ -386,31 +351,10 @@ mod tests {
     }
 
     #[test]
-    fn chat_research_policy_unlocks_research_tools() {
-        let filtered = filter_tools_inner(
-            vec![
-                tool("web_search"),
-                tool("agent"),
-                tool("report"),
-                tool("bash"),
-            ],
-            SessionType::Chat,
-            true,
-        );
-
-        let names = filtered
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect::<Vec<_>>();
-        assert_eq!(names, vec!["web_search", "agent", "report"]);
-    }
-
-    #[test]
     fn code_policy_excludes_mako_only_tools() {
         let filtered = filter_tools_inner(
             vec![tool("bash"), tool("sleep"), tool("report")],
             SessionType::Code,
-            false,
         );
 
         let names = filtered
@@ -425,7 +369,6 @@ mod tests {
         let filtered = filter_tools_inner(
             vec![tool("bash"), tool("sleep"), tool("report")],
             SessionType::Mako,
-            false,
         );
 
         let names = filtered

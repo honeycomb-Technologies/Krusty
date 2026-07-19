@@ -157,7 +157,6 @@ async fn chat(
         requested_model,
         req.thinking_enabled,
         req.fast_mode,
-        req.research_enabled.unwrap_or(false),
         requires_vision,
     )
     .await?;
@@ -178,6 +177,11 @@ async fn chat(
 
     let mut work_mode = ctx.work_mode;
     if let Some(requested_mode) = req.mode {
+        if ctx.session_type != SessionType::Code {
+            return Err(AppError::Conflict(
+                "Build and Plan modes are only available for Code conversations".into(),
+            ));
+        }
         if requested_mode != work_mode {
             ctx.session_manager
                 .update_session_work_mode(&session_id, requested_mode)?;
@@ -221,6 +225,6 @@ async fn chat(
 // ── Helpers ──────────────────────────────────────────────────────────
 
 /// Tools allowed in Chat sessions — conversation only, no file/bash/code tools.
-/// Web search/fetch are the only tools. Research mode adds agent + report tools.
+/// Web search/fetch are the only tools; research behavior is automatic.
 #[cfg(test)]
 mod tests;

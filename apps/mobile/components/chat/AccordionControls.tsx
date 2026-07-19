@@ -31,7 +31,6 @@ import {
   Compass,
   Paperclip,
   Bot,
-  FlaskConical,
   ShieldCheck,
   ShieldOff,
   Zap,
@@ -75,8 +74,6 @@ interface AccordionControlsProps {
   isOpen: boolean;
   onToggle: () => void;
   sessionType?: 'chat' | 'code' | 'mako';
-  researchEnabled?: boolean;
-  onResearchToggle?: () => void;
 }
 
 interface ProviderFilterAction {
@@ -201,6 +198,9 @@ function AccordionPill({
   sideContent,
   disabled = false,
   compact = false,
+  maxIndex = MAX_PILL_INDEX,
+  accessibilityLabel,
+  accessibilityHint,
 }: {
   children: React.ReactNode;
   index: number;
@@ -211,6 +211,9 @@ function AccordionPill({
   disabled?: boolean;
   /** When true, only as wide as the pill (no full-width row stretch). */
   compact?: boolean;
+  maxIndex?: number;
+  accessibilityLabel: string;
+  accessibilityHint?: string;
 }) {
   const { theme } = useThemeContext();
   const progress = useSharedValue(0);
@@ -219,7 +222,7 @@ function AccordionPill({
   useEffect(() => {
     const delayMs = isOpen
       ? index * OPEN_STAGGER_MS
-      : Math.max(0, MAX_PILL_INDEX - index) * CLOSE_STAGGER_MS;
+      : Math.max(0, maxIndex - index) * CLOSE_STAGGER_MS;
     progress.value = withDelay(
       delayMs,
       withSpring(isOpen ? 1 : 0, SPRING_CONFIG),
@@ -230,7 +233,7 @@ function AccordionPill({
         duration: isOpen ? ACTION_FADE_IN_MS : ACTION_FADE_OUT_MS,
       }),
     );
-  }, [index, isOpen, opacityProgress, progress]);
+  }, [index, isOpen, maxIndex, opacityProgress, progress]);
 
   const animatedStyle = useAnimatedStyle(() => ({
     opacity: opacityProgress.value,
@@ -251,7 +254,14 @@ function AccordionPill({
       ]}
     >
       {sideContent}
-      <Pressable disabled={!isOpen || disabled} onPress={onPress}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={accessibilityLabel}
+        accessibilityHint={accessibilityHint}
+        accessibilityState={{ disabled: !isOpen || disabled, selected: active }}
+        disabled={!isOpen || disabled}
+        onPress={onPress}
+      >
         <BlurView
           intensity={theme.colors.glassBlur}
           tint={theme.scheme === 'dark' ? 'systemMaterialDark' : 'systemMaterialLight'}
@@ -673,8 +683,6 @@ export function AccordionControls({
   isOpen,
   onToggle,
   sessionType = 'code',
-  researchEnabled = false,
-  onResearchToggle,
 }: AccordionControlsProps) {
   const { theme } = useThemeContext();
   const { isDesktop } = useBreakpoint();
@@ -696,8 +704,10 @@ export function AccordionControls({
   const providerDropIndex = useSharedValue(-1);
   const providerDragX = useSharedValue(0);
   const providerDragScrollDelta = useSharedValue(0);
-  const isChat = sessionType === 'chat';
-  const isMako = sessionType === 'mako';
+  const hasWorkMode = sessionType === 'code';
+  const maxPillIndex = hasWorkMode ? 5 : 4;
+  const modelPillIndex = maxPillIndex;
+  const attachPillIndex = hasWorkMode ? 4 : 3;
   const thinkingSupported = supportsThinking(modelInfo ?? model);
 
   const clearProviderEditExitTimer = useCallback(() => {
@@ -828,11 +838,6 @@ export function AccordionControls({
   const handleMode = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     onModeToggle();
-  };
-
-  const handleResearch = () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    onResearchToggle?.();
   };
 
   const handleAttach = () => {
@@ -1014,11 +1019,13 @@ export function AccordionControls({
                   })
                 : null}
               <AccordionPill
-                index={5}
+                index={modelPillIndex}
                 isOpen={isOpen}
                 onPress={handleModel}
                 active={modelPickerOpen}
                 compact
+                maxIndex={maxPillIndex}
+                accessibilityLabel="Choose model"
               >
                 <Bot
                   size={24}
@@ -1029,10 +1036,12 @@ export function AccordionControls({
             </View>
           ) : (
           <AccordionPill
-            index={5}
+            index={modelPillIndex}
             isOpen={isOpen}
             onPress={handleModel}
             active={modelPickerOpen}
+            maxIndex={maxPillIndex}
+            accessibilityLabel="Choose model"
             sideContent={
               <Animated.View
                 pointerEvents={providerDockOpen ? "box-none" : "none"}
@@ -1114,10 +1123,12 @@ export function AccordionControls({
           )}
 
           <AccordionPill
-            index={4}
+            index={attachPillIndex}
             isOpen={isOpen}
             onPress={handleAttach}
             active={attachPickerOpen}
+            maxIndex={maxPillIndex}
+            accessibilityLabel="Add attachment"
             sideContent={
               <View
                 pointerEvents={attachPickerOpen ? "box-none" : "none"}
@@ -1160,12 +1171,15 @@ export function AccordionControls({
             />
           </AccordionPill>
 
-          {isChat ? (
-            <AccordionPill index={3} isOpen={isOpen} onPress={handleResearch}>
-              <FlaskConical size={24} color={researchEnabled ? fabAccent : t.mutedForeground} strokeWidth={1.6} />
-            </AccordionPill>
-          ) : !isMako ? (
-            <AccordionPill index={3} isOpen={isOpen} onPress={handleMode}>
+          {hasWorkMode ? (
+            <AccordionPill
+              index={3}
+              isOpen={isOpen}
+              onPress={handleMode}
+              maxIndex={maxPillIndex}
+              accessibilityLabel={mode === 'build' ? 'Build mode' : 'Plan mode'}
+              accessibilityHint="Switch between Build and Plan"
+            >
               {mode === 'build' ? (
                 <Hammer size={24} color={t.mutedForeground} strokeWidth={1.6} />
               ) : (
@@ -1174,7 +1188,14 @@ export function AccordionControls({
             </AccordionPill>
           ) : null}
 
-          <AccordionPill index={2} isOpen={isOpen} onPress={handlePermissionMode}>
+          <AccordionPill
+            index={2}
+            isOpen={isOpen}
+            onPress={handlePermissionMode}
+            maxIndex={maxPillIndex}
+            accessibilityLabel={permissionMode === 'supervised' ? 'Supervised permissions' : 'Autonomous permissions'}
+            accessibilityHint="Switch permission mode"
+          >
             {permissionMode === 'supervised' ? (
               <ShieldCheck size={24} color={t.success} strokeWidth={1.6} />
             ) : (
@@ -1188,6 +1209,9 @@ export function AccordionControls({
             onPress={handleFastMode}
             disabled={!fastModeSupported}
             active={fastModeSupported && fastModeEnabled}
+            maxIndex={maxPillIndex}
+            accessibilityLabel={fastModeSupported ? (fastModeEnabled ? 'Fast mode on' : 'Fast mode off') : 'Fast mode unavailable for this model'}
+            accessibilityHint={fastModeSupported ? 'Toggle provider speed mode' : undefined}
           >
             <Zap
               size={24}
@@ -1202,15 +1226,21 @@ export function AccordionControls({
             />
           </AccordionPill>
 
-          {thinkingSupported ? (
-            <AccordionPill
-              index={0}
-              isOpen={isOpen}
-              onPress={handleThinking}
-            >
-              <Brain size={24} color={thinkingColor} strokeWidth={1.6} />
-            </AccordionPill>
-          ) : null}
+          <AccordionPill
+            index={0}
+            isOpen={isOpen}
+            onPress={handleThinking}
+            disabled={!thinkingSupported}
+            maxIndex={maxPillIndex}
+            accessibilityLabel={thinkingSupported ? `Thinking ${thinkingLevel}` : 'Thinking unavailable for this model'}
+            accessibilityHint={thinkingSupported ? 'Cycle thinking level' : undefined}
+          >
+            <Brain
+              size={24}
+              color={thinkingSupported ? thinkingColor : `${t.mutedForeground}66`}
+              strokeWidth={1.6}
+            />
+          </AccordionPill>
         </Animated.View>
       </GestureDetector>
     </View>

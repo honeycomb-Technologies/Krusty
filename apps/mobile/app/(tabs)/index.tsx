@@ -8,8 +8,8 @@ import {
   useWindowDimensions,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { router } from "expo-router";
-import { Menu, Toolbox } from "lucide-react-native";
+import { router, useLocalSearchParams } from "expo-router";
+import { Bot, Menu, Toolbox } from "lucide-react-native";
 import * as Haptics from "../../platform/haptics";
 import * as SecureStore from "../../platform/secure-store";
 import { useThemeContext } from "../../hooks/useTheme";
@@ -36,6 +36,7 @@ import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
 import { useLiveActivity } from "../../hooks/useLiveActivity";
 import { useWidgetSync } from "../../hooks/useWidgetSync";
 import { useNotifications } from "../../hooks/useNotifications";
+import { buildToolDiffPresentation } from "../../components/chat/toolDiffModel";
 import Animated from "react-native-reanimated";
 
 import type {
@@ -102,6 +103,10 @@ export default function ChatScreen() {
 }
 
 function ChatScreenContent({ stores }: { stores: LoadedStores }) {
+  const routeParams = useLocalSearchParams<{
+    sessionId?: string | string[];
+    focus?: string | string[];
+  }>();
   const { theme } = useThemeContext();
   const { client, isConnected } = useConnection();
   const { isDesktop } = useBreakpoint();
@@ -143,8 +148,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [makoTopLevel, setMakoTopLevel] = useState<MakoTopLevelView>("mako");
   const [toolboxOpen, setToolboxOpen] = useState(false);
-  const [toolboxTab, setToolboxTab] = useState(2);
-  const [researchEnabled, setResearchEnabled] = useState(false);
+  const [toolboxTab, setToolboxTab] = useState(0);
   const [bottomControlsOpen, setBottomControlsOpen] = useState(false);
   const [composerReserveHeight, setComposerReserveHeight] =
     useState(CHAT_BAR_ZONE);
@@ -190,6 +194,21 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     () => getActiveToolCall(toolCalls),
     [toolCalls],
   );
+  const activityDiff = useMemo(
+    () =>
+      toolCalls.reduce(
+        (total, toolCall) => {
+          const diff = buildToolDiffPresentation(toolCall);
+          if (diff) {
+            total.additions += diff.additions;
+            total.deletions += diff.deletions;
+          }
+          return total;
+        },
+        { additions: 0, deletions: 0 },
+      ),
+    [toolCalls],
+  );
 
   const lastAssistantSnippet =
     lastAssistantMessage?.content?.slice(0, 200) ?? "";
@@ -228,13 +247,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     async (_route: string, params?: Record<string, string>) => {
       const focus = params?.focus;
       const targetSessionId = params?.sessionId;
-      const shouldOpenReports = params?.openReports === "true";
 
       if (focus === "mako") {
         setActiveTab(2);
-      }
-      if (shouldOpenReports) {
-        setToolboxOpen(true);
       }
       if (!targetSessionId) {
         return;
@@ -249,16 +264,33 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     [sessionStore, sessionsStore],
   );
 
+  useEffect(() => {
+    const targetSessionId = Array.isArray(routeParams.sessionId)
+      ? routeParams.sessionId[0]
+      : routeParams.sessionId;
+    const focus = Array.isArray(routeParams.focus)
+      ? routeParams.focus[0]
+      : routeParams.focus;
+    if ((targetSessionId && targetSessionId !== sessionId) || focus === "mako") {
+      void handleNotificationNavigate("/(tabs)", {
+        ...(targetSessionId ? { sessionId: targetSessionId } : {}),
+        ...(focus ? { focus } : {}),
+      });
+    }
+  }, [handleNotificationNavigate, routeParams.focus, routeParams.sessionId, sessionId]);
+
   const handleRegisterNativeDevice = useCallback(
     async (deviceToken: string) => {
       if (!client || !isConnected || !deviceToken) {
-        return;
+        return false;
       }
 
       try {
         await client.registerApnsDevice(deviceToken);
+        return true;
       } catch (error) {
         console.debug("Failed to register APNs device", error);
+        return false;
       }
     },
     [client, isConnected],
@@ -462,27 +494,17 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     }
 
     if (shouldKeepActivity && !liveActivityOpenRef.current) {
-      startActivity(sessionTitle || "Chat", model || "unknown");
+      startActivity(sessionId!, sessionTitle || "Chat");
       liveActivityOpenRef.current = true;
     }
 
     if (shouldKeepActivity) {
       updateActivity({
         chatTitle: sessionTitle || "Chat",
-        model: model || "unknown",
-        status: awaitingApproval
-          ? "awaiting_approval"
-          : isThinking
-            ? "thinking"
-            : activeToolCall
-              ? "tool_call"
-              : "streaming",
-        currentText: isThinking
-          ? "Thinking..."
-          : (lastAssistantMessage?.content?.slice(-200) ?? ""),
-        currentTool: awaitingApproval?.name || activeToolCall?.name || "",
-        tokenCount,
-        progress: awaitingApproval ? 0.85 : isStreaming ? 0.5 : 1,
+        status: awaitingApproval ? "needs_input" : "working",
+        toolCount: toolCalls.length,
+        filesAdded: activityDiff.additions,
+        filesRemoved: activityDiff.deletions,
         toolApprovalId: awaitingApproval?.id,
         toolApprovalName: awaitingApproval?.name,
         toolApprovalSessionId: awaitingApproval ? sessionId ?? undefined : undefined,
@@ -524,6 +546,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     previousStreamingRef.current = isStreaming;
   }, [
     activeToolCall,
+    activityDiff,
     awaitingApprovalCalls,
     endActivity,
     isStreaming,
@@ -535,6 +558,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     sessionTitle,
     startActivity,
     tokenCount,
+    toolCalls.length,
     updateActivity,
   ]);
 
@@ -560,7 +584,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     setActiveTab,
     setDrawerOpen,
     ensureModelReady,
-    researchEnabled,
     sessionStore,
     sessionsStore,
     workspace,
@@ -705,25 +728,36 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         </Text>
       </Pressable>
 
-      <Pressable
-        onPress={() => {
-          void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-          setToolboxOpen((open) => !open);
-        }}
-        style={[
-          isDesktop ? styles.toolboxCornerBtn : styles.menuBtn,
-          isDesktop && toolboxOpen
-            ? { backgroundColor: `${t.thinking}22` }
-            : null,
-        ]}
-        accessibilityLabel={toolboxOpen ? "Close toolbox" : "Open toolbox"}
-      >
-        <Toolbox
-          size={isDesktop ? 20 : 20}
-          color={toolboxOpen ? t.thinking : t.mutedForeground}
-          strokeWidth={1.8}
-        />
-      </Pressable>
+      <View style={styles.topBarActions}>
+        <Pressable
+          onPress={() => handleSelectMakoView("mako")}
+          style={isDesktop ? styles.toolboxCornerBtn : styles.menuBtn}
+          accessibilityRole="button"
+          accessibilityLabel="Open Mako"
+        >
+          <Bot size={20} color={t.mutedForeground} strokeWidth={1.8} />
+        </Pressable>
+        <Pressable
+          onPress={() => {
+            void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            setToolboxOpen((open) => !open);
+          }}
+          style={[
+            isDesktop ? styles.toolboxCornerBtn : styles.menuBtn,
+            isDesktop && toolboxOpen
+              ? { backgroundColor: `${t.thinking}22` }
+              : null,
+          ]}
+          accessibilityRole="button"
+          accessibilityLabel={toolboxOpen ? "Close toolbox" : "Open toolbox"}
+        >
+          <Toolbox
+            size={20}
+            color={toolboxOpen ? t.thinking : t.mutedForeground}
+            strokeWidth={1.8}
+          />
+        </Pressable>
+      </View>
     </Animated.View>
   );
 
@@ -832,8 +866,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           model={model}
           models={models}
           sessionType={sessionTypeForTab(activeTab)}
-          researchEnabled={researchEnabled}
-          onResearchToggle={() => setResearchEnabled((current) => !current)}
           tokenCount={tokenCount}
           onOverlayOpenChange={setBottomControlsOpen}
           contentMaxWidth={isDesktop ? desktopChatMaxWidth : undefined}
@@ -940,7 +972,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           mode,
           model,
           models,
-          researchEnabled,
           tokenCount,
           onApproveTool: (targetSessionId, toolCallId) =>
             handleSessionToolApproval(targetSessionId, toolCallId, true),
@@ -960,7 +991,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           onModeToggle: () =>
             sessionStore.getState().setMode(mode === "build" ? "plan" : "build"),
           onModelSelect: handleModelSelect,
-          onResearchToggle: () => setResearchEnabled((current) => !current),
         }}
       />
     </Animated.View>
@@ -971,7 +1001,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       sessions={sessions}
       activeSessionId={sessionId}
       onSelectSession={(session) => void loadSession(session)}
-      onNewSession={() => void handleNewSession()}
+      onNewSession={() => void handleNewSession("chat")}
       onNewSessionWithDir={(path) => void handleDirectorySelected(path)}
       onDeleteSession={handleDeleteSession}
       onOpenSettings={() => router.push("/(tabs)/settings")}
@@ -989,7 +1019,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           sessions={sessions}
           activeSessionId={sessionId}
           onSelectSession={(session) => void loadSession(session)}
-          onNewSession={() => void handleNewSession()}
+          onNewSession={() => void handleNewSession("chat")}
           onNewSessionWithDir={(path) => void handleDirectorySelected(path)}
           onDeleteSession={handleDeleteSession}
           onOpenSettings={() => {

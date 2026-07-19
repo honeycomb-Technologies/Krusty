@@ -169,7 +169,6 @@ pub(super) async fn tool_result(
         req.thinking_level,
         req.fast_mode,
         false,
-        false,
     )
     .await?;
 

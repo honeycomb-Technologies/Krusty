@@ -170,6 +170,16 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - Frontend edits hot-reload automatically; Rust backend edits require a restart.
 - **ACP mode** (editor integration): `krusty acp`
 
+## Release Integration Workflow
+- Keep `main` as the last accepted release baseline. Cross-surface work intended for the next coordinated release belongs on the current dated `codex/release-staging-YYYYMMDD` branch.
+- At the start of any Krusty conversation that may change or release the product, inspect the active branch, every registered worktree, staged and unstaged changes, and the current release-staging branch before editing.
+- Treat each worktree as an independent Git index. Commit a logical change on its source branch, then deliberately cherry-pick or otherwise reconcile it into release staging; files cannot be staged across worktrees through one shared index.
+- Do not merge preservation, archive, or old rollup branches wholesale. Audit their commits against release staging and integrate only changes that are genuinely missing and still intended.
+- Preserve concurrent dirty work. When a mixed dirty tree must be captured, place it on release staging as an explicit staging snapshot before reorganizing or squashing it for release.
+- Build private Honey previews from the exact release-staging commit. A detached preview mirror is not a source branch and must not become the release authority.
+- Do not push, merge to `main`, tag, publish artifacts, restart the production service, or issue a public release until release staging passes the required validation below and the user explicitly approves the release.
+- One coordinated release may contain multiple logical commits. Prefer an auditable staging history over one unreviewable cross-worktree commit; squash only at the final release boundary when requested.
+
 ## Required Validation
 All code must pass before commit:
 ```bash

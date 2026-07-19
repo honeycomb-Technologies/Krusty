@@ -192,6 +192,7 @@ export function createSessionStore(
     | "cleanup"
   > = {
     sessionId: null,
+    sessionType: null,
     title: "",
     mode: "build",
     permissionMode: loadPermissionMode(),
@@ -331,7 +332,6 @@ export function createSessionStore(
     async sendMessage(
       content: string,
       attachments: Attachment[] = [],
-      researchEnabled = false,
       sendOptions: SendMessageOptions = {},
     ) {
       const state = get();
@@ -378,7 +378,7 @@ export function createSessionStore(
             return {
               queuedMessages: [
                 ...s.queuedMessages,
-                { content, attachments, researchEnabled, sendOptions },
+                { content, attachments, sendOptions },
               ],
               messages: alreadyDisplayed
                 ? s.messages
@@ -399,10 +399,10 @@ export function createSessionStore(
           });
         };
 
-        // Rich/research follow-ups can change the tool or model contract, so
-        // they remain a separate turn. Plain text can steer the active core
-        // loop without waiting for it to finish first.
-        if (!state.sessionId || attachments.length > 0 || researchEnabled) {
+        // Rich follow-ups can change the model contract, so they remain a
+        // separate turn. Plain text can steer the active core loop without
+        // waiting for it to finish first.
+        if (!state.sessionId || attachments.length > 0) {
           queueLocally();
           return;
         }
@@ -464,7 +464,6 @@ export function createSessionStore(
             await get().sendMessage(
               content,
               attachments,
-              researchEnabled,
               sendOptions,
             );
             return;
@@ -562,6 +561,7 @@ export function createSessionStore(
             ? sendOptions?.sessionType
             : undefined
           : undefined;
+        const effectiveSessionType = state.sessionType ?? requestedSessionType ?? "code";
         const requestedTargetBranch = isNewSessionRequest
           ? normalizeTargetBranch(
               sendOptionHasTargetBranch
@@ -583,12 +583,12 @@ export function createSessionStore(
               sendOptionHasTargetBranch || requestedTargetBranch
                 ? requestedTargetBranch
                 : undefined,
-            research_enabled: researchEnabled || undefined,
-            model: state.model ?? undefined,
+            model: effectiveSessionType === "mako" ? undefined : state.model ?? undefined,
             fast_mode: state.fastModeEnabled || undefined,
             thinking_enabled: thinkingLevelToApiValue(state.thinkingLevel),
-            permission_mode: state.permissionMode,
-            mode: state.mode,
+            permission_mode:
+              effectiveSessionType === "mako" ? undefined : state.permissionMode,
+            mode: effectiveSessionType === "code" ? state.mode : undefined,
           },
           callbacks,
           abortController.signal,
@@ -664,6 +664,7 @@ export function createSessionStore(
           return {
             ...s,
             sessionId: data.session.id,
+            sessionType: data.session.session_type,
             title: normalizeDisplayTitle(data.session.title),
             mode,
             permissionMode,
@@ -771,7 +772,12 @@ export function createSessionStore(
 
     // -- initSession --------------------------------------------------------
 
-    initSession(sessionId: string, title: string, permissionMode?: PermissionMode) {
+    initSession(
+      sessionId: string,
+      title: string,
+      permissionMode?: PermissionMode,
+      sessionType?: import("@krusty/api").SessionType,
+    ) {
       const current = get();
       get().stopPresenceHeartbeat(current.sessionId);
       const nextPermissionMode = permissionMode ?? current.permissionMode;
@@ -790,6 +796,7 @@ export function createSessionStore(
         thinkingEnabled: current.thinkingEnabled,
         fastModeEnabled: current.fastModeEnabled,
         sessionId,
+        sessionType: sessionType ?? null,
         title: normalizeDisplayTitle(title),
       });
       get().startPresenceHeartbeat(sessionId);
@@ -816,6 +823,7 @@ export function createSessionStore(
     // -- setMode ------------------------------------------------------------
 
     setMode(mode: SessionMode) {
+      if (get().sessionType !== "code") return;
       set({ mode });
       planStore.getState().setVisible(mode === "plan");
       void persistMode(get, mode);

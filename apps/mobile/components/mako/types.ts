@@ -56,7 +56,6 @@ export interface MakoChatContext {
   mode: "build" | "plan";
   model: string | null;
   models: ModelInfo[];
-  researchEnabled: boolean;
   tokenCount: number;
   onApproveTool: (sessionId: string, toolCallId: string) => void;
   onDenyTool: (sessionId: string, toolCallId: string) => void;
@@ -75,7 +74,6 @@ export interface MakoChatContext {
   onFastModeToggle: () => void;
   onModeToggle: () => void;
   onModelSelect: (modelId: string) => void;
-  onResearchToggle: () => void;
 }
 
 export interface MakoCurrentState {

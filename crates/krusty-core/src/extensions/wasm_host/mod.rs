@@ -1,7 +1,7 @@
 //! WASM Extension Host
 //!
 //! Ported from Zed's crates/extension_host/src/wasm_host.rs
-//! Replaces gpui runtime with tokio
+//! Adapted to Krusty's Tokio runtime.
 
 pub mod wit;
 

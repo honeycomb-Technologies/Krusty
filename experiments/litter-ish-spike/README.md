@@ -6,7 +6,7 @@ Purpose: evaluate whether `dnakov/litter-ish` can eventually let Krusty run loca
 
 - Do **not** link or vendor litter-ish into MIT Krusty crates yet.
 - Keep this as a separate Xcode target/submodule experiment because litter-ish is iSH/GPL-derived and App Store/legal obligations need explicit review.
-- The production mobile app remains chat-first: Rust client/state + GPUI UI + Swift OS shell + WKWebView terminal/browser bridge.
+- The production mobile app remains the Expo client in `apps/mobile`; any local-runtime experiment stays isolated from the shipping app until its technical, licensing, and App Store gates are resolved.
 
 ## Spike gates
 

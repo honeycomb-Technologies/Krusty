@@ -141,12 +141,12 @@ export interface SendMessageOptions {
 export interface QueuedMessage {
   content: string;
   attachments: Attachment[];
-  researchEnabled: boolean;
   sendOptions?: SendMessageOptions;
 }
 
 export interface SessionStoreState {
   sessionId: string | null;
+  sessionType: SessionType | null;
   title: string;
   mode: SessionMode;
   permissionMode: PermissionMode;
@@ -171,12 +171,16 @@ export interface SessionStoreState {
   sendMessage: (
     content: string,
     attachments?: Attachment[],
-    researchEnabled?: boolean,
     sendOptions?: SendMessageOptions,
   ) => Promise<void>;
   loadSession: (sessionId: string, isRefresh?: boolean) => Promise<void>;
   clearSession: () => void;
-  initSession: (sessionId: string, title: string, permissionMode?: PermissionMode) => void;
+  initSession: (
+    sessionId: string,
+    title: string,
+    permissionMode?: PermissionMode,
+    sessionType?: SessionType,
+  ) => void;
   setTitle: (title: string) => void;
   updateTitle: (sessionId: string, title: string) => Promise<void>;
   setMode: (mode: SessionMode) => void;

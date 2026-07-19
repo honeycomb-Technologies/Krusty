@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -20,6 +21,7 @@ pub(super) struct MakoRunOutcome {
     pinched_session_id: Option<String>,
     stop_reason: Option<LoopStopReason>,
     sent_user_message: bool,
+    notified_tool_approvals: HashSet<String>,
 }
 
 impl MakoRunOutcome {
@@ -53,7 +55,7 @@ impl MakoRunOutcome {
             }
         }
 
-        if matches!(event, LoopEvent::AwaitingInput { .. }) {
+        if matches!(event, LoopEvent::AwaitingInput { .. }) && !self.awaiting_input {
             self.awaiting_input = true;
             notify_mako_awaiting_input(
                 &state.push_service,
@@ -67,7 +69,9 @@ impl MakoRunOutcome {
             ref id, ref name, ..
         } = event
         {
-            notify_mako_tool_approval(&state.apns_service, user_id, session_id, id, name);
+            if self.notified_tool_approvals.insert(id.clone()) {
+                notify_mako_tool_approval(&state.apns_service, user_id, session_id, id, name);
+            }
         }
 
         if let LoopEvent::UserMessage {

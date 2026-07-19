@@ -18,6 +18,8 @@ import {
 import * as Haptics from "../../platform/haptics";
 import { useThemeContext } from "../../hooks/useTheme";
 import { BashOutput } from "./BashOutput";
+import { ToolDiffViewer } from "./ToolDiffViewer";
+import { buildToolDiffPresentation, isDiffTool } from "./toolDiffModel";
 import type { ToolCall } from "@krusty/api";
 
 interface ToolCallCardProps {
@@ -184,19 +186,9 @@ export function ToolCallCard({
       );
     }
 
-    // Edit/Write — show file path and diff summary
-    if (
-      name === "edit" ||
-      name === "write" ||
-      name === "multiedit" ||
-      name === "Edit" ||
-      name === "Write" ||
-      name === "MultiEdit"
-    ) {
-      const oldStr = (args.old_string ?? "") as string;
-      const newStr = (args.new_string ?? args.content ?? "") as string;
-      const addedLines = newStr.split("\n").length;
-      const removedLines = oldStr ? oldStr.split("\n").length : 0;
+    // File mutations — branded diff surface on web and native.
+    if (isDiffTool(name)) {
+      const diff = buildToolDiffPresentation(toolCall);
 
       return (
         <View style={styles.diffSummary}>
@@ -206,14 +198,20 @@ export function ToolCallCard({
             </Text>
           ) : null}
           <View style={styles.diffStats}>
-            {addedLines > 0 && (
-              <Text style={styles.addedText}>+{addedLines}</Text>
+            {(diff?.additions ?? 0) > 0 && (
+              <Text style={styles.addedText}>+{diff?.additions}</Text>
             )}
-            {removedLines > 0 && (
-              <Text style={styles.removedText}>-{removedLines}</Text>
+            {(diff?.deletions ?? 0) > 0 && (
+              <Text style={styles.removedText}>-{diff?.deletions}</Text>
             )}
           </View>
-          {expanded && toolCall.output && (
+          {expanded && diff?.summary ? (
+            <Text style={[styles.diffMessage, { color: t.mutedForeground }]}>
+              {diff.summary}
+            </Text>
+          ) : null}
+          {expanded && diff ? <ToolDiffViewer presentation={diff} /> : null}
+          {expanded && !diff && toolCall.output && (
             <Text
               style={[styles.outputText, { color: t.foreground }]}
               selectable
@@ -298,8 +296,7 @@ export function ToolCallCard({
   };
 
   return (
-    <Pressable
-      onPress={toggle}
+    <View
       style={[
         styles.card,
         showDetailedSurface
@@ -310,7 +307,7 @@ export function ToolCallCard({
           : styles.compactCard,
       ]}
     >
-      <View style={styles.header}>
+      <Pressable onPress={toggle} style={styles.header}>
         <StatusIcon />
         <Text
           style={[styles.toolName, { color: t.foreground }]}
@@ -330,9 +327,9 @@ export function ToolCallCard({
           ) : (
             <ChevronRight size={14} color={t.mutedForeground} />
           ))}
-      </View>
+      </Pressable>
       {renderBody()}
-    </Pressable>
+    </View>
   );
 }
 
@@ -395,6 +392,7 @@ const styles = StyleSheet.create({
   agentList: { marginTop: 6, gap: 3 },
   agentLine: { fontSize: 11, fontFamily: "Courier", lineHeight: 15 },
   diffSummary: { marginTop: 6, gap: 4 },
+  diffMessage: { fontSize: 11, lineHeight: 15 },
   diffStats: { flexDirection: "row", gap: 10 },
   addedText: { color: "#22c55e", fontSize: 12, fontFamily: "Courier" },
   removedText: { color: "#ef4444", fontSize: 12, fontFamily: "Courier" },
