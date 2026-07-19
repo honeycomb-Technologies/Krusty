@@ -1,5 +1,9 @@
 import { useRef, useCallback, useEffect } from 'react';
 import { Platform } from 'react-native';
+import {
+  liveActivityStateEqual,
+  type LiveActivitySemanticState,
+} from './presentationCadence';
 
 // Native-only imports — loaded dynamically to avoid crash on web
 let addUserInteractionListener: any = () => ({ remove: () => {} });
@@ -19,16 +23,14 @@ type LiveActivityInteractionEvent = {
   target?: unknown;
 };
 
-interface StreamState {
-  chatTitle: string;
-  status: 'working' | 'needs_input' | 'completed';
-  toolCount: number;
-  filesAdded: number;
-  filesRemoved: number;
-  toolApprovalId?: string;
-  toolApprovalName?: string;
-  toolApprovalSessionId?: string;
+type StreamState = LiveActivitySemanticState;
+
+interface ActivityContentState extends StreamState {
+  startedAtMs: number;
+  elapsedSeconds: number;
 }
+
+const MIN_ACTIVITY_UPDATE_INTERVAL_MS = 2_000;
 
 interface UseLiveActivityOptions {
   onToolApproval?: (
@@ -61,16 +63,72 @@ function parseApprovalTarget(
 export function useLiveActivity(options?: UseLiveActivityOptions) {
   const activityRef = useRef<LiveActivity | null>(null);
   const startTimeRef = useRef<number>(0);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stateRef = useRef<StreamState | null>(null);
   const sessionIdRef = useRef<string | null>(null);
+  const pendingUpdateRef = useRef<ActivityContentState | null>(null);
+  const pendingUpdateUrgentRef = useRef(false);
+  const updateInFlightRef = useRef(false);
+  const updateGenerationRef = useRef(0);
+  const lastUpdateStartedAtRef = useRef(0);
+  const updateDelayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const clearTimer = useCallback(() => {
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
+  const clearUpdateDelay = useCallback(() => {
+    if (updateDelayRef.current) {
+      clearTimeout(updateDelayRef.current);
+      updateDelayRef.current = null;
     }
   }, []);
+
+  const runPendingUpdateRef = useRef<(generation: number) => void>(() => {});
+
+  const schedulePendingUpdate = useCallback((force = false) => {
+    if (!activityRef.current || !pendingUpdateRef.current) return;
+    if (force) pendingUpdateUrgentRef.current = true;
+
+    const generation = updateGenerationRef.current;
+    const elapsed = Date.now() - lastUpdateStartedAtRef.current;
+    const delay = pendingUpdateUrgentRef.current
+      ? 0
+      : Math.max(0, MIN_ACTIVITY_UPDATE_INTERVAL_MS - elapsed);
+
+    if (delay === 0 && !updateInFlightRef.current) {
+      clearUpdateDelay();
+      runPendingUpdateRef.current(generation);
+      return;
+    }
+
+    if (!updateDelayRef.current && !updateInFlightRef.current) {
+      updateDelayRef.current = setTimeout(() => {
+        updateDelayRef.current = null;
+        runPendingUpdateRef.current(generation);
+      }, delay);
+    }
+  }, [clearUpdateDelay]);
+
+  runPendingUpdateRef.current = (generation: number) => {
+    if (
+      generation !== updateGenerationRef.current ||
+      updateInFlightRef.current ||
+      !activityRef.current ||
+      !pendingUpdateRef.current
+    ) {
+      return;
+    }
+
+    const activity = activityRef.current;
+    const content = pendingUpdateRef.current;
+    pendingUpdateRef.current = null;
+    pendingUpdateUrgentRef.current = false;
+    updateInFlightRef.current = true;
+    lastUpdateStartedAtRef.current = Date.now();
+
+    void activity.update(content).catch(() => {}).finally(() => {
+      updateInFlightRef.current = false;
+      if (pendingUpdateRef.current && activityRef.current) {
+        schedulePendingUpdate(pendingUpdateUrgentRef.current);
+      }
+    });
+  };
 
   const closeExistingActivities = useCallback(() => {
     if (!ChatStreamActivityFactory) return;
@@ -124,7 +182,10 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
       return;
     }
 
-    clearTimer();
+    clearUpdateDelay();
+    updateGenerationRef.current += 1;
+    pendingUpdateRef.current = null;
+    pendingUpdateUrgentRef.current = false;
     if (activityRef.current) {
       void activityRef.current.end('immediate').catch(() => {});
       activityRef.current = null;
@@ -144,8 +205,10 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
     try {
       activityRef.current = ChatStreamActivityFactory.start({
         ...stateRef.current,
+        startedAtMs: startTimeRef.current,
         elapsedSeconds: 0,
       }, `krusty://?sessionId=${encodeURIComponent(sessionId)}`);
+      lastUpdateStartedAtRef.current = Date.now();
     } catch {
       // Live Activities may not be available (simulator, unsupported device)
       activityRef.current = null;
@@ -154,53 +217,60 @@ export function useLiveActivity(options?: UseLiveActivityOptions) {
       return;
     }
 
-    // Update elapsed time every second
-    timerRef.current = setInterval(() => {
-      if (!activityRef.current || !stateRef.current) return;
-      const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
-      activityRef.current.update({
-        ...stateRef.current,
-        elapsedSeconds: elapsed,
-      }).catch(() => {});
-    }, 1000);
-  }, [clearTimer, closeExistingActivities]);
+  }, [clearUpdateDelay, closeExistingActivities]);
 
   const updateActivity = useCallback((partial: Partial<StreamState>) => {
     if (!activityRef.current || !stateRef.current) return;
 
-    stateRef.current = { ...stateRef.current, ...partial };
-    const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
+    const previous = stateRef.current;
+    const next = { ...previous, ...partial };
+    if (liveActivityStateEqual(previous, next)) return;
 
-    activityRef.current.update({
-      ...stateRef.current,
+    stateRef.current = next;
+    const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
+    pendingUpdateRef.current = {
+      ...next,
+      startedAtMs: startTimeRef.current,
       elapsedSeconds: elapsed,
-    }).catch(() => {});
-  }, []);
+    };
+
+    const statusChanged = previous.status !== next.status;
+    schedulePendingUpdate(statusChanged);
+  }, [schedulePendingUpdate]);
 
   const endActivity = useCallback(() => {
-    clearTimer();
+    clearUpdateDelay();
 
     if (!activityRef.current || !stateRef.current) return;
 
+    const activity = activityRef.current;
+    const finalState = stateRef.current;
     const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
+    updateGenerationRef.current += 1;
+    pendingUpdateRef.current = null;
+    pendingUpdateUrgentRef.current = false;
 
-    activityRef.current.end({ after: new Date(Date.now() + 60_000) }, {
-      ...stateRef.current,
+    activity.end({ after: new Date(Date.now() + 60_000) }, {
+      ...finalState,
       status: 'completed',
+      startedAtMs: startTimeRef.current,
       elapsedSeconds: elapsed,
     }, new Date()).catch(() => {});
 
     activityRef.current = null;
     stateRef.current = null;
     sessionIdRef.current = null;
-  }, [clearTimer]);
+  }, [clearUpdateDelay]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      clearTimer();
+      clearUpdateDelay();
+      updateGenerationRef.current += 1;
+      pendingUpdateRef.current = null;
+      pendingUpdateUrgentRef.current = false;
     };
-  }, [clearTimer]);
+  }, [clearUpdateDelay]);
 
   return { startActivity, updateActivity, endActivity };
 }

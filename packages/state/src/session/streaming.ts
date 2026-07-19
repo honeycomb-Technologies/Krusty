@@ -116,7 +116,9 @@ export function createStreamCallbacks(
 	let compactedInPlace = false;
 	let streamLagged = false;
 	let pendingTextDelta = "";
-	let textFlushScheduled = false;
+	let pendingThinkingDelta = "";
+	const pendingToolOutputDeltas = new Map<string, string>();
+	let streamFlushScheduled = false;
 
 	function updateLastAssistantMessage(
 		updater?: (state: SessionStoreState) => Partial<SessionStoreState>,
@@ -129,20 +131,94 @@ export function createStreamCallbacks(
 		});
 	}
 
-	function flushPendingTextDelta() {
-		if (!pendingTextDelta) return;
-		ref.current.content += pendingTextDelta;
-		appendTextRenderPart(ref, pendingTextDelta);
-		pendingTextDelta = "";
+	function flushPendingDeltas() {
+		let changed = false;
+		let flushedText = false;
+		let flushedThinking = false;
+
+		if (pendingTextDelta) {
+			ref.current.content += pendingTextDelta;
+			appendTextRenderPart(ref, pendingTextDelta);
+			pendingTextDelta = "";
+			changed = true;
+			flushedText = true;
+		}
+
+		if (pendingThinkingDelta) {
+			ref.current.thinking =
+				(ref.current.thinking || "") + pendingThinkingDelta;
+			appendThinkingRenderPart(ref, pendingThinkingDelta);
+			pendingThinkingDelta = "";
+			const delegatedIndex = (ref.current.toolCalls || []).findIndex(
+				(toolCall) =>
+					resolveDelegatedKind(
+						toolCall.name,
+						toolCall.arguments,
+						toolCall.delegated?.kind,
+					) !== undefined,
+			);
+			if (delegatedIndex >= 0) {
+				const toolCalls = [...(ref.current.toolCalls || [])];
+				const delegatedTool = toolCalls[delegatedIndex];
+				const delegatedKind = resolveDelegatedKind(
+					delegatedTool.name,
+					delegatedTool.arguments,
+					delegatedTool.delegated?.kind,
+				);
+				if (delegatedKind) {
+					toolCalls[delegatedIndex] = {
+						...delegatedTool,
+						delegated: mergeDelegatedArtifactState(delegatedTool.delegated, {
+							...(delegatedTool.delegated ||
+								createDelegatedArtifactState(
+									delegatedKind,
+									delegatedTool.arguments,
+								)),
+							kind: delegatedKind,
+							thinking: ref.current.thinking || "",
+						}),
+					};
+					ref.current.toolCalls = toolCalls;
+				}
+			}
+			changed = true;
+			flushedThinking = true;
+		}
+
+		if (pendingToolOutputDeltas.size > 0) {
+			let toolCallsChanged = false;
+			if (ref.current.toolCalls?.length) {
+				ref.current.toolCalls = ref.current.toolCalls.map((toolCall) => {
+					const delta = pendingToolOutputDeltas.get(toolCall.id);
+					if (!delta) return toolCall;
+					toolCallsChanged = true;
+					return {
+						...toolCall,
+						output: (toolCall.output || "") + delta,
+					};
+				});
+			}
+			pendingToolOutputDeltas.clear();
+			changed = changed || toolCallsChanged;
+		}
+
+		if (!changed) return;
 		updateLastAssistantMessage(() => ({
-			isLoading: false,
-			isThinking: false,
+			...(flushedText
+				? { isLoading: false, isThinking: false }
+				: {}),
+			...(flushedThinking
+				? {
+						isThinking: true,
+						thinkingContent: ref.current.thinking || "",
+					}
+				: {}),
 		}));
 	}
 
-	function scheduleTextFlush() {
-		if (textFlushScheduled) return;
-		textFlushScheduled = true;
+	function scheduleStreamFlush() {
+		if (streamFlushScheduled) return;
+		streamFlushScheduled = true;
 		type FrameScheduler = (callback: (timestamp: number) => void) => unknown;
 		const runtime = globalThis as typeof globalThis & {
 			requestAnimationFrame?: FrameScheduler;
@@ -151,8 +227,8 @@ export function createStreamCallbacks(
 			? runtime.requestAnimationFrame.bind(runtime)
 			: (callback) => setTimeout(() => callback(Date.now()), 16);
 		schedule(() => {
-			textFlushScheduled = false;
-			flushPendingTextDelta();
+			streamFlushScheduled = false;
+			flushPendingDeltas();
 		});
 	}
 
@@ -171,59 +247,23 @@ export function createStreamCallbacks(
 
 	return {
 		onTextDelta: (delta) => {
+			if (pendingThinkingDelta || pendingToolOutputDeltas.size > 0) {
+				flushPendingDeltas();
+			}
 			pendingTextDelta += delta;
-			scheduleTextFlush();
+			scheduleStreamFlush();
 		},
 
 		onThinkingDelta: (thinking) => {
-			flushPendingTextDelta();
-			ref.current.thinking = (ref.current.thinking || "") + thinking;
-			appendThinkingRenderPart(ref, thinking);
-			const delegatedIndex = (ref.current.toolCalls || []).findIndex(
-				(toolCall) =>
-					resolveDelegatedKind(
-						toolCall.name,
-						toolCall.arguments,
-						toolCall.delegated?.kind,
-					) !== undefined,
-			);
-			if (delegatedIndex >= 0) {
-				const toolCalls = [...(ref.current.toolCalls || [])];
-				const delegatedTool = toolCalls[delegatedIndex];
-				const delegatedKind = resolveDelegatedKind(
-					delegatedTool.name,
-					delegatedTool.arguments,
-					delegatedTool.delegated?.kind,
-				);
-				if (!delegatedKind) {
-					updateLastAssistantMessage(() => ({
-						isThinking: true,
-						thinkingContent: ref.current.thinking || "",
-					}));
-					return;
-				}
-				toolCalls[delegatedIndex] = {
-					...delegatedTool,
-					delegated: mergeDelegatedArtifactState(delegatedTool.delegated, {
-						...(delegatedTool.delegated ||
-							createDelegatedArtifactState(
-								delegatedKind,
-								delegatedTool.arguments,
-							)),
-						kind: delegatedKind,
-						thinking: ref.current.thinking || "",
-					}),
-				};
-				ref.current.toolCalls = toolCalls;
+			if (pendingTextDelta || pendingToolOutputDeltas.size > 0) {
+				flushPendingDeltas();
 			}
-			updateLastAssistantMessage(() => ({
-				isThinking: true,
-				thinkingContent: ref.current.thinking || "",
-			}));
+			pendingThinkingDelta += thinking;
+			scheduleStreamFlush();
 		},
 
 		onToolCallStart: (id, name) => {
-			flushPendingTextDelta();
+			flushPendingDeltas();
 			if ((ref.current.toolCalls || []).some((toolCall) => toolCall.id === id)) {
 				appendToolRenderPart(ref, id);
 				return;
@@ -245,7 +285,7 @@ export function createStreamCallbacks(
 		},
 
 		onToolCallComplete: (id, _name, args) => {
-			flushPendingTextDelta();
+			flushPendingDeltas();
 			mapToolCalls(id, (toolCall) => {
 				const delegatedKind = resolveDelegatedKind(
 					toolCall.name,
@@ -266,7 +306,7 @@ export function createStreamCallbacks(
 		},
 
 		onToolResult: (id, output, isError) => {
-			flushPendingTextDelta();
+			flushPendingDeltas();
 			mapToolCalls(id, (toolCall) => {
 				const delegatedKind = resolveDelegatedKind(
 					toolCall.name,
@@ -307,27 +347,30 @@ export function createStreamCallbacks(
 		},
 
 		onToolOutputDelta: (id, delta) => {
-			flushPendingTextDelta();
-			mapToolCalls(id, (toolCall) => ({
-				...toolCall,
-				output: (toolCall.output || "") + delta,
-			}));
+			if (pendingTextDelta || pendingThinkingDelta) {
+				flushPendingDeltas();
+			}
+			pendingToolOutputDeltas.set(
+				id,
+				(pendingToolOutputDeltas.get(id) || "") + delta,
+			);
+			scheduleStreamFlush();
 		},
 
 		onDelegatedProgress: (event) => {
-			flushPendingTextDelta();
+			flushPendingDeltas();
 			mapToolCalls(event.tool_call_id, (toolCall) =>
 				applyDelegatedProgress(toolCall, event),
 			);
 		},
 
 		onPlanUpdate: (items: PlanItem[]) => {
-			flushPendingTextDelta();
+			flushPendingDeltas();
 			planStore.getState().setItems(items);
 		},
 
 		onModeChange: (mode) => {
-			flushPendingTextDelta();
+			flushPendingDeltas();
 			const nextMode: SessionMode = mode === "plan" ? "plan" : "build";
 			set({ mode: nextMode });
 			planStore.getState().setVisible(nextMode === "plan");
@@ -335,7 +378,7 @@ export function createStreamCallbacks(
 		},
 
 		onPlanComplete: (toolCallId, title, taskCount) => {
-			flushPendingTextDelta();
+			flushPendingDeltas();
 			const planConfirmCall: ToolCall = {
 				id: toolCallId,
 				name: "PlanConfirm",
@@ -351,7 +394,7 @@ export function createStreamCallbacks(
 		},
 
 		onTurnComplete: (_turn, hasMore) => {
-			flushPendingTextDelta();
+			flushPendingDeltas();
 			if (hasMore) {
 				const completed = ref.current;
 				const hasRenderableContent = Boolean(
@@ -369,7 +412,7 @@ export function createStreamCallbacks(
 		},
 
 		onToolApprovalRequired: (id, _name, args) => {
-			flushPendingTextDelta();
+			flushPendingDeltas();
 			mapToolCalls(id, (toolCall) => ({
 				...toolCall,
 				arguments: args,
@@ -378,12 +421,12 @@ export function createStreamCallbacks(
 		},
 
 		onToolApproved: (id) => {
-			flushPendingTextDelta();
+			flushPendingDeltas();
 			mapToolCalls(id, (toolCall) => ({ ...toolCall, status: "running" }));
 		},
 
 		onToolDenied: (id) => {
-			flushPendingTextDelta();
+			flushPendingDeltas();
 			mapToolCalls(id, (toolCall) => ({
 				...toolCall,
 				status: "error",
@@ -392,7 +435,7 @@ export function createStreamCallbacks(
 		},
 
 		onSteeringInjected: (pendingId, message) => {
-			flushPendingTextDelta();
+			flushPendingDeltas();
 			const id = pendingId
 				? `user-steering-${pendingId}`
 				: createChatMessageId("user-steering");
@@ -422,7 +465,7 @@ export function createStreamCallbacks(
 		},
 
 		onUsage: (promptTokens, completionTokens, metrics) => {
-			flushPendingTextDelta();
+			flushPendingDeltas();
 			set({
 				tokenCount:
 					metrics?.totalTokens ?? promptTokens + completionTokens,
@@ -435,7 +478,7 @@ export function createStreamCallbacks(
 		},
 
 		onSessionPinched: (event: SessionContinuationEvent) => {
-			flushPendingTextDelta();
+			flushPendingDeltas();
 			if (event.type === "session_pinched") {
 				pinchedSessionId = event.new_session_id;
 				return;
@@ -451,13 +494,13 @@ export function createStreamCallbacks(
 		},
 
 		onTitleUpdate: (title) => {
-			flushPendingTextDelta();
+			flushPendingDeltas();
 			set({ title });
 			sessionsStore.getState().loadSessions();
 		},
 
 		onFinish: (sessionId) => {
-			flushPendingTextDelta();
+			flushPendingDeltas();
 			const currentState = get();
 			const queued = currentState.queuedMessages;
 			const activeSessionId = pinchedSessionId ?? sessionId;
@@ -564,8 +607,8 @@ export function createStreamCallbacks(
 		},
 
 		onError: (error) => {
-			// Flush rAF-batched text so the last frame is not dropped on failure.
-			flushPendingTextDelta();
+			// Flush frame-batched stream content so the final update is not dropped.
+			flushPendingDeltas();
 			set((state) => ({
 				isLoading: false,
 				isStreaming: false,

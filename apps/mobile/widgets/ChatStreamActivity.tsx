@@ -19,6 +19,7 @@ import type { LiveActivityComponent } from "expo-widgets";
 export interface ChatStreamProps {
   chatTitle: string;
   status: "working" | "needs_input" | "completed";
+  startedAtMs: number;
   elapsedSeconds: number;
   toolCount: number;
   filesAdded: number;
@@ -52,6 +53,7 @@ const ChatStreamActivity: LiveActivityComponent<ChatStreamProps> = (props) => {
   const {
     chatTitle,
     status,
+    startedAtMs,
     elapsedSeconds,
     toolCount,
     filesAdded,
@@ -72,6 +74,34 @@ const ChatStreamActivity: LiveActivityComponent<ChatStreamProps> = (props) => {
         ? "checkmark.circle.fill"
         : "circle.fill";
   const elapsed = formatElapsed(elapsedSeconds);
+  const timerInterval = {
+    lower: new Date(startedAtMs),
+    upper: new Date(startedAtMs + 24 * 60 * 60 * 1000),
+  };
+  const bannerTimer =
+    status === "completed" ? (
+      <Text modifiers={[font({ size: 15, weight: "semibold" }), monospacedDigit(), foregroundStyle(timerColor)]}>
+        {elapsed}
+      </Text>
+    ) : (
+      <Text
+        timerInterval={timerInterval}
+        countsDown={false}
+        modifiers={[font({ size: 15, weight: "semibold" }), monospacedDigit(), foregroundStyle(timerColor)]}
+      />
+    );
+  const compactTimer =
+    status === "completed" ? (
+      <Text modifiers={[font({ size: 11, weight: "semibold" }), monospacedDigit(), foregroundStyle(timerColor)]}>
+        {elapsed}
+      </Text>
+    ) : (
+      <Text
+        timerInterval={timerInterval}
+        countsDown={false}
+        modifiers={[font({ size: 11, weight: "semibold" }), monospacedDigit(), foregroundStyle(timerColor)]}
+      />
+    );
   const approvalTarget =
     toolApprovalId && toolApprovalSessionId
       ? `${encodeURIComponent(toolApprovalSessionId)}:${encodeURIComponent(toolApprovalId)}`
@@ -147,9 +177,7 @@ const ChatStreamActivity: LiveActivityComponent<ChatStreamProps> = (props) => {
           </Text>
           <Spacer />
           <VStack alignment="trailing" spacing={3} modifiers={[frame({ minWidth: 58, alignment: "trailing" })]}>
-            <Text modifiers={[font({ size: 15, weight: "semibold" }), monospacedDigit(), foregroundStyle(timerColor)]}>
-              {elapsed}
-            </Text>
+            {bannerTimer}
             <HStack spacing={4}>
               <Image systemName="circle.fill" size={5} color={statusColor} />
               <Text modifiers={[font({ size: 9, weight: "medium" }), foregroundStyle(statusColor)]}>{statusLabel}</Text>
@@ -194,9 +222,7 @@ const ChatStreamActivity: LiveActivityComponent<ChatStreamProps> = (props) => {
     compactTrailing: (
       <HStack spacing={4}>
         <Image systemName={compactStatusSymbol} size={7} color={statusColor} />
-        <Text modifiers={[font({ size: 11, weight: "semibold" }), monospacedDigit(), foregroundStyle(timerColor)]}>
-          {elapsed}
-        </Text>
+        {compactTimer}
       </HStack>
     ),
     minimal: compactLogo,
@@ -208,9 +234,7 @@ const ChatStreamActivity: LiveActivityComponent<ChatStreamProps> = (props) => {
     ),
     expandedTrailing: (
       <VStack alignment="trailing" spacing={3}>
-        <Text modifiers={[font({ size: 11, weight: "semibold" }), monospacedDigit(), foregroundStyle(timerColor)]}>
-          {elapsed}
-        </Text>
+        {compactTimer}
         <HStack spacing={3}>
           <Image systemName="circle.fill" size={4} color={statusColor} />
           <Text modifiers={[font({ size: 8, weight: "medium" }), foregroundStyle(statusColor)]}>{statusLabel}</Text>
