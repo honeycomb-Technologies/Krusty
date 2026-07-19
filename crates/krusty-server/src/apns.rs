@@ -115,6 +115,9 @@ impl ApnsService {
 
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
+            // APNs is HTTP/2-only. Do not allow reqwest to fall back to HTTP/1.1
+            // when ALPN negotiation is unavailable or inconclusive.
+            .http2_prior_knowledge()
             .build()
             .context("Failed to build HTTP client for APNs")?;
 
