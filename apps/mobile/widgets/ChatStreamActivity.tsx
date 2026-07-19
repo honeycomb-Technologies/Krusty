@@ -7,7 +7,9 @@ import {
   font,
   foregroundStyle,
   frame,
+  layoutPriority,
   lineLimit,
+  monospacedDigit,
   opacity,
   padding,
   resizable,
@@ -55,7 +57,8 @@ const ChatStreamActivity: LiveActivityComponent<ChatStreamProps> = (props) => {
     toolApprovalSessionId,
   } = props;
   const statusColor =
-    status === "needs_input" ? "#ef4444" : status === "completed" ? "#22c55e" : "#ff6b35";
+    status === "needs_input" ? "#fbbf24" : status === "completed" ? "#34c759" : "#ff7a32";
+  const timerColor = "#ff7a32";
   const statusLabel =
     status === "needs_input" ? "Needs input" : status === "completed" ? "Completed" : "Working";
   const elapsed = formatElapsed(elapsedSeconds);
@@ -70,8 +73,8 @@ const ChatStreamActivity: LiveActivityComponent<ChatStreamProps> = (props) => {
       modifiers={[
         resizable(),
         aspectRatio({ ratio: 1, contentMode: "fit" }),
-        frame({ width: 30, height: 30 }),
-        cornerRadius(9),
+        frame({ width: 28, height: 28 }),
+        cornerRadius(8),
         clipped(),
       ]}
     />
@@ -82,49 +85,51 @@ const ChatStreamActivity: LiveActivityComponent<ChatStreamProps> = (props) => {
       modifiers={[
         resizable(),
         aspectRatio({ ratio: 1, contentMode: "fit" }),
-        frame({ width: 18, height: 18 }),
+        frame({ width: 17, height: 17 }),
         cornerRadius(5),
         clipped(),
       ]}
     />
   );
   const metrics = (
-    <HStack spacing={14}>
-      <HStack spacing={5}>
-        <Image systemName="wrench" modifiers={[foregroundStyle("#60a5fa"), font({ size: 11 })]} />
-        <Text modifiers={[font({ size: 11 }), opacity(0.78)]}>{toolCount} tools</Text>
+    <HStack spacing={16}>
+      <HStack spacing={6}>
+        <Image systemName="wrench" size={12} color="#a8b0bc" />
+        <Text modifiers={[font({ size: 10, weight: "medium" }), opacity(0.76)]}>{toolCount} tools</Text>
       </HStack>
-      <HStack spacing={5}>
-        <Image systemName="doc.text.magnifyingglass" modifiers={[foregroundStyle("#60a5fa"), font({ size: 11 })]} />
-        <Text modifiers={[font({ size: 11, design: "monospaced" }), foregroundStyle("#22c55e")]}>+{filesAdded}</Text>
-        <Text modifiers={[font({ size: 11, design: "monospaced" }), foregroundStyle("#ef4444")]}>−{filesRemoved}</Text>
+      <HStack spacing={6}>
+        <Image systemName="doc.text.magnifyingglass" size={12} color="#a8b0bc" />
+        <HStack spacing={3}>
+          <Text modifiers={[font({ size: 10, weight: "medium" }), monospacedDigit(), foregroundStyle("#34c759")]}>+{filesAdded}</Text>
+          <Text modifiers={[font({ size: 10, weight: "medium" }), monospacedDigit(), foregroundStyle("#ff5b62")]}>−{filesRemoved}</Text>
+        </HStack>
       </HStack>
     </HStack>
   );
 
   return {
     banner: (
-      <VStack alignment="leading" spacing={9} modifiers={[padding({ all: 14 })]}>
-        <HStack spacing={9}>
+      <VStack alignment="leading" spacing={10} modifiers={[padding({ horizontal: 14, vertical: 13 })]}>
+        <HStack spacing={10}>
           {logo}
-          <Text modifiers={[font({ size: 14, weight: "semibold" }), lineLimit(1)]}>
+          <Text modifiers={[font({ size: 13, weight: "semibold" }), lineLimit(1), layoutPriority(1)]}>
             {chatTitle || "Krusty session"}
           </Text>
           <Spacer />
-          <VStack alignment="trailing" spacing={2}>
-            <Text modifiers={[font({ size: 17, weight: "medium", design: "monospaced" }), foregroundStyle(statusColor)]}>
+          <VStack alignment="trailing" spacing={3} modifiers={[frame({ minWidth: 58, alignment: "trailing" })]}>
+            <Text modifiers={[font({ size: 15, weight: "semibold" }), monospacedDigit(), foregroundStyle(timerColor)]}>
               {elapsed}
             </Text>
             <HStack spacing={4}>
-              <Image systemName="circle.fill" modifiers={[foregroundStyle(statusColor), font({ size: 6 })]} />
-              <Text modifiers={[font({ size: 9, weight: "semibold" }), foregroundStyle(statusColor)]}>{statusLabel}</Text>
+              <Image systemName="circle.fill" size={5} color={statusColor} />
+              <Text modifiers={[font({ size: 9, weight: "medium" }), foregroundStyle(statusColor)]}>{statusLabel}</Text>
             </HStack>
           </VStack>
         </HStack>
         <HStack>
           {metrics}
           <Spacer />
-          <Image systemName="chevron.right" modifiers={[foregroundStyle("#60a5fa"), font({ size: 11 })]} />
+          <Image systemName="chevron.right" size={9} color="#8b93a1" />
         </HStack>
         {status === "needs_input" && approvalTarget && (
           <VStack spacing={6}>
@@ -143,29 +148,32 @@ const ChatStreamActivity: LiveActivityComponent<ChatStreamProps> = (props) => {
       <HStack spacing={6}>
         {compactLogo}
         <HStack spacing={3}>
-          <Text modifiers={[font({ size: 9, design: "monospaced" }), foregroundStyle("#22c55e")]}>+{filesAdded}</Text>
-          <Text modifiers={[font({ size: 9, design: "monospaced" }), foregroundStyle("#ef4444")]}>−{filesRemoved}</Text>
+          <Text modifiers={[font({ size: 9, weight: "medium" }), monospacedDigit(), foregroundStyle("#34c759")]}>+{filesAdded}</Text>
+          <Text modifiers={[font({ size: 9, weight: "medium" }), monospacedDigit(), foregroundStyle("#ff5b62")]}>−{filesRemoved}</Text>
         </HStack>
       </HStack>
     ),
     compactTrailing: (
-      <Text modifiers={[font({ size: 11, weight: "medium", design: "monospaced" }), foregroundStyle(statusColor)]}>
+      <Text modifiers={[font({ size: 11, weight: "semibold" }), monospacedDigit(), foregroundStyle(timerColor)]}>
         {elapsed}
       </Text>
     ),
     minimal: compactLogo,
     expandedLeading: logo,
     expandedCenter: (
-      <Text modifiers={[font({ size: 13, weight: "semibold" }), lineLimit(1)]}>
+      <Text modifiers={[font({ size: 12, weight: "semibold" }), lineLimit(1)]}>
         {chatTitle || "Krusty session"}
       </Text>
     ),
     expandedTrailing: (
-      <VStack alignment="trailing" spacing={2}>
-        <Text modifiers={[font({ size: 12, weight: "medium", design: "monospaced" }), foregroundStyle(statusColor)]}>
+      <VStack alignment="trailing" spacing={3}>
+        <Text modifiers={[font({ size: 11, weight: "semibold" }), monospacedDigit(), foregroundStyle(timerColor)]}>
           {elapsed}
         </Text>
-        <Text modifiers={[font({ size: 9, weight: "semibold" }), foregroundStyle(statusColor)]}>{statusLabel}</Text>
+        <HStack spacing={3}>
+          <Image systemName="circle.fill" size={4} color={statusColor} />
+          <Text modifiers={[font({ size: 8, weight: "medium" }), foregroundStyle(statusColor)]}>{statusLabel}</Text>
+        </HStack>
       </VStack>
     ),
     expandedBottom: (
