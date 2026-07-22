@@ -213,6 +213,91 @@ class TraceConvergenceTests(unittest.TestCase):
 
         self.assertEqual(api.calls, 1)
 
+    def test_settled_trace_waits_for_expected_followup_and_accounting(self) -> None:
+        prior = [
+            budget_event(1, "run-1"),
+            trace_event(2, "finished", run_id="run-1", stop_reason="completed"),
+            trace_event(3, "provider_call", run_id="run-1"),
+        ]
+        next_budget = budget_event(4, "run-2")
+        next_finished = trace_event(
+            5, "finished", run_id="run-2", stop_reason="completed"
+        )
+        next_provider_call = trace_event(6, "provider_call", run_id="run-2")
+        responses = [
+            trace_response(prior),
+            trace_response(prior + [next_budget]),
+            trace_response(prior + [next_budget, next_finished]),
+            trace_response(prior + [next_budget, next_finished, next_provider_call]),
+        ]
+        for response in responses:
+            response["summary"]["total_runs"] = len(
+                {
+                    event["run_id"]
+                    for event in response["events"]
+                    if event.get("event_type") == "run_budget_resolved"
+                }
+            )
+        api = SequenceTraceApi(responses)
+
+        trace, summary = HARNESS.wait_for_settled_trace_runs(
+            api,
+            "session-1",
+            "settled trace",
+            expected_runs=2,
+            timeout=1.0,
+            poll_interval=0.0,
+        )
+
+        self.assertEqual(api.calls, 4)
+        self.assertEqual(trace["latest_sequence"], 6)
+        self.assertEqual(summary["total_runs"], 2)
+
+    def test_settled_trace_rejects_terminal_without_budget_immediately(self) -> None:
+        terminal = trace_event(1, "finished", stop_reason="completed")
+        response = trace_response([terminal])
+        response["summary"]["total_runs"] = 1
+        api = SequenceTraceApi([response])
+
+        with self.assertRaisesRegex(
+            HARNESS.AcceptanceFailure, "terminal runs lacked prior budget events"
+        ):
+            HARNESS.wait_for_settled_trace_runs(
+                api,
+                "session-1",
+                "contradictory trace",
+                expected_runs=1,
+                timeout=1.0,
+                poll_interval=0.0,
+            )
+
+        self.assertEqual(api.calls, 1)
+
+    def test_settled_trace_timeout_reports_all_run_boundaries(self) -> None:
+        incomplete = [
+            budget_event(1, "run-1"),
+            trace_event(2, "finished", run_id="run-1", stop_reason="completed"),
+        ]
+        response = trace_response(incomplete)
+        response["summary"]["total_runs"] = 1
+        api = SequenceTraceApi([response])
+
+        with self.assertRaisesRegex(
+            HARNESS.AcceptanceFailure,
+            "budget_run_ids=\\['run-1'\\].*finished_run_ids=\\['run-1'\\].*"
+            "provider_call_run_ids=\\[\\]",
+        ):
+            HARNESS.wait_for_settled_trace_runs(
+                api,
+                "session-1",
+                "incomplete settled trace",
+                expected_runs=1,
+                timeout=0.0,
+                poll_interval=0.0,
+            )
+
+        self.assertEqual(api.calls, 1)
+
 
 class RunBudgetTraceTests(unittest.TestCase):
     def test_accepts_one_unlimited_default_budget_per_completed_run(self) -> None:

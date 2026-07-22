@@ -1374,16 +1374,132 @@ def wait_for_completed_trace_run(
     )
 
 
+def wait_for_settled_trace_runs(
+    api: KrustyApi,
+    session_id: str,
+    label: str,
+    *,
+    expected_runs: int,
+    timeout: float = 5.0,
+    poll_interval: float = 0.05,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Wait until every expected run has a durable terminal and accounting row.
+
+    A trace read can legitimately land between compact SQLite batches after the
+    session has already returned to idle. Requiring the expected run count keeps
+    an older, already-settled snapshot from satisfying a newer follow-up run.
+    Structural contradictions still fail immediately; only missing suffix rows
+    are allowed to converge during the bounded persistence window.
+    """
+    require(
+        isinstance(expected_runs, int)
+        and not isinstance(expected_runs, bool)
+        and expected_runs > 0,
+        f"{label}: invalid expected run count {expected_runs!r}",
+    )
+    deadline = time.monotonic() + timeout
+    latest_summary: dict[str, Any] | None = None
+    latest_budget_ids: set[str] = set()
+    latest_finished_ids: set[str] = set()
+    latest_provider_call_ids: set[str] = set()
+
+    while True:
+        trace = api.json_request(
+            "GET", f"/api/sessions/{session_id}/trace?limit=1000"
+        )
+        summary = validate_trace_response(trace, label)
+        latest_summary = summary
+        budget_ids: list[str] = []
+        finished_ids: list[str] = []
+        provider_call_ids: set[str] = set()
+
+        for event in trace["events"]:
+            event_type = event.get("event_type")
+            if event_type not in {
+                "run_budget_resolved",
+                "finished",
+                "provider_call",
+            }:
+                continue
+            run_id = event.get("run_id")
+            if event_type == "provider_call" and not (
+                isinstance(run_id, str) and run_id
+            ):
+                # Auxiliary provider work, such as title generation, is not an
+                # orchestrated run boundary.
+                continue
+            require(
+                isinstance(run_id, str) and bool(run_id),
+                f"{label}: {event_type} event lacked a run id: {event}",
+            )
+            if event_type == "run_budget_resolved":
+                budget_ids.append(run_id)
+            elif event_type == "finished":
+                finished_ids.append(run_id)
+            else:
+                provider_call_ids.add(run_id)
+
+        require(
+            len(finished_ids) == len(set(finished_ids)),
+            f"{label}: duplicate terminal run ids: {finished_ids}",
+        )
+        budget_id_set = set(budget_ids)
+        finished_id_set = set(finished_ids)
+        require(
+            finished_id_set <= budget_id_set,
+            f"{label}: terminal runs lacked prior budget events: "
+            f"budgets={sorted(budget_id_set)}, finished={sorted(finished_id_set)}",
+        )
+        require(
+            len(budget_id_set) <= expected_runs,
+            f"{label}: observed more runs than expected: "
+            f"expected={expected_runs}, budgets={sorted(budget_id_set)}",
+        )
+
+        latest_budget_ids = budget_id_set
+        latest_finished_ids = finished_id_set
+        latest_provider_call_ids = provider_call_ids
+        if (
+            len(budget_id_set) == expected_runs
+            and finished_id_set == budget_id_set
+            and budget_id_set <= provider_call_ids
+        ):
+            validate_trace_run_budgets(trace, label)
+            require(
+                summary.get("total_runs") == expected_runs,
+                f"{label}: summary total_runs={summary.get('total_runs')}, "
+                f"expected {expected_runs}",
+            )
+            return trace, summary
+
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(max(0.0, poll_interval))
+
+    raise AcceptanceFailure(
+        f"{label}: trace did not durably settle {expected_runs} expected runs "
+        f"within {timeout:.1f}s; budget_run_ids={sorted(latest_budget_ids)}, "
+        f"finished_run_ids={sorted(latest_finished_ids)}, "
+        f"provider_call_run_ids={sorted(latest_provider_call_ids)}, "
+        f"latest_summary={latest_summary}"
+    )
+
+
 def trace_summary(
     api: KrustyApi,
     session_id: str,
     *,
+    expected_runs: int,
     exact_tool_calls: int | None = None,
     expected_tool_name: str | None = None,
 ) -> dict[str, Any]:
-    trace = api.json_request("GET", f"/api/sessions/{session_id}/trace?limit=1000")
     label = f"session {session_id}"
-    summary = validate_trace_response(trace, label)
+    trace, summary = wait_for_settled_trace_runs(
+        api,
+        session_id,
+        label,
+        expected_runs=expected_runs,
+    )
     if exact_tool_calls is not None:
         validate_trace_tool_lifecycles(
             trace["events"],
@@ -2182,9 +2298,13 @@ def verify_persistence_and_trace(
     require(not state.get("pending_interactions"), f"session retained pending input: {state}")
     require(state.get("recovery") is None, f"completed session retained recovery state: {state}")
 
-    trace = api.json_request("GET", f"/api/sessions/{session_id}/trace?limit=1000")
     label = f"session {session_id}"
-    summary = validate_trace_response(trace, label)
+    trace, summary = wait_for_settled_trace_runs(
+        api,
+        session_id,
+        label,
+        expected_runs=expected_user_turns,
+    )
     if exact_tool_calls is not None:
         validate_trace_tool_lifecycles(
             trace["events"],
@@ -3407,10 +3527,12 @@ def run_live_steering_lane(
             expected_reply=steered_reply,
         )
 
-        trace = api.json_request(
-            "GET", f"/api/sessions/{session_id}/trace?limit=1000"
+        trace, trace_summary_result = wait_for_settled_trace_runs(
+            api,
+            session_id,
+            f"{lane} trace",
+            expected_runs=1,
         )
-        trace_summary_result = validate_trace_response(trace, f"{lane} trace")
         validate_trace_tool_lifecycles(
             trace["events"],
             f"{lane} trace",
@@ -3627,6 +3749,7 @@ def run_cancel_lane(
         cancelled_summary = trace_summary(
             api,
             session_id,
+            expected_runs=1,
             exact_tool_calls=1,
             expected_tool_name="bash",
         )
@@ -3666,6 +3789,7 @@ def run_cancel_lane(
         final_summary = trace_summary(
             api,
             session_id,
+            expected_runs=2,
             exact_tool_calls=1,
             expected_tool_name="bash",
         )
