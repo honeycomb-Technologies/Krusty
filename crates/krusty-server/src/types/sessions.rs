@@ -1,3 +1,4 @@
+use krusty_core::ai::models::ModelKey;
 use krusty_core::storage::{
     DelegatedRunRecord, DelegatedRunScope, PartialAssistantState, PendingInteractionSnapshot,
     RuntimeTraceEvent, RuntimeTraceSummary, SessionInfo, SessionRecoveryState, SessionType,
@@ -17,6 +18,8 @@ use super::{DelegatedProgressStatus, DelegatedRunStage, DelegatedToolKind};
 pub struct CreateSessionRequest {
     pub title: Option<String>,
     pub model: Option<String>,
+    #[serde(default)]
+    pub model_key: Option<ModelKey>,
     pub project_dir: Option<String>,
     pub working_dir: Option<String>,
     pub workspace_mode: Option<WorkspaceMode>,
@@ -35,6 +38,8 @@ pub struct UpdateSessionRequest {
     pub workspace_mode: Option<WorkspaceMode>,
     pub mode: Option<WorkMode>,
     pub model: Option<String>,
+    #[serde(default)]
+    pub model_key: Option<ModelKey>,
     #[serde(
         default,
         alias = "targetBranch",
@@ -129,6 +134,8 @@ pub struct SessionResponse {
     pub session_type: SessionType,
     pub mode: WorkMode,
     pub model: Option<String>,
+    pub model_key: Option<ModelKey>,
+    pub model_catalog_revision: Option<String>,
     pub target_branch: Option<String>,
     pub permission_mode: PermissionMode,
 }
@@ -147,6 +154,8 @@ impl From<SessionInfo> for SessionResponse {
             session_type: s.session_type,
             mode: s.work_mode,
             model: s.model,
+            model_key: s.model_key,
+            model_catalog_revision: s.model_catalog_revision,
             target_branch: s.target_branch,
             permission_mode: s.permission_mode,
         }

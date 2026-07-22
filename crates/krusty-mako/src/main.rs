@@ -12,7 +12,7 @@ use krusty_mako::{
 };
 #[cfg(unix)]
 use krusty_mako_protocol::{
-    Actor, Command, DispatchCommand, MakoEvent, MakoIpcClient, MakoIpcClientConfig,
+    Actor, Command, DispatchCommand, MakoEvent, MakoIpcClient, MakoIpcClientConfig, ModelKey,
     RequestEnvelope, ResponsePayload, ShutdownCommand, SubscribeCommand,
 };
 #[cfg(unix)]
@@ -120,7 +120,9 @@ enum CliCommand {
     Dispatch {
         task: String,
         project_dir: Option<String>,
-        model: Option<String>,
+        model: String,
+        model_key: Option<Box<ModelKey>>,
+        model_catalog_revision: Option<String>,
         priority: Option<String>,
         crew_slug: Option<String>,
         start_at_unix_ms: Option<i64>,
@@ -143,6 +145,10 @@ fn parse_arguments(
     let mut task = None;
     let mut project_dir = None;
     let mut model = None;
+    let mut model_provider = None;
+    let mut model_auth_scope = None;
+    let mut model_api_format = None;
+    let mut model_catalog_revision = None;
     let mut priority = None;
     let mut crew_slug = None;
     let mut start_at_unix_ms = None;
@@ -209,6 +215,19 @@ fn parse_arguments(
             Some("--model") => {
                 model = Some(argument_value(&mut arguments, "--model")?);
             }
+            Some("--provider") => {
+                model_provider = Some(argument_value(&mut arguments, "--provider")?);
+            }
+            Some("--auth-scope") => {
+                model_auth_scope = Some(argument_value(&mut arguments, "--auth-scope")?);
+            }
+            Some("--api-format") => {
+                model_api_format = Some(argument_value(&mut arguments, "--api-format")?);
+            }
+            Some("--model-catalog-revision") => {
+                model_catalog_revision =
+                    Some(argument_value(&mut arguments, "--model-catalog-revision")?);
+            }
             Some("--priority") => {
                 priority = Some(argument_value(&mut arguments, "--priority")?);
             }
@@ -264,20 +283,27 @@ fn parse_arguments(
         "shutdown" => Ok(CliCommand::Shutdown {
             reason: shutdown_reason,
         }),
-        "dispatch" => Ok(CliCommand::Dispatch {
-            task: task
-                .filter(|value| !value.trim().is_empty())
-                .context("dispatch requires --task")?,
-            project_dir,
-            model: Some(
-                model
+        "dispatch" => {
+            let (model, model_key, model_catalog_revision) = diagnostic_model_identity(
+                model,
+                model_provider,
+                model_auth_scope,
+                model_api_format,
+                model_catalog_revision,
+            )?;
+            Ok(CliCommand::Dispatch {
+                task: task
                     .filter(|value| !value.trim().is_empty())
-                    .context("dispatch requires an explicit --model")?,
-            ),
-            priority,
-            crew_slug,
-            start_at_unix_ms,
-        }),
+                    .context("dispatch requires --task")?,
+                project_dir,
+                model,
+                model_key: model_key.map(Box::new),
+                model_catalog_revision,
+                priority,
+                crew_slug,
+                start_at_unix_ms,
+            })
+        }
         "events" => Ok(CliCommand::Events {
             session_id: session_id
                 .filter(|value| !value.trim().is_empty())
@@ -300,6 +326,59 @@ fn argument_value(
         .with_context(|| format!("{option} requires a value"))?
         .into_string()
         .map_err(|_| anyhow::anyhow!("{option} must be valid UTF-8"))
+}
+
+#[cfg(unix)]
+fn trimmed(value: String, option: &str) -> Result<String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        bail!("{option} cannot be empty");
+    }
+    Ok(value)
+}
+
+#[cfg(unix)]
+fn required_trimmed(value: Option<String>, option: &str) -> Result<String> {
+    trimmed(
+        value.with_context(|| {
+            format!("exact model identity requires {option} together with --model")
+        })?,
+        option,
+    )
+}
+
+#[cfg(unix)]
+fn diagnostic_model_identity(
+    model: Option<String>,
+    provider: Option<String>,
+    auth_scope: Option<String>,
+    api_format: Option<String>,
+    catalog_revision: Option<String>,
+) -> Result<(String, Option<ModelKey>, Option<String>)> {
+    let model = model
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .context("dispatch requires an explicit --model")?;
+    let exact_identity_requested = provider.is_some()
+        || auth_scope.is_some()
+        || api_format.is_some()
+        || catalog_revision.is_some();
+    let model_key = if exact_identity_requested {
+        Some(ModelKey {
+            provider: required_trimmed(provider, "--provider")?,
+            model_id: model.clone(),
+            auth_scope: auth_scope
+                .map(|value| trimmed(value, "--auth-scope"))
+                .transpose()?,
+            api_format: required_trimmed(api_format, "--api-format")?,
+        })
+    } else {
+        None
+    };
+    let catalog_revision = catalog_revision
+        .map(|value| trimmed(value, "--model-catalog-revision"))
+        .transpose()?;
+    Ok((model, model_key, catalog_revision))
 }
 
 #[cfg(unix)]
@@ -348,6 +427,8 @@ async fn run_diagnostic(
             task,
             project_dir,
             model,
+            model_key,
+            model_catalog_revision,
             priority,
             crew_slug,
             start_at_unix_ms,
@@ -359,7 +440,9 @@ async fn run_diagnostic(
                         task,
                         working_dir: working_dir.to_string_lossy().into_owned(),
                         project_dir,
-                        model,
+                        model: Some(model),
+                        model_key: model_key.map(|key| *key),
+                        model_catalog_revision,
                         start_at_unix_ms,
                         priority,
                         crew_slug,
@@ -442,7 +525,7 @@ fn print_help() {
            krusty-mako [daemon] [OPTIONS]\n  \
            krusty-mako ping|stats [--socket PATH] [--key PATH]\n  \
            krusty-mako shutdown [--reason TEXT] [--socket PATH] [--key PATH]\n  \
-           krusty-mako dispatch --task TEXT --model ID [--working-dir PATH] [--start-at-unix-ms N]\n  \
+           krusty-mako dispatch --task TEXT --model ID [--provider ID --api-format FORMAT] [--working-dir PATH] [--start-at-unix-ms N]\n  \
            krusty-mako events --session ID [--after N] [--follow]\n\n\
          Options:\n  \
            --socket <PATH>       Private Unix socket path\n  \
@@ -452,7 +535,11 @@ fn print_help() {
            --working-dir <PATH>  Default tool working directory\n  \
            --task <TEXT>         Task for diagnostic dispatch\n  \
            --project-dir <PATH>  Project scope for diagnostic dispatch\n  \
-           --model <ID>          Model for diagnostic dispatch\n  \
+           --model <ID>          Model for diagnostic dispatch (bare ID uses legacy fallback)\n  \
+           --provider <ID>       Provider for an exact diagnostic model key\n  \
+           --api-format <FORMAT> Wire format for an exact diagnostic model key\n  \
+           --auth-scope <SCOPE>  Optional auth scope for an exact diagnostic model key\n  \
+           --model-catalog-revision <REV>  Catalog revision observed at selection\n  \
            --priority <NAME>     Priority for diagnostic dispatch\n  \
            --crew <SLUG>         Crew profile for diagnostic dispatch\n  \
            --start-at-unix-ms N  Do not claim the dispatched run before this Unix time\n  \
@@ -464,6 +551,49 @@ fn print_help() {
            -h, --help            Print help\n  \
            -V, --version         Print version"
     );
+}
+
+#[cfg(all(test, unix))]
+mod model_identity_tests {
+    use super::diagnostic_model_identity;
+
+    #[test]
+    fn diagnostic_dispatch_accepts_exact_or_legacy_model_identity() {
+        let (_, legacy_key, legacy_revision) =
+            diagnostic_model_identity(Some("grok-4.5".into()), None, None, None, None)
+                .expect("legacy fallback should remain accepted");
+        assert!(legacy_key.is_none());
+        assert!(legacy_revision.is_none());
+
+        let (model, key, revision) = diagnostic_model_identity(
+            Some(" grok-4.5 ".into()),
+            Some("grok".into()),
+            Some("oauth".into()),
+            Some("open_ai_responses".into()),
+            Some("catalog-42".into()),
+        )
+        .expect("complete exact identity should be accepted");
+        assert_eq!(model, "grok-4.5");
+        let key = key.expect("exact key should exist");
+        assert_eq!(key.provider, "grok");
+        assert_eq!(key.model_id, model);
+        assert_eq!(key.auth_scope.as_deref(), Some("oauth"));
+        assert_eq!(key.api_format, "open_ai_responses");
+        assert_eq!(revision.as_deref(), Some("catalog-42"));
+    }
+
+    #[test]
+    fn diagnostic_dispatch_rejects_partial_exact_model_identity() {
+        let error = diagnostic_model_identity(
+            Some("grok-4.5".into()),
+            Some("grok".into()),
+            None,
+            None,
+            None,
+        )
+        .expect_err("provider without API format must fail");
+        assert!(error.to_string().contains("--api-format"));
+    }
 }
 
 #[cfg(unix)]

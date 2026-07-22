@@ -189,18 +189,6 @@ fn restrictive_turn_budget(requested: Option<usize>, inherited: Option<usize>) -
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::restrictive_turn_budget;
-
-    #[test]
-    fn teammate_turn_budget_can_tighten_but_never_relax_parent() {
-        assert_eq!(restrictive_turn_budget(Some(10), Some(20)), Some(10));
-        assert_eq!(restrictive_turn_budget(Some(40), Some(20)), Some(20));
-        assert_eq!(restrictive_turn_budget(None, Some(20)), Some(20));
-    }
-}
-
 impl Drop for TeamManager {
     fn drop(&mut self) {
         let teammates = self.teammates.clone();
@@ -210,5 +198,17 @@ impl Drop for TeamManager {
                 teammate.cancel();
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restrictive_turn_budget;
+
+    #[test]
+    fn teammate_turn_budget_can_tighten_but_never_relax_parent() {
+        assert_eq!(restrictive_turn_budget(Some(10), Some(20)), Some(10));
+        assert_eq!(restrictive_turn_budget(Some(40), Some(20)), Some(20));
+        assert_eq!(restrictive_turn_budget(None, Some(20)), Some(20));
     }
 }

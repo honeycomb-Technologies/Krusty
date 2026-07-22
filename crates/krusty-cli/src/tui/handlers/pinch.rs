@@ -5,7 +5,6 @@ use crate::agent::{
     run_compaction_pipeline, CompactionManager, CompactionRequest, CompactionTrigger,
 };
 use crate::ai::client::CallOptions;
-use crate::ai::models::resolve_context_window;
 use crate::paths;
 use crate::storage::ProjectSettings;
 use crate::tools::registry::ToolRequestPolicy;
@@ -80,20 +79,16 @@ impl App {
         let conversation = self.runtime.chat.conversation.clone();
         let working_dir = self.runtime.working_dir.clone();
         let current_model = self.runtime.current_model.clone();
+        let selected_context_window = self.max_context_tokens();
         let project_dir = Some(self.runtime.working_dir.to_string_lossy().into_owned());
 
         let client = self.create_ai_client();
         let (compaction_manager, request_budget) = client.as_ref().map_or_else(
             || (CompactionManager::default(), None),
             |ai_client| {
-                let resolved_window = resolve_context_window(
-                    ai_client.provider_id(),
-                    &current_model,
-                    ai_client.config().api_format,
-                );
                 let effective_window = effective_context_window_for_runtime(
                     ai_client.config().uses_chatgpt_codex_format(),
-                    resolved_window,
+                    selected_context_window,
                 );
                 let manager = CompactionManager::for_model(
                     ai_client.provider_id(),

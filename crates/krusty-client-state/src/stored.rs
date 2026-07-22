@@ -275,6 +275,8 @@ mod tests {
                 session_type: krusty_client::SessionType::Chat,
                 mode: krusty_client::WorkMode::Build,
                 model: None,
+                model_key: None,
+                model_catalog_revision: None,
                 target_branch: None,
                 permission_mode: krusty_client::PermissionMode::Autonomous,
             },

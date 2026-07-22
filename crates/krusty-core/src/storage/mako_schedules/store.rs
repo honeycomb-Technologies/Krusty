@@ -3,6 +3,7 @@ use std::io::{Error as IoError, ErrorKind};
 use anyhow::{Context, Result};
 use rusqlite::{params, OptionalExtension, Row, Transaction, TransactionBehavior};
 
+use crate::ai::models::ModelKey;
 use crate::mako::{
     normalize_timestamp, parse_timezone, DstFoldPolicy, DstGapPolicy, DstPolicy, MisfireConfig,
     MisfirePolicy, RecurrenceV1, RetryJitter, RetryPolicy,
@@ -14,7 +15,7 @@ use super::{
     OverlapPolicy,
 };
 
-const SCHEDULE_COLUMNS: &str = "id, controller_id, title, summary, objective, recurrence_kind, recurrence_json, timezone, gap_policy, fold_policy, next_fire_at, last_scheduled_for, status, priority, project_dir, model, crew_slug, misfire_policy, misfire_grace_secs, catch_up_limit, overlap_policy, max_attempts, retry_base_secs, retry_max_secs, retry_jitter, revision, created_by, created_at, updated_at";
+const SCHEDULE_COLUMNS: &str = "id, controller_id, title, summary, objective, recurrence_kind, recurrence_json, timezone, gap_policy, fold_policy, next_fire_at, last_scheduled_for, status, priority, project_dir, model, model_key_json, model_catalog_revision, crew_slug, misfire_policy, misfire_grace_secs, catch_up_limit, overlap_policy, max_attempts, retry_base_secs, retry_max_secs, retry_jitter, revision, created_by, created_at, updated_at";
 const OCCURRENCE_COLUMNS: &str = "id, schedule_id, scheduled_for, run_id, status, decision_reason, coalesced_count, created_at, updated_at";
 
 pub struct MakoScheduleStore {
@@ -34,18 +35,24 @@ impl MakoScheduleStore {
             normalize_optional_timestamp(schedule.last_scheduled_for.as_deref())?;
         let created_at = normalize_timestamp(&schedule.created_at)?;
         let updated_at = normalize_timestamp(&schedule.updated_at)?;
+        let model_key_json = schedule
+            .model_key
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         self.db.conn().execute(
             "INSERT INTO mako_schedules (
                 id, controller_id, title, summary, objective, recurrence_kind,
                 recurrence_json, timezone, gap_policy, fold_policy, next_fire_at,
-                last_scheduled_for, status, priority, project_dir, model, crew_slug,
+                last_scheduled_for, status, priority, project_dir, model,
+                model_key_json, model_catalog_revision, crew_slug,
                 misfire_policy, misfire_grace_secs, catch_up_limit, overlap_policy,
                 max_attempts, retry_base_secs, retry_max_secs, retry_jitter,
                 revision, created_by, created_at, updated_at
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24,
-                ?25, ?26, ?27, ?28, ?29
+                ?25, ?26, ?27, ?28, ?29, ?30, ?31
              )",
             params![
                 schedule.id,
@@ -64,6 +71,8 @@ impl MakoScheduleStore {
                 schedule.priority,
                 schedule.project_dir,
                 schedule.model,
+                model_key_json,
+                schedule.model_catalog_revision,
                 schedule.crew_slug,
                 schedule.misfire.policy.as_str(),
                 schedule.misfire.grace_secs,
@@ -306,6 +315,17 @@ fn validate_schedule(schedule: &MakoSchedule) -> Result<()> {
         !schedule.created_by.trim().is_empty(),
         "schedule creator is empty"
     );
+    if let Some(key) = schedule.model_key.as_ref() {
+        anyhow::ensure!(
+            schedule.model.as_deref() == Some(key.model_id.as_str()),
+            "schedule model does not match model key"
+        );
+    } else {
+        anyhow::ensure!(
+            schedule.model_catalog_revision.is_none(),
+            "schedule catalog revision requires a model key"
+        );
+    }
     Ok(())
 }
 
@@ -334,9 +354,16 @@ fn map_schedule(row: &Row<'_>) -> rusqlite::Result<MakoSchedule> {
     let gap = parse_required(8, row.get::<_, String>(8)?, DstGapPolicy::parse)?;
     let fold = parse_required(9, row.get::<_, String>(9)?, DstFoldPolicy::parse)?;
     let status = parse_required(12, row.get::<_, String>(12)?, MakoScheduleStatus::parse)?;
-    let misfire_policy = parse_required(17, row.get::<_, String>(17)?, MisfirePolicy::parse)?;
-    let overlap_policy = parse_required(20, row.get::<_, String>(20)?, OverlapPolicy::parse)?;
-    let retry_jitter = parse_required(24, row.get::<_, String>(24)?, RetryJitter::parse)?;
+    let model_key = row
+        .get::<_, Option<String>>(16)?
+        .map(|value| {
+            serde_json::from_str::<ModelKey>(&value)
+                .map_err(|error| conversion_error(16, format!("invalid model key JSON: {error}")))
+        })
+        .transpose()?;
+    let misfire_policy = parse_required(19, row.get::<_, String>(19)?, MisfirePolicy::parse)?;
+    let overlap_policy = parse_required(22, row.get::<_, String>(22)?, OverlapPolicy::parse)?;
+    let retry_jitter = parse_required(26, row.get::<_, String>(26)?, RetryJitter::parse)?;
 
     Ok(MakoSchedule {
         id: row.get(0)?,
@@ -353,23 +380,25 @@ fn map_schedule(row: &Row<'_>) -> rusqlite::Result<MakoSchedule> {
         priority: row.get(13)?,
         project_dir: row.get(14)?,
         model: row.get(15)?,
-        crew_slug: row.get(16)?,
+        model_key,
+        model_catalog_revision: row.get(17)?,
+        crew_slug: row.get(18)?,
         misfire: MisfireConfig {
             policy: misfire_policy,
-            grace_secs: nonnegative_i64(row, 18)? as u64,
-            catch_up_limit: nonnegative_i64(row, 19)? as usize,
+            grace_secs: nonnegative_i64(row, 20)? as u64,
+            catch_up_limit: nonnegative_i64(row, 21)? as usize,
         },
         overlap_policy,
         retry: RetryPolicy {
-            max_attempts: nonnegative_i64(row, 21)? as u32,
-            base_delay_secs: nonnegative_i64(row, 22)? as u64,
-            max_delay_secs: nonnegative_i64(row, 23)? as u64,
+            max_attempts: nonnegative_i64(row, 23)? as u32,
+            base_delay_secs: nonnegative_i64(row, 24)? as u64,
+            max_delay_secs: nonnegative_i64(row, 25)? as u64,
             jitter: retry_jitter,
         },
-        revision: nonnegative_i64(row, 25)? as u64,
-        created_by: row.get(26)?,
-        created_at: row.get(27)?,
-        updated_at: row.get(28)?,
+        revision: nonnegative_i64(row, 27)? as u64,
+        created_by: row.get(28)?,
+        created_at: row.get(29)?,
+        updated_at: row.get(30)?,
     })
 }
 

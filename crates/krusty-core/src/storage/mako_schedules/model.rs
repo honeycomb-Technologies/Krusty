@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::ai::models::ModelKey;
 use crate::mako::{DstPolicy, MisfireConfig, RecurrenceV1, RetryPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +93,12 @@ pub struct MakoSchedule {
     pub priority: i32,
     pub project_dir: Option<String>,
     pub model: Option<String>,
+    /// Exact provider/auth/transport identity frozen for future occurrences.
+    #[serde(default)]
+    pub model_key: Option<ModelKey>,
+    /// Catalog revision observed when `model_key` was selected.
+    #[serde(default)]
+    pub model_catalog_revision: Option<String>,
     pub crew_slug: Option<String>,
     pub misfire: MisfireConfig,
     pub overlap_policy: OverlapPolicy,

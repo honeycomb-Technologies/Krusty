@@ -4,42 +4,25 @@ use krusty_core::ai::providers::ReasoningControl;
 impl App {
     /// Get max context window size for current model
     pub fn max_context_tokens(&self) -> usize {
-        // First check dynamic ModelRegistry (OpenRouter models live here)
-        // Use try_get_model() to avoid blocking during rendering
-        if let Some(metadata) = self
-            .services
-            .model_registry
-            .try_get_model(&self.runtime.current_model)
-        {
+        // Use the exact provider/auth/transport row; bare slugs may be shared.
+        if let Some(metadata) = self.selected_model_metadata() {
             return metadata.context_window;
         }
 
-        // Fall back to static provider config (Anthropic, Z.ai, etc.)
-        if let Some(provider) = crate::ai::providers::get_provider(self.runtime.active_provider) {
-            if let Some(model) = provider
-                .models
-                .iter()
-                .find(|m| m.id == self.runtime.current_model)
-            {
-                return model.context_window;
-            }
-        }
-
-        resolve_context_window(
-            self.runtime.active_provider,
-            &self.runtime.current_model,
-            detect_api_format(self.runtime.active_provider, &self.runtime.current_model),
+        self.runtime.current_model_key.as_ref().map_or_else(
+            || {
+                resolve_context_window(
+                    self.runtime.active_provider,
+                    &self.runtime.current_model,
+                    detect_api_format(self.runtime.active_provider, &self.runtime.current_model),
+                )
+            },
+            |key| resolve_context_window(key.provider, &key.model_id, key.api_format),
         )
     }
 
-    fn current_model_metadata(&self) -> Option<crate::ai::models::ModelMetadata> {
-        self.services
-            .model_registry
-            .try_get_model(&self.runtime.current_model)
-    }
-
     pub fn selectable_thinking_levels(&self) -> Vec<ThinkingLevel> {
-        let Some(metadata) = self.current_model_metadata() else {
+        let Some(metadata) = self.selected_model_metadata() else {
             return vec![ThinkingLevel::Off];
         };
         if metadata.reasoning_control == Some(ReasoningControl::OutputOnly) {
@@ -226,15 +209,17 @@ impl App {
         self.runtime.chat.stop_tool_execution();
     }
 
-    fn current_stream_drain_policy(&self) -> crate::ai::model_profile::StreamDrainPolicy {
-        let api_format =
-            detect_api_format(self.runtime.active_provider, &self.runtime.current_model);
-        ModelProfile::resolve(
-            self.runtime.active_provider,
-            api_format,
-            &self.runtime.current_model,
-        )
-        .stream_drain_policy()
+    fn current_stream_drain_policy(&self) -> crate::ai::transport_policy::StreamDrainPolicy {
+        let (provider, api_format) = self.runtime.current_model_key.as_ref().map_or_else(
+            || {
+                (
+                    self.runtime.active_provider,
+                    detect_api_format(self.runtime.active_provider, &self.runtime.current_model),
+                )
+            },
+            |key| (key.provider, key.api_format),
+        );
+        StreamTransportPolicy::resolve(provider, api_format).drain
     }
 
     /// Apply any pending view change (called at end of event loop iteration)

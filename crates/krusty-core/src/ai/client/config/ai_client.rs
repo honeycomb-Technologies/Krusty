@@ -145,11 +145,24 @@ impl AiClientConfig {
     pub fn for_grok(model: &str) -> Self {
         use crate::ai::format_detection::detect_api_format;
         use crate::ai::models::resolve_model_metadata;
-        use crate::ai::providers::get_provider;
 
-        let provider = get_provider(ProviderId::Grok);
         let api_format = detect_api_format(ProviderId::Grok, model);
         let metadata = resolve_model_metadata(ProviderId::Grok, model, api_format);
+        Self::for_grok_with_metadata(&metadata)
+    }
+
+    /// Create Grok transport from an exact catalog row.
+    ///
+    /// The Grok catalog advertises its API backend per model. Using the frozen
+    /// metadata prevents a chat-completions model from being sent to the
+    /// Responses endpoint merely because both share the Grok provider.
+    pub fn for_grok_with_metadata(metadata: &crate::ai::models::ModelMetadata) -> Self {
+        use crate::ai::providers::get_provider;
+
+        debug_assert_eq!(metadata.provider, ProviderId::Grok);
+        let provider = get_provider(ProviderId::Grok);
+        let model = metadata.id.as_str();
+        let api_format = metadata.api_format;
         let mut custom_headers = provider
             .map(|config| config.custom_headers.clone())
             .unwrap_or_default();
@@ -252,7 +265,7 @@ fn grok_endpoint_url(base_url: &str, api_format: ApiFormat) -> String {
 #[cfg(test)]
 mod tests {
     use super::AiClientConfig;
-    use crate::ai::models::ApiFormat;
+    use crate::ai::models::{ApiFormat, ModelMetadata};
     use crate::ai::providers::ProviderId;
 
     #[test]
@@ -288,6 +301,22 @@ mod tests {
         );
         assert!(!config.uses_chatgpt_codex_format());
         assert!(config.uses_openai_format());
+    }
+
+    #[test]
+    fn grok_config_uses_catalog_selected_transport() {
+        let metadata = ModelMetadata::new("grok-chat", "Grok Chat", ProviderId::Grok)
+            .with_transport(ApiFormat::OpenAI)
+            .with_context(131_072, 16_384);
+
+        let config = AiClientConfig::for_grok_with_metadata(&metadata);
+
+        assert_eq!(config.api_format, ApiFormat::OpenAI);
+        assert!(config
+            .base_url
+            .as_deref()
+            .is_some_and(|url| url.ends_with("/chat/completions")));
+        assert_eq!(config.max_tokens, 16_384);
     }
 
     #[test]

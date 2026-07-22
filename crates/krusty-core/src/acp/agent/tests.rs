@@ -6,13 +6,17 @@ use agent_client_protocol::{
 use tempfile::tempdir;
 use tokio::sync::{mpsc, Mutex, RwLock};
 
-use super::{negotiate_protocol_version, AvailableModelRecord, KrustyAgent};
+use super::{
+    acp_model_id_for_key, decode_acp_model_id, negotiate_protocol_version,
+    persist_current_model_preference, AvailableModelRecord, KrustyAgent,
+};
 use crate::acp::processor::PromptProcessor;
 use crate::acp::session::SessionManager;
 use crate::agent::loop_events::LoopStopReason;
+use crate::ai::models::{ApiFormat, ModelAuthScope, ModelCatalogSource, ModelKey, ModelMetadata};
 use crate::ai::providers::ProviderId;
 use crate::storage::{
-    Database, PartialAssistantState, RecoveryDecision, RecoveryStatus,
+    Database, PartialAssistantState, Preferences, RecoveryDecision, RecoveryStatus,
     SessionManager as StorageSessionManager, SessionRecoveryState,
 };
 use crate::tools::registry::ToolRegistry;
@@ -138,38 +142,33 @@ async fn model_selection_is_isolated_per_acp_session() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let db = Database::new(&dir.path().join("test.db"))?;
     let agent = agent_with_storage(Arc::new(Mutex::new(StorageSessionManager::new(db))));
+    let model_a = ModelMetadata::new("model-a", "Model A", ProviderId::MiniMax)
+        .with_transport(ApiFormat::Anthropic);
+    let model_b = ModelMetadata::new("model-b", "Model B", ProviderId::MiniMax)
+        .with_transport(ApiFormat::Anthropic);
+    let model_a_id = acp_model_id_for_key(&model_a.key());
+    let model_b_id = acp_model_id_for_key(&model_b.key());
     *agent.available_models.write().await = vec![
-        AvailableModelRecord {
-            acp_model_id: "minimax:model-a".to_string(),
-            provider: ProviderId::MiniMax,
-            model_id: "model-a".to_string(),
-            credential: "test-key-a".to_string(),
-            display_name: "Model A".to_string(),
-            auth_scope: None,
-            account_id: None,
-        },
-        AvailableModelRecord {
-            acp_model_id: "minimax:model-b".to_string(),
-            provider: ProviderId::MiniMax,
-            model_id: "model-b".to_string(),
-            credential: "test-key-b".to_string(),
-            display_name: "Model B".to_string(),
-            auth_scope: None,
-            account_id: None,
-        },
+        AvailableModelRecord::new(model_a, "test-key-a".to_string(), None),
+        AvailableModelRecord::new(model_b, "test-key-b".to_string(), None),
     ];
     let first = agent.sessions().create_session(Some("/tmp".into()), None);
     let second = agent.sessions().create_session(Some("/tmp".into()), None);
 
     agent
-        .set_model_for_session(&first, "minimax:model-a", false)
+        .set_model_for_session(&first, &model_a_id, false)
         .await?;
     agent
-        .set_model_for_session(&second, "minimax:model-b", false)
+        .set_model_for_session(&second, &model_b_id, false)
         .await?;
 
     assert_eq!(
-        first.selected_model().await.expect("first model").model_id,
+        first
+            .selected_model()
+            .await
+            .expect("first model")
+            .key
+            .model_id,
         "model-a"
     );
     assert_eq!(
@@ -177,9 +176,121 @@ async fn model_selection_is_isolated_per_acp_session() -> anyhow::Result<()> {
             .selected_model()
             .await
             .expect("second model")
+            .key
             .model_id,
         "model-b"
     );
     assert!(agent.current_model_id().await.is_none());
+    Ok(())
+}
+
+#[test]
+fn acp_model_id_round_trips_complete_key() {
+    let key = ModelKey::new(
+        ProviderId::OpenAI,
+        "shared-slug",
+        ApiFormat::OpenAIResponses,
+    )
+    .with_auth_scope(ModelAuthScope::OAuth);
+
+    let encoded = acp_model_id_for_key(&key);
+
+    assert_eq!(decode_acp_model_id(&encoded), Some(key));
+}
+
+#[test]
+fn acp_shared_preference_write_preserves_exact_key() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let preferences = Preferences::new(Database::new(&dir.path().join("preferences.db"))?);
+    let key = ModelKey::new(ProviderId::Grok, "grok-4.5", ApiFormat::OpenAIResponses);
+
+    persist_current_model_preference(&preferences, &key)?;
+
+    assert_eq!(preferences.get_current_model_key(), Some(key));
+    assert_eq!(preferences.get_current_model().as_deref(), Some("grok-4.5"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn same_slug_variants_require_exact_identity() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let db = Database::new(&dir.path().join("test.db"))?;
+    let agent = agent_with_storage(Arc::new(Mutex::new(StorageSessionManager::new(db))));
+
+    let mut api = ModelMetadata::new("shared-slug", "API", ProviderId::OpenAI)
+        .with_transport(ApiFormat::OpenAIResponses);
+    api.auth_scope = Some(ModelAuthScope::ApiKey);
+    let mut oauth = api.clone();
+    oauth.display_name = "OAuth".to_string();
+    oauth.auth_scope = Some(ModelAuthScope::OAuth);
+    let oauth_id = acp_model_id_for_key(&oauth.key());
+    *agent.available_models.write().await = vec![
+        AvailableModelRecord::new(api, "sk-api".to_string(), None),
+        AvailableModelRecord::new(
+            oauth.clone(),
+            "oauth-token".to_string(),
+            Some("acct".into()),
+        ),
+    ];
+
+    assert!(agent
+        .resolve_persisted_model_id("shared-slug")
+        .await
+        .is_none());
+    assert_eq!(
+        agent.resolve_persisted_model_id(&oauth_id).await,
+        Some(oauth_id)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_selection_uses_and_persists_exact_runtime() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let db = Database::new(&dir.path().join("test.db"))?;
+    let storage = Arc::new(Mutex::new(StorageSessionManager::new(db)));
+    let agent = agent_with_storage(Arc::clone(&storage));
+    let session = agent
+        .sessions()
+        .create_persisted_session(Some("/tmp".into()), None)
+        .await?;
+
+    let mut metadata = ModelMetadata::new("grok-4.5", "Grok Exact", ProviderId::Grok)
+        .with_context(456_789, 12_345)
+        .with_transport(ApiFormat::OpenAI);
+    metadata.catalog_source = ModelCatalogSource::LiveDynamic;
+    metadata.catalog_revision = Some("grok-catalog-42".to_string());
+    metadata.supports_vision = true;
+    let expected_runtime = metadata.resolve_runtime();
+    let model_id = acp_model_id_for_key(&metadata.key());
+    *agent.available_models.write().await = vec![AvailableModelRecord::new(
+        metadata,
+        "grok-token".to_string(),
+        None,
+    )];
+
+    agent
+        .set_model_for_session(&session, &model_id, true)
+        .await?;
+
+    assert_eq!(
+        session.selected_model().await.expect("selection").key,
+        expected_runtime.key
+    );
+    assert_eq!(
+        session.ai_client().await.expect("client").resolved_model(),
+        &expected_runtime
+    );
+    let stored = storage
+        .lock()
+        .await
+        .get_session(&session.id.to_string())?
+        .expect("stored ACP session");
+    assert_eq!(stored.model_key, Some(expected_runtime.key));
+    assert_eq!(stored.model.as_deref(), Some("grok-4.5"));
+    assert_eq!(
+        stored.model_catalog_revision.as_deref(),
+        Some("grok-catalog-42")
+    );
     Ok(())
 }

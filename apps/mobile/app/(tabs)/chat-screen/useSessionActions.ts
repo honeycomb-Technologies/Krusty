@@ -71,7 +71,9 @@ export function useSessionActions({
 
   const bootstrapSession = useCallback(
     async (session: SessionResponse) => {
-      const currentModel = sessionStore.getState().model;
+      const currentState = sessionStore.getState();
+      const currentModel = currentState.model;
+      const currentModelInfo = currentState.modelInfo;
       const currentThinkingLevel = sessionStore.getState().thinkingLevel;
       const directory = session.project_dir ?? session.working_dir ?? null;
       const workspaceMode = (session.workspace_mode ??
@@ -95,8 +97,12 @@ export function useSessionActions({
         );
 
       if (currentModel) {
-        const modelInfo = models.find((candidate) => candidate.id === currentModel);
-        sessionStore.getState().setModel(currentModel, modelInfo?.provider ?? null);
+        const modelInfo = currentModelInfo
+          ?? models.find((candidate) => candidate.id === currentModel)
+          ?? null;
+        sessionStore
+          .getState()
+          .setModel(currentModel, modelInfo?.provider ?? null, modelInfo);
       }
       if (sessionStore.getState().thinkingLevel !== currentThinkingLevel) {
         sessionStore.getState().setThinkingLevel(currentThinkingLevel);
@@ -387,7 +393,9 @@ export function useSessionActions({
     (modelId: string) => {
       const modelInfo = models.find((candidate) => candidate.id === modelId);
       sessionStore.setState({ error: null });
-      sessionStore.getState().setModel(modelId, modelInfo?.provider ?? null);
+      sessionStore
+        .getState()
+        .setModel(modelId, modelInfo?.provider ?? null, modelInfo ?? null);
       void SecureStore.setItemAsync(SELECTED_MODEL_KEY, modelId);
     },
     [models, sessionStore],
@@ -396,8 +404,12 @@ export function useSessionActions({
   const handleFastModeToggle = useCallback(() => {
     const currentModel = sessionStore.getState().model;
     if (currentModel) {
-      const modelInfo = models.find((candidate) => candidate.id === currentModel);
-      sessionStore.getState().setModel(currentModel, modelInfo?.provider ?? null);
+      const modelInfo = sessionStore.getState().modelInfo
+        ?? models.find((candidate) => candidate.id === currentModel)
+        ?? null;
+      sessionStore
+        .getState()
+        .setModel(currentModel, modelInfo?.provider ?? null, modelInfo);
     }
     sessionStore.getState().toggleFastMode();
   }, [models, sessionStore]);

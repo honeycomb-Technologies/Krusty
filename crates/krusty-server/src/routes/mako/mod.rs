@@ -10,10 +10,12 @@ use axum::{
 };
 use serde::Serialize;
 
+use krusty_core::ai::models::{ModelKey as CoreModelKey, ModelLookupError};
 #[cfg(test)]
 use krusty_core::paths as core_paths;
 use krusty_core::storage::Database;
 use krusty_core::SessionManager;
+use krusty_mako_protocol::ModelKey as ProtocolModelKey;
 
 #[cfg(test)]
 use super::session_access::current_user_home_dir;
@@ -102,6 +104,76 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Serialize)]
 struct OkResponse {
     ok: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ResolvedMakoModel {
+    pub(super) model: String,
+    pub(super) key: CoreModelKey,
+    pub(super) catalog_revision: Option<String>,
+}
+
+impl ResolvedMakoModel {
+    pub(super) fn protocol_key(&self) -> Result<ProtocolModelKey, AppError> {
+        let value = serde_json::to_value(&self.key)
+            .map_err(|error| AppError::Internal(error.to_string()))?;
+        serde_json::from_value(value).map_err(|error| AppError::Internal(error.to_string()))
+    }
+}
+
+/// Resolve every new Mako mutation to one exact provider/auth/transport row.
+/// Bare IDs remain a compatibility input, but ambiguity is never settled by
+/// provider order or whichever credential happened to refresh first.
+pub(super) async fn resolve_mako_model(
+    state: &AppState,
+    user_id: Option<&str>,
+    requested_model: Option<&str>,
+    requested_key: Option<&CoreModelKey>,
+) -> Result<ResolvedMakoModel, AppError> {
+    let requested_model = requested_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let (Some(model), Some(key)) = (requested_model, requested_key) {
+        if model != key.model_id {
+            return Err(AppError::BadRequest(
+                "model must match model_key.model_id".to_string(),
+            ));
+        }
+    }
+
+    let key = match requested_key {
+        Some(key) => key.clone(),
+        None => {
+            let model = requested_model.ok_or_else(|| {
+                AppError::BadRequest("No model selected. Choose a model and try again.".into())
+            })?;
+            state
+                .model_registry
+                .resolve_legacy_key(model)
+                .await
+                .map_err(|error| match error {
+                    ModelLookupError::NotFound { model_id } => {
+                        AppError::BadRequest(format!("Model '{model_id}' is not available"))
+                    }
+                    ModelLookupError::Ambiguous { model_id, .. } => AppError::BadRequest(format!(
+                        "Model '{model_id}' is ambiguous; submit an exact model_key"
+                    )),
+                })?
+        }
+    };
+
+    let client = state
+        .resolve_ai_client_for_key_for_user(&key, user_id)
+        .await
+        .ok_or_else(|| {
+            AppError::BadRequest("The selected model has no usable provider credentials.".into())
+        })?;
+    let runtime = client.resolved_model();
+    Ok(ResolvedMakoModel {
+        model: runtime.wire_model_id.clone(),
+        key: runtime.key.clone(),
+        catalog_revision: runtime.catalog_revision.clone(),
+    })
 }
 
 fn open_session_manager(state: &AppState) -> Result<SessionManager, AppError> {

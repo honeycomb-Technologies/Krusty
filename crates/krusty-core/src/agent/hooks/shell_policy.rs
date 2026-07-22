@@ -69,6 +69,110 @@ pub(crate) fn classify_bash_command(command: &str) -> BashCommandClassification 
     }
 }
 
+/// Build a stable, privacy-preserving-enough semantic key for progress
+/// detection. Presentation-only differences (line numbers, color, output
+/// caps, descriptions supplied outside the command, and harmless context
+/// probes such as `pwd`) must not let a model evade the no-progress guard.
+pub(crate) fn semantic_bash_signature(command: &str) -> String {
+    let mut normalized_segments = split_shell_segments(command)
+        .into_iter()
+        .filter_map(|segment| normalize_progress_segment(&segment))
+        .collect::<Vec<_>>();
+    normalized_segments.sort();
+    normalized_segments.dedup();
+
+    if normalized_segments.is_empty() {
+        "noop".to_string()
+    } else {
+        normalized_segments.join("|")
+    }
+}
+
+fn normalize_progress_segment(segment: &str) -> Option<String> {
+    let tokens = tokenize_shell(segment);
+    let tokens = strip_invocation_wrappers(&tokens);
+    let command = command_basename(tokens.first()?);
+
+    // These commands add no durable evidence and frequently get prepended to
+    // an otherwise identical search by models trying the same strategy again.
+    if matches!(
+        command.as_str(),
+        "pwd" | "true" | "echo" | "printf" | "whoami" | "date"
+    ) {
+        return None;
+    }
+    if command == "cd" && tokens.get(1).is_some_and(|path| path == ".") {
+        return None;
+    }
+
+    // A pipe-only output cap changes presentation, not investigative intent.
+    if matches!(command.as_str(), "head" | "tail") && !head_or_tail_has_file_operand(tokens) {
+        return None;
+    }
+
+    let mut normalized = vec![command.clone()];
+    let mut index = 1;
+    while index < tokens.len() {
+        let token = tokens[index].as_str();
+
+        let presentation_flag = matches!(
+            token,
+            "-n" | "--line-number"
+                | "--no-heading"
+                | "--heading"
+                | "--stats"
+                | "--short"
+                | "--porcelain"
+                | "--color"
+        ) || token.starts_with("--color=");
+        if presentation_flag {
+            if token == "--color" {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+
+        if matches!(token, "-m" | "--max-count") {
+            index = (index + 2).min(tokens.len());
+            continue;
+        }
+        if token.starts_with("--max-count=") {
+            index += 1;
+            continue;
+        }
+
+        // `ls -la` versus `ls -al`, or a status formatting flag, does not
+        // represent a different resource or strategy.
+        if matches!(command.as_str(), "ls" | "tree") && token.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if command == "git"
+            && tokens.get(1).map(String::as_str) == Some("status")
+            && index > 1
+            && token.starts_with('-')
+        {
+            index += 1;
+            continue;
+        }
+
+        normalized.push(normalize_progress_token(token));
+        index += 1;
+    }
+
+    Some(normalized.join(" "))
+}
+
+fn normalize_progress_token(token: &str) -> String {
+    let without_dot = token.strip_prefix("./").unwrap_or(token);
+    if without_dot.len() > 1 {
+        without_dot.trim_end_matches('/').to_string()
+    } else {
+        without_dot.to_string()
+    }
+}
+
 /// Plan-mode Bash is deny-by-default. Static mutation blacklists cannot prove
 /// that interpreters, downloader flags, shell expansions, or uncommon tools
 /// are read-only, so only a small auditable command surface is admitted.

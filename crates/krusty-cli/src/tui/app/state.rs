@@ -109,6 +109,15 @@ pub struct AppRuntime {
     pub chat: ChatState,
     /// Current model identifier
     pub current_model: String,
+    /// Exact provider/auth/transport identity for the selected model.
+    ///
+    /// `current_model` remains the display/legacy slug, but runtime routing
+    /// must use this key so duplicate slugs cannot silently change transport.
+    pub current_model_key: Option<ModelKey>,
+    /// True only after an explicit model-picker action in the active TUI
+    /// context. Startup preferences and automatic project selection are lower
+    /// precedence than this per-turn intent.
+    pub model_selection_explicit: bool,
     /// Token usage tracking
     pub context_tokens_used: usize,
     /// Last provider usage snapshot with uncached/cache/output buckets intact.
@@ -194,6 +203,7 @@ pub struct AppRuntime {
 impl AppRuntime {
     pub fn new(
         current_model: String,
+        current_model_key: Option<ModelKey>,
         active_provider: ProviderId,
         working_dir: PathBuf,
         process_registry: Arc<ProcessRegistry>,
@@ -202,6 +212,8 @@ impl AppRuntime {
             active_plan: None,
             chat: ChatState::new(),
             current_model,
+            current_model_key,
+            model_selection_explicit: false,
             context_tokens_used: 0,
             last_token_usage: None,
             active_pinch_block: None,

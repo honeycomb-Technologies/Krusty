@@ -29,6 +29,9 @@ pub(super) fn loop_event_type(event: &LoopEvent) -> &'static str {
         LoopEvent::PlanComplete { .. } => "plan_complete",
         LoopEvent::AgentSleeping { .. } => "agent_sleeping",
         LoopEvent::TurnComplete { .. } => "turn_complete",
+        LoopEvent::RunBudgetResolved { .. } => "run_budget_resolved",
+        LoopEvent::ProviderRequestPrepared { .. } => "provider_request_prepared",
+        LoopEvent::ProgressGuard { .. } => "progress_guard",
         LoopEvent::TickInjected { .. } => "tick_injected",
         LoopEvent::Usage { .. } => "usage",
         LoopEvent::SessionPinched { .. } => "session_pinched",
@@ -141,6 +144,24 @@ pub(super) fn summarize_loop_event(event: &LoopEvent) -> Value {
         LoopEvent::TurnComplete { turn, has_more } => {
             json!({ "turn": turn, "has_more": has_more })
         }
+        LoopEvent::RunBudgetResolved { max_turns, source } => json!({
+            "max_turns": max_turns,
+            "source": source,
+        }),
+        LoopEvent::ProviderRequestPrepared { turn, diagnostics } => json!({
+            "turn": turn,
+            "diagnostics": diagnostics,
+        }),
+        LoopEvent::ProgressGuard { telemetry } => json!({
+            "guard": telemetry.guard,
+            "action": telemetry.action,
+            "no_progress_turns": telemetry.no_progress_turns,
+            "threshold": telemetry.threshold,
+            "mutation_epoch": telemetry.mutation_epoch,
+            "action_classes": telemetry.action_classes,
+            "evidence_signature": telemetry.evidence_signature,
+            "triggered": telemetry.triggered,
+        }),
         LoopEvent::TickInjected { tick_number } => json!({ "tick_number": tick_number }),
         LoopEvent::Usage {
             prompt_tokens,

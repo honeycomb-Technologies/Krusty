@@ -30,6 +30,7 @@ fn openrouter_provider() -> ProviderConfig {
                 1_000_000,
                 128_000,
             )
+            .with_vision()
             .with_anthropic_thinking()
             .with_reasoning_levels(
                 &[
@@ -49,6 +50,7 @@ fn openrouter_provider() -> ProviderConfig {
                 1_000_000,
                 128_000,
             )
+            .with_vision()
             .with_anthropic_thinking()
             .with_reasoning_levels(
                 &[
@@ -69,6 +71,7 @@ fn openrouter_provider() -> ProviderConfig {
                 1_000_000,
                 128_000,
             )
+            .with_vision()
             .with_anthropic_thinking()
             .with_reasoning_levels(
                 &[
@@ -88,6 +91,7 @@ fn openrouter_provider() -> ProviderConfig {
                 200_000,
                 64_000,
             )
+            .with_vision()
             .with_anthropic_thinking()
             .with_reasoning_levels(
                 &[ReasoningEffort::None, ReasoningEffort::High],
@@ -96,6 +100,7 @@ fn openrouter_provider() -> ProviderConfig {
             .with_reasoning_control(ReasoningControl::Boolean)
             .with_fast_mode(FastMode::Priority),
             ModelInfo::new("openai/gpt-5.6-sol", "GPT-5.6 Sol", 1_050_000, 128_000)
+                .with_vision()
                 .with_reasoning(ReasoningFormat::Anthropic)
                 .with_reasoning_levels(
                     &[
@@ -168,6 +173,7 @@ fn minimax_provider() -> ProviderConfig {
         auth_header: AuthHeader::XApiKey,
         models: vec![
             ModelInfo::new("MiniMax-M3", "MiniMax M3", 1_000_000, 131_072)
+                .with_vision()
                 .with_anthropic_thinking()
                 .with_reasoning_levels(
                     &[ReasoningEffort::None, ReasoningEffort::High],
@@ -222,6 +228,7 @@ fn anthropic_provider() -> ProviderConfig {
         auth_header: AuthHeader::Bearer,
         models: vec![
             ModelInfo::new("claude-opus-4-8", "Claude Opus 4.8", 1_000_000, 128_000)
+                .with_vision()
                 .with_anthropic_thinking()
                 .with_reasoning_levels(
                     &[
@@ -236,6 +243,7 @@ fn anthropic_provider() -> ProviderConfig {
                 .with_reasoning_control(ReasoningControl::AnthropicAdaptive)
                 .with_fast_mode(FastMode::AnthropicFast),
             ModelInfo::new("claude-fable-5", "Claude Fable 5", 1_000_000, 128_000)
+                .with_vision()
                 .with_anthropic_thinking()
                 .with_reasoning_levels(
                     &[
@@ -250,6 +258,7 @@ fn anthropic_provider() -> ProviderConfig {
                 .with_mandatory_reasoning()
                 .with_reasoning_control(ReasoningControl::AnthropicAdaptive),
             ModelInfo::new("claude-sonnet-5", "Claude Sonnet 5", 1_000_000, 128_000)
+                .with_vision()
                 .with_anthropic_thinking()
                 .with_reasoning_levels(
                     &[
@@ -268,6 +277,7 @@ fn anthropic_provider() -> ProviderConfig {
                 200_000,
                 64_000,
             )
+            .with_vision()
             .with_anthropic_thinking()
             .with_reasoning_control(ReasoningControl::AnthropicBudget),
         ],
@@ -295,12 +305,18 @@ fn grok_provider() -> ProviderConfig {
         auth_header: AuthHeader::Bearer,
         models: vec![
             ModelInfo::new("grok-build", "Grok Build", 512_000, 32_768)
+                .with_vision()
+                .with_api_format(crate::ai::models::ApiFormat::OpenAIResponses)
                 .with_reasoning(ReasoningFormat::OpenAI)
                 .with_reasoning_control(ReasoningControl::OutputOnly),
             ModelInfo::new("grok-composer-2.5-fast", "Composer 2.5", 200_000, 32_768)
+                .with_vision()
+                .with_api_format(crate::ai::models::ApiFormat::OpenAIResponses)
                 .with_reasoning(ReasoningFormat::OpenAI)
                 .with_reasoning_control(ReasoningControl::OutputOnly),
             ModelInfo::new("grok-4.5", "Grok 4.5", 500_000, 32_768)
+                .with_vision()
+                .with_api_format(crate::ai::models::ApiFormat::OpenAIResponses)
                 .with_reasoning(ReasoningFormat::OpenAI)
                 .with_reasoning_control(ReasoningControl::OutputOnly),
         ],
@@ -456,8 +472,9 @@ fn openai_provider() -> ProviderConfig {
                 false,
                 false,
             ),
-            ModelInfo::new("chat-latest", "Chat Latest", 400_000, 128_000),
+            ModelInfo::new("chat-latest", "Chat Latest", 400_000, 128_000).with_vision(),
             ModelInfo::new("gpt-5.3-codex", "GPT-5.3 Codex", 400_000, 128_000)
+                .with_vision()
                 .with_reasoning(ReasoningFormat::OpenAI)
                 .with_reasoning_levels(
                     &[
@@ -475,6 +492,7 @@ fn openai_provider() -> ProviderConfig {
                 128_000,
                 32_000,
             )
+            .with_vision()
             .with_reasoning(ReasoningFormat::OpenAI)
             .with_reasoning_levels(
                 &[
@@ -504,6 +522,8 @@ fn openai_model(
     supports_fast: bool,
 ) -> ModelInfo {
     let mut model = ModelInfo::new(id, display_name, context_window, 128_000)
+        .with_vision()
+        .with_api_format(crate::ai::models::ApiFormat::OpenAIResponses)
         .with_reasoning(ReasoningFormat::OpenAI)
         .with_reasoning_levels(levels, default)
         .with_reasoning_control(ReasoningControl::OpenAiEffort);

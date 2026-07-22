@@ -3,6 +3,7 @@ use crate::tui::app::{App, Popup, View};
 impl App {
     pub(super) fn open_home_view(&mut self) {
         self.runtime.current_session_id = None;
+        self.runtime.model_selection_explicit = false;
         self.runtime.chat.messages.clear();
         self.runtime.chat.streaming_assistant_idx = None;
         self.runtime.chat.conversation.clear();

@@ -74,16 +74,25 @@ impl AcpServer {
             self.agent.tools().get_ai_tools().await.len()
         );
 
-        // Auto-initialize AI client from environment variables
+        // Retain the exact shared preference before model discovery. A key is
+        // not enough to recreate its capability row, so initialization waits
+        // for discovery unless the user supplied an explicit environment model.
+        if let Some(key) = load_current_model_key_preference() {
+            self.agent.set_current_model_key(key).await;
+        }
+
+        // Auto-initialize an explicitly selected environment model.
         if let Some(config) = detect_api_key_from_env() {
             info!(
                 "Auto-initializing AI client: provider={:?}, model={:?}",
                 config.provider,
                 config.model.as_deref().unwrap_or("default")
             );
-            self.agent
-                .init_ai_client_with_model(config.api_key, config.provider, config.model)
-                .await;
+            if config.model.is_some() {
+                self.agent
+                    .init_ai_client_with_model(config.api_key, config.provider, config.model)
+                    .await;
+            }
         } else {
             warn!(
                 "No API key found in environment. Set one of:\n\
@@ -204,10 +213,7 @@ pub struct AcpEnvConfig {
 /// - KRUSTY_MODEL: Override the default model for the provider
 /// - KRUSTY_API_KEY: Generic API key (used with KRUSTY_PROVIDER)
 fn detect_api_key_from_env() -> Option<AcpEnvConfig> {
-    let model = std::env::var("KRUSTY_MODEL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(load_current_model_preference);
+    let model = std::env::var("KRUSTY_MODEL").ok().filter(|s| !s.is_empty());
 
     // Check for explicit provider configuration first
     if let Ok(provider_str) = std::env::var("KRUSTY_PROVIDER") {
@@ -320,13 +326,14 @@ fn detect_from_credential_store(model: Option<String>) -> Option<AcpEnvConfig> {
     None
 }
 
-fn load_current_model_preference() -> Option<String> {
+fn load_current_model_key_from(preferences: &Preferences) -> Option<crate::ai::models::ModelKey> {
+    preferences.get_current_model_key()
+}
+
+fn load_current_model_key_preference() -> Option<crate::ai::models::ModelKey> {
     let db_path = crate::paths::config_dir().join("krusty.db");
     let db = Database::new(&db_path).ok()?;
-    Preferences::new(db)
-        .get_current_model()
-        .map(|model| model.trim().to_string())
-        .filter(|model| !model.is_empty())
+    load_current_model_key_from(&Preferences::new(db))
 }
 
 /// Get provider auth from Krusty's credential store or OAuth integrations.
@@ -367,6 +374,8 @@ pub fn should_run_acp_mode(force_acp: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::models::{ApiFormat, ModelAuthScope, ModelKey};
+    use tempfile::tempdir;
 
     #[test]
     fn test_server_creation() {
@@ -388,5 +397,21 @@ mod tests {
     fn test_acp_mode_detection() {
         assert!(should_run_acp_mode(true));
         assert!(!should_run_acp_mode(false));
+    }
+
+    #[test]
+    fn startup_preference_loader_retains_exact_model_identity() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let preferences = Preferences::new(Database::new(&dir.path().join("preferences.db"))?);
+        let key = ModelKey::new(
+            ProviderId::OpenAI,
+            "shared-slug",
+            ApiFormat::OpenAIResponses,
+        )
+        .with_auth_scope(ModelAuthScope::OAuth);
+        preferences.set_current_model_key(&key)?;
+
+        assert_eq!(load_current_model_key_from(&preferences), Some(key));
+        Ok(())
     }
 }

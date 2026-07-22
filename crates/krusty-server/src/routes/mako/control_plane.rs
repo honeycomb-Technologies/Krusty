@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use krusty_core::ai::models::ModelKey;
 use krusty_core::mako::{DstPolicy, MisfireConfig, RecurrenceV1, RetryPolicy};
 use krusty_core::storage::{
     Database, MakoController, MakoControllerEvent, MakoControllerEventStore, MakoControllerStore,
@@ -15,7 +16,7 @@ use krusty_core::storage::{
 use krusty_mako_protocol::ScheduleDefinition;
 
 use super::super::session_access::{current_user_id, load_owned_session_of_type};
-use super::{idempotency_key_from_headers, open_session_manager};
+use super::{idempotency_key_from_headers, open_session_manager, resolve_mako_model};
 use crate::auth::CurrentUser;
 use crate::error::AppError;
 use crate::utils::text::trimmed_nonempty;
@@ -39,6 +40,8 @@ pub(super) struct ScheduleWriteRequest {
     priority: i32,
     project_dir: Option<String>,
     model: Option<String>,
+    #[serde(default)]
+    model_key: Option<ModelKey>,
     crew_slug: Option<String>,
     #[serde(default)]
     misfire: MisfireConfig,
@@ -369,23 +372,30 @@ async fn schedule_definition(
         user,
     )?;
     let explicit_model = trimmed_nonempty(request.model.as_deref()).map(ToOwned::to_owned);
-    let session_model = trimmed_nonempty(session.model.as_deref()).map(ToOwned::to_owned);
-    let requested_model = explicit_model
-        .or(session_model)
-        .ok_or_else(|| {
-            AppError::Conflict(
-                "Mako session has no daemon-frozen model; dispatch a new Mako session or provide an explicit schedule model".into(),
-            )
-        })?;
-    let model = state
-        .resolve_ai_client_for_user(Some(&requested_model), current_user_id(user))
-        .await
-        .ok_or_else(|| {
-            AppError::BadRequest("The schedule model has no usable provider credentials.".into())
-        })?
-        .config()
-        .model
-        .clone();
+    let inherit_session_model = explicit_model.is_none() && request.model_key.is_none();
+    let requested_model = explicit_model.or_else(|| {
+        inherit_session_model
+            .then(|| trimmed_nonempty(session.model.as_deref()).map(ToOwned::to_owned))
+            .flatten()
+    });
+    let requested_key = request.model_key.as_ref().or_else(|| {
+        inherit_session_model
+            .then_some(session.model_key.as_ref())
+            .flatten()
+    });
+    if requested_model.is_none() && requested_key.is_none() {
+        return Err(AppError::Conflict(
+            "Mako session has no daemon-frozen model; dispatch a new Mako session or provide an explicit schedule model".into(),
+        ));
+    }
+    let resolved_model = resolve_mako_model(
+        state,
+        current_user_id(user),
+        requested_model.as_deref(),
+        requested_key,
+    )
+    .await?;
+    let protocol_model_key = resolved_model.protocol_key()?;
 
     Ok(ScheduleDefinition {
         title: request.title,
@@ -396,7 +406,9 @@ async fn schedule_definition(
         dst_policy,
         priority: request.priority,
         project_dir,
-        model: Some(model),
+        model: Some(resolved_model.model),
+        model_key: Some(protocol_model_key),
+        model_catalog_revision: resolved_model.catalog_revision,
         crew_slug: trimmed_nonempty(request.crew_slug.as_deref()).map(ToOwned::to_owned),
         misfire,
         overlap_policy: request.overlap_policy.as_str().to_string(),

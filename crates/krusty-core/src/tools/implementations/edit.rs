@@ -126,6 +126,7 @@ Preserve exact indentation and prefer small replacements. Use replace_all:true o
                     });
 
                     ToolResult::success_data_with(data, warnings, Some(diff), None)
+                        .with_changed(new_content != content)
                 }
                 Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
             }
@@ -182,6 +183,7 @@ Preserve exact indentation and prefer small replacements. Use replace_all:true o
                             });
 
                             ToolResult::success_data_with(data, warnings, Some(diff), None)
+                                .with_changed(new_content != content)
                         }
                         Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
                     }

@@ -191,6 +191,30 @@ impl Command {
             Self::Extension(_) => "extension",
         }
     }
+
+    /// Minimum negotiated minor needed to transmit this command without
+    /// silently losing fields unknown to an older peer.
+    pub fn minimum_protocol_minor(&self) -> u16 {
+        let carries_exact_model_identity = match self {
+            Self::Dispatch(command) => {
+                command.model_key.is_some() || command.model_catalog_revision.is_some()
+            }
+            Self::CreateSchedule(command) => {
+                command.definition.model_key.is_some()
+                    || command.definition.model_catalog_revision.is_some()
+            }
+            Self::ReplaceSchedule(command) => {
+                command.definition.model_key.is_some()
+                    || command.definition.model_catalog_revision.is_some()
+            }
+            _ => false,
+        };
+        if carries_exact_model_identity {
+            crate::MODEL_IDENTITY_PROTOCOL_MINOR
+        } else {
+            0
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -203,12 +227,29 @@ pub struct SessionCommand {
     pub session_id: String,
 }
 
+/// Provider-aware executable model identity. String-valued transport fields
+/// keep the daemon protocol independent from `krusty-core` while preserving
+/// the exact serialized shape of the core `ModelKey`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ModelKey {
+    pub provider: String,
+    pub model_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_scope: Option<String>,
+    pub api_format: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DispatchCommand {
     pub task: String,
     pub working_dir: String,
     pub project_dir: Option<String>,
+    /// Legacy compatibility mirror of `model_key.model_id`.
     pub model: Option<String>,
+    #[serde(default)]
+    pub model_key: Option<ModelKey>,
+    #[serde(default)]
+    pub model_catalog_revision: Option<String>,
     pub start_at_unix_ms: Option<i64>,
     pub priority: Option<String>,
     pub crew_slug: Option<String>,
@@ -227,7 +268,12 @@ pub struct ScheduleDefinition {
     pub dst_policy: serde_json::Value,
     pub priority: i32,
     pub project_dir: Option<String>,
+    /// Legacy compatibility mirror of `model_key.model_id`.
     pub model: Option<String>,
+    #[serde(default)]
+    pub model_key: Option<ModelKey>,
+    #[serde(default)]
+    pub model_catalog_revision: Option<String>,
     pub crew_slug: Option<String>,
     pub misfire: serde_json::Value,
     pub overlap_policy: String,
@@ -604,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn schedule_commands_round_trip_on_minor_one() {
+    fn schedule_commands_round_trip_on_current_minor() {
         let command = Command::CreateSchedule(CreateScheduleCommand {
             session_id: "session-1".into(),
             definition: ScheduleDefinition {
@@ -624,6 +670,8 @@ mod tests {
                 priority: 0,
                 project_dir: Some("/work/repo".into()),
                 model: None,
+                model_key: None,
+                model_catalog_revision: None,
                 crew_slug: None,
                 misfire: serde_json::json!({
                     "policy": "fire_once",
@@ -643,6 +691,44 @@ mod tests {
         let decoded: Command = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded, command);
         assert!(encoded.len() < crate::MAX_FRAME_BYTES);
+    }
+
+    #[test]
+    fn model_identity_fields_are_additive_and_legacy_compatible() {
+        let legacy: DispatchCommand = serde_json::from_value(serde_json::json!({
+            "task": "inspect",
+            "working_dir": "/work",
+            "project_dir": null,
+            "model": "grok-code-fast-1",
+            "start_at_unix_ms": null,
+            "priority": null,
+            "crew_slug": null
+        }))
+        .unwrap();
+        assert!(legacy.model_key.is_none());
+        assert!(legacy.model_catalog_revision.is_none());
+
+        let exact = DispatchCommand {
+            task: "inspect".into(),
+            working_dir: "/work".into(),
+            project_dir: None,
+            model: Some("grok-code-fast-1".into()),
+            model_key: Some(ModelKey {
+                provider: "grok".into(),
+                model_id: "grok-code-fast-1".into(),
+                auth_scope: Some("oauth".into()),
+                api_format: "open_ai_responses".into(),
+            }),
+            model_catalog_revision: Some("catalog-42".into()),
+            start_at_unix_ms: None,
+            priority: None,
+            crew_slug: None,
+        };
+        let round_trip =
+            serde_json::from_value::<DispatchCommand>(serde_json::to_value(&exact).unwrap())
+                .unwrap();
+        assert_eq!(round_trip, exact);
+        assert_eq!(Command::Dispatch(exact).minimum_protocol_minor(), 2);
     }
 
     #[test]

@@ -426,6 +426,19 @@ async fn test_tool_result_success_data_with_envelope_fields() {
     assert_eq!(parsed["metadata"]["exit_code"], 0);
 }
 
+#[test]
+fn tool_result_changed_is_a_structured_producer_contract() {
+    let changed = ToolResult::success_data(json!({"message": "written"})).with_changed(true);
+    let parsed: serde_json::Value = serde_json::from_str(&changed.output).unwrap();
+    assert_eq!(parsed["changed"], true);
+
+    let unchanged = ToolResult::success("plain output").with_changed(false);
+    let parsed: serde_json::Value = serde_json::from_str(&unchanged.output).unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["changed"], false);
+    assert_eq!(parsed["data"], "plain output");
+}
+
 #[tokio::test]
 async fn test_tool_result_error_with_details_includes_data_and_metadata() {
     let result = ToolResult::error_with_details(

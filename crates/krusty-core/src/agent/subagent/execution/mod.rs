@@ -82,7 +82,6 @@ mod tests {
     };
     use super::governance::{build_subagent_tool_context, delegated_turn_budget};
     use crate::agent::subagent::SubAgentTask;
-    use crate::agent::AgentConfig as RuntimeAgentConfig;
     use crate::process::ProcessRegistry;
     use crate::tools::registry::{DelegationPolicy, PermissionMode};
     use serde_json::json;
@@ -90,7 +89,7 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn delegated_turn_budget_prefers_task_override_then_policy_then_runtime_default() {
+    fn delegated_turn_budget_prefers_task_override_then_policy_then_unlimited_default() {
         let budget_from_task = delegated_turn_budget(
             &SubAgentTask::new("task", "prompt")
                 .with_delegation_policy(DelegationPolicy::for_subagent_build(
@@ -109,7 +108,7 @@ mod tests {
 
         assert_eq!(
             delegated_turn_budget(&SubAgentTask::new("task", "prompt")),
-            RuntimeAgentConfig::default().subagent_max_turns
+            None
         );
     }
 

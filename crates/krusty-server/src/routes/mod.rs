@@ -60,3 +60,17 @@ pub fn api_router() -> Router<AppState> {
         .nest("/auth/oauth", oauth::router())
         .merge(shared_extensibility)
 }
+
+/// Minimal HTTP surface for disposable provider/orchestration evaluation.
+///
+/// Global credentials are intentionally resolved by `AppState`, but mutation
+/// surfaces for credentials, plugins, hooks, MCP, push, Mako, remote access,
+/// and server settings are absent from this router.
+pub(crate) fn evaluation_api_router() -> Router<AppState> {
+    Router::new()
+        .nest("/sessions", sessions::router())
+        .nest("/chat", chat::router())
+        .nest("/models", models::router())
+        .nest("/tools", tools::router())
+        .nest("/processes", processes::router())
+}

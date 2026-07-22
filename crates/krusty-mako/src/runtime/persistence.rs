@@ -6,7 +6,7 @@ use krusty_core::mako::{canonical_timestamp, parse_utc_timestamp};
 use krusty_core::storage::{hash_request_bytes, Database};
 use krusty_mako_protocol::{
     unix_time_millis, Actor, DaemonRuntimeStats, EventEnvelope, ExtensionEvent, MakoEvent,
-    ProtocolErrorPayload, ProtocolVersion, ResponsePayload, RuntimeEvent,
+    ModelKey, ProtocolErrorPayload, ProtocolVersion, ResponsePayload, RuntimeEvent,
 };
 use rusqlite::{params, OptionalExtension, Row, Transaction, TransactionBehavior};
 use serde::Serialize;
@@ -36,6 +36,8 @@ pub(crate) struct OwnedSession {
     pub(crate) working_dir: Option<String>,
     pub(crate) project_dir: Option<String>,
     pub(crate) model: Option<String>,
+    pub(crate) model_key: Option<ModelKey>,
+    pub(crate) model_catalog_revision: Option<String>,
     pub(crate) permission_mode: String,
 }
 
@@ -473,10 +475,23 @@ pub(crate) fn require_owned_session(
     }
     let session = connection
         .query_row(
-            "SELECT id, user_id, title, working_dir, project_dir, model, permission_mode
+            "SELECT id, user_id, title, working_dir, project_dir, model,
+                    model_key_json, model_catalog_revision, permission_mode
              FROM sessions WHERE id = ?1 AND session_type = 'mako'",
             [session_id],
             |row| {
+                let model_key = row
+                    .get::<_, Option<String>>(6)?
+                    .map(|value| {
+                        serde_json::from_str::<ModelKey>(&value).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                6,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })
+                    })
+                    .transpose()?;
                 Ok(OwnedSession {
                     id: row.get(0)?,
                     user_id: row.get(1)?,
@@ -484,7 +499,9 @@ pub(crate) fn require_owned_session(
                     working_dir: row.get(3)?,
                     project_dir: row.get(4)?,
                     model: row.get(5)?,
-                    permission_mode: row.get(6)?,
+                    model_key,
+                    model_catalog_revision: row.get(7)?,
+                    permission_mode: row.get(8)?,
                 })
             },
         )

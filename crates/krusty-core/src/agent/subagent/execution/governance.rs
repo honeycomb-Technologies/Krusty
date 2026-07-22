@@ -1,17 +1,14 @@
 use std::time::Duration;
 
-use crate::agent::AgentConfig as RuntimeAgentConfig;
 use crate::tools::registry::ToolContext;
 
 use super::super::types::SubAgentTask;
 
 pub(super) fn delegated_turn_budget(task: &SubAgentTask) -> Option<usize> {
-    task.max_turns_override
-        .or(task
-            .delegation_policy
-            .as_ref()
-            .and_then(|policy| policy.max_turns))
-        .or(RuntimeAgentConfig::default().subagent_max_turns)
+    task.max_turns_override.or(task
+        .delegation_policy
+        .as_ref()
+        .and_then(|policy| policy.max_turns))
 }
 
 pub(super) fn build_subagent_tool_context(task: &SubAgentTask, timeout_secs: u64) -> ToolContext {

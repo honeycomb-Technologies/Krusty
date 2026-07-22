@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use tokio::sync::mpsc;
@@ -6,9 +6,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::agent::constants::subagent;
+use crate::agent::failure;
 use crate::agent::history_policy::build_history_tool_result;
+use crate::agent::{ProgressLedger, RunProvenance};
 use crate::ai::client::AiClient;
-use crate::ai::types::{Content, ModelMessage, Role};
+use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
 use crate::tools::ToolResult;
 
 use super::super::types::{
@@ -93,7 +95,10 @@ fn record_delegated_process(
     }
 }
 
-/// Unified agentic loop that replaces separate explorer/builder implementations.
+/// Unified delegated, non-streaming tool loop for explorer/builder agents.
+///
+/// This kernel intentionally does not consume `RunSpec`: it has a separate
+/// message/tool protocol and inherits governance through `SubAgentTask`.
 pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     client: &AiClient,
     task: &SubAgentTask,
@@ -102,6 +107,14 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     config: &C,
     progress_tx: Option<mpsc::UnboundedSender<AgentProgress>>,
 ) -> SubAgentResult {
+    let provenance = RunProvenance::Delegated;
+    info!(
+        surface = provenance.as_str(),
+        kernel = provenance.kernel().as_str(),
+        task_id = %task.id,
+        delegated_run_id = ?task.delegated_run_id,
+        "Starting delegated agent kernel"
+    );
     let start = Instant::now();
     let task_id = task.id.clone();
     let task_name = task.display_name();
@@ -137,6 +150,9 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     let mut forced_read_before_completion = false;
     let mut structured_report_repair_requested = false;
     let mut background_processes = Vec::new();
+    let mut progress_ledger = ProgressLedger::new();
+    let mut tool_failure_signatures = HashMap::new();
+    let mut validation_pattern_signatures = HashMap::new();
 
     let send_progress = |status: AgentProgressStatus,
                          action: &str,
@@ -204,11 +220,9 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             };
         }
 
-        turns += 1;
-
         let max_turns_budget = delegated_turn_budget(task);
         if let Some(max_turns) = max_turns_budget {
-            if turns > max_turns {
+            if turns >= max_turns {
                 warn!(
                     task_id = %task_id,
                     turns = turns,
@@ -242,6 +256,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 };
             }
         }
+        turns += 1;
 
         let system_prompt = config.system_prompt(turns);
 
@@ -679,10 +694,76 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             });
         }
 
+        let progress_calls = tool_calls
+            .iter()
+            .map(|call| AiToolCall {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                arguments: call.input.clone(),
+            })
+            .collect::<Vec<_>>();
+        let repeated_failure = failure::detect_repeated_failures(
+            &mut tool_failure_signatures,
+            &progress_calls,
+            &tool_results,
+        );
+        let repeated_validation = failure::detect_repeated_validation_sequence(
+            &mut validation_pattern_signatures,
+            &progress_calls,
+            &tool_results,
+        );
+        let progress_telemetry = progress_ledger.record_turn(&progress_calls, &tool_results);
+        let guard_diagnostic = repeated_failure.or(repeated_validation).or_else(|| {
+            progress_telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.diagnostic())
+        });
+
         messages.push(ModelMessage {
             role: Role::User,
             content: tool_results,
         });
+        if let Some(instruction) = progress_telemetry
+            .as_ref()
+            .and_then(|telemetry| telemetry.replan_instruction())
+        {
+            messages.push(ModelMessage {
+                role: Role::User,
+                content: vec![Content::Text {
+                    text: instruction.to_string(),
+                }],
+            });
+        }
+        if let Some(diagnostic) = guard_diagnostic {
+            warn!(
+                task_id = %task_id,
+                turns,
+                diagnostic = %diagnostic,
+                "Delegated semantic progress guard stopped the run"
+            );
+            send_progress(
+                AgentProgressStatus::Failed,
+                "no semantic progress",
+                total_tool_calls,
+                estimated_tokens,
+                completion_summary_preview(&final_output),
+                config,
+            );
+            config.cleanup();
+            return SubAgentResult {
+                task_id,
+                agent_name: task_name.clone(),
+                delegated_run_id: task.delegated_run_id.clone(),
+                success: false,
+                output: final_output,
+                files_examined,
+                duration_ms: start.elapsed().as_millis() as u64,
+                turns_used: turns,
+                error: Some(diagnostic),
+                policy_violations,
+                background_processes: background_processes.clone(),
+            };
+        }
         last_cycle_positive_evidence = cycle_positive_evidence;
 
         if config.use_explorer_heuristics() && is_explore_delegation && all_read_only_tools {

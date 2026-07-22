@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
+use crate::ai::models::ModelKey;
 use crate::tools::registry::PermissionMode;
 
 /// Session metadata
@@ -28,6 +29,12 @@ pub struct SessionInfo {
     pub work_mode: WorkMode,
     /// Model selected for this session
     pub model: Option<String>,
+    /// Exact provider/auth/transport identity when selected by a modern client.
+    #[serde(default)]
+    pub model_key: Option<ModelKey>,
+    /// Catalog revision that was active when `model_key` was persisted.
+    #[serde(default)]
+    pub model_catalog_revision: Option<String>,
     /// Optional target branch selected for this session
     pub target_branch: Option<String>,
     /// Permission mode selected for this session's tool execution.

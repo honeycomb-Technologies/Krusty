@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 
 use crate::agent::LoopInput;
 use crate::ai::client::AiClient;
-use crate::ai::providers::ProviderId;
+use crate::ai::models::ModelKey;
 use crate::ai::types::{ModelMessage, Role};
 use crate::storage::{SessionManager as StorageSessionManager, SessionRecoveryState, WorkMode};
 use crate::tools::registry::PermissionMode;
@@ -23,9 +23,9 @@ pub type StorageHandle = Arc<Mutex<StorageSessionManager>>;
 /// Model selection and client owned by one ACP session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionModelSelection {
-    pub provider: ProviderId,
-    pub model_id: String,
+    pub key: ModelKey,
     pub acp_model_id: String,
+    pub catalog_revision: Option<String>,
 }
 
 /// Session state for a single ACP session.
@@ -184,13 +184,20 @@ impl SessionState {
         }
     }
 
-    /// Persist the ACP model identifier used to restore an unambiguous provider/model pair.
-    pub async fn persist_model(&self, acp_model_id: &str) {
+    /// Persist the exact executable model identity owned by this ACP session.
+    pub async fn persist_model_selection(&self) {
+        let Some(selection) = self.selected_model().await else {
+            return;
+        };
         if let (Some(storage), Some(session_id)) =
             (self.storage.as_ref(), self.get_storage_session_id().await)
         {
             let storage = storage.lock().await;
-            if let Err(error) = storage.update_session_model(&session_id, Some(acp_model_id)) {
+            if let Err(error) = storage.update_session_model_selection(
+                &session_id,
+                Some(&selection.key),
+                selection.catalog_revision.as_deref(),
+            ) {
                 warn!("Failed to persist ACP session model: {}", error);
             }
         }
@@ -342,6 +349,18 @@ impl SessionState {
             .ok()
             .flatten()
             .and_then(|session| session.model)
+    }
+
+    /// Return the exact persisted model identity for this session.
+    pub async fn persisted_model_key(&self) -> Option<ModelKey> {
+        let storage = self.storage.as_ref()?;
+        let session_id = self.get_storage_session_id().await?;
+        let storage = storage.lock().await;
+        storage
+            .get_session(&session_id)
+            .ok()
+            .flatten()
+            .and_then(|session| session.model_key)
     }
 
     /// Get the current persisted permission mode for this session.

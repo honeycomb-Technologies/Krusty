@@ -689,6 +689,13 @@ pub(crate) fn materialize_schedule_transaction(
     {
         Some("schedule has no frozen model")
     } else if schedule
+        .model_key
+        .as_ref()
+        .is_some_and(|key| schedule.model.as_deref() != Some(key.model_id.as_str()))
+        || (schedule.model_key.is_none() && schedule.model_catalog_revision.is_some())
+    {
+        Some("schedule has inconsistent frozen model identity")
+    } else if schedule
         .project_dir
         .as_deref()
         .is_none_or(|path| path.trim().is_empty() || !std::path::Path::new(path).is_absolute())
@@ -828,6 +835,8 @@ fn materialize_dispatch(
             "working_dir": schedule.project_dir.clone(),
             "project_dir": schedule.project_dir,
             "model": schedule.model,
+            "model_key": schedule.model_key,
+            "model_catalog_revision": schedule.model_catalog_revision,
             "permission_mode": permission_mode,
             "crew_slug": schedule.crew_slug,
             "retry": schedule.retry,

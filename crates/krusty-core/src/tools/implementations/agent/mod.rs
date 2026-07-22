@@ -213,23 +213,21 @@ impl AgentTool {
         }
     }
 
-    /// Resolve the model — use the user's current model or the provider default.
-    fn resolve_model(&self, ctx: &ToolContext, client: &AiClient) -> String {
-        ctx.current_model
-            .clone()
-            .unwrap_or_else(|| client.config().model.clone())
+    /// Resolve the immutable model owned by the session client.
+    ///
+    /// `ToolContext::current_model` is retained as legacy UI metadata. It is a
+    /// bare slug and therefore cannot safely override the exact provider/auth/
+    /// transport identity frozen into `AiClient` for this run.
+    fn resolve_model(&self, _ctx: &ToolContext, client: &AiClient) -> String {
+        client.resolved_model().wire_model_id.clone()
     }
 
-    /// Resolve a fast/cheap model for lightweight agent tasks (e.g., explore).
-    /// Only downgrades for providers that have a known compatible fast tier — otherwise
-    /// inherits the parent model. OpenAI ChatGPT/Codex accounts do not support every
-    /// "mini" model on the websocket tool path, so keep OpenAI delegated runs on the
-    /// selected parent model instead of silently switching to a mini variant.
+    /// Resolve a model for lightweight delegated work.
+    ///
+    /// A different fast model requires its own exact catalog resolution,
+    /// credentials, transport, and `AiClient`. Until that typed boundary is
+    /// supplied, inherit the parent runtime instead of changing only a slug.
     fn resolve_fast_model(&self, ctx: &ToolContext, client: &AiClient) -> String {
-        use crate::ai::providers::ProviderId;
-        match client.provider_id() {
-            ProviderId::Anthropic => "claude-haiku-4-5-20251001".to_string(),
-            _ => self.resolve_model(ctx, client),
-        }
+        self.resolve_model(ctx, client)
     }
 }

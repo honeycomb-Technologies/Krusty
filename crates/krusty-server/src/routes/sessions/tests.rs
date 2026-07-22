@@ -8,8 +8,13 @@ use chrono::Utc;
 use tokio::sync::{Mutex, RwLock};
 
 use krusty_core::agent::loop_events::{LoopEvent, LoopStopReason};
-use krusty_core::agent::{AgentCancellation, LoopInput, UserHookManager};
-use krusty_core::ai::models::create_model_registry;
+use krusty_core::agent::{
+    effective_context_window_for_runtime, AgentCancellation, LoopInput, UserHookManager,
+};
+use krusty_core::ai::models::{
+    create_model_registry, ApiFormat, ModelCatalogSource, ModelKey, ModelMetadata,
+};
+use krusty_core::ai::providers::ProviderId;
 use krusty_core::mcp::McpManager;
 use krusty_core::plan::{PlanFile, PlanManager};
 use krusty_core::process::ProcessRegistry;
@@ -100,6 +105,7 @@ async fn generic_session_routes_reject_daemon_owned_mako_create_update_and_pinch
         Json(CreateSessionRequest {
             title: Some("Orphan Mako".into()),
             model: Some("test:model".into()),
+            model_key: None,
             project_dir: None,
             working_dir: None,
             workspace_mode: None,
@@ -140,6 +146,7 @@ async fn generic_session_routes_reject_daemon_owned_mako_create_update_and_pinch
             workspace_mode: None,
             mode: None,
             model: None,
+            model_key: None,
             target_branch: None,
             permission_mode: None,
         }),
@@ -183,6 +190,7 @@ async fn session_create_persists_full_continuation_contract() {
         Json(CreateSessionRequest {
             title: Some("Continuation Contract".to_string()),
             model: Some("openai/gpt-5.5".to_string()),
+            model_key: None,
             project_dir: Some(project_dir.to_string_lossy().to_string()),
             working_dir: None,
             workspace_mode: Some(WorkspaceMode::Created),
@@ -239,6 +247,7 @@ async fn create_session_persists_user_ownership() {
         Json(CreateSessionRequest {
             title: Some("Owned Session".to_string()),
             model: None,
+            model_key: None,
             project_dir: None,
             working_dir: None,
             workspace_mode: None,
@@ -276,6 +285,7 @@ async fn create_session_resolves_relative_workspace_paths_within_user_root() {
         Json(CreateSessionRequest {
             title: Some("Relative Workspace".to_string()),
             model: None,
+            model_key: None,
             project_dir: Some("repo".to_string()),
             working_dir: None,
             workspace_mode: Some(WorkspaceMode::Selected),
@@ -308,6 +318,7 @@ async fn create_session_accepts_fresh_absolute_workspace_path_with_existing_ance
         Json(CreateSessionRequest {
             title: Some("Fresh Workspace".to_string()),
             model: None,
+            model_key: None,
             project_dir: Some(fresh_project_dir.to_string_lossy().to_string()),
             working_dir: None,
             workspace_mode: Some(WorkspaceMode::Selected),
@@ -337,6 +348,7 @@ async fn create_session_rejects_invalid_workspace_payloads() {
         Json(CreateSessionRequest {
             title: Some("Invalid Selected Workspace".to_string()),
             model: None,
+            model_key: None,
             project_dir: None,
             working_dir: None,
             workspace_mode: Some(WorkspaceMode::Selected),
@@ -364,6 +376,7 @@ async fn create_session_rejects_invalid_workspace_payloads() {
         Json(CreateSessionRequest {
             title: Some("Invalid Neutral Workspace".to_string()),
             model: None,
+            model_key: None,
             project_dir: Some("/tmp/repo".to_string()),
             working_dir: None,
             workspace_mode: Some(WorkspaceMode::Neutral),
@@ -897,9 +910,79 @@ async fn get_session_state_exposes_awaiting_input_details_after_reload() {
 }
 
 #[tokio::test]
+async fn pinch_model_contract_resolves_persisted_exact_key_and_runtime_context() {
+    let (state, _temp_dir) = create_test_state();
+    let narrow = ModelMetadata::new("shared-pinch", "Narrow", ProviderId::MiniMax)
+        .with_context(8_192, 2_048)
+        .with_transport(ApiFormat::Anthropic);
+    let exact = ModelMetadata::new("shared-pinch", "Exact", ProviderId::OpenRouter)
+        .with_context(500_000, 32_768)
+        .with_transport(ApiFormat::OpenAI);
+    let exact_key = exact.key();
+    state
+        .model_registry
+        .set_models(ProviderId::MiniMax, vec![narrow])
+        .await;
+    state
+        .model_registry
+        .set_models(ProviderId::OpenRouter, vec![exact])
+        .await;
+    state
+        .credential_store
+        .write()
+        .await
+        .set(ProviderId::OpenRouter, "openrouter-test-key".to_string());
+
+    let manager =
+        open_session_manager(&state).unwrap_or_else(|_| panic!("session manager should open"));
+    let session_id = manager
+        .create_session("Exact pinch", Some("shared-pinch"), None)
+        .expect("session should create");
+    manager
+        .update_session_model_selection(&session_id, Some(&exact_key), Some("pinch-runtime"))
+        .expect("exact selection should persist");
+
+    let source = manager
+        .get_session(&session_id)
+        .expect("session should load")
+        .expect("session should exist");
+    let persisted_key = source.model_key.as_ref().expect("exact key should load");
+    let client = state
+        .resolve_ai_client_for_key_for_user(persisted_key, source.user_id.as_deref())
+        .await
+        .expect("exact pinch client should resolve");
+    let effective_window = effective_context_window_for_runtime(
+        client.config().uses_chatgpt_codex_format(),
+        client.resolved_model().capabilities.context_window,
+    );
+
+    assert_eq!(client.resolved_model().key, exact_key);
+    assert_eq!(client.provider_id(), ProviderId::OpenRouter);
+    assert_eq!(effective_window, 500_000);
+}
+
+#[tokio::test]
 async fn pinch_session_includes_project_context_and_ranked_files() {
     let (state, _temp_dir) = create_test_state();
     create_test_user(&state, "alice");
+
+    let exact_metadata = ModelMetadata::new(
+        "claude-3-5-sonnet",
+        "Claude 3.5 Sonnet",
+        ProviderId::Anthropic,
+    )
+    .with_context(200_000, 8_192)
+    .with_transport(ApiFormat::Anthropic);
+    let exact_key = exact_metadata.key();
+    state
+        .model_registry
+        .set_models_with_catalog(
+            ProviderId::Anthropic,
+            vec![exact_metadata],
+            Some(ModelCatalogSource::Curated),
+            Some("pinch-catalog".to_string()),
+        )
+        .await;
 
     let workspace = state.working_dir.as_ref();
     let source_file = workspace.join("src/lib.rs");
@@ -928,6 +1011,9 @@ async fn pinch_session_includes_project_context_and_ranked_files() {
             Some("alice"),
         )
         .expect("session should create");
+    session_manager
+        .update_session_model_selection(&session_id, Some(&exact_key), Some("pinch-catalog"))
+        .expect("exact pinch model should persist");
 
     let user_message =
         serde_json::json!([{ "type": "text", "text": "Continue refining the server pinch flow." }])
@@ -995,6 +1081,11 @@ Status: in_progress
     .unwrap_or_else(|_| panic!("pinch should succeed"));
 
     assert_eq!(response.session.id, session_id);
+    assert_eq!(response.session.model_key, Some(exact_key));
+    assert_eq!(
+        response.session.model_catalog_revision.as_deref(),
+        Some("pinch-catalog")
+    );
     assert!(response.checkpoint_id.is_some());
     assert!(response.replaced_messages.unwrap_or(0) > 0);
 
@@ -1139,6 +1230,59 @@ fn live_partial_assistant_only_surfaces_for_active_states() {
 }
 
 #[tokio::test]
+async fn create_session_persists_exact_model_key_and_catalog_revision() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let mut metadata = ModelMetadata::new("shared-model", "Shared via Grok", ProviderId::Grok);
+    metadata.api_format = ApiFormat::OpenAIResponses;
+    let key = ModelKey::from_metadata(&metadata);
+    state
+        .model_registry
+        .set_models_with_catalog(
+            ProviderId::Grok,
+            vec![metadata],
+            Some(ModelCatalogSource::LiveDynamic),
+            Some("catalog-exact-test".to_string()),
+        )
+        .await;
+
+    let (_, Json(created)) = create_session(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Json(CreateSessionRequest {
+            title: Some("Exact model".to_string()),
+            model: Some("shared-model".to_string()),
+            model_key: Some(key.clone()),
+            project_dir: None,
+            working_dir: None,
+            workspace_mode: None,
+            target_branch: None,
+            session_type: None,
+            permission_mode: None,
+        }),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("exact session creation should succeed"));
+
+    assert_eq!(created.model.as_deref(), Some("shared-model"));
+    assert_eq!(created.model_key, Some(key.clone()));
+    assert_eq!(
+        created.model_catalog_revision.as_deref(),
+        Some("catalog-exact-test")
+    );
+    let persisted = open_session_manager(&state)
+        .unwrap_or_else(|_| panic!("session manager should open"))
+        .get_session(&created.id)
+        .expect("session should load")
+        .expect("session should exist");
+    assert_eq!(persisted.model_key, Some(key));
+    assert_eq!(
+        persisted.model_catalog_revision.as_deref(),
+        Some("catalog-exact-test")
+    );
+}
+
+#[tokio::test]
 async fn session_routes_normalize_blank_model_input_to_none() {
     let (state, _temp_dir) = create_test_state();
     create_test_user(&state, "alice");
@@ -1149,6 +1293,7 @@ async fn session_routes_normalize_blank_model_input_to_none() {
         Json(CreateSessionRequest {
             title: Some("Whitespace Model".to_string()),
             model: Some("   ".to_string()),
+            model_key: None,
             project_dir: None,
             working_dir: None,
             workspace_mode: None,
@@ -1173,6 +1318,7 @@ async fn session_routes_normalize_blank_model_input_to_none() {
             workspace_mode: None,
             mode: None,
             model: Some("  gpt-5  ".to_string()),
+            model_key: None,
             target_branch: None,
             permission_mode: None,
         }),
@@ -1193,6 +1339,7 @@ async fn session_routes_normalize_blank_model_input_to_none() {
             workspace_mode: None,
             mode: None,
             model: Some("   ".to_string()),
+            model_key: None,
             target_branch: None,
             permission_mode: None,
         }),
@@ -1216,6 +1363,7 @@ async fn session_routes_apply_workspace_updates() {
         Json(CreateSessionRequest {
             title: Some("Workspace Update".to_string()),
             model: None,
+            model_key: None,
             project_dir: None,
             working_dir: None,
             workspace_mode: None,
@@ -1238,6 +1386,7 @@ async fn session_routes_apply_workspace_updates() {
             workspace_mode: Some(WorkspaceMode::Created),
             mode: None,
             model: None,
+            model_key: None,
             target_branch: None,
             permission_mode: None,
         }),
@@ -1266,6 +1415,7 @@ async fn session_routes_apply_workspace_updates() {
             workspace_mode: Some(WorkspaceMode::Neutral),
             mode: None,
             model: None,
+            model_key: None,
             target_branch: None,
             permission_mode: None,
         }),
@@ -1289,6 +1439,7 @@ async fn session_routes_reject_invalid_workspace_payloads() {
         Json(CreateSessionRequest {
             title: Some("Workspace Validation".to_string()),
             model: None,
+            model_key: None,
             project_dir: None,
             working_dir: None,
             workspace_mode: None,
@@ -1311,6 +1462,7 @@ async fn session_routes_reject_invalid_workspace_payloads() {
             workspace_mode: Some(WorkspaceMode::Created),
             mode: None,
             model: None,
+            model_key: None,
             target_branch: None,
             permission_mode: None,
         }),
@@ -1344,6 +1496,7 @@ async fn session_routes_reject_working_dir_updates_outside_user_root() {
         Json(CreateSessionRequest {
             title: Some("Workspace Validation".to_string()),
             model: None,
+            model_key: None,
             project_dir: None,
             working_dir: None,
             workspace_mode: None,
@@ -1366,6 +1519,7 @@ async fn session_routes_reject_working_dir_updates_outside_user_root() {
             workspace_mode: None,
             mode: None,
             model: None,
+            model_key: None,
             target_branch: None,
             permission_mode: None,
         }),

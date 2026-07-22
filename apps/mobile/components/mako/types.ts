@@ -8,6 +8,7 @@ import type {
   MakoHomeDocumentKind,
   MakoHomeResponse,
   MakoRunPriority,
+  ModelKey,
   MakoRunWakeEvent,
   MakoSessionStatus,
   ModelInfo,
@@ -86,6 +87,7 @@ export interface MakoCurrentState {
   setCourse: (task: string, options?: {
     projectDir?: string | null;
     model?: string | null;
+    modelKey?: ModelKey | null;
     startAt?: string | null;
     priority?: MakoRunPriority | null;
     crewSlug?: string | null;

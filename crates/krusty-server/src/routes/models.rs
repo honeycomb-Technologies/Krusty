@@ -7,10 +7,12 @@ use axum::{
 };
 use serde::Deserialize;
 
+use krusty_core::ai::models::{ModelKey, ModelLookupError};
 use krusty_core::ai::providers::ProviderId;
 
 use crate::ai_bootstrap::{
-    clear_current_model_preference, persist_current_model_selection, resolve_preferred_model,
+    clear_current_model_preference, persist_current_model_key_selection,
+    persist_current_model_selection, resolve_preferred_model, resolve_preferred_model_key,
 };
 use crate::auth::CurrentUser;
 use crate::error::AppError;
@@ -28,6 +30,8 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 struct CurrentModelRequest {
     model: Option<String>,
+    #[serde(default)]
+    model_key: Option<ModelKey>,
 }
 
 fn resolve_default_model(active_model: Option<&str>) -> Option<String> {
@@ -61,7 +65,7 @@ async fn list_models(
     for provider_id in ProviderId::all() {
         if let Some(provider_models) = models_by_provider.get(provider_id) {
             for m in provider_models {
-                if models.iter().any(|existing| existing.id == m.id) {
+                if models.iter().any(|existing| existing.key == m.key()) {
                     continue;
                 }
                 models.push(ModelResponse::from_metadata(
@@ -78,10 +82,12 @@ async fn list_models(
     let default_model = resolve_default_model(
         resolve_preferred_model(state.db_path.as_ref().as_path(), user_id).as_deref(),
     );
+    let default_model_key = resolve_preferred_model_key(state.db_path.as_ref().as_path(), user_id);
 
     Ok(Json(ModelsListResponse {
         models,
         default_model,
+        default_model_key,
     }))
 }
 
@@ -99,13 +105,33 @@ async fn set_current_model(
         .map(str::trim)
         .filter(|model| !model.is_empty());
 
-    if let Some(model_id) = next_model {
-        if state.model_registry.get_model(model_id).await.is_none() {
+    if let Some(key) = req.model_key.as_ref() {
+        if next_model.is_some_and(|model| model != key.model_id) {
             return Err(AppError::BadRequest(format!(
-                "Model '{}' is not available",
-                model_id
+                "Model '{}' does not match provider-aware key '{}'",
+                next_model.unwrap_or_default(),
+                key.model_id
             )));
         }
+        if state.model_registry.get_model_by_key(key).await.is_none() {
+            return Err(AppError::BadRequest(format!(
+                "Model key {:?} is not available",
+                key
+            )));
+        }
+        persist_current_model_key_selection(
+            &state.model_registry,
+            state.db_path.as_ref().as_path(),
+            user_id,
+            key,
+        )
+        .await?;
+    } else if let Some(model_id) = next_model {
+        state
+            .model_registry
+            .resolve_legacy_key(model_id)
+            .await
+            .map_err(model_lookup_error)?;
         persist_current_model_selection(
             &state.model_registry,
             state.db_path.as_ref().as_path(),
@@ -125,12 +151,31 @@ async fn get_model(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<ModelResponse>, AppError> {
-    if let Some(model) = state.model_registry.get_model(&id).await {
+    let key = state
+        .model_registry
+        .resolve_legacy_key(&id)
+        .await
+        .map_err(model_lookup_error)?;
+    if let Some(model) = state.model_registry.get_model_by_key(&key).await {
         let provider = crate::utils::providers::provider_display_name(model.provider).to_string();
         return Ok(Json(ModelResponse::from_metadata(&model, provider)));
     }
 
     Err(AppError::NotFound(format!("Model {} not found", id)))
+}
+
+fn model_lookup_error(error: ModelLookupError) -> AppError {
+    match error {
+        ModelLookupError::NotFound { model_id } => {
+            AppError::NotFound(format!("Model {model_id} not found"))
+        }
+        ModelLookupError::Ambiguous {
+            model_id,
+            candidates,
+        } => AppError::BadRequest(format!(
+            "Model '{model_id}' is ambiguous; submit one of these provider-aware keys: {candidates:?}"
+        )),
+    }
 }
 
 #[cfg(test)]

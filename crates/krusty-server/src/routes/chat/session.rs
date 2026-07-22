@@ -1,10 +1,11 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::OwnedMutexGuard;
 
 use krusty_core::agent::autonomy::coordinator_prompt::system_prompt_for_session;
 use krusty_core::ai::client::{AiClient, CallOptions};
+use krusty_core::ai::models::{ModelKey, ModelLookupError, ModelMetadata, ProjectModelRef};
 use krusty_core::ai::providers::ProviderId;
 use krusty_core::ai::types::{ModelMessage, WebFetchConfig, WebSearchConfig};
 use krusty_core::plan::PlanManager;
@@ -17,7 +18,10 @@ use krusty_core::SessionManager;
 
 use super::super::session_access::{current_user_id, load_owned_session, request_workspace_scope};
 use super::tools::{apply_thinking_config, chat_system_prompt, filter_tools_for_session_type};
-use crate::ai_bootstrap::{persist_current_model_selection, resolve_preferred_model};
+use crate::ai_bootstrap::{
+    persist_current_model_key_selection, persist_current_model_selection, resolve_preferred_model,
+    resolve_preferred_model_key,
+};
 use crate::auth::CurrentUser;
 use crate::error::AppError;
 use crate::types::{ChatRequest, ThinkingLevel};
@@ -50,6 +54,7 @@ pub(super) enum RequestedModel<'a> {
     Unspecified,
     Clear,
     Set(&'a str),
+    Exact(&'a ModelKey),
 }
 
 impl<'a> RequestedModel<'a> {
@@ -62,11 +67,35 @@ impl<'a> RequestedModel<'a> {
         }
     }
 
+    pub(super) fn from_request_parts(
+        value: Option<&'a str>,
+        key: Option<&'a ModelKey>,
+    ) -> Result<Self, AppError> {
+        let legacy = trimmed_nonempty(value);
+        if let Some(key) = key {
+            if value.is_some() && legacy.is_none() {
+                return Err(AppError::BadRequest(
+                    "model_key cannot be combined with an empty model override".to_string(),
+                ));
+            }
+            if legacy.is_some_and(|model| model != key.model_id.as_str()) {
+                return Err(AppError::BadRequest(format!(
+                    "Model '{}' does not match provider-aware key '{}'",
+                    legacy.unwrap_or_default(),
+                    key.model_id
+                )));
+            }
+            return Ok(Self::Exact(key));
+        }
+        Ok(Self::from_request(value))
+    }
+
     pub(super) fn effective(self, session_model: Option<&'a str>) -> Option<&'a str> {
         match self {
             Self::Unspecified => trimmed_nonempty(session_model),
             Self::Clear => None,
             Self::Set(model) => Some(model),
+            Self::Exact(key) => Some(key.model_id.as_str()),
         }
     }
 
@@ -75,6 +104,7 @@ impl<'a> RequestedModel<'a> {
             Self::Unspecified => None,
             Self::Clear => Some(None),
             Self::Set(model) => Some(Some(model)),
+            Self::Exact(key) => Some(Some(key.model_id.as_str())),
         }
     }
 }
@@ -96,6 +126,8 @@ pub(super) struct ChatContinuationContract {
     pub(super) session_type: SessionType,
     pub(super) work_mode: WorkMode,
     pub(super) model: Option<String>,
+    pub(super) model_key: Option<ModelKey>,
+    pub(super) model_catalog_revision: Option<String>,
     pub(super) target_branch: Option<String>,
     pub(super) permission_mode: PermissionMode,
     pub(super) fast_mode: bool,
@@ -163,16 +195,40 @@ pub(super) async fn prepare_chat_route_session(
             )?;
             let preferred_model =
                 resolve_preferred_model(state.db_path.as_ref().as_path(), user_id.as_deref());
-            let initial_model = select_model_for_chat_request(
+            let preferred_key =
+                resolve_preferred_model_key(state.db_path.as_ref().as_path(), user_id.as_deref());
+            let preferred_key = if let Some(key) = preferred_key {
+                if state.model_registry.get_model_by_key(&key).await.is_some() {
+                    Some(key)
+                } else {
+                    tracing::warn!(?key, "Ignoring unavailable preferred model key");
+                    None
+                }
+            } else {
+                None
+            };
+            let project_settings = workspace
+                .project_dir
+                .as_deref()
+                .or(workspace.working_dir.as_deref())
+                .map(Path::new)
+                .map(ProjectSettings::load)
+                .unwrap_or_default();
+            let initial_selection = select_model_selection_for_chat_request(
                 state,
                 requested_model,
-                preferred_model
-                    .as_deref()
-                    .filter(|_| matches!(requested_model, RequestedModel::Unspecified)),
+                None,
+                None,
+                project_settings.model.as_ref(),
+                preferred_key.as_ref(),
+                preferred_model.as_deref(),
                 requires_vision,
             )
             .await?;
-            if initial_model.is_none() && preferred_model.is_none() {
+            let initial_model = initial_selection
+                .as_ref()
+                .map(|selection| selection.model_id.as_str());
+            if initial_model.is_none() && preferred_key.is_none() && preferred_model.is_none() {
                 return Err(AppError::BadRequest(
                     "No model selected. Choose a model and try again.".to_string(),
                 ));
@@ -180,7 +236,7 @@ pub(super) async fn prepare_chat_route_session(
             let initial_target_branch = trimmed_nonempty(req.target_branch.as_deref());
             let session_id = sm.create_session_for_user_with_config_and_permission(
                 &title,
-                initial_model.as_deref(),
+                initial_model,
                 workspace.working_dir.as_deref(),
                 workspace.project_dir.as_deref(),
                 workspace.workspace_mode,
@@ -189,22 +245,43 @@ pub(super) async fn prepare_chat_route_session(
                 requested_session_type,
                 req.permission_mode.unwrap_or_default(),
             )?;
+            if let Some(selection) = initial_selection.as_ref() {
+                if let Some(key) = selection.key() {
+                    sm.update_session_model_selection(
+                        &session_id,
+                        Some(&key),
+                        selection.catalog_revision(),
+                    )?;
+                }
+            }
             let should_persist_current_model = match requested_model {
-                RequestedModel::Set(_) => true,
+                RequestedModel::Set(_) | RequestedModel::Exact(_) => true,
                 RequestedModel::Unspecified => {
-                    preferred_model.as_deref() == initial_model.as_deref()
+                    preferred_key.as_ref().is_some_and(|key| {
+                        initial_selection.as_ref().and_then(|s| s.key()) == Some(key.clone())
+                    }) || preferred_model.as_deref() == initial_model
                 }
                 RequestedModel::Clear => false,
             };
             if should_persist_current_model {
-                if let Some(model) = initial_model.as_deref() {
-                    persist_current_model_selection(
-                        &state.model_registry,
-                        state.db_path.as_ref().as_path(),
-                        user_id.as_deref(),
-                        model,
-                    )
-                    .await?;
+                if let Some(selection) = initial_selection.as_ref() {
+                    if let Some(key) = selection.key() {
+                        persist_current_model_key_selection(
+                            &state.model_registry,
+                            state.db_path.as_ref().as_path(),
+                            user_id.as_deref(),
+                            &key,
+                        )
+                        .await?;
+                    } else {
+                        persist_current_model_selection(
+                            &state.model_registry,
+                            state.db_path.as_ref().as_path(),
+                            user_id.as_deref(),
+                            &selection.model_id,
+                        )
+                        .await?;
+                    }
                 }
             }
 
@@ -235,6 +312,8 @@ pub(super) fn build_chat_continuation_contract(
         session_type: session.session_type,
         work_mode,
         model: session.model.clone(),
+        model_key: session.model_key.clone(),
+        model_catalog_revision: session.model_catalog_revision.clone(),
         target_branch: session.target_branch.clone(),
         permission_mode: session.permission_mode,
         fast_mode,
@@ -282,7 +361,8 @@ pub(super) async fn prepare_chat_contract_for_test(
     user: Option<CurrentUser>,
     req: ChatRequest,
 ) -> Result<ChatContinuationContract, AppError> {
-    let requested_model = RequestedModel::from_request(req.model.as_deref());
+    let requested_model =
+        RequestedModel::from_request_parts(req.model.as_deref(), req.model_key.as_ref())?;
     let requested_session_type = req.session_type.unwrap_or(SessionType::Code);
     let requires_vision = false;
     let prepared = prepare_chat_route_session(
@@ -306,24 +386,112 @@ fn effective_session_work_mode(state: &AppState, session: &SessionInfo) -> WorkM
         .unwrap_or(session.work_mode)
 }
 
-async fn model_supports_vision(state: &AppState, model_id: &str) -> bool {
-    if let Some(metadata) = state.model_registry.get_model(model_id).await {
-        return metadata.supports_vision;
-    }
-
-    let Some(ai_client) = state.resolve_ai_client(Some(model_id)).await else {
-        return false;
-    };
-
-    krusty_core::ai::models::resolve_model_metadata(
-        ai_client.provider_id(),
-        model_id,
-        ai_client.config().api_format,
-    )
-    .supports_vision
+#[derive(Debug, Clone)]
+struct ChatModelSelection {
+    model_id: String,
+    metadata: Option<ModelMetadata>,
 }
 
-async fn resolve_default_vision_model(state: &AppState) -> Option<String> {
+impl ChatModelSelection {
+    fn exact(metadata: ModelMetadata) -> Self {
+        Self {
+            model_id: metadata.id.clone(),
+            metadata: Some(metadata),
+        }
+    }
+
+    fn legacy(model_id: impl Into<String>) -> Self {
+        Self {
+            model_id: model_id.into(),
+            metadata: None,
+        }
+    }
+
+    fn key(&self) -> Option<ModelKey> {
+        self.metadata.as_ref().map(ModelMetadata::key)
+    }
+
+    fn catalog_revision(&self) -> Option<&str> {
+        self.metadata
+            .as_ref()
+            .and_then(|metadata| metadata.catalog_revision.as_deref())
+    }
+
+    fn supports_vision(&self) -> bool {
+        self.metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.supports_vision)
+    }
+}
+
+fn model_lookup_error(error: ModelLookupError) -> AppError {
+    match error {
+        ModelLookupError::NotFound { model_id } => {
+            AppError::BadRequest(format!("Model '{model_id}' is not available"))
+        }
+        ModelLookupError::Ambiguous {
+            model_id,
+            candidates,
+        } => AppError::BadRequest(format!(
+            "Model '{model_id}' is ambiguous; submit one of these provider-aware keys: {candidates:?}"
+        )),
+    }
+}
+
+async fn exact_model_selection(
+    state: &AppState,
+    key: &ModelKey,
+) -> Result<ChatModelSelection, AppError> {
+    state
+        .model_registry
+        .get_model_by_key(key)
+        .await
+        .map(ChatModelSelection::exact)
+        .ok_or_else(|| AppError::BadRequest(format!("Model key {key:?} is not available")))
+}
+
+async fn legacy_model_selection(
+    state: &AppState,
+    model_id: &str,
+) -> Result<ChatModelSelection, AppError> {
+    match state.model_registry.resolve_legacy_key(model_id).await {
+        Ok(key) => exact_model_selection(state, &key).await,
+        // Preserve the legacy KRUSTY_PROVIDER + custom-slug bootstrap path.
+        // It remains conservative and cannot claim catalog capabilities.
+        Err(ModelLookupError::NotFound { .. }) => {
+            Ok(ChatModelSelection::legacy(model_id.to_string()))
+        }
+        Err(error @ ModelLookupError::Ambiguous { .. }) => Err(model_lookup_error(error)),
+    }
+}
+
+async fn project_model_selection(
+    state: &AppState,
+    model_ref: &ProjectModelRef,
+) -> Result<ChatModelSelection, AppError> {
+    state
+        .model_registry
+        .resolve_project_model_ref(model_ref)
+        .await
+        .map(ChatModelSelection::exact)
+        .map_err(model_lookup_error)
+}
+
+async fn optional_model_selection(
+    state: &AppState,
+    model_key: Option<&ModelKey>,
+    model_id: Option<&str>,
+) -> Result<Option<ChatModelSelection>, AppError> {
+    if let Some(key) = model_key {
+        Ok(Some(exact_model_selection(state, key).await?))
+    } else if let Some(model_id) = trimmed_nonempty(model_id) {
+        Ok(Some(legacy_model_selection(state, model_id).await?))
+    } else {
+        Ok(None)
+    }
+}
+
+async fn resolve_default_vision_model(state: &AppState) -> Option<ChatModelSelection> {
     let providers_with_auth = {
         let store = state.credential_store.read().await;
         store.providers_with_auth()
@@ -335,7 +503,7 @@ async fn resolve_default_vision_model(state: &AppState) -> Option<String> {
         .await;
 
     if let Some(model) = recent_models.iter().find(|model| model.supports_vision) {
-        return Some(model.id.clone());
+        return Some(ChatModelSelection::exact(model.clone()));
     }
 
     for provider in ProviderId::all() {
@@ -344,7 +512,7 @@ async fn resolve_default_vision_model(state: &AppState) -> Option<String> {
         }
         if let Some(models) = models_by_provider.get(provider) {
             if let Some(model) = models.iter().find(|model| model.supports_vision) {
-                return Some(model.id.clone());
+                return Some(ChatModelSelection::exact(model.clone()));
             }
         }
     }
@@ -352,32 +520,62 @@ async fn resolve_default_vision_model(state: &AppState) -> Option<String> {
     None
 }
 
-pub(super) async fn select_model_for_chat_request(
+async fn select_model_selection_for_chat_request(
     state: &AppState,
     requested_model: RequestedModel<'_>,
+    session_model_key: Option<&ModelKey>,
     session_model: Option<&str>,
+    project_model: Option<&ProjectModelRef>,
+    preferred_model_key: Option<&ModelKey>,
+    preferred_model: Option<&str>,
     requires_vision: bool,
-) -> Result<Option<String>, AppError> {
-    let effective_model = requested_model
-        .effective(session_model)
-        .map(ToOwned::to_owned);
+) -> Result<Option<ChatModelSelection>, AppError> {
+    let effective = match requested_model {
+        RequestedModel::Exact(key) => Some(exact_model_selection(state, key).await?),
+        RequestedModel::Set(model) => Some(legacy_model_selection(state, model).await?),
+        RequestedModel::Clear => {
+            if let Some(model_ref) = project_model {
+                Some(project_model_selection(state, model_ref).await?)
+            } else {
+                optional_model_selection(state, preferred_model_key, preferred_model).await?
+            }
+        }
+        RequestedModel::Unspecified => {
+            if let Some(selection) =
+                optional_model_selection(state, session_model_key, session_model).await?
+            {
+                Some(selection)
+            } else if let Some(model_ref) = project_model {
+                Some(project_model_selection(state, model_ref).await?)
+            } else {
+                optional_model_selection(state, preferred_model_key, preferred_model).await?
+            }
+        }
+    };
+
     if !requires_vision {
-        return Ok(effective_model);
+        return Ok(effective);
     }
 
-    if let RequestedModel::Set(model) = requested_model {
-        if !model_supports_vision(state, model).await {
-            return Err(AppError::BadRequest(format!(
-                "Model '{}' does not support image input. Select a vision-capable model and try again.",
-                model
-            )));
-        }
+    if matches!(
+        requested_model,
+        RequestedModel::Exact(_) | RequestedModel::Set(_)
+    ) && !effective
+        .as_ref()
+        .is_some_and(ChatModelSelection::supports_vision)
+    {
+        let model = requested_model.effective(None).unwrap_or_default();
+        return Err(AppError::BadRequest(format!(
+            "Model '{}' does not support image input. Select a vision-capable model and try again.",
+            model
+        )));
     }
 
-    if let Some(model_id) = effective_model.as_deref() {
-        if model_supports_vision(state, model_id).await {
-            return Ok(effective_model);
-        }
+    if effective
+        .as_ref()
+        .is_some_and(ChatModelSelection::supports_vision)
+    {
+        return Ok(effective);
     }
 
     resolve_default_vision_model(state)
@@ -388,6 +586,27 @@ pub(super) async fn select_model_for_chat_request(
                 "No vision-capable model is configured. Configure OpenAI, Anthropic, or another vision model before sending images.".to_string(),
             )
         })
+}
+
+#[cfg(test)]
+pub(super) async fn select_model_for_chat_request(
+    state: &AppState,
+    requested_model: RequestedModel<'_>,
+    session_model: Option<&str>,
+    requires_vision: bool,
+) -> Result<Option<String>, AppError> {
+    Ok(select_model_selection_for_chat_request(
+        state,
+        requested_model,
+        None,
+        session_model,
+        None,
+        None,
+        None,
+        requires_vision,
+    )
+    .await?
+    .map(|selection| selection.model_id))
 }
 
 pub(super) async fn setup_chat_session(
@@ -406,33 +625,6 @@ pub(super) async fn setup_chat_session(
     let session_manager = SessionManager::new(db);
     let session = load_owned_session(&session_manager, session_id, user)?;
 
-    let session_model = trimmed_nonempty(session.model.as_deref());
-    let effective_model =
-        select_model_for_chat_request(state, requested_model, session_model, requires_vision)
-            .await?;
-    let selected_model = effective_model.clone().or_else(|| {
-        resolve_preferred_model(state.db_path.as_ref().as_path(), session.user_id.as_deref())
-    });
-    if selected_model.is_none() {
-        return Err(AppError::BadRequest(
-            "No model selected. Choose a model and try again.".to_string(),
-        ));
-    }
-
-    let ai_client = state
-        .resolve_ai_client_for_user(effective_model.as_deref(), session.user_id.as_deref())
-        .await
-        .ok_or_else(|| AppError::BadRequest("No AI credentials configured".to_string()))?;
-    let resolved_model = ai_client.config().model.clone();
-
-    let should_persist_model = (requires_vision && effective_model.as_deref() != session_model)
-        || (matches!(requested_model, RequestedModel::Unspecified)
-            && session_model.is_none()
-            && effective_model.is_none());
-    if should_persist_model {
-        session_manager.update_session_model(session_id, Some(resolved_model.as_str()))?;
-    }
-
     let working_dir = resolve_session_working_dir(
         session.working_dir.as_deref(),
         &workspace_scope.base_dir,
@@ -444,14 +636,87 @@ pub(super) async fn setup_chat_session(
         &workspace_scope.allowed_root,
     )?
     .map(PathBuf::from);
+    let project_settings = ProjectSettings::load(project_dir.as_deref().unwrap_or(&working_dir));
+
+    let session_model = trimmed_nonempty(session.model.as_deref());
+    let preferred_model =
+        resolve_preferred_model(state.db_path.as_ref().as_path(), session.user_id.as_deref());
+    let preferred_model_key =
+        resolve_preferred_model_key(state.db_path.as_ref().as_path(), session.user_id.as_deref());
+    let preferred_model_key = if let Some(key) = preferred_model_key {
+        if state.model_registry.get_model_by_key(&key).await.is_some() {
+            Some(key)
+        } else {
+            tracing::warn!(?key, "Ignoring unavailable preferred model key");
+            None
+        }
+    } else {
+        None
+    };
+    let effective_selection = select_model_selection_for_chat_request(
+        state,
+        requested_model,
+        session.model_key.as_ref(),
+        session_model,
+        project_settings.model.as_ref(),
+        preferred_model_key.as_ref(),
+        preferred_model.as_deref(),
+        requires_vision,
+    )
+    .await?;
+    if effective_selection.is_none() {
+        return Err(AppError::BadRequest(
+            "No model selected. Choose a model and try again.".to_string(),
+        ));
+    }
+
+    let ai_client = if let Some(key) = effective_selection
+        .as_ref()
+        .and_then(ChatModelSelection::key)
+    {
+        state
+            .resolve_ai_client_for_key_for_user(&key, session.user_id.as_deref())
+            .await
+    } else {
+        state
+            .resolve_ai_client_for_user(
+                effective_selection
+                    .as_ref()
+                    .map(|selection| selection.model_id.as_str()),
+                session.user_id.as_deref(),
+            )
+            .await
+    }
+    .ok_or_else(|| AppError::BadRequest("No AI credentials configured".to_string()))?;
+    let resolved_model = ai_client.config().model.clone();
+    let resolved_key = ai_client.resolved_model().key.clone();
+
+    let session_matches_resolved = session.model_key.as_ref().map_or_else(
+        || session_model == Some(resolved_model.as_str()),
+        |key| key == &resolved_key,
+    );
+    let should_persist_model = (requires_vision && !session_matches_resolved)
+        || (matches!(requested_model, RequestedModel::Unspecified)
+            && session_model.is_none()
+            && session.model_key.is_none());
+    if should_persist_model {
+        if let Some(metadata) = state.model_registry.get_model_by_key(&resolved_key).await {
+            session_manager.update_session_model_selection(
+                session_id,
+                Some(&resolved_key),
+                metadata.catalog_revision.as_deref(),
+            )?;
+        } else {
+            session_manager.update_session_model(session_id, Some(resolved_model.as_str()))?;
+        }
+    }
+
     let effective_work_mode = effective_session_work_mode(state, &session);
     let has_active_plan = PlanManager::new((*state.db_path).clone())
         .ok()
         .and_then(|manager| manager.get_active_plan(session_id).ok())
         .flatten()
         .is_some();
-    let project_settings = ProjectSettings::load(project_dir.as_deref().unwrap_or(&working_dir));
-
     let guard = state
         .try_lock_session(session_id)
         .await
@@ -496,7 +761,7 @@ pub(super) async fn setup_chat_session(
             .collect()
     };
     let hosted_web_tools = session.session_type != SessionType::Code;
-    let model_metadata = state.model_registry.get_model(&resolved_model).await;
+    let model_metadata = state.model_registry.get_model_by_key(&resolved_key).await;
     let effective_thinking_level =
         normalize_thinking_level_for_model(thinking_level, model_metadata.as_ref());
     let reasoning_format = model_metadata

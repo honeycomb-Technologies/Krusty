@@ -67,6 +67,18 @@ def trace_event(
     return event
 
 
+class CandidateSafetyTests(unittest.TestCase):
+    def test_candidate_url_requires_loopback_nonproduction_port(self) -> None:
+        self.assertEqual(
+            HARNESS.validate_candidate_base_url("http://127.0.0.1:3100"),
+            "http://127.0.0.1:3100",
+        )
+        with self.assertRaises(HARNESS.AcceptanceFailure):
+            HARNESS.validate_candidate_base_url("http://127.0.0.1:3000")
+        with self.assertRaises(HARNESS.AcceptanceFailure):
+            HARNESS.validate_candidate_base_url("http://honey:3100")
+
+
 class TraceConvergenceTests(unittest.TestCase):
     def test_waits_through_async_batches_until_terminal_call_is_accounted(self) -> None:
         thinking = trace_event(1, "thinking_delta")

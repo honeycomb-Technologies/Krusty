@@ -67,6 +67,14 @@ pub enum ProtocolViolation {
         actual_major: u16,
         actual_minor: u16,
     },
+    #[error(
+        "protocol command {command} requires minor {required_minor}, peer negotiated minor {actual_minor}"
+    )]
+    FeatureRequiresMinor {
+        command: &'static str,
+        required_minor: u16,
+        actual_minor: u16,
+    },
     #[error("request id is empty or too long")]
     InvalidRequestId,
     #[error("actor identity is empty or too long")]

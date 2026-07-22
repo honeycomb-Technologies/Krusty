@@ -49,10 +49,12 @@ pub mod hooks;
 pub mod learning;
 pub mod loop_events;
 mod observability;
-pub mod orchestrator;
+mod orchestrator;
 pub mod pinch_context;
 pub mod pinch_session;
 pub mod plan_handler;
+pub mod progress;
+pub mod run_spec;
 pub mod state;
 pub mod stream;
 pub mod subagent;
@@ -78,14 +80,16 @@ pub use context::{
 pub use event_bus::AgentEventBus;
 pub use events::{AgentEvent, InterruptReason};
 pub use hooks::{LoggingHook, PlanModeHook, SafetyHook};
-pub use loop_events::{LoopEvent, LoopInput, PlanTaskInfo};
+pub use loop_events::{LoopEvent, LoopInput, PlanTaskInfo, ProviderRequestSnapshot};
 pub use observability::ProviderCallTraceContext;
-pub use orchestrator::{AgenticOrchestrator, OrchestratorConfig, OrchestratorServices};
+pub use orchestrator::OrchestratorServices;
 pub use pinch_context::{PinchContext, PinchContextInput};
 pub use pinch_session::{
     create_pinched_session, CreatePinchedSessionRequest, CreatePinchedSessionResult,
 };
-pub use state::{AgentConfig, AgentState};
+pub use progress::{ActionClass, ProgressGuardAction, ProgressGuardTelemetry, ProgressLedger};
+pub use run_spec::{RunKernel, RunProvenance, RunSpec, RunSpecBuilder, RunSpecError};
+pub use state::{AgentConfig, AgentState, RunBudget, RunBudgetResolution, RunBudgetSource};
 pub use subagent::build_context;
 pub use subagent::build_context::SharedBuildContext;
 pub use summarizer::{generate_summary, SummarizationResult};

@@ -20,7 +20,7 @@ pub use config::{
     supports_openai_xhigh_reasoning, AiClientConfig, AnthropicAdaptiveEffort, CallOptions,
     CodexReasoningEffort, PromptCacheRetention,
 };
-pub use core::AiClient;
 pub use core::KRUSTY_SYSTEM_PROMPT;
+pub use core::{AiClient, PreparedRequestDiagnostics};
 pub use request_builder::{BuildOptions, RequestBuilder};
 pub use simple::SimpleCallResult;

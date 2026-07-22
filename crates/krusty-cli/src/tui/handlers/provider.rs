@@ -7,16 +7,156 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::ai::client::AiClient;
-use crate::ai::providers::{get_provider, ProviderId};
+use crate::ai::models::{ModelKey, ModelMetadata, ProjectModelRef};
+use crate::ai::providers::ProviderId;
+use crate::storage::ProjectSettings;
 use crate::tools::register_agent_tool;
 use crate::tui::app::App;
-use crate::tui::auth::{
-    infer_provider_for_model, resolve_openai_auth_for_model, translate_model_for_provider,
-};
+use crate::tui::auth::{resolve_openai_auth_for_metadata, translate_model_for_provider};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrimaryRunModelSource {
+    Explicit,
+    Session,
+    Project,
+    Preference,
+}
+
+fn choose_primary_run_model(
+    explicit: Option<ModelKey>,
+    session: Option<ProjectModelRef>,
+    project: Option<ProjectModelRef>,
+    preference: Option<ProjectModelRef>,
+) -> Option<(PrimaryRunModelSource, ProjectModelRef)> {
+    explicit
+        .map(ProjectModelRef::Exact)
+        .map(|model_ref| (PrimaryRunModelSource::Explicit, model_ref))
+        .or_else(|| session.map(|model_ref| (PrimaryRunModelSource::Session, model_ref)))
+        .or_else(|| project.map(|model_ref| (PrimaryRunModelSource::Project, model_ref)))
+        .or_else(|| preference.map(|model_ref| (PrimaryRunModelSource::Preference, model_ref)))
+}
 
 impl App {
+    /// Resolve and activate the exact model for the next primary TUI run.
+    ///
+    /// This is intentionally called before client construction. Invalid
+    /// explicit/session/project identities fail closed rather than falling
+    /// through to a lower-precedence preference.
+    pub(crate) fn prepare_primary_run_model(
+        &mut self,
+        project_settings: &ProjectSettings,
+    ) -> Result<ModelMetadata> {
+        let explicit = self
+            .runtime
+            .model_selection_explicit
+            .then(|| self.runtime.current_model_key.clone())
+            .flatten();
+        if self.runtime.model_selection_explicit && explicit.is_none() {
+            anyhow::bail!("The explicit model selection has no exact model key");
+        }
+
+        let session = if let Some(session_id) = self.runtime.current_session_id.as_deref() {
+            let session_manager = self
+                .services
+                .session_manager
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("No session manager is available"))?;
+            let session = session_manager
+                .get_session(session_id)?
+                .ok_or_else(|| anyhow::anyhow!("Session '{session_id}' no longer exists"))?;
+            session.model_key.map(ProjectModelRef::Exact).or_else(|| {
+                session
+                    .model
+                    .map(|model| model.trim().to_string())
+                    .filter(|model| !model.is_empty())
+                    .map(ProjectModelRef::Legacy)
+            })
+        } else {
+            None
+        };
+        let session_was_empty = session.is_none();
+        let preference = self
+            .runtime
+            .current_model_key
+            .clone()
+            .map(ProjectModelRef::Exact)
+            .or_else(|| {
+                let model = self.runtime.current_model.trim();
+                (!model.is_empty()).then(|| ProjectModelRef::Legacy(model.to_string()))
+            });
+        let (source, model_ref) = choose_primary_run_model(
+            explicit,
+            session,
+            project_settings.model.clone(),
+            preference,
+        )
+        .ok_or_else(|| anyhow::anyhow!("No model selected. Use /model to choose one."))?;
+
+        let metadata = futures::executor::block_on(
+            self.services
+                .model_registry
+                .resolve_project_model_ref(&model_ref),
+        )
+        .map_err(|error| anyhow::anyhow!("Cannot resolve model for this run: {error}"))?;
+
+        self.runtime.current_model = metadata.id.clone();
+        self.runtime.current_model_key = Some(metadata.key());
+        self.runtime.active_provider = metadata.provider;
+        self.reconcile_model_controls(&metadata);
+        self.runtime.api_key = self.resolve_auth_for_active_provider();
+        self.runtime.ai_client = self.create_ai_client();
+
+        if source == PrimaryRunModelSource::Project && session_was_empty {
+            if let (Some(session_manager), Some(session_id)) = (
+                self.services.session_manager.as_ref(),
+                self.runtime.current_session_id.as_deref(),
+            ) {
+                session_manager.update_session_model_selection(
+                    session_id,
+                    Some(&metadata.key()),
+                    metadata.catalog_revision.as_deref(),
+                )?;
+            }
+        }
+
+        Ok(metadata)
+    }
+
     pub(crate) fn has_selected_model(&self) -> bool {
-        !self.runtime.current_model.trim().is_empty()
+        self.runtime.current_model_key.as_ref().is_some_and(|key| {
+            !self.runtime.current_model.trim().is_empty()
+                && key.model_id == self.runtime.current_model
+                && key.provider == self.runtime.active_provider
+        })
+    }
+
+    /// Resolve the exact selected catalog row without falling back to a bare
+    /// model slug. All runtime capability and transport decisions use this.
+    pub(crate) fn selected_model_metadata(&self) -> Option<ModelMetadata> {
+        let key = self.runtime.current_model_key.as_ref()?;
+        if key.model_id != self.runtime.current_model
+            || key.provider != self.runtime.active_provider
+        {
+            return None;
+        }
+        self.services.model_registry.try_get_model_by_key(key)
+    }
+
+    /// Find a unique row for a legacy/provider translation. Multiple auth or
+    /// transport rows with the same slug are intentionally not guessed.
+    fn unique_model_key_for_provider(&self, provider: ProviderId, model: &str) -> Option<ModelKey> {
+        let (_, models_by_provider) = futures::executor::block_on(
+            self.services
+                .model_registry
+                .get_organized_models(ProviderId::all()),
+        );
+        let mut matches = models_by_provider
+            .get(&provider)?
+            .iter()
+            .filter(|metadata| metadata.id == model)
+            .map(ModelMetadata::key);
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
     }
 
     pub(crate) fn persist_current_model_selection(&self) {
@@ -24,12 +164,16 @@ impl App {
             return;
         };
 
-        let result = if let Some(model) = (!self.runtime.current_model.trim().is_empty())
-            .then_some(self.runtime.current_model.trim())
-        {
-            prefs.set_current_model(model)
+        let result = if let Some(key) = self.runtime.current_model_key.as_ref().filter(|key| {
+            key.model_id == self.runtime.current_model
+                && key.provider == self.runtime.active_provider
+        }) {
+            prefs.set_current_model_key(key)
+        } else if !self.runtime.current_model.trim().is_empty() {
+            // Legacy/bare assignments must invalidate any stale exact key.
+            prefs.set_current_model(self.runtime.current_model.trim())
         } else {
-            prefs.delete("current_model")
+            prefs.clear_current_model()
         };
 
         if let Err(error) = result {
@@ -37,32 +181,35 @@ impl App {
         }
     }
 
-    pub(crate) fn sync_active_provider_to_current_model(&mut self) {
-        let Some(provider) =
-            infer_provider_for_model(&self.services.model_registry, &self.runtime.current_model)
-        else {
+    pub(crate) fn persist_current_session_model_selection(&self) {
+        let (Some(session_manager), Some(session_id)) = (
+            self.services.session_manager.as_ref(),
+            self.runtime.current_session_id.as_deref(),
+        ) else {
             return;
         };
 
-        self.runtime.active_provider = provider;
-        if let Err(error) = crate::storage::credentials::ActiveProviderStore::save(provider) {
-            tracing::warn!("Failed to save active provider: {}", error);
-        }
-    }
+        let result = if let Some(key) = self.runtime.current_model_key.as_ref().filter(|key| {
+            key.model_id == self.runtime.current_model
+                && key.provider == self.runtime.active_provider
+        }) {
+            let catalog_revision = self
+                .selected_model_metadata()
+                .and_then(|metadata| metadata.catalog_revision);
+            session_manager.update_session_model_selection(
+                session_id,
+                Some(key),
+                catalog_revision.as_deref(),
+            )
+        } else {
+            let model = (!self.runtime.current_model.trim().is_empty())
+                .then_some(self.runtime.current_model.trim());
+            session_manager.update_session_model(session_id, model)
+        };
 
-    pub(crate) fn model_available_for_provider(&self, model: &str, provider: ProviderId) -> bool {
-        let model = model.trim();
-        if model.is_empty() {
-            return false;
+        if let Err(error) = result {
+            tracing::warn!(%error, %session_id, "Failed to persist session model selection");
         }
-
-        if let Some(metadata) = self.services.model_registry.try_get_model(model) {
-            return metadata.provider == provider;
-        }
-
-        get_provider(provider)
-            .map(|config| config.has_model(model))
-            .unwrap_or(false)
     }
 
     pub(crate) fn resolve_auth_for_active_provider(&self) -> Option<String> {
@@ -73,11 +220,9 @@ impl App {
         }
 
         if self.runtime.active_provider == ProviderId::OpenAI {
-            let resolved = resolve_openai_auth_for_model(
-                &self.runtime.current_model,
-                &self.services.credential_store,
-                &self.services.model_registry,
-            );
+            let metadata = self.selected_model_metadata()?;
+            let resolved =
+                resolve_openai_auth_for_metadata(&metadata, &self.services.credential_store);
             return resolved.credential;
         }
 
@@ -145,13 +290,12 @@ impl App {
     }
 
     /// Create AiClientConfig for the current active provider
-    pub fn create_client_config(&self) -> crate::ai::client::AiClientConfig {
-        crate::tui::auth::create_client_config(
-            self.runtime.active_provider,
-            &self.runtime.current_model,
+    pub fn create_client_config(&self) -> Option<crate::ai::client::AiClientConfig> {
+        let metadata = self.selected_model_metadata()?;
+        Some(crate::tui::auth::create_client_config(
+            &metadata,
             &self.services.credential_store,
-            &self.services.model_registry,
-        )
+        ))
     }
 
     /// Create an AI client with the current provider configuration
@@ -159,32 +303,43 @@ impl App {
         if !self.has_selected_model() {
             return None;
         }
-        if !self
-            .model_available_for_provider(&self.runtime.current_model, self.runtime.active_provider)
-        {
-            return None;
-        }
+        let metadata = self.selected_model_metadata()?;
 
         if self.runtime.active_provider == ProviderId::OpenAI {
             // Resolve provenance once and use the same result for both the
             // credential and endpoint. A scoped catalog row must never fall
             // back to the other OpenAI transport.
-            let resolution = resolve_openai_auth_for_model(
-                &self.runtime.current_model,
-                &self.services.credential_store,
-                &self.services.model_registry,
-            );
+            let resolution =
+                resolve_openai_auth_for_metadata(&metadata, &self.services.credential_store);
             let credential = resolution.credential.clone()?;
-            let config = crate::ai::client::AiClientConfig::for_openai_with_auth_resolution(
-                &self.runtime.current_model,
+            let mut config = crate::ai::client::AiClientConfig::for_openai_with_auth_resolution(
+                &metadata.id,
                 resolution,
             );
-            return Some(AiClient::with_api_key(config, credential));
+            config.api_format = metadata.api_format;
+            config.max_tokens = metadata.max_output;
+            return match AiClient::new_with_resolved_model(
+                config,
+                credential,
+                metadata.resolve_runtime(),
+            ) {
+                Ok(client) => Some(client),
+                Err(error) => {
+                    tracing::warn!(%error, "Refused inconsistent OpenAI model runtime");
+                    None
+                }
+            };
         }
 
-        let config = self.create_client_config();
-        self.resolve_auth_for_active_provider()
-            .map(|key| AiClient::with_api_key(config, key))
+        let config = self.create_client_config()?;
+        let credential = self.resolve_auth_for_active_provider()?;
+        match AiClient::new_with_resolved_model(config, credential, metadata.resolve_runtime()) {
+            Ok(client) => Some(client),
+            Err(error) => {
+                tracing::warn!(%error, "Refused inconsistent model runtime");
+                None
+            }
+        }
     }
 
     /// Set API key for current provider and create client
@@ -223,23 +378,41 @@ impl App {
     /// Otherwise clear the selected model and require explicit selection.
     pub fn switch_provider(&mut self, provider_id: ProviderId) {
         let previous_provider = self.runtime.active_provider;
+        let had_selected_model = self.has_selected_model();
         self.runtime.active_provider = provider_id;
 
         if let Err(e) = crate::storage::credentials::ActiveProviderStore::save(provider_id) {
             tracing::warn!("Failed to save active provider: {}", e);
         }
 
-        let next_model = translate_model_for_provider(
-            &self.runtime.current_model,
-            previous_provider,
-            provider_id,
-        )
-        .filter(|model| self.model_available_for_provider(model, provider_id))
-        .unwrap_or_default();
+        let next_key = if previous_provider == provider_id {
+            self.runtime.current_model_key.clone().filter(|key| {
+                key.provider == provider_id && key.model_id == self.runtime.current_model
+            })
+        } else {
+            translate_model_for_provider(
+                &self.runtime.current_model,
+                previous_provider,
+                provider_id,
+            )
+            .and_then(|model| self.unique_model_key_for_provider(provider_id, &model))
+        };
+        let next_model = next_key
+            .as_ref()
+            .map(|key| key.model_id.clone())
+            .unwrap_or_default();
 
-        let cleared_model = self.has_selected_model() && next_model.is_empty();
+        let cleared_model = had_selected_model && next_model.is_empty();
         self.runtime.current_model = next_model;
+        self.runtime.current_model_key = next_key;
+        if let Some(metadata) = self.selected_model_metadata() {
+            self.reconcile_model_controls(&metadata);
+        } else {
+            self.runtime.fast_mode = false;
+            self.runtime.thinking_level = crate::tui::app::ThinkingLevel::Off;
+        }
         self.persist_current_model_selection();
+        self.persist_current_session_model_selection();
 
         let auth = self.resolve_auth_for_active_provider();
         self.runtime.api_key = auth.clone();
@@ -279,5 +452,54 @@ impl App {
     /// Check if authenticated
     pub fn is_authenticated(&self) -> bool {
         self.runtime.ai_client.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::models::ApiFormat;
+
+    fn key(id: &str) -> ModelKey {
+        ModelKey::new(ProviderId::OpenRouter, id, ApiFormat::OpenAI)
+    }
+
+    #[test]
+    fn primary_run_model_precedence_is_explicit_session_project_preference() {
+        let explicit = key("explicit");
+        let session = ProjectModelRef::Exact(key("session"));
+        let project = ProjectModelRef::Exact(key("project"));
+        let preference = ProjectModelRef::Exact(key("preference"));
+
+        let selected = choose_primary_run_model(
+            Some(explicit.clone()),
+            Some(session.clone()),
+            Some(project.clone()),
+            Some(preference.clone()),
+        );
+        assert_eq!(
+            selected,
+            Some((
+                PrimaryRunModelSource::Explicit,
+                ProjectModelRef::Exact(explicit)
+            ))
+        );
+        assert_eq!(
+            choose_primary_run_model(
+                None,
+                Some(session.clone()),
+                Some(project.clone()),
+                Some(preference.clone())
+            ),
+            Some((PrimaryRunModelSource::Session, session))
+        );
+        assert_eq!(
+            choose_primary_run_model(None, None, Some(project.clone()), Some(preference.clone())),
+            Some((PrimaryRunModelSource::Project, project))
+        );
+        assert_eq!(
+            choose_primary_run_model(None, None, None, Some(preference.clone())),
+            Some((PrimaryRunModelSource::Preference, preference))
+        );
     }
 }

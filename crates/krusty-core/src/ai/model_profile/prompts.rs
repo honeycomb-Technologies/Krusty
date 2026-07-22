@@ -1,10 +1,67 @@
 use crate::ai::models::ApiFormat;
 use crate::ai::providers::ProviderId;
 use crate::ai::types::{Content, ModelMessage, Role};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::profile::ModelProfile;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptSectionKind {
+    AgentContract,
+    Identity,
+    Project,
+    Session,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptStability {
+    Stable,
+    Dynamic,
+}
+
+/// One typed, inspectable model-visible instruction layer.
+///
+/// Provider adapters still receive the cache-oriented aggregate strings below,
+/// but prompt construction and diagnostics no longer have to reverse-engineer
+/// an opaque concatenated system prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptSection {
+    pub kind: PromptSectionKind,
+    pub stability: PromptStability,
+    pub source: String,
+    pub content: String,
+    pub sha256: String,
+    pub bytes: usize,
+}
+
+impl PromptSection {
+    fn new(
+        kind: PromptSectionKind,
+        stability: PromptStability,
+        source: impl Into<String>,
+        content: String,
+    ) -> Option<Self> {
+        if content.trim().is_empty() {
+            return None;
+        }
+        let digest = Sha256::digest(content.as_bytes());
+        Some(Self {
+            kind,
+            stability,
+            source: source.into(),
+            bytes: content.len(),
+            sha256: format!("{digest:x}"),
+            content,
+        })
+    }
+}
+
 pub struct SystemPromptSections {
     pub profile: ModelProfile,
+    pub sections: Vec<PromptSection>,
     pub base_prompt: String,
     /// Mako coordinator/persona/user context frozen for the current run.
     /// This is stable within a run and belongs in the cached prefix.
@@ -32,6 +89,28 @@ impl SystemPromptSections {
 
         sections.join("\n\n---\n\n")
     }
+
+    /// Stable fingerprint for the exact model-visible instruction stack.
+    pub fn prompt_hash(&self) -> String {
+        let digest = Sha256::digest(self.combined().as_bytes());
+        format!("{digest:x}")
+    }
+
+    /// Redacted diagnostics retain ordering, provenance, stability, size and
+    /// hashes while omitting prompt contents that may contain user data.
+    pub fn diagnostic_manifest(&self) -> serde_json::Value {
+        serde_json::json!({
+            "prompt_hash": self.prompt_hash(),
+            "total_bytes": self.combined().len(),
+            "sections": self.sections.iter().map(|section| serde_json::json!({
+                "kind": section.kind,
+                "stability": section.stability,
+                "source": section.source,
+                "bytes": section.bytes,
+                "sha256": section.sha256,
+            })).collect::<Vec<_>>(),
+        })
+    }
 }
 
 pub fn build_system_prompt_sections(
@@ -48,8 +127,43 @@ pub fn build_system_prompt_sections(
 
     let base = profile.layered_system_prompt(provider, api_format, model_id, custom_system_prompt);
 
+    let mut sections = Vec::new();
+    if let Some(section) = PromptSection::new(
+        PromptSectionKind::AgentContract,
+        PromptStability::Stable,
+        format!("model_profile:{provider}:{model_id}"),
+        base.clone(),
+    ) {
+        sections.push(section);
+    }
+    if let Some(section) = PromptSection::new(
+        PromptSectionKind::Identity,
+        PromptStability::Stable,
+        "runtime_identity",
+        identity_context.clone(),
+    ) {
+        sections.push(section);
+    }
+    if let Some(section) = PromptSection::new(
+        PromptSectionKind::Project,
+        PromptStability::Stable,
+        "project_context",
+        project_context.clone(),
+    ) {
+        sections.push(section);
+    }
+    if let Some(section) = PromptSection::new(
+        PromptSectionKind::Session,
+        PromptStability::Dynamic,
+        "session_context",
+        session_context.clone(),
+    ) {
+        sections.push(section);
+    }
+
     SystemPromptSections {
         profile,
+        sections,
         base_prompt: base,
         identity_context,
         project_context,
@@ -152,6 +266,14 @@ mod tests {
 
         assert!(!sections.base_prompt.contains("LEGACY EXTENDED TOOL MANUAL"));
         assert!(sections.base_prompt.len() <= 5_000);
+        assert_eq!(sections.sections.len(), 1);
+        assert_eq!(sections.prompt_hash().len(), 64);
+        let manifest = sections.diagnostic_manifest();
+        assert_eq!(manifest["sections"][0]["content"], serde_json::Value::Null);
+        assert_eq!(
+            manifest["sections"][0]["sha256"].as_str().unwrap().len(),
+            64
+        );
     }
 
     #[test]

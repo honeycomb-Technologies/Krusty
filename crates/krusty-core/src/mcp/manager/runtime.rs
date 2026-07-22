@@ -898,6 +898,14 @@ impl McpManager {
     }
 }
 
+fn resolve_cwd(workspace: &Path, configured: Option<&Path>) -> PathBuf {
+    match configured {
+        Some(path) if path.is_absolute() => path.to_path_buf(),
+        Some(path) => workspace.join(path),
+        None => workspace.to_path_buf(),
+    }
+}
+
 #[cfg(test)]
 mod fail_closed_tests {
     use super::McpManager;
@@ -1024,13 +1032,5 @@ mod fail_closed_tests {
                 .connection_snapshot_is_current("local", &config, generation)
                 .await
         );
-    }
-}
-
-fn resolve_cwd(workspace: &Path, configured: Option<&Path>) -> PathBuf {
-    match configured {
-        Some(path) if path.is_absolute() => path.to_path_buf(),
-        Some(path) => workspace.join(path),
-        None => workspace.to_path_buf(),
     }
 }

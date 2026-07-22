@@ -39,7 +39,7 @@ use self::stream::start_orchestrator_sse;
 use self::stream::{forward_loop_event, run_orchestrator_event_bridge};
 use self::tools::should_suppress_code_tools;
 use super::session_access::{current_user_id, load_owned_session};
-use crate::ai_bootstrap::persist_current_model_selection;
+use crate::ai_bootstrap::{persist_current_model_key_selection, persist_current_model_selection};
 use crate::auth::CurrentUser;
 use crate::error::AppError;
 use crate::types::ChatRequest;
@@ -65,7 +65,8 @@ async fn chat(
 
     let user_id = current_user_id(user.as_ref()).map(ToOwned::to_owned);
     let idempotency_key = super::mako::idempotency_key_from_headers(&headers)?;
-    let requested_model = RequestedModel::from_request(req.model.as_deref());
+    let requested_model =
+        RequestedModel::from_request_parts(req.model.as_deref(), req.model_key.as_ref())?;
     let requested_session_type = req.session_type.unwrap_or(SessionType::Code);
     if req.session_id.is_none() && requested_session_type == SessionType::Mako {
         return Err(AppError::Conflict(
@@ -77,6 +78,7 @@ async fn chat(
         let existing = load_owned_session(&manager, session_id, user.as_ref())?;
         if existing.session_type == SessionType::Mako
             && (req.model.is_some()
+                || req.model_key.is_some()
                 || req.target_branch.is_some()
                 || req.mode.is_some()
                 || req.permission_mode.is_some())
@@ -162,16 +164,35 @@ async fn chat(
     .await?;
 
     if let Some(model_override) = pending_model_update {
-        ctx.session_manager
-            .update_session_model(&session_id, model_override.as_deref())?;
-        if let Some(model) = model_override.as_deref() {
-            persist_current_model_selection(
-                &state.model_registry,
-                state.db_path.as_ref().as_path(),
-                user_id.as_deref(),
-                model,
-            )
-            .await?;
+        if model_override.is_none() {
+            ctx.session_manager
+                .update_session_model_selection(&session_id, None, None)?;
+        } else {
+            let runtime = ctx.ai_client.resolved_model();
+            if let Some(metadata) = state.model_registry.get_model_by_key(&runtime.key).await {
+                ctx.session_manager.update_session_model_selection(
+                    &session_id,
+                    Some(&runtime.key),
+                    metadata.catalog_revision.as_deref(),
+                )?;
+                persist_current_model_key_selection(
+                    &state.model_registry,
+                    state.db_path.as_ref().as_path(),
+                    user_id.as_deref(),
+                    &runtime.key,
+                )
+                .await?;
+            } else if let Some(model) = model_override.as_deref() {
+                ctx.session_manager
+                    .update_session_model(&session_id, Some(model))?;
+                persist_current_model_selection(
+                    &state.model_registry,
+                    state.db_path.as_ref().as_path(),
+                    user_id.as_deref(),
+                    model,
+                )
+                .await?;
+            }
         }
     }
 

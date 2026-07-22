@@ -12,7 +12,47 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use crate::ai::client::config::EffectiveRequestSettings;
+use crate::ai::client::PreparedRequestDiagnostics;
+use crate::ai::models::{ModelCatalogSource, ModelKey};
 use crate::ai::types::{Citation, Content, WebFetchContent, WebSearchResult};
+
+use super::progress::ProgressGuardTelemetry;
+use super::state::RunBudgetSource;
+
+/// Stable, minimal projection of `PreparedRequestDiagnostics` that is safe to
+/// cross persistence, extension, ACP, TUI, and HTTP/SSE boundaries.
+///
+/// Keeping the projection separate means a future field added to the internal
+/// prepared request cannot accidentally expose request contents to observers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProviderRequestSnapshot {
+    pub model_key: ModelKey,
+    pub catalog_source: ModelCatalogSource,
+    pub catalog_revision: Option<String>,
+    pub effective_request: EffectiveRequestSettings,
+    pub prompt_manifest: serde_json::Value,
+    pub message_count: usize,
+    pub system_message_count: usize,
+    pub user_message_count: usize,
+    pub assistant_message_count: usize,
+}
+
+impl From<PreparedRequestDiagnostics> for ProviderRequestSnapshot {
+    fn from(diagnostics: PreparedRequestDiagnostics) -> Self {
+        Self {
+            model_key: diagnostics.model.key,
+            catalog_source: diagnostics.model.catalog_source,
+            catalog_revision: diagnostics.model.catalog_revision,
+            effective_request: diagnostics.effective_request,
+            prompt_manifest: diagnostics.prompt_manifest,
+            message_count: diagnostics.message_count,
+            system_message_count: diagnostics.system_message_count,
+            user_message_count: diagnostics.user_message_count,
+            assistant_message_count: diagnostics.assistant_message_count,
+        }
+    }
+}
 
 /// Structured terminal reason for an agentic loop.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -153,6 +193,24 @@ pub enum LoopEvent {
     // ── Turn lifecycle ─────────────────────────────────────────────────
     /// An agentic turn completed.
     TurnComplete { turn: usize, has_more: bool },
+
+    /// Effective parent-run budget resolved once at the core boundary.
+    RunBudgetResolved {
+        max_turns: Option<usize>,
+        source: RunBudgetSource,
+    },
+
+    /// Redacted request contract frozen immediately before a provider turn.
+    /// Prompt/user contents, tool schemas, and credentials are intentionally
+    /// absent; consumers may safely persist or expose this diagnostic event.
+    ProviderRequestPrepared {
+        turn: usize,
+        diagnostics: Box<ProviderRequestSnapshot>,
+    },
+
+    /// Semantic no-progress telemetry. `triggered=false` is an early warning;
+    /// `triggered=true` is immediately followed by the typed terminal event.
+    ProgressGuard { telemetry: ProgressGuardTelemetry },
 
     /// Tick engine injected a synthetic tick message to continue autonomous work.
     TickInjected { tick_number: usize },

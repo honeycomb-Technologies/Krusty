@@ -12,9 +12,10 @@ use std::collections::HashMap;
 pub use inference::{infer_model_metadata, resolve_context_window, resolve_model_metadata};
 pub use metadata::{
     dynamic_model_cache_ttl, model_catalog_fingerprint, ApiFormat, DynamicModelCacheMetadata,
-    ModelAuthScope, ModelMetadata,
+    ModelAuthScope, ModelCapabilities, ModelCatalogSource, ModelKey, ModelMetadata,
+    ProjectModelRef, ResolvedModelRuntime,
 };
-pub use registry::{create_model_registry, ModelRegistry, SharedModelRegistry};
+pub use registry::{create_model_registry, ModelLookupError, ModelRegistry, SharedModelRegistry};
 
 use super::providers::ProviderId;
 
@@ -31,7 +32,7 @@ mod tests {
         assert_eq!(
             resolve_context_window(
                 ProviderId::Anthropic,
-                "claude-opus-4-6",
+                "claude-haiku-4-5-20251001",
                 ApiFormat::Anthropic
             ),
             200_000
@@ -39,38 +40,40 @@ mod tests {
     }
 
     #[test]
-    fn infers_future_openai_reasoning_model_window() {
+    fn unknown_openai_models_use_conservative_window() {
         assert_eq!(
             resolve_context_window(
                 ProviderId::OpenAI,
                 "gpt-6.4-codex",
                 ApiFormat::OpenAIResponses
             ),
-            400_000
+            32_768
         );
     }
 
     #[test]
-    fn infers_gemini_window_for_dynamic_model_ids() {
+    fn unknown_router_models_use_conservative_window() {
         assert_eq!(
             resolve_context_window(
                 ProviderId::OpenRouter,
                 "google/gemini-2.5-pro",
                 ApiFormat::Anthropic,
             ),
-            1_000_000
+            32_768
         );
     }
 
     #[test]
-    fn infers_custom_openai_metadata_for_manual_model_ids() {
+    fn unknown_manual_models_do_not_guess_capabilities() {
         let metadata =
             infer_model_metadata(ProviderId::OpenAI, "gpt-6.4", ApiFormat::OpenAIResponses);
 
         assert_eq!(metadata.id, "gpt-6.4");
         assert_eq!(metadata.api_format, ApiFormat::OpenAIResponses);
-        assert_eq!(metadata.context_window, 400_000);
-        assert!(metadata.supports_thinking);
+        assert_eq!(metadata.context_window, 32_768);
+        assert!(!metadata.supports_thinking);
+        assert!(!metadata.supports_tools);
+        assert!(!metadata.supports_vision);
     }
 
     #[test]

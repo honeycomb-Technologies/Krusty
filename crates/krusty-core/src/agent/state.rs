@@ -4,7 +4,96 @@
 
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use crate::constants;
+
+/// Optional resource limits for one parent agent run.
+///
+/// A missing value is deliberately unlimited. Behavioral loop protection is
+/// handled by the semantic progress ledger rather than by an arbitrary turn
+/// ceiling.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RunBudget {
+    /// Maximum provider turns in this run (`None` = unlimited).
+    pub max_turns: Option<usize>,
+}
+
+impl RunBudget {
+    pub const fn unlimited() -> Self {
+        Self { max_turns: None }
+    }
+
+    pub const fn with_max_turns(max_turns: usize) -> Self {
+        Self {
+            max_turns: Some(max_turns),
+        }
+    }
+
+    pub fn is_exhausted(self, completed_turns: usize) -> bool {
+        self.max_turns
+            .is_some_and(|max_turns| completed_turns >= max_turns)
+    }
+}
+
+/// Provenance for the effective run budget recorded in runtime telemetry.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunBudgetSource {
+    /// Typed per-run override supplied by the caller.
+    ExplicitRun,
+    /// Compatibility path for callers still using `max_iterations`.
+    LegacyMaxIterations,
+    /// Repository-owned `.krusty/settings.json` override.
+    ProjectSettings,
+    /// No configured ceiling; primary interactive execution is unlimited.
+    UnlimitedDefault,
+}
+
+/// The canonical effective budget and where it came from.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunBudgetResolution {
+    pub budget: RunBudget,
+    pub source: RunBudgetSource,
+}
+
+impl RunBudgetResolution {
+    /// Resolve exactly once at the core execution boundary.
+    ///
+    /// Per-run overrides are strongest. The legacy field remains ahead of
+    /// project settings so bounded Mako tick execution keeps its existing
+    /// semantics while callers migrate to the typed surface.
+    pub fn resolve(
+        explicit_run: Option<RunBudget>,
+        legacy_max_iterations: Option<usize>,
+        project: Option<RunBudget>,
+    ) -> Self {
+        if let Some(budget) = explicit_run {
+            return Self {
+                budget,
+                source: RunBudgetSource::ExplicitRun,
+            };
+        }
+        if let Some(max_turns) = legacy_max_iterations {
+            return Self {
+                budget: RunBudget::with_max_turns(max_turns),
+                source: RunBudgetSource::LegacyMaxIterations,
+            };
+        }
+        if let Some(budget) = project {
+            return Self {
+                budget,
+                source: RunBudgetSource::ProjectSettings,
+            };
+        }
+
+        Self {
+            budget: RunBudget::unlimited(),
+            source: RunBudgetSource::UnlimitedDefault,
+        }
+    }
+}
 
 /// Runtime state of the agent
 #[derive(Debug, Default)]
@@ -68,8 +157,8 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             max_turns: None,
-            primary_max_turns: Some(50),
-            subagent_max_turns: Some(200),
+            primary_max_turns: None,
+            subagent_max_turns: None,
             acp_max_turns: None,
             stream_idle_timeout_secs: constants::http::STREAM_TIMEOUT.as_secs(),
         }
@@ -80,6 +169,14 @@ impl AgentConfig {
     /// Resolve the primary-session turn budget, honoring the legacy alias.
     pub fn primary_max_turns(&self) -> Option<usize> {
         self.primary_max_turns.or(self.max_turns)
+    }
+
+    /// Typed primary-run override for the canonical core resolver.
+    ///
+    /// `None` means there is no caller override, allowing project settings or
+    /// the unlimited default to resolve at the execution boundary.
+    pub fn primary_run_budget_override(&self) -> Option<RunBudget> {
+        self.primary_max_turns().map(RunBudget::with_max_turns)
     }
 
     /// Resolve the ACP turn budget, honoring the legacy alias when no explicit ACP budget exists.
@@ -101,7 +198,7 @@ impl AgentConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentConfig, AgentState};
+    use super::{AgentConfig, AgentState, RunBudget, RunBudgetResolution, RunBudgetSource};
 
     #[test]
     fn state_reset_clears_turn_tracking() {
@@ -116,12 +213,36 @@ mod tests {
     }
 
     #[test]
-    fn default_config_bounds_primary_but_leaves_acp_unlimited() {
+    fn default_config_leaves_primary_and_acp_unlimited() {
         let config = AgentConfig::default();
 
-        assert_eq!(config.primary_max_turns(), Some(50));
+        assert_eq!(config.primary_max_turns(), None);
+        assert_eq!(config.primary_run_budget_override(), None);
         assert_eq!(config.acp_max_turns(), None);
-        assert_eq!(config.subagent_max_turns, Some(200));
+        assert_eq!(config.subagent_max_turns, None);
         assert!(config.stream_idle_timeout().as_secs() >= 600);
+    }
+
+    #[test]
+    fn unlimited_primary_budget_allows_progress_beyond_fifty_turns() {
+        let resolution = RunBudgetResolution::resolve(None, None, None);
+
+        assert_eq!(resolution.source, RunBudgetSource::UnlimitedDefault);
+        for completed_turns in 0..=100 {
+            assert!(!resolution.budget.is_exhausted(completed_turns));
+        }
+    }
+
+    #[test]
+    fn run_budget_resolution_preserves_precedence_and_provenance() {
+        let project = RunBudget::with_max_turns(80);
+        let legacy = RunBudgetResolution::resolve(None, Some(32), Some(project));
+        assert_eq!(legacy.budget.max_turns, Some(32));
+        assert_eq!(legacy.source, RunBudgetSource::LegacyMaxIterations);
+
+        let explicit =
+            RunBudgetResolution::resolve(Some(RunBudget::unlimited()), Some(32), Some(project));
+        assert_eq!(explicit.budget.max_turns, None);
+        assert_eq!(explicit.source, RunBudgetSource::ExplicitRun);
     }
 }

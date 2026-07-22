@@ -26,27 +26,57 @@ mod tests {
 
     #[test]
     fn test_temperature_for_model() {
-        assert_eq!(temperature_for_model("qwen-coder"), Some(0.55));
-        assert_eq!(temperature_for_model("claude-sonnet-4"), None);
-        assert_eq!(temperature_for_model("gemini-3-pro"), Some(1.0));
-        assert_eq!(temperature_for_model("GLM-5"), Some(1.0));
-        assert_eq!(temperature_for_model("minimax-m2.5"), Some(1.0));
+        assert_eq!(
+            temperature_for_model(ProviderId::OpenRouter, "qwen-coder"),
+            Some(0.55)
+        );
+        assert_eq!(
+            temperature_for_model(ProviderId::Anthropic, "claude-sonnet-4"),
+            None
+        );
+        assert_eq!(
+            temperature_for_model(ProviderId::OpenRouter, "gemini-3-pro"),
+            Some(1.0)
+        );
+        assert_eq!(temperature_for_model(ProviderId::ZAi, "GLM-5"), Some(1.0));
+        assert_eq!(
+            temperature_for_model(ProviderId::MiniMax, "minimax-m2.5"),
+            Some(1.0)
+        );
     }
 
     #[test]
     fn test_top_p_for_model() {
-        assert_eq!(top_p_for_model("qwen-coder"), Some(1.0));
-        assert_eq!(top_p_for_model("minimax-m2.5"), Some(0.95));
-        assert_eq!(top_p_for_model("gemini-3-pro"), Some(0.95));
-        assert_eq!(top_p_for_model("claude-sonnet-4"), None);
+        assert_eq!(
+            top_p_for_model(ProviderId::OpenRouter, "qwen-coder"),
+            Some(1.0)
+        );
+        assert_eq!(
+            top_p_for_model(ProviderId::MiniMax, "minimax-m2.5"),
+            Some(0.95)
+        );
+        assert_eq!(
+            top_p_for_model(ProviderId::OpenRouter, "gemini-3-pro"),
+            Some(0.95)
+        );
+        assert_eq!(
+            top_p_for_model(ProviderId::Anthropic, "claude-sonnet-4"),
+            None
+        );
     }
 
     #[test]
     fn test_top_k_for_model() {
-        assert_eq!(top_k_for_model("minimax-m2.5"), None);
-        assert_eq!(top_k_for_model("minimax-m2"), None);
-        assert_eq!(top_k_for_model("gemini-3-pro"), Some(64));
-        assert_eq!(top_k_for_model("claude-sonnet-4"), None);
+        assert_eq!(top_k_for_model(ProviderId::MiniMax, "minimax-m2.5"), None);
+        assert_eq!(top_k_for_model(ProviderId::MiniMax, "minimax-m2"), None);
+        assert_eq!(
+            top_k_for_model(ProviderId::OpenRouter, "gemini-3-pro"),
+            Some(64)
+        );
+        assert_eq!(
+            top_k_for_model(ProviderId::Anthropic, "claude-sonnet-4"),
+            None
+        );
     }
 
     #[test]
@@ -61,19 +91,19 @@ mod tests {
 
     #[test]
     fn test_chat_template_args_for_model() {
-        let args = chat_template_args_for_model("GLM-5", true);
+        let args = chat_template_args_for_model(ProviderId::ZAi, "GLM-5", true);
         assert!(args.is_some());
         let binding = args.unwrap();
         let obj = binding.as_object().unwrap();
         assert_eq!(obj.get("enableThinking").unwrap().as_bool(), Some(true));
 
-        let args = chat_template_args_for_model("GLM-5", false);
+        let args = chat_template_args_for_model(ProviderId::ZAi, "GLM-5", false);
         assert!(args.is_none());
 
-        let args = chat_template_args_for_model("minimax-m2.5", true);
+        let args = chat_template_args_for_model(ProviderId::MiniMax, "minimax-m2.5", true);
         assert!(args.is_none());
 
-        let args = chat_template_args_for_model("claude-sonnet-4", true);
+        let args = chat_template_args_for_model(ProviderId::Anthropic, "claude-sonnet-4", true);
         assert!(args.is_none());
     }
 

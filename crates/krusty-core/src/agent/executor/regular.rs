@@ -5,7 +5,6 @@ use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 
 use crate::agent::subagent::{AgentProgress, AgentProgressStatus};
-use crate::agent::AgentConfig as RuntimeAgentConfig;
 use crate::agent::ProviderCallTraceContext;
 use crate::agent::{DelegatedProgressEvent, DelegatedRunStage, DelegatedToolKind};
 use crate::ai::client::AiClient;
@@ -97,9 +96,7 @@ pub(super) async fn execute_regular_tool(
         ..Default::default()
     }
     .with_permission_mode(permission_mode)
-    .with_subagent_max_turns(
-        subagent_max_turns_override.or(RuntimeAgentConfig::default().subagent_max_turns),
-    )
+    .with_subagent_max_turns(subagent_max_turns_override)
     .with_ai_client(ai_client.clone())
     .with_skills_manager(Arc::clone(skills_manager))
     .with_tool_registry(Arc::clone(tool_registry))

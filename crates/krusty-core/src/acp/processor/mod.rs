@@ -14,7 +14,9 @@ use std::sync::Arc;
 use crate::agent::AgentConfig;
 use crate::ai::client::{AiClient, AiClientConfig};
 use crate::ai::format_detection::detect_api_format;
-use crate::ai::models::ModelAuthScope;
+use crate::ai::models::{
+    resolve_model_metadata, ModelAuthScope, ModelMetadata, ResolvedModelRuntime,
+};
 use crate::ai::providers::{get_provider, AuthHeader, ProviderConfig, ProviderId};
 use crate::auth::{
     resolve_anthropic_auth, resolve_openai_auth, AnthropicAuthType, OpenAIAuthResolution,
@@ -86,6 +88,18 @@ impl PromptProcessor {
         self.ai_client.is_some()
     }
 
+    /// Initialize from the exact catalog row selected by ACP discovery.
+    pub(super) fn init_ai_client_for_metadata(
+        &mut self,
+        api_key: String,
+        metadata: &ModelMetadata,
+        runtime: ResolvedModelRuntime,
+        account_id: Option<String>,
+    ) -> bool {
+        self.ai_client = self.build_ai_client_for_metadata(api_key, metadata, runtime, account_id);
+        self.ai_client.is_some()
+    }
+
     /// Build an isolated client without mutating the processor's default model.
     pub fn build_ai_client(
         &self,
@@ -119,12 +133,87 @@ impl PromptProcessor {
             self.config_for_selected_credential(provider, &model, &api_key, auth_scope, account_id);
         config.max_tokens = ACP_DEFAULT_MAX_TOKENS;
 
-        let client = Arc::new(AiClient::new(config, api_key));
+        let mut metadata =
+            resolve_model_metadata(config.provider_id, &config.model, config.api_format);
+        metadata.auth_scope = auth_scope.or_else(|| {
+            (config.provider_id == ProviderId::OpenAI).then_some(
+                if config.uses_chatgpt_codex_format() {
+                    ModelAuthScope::OAuth
+                } else {
+                    ModelAuthScope::ApiKey
+                },
+            )
+        });
+        let client =
+            match AiClient::new_with_resolved_model(config, api_key, metadata.resolve_runtime()) {
+                Ok(client) => Arc::new(client),
+                Err(error) => {
+                    tracing::error!(
+                        provider = ?provider,
+                        model = %model,
+                        %error,
+                        "Refusing ACP client whose transport disagrees with resolved model metadata"
+                    );
+                    return None;
+                }
+            };
 
         tracing::info!(
             "AI client initialized: provider={:?}, model={}",
             provider,
             model
+        );
+        Some(client)
+    }
+
+    /// Build an isolated client from one frozen catalog row. This path must be
+    /// used by ACP model selection so dynamic capabilities, auth scope, and
+    /// provider transport are not re-inferred from a wire slug.
+    pub(super) fn build_ai_client_for_metadata(
+        &self,
+        api_key: String,
+        metadata: &ModelMetadata,
+        runtime: ResolvedModelRuntime,
+        account_id: Option<String>,
+    ) -> Option<Arc<AiClient>> {
+        if runtime.key != metadata.key() || runtime.wire_model_id != metadata.id {
+            tracing::error!(
+                provider = ?metadata.provider,
+                model = %metadata.id,
+                "Refusing ACP client whose frozen runtime disagrees with its catalog row"
+            );
+            return None;
+        }
+        if metadata.provider == ProviderId::OpenAI
+            && metadata.auth_scope == Some(ModelAuthScope::OAuth)
+            && metadata.api_format != crate::ai::models::ApiFormat::OpenAIResponses
+        {
+            tracing::error!(
+                model = %metadata.id,
+                "Refusing an OpenAI OAuth ACP row that does not use the Responses transport"
+            );
+            return None;
+        }
+
+        let mut config = self.config_for_exact_metadata(metadata, &api_key, account_id);
+        config.max_tokens = ACP_DEFAULT_MAX_TOKENS.min(runtime.capabilities.max_output);
+        let client = match AiClient::new_with_resolved_model(config, api_key, runtime) {
+            Ok(client) => Arc::new(client),
+            Err(error) => {
+                tracing::error!(
+                    provider = ?metadata.provider,
+                    model = %metadata.id,
+                    %error,
+                    "Refusing ACP client whose transport disagrees with exact catalog metadata"
+                );
+                return None;
+            }
+        };
+
+        tracing::info!(
+            "AI client initialized from exact ACP model row: provider={:?}, model={}",
+            metadata.provider,
+            metadata.id
         );
         Some(client)
     }
@@ -150,6 +239,42 @@ impl PromptProcessor {
             ProviderId::Grok => AiClientConfig::for_grok(model),
             _ => self.generic_provider_config(provider, model),
         }
+    }
+
+    fn config_for_exact_metadata(
+        &self,
+        metadata: &ModelMetadata,
+        credential: &str,
+        account_id: Option<String>,
+    ) -> AiClientConfig {
+        if metadata.provider == ProviderId::Grok {
+            return AiClientConfig::for_grok_with_metadata(metadata);
+        }
+
+        let mut config = self.config_for_selected_credential(
+            metadata.provider,
+            &metadata.id,
+            credential,
+            metadata.auth_scope,
+            account_id,
+        );
+
+        // API-key OpenAI supports both public endpoints. Select the endpoint
+        // advertised by the row instead of repeating model-name detection.
+        if metadata.provider == ProviderId::OpenAI && !config.uses_chatgpt_codex_format() {
+            use crate::ai::models::ApiFormat;
+            use crate::ai::providers::{OPENAI_CHAT_API, OPENAI_RESPONSES_API};
+            config.base_url = Some(
+                match metadata.api_format {
+                    ApiFormat::OpenAI => OPENAI_CHAT_API,
+                    ApiFormat::OpenAIResponses => OPENAI_RESPONSES_API,
+                    _ => config.base_url.as_deref().unwrap_or_default(),
+                }
+                .to_string(),
+            );
+        }
+        config.api_format = metadata.api_format;
+        config
     }
 
     fn openai_config_for_selected_credential(

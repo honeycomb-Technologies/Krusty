@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
+use krusty_core::ai::models::ModelKey;
 use krusty_core::storage::{
     AutonomousTask, AutonomousTaskStore, Database, MakoRunPriority, MakoRuntimeState,
     MakoRuntimeStateStore, RuntimeTraceEvent, SessionType, WorkspaceMode,
@@ -20,8 +21,10 @@ use super::super::session_access::{
     current_user_id, ensure_owned_session_of_type, load_agent_state_or_idle,
     load_owned_session_of_type, request_workspace_scope, session_visible_to_user,
 };
-use super::{current, idempotency_key_from_headers, open_session_manager, OkResponse};
-use crate::ai_bootstrap::resolve_preferred_model;
+use super::{
+    current, idempotency_key_from_headers, open_session_manager, resolve_mako_model, OkResponse,
+};
+use crate::ai_bootstrap::{resolve_preferred_model, resolve_preferred_model_key};
 use crate::auth::CurrentUser;
 use crate::error::AppError;
 use crate::types::AgenticEvent;
@@ -38,6 +41,8 @@ pub(super) struct DispatchRequest {
     pub(super) task: String,
     pub(super) project_dir: Option<String>,
     pub(super) model: Option<String>,
+    #[serde(default)]
+    pub(super) model_key: Option<ModelKey>,
     pub(super) start_at: Option<String>,
     pub(super) priority: Option<MakoRunPriority>,
     pub(super) crew_slug: Option<String>,
@@ -125,21 +130,23 @@ pub(super) async fn dispatch(
     )?
     .unwrap_or_else(|| workspace_scope.base_dir.to_string_lossy().into_owned());
     let start_at = parse_requested_wake_at(req.start_at.as_deref())?;
-    let requested_model = trimmed_nonempty(req.model.as_deref())
-        .map(ToOwned::to_owned)
-        .or_else(|| resolve_preferred_model(state.db_path.as_ref().as_path(), user_id))
-        .ok_or_else(|| {
-            AppError::BadRequest("No model selected. Choose a model and try again.".into())
-        })?;
-    let model = state
-        .resolve_ai_client_for_user(Some(&requested_model), user_id)
-        .await
-        .ok_or_else(|| {
-            AppError::BadRequest("The selected model has no usable provider credentials.".into())
-        })?
-        .config()
-        .model
-        .clone();
+    let explicit_model = trimmed_nonempty(req.model.as_deref()).map(ToOwned::to_owned);
+    let preferred_key = (explicit_model.is_none() && req.model_key.is_none())
+        .then(|| resolve_preferred_model_key(state.db_path.as_ref().as_path(), user_id))
+        .flatten();
+    let requested_model = explicit_model.or_else(|| {
+        (preferred_key.is_none())
+            .then(|| resolve_preferred_model(state.db_path.as_ref().as_path(), user_id))
+            .flatten()
+    });
+    let resolved_model = resolve_mako_model(
+        &state,
+        user_id,
+        requested_model.as_deref(),
+        req.model_key.as_ref().or(preferred_key.as_ref()),
+    )
+    .await?;
+    let protocol_model_key = resolved_model.protocol_key()?;
     let priority = req.priority.unwrap_or(MakoRunPriority::Normal);
     let crew_slug = req
         .crew_slug
@@ -161,7 +168,9 @@ pub(super) async fn dispatch(
                 task,
                 &working_dir,
                 Some(&working_dir),
-                Some(model.as_str()),
+                Some(resolved_model.model.as_str()),
+                Some(&protocol_model_key),
+                resolved_model.catalog_revision.as_deref(),
                 start_at,
                 priority,
                 crew_slug.as_deref(),
@@ -182,13 +191,18 @@ pub(super) async fn dispatch(
     // router construction is fail-closed and always takes the daemon branch.
     let session_id = session_manager.create_session_for_user_with_config(
         task,
-        Some(model.as_str()),
+        Some(resolved_model.model.as_str()),
         Some(working_dir.as_str()),
         Some(working_dir.as_str()),
         WorkspaceMode::Selected,
         current_user_id(user.as_ref()),
         None,
         SessionType::Mako,
+    )?;
+    session_manager.update_session_model_selection(
+        &session_id,
+        Some(&resolved_model.key),
+        resolved_model.catalog_revision.as_deref(),
     )?;
     let runtime_store = MakoRuntimeStateStore::new(Database::new(&state.db_path)?);
     runtime_store.set_priority(&session_id, priority)?;
@@ -709,27 +723,35 @@ async fn bind_frozen_session_model(
         "Mako",
         user,
     )?;
-    let requested_model = trimmed_nonempty(session.model.as_deref())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| {
-            AppError::Conflict(
-                "Mako session has no daemon-frozen model; dispatch a new Mako session".into(),
-            )
-        })?;
-    let resolved_model = state
-        .resolve_ai_client_for_user(Some(&requested_model), current_user_id(user))
-        .await
-        .ok_or_else(|| {
-            AppError::Conflict("The Mako session model has no usable provider credentials".into())
-        })?
-        .config()
-        .model
-        .clone();
-    if requested_model != resolved_model {
+    if session.model.is_none() && session.model_key.is_none() {
         return Err(AppError::Conflict(
-            "Mako session model is not a canonical frozen provider model; dispatch a new Mako session"
-                .into(),
+            "Mako session has no daemon-frozen model; dispatch a new Mako session".into(),
         ));
+    }
+    let resolved = resolve_mako_model(
+        state,
+        current_user_id(user),
+        session.model.as_deref(),
+        session.model_key.as_ref(),
+    )
+    .await
+    .map_err(|error| match error {
+        AppError::BadRequest(message) => AppError::Conflict(message),
+        error => error,
+    })?;
+    let should_backfill_key = session.model_key.is_none();
+    let should_backfill_revision = session.model_key.as_ref() == Some(&resolved.key)
+        && session.model_catalog_revision.is_none()
+        && resolved.catalog_revision.is_some();
+    if should_backfill_key || should_backfill_revision {
+        session_manager.update_session_model_selection(
+            session_id,
+            Some(&resolved.key),
+            session
+                .model_catalog_revision
+                .as_deref()
+                .or(resolved.catalog_revision.as_deref()),
+        )?;
     }
     Ok(())
 }

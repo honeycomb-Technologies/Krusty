@@ -14,10 +14,26 @@ pub struct ModelsResponse {
     #[serde(default)]
     pub models: Vec<ModelInfo>,
     pub default_model: Option<String>,
+    #[serde(default)]
+    pub default_model_key: Option<ModelKey>,
+}
+
+/// Provider-aware executable model identity returned by modern Krusty servers.
+/// String-valued wire fields keep this client forward-compatible with new
+/// providers and transport formats.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
+pub struct ModelKey {
+    pub provider: String,
+    pub model_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_scope: Option<String>,
+    pub api_format: String,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ModelInfo {
+    #[serde(default)]
+    pub key: Option<ModelKey>,
     pub id: String,
     #[serde(default)]
     pub display_name: String,
@@ -415,6 +431,10 @@ pub struct SessionInfo {
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
+    pub model_key: Option<ModelKey>,
+    #[serde(default)]
+    pub model_catalog_revision: Option<String>,
+    #[serde(default)]
     pub target_branch: Option<String>,
     #[serde(default)]
     pub permission_mode: PermissionMode,
@@ -440,6 +460,8 @@ pub struct CreateSessionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_key: Option<ModelKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub project_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
@@ -459,6 +481,8 @@ pub struct UpdateSessionRequest {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_key: Option<ModelKey>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -656,6 +680,8 @@ pub struct ChatRequest {
     pub session_type: Option<SessionType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_key: Option<ModelKey>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_enabled: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1139,6 +1165,7 @@ mod tests {
     #[test]
     fn model_capabilities_drive_reasoning_cycle_and_fast_support() {
         let model = ModelInfo {
+            key: None,
             id: "gpt-test".to_string(),
             display_name: "GPT Test".to_string(),
             provider: "OpenAI".to_string(),
@@ -1192,6 +1219,7 @@ mod tests {
     #[test]
     fn legacy_reasoning_metadata_keeps_a_safe_selectable_fallback() {
         let mut model = ModelInfo {
+            key: None,
             id: "legacy-model".to_string(),
             display_name: "Legacy Model".to_string(),
             provider: "Legacy".to_string(),

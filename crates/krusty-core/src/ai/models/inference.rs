@@ -1,111 +1,25 @@
-use crate::constants;
-
-use super::super::providers::{ProviderId, ReasoningControl, ReasoningFormat};
+use super::super::providers::ProviderId;
 use super::metadata::{ApiFormat, ModelMetadata};
 
-/// Infer minimal metadata for an arbitrary model ID.
+const UNKNOWN_MODEL_CONTEXT_WINDOW: usize = 32_768;
+const UNKNOWN_MODEL_MAX_OUTPUT: usize = 4_096;
+
+/// Build conservative metadata for an arbitrary model ID.
 ///
-/// This is used when a user selects a model that is not present in the cached
-/// catalog but should still be usable with the provider.
+/// Unknown IDs must not acquire tools, vision, reasoning controls, or a large
+/// context window because their name resembles a known family. Users may add
+/// explicit custom metadata when a provider does not expose a catalog row.
 pub fn infer_model_metadata(
     provider: ProviderId,
     model_id: &str,
     api_format: ApiFormat,
 ) -> ModelMetadata {
-    let normalized = model_id.trim().to_ascii_lowercase();
-    let context_window = resolve_context_window(provider, model_id, api_format);
-    let max_output = if context_window >= 1_000_000 {
-        65_536
-    } else if context_window >= 400_000 {
-        128_000
-    } else if context_window >= 200_000 {
-        100_000
-    } else {
-        32_768
-    };
-
-    let mut metadata =
-        ModelMetadata::new(model_id, model_id, provider).with_context(context_window, max_output);
-
-    metadata.api_format = if provider == ProviderId::Grok
-        || (provider == ProviderId::OpenAI
-            && crate::ai::providers::ProviderConfig::openai_prefers_responses_api(model_id))
-    {
-        ApiFormat::OpenAIResponses
-    } else {
-        api_format
-    };
-
-    metadata.reasoning_format = if provider == ProviderId::MiniMax
-        || normalized.contains("claude")
-        || normalized.starts_with("anthropic/")
-    {
-        Some(ReasoningFormat::Anthropic)
-    } else if provider == ProviderId::ZAi && normalized.contains("glm") {
-        Some(ReasoningFormat::OpenAI)
-    } else if normalized.contains("deepseek") {
-        Some(ReasoningFormat::DeepSeek)
-    } else if provider == ProviderId::Grok
-        || crate::ai::providers::ProviderConfig::openai_prefers_responses_api(model_id)
-    {
-        Some(ReasoningFormat::OpenAI)
-    } else {
-        None
-    };
-    metadata.supports_thinking = metadata.reasoning_format.is_some();
-    metadata.reasoning_control = match metadata.reasoning_format {
-        Some(ReasoningFormat::OpenAI) => Some(ReasoningControl::OpenAiEffort),
-        Some(ReasoningFormat::Anthropic) => Some(ReasoningControl::AnthropicBudget),
-        Some(ReasoningFormat::DeepSeek) => Some(ReasoningControl::Boolean),
-        None => None,
-    };
-    if provider == ProviderId::Anthropic && is_anthropic_adaptive_family(&normalized) {
-        metadata.reasoning_control = Some(ReasoningControl::AnthropicAdaptive);
-    }
-    if provider == ProviderId::MiniMax {
-        metadata.reasoning_control = Some(if normalized.contains("minimax-m3") {
-            ReasoningControl::AnthropicAdaptive
-        } else {
-            ReasoningControl::Boolean
-        });
-    }
-    if provider == ProviderId::ZAi && normalized.contains("glm") {
-        metadata.reasoning_control = Some(if normalized.contains("glm-5.2") {
-            ReasoningControl::OpenAiEffort
-        } else {
-            ReasoningControl::Boolean
-        });
-    }
-    if provider == ProviderId::Grok && metadata.supports_thinking {
-        metadata.reasoning_control = Some(ReasoningControl::OutputOnly);
-    }
-    metadata.supports_tools = true;
-    metadata.supports_vision = normalized.contains("gpt-4o")
-        || normalized.contains("gpt-4.1")
-        || normalized.contains("gpt-5")
-        || normalized.contains("gpt-6")
-        || normalized.contains("gemini")
-        || normalized.contains("claude")
-        || normalized.contains("grok")
-        || (provider == ProviderId::MiniMax && normalized.contains("minimax-m3"));
-
+    let mut metadata = ModelMetadata::new(model_id, model_id, provider)
+        .with_context(UNKNOWN_MODEL_CONTEXT_WINDOW, UNKNOWN_MODEL_MAX_OUTPUT)
+        .with_transport(api_format);
+    metadata.supports_tools = false;
+    metadata.supports_vision = false;
     metadata
-}
-
-fn is_anthropic_adaptive_family(model_id: &str) -> bool {
-    let normalized = model_id.replace(['.', '_', '/', ' '], "-");
-    [
-        "opus-4-6",
-        "opus-4-7",
-        "opus-4-8",
-        "sonnet-4-6",
-        "sonnet-5",
-        "fable-5",
-        "mythos-5",
-        "mythos-preview",
-    ]
-    .iter()
-    .any(|family| normalized.contains(family))
 }
 
 /// Resolve best-known metadata for a model by checking built-in provider catalog first,
@@ -123,7 +37,7 @@ pub fn resolve_model_metadata(
         {
             let mut metadata = ModelMetadata::new(&model.id, &model.display_name, provider)
                 .with_context(model.context_window, model.max_output);
-            metadata.supports_tools = true;
+            metadata.supports_tools = model.supports_tools;
             metadata.reasoning_format = model.reasoning;
             metadata.supports_thinking = model.reasoning.is_some();
             metadata.supported_reasoning_levels = model.supported_reasoning_levels.clone();
@@ -131,17 +45,8 @@ pub fn resolve_model_metadata(
             metadata.reasoning_is_mandatory = model.reasoning_is_mandatory;
             metadata.reasoning_control = model.reasoning_control;
             metadata.fast_mode = model.fast_mode;
-            metadata.supports_vision =
-                infer_model_metadata(provider, model_id, api_format).supports_vision;
-            metadata.api_format = if provider == ProviderId::Grok
-                || (provider == ProviderId::OpenAI
-                    && crate::ai::providers::ProviderConfig::openai_prefers_responses_api(
-                        &model.id,
-                    )) {
-                ApiFormat::OpenAIResponses
-            } else {
-                api_format
-            };
+            metadata.supports_vision = model.supports_vision;
+            metadata.api_format = model.api_format.unwrap_or(api_format);
             return metadata;
         }
     }
@@ -153,8 +58,7 @@ pub fn resolve_model_metadata(
 ///
 /// Order of preference:
 /// 1. exact built-in provider metadata
-/// 2. heuristic inference from model ID / family
-/// 3. global default fallback
+/// 2. conservative unknown-model fallback
 pub fn resolve_context_window(
     provider: ProviderId,
     model_id: &str,
@@ -170,100 +74,39 @@ pub fn resolve_context_window(
         }
     }
 
-    infer_context_window(model_id, api_format).unwrap_or(constants::ai::CONTEXT_WINDOW_TOKENS)
-}
-
-fn infer_context_window(model_id: &str, api_format: ApiFormat) -> Option<usize> {
-    let normalized = model_id.trim().to_ascii_lowercase();
-    let id = normalized.strip_prefix("openai/").unwrap_or(&normalized);
-
-    if normalized == "grok-build" {
-        return Some(512_000);
-    }
-
-    if normalized.starts_with("grok-composer-") {
-        return Some(200_000);
-    }
-
-    if normalized.contains("claude-sonnet-4.5") || normalized.contains("gemini-2.5") {
-        return Some(1_000_000);
-    }
-
-    if normalized.contains("gemini")
-        || normalized.contains("llama-4-maverick")
-        || normalized.contains("gemini-2.0")
-    {
-        return Some(1_000_000);
-    }
-
-    if normalized.contains("llama-4-scout") {
-        return Some(512_000);
-    }
-
-    if normalized.contains("codex") || gpt_major_version(id).is_some_and(|major| major >= 5) {
-        return Some(400_000);
-    }
-
-    if id.starts_with("o1")
-        || id.starts_with("o3")
-        || id.starts_with("o4")
-        || normalized.contains("gpt-4.1")
-        || matches!(api_format, ApiFormat::OpenAIResponses)
-    {
-        return Some(200_000);
-    }
-
-    if normalized.contains("claude") || normalized.contains("glm-5") {
-        return Some(200_000);
-    }
-
-    if normalized.contains("qwen") || normalized.contains("deepseek") {
-        return Some(128_000);
-    }
-
-    if normalized.contains("gpt-4") || normalized.contains("gpt-3.5") || normalized.contains("grok")
-    {
-        return Some(128_000);
-    }
-
-    None
-}
-
-fn gpt_major_version(model_id: &str) -> Option<u32> {
-    let suffix = model_id.strip_prefix("gpt-")?;
-    let digits = suffix
-        .split(|ch: char| !ch.is_ascii_digit())
-        .find(|segment| !segment.is_empty())?;
-    digits.parse().ok()
+    let _ = api_format;
+    UNKNOWN_MODEL_CONTEXT_WINDOW
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::providers::{ReasoningControl, ReasoningFormat};
 
     #[test]
-    fn current_anthropic_families_fall_back_to_adaptive_control() {
-        for model in [
-            "claude-opus-4.7",
-            "claude-sonnet-4-6",
-            "claude-mythos-preview",
-        ] {
-            let metadata = infer_model_metadata(ProviderId::Anthropic, model, ApiFormat::Anthropic);
-            assert_eq!(
-                metadata.reasoning_control,
-                Some(ReasoningControl::AnthropicAdaptive),
-                "{model}"
-            );
-        }
+    fn unknown_model_metadata_is_conservative() {
+        let metadata = infer_model_metadata(
+            ProviderId::OpenAI,
+            "gpt-99-vision",
+            ApiFormat::OpenAIResponses,
+        );
+        assert_eq!(metadata.context_window, UNKNOWN_MODEL_CONTEXT_WINDOW);
+        assert_eq!(metadata.max_output, UNKNOWN_MODEL_MAX_OUTPUT);
+        assert!(!metadata.supports_tools);
+        assert!(!metadata.supports_vision);
+        assert!(!metadata.supports_thinking);
+        assert_eq!(metadata.reasoning_format, None);
+        assert_eq!(metadata.reasoning_control, None);
     }
 
     #[test]
-    fn zai_and_minimax_fallbacks_use_provider_wire_controls() {
-        let zai = infer_model_metadata(ProviderId::ZAi, "glm-5.2", ApiFormat::OpenAI);
+    fn known_rows_use_explicit_provider_metadata() {
+        let zai = resolve_model_metadata(ProviderId::ZAi, "glm-5.2", ApiFormat::OpenAI);
         assert_eq!(zai.reasoning_format, Some(ReasoningFormat::OpenAI));
         assert_eq!(zai.reasoning_control, Some(ReasoningControl::OpenAiEffort));
 
-        let minimax = infer_model_metadata(ProviderId::MiniMax, "MiniMax-M3", ApiFormat::Anthropic);
+        let minimax =
+            resolve_model_metadata(ProviderId::MiniMax, "MiniMax-M3", ApiFormat::Anthropic);
         assert_eq!(
             minimax.reasoning_control,
             Some(ReasoningControl::AnthropicAdaptive)

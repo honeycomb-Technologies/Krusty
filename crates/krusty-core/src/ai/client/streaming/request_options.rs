@@ -264,12 +264,14 @@ impl AiClient {
         // Temperature incompatible with reasoning
         if !thinking_enabled {
             if let Some(temp) = provider_params.temperature {
-                body["temperature"] = Value::Number(serde_json::Number::from(temp as i32));
-                debug!(
-                    "Setting temperature: {} for model {}",
-                    temp,
-                    self.config().model
-                );
+                if let Some(number) = serde_json::Number::from_f64(f64::from(temp)) {
+                    body["temperature"] = Value::Number(number);
+                    debug!(
+                        "Setting temperature: {} for model {}",
+                        temp,
+                        self.config().model
+                    );
+                }
             }
         }
 
@@ -476,5 +478,16 @@ mod tests {
         let mut fable_body = serde_json::json!({});
         fable.add_reasoning_config(&mut fable_body, &options, false);
         assert!(fable_body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn fractional_temperature_is_not_truncated_to_integer_json() {
+        let client = client(ProviderId::OpenRouter, "qwen/example");
+        let mut body = serde_json::json!({});
+
+        client.add_provider_params(&mut body, false);
+
+        let temperature = body["temperature"].as_f64().expect("numeric temperature");
+        assert!((temperature - 0.55).abs() < 1e-6);
     }
 }

@@ -855,7 +855,7 @@ mod tests {
 
     #[tokio::test]
     async fn protocol_reader_rejects_a_record_over_the_limit() {
-        let input = vec![b'x'; 65];
+        let input = [b'x'; 65];
         let mut reader = BufReader::new(&input[..]);
 
         let error = read_protocol_line(&mut reader, 64)

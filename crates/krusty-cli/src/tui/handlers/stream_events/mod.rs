@@ -186,6 +186,30 @@ impl App {
             } => self.handle_agent_sleeping(duration_secs, reason),
 
             LoopEvent::TurnComplete { turn, has_more } => self.handle_turn_complete(turn, has_more),
+            LoopEvent::RunBudgetResolved { max_turns, source } => {
+                tracing::debug!(?max_turns, ?source, "Core resolved parent agent run budget")
+            }
+            LoopEvent::ProviderRequestPrepared { turn, diagnostics } => tracing::debug!(
+                turn,
+                provider = %diagnostics.model_key.provider,
+                model = %diagnostics.model_key.model_id,
+                api_format = ?diagnostics.model_key.api_format,
+                catalog_source = ?diagnostics.catalog_source,
+                catalog_revision = ?diagnostics.catalog_revision,
+                prompt_hash = diagnostics.prompt_manifest
+                    .get("prompt_hash")
+                    .and_then(serde_json::Value::as_str),
+                message_count = diagnostics.message_count,
+                tool_count = diagnostics.effective_request.tool_count,
+                "Prepared redacted provider request contract"
+            ),
+            LoopEvent::ProgressGuard { telemetry } => tracing::info!(
+                no_progress_turns = telemetry.no_progress_turns,
+                threshold = telemetry.threshold,
+                triggered = telemetry.triggered,
+                evidence_signature = %telemetry.evidence_signature,
+                "Core semantic progress guard update"
+            ),
             LoopEvent::TickInjected { tick_number } => self.handle_tick_injected(tick_number),
             LoopEvent::Usage {
                 prompt_tokens,

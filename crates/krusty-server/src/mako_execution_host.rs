@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
+use krusty_core::ai::models::{ModelKey, ModelLookupError};
 use krusty_core::storage::credentials::CredentialStore;
 use krusty_core::storage::{ClaimedMakoRun, DaemonFence, Database, MakoRunStore};
 use krusty_core::tools::registry::PermissionMode;
@@ -75,6 +76,8 @@ pub(crate) struct MakoExecutionSpec {
     pub(crate) working_dir: Option<PathBuf>,
     pub(crate) project_dir: Option<PathBuf>,
     pub(crate) model: String,
+    pub(crate) model_key: Option<ModelKey>,
+    pub(crate) model_catalog_revision: Option<String>,
     pub(crate) crew_slug: Option<String>,
     pub(crate) permission_mode: PermissionMode,
 }
@@ -117,6 +120,15 @@ impl MakoExecutionSpec {
         }
         let model = optional_config_string(&claim.run.config, "model")?
             .context("claimed Mako run has no explicit model")?;
+        let model_key = optional_config_model_key(&claim.run.config)?;
+        let model_catalog_revision =
+            optional_config_string(&claim.run.config, "model_catalog_revision")?;
+        if model_key.as_ref().is_some_and(|key| key.model_id != model) {
+            bail!("claimed Mako model does not match model_key.model_id");
+        }
+        if model_key.is_none() && model_catalog_revision.is_some() {
+            bail!("claimed Mako catalog revision has no model key");
+        }
         let crew_slug = optional_config_string(&claim.run.config, "crew_slug")?;
         let permission_mode = optional_config_string(&claim.run.config, "permission_mode")?
             .context("claimed Mako run has no explicit permission_mode")?
@@ -126,6 +138,8 @@ impl MakoExecutionSpec {
             run_id = %claim.run.id,
             session_id,
             model = ?model,
+            model_key = ?model_key,
+            model_catalog_revision = ?model_catalog_revision,
             project_dir = ?project_dir,
             crew_slug = ?crew_slug,
             "Captured immutable Mako execution inputs"
@@ -136,6 +150,8 @@ impl MakoExecutionSpec {
             working_dir,
             project_dir,
             model,
+            model_key,
+            model_catalog_revision,
             crew_slug,
             permission_mode,
         })
@@ -185,6 +201,15 @@ fn optional_config_string(config: &serde_json::Value, key: &str) -> Result<Optio
         }
         Some(serde_json::Value::String(_)) => bail!("claimed Mako {key} is empty"),
         Some(_) => bail!("claimed Mako {key} must be a string or null"),
+    }
+}
+
+fn optional_config_model_key(config: &serde_json::Value) -> Result<Option<ModelKey>> {
+    match config.get("model_key") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => serde_json::from_value::<ModelKey>(value.clone())
+            .map(Some)
+            .context("claimed Mako model_key is invalid"),
     }
 }
 
@@ -270,6 +295,7 @@ impl MakoExecutionHost {
         let server_config = ServerConfig {
             port: 0,
             working_dir: config.working_dir.clone(),
+            database_path: None,
         };
         let state = build_app_state(
             &server_config,
@@ -292,26 +318,41 @@ impl MakoExecutionHost {
         daemon_instance_id: String,
         wake_reason: String,
     ) -> std::result::Result<MakoExecutionRun, MakoExecutionStartError> {
-        let spec = MakoExecutionSpec::from_claim(claim, daemon_instance_id)
+        let mut spec = MakoExecutionSpec::from_claim(claim, daemon_instance_id)
             .map_err(|error| MakoExecutionStartError::InvalidClaim(error.to_string()))?;
         self.validate_execution(&spec)
             .await
             .map_err(|error| MakoExecutionStartError::FenceLost(error.to_string()))?;
-        self.refresh_credentials_and_catalog_if_needed(&spec.model)
+        self.refresh_credentials_and_catalog_if_needed(&spec)
             .await
             .map_err(|error| MakoExecutionStartError::CredentialReload(error.to_string()))?;
-        if self
-            .state
-            .model_registry
-            .get_model(&spec.model)
-            .await
-            .is_none()
-        {
-            return Err(MakoExecutionStartError::InvalidClaim(format!(
-                "claimed model {} is absent from the refreshed model catalog",
-                spec.model
-            )));
-        }
+        let resolved_key = match spec.model_key.as_ref() {
+            Some(key) => self
+                .state
+                .model_registry
+                .get_model_by_key(key)
+                .await
+                .map(|_| key.clone())
+                .ok_or_else(|| {
+                    MakoExecutionStartError::InvalidClaim(format!(
+                        "claimed model key {key:?} is absent from the refreshed model catalog"
+                    ))
+                })?,
+            None => self
+                .state
+                .model_registry
+                .resolve_legacy_key(&spec.model)
+                .await
+                .map_err(|error| match error {
+                    ModelLookupError::Ambiguous { .. } => MakoExecutionStartError::InvalidClaim(
+                        format!("legacy claimed model cannot be resolved safely: {error}"),
+                    ),
+                    ModelLookupError::NotFound { .. } => MakoExecutionStartError::InvalidClaim(
+                        format!("claimed model is absent from the refreshed catalog: {error}"),
+                    ),
+                })?,
+        };
+        spec.model_key = Some(resolved_key);
         // Dynamic catalog refresh can involve network I/O. Close the window
         // by validating the exact durable lease again before spawning any
         // model or tool execution.
@@ -403,7 +444,10 @@ impl MakoExecutionHost {
     /// off-thread, swaps it under one write lock, and refreshes catalogs only
     /// when credential content actually changed. No credential values or
     /// fingerprints are logged.
-    async fn refresh_credentials_and_catalog_if_needed(&self, claimed_model: &str) -> Result<bool> {
+    async fn refresh_credentials_and_catalog_if_needed(
+        &self,
+        spec: &MakoExecutionSpec,
+    ) -> Result<bool> {
         let _refresh_guard = self.credential_refresh.lock().await;
         let loaded = tokio::task::spawn_blocking(CredentialStore::load)
             .await
@@ -413,12 +457,20 @@ impl MakoExecutionHost {
             let mut current = self.state.credential_store.write().await;
             replace_credential_snapshot_if_changed(&mut current, loaded.clone())
         };
-        let claimed_model_unknown = self
-            .state
-            .model_registry
-            .get_model(claimed_model)
-            .await
-            .is_none();
+        let claimed_model_unknown = match spec.model_key.as_ref() {
+            Some(key) => self
+                .state
+                .model_registry
+                .get_model_by_key(key)
+                .await
+                .is_none(),
+            None => self
+                .state
+                .model_registry
+                .resolve_legacy_key(&spec.model)
+                .await
+                .is_err(),
+        };
         if changed || claimed_model_unknown {
             initialize_models(&self.state.model_registry, self.state.db_path.as_path()).await;
             spawn_model_catalog_refresh(
@@ -627,6 +679,7 @@ pub(crate) async fn validate_execution_spec(
 mod tests {
     use chrono::Utc;
     use krusty_core::agent::LoopInput;
+    use krusty_core::ai::models::{ApiFormat, ModelAuthScope};
     use krusty_core::ai::providers::ProviderId;
     use krusty_core::ai::types::Content;
     use krusty_core::mako::MakoRunStatus;
@@ -655,7 +708,7 @@ mod tests {
         assert!(bounded.ends_with(" [truncated]"));
     }
 
-    fn execution_spec_for_test(run_id: &str, config: serde_json::Value) -> MakoExecutionSpec {
+    fn claimed_run_for_test(run_id: &str, config: serde_json::Value) -> ClaimedMakoRun {
         let lease_token = format!("lease-{run_id}");
         let run = MakoRun {
             id: run_id.into(),
@@ -687,13 +740,17 @@ mod tests {
             finished_at: None,
             updated_at: Utc::now().to_rfc3339(),
         };
+        ClaimedMakoRun {
+            run,
+            attempt_id: format!("attempt-{run_id}"),
+            attempt_no: 1,
+            lease_token,
+        }
+    }
+
+    fn execution_spec_for_test(run_id: &str, config: serde_json::Value) -> MakoExecutionSpec {
         MakoExecutionSpec::from_claim(
-            ClaimedMakoRun {
-                run,
-                attempt_id: format!("attempt-{run_id}"),
-                attempt_no: 1,
-                lease_token,
-            },
+            claimed_run_for_test(run_id, config),
             "daemon:boot:one".into(),
         )
         .expect("test execution spec should be valid")
@@ -713,6 +770,13 @@ mod tests {
                 "working_dir": "/claimed/work",
                 "project_dir": "/claimed/project",
                 "model": "provider:claimed",
+                "model_key": {
+                    "provider": "grok",
+                    "model_id": "provider:claimed",
+                    "auth_scope": "oauth",
+                    "api_format": "open_ai_responses"
+                },
+                "model_catalog_revision": "catalog-42",
                 "crew_slug": "release",
                 "permission_mode": "supervised"
             }),
@@ -753,8 +817,38 @@ mod tests {
             Some(std::path::Path::new("/claimed/project"))
         );
         assert_eq!(spec.model, "provider:claimed");
+        let model_key = spec.model_key.as_ref().expect("exact key must be frozen");
+        assert_eq!(model_key.provider, ProviderId::Grok);
+        assert_eq!(model_key.model_id, "provider:claimed");
+        assert_eq!(model_key.auth_scope, Some(ModelAuthScope::OAuth));
+        assert_eq!(model_key.api_format, ApiFormat::OpenAIResponses);
+        assert_eq!(spec.model_catalog_revision.as_deref(), Some("catalog-42"));
         assert_eq!(spec.crew_slug.as_deref(), Some("release"));
         assert_eq!(spec.permission_mode, PermissionMode::Supervised);
+    }
+
+    #[test]
+    fn claimed_config_rejects_model_key_mismatch() {
+        let claim = claimed_run_for_test(
+            "run-mismatch",
+            serde_json::json!({
+                "working_dir": "/claimed/work",
+                "model": "grok-4.5",
+                "model_key": {
+                    "provider": "grok",
+                    "model_id": "different-model",
+                    "auth_scope": "oauth",
+                    "api_format": "open_ai_responses"
+                },
+                "model_catalog_revision": "catalog-42",
+                "permission_mode": "autonomous"
+            }),
+        );
+        let error = MakoExecutionSpec::from_claim(claim, "daemon:boot:one".into())
+            .expect_err("a mismatched legacy mirror must fail closed");
+        assert!(error
+            .to_string()
+            .contains("does not match model_key.model_id"));
     }
 
     #[test]

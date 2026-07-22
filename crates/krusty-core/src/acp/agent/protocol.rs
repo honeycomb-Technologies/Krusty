@@ -8,7 +8,7 @@ use agent_client_protocol::{
     SetSessionModelResponse, TextContent, ToolCall, ToolCallId, ToolCallStatus,
 };
 
-use super::{negotiate_protocol_version, AvailableModelRecord, KrustyAgent};
+use super::{acp_model_id_for_key, negotiate_protocol_version, AvailableModelRecord, KrustyAgent};
 use crate::acp::bridge::NotificationBridge;
 use crate::acp::error::AcpError;
 use crate::acp::session::{SessionModelSelection, SessionState};
@@ -113,17 +113,22 @@ impl Agent for KrustyAgent {
             let current_model_id = default_model.as_ref().and_then(|selected| {
                 detected_models
                     .iter()
-                    .find(|record| {
-                        record.provider == selected.provider && record.model_id == selected.model_id
-                    })
+                    .find(|record| record.key() == &selected.key)
                     .map(|record| record.acp_model_id.clone())
             });
 
-            let selected_model_id = current_model_id.or_else(|| {
+            let selected_model_id = if default_model.is_some() {
+                if current_model_id.is_none() {
+                    tracing::warn!(
+                        "Exact ACP default model is unavailable; refusing to rebind the session"
+                    );
+                }
+                current_model_id
+            } else {
                 detected_models
                     .first()
                     .map(|record| record.acp_model_id.clone())
-            });
+            };
             if let Some(current_model_id) = selected_model_id {
                 self.set_model_for_session(&session, &current_model_id, true)
                     .await
@@ -145,18 +150,24 @@ impl Agent for KrustyAgent {
             let default_model = self.current_model.read().await.clone();
             let default_client = self.processor.read().await.default_ai_client();
             if let (Some(model), Some(client)) = (default_model, default_client) {
-                let acp_model_id = format!("{}:{}", model.provider.storage_key(), model.model_id);
-                session
-                    .set_model_client(
-                        SessionModelSelection {
-                            provider: model.provider,
-                            model_id: model.model_id,
-                            acp_model_id: acp_model_id.clone(),
-                        },
-                        client,
-                    )
-                    .await;
-                session.persist_model(&acp_model_id).await;
+                if client.resolved_model().key == model.key {
+                    let runtime = client.resolved_model();
+                    session
+                        .set_model_client(
+                            SessionModelSelection {
+                                key: runtime.key.clone(),
+                                acp_model_id: acp_model_id_for_key(&runtime.key),
+                                catalog_revision: runtime.catalog_revision.clone(),
+                            },
+                            client.clone(),
+                        )
+                        .await;
+                    session.persist_model_selection().await;
+                } else {
+                    tracing::warn!(
+                        "ACP default client does not match the exact persisted model key"
+                    );
+                }
             } else {
                 tracing::warn!("No models detected - configure API keys to enable AI features");
             }
@@ -202,27 +213,43 @@ impl Agent for KrustyAgent {
             *self.available_models.write().await = detected_models.clone();
         }
 
+        let persisted_model_key = session.persisted_model_key().await;
         let persisted_model = session.persisted_model_id().await;
         let default_model = self.current_model.read().await.clone();
-        let default_model_id = default_model.and_then(|selected| {
+        let default_model_id = default_model.as_ref().and_then(|selected| {
             detected_models
                 .iter()
-                .find(|record| {
-                    record.provider == selected.provider && record.model_id == selected.model_id
-                })
+                .find(|record| record.key() == &selected.key)
                 .map(|record| record.acp_model_id.clone())
         });
-        let selected_model_id = if let Some(persisted) = persisted_model.as_deref() {
-            self.resolve_persisted_model_id(persisted).await
+        let selected_model_id = if let Some(key) = persisted_model_key.as_ref() {
+            let selected = self.resolve_model_key(key).await;
+            if selected.is_none() {
+                tracing::warn!(
+                    "Exact persisted ACP session model is unavailable; refusing to rebind it"
+                );
+            }
+            selected
+        } else if let Some(persisted) = persisted_model.as_deref() {
+            let selected = self.resolve_persisted_model_id(persisted).await;
+            if selected.is_none() {
+                tracing::warn!(
+                    "Legacy ACP session model is ambiguous or unavailable; refusing to guess"
+                );
+            }
+            selected
+        } else if default_model.is_some() {
+            if default_model_id.is_none() {
+                tracing::warn!(
+                    "Exact ACP default model is unavailable; refusing to rebind the session"
+                );
+            }
+            default_model_id
         } else {
-            None
-        }
-        .or(default_model_id)
-        .or_else(|| {
             detected_models
                 .first()
                 .map(|record| record.acp_model_id.clone())
-        });
+        };
 
         if let Some(model_id) = selected_model_id.as_deref() {
             self.set_model_for_session(&session, model_id, false)
@@ -235,20 +262,19 @@ impl Agent for KrustyAgent {
             let default_model = self.current_model.read().await.clone();
             let default_client = self.processor.read().await.default_ai_client();
             if let (Some(model), Some(client)) = (default_model, default_client) {
-                session
-                    .set_model_client(
-                        SessionModelSelection {
-                            provider: model.provider,
-                            model_id: model.model_id.clone(),
-                            acp_model_id: format!(
-                                "{}:{}",
-                                model.provider.storage_key(),
-                                model.model_id
-                            ),
-                        },
-                        client,
-                    )
-                    .await;
+                if client.resolved_model().key == model.key {
+                    let runtime = client.resolved_model();
+                    session
+                        .set_model_client(
+                            SessionModelSelection {
+                                key: runtime.key.clone(),
+                                acp_model_id: acp_model_id_for_key(&runtime.key),
+                                catalog_revision: runtime.catalog_revision.clone(),
+                            },
+                            client.clone(),
+                        )
+                        .await;
+                }
             }
         }
 
@@ -502,7 +528,11 @@ fn acp_model_infos(models: &[AvailableModelRecord]) -> Vec<AcpModelInfo> {
     models
         .iter()
         .map(|record| {
-            let name = format!("[{}] {}", record.provider, record.display_name);
+            let name = format!(
+                "[{}] {}",
+                record.key().provider,
+                record.runtime.display_name
+            );
             AcpModelInfo::new(ModelId::new(record.acp_model_id.clone()), name)
         })
         .collect()

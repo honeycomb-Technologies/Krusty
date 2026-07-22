@@ -89,6 +89,22 @@ impl ToolResult {
         }
     }
 
+    /// Attach a producer-owned semantic state delta to this result.
+    pub fn with_changed(mut self, changed: bool) -> Self {
+        let mut envelope = serde_json::from_str::<Value>(&self.output)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_else(|| {
+                let mut object = serde_json::Map::new();
+                object.insert("ok".to_string(), Value::Bool(!self.is_error));
+                object.insert("data".to_string(), Value::String(self.output.clone()));
+                object
+            });
+        envelope.insert("changed".to_string(), Value::Bool(changed));
+        self.output = Value::Object(envelope).to_string();
+        self
+    }
+
     /// Create an invalid-parameters error.
     pub fn invalid_parameters(msg: impl std::fmt::Display) -> Self {
         Self::error_with_code("invalid_parameters", msg)

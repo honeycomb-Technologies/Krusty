@@ -12,7 +12,7 @@ use tokio::sync::{Mutex, RwLock};
 use krusty_core::agent::{
     loop_events::LoopStopReason, AgentCancellation, DelegatedRunStage, LoopEvent, UserHookManager,
 };
-use krusty_core::ai::models::{create_model_registry, ModelMetadata};
+use krusty_core::ai::models::{create_model_registry, ApiFormat, ModelAuthScope, ModelMetadata};
 use krusty_core::ai::providers::ProviderId;
 use krusty_core::mcp::McpManager;
 use krusty_core::paths;
@@ -127,14 +127,10 @@ fn app_error_description(error: AppError) -> String {
 }
 
 async fn configure_test_model(state: &AppState) {
-    state
-        .model_registry
-        .upsert_model(ModelMetadata::new(
-            "gpt-5.5",
-            "GPT-5.5 Test",
-            ProviderId::OpenAI,
-        ))
-        .await;
+    let mut model = ModelMetadata::new("gpt-5.5", "GPT-5.5 Test", ProviderId::OpenAI)
+        .with_transport(ApiFormat::OpenAIResponses);
+    model.auth_scope = Some(ModelAuthScope::ApiKey);
+    state.model_registry.upsert_model(model).await;
 }
 
 #[tokio::test]
@@ -151,6 +147,7 @@ async fn dispatch_normalizes_model_before_persisting_session() {
             task: "Investigate issue".to_string(),
             project_dir: None,
             model: Some("  gpt-5.5  ".to_string()),
+            model_key: None,
             start_at: None,
             priority: None,
             crew_slug: None,
@@ -166,6 +163,14 @@ async fn dispatch_normalizes_model_before_persisting_session() {
         .expect("session lookup should succeed")
         .expect("session should exist");
     assert_eq!(session.model.as_deref(), Some("gpt-5.5"));
+    let model_key = session
+        .model_key
+        .as_ref()
+        .expect("dispatch should freeze an exact executable key");
+    assert_eq!(model_key.provider, ProviderId::OpenAI);
+    assert_eq!(model_key.model_id, "gpt-5.5");
+    assert_eq!(model_key.auth_scope, Some(ModelAuthScope::ApiKey));
+    assert_eq!(model_key.api_format, ApiFormat::OpenAIResponses);
 }
 
 #[test]
@@ -418,6 +423,7 @@ async fn dispatch_resolves_relative_project_dir_against_user_home() {
             task: "Investigate issue".to_string(),
             project_dir: Some("repo".to_string()),
             model: None,
+            model_key: None,
             start_at: None,
             priority: None,
             crew_slug: None,
@@ -450,6 +456,7 @@ async fn dispatch_rejects_blank_task() {
             task: "   ".to_string(),
             project_dir: None,
             model: None,
+            model_key: None,
             start_at: None,
             priority: None,
             crew_slug: None,
@@ -481,6 +488,7 @@ async fn dispatch_rejects_project_dir_outside_user_root() {
             task: "Investigate issue".to_string(),
             project_dir: Some(outside_root.to_string_lossy().to_string()),
             model: None,
+            model_key: None,
             start_at: None,
             priority: None,
             crew_slug: None,
@@ -506,6 +514,7 @@ async fn dispatch_can_schedule_future_run() {
             task: "Check CI later".to_string(),
             project_dir: None,
             model: None,
+            model_key: None,
             start_at: Some(wake_at.to_rfc3339()),
             priority: None,
             crew_slug: None,
@@ -555,6 +564,7 @@ async fn dispatch_persists_requested_priority() {
             task: "Escalate production fix".to_string(),
             project_dir: None,
             model: None,
+            model_key: None,
             start_at: None,
             priority: Some(MakoRunPriority::High),
             crew_slug: None,
@@ -586,6 +596,7 @@ async fn schedule_session_can_reschedule_existing_run() {
             task: "Investigate issue".to_string(),
             project_dir: None,
             model: None,
+            model_key: None,
             start_at: None,
             priority: None,
             crew_slug: None,

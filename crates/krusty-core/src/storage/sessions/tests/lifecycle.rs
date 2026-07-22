@@ -1,6 +1,8 @@
 use super::{create_test_db, create_test_user};
 use crate::agent::pinch_context::{PinchContext, PinchContextInput};
 use crate::agent::summarizer::SummarizationResult;
+use crate::ai::models::{ApiFormat, ModelAuthScope, ModelKey};
+use crate::ai::providers::ProviderId;
 use crate::storage::sessions::SessionManager;
 use crate::storage::{SessionType, WorkspaceMode};
 use crate::tools::registry::PermissionMode;
@@ -64,6 +66,34 @@ fn session_creation_supports_legacy_required_provider_columns() {
 
     assert_eq!(provider, "krusty");
     assert!(model.is_empty());
+}
+
+#[test]
+fn session_model_selection_preserves_provider_auth_and_transport() {
+    let (db, _temp) = create_test_db();
+    let manager = SessionManager::new(db);
+    let session_id = manager
+        .create_session("Exact model", Some("gpt-shared"), Some("/tmp"))
+        .unwrap();
+    let key = ModelKey::new(ProviderId::OpenAI, "gpt-shared", ApiFormat::OpenAIResponses)
+        .with_auth_scope(ModelAuthScope::OAuth);
+
+    manager
+        .update_session_model_selection(&session_id, Some(&key), Some("catalog-a"))
+        .unwrap();
+    let session = manager.get_session(&session_id).unwrap().unwrap();
+
+    assert_eq!(session.model.as_deref(), Some("gpt-shared"));
+    assert_eq!(session.model_key, Some(key));
+    assert_eq!(session.model_catalog_revision.as_deref(), Some("catalog-a"));
+
+    manager
+        .update_session_model(&session_id, Some("legacy-only"))
+        .unwrap();
+    let legacy = manager.get_session(&session_id).unwrap().unwrap();
+    assert_eq!(legacy.model.as_deref(), Some("legacy-only"));
+    assert!(legacy.model_key.is_none());
+    assert!(legacy.model_catalog_revision.is_none());
 }
 
 #[test]

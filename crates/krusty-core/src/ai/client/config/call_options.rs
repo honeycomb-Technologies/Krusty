@@ -1,10 +1,13 @@
-use crate::ai::models::{resolve_model_metadata, ApiFormat};
+use crate::ai::models::{
+    resolve_model_metadata, ApiFormat, ModelCapabilities, ResolvedModelRuntime,
+};
 use crate::ai::providers::{
     FastMode, ProviderCapabilities, ProviderId, ReasoningControl, ReasoningFormat,
 };
 use crate::ai::types::{
     AiTool, ContextManagement, ThinkingConfig, WebFetchConfig, WebSearchConfig,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -27,6 +30,31 @@ pub enum PromptCacheRetention {
 pub(crate) enum OpenAiPromptCacheMode {
     Implicit,
     Explicit,
+}
+
+/// Redacted, provider-resolved request settings suitable for diagnostics and
+/// persisted runtime evidence. Credentials, prompts, message contents and tool
+/// schemas are deliberately excluded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EffectiveRequestSettings {
+    pub provider: String,
+    pub model: String,
+    pub api_format: String,
+    pub max_tokens: Option<usize>,
+    pub temperature: Option<f32>,
+    pub tool_count: usize,
+    pub thinking_enabled: bool,
+    pub reasoning_format: Option<String>,
+    pub reasoning_control: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub parallel_tool_calls: bool,
+    pub caching_enabled: bool,
+    pub fast_mode: bool,
+    pub service_tier: Option<String>,
+    pub hosted_web_search: bool,
+    pub hosted_web_fetch: bool,
+    pub context_management: bool,
+    pub warnings: Vec<String>,
 }
 
 impl OpenAiPromptCacheMode {
@@ -124,6 +152,128 @@ impl Default for CallOptions {
 }
 
 impl CallOptions {
+    /// Resolve this request and return a safe explanation of the effective
+    /// settings. This is the canonical source for `debug request` output and
+    /// makes capability downgrades observable instead of silent.
+    pub fn effective_request_settings(
+        &self,
+        provider: ProviderId,
+        model: &str,
+        api_format: ApiFormat,
+    ) -> EffectiveRequestSettings {
+        let canonical = self.canonicalized_for(provider, model, api_format);
+        self.effective_settings_from_canonical(provider, model, api_format, &canonical)
+    }
+
+    fn effective_settings_from_canonical(
+        &self,
+        provider: ProviderId,
+        model: &str,
+        api_format: ApiFormat,
+        canonical: &Self,
+    ) -> EffectiveRequestSettings {
+        let mut warnings = Vec::new();
+
+        if self.fast_mode && !canonical.fast_mode {
+            warnings.push("fast mode was requested but is unsupported by this model".to_string());
+        }
+        if self.thinking.is_some() && canonical.thinking.is_none() {
+            warnings.push(
+                "reasoning was requested but the selected transport cannot accept it".to_string(),
+            );
+        }
+        if self.codex_reasoning_effort.is_some() && canonical.codex_reasoning_effort.is_none() {
+            warnings.push("reasoning effort was removed by model capability policy".to_string());
+        }
+        if self.codex_parallel_tool_calls && !canonical.codex_parallel_tool_calls {
+            warnings.push("parallel tool calls are unsupported by the selected API".to_string());
+        }
+        if self.context_management.is_some() && canonical.context_management.is_none() {
+            warnings.push("provider context management is unsupported".to_string());
+        }
+        if self.web_search.is_some() && canonical.web_search.is_none() {
+            warnings.push("hosted web search is unsupported; use the portable tool".to_string());
+        }
+        if self.web_fetch.is_some() && canonical.web_fetch.is_none() {
+            warnings.push("hosted web fetch is unsupported; use the portable tool".to_string());
+        }
+
+        let mut settings = EffectiveRequestSettings {
+            provider: provider.storage_key().to_string(),
+            model: model.to_string(),
+            api_format: format!("{api_format:?}"),
+            max_tokens: canonical.max_tokens,
+            temperature: canonical.temperature,
+            tool_count: canonical.tools.as_ref().map_or(0, Vec::len),
+            thinking_enabled: canonical.thinking.is_some(),
+            reasoning_format: canonical.reasoning_format.map(|value| format!("{value:?}")),
+            reasoning_control: canonical
+                .reasoning_control
+                .map(|value| format!("{value:?}")),
+            reasoning_effort: canonical
+                .codex_reasoning_effort
+                .map(|value| format!("{value:?}")),
+            parallel_tool_calls: canonical.codex_parallel_tool_calls,
+            caching_enabled: canonical.enable_caching,
+            fast_mode: canonical.fast_mode,
+            service_tier: canonical
+                .service_tier_for_provider(provider)
+                .map(ToString::to_string),
+            hosted_web_search: canonical.web_search.is_some(),
+            hosted_web_fetch: canonical.web_fetch.is_some(),
+            context_management: canonical.context_management.is_some(),
+            warnings,
+        };
+        settings.warnings.sort();
+        settings.warnings.dedup();
+        settings
+    }
+
+    /// Resolve request policy against the exact catalog row frozen for this
+    /// run. This is the authoritative path for production clients.
+    pub fn effective_request_settings_for_runtime(
+        &self,
+        runtime: &ResolvedModelRuntime,
+    ) -> EffectiveRequestSettings {
+        let canonical = self.canonicalized_for_runtime(runtime);
+        let mut settings = self.effective_settings_from_canonical(
+            runtime.key.provider,
+            &runtime.wire_model_id,
+            runtime.key.api_format,
+            &canonical,
+        );
+
+        if self.tools.is_some() && canonical.tools.is_none() {
+            settings.warnings.push(
+                "tools were removed because the selected model does not advertise tool calling"
+                    .to_string(),
+            );
+        }
+        if self
+            .max_tokens
+            .is_some_and(|requested| requested > runtime.capabilities.max_output)
+        {
+            settings.warnings.push(format!(
+                "max_tokens was capped at the model limit ({})",
+                runtime.capabilities.max_output
+            ));
+        }
+
+        settings.warnings.sort();
+        settings.warnings.dedup();
+        settings
+    }
+
+    /// Canonicalize against immutable run-scoped capabilities rather than
+    /// model-name inference or a mutable global catalog.
+    pub fn canonicalized_for_runtime(&self, runtime: &ResolvedModelRuntime) -> Self {
+        self.canonicalized_with_capabilities(
+            runtime.key.provider,
+            runtime.key.api_format,
+            &runtime.capabilities,
+        )
+    }
+
     /// Build a canonicalized options set for a specific provider/model pipeline.
     ///
     /// This prevents per-surface drift by enforcing provider capabilities and
@@ -134,12 +284,25 @@ impl CallOptions {
         model: &str,
         api_format: ApiFormat,
     ) -> Self {
-        let caps = ProviderCapabilities::for_provider(provider);
         let inferred = resolve_model_metadata(provider, model, api_format);
+        self.canonicalized_with_capabilities(
+            provider,
+            api_format,
+            &inferred.resolve_runtime().capabilities,
+        )
+    }
+
+    fn canonicalized_with_capabilities(
+        &self,
+        provider: ProviderId,
+        api_format: ApiFormat,
+        model_capabilities: &ModelCapabilities,
+    ) -> Self {
+        let caps = ProviderCapabilities::for_provider(provider);
         let mut options = self.clone();
 
         if options.fast_mode {
-            options.fast_mode_format = options.fast_mode_format.or(inferred.fast_mode);
+            options.fast_mode_format = options.fast_mode_format.or(model_capabilities.fast_mode);
             if options.fast_mode_format.is_none() {
                 options.fast_mode = false;
             }
@@ -151,9 +314,11 @@ impl CallOptions {
         let resolved_reasoning_format = if authoritative_reasoning_metadata {
             options.reasoning_format
         } else {
-            inferred.reasoning_format
+            model_capabilities.reasoning_format
         };
-        let resolved_reasoning_control = options.reasoning_control.or(inferred.reasoning_control);
+        let resolved_reasoning_control = options
+            .reasoning_control
+            .or(model_capabilities.reasoning_control);
 
         if provider == ProviderId::Grok
             || resolved_reasoning_control == Some(ReasoningControl::OutputOnly)
@@ -179,7 +344,7 @@ impl CallOptions {
 
             // Mandatory-reasoning models cannot honor an Off request. Internal
             // call paths that bypass the UI still need a valid request.
-            if inferred.reasoning_is_mandatory && options.thinking.is_none() {
+            if model_capabilities.reasoning_is_mandatory && options.thinking.is_none() {
                 options.thinking = Some(ThinkingConfig::default());
             }
 
@@ -207,8 +372,19 @@ impl CallOptions {
             options.context_management = None;
         }
 
-        let hosted_web_search = provider_hosted_web_search_supported(provider, api_format, &caps);
-        let hosted_web_fetch = caps.web_fetch;
+        if !model_capabilities.supports_tools {
+            options.tools = None;
+            options.web_search = None;
+            options.web_fetch = None;
+        }
+
+        if let Some(max_tokens) = options.max_tokens.as_mut() {
+            *max_tokens = (*max_tokens).min(model_capabilities.max_output);
+        }
+
+        let hosted_web_search = model_capabilities.supports_tools
+            && provider_hosted_web_search_supported(provider, api_format, &caps);
+        let hosted_web_fetch = model_capabilities.supports_tools && caps.web_fetch;
 
         if !hosted_web_search {
             options.web_search = None;
@@ -612,7 +788,7 @@ mod tests {
 
         let canonical = options.canonicalized_for(
             ProviderId::Anthropic,
-            "claude-opus-4-6",
+            "claude-opus-4-8",
             ApiFormat::Anthropic,
         );
 
@@ -684,7 +860,7 @@ mod tests {
 
         let canonical = options.canonicalized_for(
             ProviderId::OpenRouter,
-            "openai/gpt-5.5",
+            "openai/gpt-5.6-sol",
             ApiFormat::Anthropic,
         );
 
@@ -732,7 +908,7 @@ mod tests {
 
         let canonical = options.canonicalized_for(
             ProviderId::Anthropic,
-            "claude-opus-4.5",
+            "claude-opus-4-8",
             ApiFormat::Anthropic,
         );
 
@@ -835,5 +1011,80 @@ mod tests {
         assert_eq!(canonical.reasoning_format, Some(ReasoningFormat::Anthropic));
         assert!(canonical.thinking.is_none());
         assert!(canonical.anthropic_adaptive_effort.is_none());
+    }
+
+    #[test]
+    fn effective_settings_explain_dropped_grok_reasoning_controls() {
+        let options = CallOptions {
+            thinking: Some(ThinkingConfig::default()),
+            codex_reasoning_effort: Some(CodexReasoningEffort::High),
+            ..Default::default()
+        };
+
+        let settings = options.effective_request_settings(
+            ProviderId::Grok,
+            "grok-4.5",
+            ApiFormat::OpenAIResponses,
+        );
+
+        assert_eq!(settings.provider, "grok");
+        assert_eq!(settings.model, "grok-4.5");
+        assert!(!settings.thinking_enabled);
+        assert_eq!(settings.reasoning_control.as_deref(), Some("OutputOnly"));
+        assert!(settings
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("cannot accept")));
+        assert!(settings
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("reasoning effort")));
+    }
+
+    #[test]
+    fn frozen_runtime_capabilities_override_unknown_model_inference() {
+        use crate::ai::models::ModelMetadata;
+
+        let mut metadata =
+            ModelMetadata::new("catalog-only-model", "Catalog only", ProviderId::OpenRouter)
+                .with_context(256_000, 12_345);
+        metadata.supports_tools = true;
+        metadata.api_format = ApiFormat::Anthropic;
+        let runtime = metadata.resolve_runtime();
+        let options = CallOptions {
+            max_tokens: Some(50_000),
+            tools: Some(vec![tool("read")]),
+            ..Default::default()
+        };
+
+        let canonical = options.canonicalized_for_runtime(&runtime);
+
+        assert_eq!(canonical.max_tokens, Some(12_345));
+        assert_eq!(canonical.tools.as_ref().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn frozen_runtime_without_tool_capability_removes_tool_surfaces() {
+        use crate::ai::models::ModelMetadata;
+
+        let mut metadata =
+            ModelMetadata::new("text-only-model", "Text only", ProviderId::OpenRouter);
+        metadata.supports_tools = false;
+        metadata.api_format = ApiFormat::Anthropic;
+        let runtime = metadata.resolve_runtime();
+        let options = CallOptions {
+            tools: Some(vec![tool("read")]),
+            web_search: Some(WebSearchConfig::default()),
+            ..Default::default()
+        };
+
+        let settings = options.effective_request_settings_for_runtime(&runtime);
+
+        assert_eq!(settings.tool_count, 0);
+        assert!(!settings.hosted_web_search);
+        assert!(settings
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("does not advertise tool calling")));
     }
 }

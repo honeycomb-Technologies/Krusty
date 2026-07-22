@@ -11,7 +11,7 @@ use agent_client_protocol::{
 };
 
 use crate::agent::loop_events::{LoopEvent, LoopStopReason};
-use crate::agent::{AgenticOrchestrator, LoopInput, OrchestratorConfig, OrchestratorServices};
+use crate::agent::{LoopInput, OrchestratorServices, RunProvenance, RunSpecBuilder};
 use crate::ai::client::CallOptions;
 use crate::ai::types::{Content, Role};
 use crate::skills::SkillsManager;
@@ -82,21 +82,23 @@ impl PromptProcessor {
                 &workspace_root,
             ))),
         };
-        let config = OrchestratorConfig {
-            session_id: session.id.to_string(),
-            working_dir: workspace_root.clone(),
-            project_dir: Some(workspace_root),
-            session_type: SessionType::Code,
-            permission_mode: session.permission_mode().await,
-            max_iterations: self.agent_config.acp_max_turns(),
-            stream_idle_timeout: self.agent_config.stream_idle_timeout(),
-            initial_work_mode: session.work_mode().await,
-            generate_title: false,
-            ..Default::default()
-        };
+        let run_spec = RunSpecBuilder::new(
+            RunProvenance::Acp,
+            session.id.to_string(),
+            workspace_root.clone(),
+            SessionType::Code,
+        )
+        .project_dir(Some(workspace_root))
+        .permission_mode(session.permission_mode().await)
+        .max_iterations(self.agent_config.acp_max_turns())
+        .stream_idle_timeout(self.agent_config.stream_idle_timeout())
+        .initial_work_mode(session.work_mode().await)
+        .generate_title(false)
+        .call_options(options)
+        .build(services.ai_client.as_ref())
+        .map_err(|error| AcpError::InvalidRequest(error.to_string()))?;
 
-        let orchestrator = AgenticOrchestrator::new(services, config);
-        let (mut event_rx, input_tx) = orchestrator.run(conversation, options);
+        let (mut event_rx, input_tx) = run_spec.start(services, conversation);
         session.set_active_input(input_tx.clone());
 
         let result = self
@@ -293,6 +295,9 @@ impl PromptProcessor {
                 | LoopEvent::PlanComplete { .. }
                 | LoopEvent::Usage { .. }
                 | LoopEvent::TurnComplete { .. }
+                | LoopEvent::RunBudgetResolved { .. }
+                | LoopEvent::ProviderRequestPrepared { .. }
+                | LoopEvent::ProgressGuard { .. }
                 | LoopEvent::TickInjected { .. }
                 | LoopEvent::AgentSleeping { .. }
                 | LoopEvent::SessionPinched { .. }

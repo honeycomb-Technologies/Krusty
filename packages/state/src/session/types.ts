@@ -2,6 +2,7 @@ import type {
   DelegatedRunStage,
   DelegatedToolKind,
   ModelInfo,
+  ModelKey,
   SessionType,
   ThinkingLevel as ApiThinkingLevel,
   UsageMetrics,
@@ -165,6 +166,7 @@ export interface SessionStoreState {
   lastEventSequence: number | null;
   error: string | null;
   model: string | null;
+  modelKey: ModelKey | null;
   modelProvider: string | null;
   modelInfo: ModelInfo | null;
 
@@ -188,6 +190,7 @@ export interface SessionStoreState {
     model: string | null,
     provider?: string | null,
     modelInfo?: ModelInfo | null,
+    modelKey?: ModelKey | null,
   ) => void;
   setThinkingLevel: (level: ThinkingLevel) => void;
   toggleThinking: () => void;

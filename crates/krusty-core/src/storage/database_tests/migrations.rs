@@ -122,6 +122,106 @@ fn test_token_count_column_migration() {
 }
 
 #[test]
+fn provider_aware_model_identity_columns_are_additive() {
+    let (db, _temp) = create_test_db();
+    let columns: Vec<String> = db
+        .conn()
+        .prepare("PRAGMA table_info(sessions)")
+        .expect("prepare session columns")
+        .query_map([], |row| row.get(1))
+        .expect("query session columns")
+        .collect::<rusqlite::Result<_>>()
+        .expect("collect session columns");
+
+    assert!(columns.contains(&"model".to_string()));
+    assert!(columns.contains(&"model_key_json".to_string()));
+    assert!(columns.contains(&"model_catalog_revision".to_string()));
+
+    let schedule_columns: Vec<String> = db
+        .conn()
+        .prepare("PRAGMA table_info(mako_schedules)")
+        .expect("prepare Mako schedule columns")
+        .query_map([], |row| row.get(1))
+        .expect("query Mako schedule columns")
+        .collect::<rusqlite::Result<_>>()
+        .expect("collect Mako schedule columns");
+    assert!(schedule_columns.contains(&"model".to_string()));
+    assert!(schedule_columns.contains(&"model_key_json".to_string()));
+    assert!(schedule_columns.contains(&"model_catalog_revision".to_string()));
+}
+
+#[test]
+fn migration_45_upgrades_schema_44_without_rewriting_legacy_model() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let path = temp.path().join("schema-44.db");
+    let conn = rusqlite::Connection::open(&path).expect("seed database");
+    conn.execute_batch(
+        "CREATE TABLE schema_version (
+             version INTEGER PRIMARY KEY,
+             applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+         );
+         INSERT INTO schema_version (version) VALUES (44);
+         CREATE TABLE sessions (
+             id TEXT PRIMARY KEY,
+             model TEXT
+         );
+         INSERT INTO sessions (id, model) VALUES ('legacy', 'shared-model');",
+    )
+    .expect("seed schema 44");
+    drop(conn);
+
+    let db = crate::storage::database::Database::new(&path).expect("migrate schema 44");
+    assert_eq!(db.get_schema_version(), 46);
+    let row: (Option<String>, Option<String>, Option<String>) = db
+        .conn()
+        .query_row(
+            "SELECT model, model_key_json, model_catalog_revision FROM sessions WHERE id = 'legacy'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read migrated session");
+    assert_eq!(row.0.as_deref(), Some("shared-model"));
+    assert!(row.1.is_none());
+    assert!(row.2.is_none());
+}
+
+#[test]
+fn migration_46_upgrades_schema_45_without_guessing_legacy_schedule_identity() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let path = temp.path().join("schema-45.db");
+    let conn = rusqlite::Connection::open(&path).expect("seed database");
+    conn.execute_batch(
+        "CREATE TABLE schema_version (
+             version INTEGER PRIMARY KEY,
+             applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+         );
+         INSERT INTO schema_version (version) VALUES (45);
+         CREATE TABLE mako_schedules (
+             id TEXT PRIMARY KEY,
+             model TEXT
+         );
+         INSERT INTO mako_schedules (id, model) VALUES ('legacy', 'shared-model');",
+    )
+    .expect("seed schema 45");
+    drop(conn);
+
+    let db = crate::storage::database::Database::new(&path).expect("migrate schema 45");
+    assert_eq!(db.get_schema_version(), 46);
+    let row: (Option<String>, Option<String>, Option<String>) = db
+        .conn()
+        .query_row(
+            "SELECT model, model_key_json, model_catalog_revision
+               FROM mako_schedules WHERE id = 'legacy'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read migrated schedule");
+    assert_eq!(row.0.as_deref(), Some("shared-model"));
+    assert!(row.1.is_none());
+    assert!(row.2.is_none());
+}
+
+#[test]
 fn test_push_delivery_tables_migration() {
     let (db, _temp) = create_test_db();
     let conn = db.conn();

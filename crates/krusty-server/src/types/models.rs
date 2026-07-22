@@ -1,5 +1,7 @@
-use krusty_core::ai::models::ModelMetadata;
-use krusty_core::ai::providers::{FastMode, ReasoningControl, ReasoningEffort};
+use krusty_core::ai::models::{
+    ApiFormat, ModelAuthScope, ModelCatalogSource, ModelKey, ModelMetadata,
+};
+use krusty_core::ai::providers::{FastMode, ProviderId, ReasoningControl, ReasoningEffort};
 use serde::Serialize;
 
 // ============================================================================
@@ -8,9 +10,17 @@ use serde::Serialize;
 
 #[derive(Serialize)]
 pub struct ModelResponse {
+    /// Provider-aware executable identity. Older clients may continue using `id`
+    /// only while that slug is unambiguous.
+    pub key: ModelKey,
     pub id: String,
     pub display_name: String,
     pub provider: String,
+    pub provider_id: ProviderId,
+    pub auth_scope: Option<ModelAuthScope>,
+    pub api_format: ApiFormat,
+    pub catalog_source: ModelCatalogSource,
+    pub catalog_revision: Option<String>,
     pub context_window: usize,
     pub max_output: usize,
     /// Legacy capability flag retained for older clients.
@@ -43,9 +53,15 @@ impl ModelResponse {
             .filter(|level| supported_reasoning_levels.contains(level));
 
         Self {
+            key: model.key(),
             id: model.id.clone(),
             display_name: model.display_name.clone(),
             provider,
+            provider_id: model.provider,
+            auth_scope: model.auth_scope,
+            api_format: model.api_format,
+            catalog_source: model.catalog_source,
+            catalog_revision: model.catalog_revision.clone(),
             context_window: model.context_window,
             max_output: model.max_output,
             supports_thinking: model.supports_thinking,
@@ -65,6 +81,7 @@ impl ModelResponse {
 pub struct ModelsListResponse {
     pub models: Vec<ModelResponse>,
     pub default_model: Option<String>,
+    pub default_model_key: Option<ModelKey>,
 }
 
 #[derive(Serialize)]

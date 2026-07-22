@@ -316,6 +316,7 @@ fn clone_for_tick(config: &OrchestratorConfig) -> OrchestratorConfig {
         mako_profile: config.mako_profile.clone(),
         session_type: config.session_type,
         permission_mode: config.permission_mode,
+        run_budget: config.run_budget,
         max_iterations: config.max_iterations,
         stream_idle_timeout: config.stream_idle_timeout,
         user_id: config.user_id.clone(),

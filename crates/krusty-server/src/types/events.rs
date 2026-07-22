@@ -1,7 +1,8 @@
 use krusty_core::agent::subagent::AgentProgressStatus;
 use krusty_core::agent::{
     DelegatedProgressEvent, DelegatedRunStage as CoreDelegatedRunStage,
-    DelegatedToolKind as CoreDelegatedToolKind,
+    DelegatedToolKind as CoreDelegatedToolKind, ProgressGuardTelemetry, ProviderRequestSnapshot,
+    RunBudgetSource,
 };
 use krusty_core::ai::types::{Citation, WebFetchContent, WebSearchResult};
 use krusty_core::storage::RuntimeTraceEvent;
@@ -177,6 +178,18 @@ pub enum AgenticEvent {
     AgentSleeping { duration_secs: u64, reason: String },
     /// An agentic turn completed
     TurnComplete { turn: usize, has_more: bool },
+    /// Effective parent-run resource budget and provenance.
+    RunBudgetResolved {
+        max_turns: Option<usize>,
+        source: RunBudgetSource,
+    },
+    /// Redacted provider request contract, emitted immediately before a turn.
+    ProviderRequestPrepared {
+        turn: usize,
+        diagnostics: Box<ProviderRequestSnapshot>,
+    },
+    /// Semantic no-progress warning or terminal guard telemetry.
+    ProgressGuard { telemetry: ProgressGuardTelemetry },
     /// The server injected a synthetic tick to continue autonomous work.
     TickInjected { tick_number: usize },
     /// Token usage information
@@ -315,6 +328,12 @@ impl AgenticEvent {
     pub fn from_runtime_trace(event: RuntimeTraceEvent) -> Option<Self> {
         let payload = event.payload;
         match event.event_type.as_str() {
+            "provider_request_prepared" => Some(Self::ProviderRequestPrepared {
+                turn: payload.get("turn")?.as_u64()?.try_into().ok()?,
+                diagnostics: Box::new(
+                    serde_json::from_value(payload.get("diagnostics")?.clone()).ok()?,
+                ),
+            }),
             "agent_sleeping" => Some(Self::AgentSleeping {
                 duration_secs: payload.get("duration_secs")?.as_u64()?,
                 reason: payload.get("reason")?.as_str()?.to_string(),
@@ -491,6 +510,13 @@ impl From<krusty_core::agent::LoopEvent> for AgenticEvent {
                 reason,
             },
             LoopEvent::TurnComplete { turn, has_more } => Self::TurnComplete { turn, has_more },
+            LoopEvent::RunBudgetResolved { max_turns, source } => {
+                Self::RunBudgetResolved { max_turns, source }
+            }
+            LoopEvent::ProviderRequestPrepared { turn, diagnostics } => {
+                Self::ProviderRequestPrepared { turn, diagnostics }
+            }
+            LoopEvent::ProgressGuard { telemetry } => Self::ProgressGuard { telemetry },
             LoopEvent::TickInjected { tick_number } => Self::TickInjected { tick_number },
             LoopEvent::Usage {
                 prompt_tokens,
@@ -610,6 +636,69 @@ impl From<krusty_core::agent::LoopEvent> for AgenticEvent {
                 error,
             },
             LoopEvent::TeammateCancelled { name } => Self::TeammateCancelled { name },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use krusty_core::agent::LoopEvent;
+    use krusty_core::ai::client::{AiClient, AiClientConfig, CallOptions};
+    use krusty_core::ai::types::{Content, ModelMessage, Role};
+    use krusty_core::storage::RuntimeTraceEvent;
+
+    use super::AgenticEvent;
+
+    #[test]
+    fn provider_request_diagnostics_survive_sse_and_trace_replay_without_contents() {
+        const SYSTEM_SECRET: &str = "sse-system-secret";
+        const USER_SECRET: &str = "sse-user-secret";
+        const CREDENTIAL_SECRET: &str = "sse-credential-secret";
+
+        let client = AiClient::new(
+            AiClientConfig::for_grok("grok-4.5"),
+            CREDENTIAL_SECRET.to_string(),
+        );
+        let messages = vec![
+            ModelMessage {
+                role: Role::System,
+                content: vec![Content::Text {
+                    text: SYSTEM_SECRET.to_string(),
+                }],
+            },
+            ModelMessage {
+                role: Role::User,
+                content: vec![Content::Text {
+                    text: USER_SECRET.to_string(),
+                }],
+            },
+        ];
+        let diagnostics = client.request_diagnostics(
+            &messages,
+            &CallOptions {
+                system_prompt: Some(SYSTEM_SECRET.to_string()),
+                ..CallOptions::default()
+            },
+        );
+        let loop_event = LoopEvent::ProviderRequestPrepared {
+            turn: 3,
+            diagnostics: Box::new(diagnostics.into()),
+        };
+
+        let sse_event = AgenticEvent::from(loop_event.clone());
+        let sse_json = serde_json::to_string(&sse_event).expect("SSE event should serialize");
+        assert!(sse_json.contains("provider_request_prepared"));
+        assert!(sse_json.contains("grok-4.5"));
+
+        let trace = RuntimeTraceEvent::from_loop_event("run-sse", 1, 3, &loop_event);
+        let replayed = AgenticEvent::from_runtime_trace(trace).expect("trace should replay");
+        let replay_json = serde_json::to_string(&replayed).expect("replay should serialize");
+        assert!(replay_json.contains("provider_request_prepared"));
+        assert!(replay_json.contains("grok-4.5"));
+
+        for secret in [SYSTEM_SECRET, USER_SECRET, CREDENTIAL_SECRET] {
+            assert!(!sse_json.contains(secret));
+            assert!(!replay_json.contains(secret));
         }
     }
 }

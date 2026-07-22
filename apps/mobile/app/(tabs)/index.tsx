@@ -41,6 +41,7 @@ import Animated from "react-native-reanimated";
 
 import type {
   ModelInfo,
+  ModelKey,
   SessionResponse,
 } from "@krusty/api";
 import type { MakoTopLevelView } from "../../components/mako/types";
@@ -49,7 +50,11 @@ import type {
   PermissionMode,
   ThinkingLevel,
 } from "@krusty/state";
-import { resolveUsableModel, supportsFastMode } from "@krusty/state";
+import {
+  modelKeysEqual,
+  resolveUsableModel,
+  supportsFastMode,
+} from "@krusty/state";
 
 import { ChatBootScreen } from "./chat-screen/BootScreen";
 import {
@@ -125,6 +130,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const isStreaming = useSessionStore((state) => state.isStreaming) ?? false;
   const isThinking = useSessionStore((state) => state.isThinking) ?? false;
   const model = useSessionStore((state) => state.model) ?? null;
+  const modelKey = useSessionStore((state) => state.modelKey) ?? null;
   const thinkingLevel =
     useSessionStore((state) => state.thinkingLevel) ?? "medium";
   const permissionMode =
@@ -142,6 +148,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
 
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [defaultModelId, setDefaultModelId] = useState<string | null>(null);
+  const [defaultModelKey, setDefaultModelKey] = useState<ModelKey | null>(null);
   const [configuredProviders, setConfiguredProviders] = useState<string[]>([]);
   const [activeToolCallId, setActiveToolCallId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState(1);
@@ -156,8 +163,11 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   /** Measured desktop chat pane width (split host, before soft-cap). */
   const [desktopPaneWidth, setDesktopPaneWidth] = useState(0);
   const selectedModelInfo = useMemo(
-    () => models.find((candidate) => candidate.id === model) ?? null,
-    [model, models],
+    () =>
+      (modelKey
+        ? models.find((candidate) => modelKeysEqual(candidate.key, modelKey))
+        : models.find((candidate) => candidate.id === model)) ?? null,
+    [model, modelKey, models],
   );
   const fastModeSupported = supportsFastMode(
     selectedModelInfo ?? model,
@@ -331,6 +341,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       .map((provider) => normalizeProviderId(provider.name));
     setModels(response.models);
     setDefaultModelId(response.default_model ?? null);
+    setDefaultModelKey(response.default_model_key ?? null);
     setConfiguredProviders(nextConfiguredProviders);
     return {
       response,
@@ -342,6 +353,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     const existingModel = sessionStore.getState().model;
     let catalog = models;
     let fallbackDefault = defaultModelId;
+    let fallbackDefaultKey = defaultModelKey;
     let allowedProviders = configuredProviders;
 
     if (catalog.length === 0) {
@@ -351,6 +363,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       }
       catalog = result.response.models;
       fallbackDefault = result.response.default_model ?? null;
+      fallbackDefaultKey = result.response.default_model_key ?? null;
       allowedProviders = result.configuredProviders;
     }
 
@@ -359,6 +372,8 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       fallbackDefault,
       catalog,
       allowedProviders,
+      sessionStore.getState().modelKey,
+      fallbackDefaultKey,
     );
 
     if (selectedModel) {
@@ -372,7 +387,14 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     sessionStore.getState().setModel(null);
     await SecureStore.deleteItemAsync(SELECTED_MODEL_KEY).catch(() => {});
     return null;
-  }, [configuredProviders, defaultModelId, loadModelCatalog, models, sessionStore]);
+  }, [
+    configuredProviders,
+    defaultModelId,
+    defaultModelKey,
+    loadModelCatalog,
+    models,
+    sessionStore,
+  ]);
 
   useEffect(() => {
     if (!client || !isConnected) {

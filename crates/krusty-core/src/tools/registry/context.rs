@@ -9,6 +9,7 @@ use crate::agent::loop_events::LoopEvent;
 use crate::agent::subagent::AgentProgress;
 use crate::agent::ProviderCallTraceContext;
 use crate::ai::client::AiClient;
+use crate::ai::models::ModelKey;
 use crate::ai::types::ModelMessage;
 use crate::mcp::McpManager;
 use crate::process::ProcessRegistry;
@@ -131,6 +132,8 @@ pub struct ToolContext {
     pub agent_progress_tx: Option<mpsc::UnboundedSender<AgentProgress>>,
     /// Current user-selected model (for non-Anthropic providers, subagents use this)
     pub current_model: Option<String>,
+    /// Exact provider/auth/transport identity for the current run.
+    pub current_model_key: Option<ModelKey>,
     /// Session-scoped AI client (used by tools that spawn sub-agents)
     pub ai_client: Option<Arc<AiClient>>,
     /// Git identity for commit attribution
@@ -173,6 +176,7 @@ impl Default for ToolContext {
             plan_mode: false,
             agent_progress_tx: None,
             current_model: None,
+            current_model_key: None,
             ai_client: None,
             git_identity: None,
             permission_mode: PermissionMode::default(),
@@ -303,6 +307,8 @@ impl ToolContext {
 
     /// Add session-scoped AI client to context
     pub fn with_ai_client(mut self, client: Arc<AiClient>) -> Self {
+        self.current_model = Some(client.resolved_model().wire_model_id.clone());
+        self.current_model_key = Some(client.resolved_model().key.clone());
         self.ai_client = Some(client);
         self
     }

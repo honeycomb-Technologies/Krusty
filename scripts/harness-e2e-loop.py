@@ -271,6 +271,90 @@ def require(condition: bool, message: str) -> None:
         raise AcceptanceFailure(message)
 
 
+def validate_candidate_base_url(value: str) -> str:
+    parsed = urlparse(value)
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise AcceptanceFailure(f"candidate base URL had an invalid port: {value}") from error
+    require(parsed.scheme == "http", f"candidate base URL must use http: {value}")
+    require(
+        parsed.hostname in {"127.0.0.1", "localhost"},
+        f"candidate base URL must be loopback-only: {value}",
+    )
+    require(port is not None, f"candidate base URL must include an explicit port: {value}")
+    require(port != 3000, "refusing to run acceptance against production port 3000")
+    require(parsed.username is None and parsed.password is None, "base URL must not embed credentials")
+    require(parsed.path in {"", "/"}, f"candidate base URL must not include a path: {value}")
+    require(not parsed.query and not parsed.fragment, f"candidate base URL must be plain: {value}")
+    return f"http://{parsed.hostname}:{port}"
+
+
+def select_stable_exact_model(
+    api: KrustyApi,
+    model_id: str,
+    *,
+    provider_id: str = "grok",
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    previous_identity: str | None = None
+    stable_reads = 0
+    latest: Any = None
+    while time.monotonic() < deadline:
+        response = api.json_request("GET", "/api/models")
+        models = response.get("models") if isinstance(response, dict) else None
+        require(isinstance(models, list), f"model catalog was malformed: {response}")
+        candidates = [
+            model
+            for model in models
+            if isinstance(model, dict)
+            and model.get("id") == model_id
+            and model.get("provider_id") == provider_id
+        ]
+        latest = candidates
+        if len(candidates) == 1:
+            model = candidates[0]
+            key = model.get("key")
+            revision = model.get("catalog_revision")
+            valid = (
+                isinstance(key, dict)
+                and key.get("provider") == provider_id
+                and key.get("model_id") == model_id
+                and isinstance(revision, str)
+                and bool(revision.strip())
+                and model.get("catalog_source") == "live_dynamic"
+                and model.get("supports_tools") is True
+            )
+            if valid:
+                identity = json.dumps(
+                    {
+                        "key": key,
+                        "catalog_revision": revision,
+                        "catalog_source": model.get("catalog_source"),
+                        "context_window": model.get("context_window"),
+                        "max_output": model.get("max_output"),
+                        "supports_tools": model.get("supports_tools"),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                stable_reads = stable_reads + 1 if identity == previous_identity else 1
+                previous_identity = identity
+                if stable_reads >= 2:
+                    return model
+            else:
+                previous_identity = None
+                stable_reads = 0
+        else:
+            previous_identity = None
+            stable_reads = 0
+        time.sleep(0.25)
+    raise AcceptanceFailure(
+        f"exact {provider_id} model {model_id!r} did not reach two stable live catalog reads: {latest}"
+    )
+
+
 def event_text(events: list[dict[str, Any]]) -> str:
     return "".join(
         str(event.get("delta", ""))
@@ -1520,51 +1604,79 @@ def assert_preview_port_quiet(url: str, timeout: float = 5.0) -> None:
 
 
 def create_session(
-    api: KrustyApi, run_dir: Path, model: str, label: str
+    api: KrustyApi,
+    run_dir: Path,
+    model: dict[str, Any],
+    label: str,
+    *,
+    permission_mode: str = "autonomous",
 ) -> str:
     response = api.json_request(
         "POST",
         "/api/sessions",
         {
             "title": label,
-            "model": model,
+            "model": model["id"],
+            "model_key": model["key"],
             "project_dir": str(run_dir),
             "workspace_mode": "created",
             "session_type": "code",
-            "permission_mode": "autonomous",
+            "permission_mode": permission_mode,
         },
     )
     session_id = response.get("id")
     require(bool(session_id), f"session create returned no id: {response}")
     require(response.get("working_dir") == str(run_dir), "session working_dir drifted")
     require(response.get("project_dir") == str(run_dir), "session project_dir drifted")
+    require(response.get("model") == model["id"], f"session model drifted: {response}")
+    require(response.get("model_key") == model["key"], f"session model key drifted: {response}")
+    require(
+        response.get("model_catalog_revision") == model.get("catalog_revision"),
+        f"session model revision drifted: {response}",
+    )
     return str(session_id)
 
 
 def chat_payload(
-    session_id: str, message: str, model: str | None
+    session_id: str,
+    message: str,
+    model: dict[str, Any] | None,
+    *,
+    permission_mode: str = "autonomous",
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "session_id": session_id,
         "message": message,
-        "permission_mode": "autonomous",
+        "permission_mode": permission_mode,
         "thinking_enabled": "off",
     }
     if model is not None:
-        payload["model"] = model
+        payload["model"] = model["id"]
+        payload["model_key"] = model["key"]
     return payload
 
 
 def require_session_model(
-    api: KrustyApi, session_id: str, expected_model: str, label: str
+    api: KrustyApi,
+    session_id: str,
+    expected_model: dict[str, Any],
+    label: str,
 ) -> str:
     persisted = api.json_request("GET", f"/api/sessions/{session_id}")
     session = persisted.get("session") if isinstance(persisted, dict) else None
     require(isinstance(session, dict), f"{label}: persisted session was malformed: {persisted}")
     actual_model = session.get("model")
     require(
-        actual_model == expected_model,
-        f"{label}: persisted model drifted from {expected_model!r} to {actual_model!r}",
+        actual_model == expected_model["id"],
+        f"{label}: persisted model drifted from {expected_model['id']!r} to {actual_model!r}",
+    )
+    require(
+        session.get("model_key") == expected_model["key"],
+        f"{label}: persisted exact model key drifted: {session}",
+    )
+    require(
+        session.get("model_catalog_revision") == expected_model.get("catalog_revision"),
+        f"{label}: persisted model revision drifted: {session}",
     )
     return str(actual_model)
 
@@ -1908,12 +2020,73 @@ def collect_failed_cycle_evidence(
     return evidence
 
 
+def validate_trace_exact_runtime(
+    trace: dict[str, Any],
+    model: dict[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    snapshots: list[dict[str, Any]] = []
+    budget_events: list[dict[str, Any]] = []
+    for event in trace.get("events", []):
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if event.get("event_type") == "provider_request_prepared":
+            diagnostics = payload.get("diagnostics")
+            if isinstance(diagnostics, dict):
+                snapshots.append(diagnostics)
+        elif event.get("event_type") == "run_budget_resolved":
+            budget_events.append(payload)
+
+    require(snapshots, f"{label}: trace omitted provider request snapshots")
+    for index, snapshot in enumerate(snapshots):
+        require(
+            snapshot.get("model_key") == model["key"],
+            f"{label}: request {index} exact model key drifted: {snapshot}",
+        )
+        require(
+            snapshot.get("catalog_revision") == model.get("catalog_revision"),
+            f"{label}: request {index} catalog revision drifted: {snapshot}",
+        )
+        effective = snapshot.get("effective_request")
+        require(
+            isinstance(effective, dict) and effective.get("model") == model["id"],
+            f"{label}: request {index} effective model drifted: {snapshot}",
+        )
+        manifest = snapshot.get("prompt_manifest")
+        prompt_hash = manifest.get("prompt_hash") if isinstance(manifest, dict) else None
+        require(
+            isinstance(prompt_hash, str)
+            and len(prompt_hash) == 64
+            and all(character in "0123456789abcdef" for character in prompt_hash),
+            f"{label}: request {index} lacked a redacted prompt hash: {snapshot}",
+        )
+
+    require(len(budget_events) == 1, f"{label}: bad durable budget events: {budget_events}")
+    require(
+        budget_events[0].get("max_turns") is None
+        and budget_events[0].get("source") == "unlimited",
+        f"{label}: interactive run retained a hidden turn cap: {budget_events[0]}",
+    )
+    return {
+        "model_key": model["key"],
+        "catalog_revision": model.get("catalog_revision"),
+        "request_count": len(snapshots),
+        "run_budget": budget_events[0],
+        "prompt_hashes": [
+            snapshot.get("prompt_manifest", {}).get("prompt_hash")
+            for snapshot in snapshots
+        ],
+    }
+
+
 def verify_persistence_and_trace(
     api: KrustyApi,
     session_id: str,
     marker: str,
     expected_user_turns: int,
     *,
+    exact_model: dict[str, Any],
     exact_tool_calls: int | None = None,
     expected_tool_name: str | None = None,
 ) -> dict[str, Any]:
@@ -1952,6 +2125,8 @@ def verify_persistence_and_trace(
     for key in ("tool_errors", "server_tool_errors", "agent_errors", "provider_failures"):
         require(summary.get(key) == 0, f"trace {key}={summary.get(key)}")
     require(summary.get("last_stop_reason") == "completed", f"bad trace summary: {summary}")
+    summary = dict(summary)
+    summary["exact_runtime"] = validate_trace_exact_runtime(trace, exact_model, label)
     return summary
 
 
@@ -2162,7 +2337,7 @@ def cleanup_gated_error(
 def run_cycle(
     api: KrustyApi,
     root: Path,
-    model: str,
+    model: dict[str, Any],
     port: int,
     cycle: int,
     keep_process: bool,
@@ -2178,7 +2353,9 @@ def run_cycle(
         "run_dir": str(run_dir),
         "marker": marker,
         "port": port,
-        "model": model,
+        "model": model["id"],
+        "model_key": model["key"],
+        "model_catalog_revision": model.get("catalog_revision"),
         "phase": "session_create",
     }
 
@@ -2249,7 +2426,7 @@ Work autonomously. Do not install packages and do not ask styling or product que
         result["phase"] = "continuity"
         continuity_payload = chat_payload(session_id, continuity_prompt, None)
         require(
-            "model" not in continuity_payload,
+            "model" not in continuity_payload and "model_key" not in continuity_payload,
             "continuity follow-up unexpectedly sent a model override",
         )
         continuity_events = api.chat(continuity_payload)
@@ -2264,7 +2441,9 @@ Work autonomously. Do not install packages and do not ask styling or product que
         )
 
         result["phase"] = "persistence_and_process_lifecycle"
-        summary = verify_persistence_and_trace(api, session_id, marker, 3)
+        summary = verify_persistence_and_trace(
+            api, session_id, marker, 3, exact_model=model
+        )
 
         api.json_request("POST", f"/api/processes/{process_id}/suspend")
         wait_for_process_status(api, process_id, "suspended")
@@ -2349,7 +2528,7 @@ Work autonomously. Do not install packages and do not ask styling or product que
 def run_disconnect_lane(
     api: KrustyApi,
     resilience_dir: Path,
-    model: str,
+    model: dict[str, Any],
 ) -> dict[str, Any]:
     lane = "sse-disconnect"
     run_dir = resilience_dir / lane
@@ -2444,6 +2623,7 @@ def run_disconnect_lane(
             session_id,
             marker,
             1,
+            exact_model=model,
             exact_tool_calls=1,
             expected_tool_name="bash",
         )
@@ -2469,6 +2649,7 @@ def run_disconnect_lane(
             session_id,
             marker,
             2,
+            exact_model=model,
             exact_tool_calls=1,
             expected_tool_name="bash",
         )
@@ -2525,7 +2706,7 @@ def run_disconnect_lane(
 def run_failed_bash_lane(
     api: KrustyApi,
     resilience_dir: Path,
-    model: str,
+    model: dict[str, Any],
 ) -> dict[str, Any]:
     lane = "failed-bash-recovery"
     run_dir = resilience_dir / lane
@@ -2996,7 +3177,7 @@ expected failure, reply exactly {failure_reply}"""
 def run_live_steering_lane(
     api: KrustyApi,
     resilience_dir: Path,
-    model: str,
+    model: dict[str, Any],
 ) -> dict[str, Any]:
     lane = "live-steering"
     run_dir = resilience_dir / lane
@@ -3236,7 +3417,7 @@ def run_live_steering_lane(
 def run_cancel_lane(
     api: KrustyApi,
     resilience_dir: Path,
-    model: str,
+    model: dict[str, Any],
 ) -> dict[str, Any]:
     lane = "explicit-cancel"
     run_dir = resilience_dir / lane
@@ -3555,7 +3736,7 @@ def run_direct_tool_policy_lane(
 def run_resilience_suite(
     api: KrustyApi,
     resilience_dir: Path,
-    model: str,
+    model: dict[str, Any],
     direct_tool_port: int,
 ) -> list[dict[str, Any]]:
     resilience_dir.mkdir(parents=True, exist_ok=False)
@@ -3632,7 +3813,11 @@ def run_resilience_suite(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-url", default="http://127.0.0.1:3000")
+    parser.add_argument(
+        "--base-url",
+        required=True,
+        help="explicit loopback candidate URL; production port 3000 is rejected",
+    )
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--model", default="grok-4.5")
     parser.add_argument(
@@ -3663,11 +3848,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="run only the normal coding cycles, without resilience lanes",
     )
+    parser.add_argument(
+        "--retain-final-process",
+        action="store_true",
+        help="opt in to retaining the final preview process instead of verifying cleanup",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    args.base_url = validate_candidate_base_url(args.base_url)
     require(args.cycles > 0, "cycles must be positive")
     require(args.external_retries >= 0, "external-retries must be non-negative")
     require(args.external_backoff >= 0, "external-backoff must be non-negative")
@@ -3681,6 +3872,7 @@ def main() -> int:
     )
     args.root.mkdir(parents=True, exist_ok=True)
     api = KrustyApi(args.base_url, args.timeout)
+    exact_model: dict[str, Any] | None = None
     invocation_id = str(uuid.uuid4())
     attempt_log_path = args.root / "acceptance-attempts.jsonl"
     summary_path = args.root / "acceptance-summary.json"
@@ -3705,6 +3897,10 @@ def main() -> int:
                 "failure_classification": final_classification,
                 "error": final_error,
                 "model": args.model,
+                "model_key": exact_model.get("key") if exact_model else None,
+                "model_catalog_revision": (
+                    exact_model.get("catalog_revision") if exact_model else None
+                ),
                 "requested_consecutive_clean_cycles": args.cycles,
                 "achieved_consecutive_clean_cycles": clean_streak,
                 "attempt_count": len(attempt_records),
@@ -3730,8 +3926,10 @@ def main() -> int:
     try:
         health = api.json_request("GET", "/health")
         require(health.get("status") == "ok", f"server health failed: {health}")
+        exact_model = select_stable_exact_model(api, args.model)
         print(
             f"Krusty harness E2E: model={args.model} "
+            f"revision={exact_model.get('catalog_revision')} "
             f"clean_cycles={args.cycles} root={args.root}",
             flush=True,
         )
@@ -3755,6 +3953,8 @@ def main() -> int:
                 "target_streak_position": streak_position,
                 "port": port,
                 "model": args.model,
+                "model_key": exact_model["key"],
+                "model_catalog_revision": exact_model.get("catalog_revision"),
                 "started_at_epoch_seconds": time.time(),
                 "_started_monotonic": time.monotonic(),
             }
@@ -3763,10 +3963,12 @@ def main() -> int:
                 result = run_cycle(
                     api,
                     args.root,
-                    args.model,
+                    exact_model,
                     port,
                     cycle_attempt,
-                    keep_process=streak_position == args.cycles,
+                    keep_process=(
+                        args.retain_final_process and streak_position == args.cycles
+                    ),
                 )
                 clean_streak += 1
                 clean_results.append(result)
@@ -3867,6 +4069,8 @@ def main() -> int:
                     "resilience_attempt": resilience_attempt,
                     "run_dir": str(resilience_dir),
                     "model": args.model,
+                    "model_key": exact_model["key"],
+                    "model_catalog_revision": exact_model.get("catalog_revision"),
                     "started_at_epoch_seconds": time.time(),
                     "_started_monotonic": time.monotonic(),
                 }
@@ -3875,7 +4079,7 @@ def main() -> int:
                     resilience_results = run_resilience_suite(
                         api,
                         resilience_dir,
-                        args.model,
+                        exact_model,
                         direct_tool_port,
                     )
                     record.update(

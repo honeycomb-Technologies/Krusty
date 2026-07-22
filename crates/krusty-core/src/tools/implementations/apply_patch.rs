@@ -131,6 +131,11 @@ Prefer edit/multiedit for targeted 1-2 file changes."#,
                     "errors": errors,
                 })),
                 None,
+            )
+            .with_changed(
+                !files_modified.is_empty()
+                    || !files_created.is_empty()
+                    || !files_deleted.is_empty(),
             );
         }
 
@@ -159,6 +164,7 @@ Prefer edit/multiedit for targeted 1-2 file changes."#,
             None,
             None,
         )
+        .with_changed(true)
     }
 }
 

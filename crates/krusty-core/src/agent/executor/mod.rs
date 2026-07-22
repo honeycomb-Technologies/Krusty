@@ -106,6 +106,8 @@ pub(crate) async fn execute_tools(
                 db_path: Some(db_path.to_path_buf()),
                 plan_mode: work_mode == WorkMode::Plan,
                 current_model: Some(ai_client.config().model.clone()),
+                current_model_key: Some(ai_client.resolved_model().key.clone()),
+                ai_client: Some(ai_client.clone()),
                 permission_mode,
                 ..Default::default()
             };

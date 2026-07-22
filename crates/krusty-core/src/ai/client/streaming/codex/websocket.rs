@@ -16,6 +16,7 @@ use crate::ai::parsers::OpenAIParser;
 use crate::ai::retry::safe_provider_event_error;
 use crate::ai::sse::{create_streaming_channels, SseStreamProcessor};
 use crate::ai::streaming::StreamPart;
+use crate::ai::transport_policy::StreamTransportPolicy;
 use crate::ai::types::ModelMessage;
 
 use super::request::{assistant_fingerprint_from_response, prepare_codex_ws_request};
@@ -299,7 +300,9 @@ pub(super) async fn call_streaming_chatgpt_codex_ws(
     );
     let parser = OpenAIParser::new();
     let ws_idle_timeout =
-        Duration::from_secs(prompt_sections.profile.stream_idle_timeout_secs.max(30));
+        StreamTransportPolicy::resolve(client.provider_id(), client.config().api_format)
+            .idle_timeout
+            .max(Duration::from_secs(30));
 
     tokio::spawn(async move {
         let mut retried_full = !sent_delta;

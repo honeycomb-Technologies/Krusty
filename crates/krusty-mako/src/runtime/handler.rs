@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use krusty_core::ai::models::ModelKey as CoreModelKey;
 use krusty_core::mako::{
     canonical_timestamp, parse_timezone, DstPolicy, MisfireConfig, RecurrenceV1, RetryPolicy,
 };
@@ -12,8 +13,8 @@ use krusty_core::Content;
 use krusty_mako_protocol::{
     unix_time_millis, AckResponse, Actor, Command, CreateScheduleCommand, DaemonRuntimeStats,
     DispatchCommand, DispatchResponse, EventEnvelope, ExtensionResponse, LaggedEvent, MakoEvent,
-    ProtocolErrorPayload, ProtocolVersion, RecoverResponse, ReplaceScheduleCommand, ReplayGapEvent,
-    ResponsePayload, ScheduleDefinition, ScheduleResponse, SessionResponse,
+    ModelKey, ProtocolErrorPayload, ProtocolVersion, RecoverResponse, ReplaceScheduleCommand,
+    ReplayGapEvent, ResponsePayload, ScheduleDefinition, ScheduleResponse, SessionResponse,
     SetScheduleStatusCommand, SubscribeCommand, SubscriptionAccepted,
 };
 use rusqlite::{params, OptionalExtension, Transaction};
@@ -597,15 +598,20 @@ fn dispatch(
             "dispatch requires a task and working directory".into(),
         ));
     }
-    if command
-        .model
-        .as_deref()
-        .is_none_or(|model| model.trim().is_empty())
-    {
-        return Err(RuntimeStoreError::Invalid(
-            "dispatch requires a frozen model id".into(),
-        ));
-    }
+    let (model, model_key, model_catalog_revision) = normalize_model_identity(
+        command.model.clone(),
+        command.model_key.clone(),
+        command.model_catalog_revision.clone(),
+        "dispatch",
+    )?;
+    let model = model.ok_or_else(|| {
+        RuntimeStoreError::Invalid("dispatch requires a frozen model identity".into())
+    })?;
+    let model_key_json = model_key
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
     if command.task.len() > 64 * 1024 {
         return Err(RuntimeStoreError::Invalid(
             "dispatch task exceeds 65536 bytes".into(),
@@ -640,15 +646,6 @@ fn dispatch(
         ));
     }
     if command
-        .model
-        .as_deref()
-        .is_some_and(|model| model.len() > 512)
-    {
-        return Err(RuntimeStoreError::Invalid(
-            "dispatch model exceeds 512 bytes".into(),
-        ));
-    }
-    if command
         .crew_slug
         .as_deref()
         .is_some_and(|slug| !is_valid_crew_slug(slug))
@@ -678,14 +675,17 @@ fn dispatch(
         .unwrap_or_else(|| command.working_dir.clone());
     tx.execute(
         "INSERT INTO sessions (
-            id, title, created_at, updated_at, model, working_dir, project_dir,
-            workspace_mode, session_type, user_id, permission_mode
-         ) VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, 'selected', 'mako', ?7, 'autonomous')",
+            id, title, created_at, updated_at, model, model_key_json,
+            model_catalog_revision, working_dir, project_dir, workspace_mode,
+            session_type, user_id, permission_mode
+         ) VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8, 'selected', 'mako', ?9, 'autonomous')",
         params![
             session_id,
             bounded_title(&command.task),
             now,
-            command.model,
+            model,
+            model_key_json,
+            model_catalog_revision,
             command.working_dir,
             project_dir,
             actor.user_id,
@@ -724,7 +724,9 @@ fn dispatch(
         serde_json::json!({
             "working_dir": command.working_dir,
             "project_dir": project_dir,
-            "model": command.model,
+            "model": model,
+            "model_key": model_key,
+            "model_catalog_revision": model_catalog_revision,
             "permission_mode": "autonomous",
             "crew_slug": command.crew_slug,
             "retry": RetryPolicy::default(),
@@ -884,6 +886,8 @@ fn start_session(
                 "working_dir": session.working_dir,
                 "project_dir": session.project_dir,
                 "model": session.model,
+                "model_key": session.model_key,
+                "model_catalog_revision": session.model_catalog_revision,
                 "permission_mode": require_frozen_session_permission_mode(&session)?,
                 "retry": RetryPolicy::default(),
             }),
@@ -934,12 +938,14 @@ fn schedule_session(
         "INSERT INTO mako_schedules (
             id, controller_id, title, summary, objective, recurrence_kind,
             recurrence_json, timezone, gap_policy, fold_policy, next_fire_at,
-            last_scheduled_for, status, priority, project_dir, model, crew_slug,
+            last_scheduled_for, status, priority, project_dir, model,
+            model_key_json, model_catalog_revision, crew_slug,
             misfire_policy, misfire_grace_secs, catch_up_limit, overlap_policy,
             max_attempts, retry_base_secs, retry_max_secs, retry_jitter,
             revision, created_by, created_at, updated_at
          ) SELECT ?1, ?2, ?3, ?3, ?3, 'once', ?4, ?5, 'shift_forward', 'first',
-                  ?6, NULL, 'enabled', 0, s.project_dir, s.model, rs.crew_slug,
+                  ?6, NULL, 'enabled', 0, s.project_dir, s.model,
+                  s.model_key_json, s.model_catalog_revision, rs.crew_slug,
                   'fire_once', 300, 1, 'queue_one', 5, 15, 900, 'full', 0,
                   ?7, ?8, ?8
            FROM sessions s
@@ -1869,6 +1875,8 @@ fn queue_message_turn_if_idle(
             "working_dir": session.working_dir,
             "project_dir": session.project_dir,
             "model": session.model,
+            "model_key": session.model_key,
+            "model_catalog_revision": session.model_catalog_revision,
             "permission_mode": require_frozen_session_permission_mode(session)?,
             "crew_slug": crew_slug,
             "retry": RetryPolicy::default(),
@@ -1907,10 +1915,92 @@ fn queue_message_turn_if_idle(
     Ok(Some(event))
 }
 
+fn normalize_model_identity(
+    model: Option<String>,
+    model_key: Option<ModelKey>,
+    model_catalog_revision: Option<String>,
+    context: &str,
+) -> Result<(Option<String>, Option<ModelKey>, Option<String>), RuntimeStoreError> {
+    let model = model
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if model
+        .as_deref()
+        .is_some_and(|value| value.len() > 512 || value.as_bytes().contains(&0))
+    {
+        return Err(RuntimeStoreError::Invalid(format!(
+            "{context} model is invalid or exceeds 512 bytes"
+        )));
+    }
+
+    if let Some(key) = model_key.as_ref() {
+        for (field, value) in [
+            ("provider", key.provider.as_str()),
+            ("model_id", key.model_id.as_str()),
+            ("api_format", key.api_format.as_str()),
+        ] {
+            if value.trim().is_empty()
+                || value != value.trim()
+                || value.len() > 512
+                || value.as_bytes().contains(&0)
+            {
+                return Err(RuntimeStoreError::Invalid(format!(
+                    "{context} model_key.{field} is invalid"
+                )));
+            }
+        }
+        if key.auth_scope.as_deref().is_some_and(|value| {
+            value.trim().is_empty()
+                || value != value.trim()
+                || value.len() > 128
+                || value.as_bytes().contains(&0)
+        }) {
+            return Err(RuntimeStoreError::Invalid(format!(
+                "{context} model_key.auth_scope is invalid"
+            )));
+        }
+        if model.as_deref().is_some_and(|model| model != key.model_id) {
+            return Err(RuntimeStoreError::Invalid(format!(
+                "{context} model must match model_key.model_id"
+            )));
+        }
+        let serialized =
+            serde_json::to_value(key).map_err(|error| RuntimeStoreError::Internal(error.into()))?;
+        serde_json::from_value::<CoreModelKey>(serialized).map_err(|error| {
+            RuntimeStoreError::Invalid(format!("{context} model_key is unsupported: {error}"))
+        })?;
+    }
+
+    let model = model.or_else(|| model_key.as_ref().map(|key| key.model_id.clone()));
+    let model_catalog_revision = model_catalog_revision
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if model_catalog_revision
+        .as_deref()
+        .is_some_and(|value| value.len() > 512 || value.as_bytes().contains(&0))
+    {
+        return Err(RuntimeStoreError::Invalid(format!(
+            "{context} model catalog revision is invalid or exceeds 512 bytes"
+        )));
+    }
+    if model_key.is_none() && model_catalog_revision.is_some() {
+        return Err(RuntimeStoreError::Invalid(format!(
+            "{context} model catalog revision requires model_key"
+        )));
+    }
+    Ok((model, model_key, model_catalog_revision))
+}
+
 fn require_frozen_session_model(
     session: &super::persistence::OwnedSession,
 ) -> Result<&str, RuntimeStoreError> {
-    session
+    normalize_model_identity(
+        session.model.clone(),
+        session.model_key.clone(),
+        session.model_catalog_revision.clone(),
+        "Mako session",
+    )?;
+    let model = session
         .model
         .as_deref()
         .map(str::trim)
@@ -1919,7 +2009,22 @@ fn require_frozen_session_model(
             RuntimeStoreError::StateConflict(
                 "Mako session has no frozen model; select a model before starting it".into(),
             )
-        })
+        })?;
+    if session
+        .model_key
+        .as_ref()
+        .is_some_and(|key| key.model_id != model)
+    {
+        return Err(RuntimeStoreError::StateConflict(
+            "Mako session model does not match its frozen model key".into(),
+        ));
+    }
+    if session.model_key.is_none() && session.model_catalog_revision.is_some() {
+        return Err(RuntimeStoreError::StateConflict(
+            "Mako session catalog revision has no frozen model key".into(),
+        ));
+    }
+    Ok(model)
 }
 
 fn require_frozen_session_permission_mode(
@@ -1940,23 +2045,106 @@ fn freeze_session_model_into_open_runs(
 ) -> Result<(), RuntimeStoreError> {
     let model = require_frozen_session_model(session)?;
     let permission_mode = require_frozen_session_permission_mode(session)?;
-    tx.execute(
-        "UPDATE mako_runs SET config_json = json_set(
-                 json_set(config_json, '$.model',
-                     CASE WHEN json_type(config_json, '$.model') IS NULL
-                               OR json_extract(config_json, '$.model') = ''
-                          THEN ?2 ELSE json_extract(config_json, '$.model') END),
-                 '$.permission_mode',
-                     CASE WHEN json_type(config_json, '$.permission_mode') IS NULL
-                          THEN ?3 ELSE json_extract(config_json, '$.permission_mode') END),
-             updated_at = ?4
+    let session_key_value = session
+        .model_key
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
+    let mut statement = tx.prepare(
+        "SELECT id, schedule_id, config_json FROM mako_runs
          WHERE session_id = ?1
-           AND status IN ('queued', 'sleeping', 'retry_wait', 'awaiting_input')
-           AND ((json_type(config_json, '$.model') IS NULL
-                 OR json_extract(config_json, '$.model') = '')
-                OR json_type(config_json, '$.permission_mode') IS NULL)",
-        params![session.id, model, permission_mode, now],
+           AND status IN ('queued', 'sleeping', 'retry_wait', 'awaiting_input')",
     )?;
+    let rows = statement
+        .query_map([&session.id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+
+    for (run_id, schedule_id, serialized) in rows {
+        let mut config = serde_json::from_str::<Value>(&serialized)
+            .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
+        let object = config.as_object_mut().ok_or_else(|| {
+            RuntimeStoreError::StateConflict("Mako run config is not a JSON object".into())
+        })?;
+        let missing_model = object
+            .get("model")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty());
+        let missing_permission = object.get("permission_mode").is_none();
+        let should_backfill_model = missing_model && schedule_id.is_none();
+        let run_model_matches_session = object
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.trim() == model);
+        // Scheduled runs own their selection. Only legacy, non-scheduled runs
+        // may inherit provider-aware identity from their parent session.
+        let can_inherit_session_identity =
+            schedule_id.is_none() && (missing_model || run_model_matches_session);
+        let missing_key = object.get("model_key").is_none_or(Value::is_null);
+        let should_backfill_key =
+            can_inherit_session_identity && session_key_value.is_some() && missing_key;
+        let key_matches_session = session_key_value
+            .as_ref()
+            .is_some_and(|key| object.get("model_key") == Some(key));
+        let missing_revision = object
+            .get("model_catalog_revision")
+            .is_none_or(Value::is_null);
+        let should_backfill_revision = can_inherit_session_identity
+            && session.model_catalog_revision.is_some()
+            && missing_revision
+            && (should_backfill_key || key_matches_session);
+        if !should_backfill_model
+            && !missing_permission
+            && !should_backfill_key
+            && !should_backfill_revision
+        {
+            continue;
+        }
+        if should_backfill_model {
+            object.insert("model".into(), Value::String(model.to_string()));
+        }
+        if should_backfill_key {
+            object.insert(
+                "model_key".into(),
+                session_key_value
+                    .clone()
+                    .expect("backfill requires a frozen session key"),
+            );
+        }
+        if should_backfill_revision {
+            object.insert(
+                "model_catalog_revision".into(),
+                Value::String(
+                    session
+                        .model_catalog_revision
+                        .clone()
+                        .expect("backfill requires a frozen catalog revision"),
+                ),
+            );
+        }
+        if missing_permission {
+            object.insert(
+                "permission_mode".into(),
+                Value::String(permission_mode.to_string()),
+            );
+        }
+        tx.execute(
+            "UPDATE mako_runs SET config_json = ?2, updated_at = ?3 WHERE id = ?1",
+            params![
+                run_id,
+                serde_json::to_string(&config)
+                    .map_err(|error| RuntimeStoreError::Internal(error.into()))?,
+                now
+            ],
+        )?;
+    }
     Ok(())
 }
 
@@ -2280,6 +2468,9 @@ struct ParsedScheduleDefinition {
     priority: i32,
     project_dir: Option<String>,
     model: Option<String>,
+    model_key: Option<ModelKey>,
+    model_catalog_revision: Option<String>,
+    model_was_explicit: bool,
     crew_slug: Option<String>,
     misfire: MisfireConfig,
     overlap_policy: OverlapPolicy,
@@ -2305,6 +2496,11 @@ fn parse_schedule_definition(
         Ok(value.to_string())
     }
 
+    let model_was_explicit = definition
+        .model
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || definition.model_key.is_some();
     let title = required(definition.title, "title", 512)?;
     let objective = required(definition.objective, "objective", 64 * 1024)?;
     let summary = definition.summary.trim().to_string();
@@ -2393,15 +2589,12 @@ fn parse_schedule_definition(
             "schedule project_dir must be absolute".into(),
         ));
     }
-    let model = definition
-        .model
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    if model.as_deref().is_some_and(|value| value.len() > 512) {
-        return Err(RuntimeStoreError::Invalid(
-            "schedule model exceeds 512 bytes".into(),
-        ));
-    }
+    let (model, model_key, model_catalog_revision) = normalize_model_identity(
+        definition.model,
+        definition.model_key,
+        definition.model_catalog_revision,
+        "schedule",
+    )?;
 
     Ok(ParsedScheduleDefinition {
         title,
@@ -2414,6 +2607,9 @@ fn parse_schedule_definition(
         priority: definition.priority,
         project_dir,
         model,
+        model_key,
+        model_catalog_revision,
+        model_was_explicit,
         crew_slug,
         misfire,
         overlap_policy,
@@ -2434,7 +2630,14 @@ fn create_recurring_schedule(
         .project_dir
         .or_else(|| session.project_dir.clone())
         .or_else(|| session.working_dir.clone());
-    definition.model = definition.model.or_else(|| session.model.clone());
+    if !definition.model_was_explicit {
+        require_frozen_session_model(&session)?;
+        definition.model.clone_from(&session.model);
+        definition.model_key.clone_from(&session.model_key);
+        definition
+            .model_catalog_revision
+            .clone_from(&session.model_catalog_revision);
+    }
     if definition.crew_slug.is_none() {
         definition.crew_slug = tx
             .query_row(
@@ -2467,18 +2670,25 @@ fn create_recurring_schedule(
     let schedule_id = uuid::Uuid::new_v4().to_string();
     let recurrence_json = serde_json::to_string(&definition.recurrence)
         .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
+    let model_key_json = definition
+        .model_key
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
     tx.execute(
         "INSERT INTO mako_schedules (
             id, controller_id, title, summary, objective, recurrence_kind,
             recurrence_json, timezone, gap_policy, fold_policy, next_fire_at,
-            last_scheduled_for, status, priority, project_dir, model, crew_slug,
+            last_scheduled_for, status, priority, project_dir, model,
+            model_key_json, model_catalog_revision, crew_slug,
             misfire_policy, misfire_grace_secs, catch_up_limit, overlap_policy,
             max_attempts, retry_base_secs, retry_max_secs, retry_jitter,
             revision, created_by, created_at, updated_at
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL,
             'enabled', ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
-            ?21, ?22, ?23, 0, ?24, ?25, ?25
+            ?21, ?22, ?23, ?24, ?25, 0, ?26, ?27, ?27
          )",
         params![
             schedule_id,
@@ -2495,6 +2705,8 @@ fn create_recurring_schedule(
             definition.priority,
             definition.project_dir,
             definition.model,
+            model_key_json,
+            definition.model_catalog_revision,
             definition.crew_slug,
             definition.misfire.policy.as_str(),
             definition.misfire.grace_secs,
@@ -2543,7 +2755,14 @@ fn replace_recurring_schedule(
         .project_dir
         .or_else(|| session.project_dir.clone())
         .or_else(|| session.working_dir.clone());
-    definition.model = definition.model.or_else(|| session.model.clone());
+    if !definition.model_was_explicit {
+        require_frozen_session_model(&session)?;
+        definition.model.clone_from(&session.model);
+        definition.model_key.clone_from(&session.model_key);
+        definition
+            .model_catalog_revision
+            .clone_from(&session.model_catalog_revision);
+    }
     if definition.project_dir.is_none() {
         return Err(RuntimeStoreError::Invalid(
             "schedule requires an explicit or session-owned workspace".into(),
@@ -2587,17 +2806,24 @@ fn replace_recurring_schedule(
     }
     let recurrence_json = serde_json::to_string(&definition.recurrence)
         .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
+    let model_key_json = definition
+        .model_key
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
     let changed = tx.execute(
         "UPDATE mako_schedules SET
             title = ?3, summary = ?4, objective = ?5, recurrence_kind = ?6,
             recurrence_json = ?7, timezone = ?8, gap_policy = ?9,
             fold_policy = ?10, next_fire_at = ?11, priority = ?12,
-            project_dir = ?13, model = ?14, crew_slug = ?15,
-            misfire_policy = ?16, misfire_grace_secs = ?17,
-            catch_up_limit = ?18, overlap_policy = ?19, max_attempts = ?20,
-            retry_base_secs = ?21, retry_max_secs = ?22, retry_jitter = ?23,
-            revision = revision + 1, updated_at = ?24
-         WHERE id = ?1 AND controller_id = ?2 AND revision = ?25",
+            project_dir = ?13, model = ?14, model_key_json = ?15,
+            model_catalog_revision = ?16, crew_slug = ?17,
+            misfire_policy = ?18, misfire_grace_secs = ?19,
+            catch_up_limit = ?20, overlap_policy = ?21, max_attempts = ?22,
+            retry_base_secs = ?23, retry_max_secs = ?24, retry_jitter = ?25,
+            revision = revision + 1, updated_at = ?26
+         WHERE id = ?1 AND controller_id = ?2 AND revision = ?27",
         params![
             command.schedule_id,
             controller.id,
@@ -2613,6 +2839,8 @@ fn replace_recurring_schedule(
             definition.priority,
             definition.project_dir,
             definition.model,
+            model_key_json,
+            definition.model_catalog_revision,
             definition.crew_slug,
             definition.misfire.policy.as_str(),
             definition.misfire.grace_secs,

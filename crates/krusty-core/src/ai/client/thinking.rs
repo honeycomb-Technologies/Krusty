@@ -22,6 +22,7 @@ impl AiClient {
         user_message: &str,
         thinking_budget: u32,
     ) -> Result<String> {
+        self.ensure_run_model(model)?;
         // For thinking, max_tokens must be > budget_tokens
         let max_tokens = thinking_budget + 16000;
         let options = self.canonical_call_options(

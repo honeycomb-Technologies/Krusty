@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::ai::models::ApiFormat;
+
 /// ChatGPT backend API for OAuth users (Responses API).
 /// This endpoint is required for tokens obtained via ChatGPT OAuth flow.
 /// Note: ChatGPT's Codex API does NOT use /v1/ prefix unlike the standard OpenAI API.
@@ -180,6 +182,22 @@ pub struct ModelInfo {
     /// Optional per-model Standard/Fast implementation.
     #[serde(default)]
     pub fast_mode: Option<FastMode>,
+    /// Exact wire API used by this provider/model row.
+    ///
+    /// This remains optional for older provider definitions; resolution may
+    /// apply a provider fallback only when the catalog omitted it.
+    #[serde(default)]
+    pub api_format: Option<ApiFormat>,
+    /// Whether this exact model row accepts function/tool definitions.
+    #[serde(default = "default_true")]
+    pub supports_tools: bool,
+    /// Whether this exact model row accepts image input.
+    #[serde(default)]
+    pub supports_vision: bool,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 impl ModelInfo {
@@ -195,6 +213,9 @@ impl ModelInfo {
             reasoning_is_mandatory: false,
             reasoning_control: None,
             fast_mode: None,
+            api_format: None,
+            supports_tools: true,
+            supports_vision: false,
         }
     }
 
@@ -230,6 +251,21 @@ impl ModelInfo {
 
     pub fn with_fast_mode(mut self, fast_mode: FastMode) -> Self {
         self.fast_mode = Some(fast_mode);
+        self
+    }
+
+    pub fn with_api_format(mut self, api_format: ApiFormat) -> Self {
+        self.api_format = Some(api_format);
+        self
+    }
+
+    pub fn with_tools(mut self, supports_tools: bool) -> Self {
+        self.supports_tools = supports_tools;
+        self
+    }
+
+    pub fn with_vision(mut self) -> Self {
+        self.supports_vision = true;
         self
     }
 

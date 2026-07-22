@@ -51,18 +51,7 @@ fn catalog_refresh_slot(provider: ProviderId) -> &'static CatalogRefreshSlot {
 }
 
 impl App {
-    pub fn apply_model_selection(&mut self, metadata: ModelMetadata, is_custom: bool) {
-        let provider_id = metadata.provider;
-        let model_id = metadata.id.clone();
-
-        if provider_id != self.runtime.active_provider {
-            self.switch_provider(provider_id);
-            if !self.is_authenticated() {
-                let _ = futures::executor::block_on(self.try_load_auth());
-            }
-        }
-
-        self.runtime.current_model = model_id.clone();
+    pub(crate) fn reconcile_model_controls(&mut self, metadata: &ModelMetadata) {
         if metadata.fast_mode.is_none() {
             self.runtime.fast_mode = false;
         }
@@ -105,6 +94,24 @@ impl App {
                 .filter(|level| thinking_levels.contains(level))
                 .unwrap_or(thinking_levels[0]);
         }
+    }
+
+    pub fn apply_model_selection(&mut self, metadata: ModelMetadata, is_custom: bool) {
+        let provider_id = metadata.provider;
+        let model_id = metadata.id.clone();
+        let model_key = metadata.key();
+
+        if provider_id != self.runtime.active_provider {
+            self.switch_provider(provider_id);
+            if !self.is_authenticated() {
+                let _ = futures::executor::block_on(self.try_load_auth());
+            }
+        }
+
+        self.runtime.current_model = model_id;
+        self.runtime.current_model_key = Some(model_key.clone());
+        self.runtime.model_selection_explicit = true;
+        self.reconcile_model_controls(&metadata);
 
         let registry = self.services.model_registry.clone();
         let metadata_for_registry = metadata.clone();
@@ -112,7 +119,7 @@ impl App {
         // holding locks across the whole UI frame by spawning when possible.
         futures::executor::block_on(async {
             registry.upsert_model(metadata_for_registry).await;
-            registry.mark_recent(&model_id).await;
+            registry.mark_recent_key(&model_key).await;
         });
 
         // Construct transport only after custom/live metadata is registered so
@@ -121,10 +128,10 @@ impl App {
         self.runtime.ai_client = self.create_ai_client();
 
         if let Some(ref prefs) = self.services.preferences {
-            if let Err(e) = prefs.set_current_model(&model_id) {
+            if let Err(e) = prefs.set_current_model_key(&model_key) {
                 tracing::warn!("Failed to save current model: {}", e);
             }
-            if let Err(e) = prefs.add_recent_model(&model_id) {
+            if let Err(e) = prefs.add_recent_model_key(&model_key) {
                 tracing::warn!("Failed to save recent model: {}", e);
             }
             if is_custom {
@@ -133,13 +140,12 @@ impl App {
                 }
             }
         }
+        self.persist_current_session_model_selection();
     }
 
     pub fn toggle_fast_mode(&mut self) -> Option<bool> {
         let supports_fast_mode = self
-            .services
-            .model_registry
-            .try_get_model(&self.runtime.current_model)
+            .selected_model_metadata()
             .and_then(|model| model.fast_mode)
             .is_some();
         if !supports_fast_mode {
@@ -420,11 +426,12 @@ impl App {
 
         // Account-only models disappear during reset. Do not keep a client
         // alive for stale catalog state while the replacement fetch is pending.
-        if !self.model_available_for_provider(&self.runtime.current_model, provider) {
+        let Some(metadata) = self.selected_model_metadata() else {
             self.runtime.api_key = None;
             self.runtime.ai_client = None;
             return;
-        }
+        };
+        self.reconcile_model_controls(&metadata);
 
         self.runtime.api_key = self.resolve_auth_for_active_provider();
         self.runtime.ai_client = self.create_ai_client();

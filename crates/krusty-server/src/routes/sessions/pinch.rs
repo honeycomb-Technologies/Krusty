@@ -8,7 +8,6 @@ use krusty_core::agent::{
     run_compaction_pipeline, CompactionManager, CompactionRequest, CompactionTrigger,
 };
 use krusty_core::ai::client::CallOptions;
-use krusty_core::ai::models::resolve_context_window;
 use krusty_core::storage::WorkspaceMode;
 use std::path::Path as StdPath;
 
@@ -72,18 +71,28 @@ pub(super) async fn pinch_session(
             None
         };
 
-    let summary_model = source_session.model.as_deref();
-    let summary_client = state
-        .resolve_ai_client_for_user(summary_model, source_session.user_id.as_deref())
-        .await;
+    let summary_client = if let Some(key) = source_session.model_key.as_ref() {
+        state
+            .resolve_ai_client_for_key_for_user(key, source_session.user_id.as_deref())
+            .await
+    } else {
+        state
+            .resolve_ai_client_for_user(
+                source_session.model.as_deref(),
+                source_session.user_id.as_deref(),
+            )
+            .await
+    };
+    let summary_model = summary_client
+        .as_ref()
+        .map(|client| client.resolved_model().wire_model_id.as_str())
+        .or(source_session.model.as_deref());
 
     let (compaction_manager, request_budget) = if let Some(client) = summary_client.as_ref() {
-        let model = summary_model.unwrap_or(client.config().model.as_str());
-        let resolved_window =
-            resolve_context_window(client.provider_id(), model, client.config().api_format);
+        let model = client.resolved_model().wire_model_id.as_str();
         let effective_window = effective_context_window_for_runtime(
             client.config().uses_chatgpt_codex_format(),
-            resolved_window,
+            client.resolved_model().capabilities.context_window,
         );
         let manager = CompactionManager::for_model(
             client.provider_id(),

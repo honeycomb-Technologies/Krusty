@@ -41,6 +41,8 @@ The heart of the system — the agent loop, AI providers, tools, and context man
 | [Tool System](core-engine/tool-system.md) | 50+ built-in tools, the registry, execution lifecycle, permissions, and hooks |
 | [Context & Memory](core-engine/context-and-memory.md) | How the agent builds context, manages conversation history, and handles summarization |
 | [Agent Efficiency](core-engine/agent-efficiency.md) | Compact tool exposure, stable prompt/cache layers, rendered-request budgeting, compaction, and usage regression gates |
+| [Core Remediation](core-engine/core-remediation-2026-07-21.md) | Exact model identity, one run contract, semantic progress, and the current Pi/OpenCode/Goose/Codex comparison baseline |
+| [Evaluation & Live Grok](core-engine/evaluation-and-live-grok.md) | Deterministic core scenarios and the isolated Honey/Grok 4.5 release-candidate acceptance procedure |
 | [Sub-Agents & Teams](core-engine/sub-agents.md) | Parallel agent delegation, the team system, and auto-classification |
 
 ## Storage

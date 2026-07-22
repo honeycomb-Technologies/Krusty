@@ -14,9 +14,7 @@ use futures::StreamExt;
 use serde::{de::DeserializeOwned, Deserialize};
 
 // Re-export core modules for TUI usage
-use krusty_core::{
-    acp, agent, ai, constants, extensions, paths, plan, plugins, process, storage, tools,
-};
+use krusty_core::{acp, agent, ai, extensions, paths, plan, plugins, process, storage, tools};
 
 mod serve;
 mod tui;

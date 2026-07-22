@@ -147,7 +147,8 @@ Don't create documentation files unless explicitly requested."#,
                     None
                 };
 
-                ToolResult::success_data_with(data, warnings, diff, None)
+                let changed = old_content.as_deref() != Some(params.content.as_str());
+                ToolResult::success_data_with(data, warnings, diff, None).with_changed(changed)
             }
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
         }

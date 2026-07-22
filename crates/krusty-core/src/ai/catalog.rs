@@ -257,9 +257,11 @@ fn merge_identity_catalogs(
             anyhow::bail!("Provider returned an empty model catalog");
         }
         for model in models {
-            if let Some(existing) = merged.iter_mut().find(|item| item.id == model.id) {
-                // Later, richer identities (ChatGPT OAuth for OpenAI) replace
-                // sparse API-key metadata without reordering.
+            let key = model.key();
+            if let Some(existing) = merged.iter_mut().find(|item| item.key() == key) {
+                // Refreshes may replace the same exact provider/auth/transport
+                // row without reordering. Rows that share a wire slug but use
+                // different credential surfaces remain independently routable.
                 *existing = model;
             } else {
                 merged.push(model);
@@ -338,15 +340,25 @@ mod tests {
     }
 
     #[test]
-    fn multi_identity_merge_fails_closed_and_prefers_later_metadata() {
+    fn multi_identity_merge_fails_closed_and_preserves_exact_auth_variants() {
         let mut api = ModelMetadata::new("shared", "API", ProviderId::OpenAI);
         api.auth_scope = Some(ModelAuthScope::ApiKey);
         let mut oauth = ModelMetadata::new("shared", "OAuth", ProviderId::OpenAI);
         oauth.auth_scope = Some(ModelAuthScope::OAuth);
         let merged = merge_identity_catalogs(vec![Ok(vec![api]), Ok(vec![oauth])]).unwrap();
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].display_name, "OAuth");
-        assert_eq!(merged[0].auth_scope, Some(ModelAuthScope::OAuth));
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].display_name, "API");
+        assert_eq!(merged[0].auth_scope, Some(ModelAuthScope::ApiKey));
+        assert_eq!(merged[1].display_name, "OAuth");
+        assert_eq!(merged[1].auth_scope, Some(ModelAuthScope::OAuth));
+
+        let mut refreshed = ModelMetadata::new("shared", "API refreshed", ProviderId::OpenAI);
+        refreshed.auth_scope = Some(ModelAuthScope::ApiKey);
+        let replaced =
+            merge_identity_catalogs(vec![Ok(vec![merged[0].clone()]), Ok(vec![refreshed])])
+                .unwrap();
+        assert_eq!(replaced.len(), 1);
+        assert_eq!(replaced[0].display_name, "API refreshed");
 
         let partial = merge_identity_catalogs(vec![
             Ok(vec![ModelMetadata::new(

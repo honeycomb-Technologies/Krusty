@@ -82,7 +82,7 @@ Sub-agents do not get to decide their own permissions. Every sub-agent inherits 
 
 - **Surface** -- What kind of delegation this is (explore, build, plan, verify). This determines which tools are available.
 - **Permission mode** -- Whether the sub-agent runs supervised or autonomous. Inherited from the parent session.
-- **Turn budget** -- Maximum number of conversation turns before the agent is forcefully stopped. This prevents runaway agents from consuming unbounded resources. The budget cascades: the parent's `subagent_max_turns` setting flows into each task's policy.
+- **Turn budget** -- An optional explicit ceiling on conversation turns. The budget cascades: a parent's `subagent_max_turns` setting flows into each task's policy, but an absent setting remains unlimited. Semantic progress guards, cancellation, permissions, and provider limits still govern the run.
 - **Read-only flag** -- Whether the agent can only read or can also write. Explore and plan agents are always read-only.
 - **Bash access** -- Whether shell commands are available. Only verify agents and testers get this by default.
 
@@ -96,7 +96,7 @@ Concurrent agents are bounded at multiple levels:
 
 **Staggered spawning.** Agents are not all launched simultaneously. There is a configurable delay between spawns (default 100ms, higher for rate-sensitive providers like MiniMax at 600ms). This prevents burst traffic that could trigger provider rate limits.
 
-**Turn budgets.** Every sub-agent has a maximum turn count. The default is 200 turns, but this is typically overridden by the parent context to something more appropriate for the task (20 turns for quick explorations, 30 for builds). When the budget is exhausted, the agent stops regardless of whether it considers itself "done."
+**Turn budgets.** Sub-agents are unlimited by default. A parent or task may set an explicit finite ceiling when it is a real resource policy; when that ceiling is exhausted, the agent stops with a typed budget-exhaustion reason. Loop detection is handled separately by the semantic progress ledger.
 
 **Cancellation tokens.** Every sub-agent receives a child cancellation token from its parent. If the parent is cancelled (Ctrl+C, Mako tick interrupted, team manager shutdown), cancellation propagates to all children immediately. Each turn of the agent loop checks the token before proceeding.
 

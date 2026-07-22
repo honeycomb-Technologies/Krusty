@@ -3,6 +3,7 @@ import { KrustyApiError } from '@krusty/api';
 import type {
   KrustyClient,
   ModelInfo,
+  ModelKey,
   SessionStateResponse as ApiSessionStateResponse,
   StreamCallbacks,
 } from '@krusty/api';
@@ -27,6 +28,7 @@ import {
   processStoredMessages,
   unsupportedImageMimeTypeMessage,
 } from './messages';
+import { modelKeysEqual } from './modelSelection';
 import {
   persistCurrentModel,
   persistSessionMode,
@@ -152,15 +154,18 @@ export function createSessionStore(
   const persistModel = (
     getState: () => SessionStoreState,
     model: string | null,
-  ) => persistSessionModel(client, sessionsStore, getState, model);
+    modelKey?: ModelKey | null,
+  ) => persistSessionModel(client, sessionsStore, getState, model, modelKey);
 
   const persistPermissionMode = (
     getState: () => SessionStoreState,
     permissionMode: PermissionMode,
   ) => persistSessionPermissionMode(client, sessionsStore, getState, permissionMode);
 
-  const persistCurrentSelectedModel = (model: string | null) =>
-    persistCurrentModel(client, model);
+  const persistCurrentSelectedModel = (
+    model: string | null,
+    modelKey?: ModelKey | null,
+  ) => persistCurrentModel(client, model, modelKey);
 
   const syncPresence = (
     sessionId: string,
@@ -210,6 +215,7 @@ export function createSessionStore(
     lastEventSequence: null,
     error: null,
     model: null,
+    modelKey: null,
     modelProvider: null,
     modelInfo: null,
   };
@@ -584,6 +590,8 @@ export function createSessionStore(
                 ? requestedTargetBranch
                 : undefined,
             model: effectiveSessionType === "mako" ? undefined : state.model ?? undefined,
+            model_key:
+              effectiveSessionType === "mako" ? undefined : state.modelKey ?? undefined,
             fast_mode: state.fastModeEnabled || undefined,
             thinking_enabled: thinkingLevelToApiValue(state.thinkingLevel),
             permission_mode:
@@ -644,15 +652,20 @@ export function createSessionStore(
         const permissionMode =
           serverState?.permission_mode ?? data.session.permission_mode ?? "autonomous";
         const previousModel = get().model;
+        const previousModelKey = get().modelKey;
         const sessionModel = data.session.model?.trim() || null;
+        const sessionModelKey = data.session.model_key ?? null;
         set((s) => {
+          const sameExactSelection = Boolean(sessionModelKey)
+            && modelKeysEqual(sessionModelKey, s.modelKey);
           const nextModelProvider = sessionModel
-            ? sessionModel === s.model
+            ? sessionModelKey?.provider
+              ?? (sessionModel === s.model
               ? s.modelProvider
-              : null
+              : null)
             : s.modelProvider;
           const nextModelInfo = sessionModel
-            ? sessionModel === s.model
+            ? sameExactSelection || (!sessionModelKey && sessionModel === s.model)
               ? s.modelInfo
               : null
             : s.modelInfo;
@@ -669,6 +682,7 @@ export function createSessionStore(
             mode,
             permissionMode,
             model: sessionModel ?? s.model,
+            modelKey: sessionModel ? sessionModelKey : s.modelKey,
             modelProvider: nextModelProvider,
             modelInfo: nextModelInfo,
             thinkingLevel: nextThinkingLevel,
@@ -720,8 +734,14 @@ export function createSessionStore(
 
         applySessionSnapshot(sessionId, serverState, isRefresh, set, get, planStore);
         get().startPresenceHeartbeat(sessionId);
-        if (sessionModel && sessionModel !== previousModel) {
-          void persistCurrentSelectedModel(sessionModel);
+        if (
+          sessionModel
+          && (
+            sessionModel !== previousModel
+            || !modelKeysEqual(sessionModelKey, previousModelKey)
+          )
+        ) {
+          void persistCurrentSelectedModel(sessionModel, sessionModelKey);
         }
       } catch (err) {
         if (err instanceof KrustyApiError && err.status === 404) {
@@ -734,6 +754,7 @@ export function createSessionStore(
             ...initialState,
             permissionMode: current.permissionMode,
             model: current.model,
+            modelKey: current.modelKey,
             modelProvider: current.modelProvider,
             modelInfo: current.modelInfo,
             thinkingLevel: current.thinkingLevel,
@@ -761,6 +782,7 @@ export function createSessionStore(
         ...initialState,
         permissionMode: current.permissionMode,
         model: current.model,
+        modelKey: current.modelKey,
         modelProvider: current.modelProvider,
         modelInfo: current.modelInfo,
         thinkingLevel: current.thinkingLevel,
@@ -790,6 +812,7 @@ export function createSessionStore(
         ...initialState,
         permissionMode: nextPermissionMode,
         model: current.model,
+        modelKey: current.modelKey,
         modelProvider: current.modelProvider,
         modelInfo: current.modelInfo,
         thinkingLevel: current.thinkingLevel,
@@ -835,6 +858,7 @@ export function createSessionStore(
       model: string | null,
       provider?: string | null,
       modelInfo?: ModelInfo | null,
+      modelKey?: ModelKey | null,
     ) {
       const current = get();
       const nextModelInfo = model
@@ -844,11 +868,19 @@ export function createSessionStore(
             ? current.modelInfo
             : null
         : null;
+      const nextModelKey = model
+        ? modelKey !== undefined
+          ? modelKey
+          : nextModelInfo?.key
+            ?? (model === current.model ? current.modelKey : null)
+        : null;
       const nextProvider = nextModelInfo?.provider
+        ?? nextModelKey?.provider
         ?? provider
         ?? (model === current.model ? current.modelProvider : null);
       if (
         current.model === model
+        && modelKeysEqual(current.modelKey, nextModelKey)
         && current.modelProvider === nextProvider
         && current.modelInfo === nextModelInfo
       ) {
@@ -860,6 +892,7 @@ export function createSessionStore(
         const thinkingLevel = normalizeThinkingLevel(s.thinkingLevel, capabilityInput);
         return {
           model,
+          modelKey: nextModelKey,
           modelProvider: nextProvider,
           modelInfo: nextModelInfo,
           thinkingLevel,
@@ -869,8 +902,8 @@ export function createSessionStore(
             : false,
         };
       });
-      void persistCurrentSelectedModel(model);
-      void persistModel(get, model);
+      void persistCurrentSelectedModel(model, nextModelKey);
+      void persistModel(get, model, nextModelKey);
     },
 
     // -- setThinkingLevel ---------------------------------------------------

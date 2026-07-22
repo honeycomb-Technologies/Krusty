@@ -7,10 +7,8 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 
-use krusty_core::agent::{
-    AgenticOrchestrator, LoopEvent, OrchestratorConfig, OrchestratorServices,
-};
-use krusty_core::ai::model_profile::ModelProfile;
+use krusty_core::agent::{LoopEvent, OrchestratorServices, RunProvenance, RunSpecBuilder};
+use krusty_core::ai::transport_policy::StreamTransportPolicy;
 use krusty_core::storage::{SessionType, WorkMode};
 use krusty_core::tools::registry::PermissionMode;
 
@@ -34,6 +32,9 @@ fn loop_event_requires_delivery(event: &LoopEvent) -> bool {
             | LoopEvent::AgentSleeping { .. }
             | LoopEvent::UserMessage { .. }
             | LoopEvent::ClassifierDecision { .. }
+            | LoopEvent::RunBudgetResolved { .. }
+            | LoopEvent::ProviderRequestPrepared { .. }
+            | LoopEvent::ProgressGuard { .. }
             | LoopEvent::Usage { .. }
             | LoopEvent::Finished { .. }
             | LoopEvent::Error { .. }
@@ -123,6 +124,22 @@ pub(super) async fn start_orchestrator_sse(
     let (sse_tx, sse_rx) = mpsc::channel::<Result<Event, Infallible>>(SSE_CHANNEL_BUFFER);
     let stream_idle_timeout = model_stream_idle_timeout(&ctx.ai_client);
 
+    let run_spec = RunSpecBuilder::new(
+        RunProvenance::Server,
+        ctx.session_id.clone(),
+        ctx.working_dir,
+        ctx.session_type,
+    )
+    .project_dir(ctx.project_dir)
+    .mako_crew_slug(ctx.mako_crew_slug.clone())
+    .permission_mode(permission_mode)
+    .user_id(ctx.user_id.clone())
+    .initial_work_mode(work_mode)
+    .stream_idle_timeout(stream_idle_timeout)
+    .generate_title(generate_title)
+    .call_options(ctx.options)
+    .build(ctx.ai_client.as_ref())
+    .map_err(|error| AppError::BadRequest(error.to_string()))?;
     let services = OrchestratorServices {
         ai_client: ctx.ai_client,
         tool_registry: Arc::clone(&state.tool_registry),
@@ -130,23 +147,8 @@ pub(super) async fn start_orchestrator_sse(
         db_path: (*state.db_path).clone(),
         skills_manager: Arc::clone(&state.skills_manager),
     };
-    let config = OrchestratorConfig {
-        session_id: ctx.session_id.clone(),
-        working_dir: ctx.working_dir,
-        project_dir: ctx.project_dir,
-        mako_crew_slug: ctx.mako_crew_slug.clone(),
-        session_type: ctx.session_type,
-        permission_mode,
-        user_id: ctx.user_id.clone(),
-        initial_work_mode: work_mode,
-        stream_idle_timeout,
-        generate_title,
-        max_iterations: krusty_core::agent::AgentConfig::default().primary_max_turns(),
-        ..Default::default()
-    };
 
-    let orchestrator = AgenticOrchestrator::new(services, config);
-    let (event_rx, input_tx) = orchestrator.run(ctx.conversation, ctx.options);
+    let (event_rx, input_tx) = run_spec.start(services, ctx.conversation);
 
     let session_id = ctx.session_id;
     {
@@ -184,12 +186,8 @@ pub(super) async fn start_orchestrator_sse(
 }
 
 fn model_stream_idle_timeout(ai_client: &Arc<krusty_core::ai::client::AiClient>) -> Duration {
-    let profile = ModelProfile::resolve(
-        ai_client.provider_id(),
-        ai_client.config().api_format,
-        &ai_client.config().model,
-    );
-    Duration::from_secs(profile.stream_idle_timeout_secs)
+    StreamTransportPolicy::resolve(ai_client.provider_id(), ai_client.config().api_format)
+        .idle_timeout
 }
 
 pub(super) async fn run_orchestrator_event_bridge(

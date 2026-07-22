@@ -45,7 +45,8 @@ use krusty_core::tools::{
 };
 
 use self::ai_bootstrap::{
-    create_ai_client, create_ai_client_for_model, initialize_models, spawn_model_catalog_refresh,
+    create_ai_client, create_ai_client_for_key, create_ai_client_for_model, initialize_models,
+    spawn_model_catalog_refresh,
 };
 
 type SessionGuard = Arc<Mutex<()>>;
@@ -148,6 +149,9 @@ pub struct ServerConfig {
     pub port: u16,
     /// Working directory for file/tools APIs.
     pub working_dir: PathBuf,
+    /// Optional explicit database path for isolated previews and evaluations.
+    /// Production callers normally leave this unset and use `~/.krusty/krusty.db`.
+    pub database_path: Option<PathBuf>,
 }
 
 impl Default for ServerConfig {
@@ -155,6 +159,7 @@ impl Default for ServerConfig {
         Self {
             port: 3000,
             working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            database_path: None,
         }
     }
 }
@@ -244,6 +249,20 @@ impl AppState {
         Some(client)
     }
 
+    /// Resolve a fresh AI client from an exact provider-aware model identity.
+    pub async fn resolve_ai_client_for_key_for_user(
+        &self,
+        key: &krusty_core::ai::models::ModelKey,
+        _user_id: Option<&str>,
+    ) -> Option<Arc<AiClient>> {
+        let credentials = self.credential_store.read().await.clone();
+        let client = create_ai_client_for_key(&credentials, &self.model_registry, key)
+            .await
+            .map(Arc::new)?;
+        self.ensure_agent_tool_registered(client.clone()).await;
+        Some(client)
+    }
+
     async fn ensure_agent_tool_registered(&self, client: Arc<AiClient>) {
         if self.tool_registry.get("agent").await.is_some() {
             return;
@@ -271,6 +290,7 @@ fn register_autonomous_classifier_hook(
 pub(crate) enum MakoRuntimeMode {
     DaemonProxy,
     ExecutionHost,
+    IsolatedEvaluation,
 }
 
 async fn initialize_mcp_manager(
@@ -280,7 +300,10 @@ async fn initialize_mcp_manager(
     package_configs: Vec<McpPackageConfig>,
 ) -> Arc<McpManager> {
     let manager = Arc::new(McpManager::new(working_dir.to_path_buf()));
-    if matches!(mode, MakoRuntimeMode::ExecutionHost) {
+    if matches!(
+        mode,
+        MakoRuntimeMode::ExecutionHost | MakoRuntimeMode::IsolatedEvaluation
+    ) {
         // The daemon can execute runs for many frozen project roots. Loading
         // `.mcp.json` from its launch directory would expose the wrong remote
         // tools to every project, while HTTP-process connect/trust state cannot
@@ -310,7 +333,7 @@ fn initialize_remote_access(
 ) -> anyhow::Result<remote_access::RemoteAccessConfig> {
     match mode {
         MakoRuntimeMode::DaemonProxy => remote_access::RemoteAccessConfig::load_or_create(db_path),
-        MakoRuntimeMode::ExecutionHost => {
+        MakoRuntimeMode::ExecutionHost | MakoRuntimeMode::IsolatedEvaluation => {
             Ok(remote_access::RemoteAccessConfig::disabled_ephemeral())
         }
     }
@@ -324,6 +347,7 @@ pub(crate) async fn build_app_state(
     mako_mode: MakoRuntimeMode,
     database_path: Option<PathBuf>,
 ) -> anyhow::Result<AppState> {
+    let isolated_evaluation = matches!(mako_mode, MakoRuntimeMode::IsolatedEvaluation);
     let db_path = database_path.unwrap_or_else(|| paths::config_dir().join("krusty.db"));
     let _db = Database::new(&db_path)?;
     if matches!(mako_mode, MakoRuntimeMode::DaemonProxy) {
@@ -342,20 +366,25 @@ pub(crate) async fn build_app_state(
     let cancellation = AgentCancellation::new();
 
     let plugin_manager = routes::plugins::plugin_manager();
-    let installed_plugins = match plugin_manager.ensure_layout().await {
-        Ok(()) => match plugin_manager.list_installed_plugins().await {
-            Ok(plugins) => plugins
-                .into_iter()
-                .filter(|plugin| plugin.enabled)
-                .collect::<Vec<_>>(),
+    let installed_plugins = if isolated_evaluation {
+        tracing::info!("Skipping global plugin contributions for isolated evaluation");
+        Vec::new()
+    } else {
+        match plugin_manager.ensure_layout().await {
+            Ok(()) => match plugin_manager.list_installed_plugins().await {
+                Ok(plugins) => plugins
+                    .into_iter()
+                    .filter(|plugin| plugin.enabled)
+                    .collect::<Vec<_>>(),
+                Err(error) => {
+                    tracing::warn!(error = %error, "Failed to resolve installed plugin contributions");
+                    Vec::new()
+                }
+            },
             Err(error) => {
-                tracing::warn!(error = %error, "Failed to resolve installed plugin contributions");
+                tracing::warn!(error = %error, "Failed to initialize plugin layout");
                 Vec::new()
             }
-        },
-        Err(error) => {
-            tracing::warn!(error = %error, "Failed to initialize plugin layout");
-            Vec::new()
         }
     };
     let mut executable_plugin_ids = HashSet::new();
@@ -499,7 +528,9 @@ pub(crate) async fn build_app_state(
     let tool_count = tool_registry.get_ai_tools_all().await.len();
     tracing::info!("Tool registry initialized with {} tools", tool_count);
 
-    let push_service =
+    let push_service = if isolated_evaluation {
+        None
+    } else {
         match push::PushService::init(&paths::vapid_key_path(), Arc::new(db_path.clone())) {
             Ok(svc) => {
                 tracing::info!("Web Push service initialized");
@@ -509,8 +540,13 @@ pub(crate) async fn build_app_state(
                 tracing::warn!("Push notifications unavailable: {}", e);
                 None
             }
-        };
-    let apns_service = apns::ApnsService::from_env(Arc::new(db_path.clone())).map(Arc::new);
+        }
+    };
+    let apns_service = if isolated_evaluation {
+        None
+    } else {
+        apns::ApnsService::from_env(Arc::new(db_path.clone())).map(Arc::new)
+    };
     if apns_service.is_some() {
         tracing::info!("APNs service initialized");
     }
@@ -519,10 +555,16 @@ pub(crate) async fn build_app_state(
         MakoRuntimeMode::DaemonProxy => mako_runtime::MakoRuntimeManager::daemon_from_discovered()
             .await
             .context("connecting krusty-server to the Mako daemon")?,
-        MakoRuntimeMode::ExecutionHost => mako_runtime::MakoRuntimeManager::execution_host(),
+        MakoRuntimeMode::ExecutionHost | MakoRuntimeMode::IsolatedEvaluation => {
+            mako_runtime::MakoRuntimeManager::execution_host()
+        }
     };
 
-    let mut skills = SkillsManager::with_defaults(&config.working_dir);
+    let mut skills = if isolated_evaluation {
+        SkillsManager::new(config.working_dir.join(".krusty/evaluation-skills"), None)
+    } else {
+        SkillsManager::with_defaults(&config.working_dir)
+    };
     for plugin in &installed_plugins {
         for path in &plugin.skill_paths {
             skills.register_package_root(&plugin.id, path.clone());
@@ -574,22 +616,39 @@ pub(crate) async fn build_app_state(
 
 /// Build the Axum router with all routes and embedded web assets.
 pub async fn build_router(config: &ServerConfig) -> anyhow::Result<(Router, AppState)> {
+    build_router_with_runtime_mode(config, MakoRuntimeMode::DaemonProxy).await
+}
+
+async fn build_router_with_runtime_mode(
+    config: &ServerConfig,
+    mako_mode: MakoRuntimeMode,
+) -> anyhow::Result<(Router, AppState)> {
+    let isolated_evaluation = matches!(mako_mode, MakoRuntimeMode::IsolatedEvaluation);
     let http_policy = ServerHttpPolicy::default();
-    let state = build_app_state(config, MakoRuntimeMode::DaemonProxy, None).await?;
+    let state = build_app_state(config, mako_mode, config.database_path.clone()).await?;
 
     let cors = http_policy.cors_layer();
 
-    let protected_routes = Router::new()
-        .route("/ws/terminal", get(ws::terminal::handler))
-        .nest("/api", routes::api_router())
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth::auth_middleware,
-        ));
+    let protected_routes = if isolated_evaluation {
+        Router::new().nest("/api", routes::evaluation_api_router())
+    } else {
+        Router::new()
+            .route("/ws/terminal", get(ws::terminal::handler))
+            .nest("/api", routes::api_router())
+    }
+    .layer(middleware::from_fn_with_state(
+        state.clone(),
+        auth::auth_middleware,
+    ));
 
-    let app = Router::new()
-        .route("/health", get(health))
-        .merge(routes::oauth::callback_router())
+    let public_routes = Router::new().route("/health", get(health));
+    let public_routes = if isolated_evaluation {
+        public_routes
+    } else {
+        public_routes.merge(routes::oauth::callback_router())
+    };
+
+    let app = public_routes
         .merge(protected_routes)
         .fallback(serve_web_app)
         .layer(cors)
@@ -677,8 +736,28 @@ pub async fn start_server_with_listener(
     config: ServerConfig,
     listener: tokio::net::TcpListener,
 ) -> anyhow::Result<()> {
+    start_server_with_listener_mode(config, listener, MakoRuntimeMode::DaemonProxy).await
+}
+
+/// Start a server that is isolated from the shared Mako control plane.
+///
+/// This is intended for disposable candidate evaluation. It keeps the normal
+/// HTTP agent runtime and credential catalog but disables Mako daemon
+/// discovery, persistent remote-access state, and project MCP auto-connect.
+pub async fn start_isolated_server_with_listener(
+    config: ServerConfig,
+    listener: tokio::net::TcpListener,
+) -> anyhow::Result<()> {
+    start_server_with_listener_mode(config, listener, MakoRuntimeMode::IsolatedEvaluation).await
+}
+
+async fn start_server_with_listener_mode(
+    config: ServerConfig,
+    listener: tokio::net::TcpListener,
+    mako_mode: MakoRuntimeMode,
+) -> anyhow::Result<()> {
     let local_addr = listener.local_addr()?;
-    let (app, _state) = build_router(&config).await?;
+    let (app, _state) = build_router_with_runtime_mode(&config, mako_mode).await?;
 
     tracing::info!(
         bind_address = %local_addr,
