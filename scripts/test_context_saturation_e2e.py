@@ -99,6 +99,29 @@ class ContextSaturationUnitTests(unittest.TestCase):
         effective = MODULE.require_terra_high(trace, terra)
         self.assertEqual(effective["reasoning_effort"], "High")
 
+    def test_recovered_tool_error_requires_later_success(self):
+        events = [
+            {"type": "tool_result", "id": "bad", "is_error": True},
+            {"type": "tool_result", "id": "good", "is_error": False},
+            {"type": "text_delta", "delta": "recovered"},
+            {
+                "type": "usage",
+                "prompt_tokens": 1,
+                "input_tokens": 1,
+                "completion_tokens": 1,
+                "reasoning_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "total_tokens": 2,
+            },
+            {"type": "finish", "stop_reason": "completed"},
+        ]
+        text, failures = MODULE.completed_text_with_recovered_tool_errors(
+            events, "recovery"
+        )
+        self.assertEqual(text, "recovered")
+        self.assertEqual(failures, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

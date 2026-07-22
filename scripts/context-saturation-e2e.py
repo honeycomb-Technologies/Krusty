@@ -235,6 +235,35 @@ def completed_text(events: list[dict[str, Any]], label: str) -> str:
     return HARNESS.validate_stream(events, label, expect_tools=None)
 
 
+def completed_text_with_recovered_tool_errors(
+    events: list[dict[str, Any]], label: str
+) -> tuple[str, int]:
+    """Accept a model-corrected tool failure without hiding product errors."""
+    failed_indexes = [
+        index
+        for index, event in enumerate(events)
+        if event.get("type") == "tool_result" and event.get("is_error") is True
+    ]
+    filtered = [
+        event
+        for event in events
+        if not (event.get("type") == "tool_result" and event.get("is_error") is True)
+    ]
+    text = HARNESS.validate_stream(filtered, label, expect_tools=None)
+    if failed_indexes:
+        last_failure = failed_indexes[-1]
+        HARNESS.require(
+            any(
+                index > last_failure
+                and event.get("type") == "tool_result"
+                and event.get("is_error") is not True
+                for index, event in enumerate(events)
+            ),
+            f"{label}: tool failure was not followed by successful tool evidence",
+        )
+    return text, len(failed_indexes)
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     base_url = HARNESS.validate_candidate_base_url(args.base_url)
     HARNESS.require(not args.root.exists(), f"evaluation root already exists: {args.root}")
@@ -313,7 +342,7 @@ Create meaningful tests in tests/test_context_atlas.py, create README.md with ex
         receipt = f"SATURATION-BATCH-{batch_number:03d}-INDEXED"
         pressure_prompt = f"""Continue the same Context Atlas project. The deterministic corpus shard below is also staged at `{relative}`.
 
-Run ingest for that exact path and atlas-index.json, run verify, run the unit tests, and repair any real defect. Create `docs/checkpoints/batch-{batch_number:03d}.md` with batch {batch_number}, records {batch['records']}, SHA-256 {batch['sha256']}, first record {batch['first_record_id']}, and last record {batch['last_record_id']}. Do not copy the corpus into source or documentation. Finish with exact receipt `{receipt}`.
+Run `python3 context_atlas.py ingest --index atlas-index.json {relative}`, then run verify and the unit tests, and repair any real defect. Create `docs/checkpoints/batch-{batch_number:03d}.md` with batch {batch_number}, records {batch['records']}, SHA-256 {batch['sha256']}, first record {batch['first_record_id']}, and last record {batch['last_record_id']}. Do not copy the corpus into source or documentation. Finish with exact receipt `{receipt}`.
 
 This structured fixture is included to exercise real provider context rather than padding. Exact SHA-256: {batch['sha256']}; exact records: {batch['records']}.
 
@@ -321,7 +350,9 @@ This structured fixture is included to exercise real provider context rather tha
 {batch['text']}</context-atlas-corpus>
 """
         events = api.chat(chat_payload(grok_session, pressure_prompt, None, thinking="off"))
-        text = completed_text(events, f"Grok saturation batch {batch_number}")
+        text, recovered_tool_errors = completed_text_with_recovered_tool_errors(
+            events, f"Grok saturation batch {batch_number}"
+        )
         HARNESS.require(receipt in text, f"Grok response omitted {receipt}")
         trace, _ = HARNESS.wait_for_completed_trace_run(
             api,
@@ -358,6 +389,7 @@ This structured fixture is included to exercise real provider context rather tha
                 "usage": usage_summary(events),
                 "compaction_in_sse": len(streamed_compactions),
                 "compaction_in_trace": len(persistent_compactions),
+                "recovered_tool_errors": recovered_tool_errors,
                 "indexed_batches": len(index["batches"]),
                 "tests": run_project_tests(project_dir),
             }
