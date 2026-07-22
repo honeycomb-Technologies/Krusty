@@ -58,9 +58,10 @@ pub(crate) fn classify_bash_command(command: &str) -> BashCommandClassification 
     let file_operation = segments
         .iter()
         .find_map(|segment| classify_file_operation_segment(segment));
-    let modifies_filesystem_or_process = segments
-        .iter()
-        .any(|segment| is_mutating_shell_segment(segment));
+    // Treat an unproven shell surface as effectful. A mutation blacklist
+    // cannot safely classify interpreters, scripts, uncommon tools, shell
+    // expansions, or environment-driven commands as observations.
+    let modifies_filesystem_or_process = !is_proven_read_only_bash_command(command);
 
     BashCommandClassification {
         safety_violation,
@@ -173,21 +174,39 @@ fn normalize_progress_token(token: &str) -> String {
     }
 }
 
-/// Plan-mode Bash is deny-by-default. Static mutation blacklists cannot prove
-/// that interpreters, downloader flags, shell expansions, or uncommon tools
-/// are read-only, so only a small auditable command surface is admitted.
-pub(crate) fn is_write_capable_in_plan_mode(command: &str) -> bool {
-    if command.contains("$(")
+/// Free-form shell is never a Plan-mode capability. Even apparently
+/// observational programs can write or execute through version-specific
+/// flags, repository configuration, pagers/preprocessors, signals, PATH
+/// resolution, or metadata refreshes. Plan mode already advertises native
+/// Read/Glob/Grep and read-only delegated tools; shell returns only after the
+/// user explicitly enters Build mode. Future Git/system inspection should be
+/// exposed as typed argv APIs rather than another shell allowlist.
+pub(crate) fn is_write_capable_in_plan_mode(_command: &str) -> bool {
+    true
+}
+
+/// Return true only for the small audited shell surface that is proven
+/// observational for progress accounting. Plan-mode governance is stricter
+/// and denies free-form shell entirely.
+pub(crate) fn is_proven_read_only_bash_command(command: &str) -> bool {
+    // The lightweight segment parser intentionally does not parse heredoc
+    // delimiters or newline command boundaries. Multiline shell is therefore
+    // effectful by default; otherwise `echo ok\ntouch out` would be mistaken
+    // for one harmless `echo` invocation.
+    if command.contains('\n')
+        || command.contains('\r')
+        || command.contains("$(")
         || command.contains('`')
         || command.contains("<(")
         || command.contains(">(")
+        || command.contains('$')
     {
-        return true;
+        return false;
     }
 
     let segments = split_shell_segments(command);
-    segments.is_empty()
-        || !segments
+    !segments.is_empty()
+        && segments
             .iter()
             .all(|segment| is_plan_mode_read_only_segment(segment))
 }
@@ -200,7 +219,11 @@ fn is_plan_mode_read_only_segment(segment: &str) -> bool {
     let raw_tokens = tokenize_shell(segment);
     if raw_tokens
         .first()
-        .is_some_and(|token| is_env_assignment(token) || command_basename(token) == "env")
+        .is_some_and(|token| is_env_assignment(token))
+        || raw_tokens
+            .iter()
+            .take(4)
+            .any(|token| command_basename(token) == "env")
     {
         return false;
     }
@@ -211,21 +234,47 @@ fn is_plan_mode_read_only_segment(segment: &str) -> bool {
     if executable.contains('/') || executable.contains('\\') {
         return false;
     }
+    if executable != &executable.to_ascii_lowercase() {
+        return false;
+    }
     let command = command_basename(executable);
+
+    if command == "cd" {
+        return tokens.len() == 2 && tokens.get(1).is_some_and(|path| path == ".");
+    }
 
     match command.as_str() {
         "git" => is_plan_mode_read_only_git(tokens),
-        "ls" | "tree" | "cat" | "head" | "tail" | "wc" | "stat" | "file" | "rg" | "grep"
-        | "diff" | "cmp" | "sort" | "uniq" | "cut" | "tr" | "column" | "jq" | "basename"
-        | "dirname" | "realpath" | "readlink" | "pwd" | "du" | "df" | "ps" | "pgrep" | "ss"
-        | "netstat" | "lsof" | "which" | "whereis" | "type" | "printenv" | "whoami" | "id"
-        | "uname" | "date" | "uptime" | "hostname" | "free" | "md5sum" | "sha256sum" | "shasum"
-        | "echo" | "printf" | "true" | "false" | "test" | "[" => true,
+        "tree" => is_plan_mode_read_only_tree(tokens),
+        "sort" => is_plan_mode_read_only_sort(tokens),
+        "rg" => is_plan_mode_read_only_rg(tokens),
+        "date" => is_plan_mode_read_only_date(tokens),
+        "hostname" => tokens.len() == 1,
+        "ss" => is_plan_mode_read_only_ss(tokens),
+        "printf" => is_plan_mode_read_only_printf(tokens),
+        "ls" | "cat" | "head" | "tail" | "wc" | "stat" | "grep" | "diff" | "cmp" | "cut" | "tr"
+        | "column" | "jq" | "basename" | "dirname" | "realpath" | "readlink" | "pwd" | "du"
+        | "df" | "ps" | "pgrep" | "netstat" | "lsof" | "which" | "whereis" | "type"
+        | "printenv" | "whoami" | "id" | "uname" | "uptime" | "free" | "md5sum" | "sha256sum"
+        | "shasum" | "echo" | "true" | "false" | "test" | "[" => true,
         _ => false,
     }
 }
 
 fn is_plan_mode_read_only_git(tokens: &[String]) -> bool {
+    // Output redirection implemented by Git itself bypasses the shell-level
+    // redirect check. External diff hooks are executable code, not an
+    // observational surface, even for otherwise read-only subcommands.
+    if tokens.iter().skip(2).any(|token| {
+        matches!(
+            token.as_str(),
+            "--output" | "--ext-diff" | "--textconv" | "--open-files-in-pager" | "--show-signature"
+        ) || token.starts_with("--output=")
+            || token.starts_with("--open-files-in-pager=")
+    }) {
+        return false;
+    }
+
     match tokens.get(1).map(String::as_str) {
         Some(
             "status" | "diff" | "show" | "log" | "grep" | "rev-parse" | "ls-files" | "describe"
@@ -234,6 +283,72 @@ fn is_plan_mode_read_only_git(tokens: &[String]) -> bool {
         Some("branch") => tokens.len() == 2 || tokens[2..] == ["--show-current"],
         _ => false,
     }
+}
+
+fn is_plan_mode_read_only_rg(tokens: &[String]) -> bool {
+    !tokens.iter().skip(1).any(|token| {
+        matches!(token.as_str(), "--pre" | "--hostname-bin")
+            || token.starts_with("--pre=")
+            || token.starts_with("--hostname-bin=")
+    })
+}
+
+fn is_plan_mode_read_only_tree(tokens: &[String]) -> bool {
+    !tokens.iter().skip(1).any(|token| {
+        token == "-o"
+            || token.starts_with("-o")
+            || token == "--output"
+            || token.starts_with("--output=")
+    })
+}
+
+fn is_plan_mode_read_only_sort(tokens: &[String]) -> bool {
+    !tokens.iter().skip(1).any(|token| {
+        token == "-o"
+            || token.starts_with("-o")
+            || token == "--output"
+            || token.starts_with("--output=")
+            || token == "-T"
+            || token.starts_with("-T")
+            || token == "--temporary-directory"
+            || token.starts_with("--temporary-directory=")
+            || token == "--compress-program"
+            || token.starts_with("--compress-program=")
+    })
+}
+
+fn is_plan_mode_read_only_date(tokens: &[String]) -> bool {
+    // BSD `date` accepts a bare numeric operand to set the clock; GNU `date`
+    // exposes the same capability through -s/--set. Keep the allowlist small
+    // and admit only display flags and +FORMAT operands.
+    tokens.iter().skip(1).all(|token| {
+        token.starts_with('+')
+            || matches!(
+                token.as_str(),
+                "-u" | "--utc" | "-R" | "--rfc-email" | "--resolution" | "--help" | "--version"
+            )
+            || token == "-I"
+            || token.starts_with("-I")
+            || token == "--iso-8601"
+            || token.starts_with("--iso-8601=")
+            || token.starts_with("--rfc-3339=")
+    })
+}
+
+fn is_plan_mode_read_only_ss(tokens: &[String]) -> bool {
+    !tokens.iter().skip(1).any(|token| {
+        token == "--kill"
+            || (token.starts_with('-')
+                && !token.starts_with("--")
+                && token.chars().skip(1).any(|option| option == 'K'))
+    })
+}
+
+fn is_plan_mode_read_only_printf(tokens: &[String]) -> bool {
+    !tokens
+        .iter()
+        .skip(1)
+        .any(|token| token.starts_with("-v") || token.starts_with("--variable="))
 }
 
 fn strip_invocation_wrappers(mut tokens: &[String]) -> &[String] {
@@ -772,67 +887,6 @@ fn dangerous_command_reason(segment: &str) -> Option<&'static str> {
     None
 }
 
-fn is_mutating_git_subcommand(subcommand: Option<&str>) -> bool {
-    !matches!(
-        subcommand,
-        Some("status")
-            | Some("diff")
-            | Some("show")
-            | Some("log")
-            | Some("grep")
-            | Some("rev-parse")
-            | Some("ls-files")
-    )
-}
-
-fn is_mutating_shell_segment(segment: &str) -> bool {
-    if has_unquoted_redirect(segment) {
-        return true;
-    }
-
-    let tokens = tokenize_shell(segment);
-    let tokens = strip_invocation_wrappers(&tokens);
-    let Some(command) = tokens.first().map(|token| command_basename(token)) else {
-        return false;
-    };
-
-    if matches!(
-        command.as_str(),
-        "rm" | "rmdir"
-            | "mkdir"
-            | "mv"
-            | "cp"
-            | "touch"
-            | "chmod"
-            | "chown"
-            | "ln"
-            | "tee"
-            | "dd"
-            | "mkfs"
-            | "truncate"
-            | "install"
-            | "tar"
-            | "unzip"
-            | "bun"
-            | "npm"
-            | "yarn"
-            | "pip"
-            | "cargo"
-            | "make"
-            | "cmake"
-            | "ninja"
-    ) {
-        return true;
-    }
-
-    if command == "git" {
-        let subcommand = tokens.get(1).map(|s| s.to_ascii_lowercase());
-        return is_mutating_git_subcommand(subcommand.as_deref());
-    }
-
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -975,6 +1029,42 @@ mod tests {
     }
 
     #[test]
+    fn observation_signature_preserves_ls_resource_operand() {
+        assert_ne!(
+            semantic_bash_signature("ls -la src"),
+            semantic_bash_signature("ls -la other")
+        );
+    }
+
+    #[test]
+    fn unknown_and_interpreter_shell_surfaces_are_not_treated_as_observations() {
+        for command in [
+            "python3 -c 'open(\"out\", \"w\").write(\"x\")'",
+            "node -e 'require(\"fs\").writeFileSync(\"out\", \"x\")'",
+            "sh -c 'touch out'",
+            "custom-build-driver --output out",
+            "uniq input.txt output.txt",
+            "file --compile -m payload.magic",
+            "sort ${KRUSTY_UNSET:--o} output.txt input.txt",
+            "command env PATH=./attacker-bin ls",
+            "ECHO harmless-looking",
+            "echo \"$RANDOM\"",
+        ] {
+            assert!(
+                classify_bash_command(command).modifies_filesystem_or_process,
+                "unproven command must be effectful: {command}"
+            );
+        }
+
+        for command in ["pwd", "git status --short", "cd . && rg needle src"] {
+            assert!(
+                !classify_bash_command(command).modifies_filesystem_or_process,
+                "audited command should remain observational: {command}"
+            );
+        }
+    }
+
+    #[test]
     fn treats_general_purpose_interpreters_as_write_capable() {
         for command in [
             "python3 - <<'PY'\nfrom pathlib import Path\nPath('server.py').write_text('ok')\nPY",
@@ -989,8 +1079,8 @@ mod tests {
         }
 
         assert!(is_write_capable_in_plan_mode("mkdir generated"));
-        assert!(!is_write_capable_in_plan_mode("git status --short"));
-        assert!(!is_write_capable_in_plan_mode("cat Cargo.toml"));
+        assert!(is_write_capable_in_plan_mode("git status --short"));
+        assert!(is_write_capable_in_plan_mode("cat Cargo.toml"));
     }
 
     #[test]
@@ -1008,6 +1098,8 @@ mod tests {
             "PAGER='touch generated.txt' git log",
             "git fetch origin",
             "./git status",
+            "echo ok\ntouch generated.txt",
+            "printf '%s' ok\nrm -f victim.txt",
         ] {
             assert!(
                 is_write_capable_in_plan_mode(command),
@@ -1017,7 +1109,61 @@ mod tests {
     }
 
     #[test]
-    fn plan_mode_allows_only_the_audited_read_only_shell_surface() {
+    fn plan_mode_rejects_write_capable_modes_of_observational_commands() {
+        for command in [
+            "sort -o out.txt input.txt",
+            "sort --output=out.txt input.txt",
+            "tree -o tree.txt .",
+            "tree --output=tree.txt .",
+            "git diff --output=patch.diff",
+            "git diff --output patch.diff",
+            "git diff --ext-diff",
+            "git grep --open-files-in-pager needle",
+            "git grep --open-files-in-pager='sh -c touch-out' needle",
+            "git show --show-signature HEAD",
+            "rg --pre 'sh -c touch-out' needle .",
+            "rg --pre='sh -c touch-out' needle .",
+            "rg --hostname-bin 'sh -c touch-out' needle .",
+            "date --set='2026-07-22'",
+            "date -s 2026-07-22",
+            "date 072212002026",
+            "hostname new-name",
+            "ss -K dst 127.0.0.1",
+            "printf -v value '%s' payload",
+        ] {
+            assert!(
+                is_write_capable_in_plan_mode(command),
+                "write-capable command mode must not be Plan-safe: {command}"
+            );
+            assert!(
+                classify_bash_command(command).modifies_filesystem_or_process,
+                "write-capable command mode must be effectful: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_mode_blocks_even_observational_shell_forms() {
+        for command in [
+            "sort input.txt",
+            "tree .",
+            "git diff --stat",
+            "git grep needle",
+            "rg needle crates",
+            "date -u +%F",
+            "hostname",
+            "ss -ltnp",
+            "printf '%s' payload",
+        ] {
+            assert!(
+                is_write_capable_in_plan_mode(command),
+                "free-form shell must not become Plan-safe: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_mode_blocks_the_former_read_only_shell_allowlist() {
         for command in [
             "git status --short",
             "git diff --stat",
@@ -1028,8 +1174,8 @@ mod tests {
             "sha256sum target/release/krusty",
         ] {
             assert!(
-                !is_write_capable_in_plan_mode(command),
-                "expected audited Plan-mode command to be allowed: {command}"
+                is_write_capable_in_plan_mode(command),
+                "free-form shell must be blocked in Plan mode: {command}"
             );
         }
     }

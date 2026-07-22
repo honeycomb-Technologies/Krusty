@@ -29,8 +29,8 @@ fn production_unchanged_result(id: &str) -> Content {
         tool_use_id: id.to_string(),
         output: serde_json::json!({
             "ok": true,
+            "changed": false,
             "data": {"output": "already up to date"},
-            "metadata": {"changed": false}
         }),
         is_error: Some(false),
     }

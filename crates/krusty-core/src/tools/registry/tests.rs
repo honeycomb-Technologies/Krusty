@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -317,13 +318,7 @@ fn request_policy_filters_plan_writes_disabled_tools_and_unapprovable_mutations(
         ai_tool("set_work_mode"),
         ai_tool("tool_search"),
     ];
-    let plan_policy = ToolRequestPolicy::code(
-        PermissionMode::Supervised,
-        true,
-        false,
-        false,
-        &["bash".to_string()],
-    );
+    let plan_policy = ToolRequestPolicy::code(PermissionMode::Supervised, true, false, false, &[]);
     let names = plan_policy
         .filter(all)
         .into_iter()
@@ -340,7 +335,7 @@ fn delegated_explore_policy_blocks_write_tools() {
     assert!(policy.authorize_tool("edit", false).is_err());
     assert!(policy
         .authorize_tool_call("agent", &json!({ "agent_type": "explore" }), false)
-        .is_ok());
+        .is_err());
     assert!(policy
         .authorize_tool_call("agent", &json!({ "agent_type": "build" }), false)
         .is_err());
@@ -355,6 +350,93 @@ fn delegated_explore_policy_blocks_write_tools() {
             false,
         )
         .is_err());
+}
+
+#[test]
+fn exact_parent_agent_scope_cannot_expand_into_child_mutation_tools() {
+    let parent_scope = HashSet::from(["agent".to_string()]);
+    let policy = DelegationPolicy::for_subagent_build(PermissionMode::Autonomous, Some(13))
+        .with_execution_tool_allowlist(Some(&parent_scope));
+
+    for escaped_tool in ["bash", "write", "edit", "apply_patch"] {
+        let error = policy
+            .authorize_tool(escaped_tool, false)
+            .expect_err("outer agent capability must not create child mutation capabilities");
+        assert!(error.contains("explicit tool capability"));
+    }
+
+    // The outer `agent` name is a parent invocation capability, not permission
+    // for a child to recursively spawn another agent.
+    assert!(policy
+        .authorize_tool_call(
+            "agent",
+            &json!({"agent_type": "build", "prompt": "escape"}),
+            false,
+        )
+        .expect_err("recursive delegation must fail closed")
+        .contains("cannot recursively delegate"));
+    assert_eq!(policy.inherited_permission_mode, PermissionMode::Autonomous);
+    assert_eq!(policy.max_turns, Some(13));
+    assert_eq!(
+        policy.execution_tool_allowlist,
+        Some(["agent".to_string()].into_iter().collect())
+    );
+}
+
+#[test]
+fn delegated_exact_scope_checks_both_tool_search_wrapper_and_effective_target() {
+    let parent_scope = HashSet::from([
+        "agent".to_string(),
+        "read".to_string(),
+        "tool_search".to_string(),
+    ]);
+    let policy = DelegationPolicy::for_subagent_explore(PermissionMode::Supervised, Some(5))
+        .with_execution_tool_allowlist(Some(&parent_scope));
+
+    assert!(policy.authorize_tool("read", false).is_ok());
+    assert!(policy
+        .authorize_tool_call(
+            "tool_search",
+            &json!({
+                "action": "execute",
+                "tool": "read",
+                "arguments": {"file_path": "src/lib.rs"}
+            }),
+            false,
+        )
+        .is_ok());
+    assert!(policy
+        .authorize_tool_call(
+            "tool_search",
+            &json!({
+                "action": "execute",
+                "tool": "bash",
+                "arguments": {"command": "pwd"}
+            }),
+            false,
+        )
+        .expect_err("hidden target must remain below the parent ceiling")
+        .contains("explicit tool capability"));
+    assert!(policy
+        .authorize_tool_call(
+            "tool_search",
+            &json!({
+                "action": "execute",
+                "tool": "agent",
+                "arguments": {"agent_type": "explore", "prompt": "recurse"}
+            }),
+            false,
+        )
+        .expect_err("nested agent dispatch must remain non-recursive")
+        .contains("cannot recursively delegate"));
+
+    let audit = policy.audit_json();
+    assert_eq!(audit["permission_mode"], "supervised");
+    assert_eq!(audit["max_turns"], 5);
+    assert_eq!(
+        audit["execution_tool_allowlist"],
+        json!(["agent", "read", "tool_search"])
+    );
 }
 
 #[test]

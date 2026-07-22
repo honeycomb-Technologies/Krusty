@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::agent::context_ledger::{ContextLedger, ContinuationDecision, NonResumableReason};
 use crate::agent::stream;
 use crate::storage::{
@@ -57,6 +59,7 @@ pub(super) fn build_awaiting_input_recovery_state(
     partial_assistant: PartialAssistantState,
     pending_interactions: Vec<PendingInteractionSnapshot>,
     permission_mode: PermissionMode,
+    execution_tool_allowlist: Option<&HashSet<String>>,
 ) -> SessionRecoveryState {
     SessionRecoveryState::new_with_pending_interactions(
         RecoveryStatus::AwaitingInput,
@@ -69,6 +72,7 @@ pub(super) fn build_awaiting_input_recovery_state(
         },
     )
     .with_permission_mode(permission_mode)
+    .with_execution_tool_allowlist(execution_tool_allowlist)
 }
 
 fn recovery_decision(
@@ -154,6 +158,7 @@ mod tests {
                 "ask-1", &arguments,
             )],
             PermissionMode::Supervised,
+            Some(&HashSet::from(["AskUserQuestion".to_string()])),
         );
 
         assert_eq!(state.status, RecoveryStatus::AwaitingInput);
@@ -164,6 +169,10 @@ mod tests {
             }
         );
         assert_eq!(state.permission_mode, Some(PermissionMode::Supervised));
+        assert_eq!(
+            state.execution_tool_allowlist,
+            Some(vec!["AskUserQuestion".to_string()])
+        );
         assert_eq!(state.pending_interactions.len(), 1);
         match &state.pending_interactions[0] {
             PendingInteractionSnapshot::AskUserQuestion {

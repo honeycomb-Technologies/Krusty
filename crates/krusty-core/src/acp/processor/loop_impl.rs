@@ -11,7 +11,7 @@ use agent_client_protocol::{
 };
 
 use crate::agent::loop_events::{LoopEvent, LoopStopReason};
-use crate::agent::{LoopInput, OrchestratorServices, RunProvenance, RunSpecBuilder};
+use crate::agent::{LoopInput, OrchestratorServices, RunBudget, RunProvenance, RunSpecBuilder};
 use crate::ai::client::CallOptions;
 use crate::ai::types::{Content, Role};
 use crate::skills::SkillsManager;
@@ -73,6 +73,7 @@ impl PromptProcessor {
             codex_parallel_tool_calls: true,
             ..Default::default()
         };
+        let mode_aware_code_tools = options.tools.is_some();
         let services = OrchestratorServices {
             ai_client,
             tool_registry: Arc::clone(&self.tools),
@@ -90,9 +91,14 @@ impl PromptProcessor {
         )
         .project_dir(Some(workspace_root))
         .permission_mode(session.permission_mode().await)
-        .max_iterations(self.agent_config.acp_max_turns())
+        .run_budget(
+            self.agent_config
+                .acp_max_turns()
+                .map(RunBudget::with_max_turns),
+        )
         .stream_idle_timeout(self.agent_config.stream_idle_timeout())
         .initial_work_mode(session.work_mode().await)
+        .mode_aware_code_tools(mode_aware_code_tools)
         .generate_title(false)
         .call_options(options)
         .build(services.ai_client.as_ref())

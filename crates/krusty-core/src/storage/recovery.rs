@@ -232,6 +232,20 @@ pub struct PartialAssistantState {
     pub tool_calls: Vec<RecoveryToolCall>,
 }
 
+/// Durable acceptance record for a human-input continuation.
+///
+/// This remains attached to the awaiting-input recovery snapshot until the
+/// resumed orchestrator starts and supersedes that snapshot. If the server
+/// exits in between, startup resets only transient agent state and the same
+/// accepted response can be reclaimed without reopening the prompt to a
+/// different answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinuationClaimSnapshot {
+    pub interaction_id: String,
+    pub accepted_response: String,
+    pub claimed_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRecoveryState {
     pub schema_version: u8,
@@ -246,6 +260,16 @@ pub struct SessionRecoveryState {
     /// interactive continuations without weakening tool approval policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<PermissionMode>,
+    /// Exact tool capability for the interrupted turn. `None` is legacy or
+    /// unrestricted; `Some([])` is an explicitly empty capability and must
+    /// remain distinguishable across an interactive continuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_tool_allowlist: Option<Vec<String>>,
+    /// Accepted response retained across the narrow claim-to-run-start crash
+    /// window. This is not canonical conversation history; the endpoint still
+    /// persists the provider-facing ToolResult/user message before running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_claim: Option<ContinuationClaimSnapshot>,
 }
 
 impl SessionRecoveryState {
@@ -283,6 +307,8 @@ impl SessionRecoveryState {
             pending_interactions,
             decision,
             permission_mode: None,
+            execution_tool_allowlist: None,
+            continuation_claim: None,
         }
     }
 
@@ -296,6 +322,18 @@ impl SessionRecoveryState {
 
     pub fn with_permission_mode(mut self, permission_mode: PermissionMode) -> Self {
         self.permission_mode = Some(permission_mode);
+        self
+    }
+
+    pub fn with_execution_tool_allowlist(
+        mut self,
+        execution_tool_allowlist: Option<&std::collections::HashSet<String>>,
+    ) -> Self {
+        self.execution_tool_allowlist = execution_tool_allowlist.map(|allowlist| {
+            let mut names = allowlist.iter().cloned().collect::<Vec<_>>();
+            names.sort_unstable();
+            names
+        });
         self
     }
 
@@ -553,6 +591,7 @@ mod tests {
         .expect("legacy recovery state should deserialize");
 
         assert_eq!(state.permission_mode, None);
+        assert_eq!(state.execution_tool_allowlist, None);
     }
 
     #[test]
@@ -570,6 +609,39 @@ mod tests {
 
         let serialized = serde_json::to_value(&state).expect("state should serialize");
         assert_eq!(serialized["permission_mode"], "supervised");
+    }
+
+    #[test]
+    fn recovery_state_preserves_exact_empty_and_nonempty_tool_scopes() {
+        let base = || {
+            SessionRecoveryState::new(
+                RecoveryStatus::AwaitingInput,
+                Some(LoopStopReason::AwaitingInput),
+                None,
+                PartialAssistantState::default(),
+                RecoveryDecision::NonResumable {
+                    reason: RecoveryNonResumableReason::AwaitingHumanInput,
+                },
+            )
+        };
+        let empty = std::collections::HashSet::new();
+        let scoped =
+            std::collections::HashSet::from(["tool_search".to_string(), "read".to_string()]);
+
+        let empty_round_trip: SessionRecoveryState = serde_json::from_value(
+            serde_json::to_value(base().with_execution_tool_allowlist(Some(&empty))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(empty_round_trip.execution_tool_allowlist, Some(Vec::new()));
+
+        let scoped_round_trip: SessionRecoveryState = serde_json::from_value(
+            serde_json::to_value(base().with_execution_tool_allowlist(Some(&scoped))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            scoped_round_trip.execution_tool_allowlist,
+            Some(vec!["read".to_string(), "tool_search".to_string()])
+        );
     }
 
     #[test]

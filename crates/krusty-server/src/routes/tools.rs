@@ -257,7 +257,8 @@ mod tests {
                 None,
                 temp_dir.clone(),
             )
-            .await;
+            .await
+            .expect("register alice process");
         state
             .process_registry
             .register_external_for_user(
@@ -268,7 +269,8 @@ mod tests {
                 None,
                 temp_dir.clone(),
             )
-            .await;
+            .await
+            .expect("register bob process");
 
         let response = match execute_tool(
             State(state.clone()),

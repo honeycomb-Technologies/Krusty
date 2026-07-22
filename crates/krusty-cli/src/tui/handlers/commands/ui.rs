@@ -92,7 +92,7 @@ impl App {
                 let working_dir = self.runtime.working_dir.clone();
                 let cmd = shell_cmd.to_string();
                 tokio::spawn(async move {
-                    registry
+                    if let Err(error) = registry
                         .register_external(
                             process_id,
                             format!("terminal: {}", cmd),
@@ -100,7 +100,10 @@ impl App {
                             pid,
                             working_dir,
                         )
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(%error, "Interactive terminal rejected by process registry");
+                    }
                 });
 
                 self.runtime.blocks.terminal.push(pane);

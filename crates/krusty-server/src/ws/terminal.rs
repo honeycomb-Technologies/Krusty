@@ -82,7 +82,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     };
 
     let process_id = uuid::Uuid::new_v4().to_string();
-    state
+    if let Err(error) = state
         .process_registry
         .register_external(
             process_id.clone(),
@@ -91,7 +91,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             child.process_id(),
             (*state.working_dir).clone(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(%error, "Terminal process rejected by registry");
+        send_ws_error(&mut ws_sink, &format!("Terminal unavailable: {error}")).await;
+        return;
+    }
 
     let reader = match pair.master.try_clone_reader() {
         Ok(reader) => reader,

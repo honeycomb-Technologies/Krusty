@@ -378,6 +378,7 @@ fn delegated_policy_error(policy: DelegationPolicy, tool_name: &str, reason: Str
 mod tests {
     use super::*;
     use crate::tools::registry::PermissionMode;
+    use std::collections::HashSet;
 
     #[tokio::test]
     async fn builder_dispatch_blocks_supervised_write_without_approval_path() {
@@ -429,5 +430,48 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("requires delegated policy metadata"));
+    }
+
+    #[tokio::test]
+    async fn builder_dispatch_cannot_expand_an_agent_only_parent_scope() {
+        let build_context = Arc::new(SharedBuildContext::new());
+        let tools = BuilderTools::new(build_context, "builder-test".to_string());
+        let scope = HashSet::from(["agent".to_string()]);
+        let policy = DelegationPolicy::for_subagent_build(PermissionMode::Autonomous, Some(9))
+            .with_execution_tool_allowlist(Some(&scope));
+        let ctx = ToolContext::default()
+            .with_permission_mode(PermissionMode::Autonomous)
+            .with_delegation_policy(policy);
+
+        for (name, params) in [
+            ("bash", json!({"command": "touch escaped"})),
+            (
+                "write",
+                json!({"file_path": "escaped.txt", "content": "escaped"}),
+            ),
+            (
+                "edit",
+                json!({
+                    "file_path": "escaped.txt",
+                    "old_string": "old",
+                    "new_string": "new"
+                }),
+            ),
+        ] {
+            let result = tools
+                .execute(name, params, &ctx)
+                .await
+                .expect("known builder tool should return a governed result");
+            assert!(
+                result.is_error,
+                "{name} must be blocked by the parent scope"
+            );
+            let parsed: Value = serde_json::from_str(&result.output).expect("structured error");
+            assert_eq!(parsed["error"]["code"], "delegated_policy_block");
+            assert!(parsed["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("explicit tool capability"));
+        }
     }
 }

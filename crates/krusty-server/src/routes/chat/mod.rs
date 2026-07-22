@@ -32,7 +32,8 @@ use self::interactions::{
 #[cfg(test)]
 use self::session::{prepare_chat_contract_for_test, select_model_for_chat_request};
 use self::session::{
-    prepare_chat_route_session, setup_chat_session, ChatSessionContext, RequestedModel,
+    prepare_chat_route_session, refresh_chat_code_tool_surface, setup_chat_session,
+    ChatSessionContext, RequestedModel,
 };
 use self::stream::start_orchestrator_sse;
 #[cfg(test)]
@@ -196,6 +197,15 @@ async fn chat(
         }
     }
 
+    // Mako sessions always run in autonomous mode (classifier provides safety gate).
+    // Resolve this before a mode refresh so the rebuilt schema uses the same
+    // permission contract that execution will enforce.
+    let permission_mode = if ctx.session_type == SessionType::Mako {
+        PermissionMode::Autonomous
+    } else {
+        req.permission_mode.unwrap_or(ctx.permission_mode)
+    };
+
     let mut work_mode = ctx.work_mode;
     if let Some(requested_mode) = req.mode {
         if ctx.session_type != SessionType::Code {
@@ -207,6 +217,7 @@ async fn chat(
             ctx.session_manager
                 .update_session_work_mode(&session_id, requested_mode)?;
             work_mode = requested_mode;
+            refresh_chat_code_tool_surface(&state, &mut ctx, work_mode, permission_mode).await;
         }
     }
 
@@ -222,8 +233,10 @@ async fn chat(
     }
 
     if let Some(allowed_tools) = req.allowed_tools.as_deref() {
-        restrict_tools_to_allowlist(&mut ctx.options, allowed_tools)
-            .map_err(AppError::BadRequest)?;
+        ctx.execution_tool_allowlist = Some(
+            restrict_tools_to_allowlist(&mut ctx.options, allowed_tools)
+                .map_err(AppError::BadRequest)?,
+        );
     }
 
     let user_content = build_user_content(&req.message, &req.content)?;
@@ -236,12 +249,6 @@ async fn chat(
     ctx.session_manager
         .save_message(&session_id, "user", &user_content_json)?;
 
-    // Mako sessions always run in autonomous mode (classifier provides safety gate)
-    let permission_mode = if ctx.session_type == SessionType::Mako {
-        PermissionMode::Autonomous
-    } else {
-        req.permission_mode.unwrap_or(ctx.permission_mode)
-    };
     ctx.session_manager
         .update_session_permission_mode(&session_id, permission_mode)?;
 

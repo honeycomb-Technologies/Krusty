@@ -117,10 +117,10 @@ pub use push_delivery_attempts::{
 };
 pub use push_subscriptions::{PushSubscription, PushSubscriptionStore};
 pub use recovery::{
-    PartialAssistantState, PendingInteractionSnapshot, PendingPlanTaskSnapshot,
-    PendingQuestionOptionSnapshot, PendingQuestionSnapshot, RecoveryDecision,
-    RecoveryNonResumableReason, RecoveryStatus, RecoveryToolArguments, RecoveryToolCall,
-    SessionRecoveryState, REDACTED_ARGUMENT_VALUE,
+    ContinuationClaimSnapshot, PartialAssistantState, PendingInteractionSnapshot,
+    PendingPlanTaskSnapshot, PendingQuestionOptionSnapshot, PendingQuestionSnapshot,
+    RecoveryDecision, RecoveryNonResumableReason, RecoveryStatus, RecoveryToolArguments,
+    RecoveryToolCall, SessionRecoveryState, REDACTED_ARGUMENT_VALUE,
 };
 pub use reports::{Report, ReportStore};
 pub use runtime_traces::{

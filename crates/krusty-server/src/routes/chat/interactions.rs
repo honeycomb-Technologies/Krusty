@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::convert::Infallible;
+use std::path::PathBuf;
 
 use axum::{
     extract::State,
@@ -16,14 +18,14 @@ use krusty_core::ai::types::{Content, ModelMessage, Role};
 use krusty_core::plan::PlanManager;
 use krusty_core::storage::{
     Database, MakoControllerEventStore, MakoControllerStore, PendingInteractionSnapshot,
-    SessionType, WorkMode,
+    SessionRecoveryState, SessionType, WorkMode,
 };
 use krusty_core::tools::registry::PermissionMode;
 use krusty_core::SessionManager;
 
 use super::super::session_access::{current_user_id, load_owned_session};
 use super::content::{build_user_content, validate_content_blocks};
-use super::session::{setup_chat_session, RequestedModel};
+use super::session::{refresh_chat_code_tool_surface, setup_chat_session, RequestedModel};
 use super::stream::start_orchestrator_sse;
 use super::tools::apply_thinking_config;
 use crate::auth::CurrentUser;
@@ -32,6 +34,66 @@ use crate::types::{
     AgenticEvent, SteerRequest, ThinkingLevel, ToolApprovalRequest, ToolResultRequest,
 };
 use crate::AppState;
+
+/// Releases only the transient continuation execution lease when route setup
+/// fails after an answer was durably accepted. The accepted response remains
+/// in recovery and can be reclaimed with the same value after retry/restart.
+struct ContinuationClaimLease {
+    db_path: PathBuf,
+    session_id: String,
+    interaction_id: String,
+    accepted_response: String,
+    armed: bool,
+}
+
+impl ContinuationClaimLease {
+    fn new(
+        db_path: PathBuf,
+        session_id: &str,
+        interaction_id: &str,
+        accepted_response: &str,
+    ) -> Self {
+        Self {
+            db_path,
+            session_id: session_id.to_string(),
+            interaction_id: interaction_id.to_string(),
+            accepted_response: accepted_response.to_string(),
+            armed: true,
+        }
+    }
+
+    fn complete<T>(mut self, result: Result<T, AppError>) -> Result<T, AppError> {
+        if result.is_ok() {
+            self.armed = false;
+        }
+        result
+    }
+}
+
+impl Drop for ContinuationClaimLease {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let result = Database::new(&self.db_path).and_then(|db| {
+            SessionManager::new(db)
+                .yield_awaiting_interaction_claim(
+                    &self.session_id,
+                    &self.interaction_id,
+                    &self.accepted_response,
+                )
+                .map(|_| ())
+        });
+        if let Err(error) = result {
+            tracing::error!(
+                session_id = %self.session_id,
+                interaction_id = %self.interaction_id,
+                %error,
+                "Failed to yield continuation execution lease after route failure"
+            );
+        }
+    }
+}
 
 pub(super) async fn steer(
     State(state): State<AppState>,
@@ -172,47 +234,52 @@ pub(super) async fn tool_result(
     )
     .await?;
 
-    let permission_mode = continuation_permission_mode(&ctx, req.permission_mode);
+    // Permission mode and exact tool scope are one continuation contract. Load
+    // the recovery snapshot once and fail the request if it cannot be read or
+    // decoded; treating a recovery error as "no snapshot" would silently
+    // resume with an unrestricted tool surface.
+    let (recovery_state, pending_interaction) = claim_matching_continuation_recovery_state(
+        &ctx.session_manager,
+        &ctx.session_id,
+        &req.tool_call_id,
+        &req.result,
+    )?;
+    let claim_lease = ContinuationClaimLease::new(
+        (*state.db_path).clone(),
+        &req.session_id,
+        &req.tool_call_id,
+        &req.result,
+    );
+    let permission_mode = continuation_permission_mode(&ctx, req.permission_mode, &recovery_state);
+    ctx.execution_tool_allowlist = continuation_execution_tool_allowlist(&recovery_state);
     ctx.session_manager
         .update_session_permission_mode(&req.session_id, permission_mode)?;
 
     // Plan confirmation is an internal orchestrator event, not a real tool call.
     // Don't add a ToolResult — instead add a user message to resume the conversation.
-    if req.tool_call_id.starts_with("plan-confirm-") {
+    if is_plan_confirmation(&pending_interaction) {
         let choice = parse_plan_confirm_choice(&req.result);
         let work_mode = if choice.as_deref() == Some("execute") {
             ctx.session_manager
                 .update_session_work_mode(&req.session_id, WorkMode::Build)?;
-            let user_content = vec![Content::Text {
-                text:
-                    "The plan has been approved. Begin executing the plan, starting with Task 1.1."
-                        .to_string(),
-            }];
-            let user_json = serde_json::to_string(&user_content)?;
-            ctx.conversation.push(ModelMessage {
-                role: Role::User,
-                content: user_content,
-            });
-            ctx.session_manager
-                .save_message(&req.session_id, "user", &user_json)?;
+            refresh_chat_code_tool_surface(&state, &mut ctx, WorkMode::Build, permission_mode)
+                .await;
+            persist_user_text_once(
+                &mut ctx,
+                "The plan has been approved. Begin executing the plan, starting with Task 1.1.",
+            )?;
             WorkMode::Build
         } else {
-            if let Ok(plan_manager) = PlanManager::new((*state.db_path).clone()) {
-                let _ = plan_manager.abandon_plan(&req.session_id);
-            }
-            let user_content = vec![Content::Text {
-                text: "The plan has been abandoned. What would you like to do instead?".to_string(),
-            }];
-            let user_json = serde_json::to_string(&user_content)?;
-            ctx.conversation.push(ModelMessage {
-                role: Role::User,
-                content: user_content,
-            });
-            ctx.session_manager
-                .save_message(&req.session_id, "user", &user_json)?;
+            let plan_manager = PlanManager::new((*state.db_path).clone())?;
+            plan_manager.abandon_plan(&req.session_id)?;
+            persist_user_text_once(
+                &mut ctx,
+                "The plan has been abandoned. What would you like to do instead?",
+            )?;
             ctx.work_mode
         };
-        return start_orchestrator_sse(&state, ctx, work_mode, permission_mode, false).await;
+        let result = start_orchestrator_sse(&state, ctx, work_mode, permission_mode, false).await;
+        return claim_lease.complete(result);
     }
 
     let has_thinking = ctx.conversation.iter().any(|msg| {
@@ -268,26 +335,75 @@ pub(super) async fn tool_result(
     }
 
     let work_mode = ctx.work_mode;
-    start_orchestrator_sse(&state, ctx, work_mode, permission_mode, false).await
+    let result = start_orchestrator_sse(&state, ctx, work_mode, permission_mode, false).await;
+    claim_lease.complete(result)
+}
+
+fn persist_user_text_once(
+    ctx: &mut super::session::ChatSessionContext,
+    text: &str,
+) -> Result<(), AppError> {
+    let already_persisted = ctx.conversation.last().is_some_and(|message| {
+        message.role == Role::User
+            && matches!(message.content.as_slice(), [Content::Text { text: existing }] if existing == text)
+    });
+    if already_persisted {
+        return Ok(());
+    }
+
+    let content = vec![Content::Text {
+        text: text.to_string(),
+    }];
+    let content_json = serde_json::to_string(&content)?;
+    ctx.conversation.push(ModelMessage {
+        role: Role::User,
+        content,
+    });
+    ctx.session_manager
+        .save_message(&ctx.session_id, "user", &content_json)?;
+    Ok(())
 }
 
 fn continuation_permission_mode(
     ctx: &super::session::ChatSessionContext,
     requested_permission_mode: Option<PermissionMode>,
+    recovered_state: &SessionRecoveryState,
 ) -> PermissionMode {
-    let recovered_permission_mode = ctx
-        .session_manager
-        .load_recovery_state(&ctx.session_id)
-        .ok()
-        .flatten()
-        .and_then(|state| state.permission_mode);
-
     resumed_permission_mode(
         ctx.session_type,
         requested_permission_mode,
-        recovered_permission_mode,
+        recovered_state.permission_mode,
         ctx.permission_mode,
     )
+}
+
+fn continuation_execution_tool_allowlist(
+    recovered_state: &SessionRecoveryState,
+) -> Option<HashSet<String>> {
+    resumed_execution_tool_allowlist(recovered_state.execution_tool_allowlist.clone())
+}
+
+fn claim_matching_continuation_recovery_state(
+    session_manager: &SessionManager,
+    session_id: &str,
+    tool_call_id: &str,
+    accepted_response: &str,
+) -> Result<(SessionRecoveryState, PendingInteractionSnapshot), AppError> {
+    session_manager
+        .claim_awaiting_interaction(session_id, tool_call_id, accepted_response)?
+        .ok_or_else(|| {
+            AppError::Conflict(format!(
+                "Session {session_id} has no awaiting-input continuation for tool call {tool_call_id}"
+            ))
+        })
+}
+
+fn is_plan_confirmation(pending: &PendingInteractionSnapshot) -> bool {
+    matches!(pending, PendingInteractionSnapshot::PlanConfirm { .. })
+}
+
+fn resumed_execution_tool_allowlist(recovered: Option<Vec<String>>) -> Option<HashSet<String>> {
+    recovered.map(|names| names.into_iter().collect())
 }
 
 fn resumed_permission_mode(
@@ -489,6 +605,23 @@ fn recovery_has_pending_tool_approval(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use krusty_core::agent::loop_events::LoopStopReason;
+    use krusty_core::storage::{
+        PartialAssistantState, RecoveryDecision, RecoveryNonResumableReason, RecoveryStatus,
+    };
+
+    fn awaiting_recovery(pending: PendingInteractionSnapshot) -> SessionRecoveryState {
+        SessionRecoveryState::new_with_pending_interactions(
+            RecoveryStatus::AwaitingInput,
+            Some(LoopStopReason::AwaitingInput),
+            None,
+            PartialAssistantState::default(),
+            vec![pending],
+            RecoveryDecision::NonResumable {
+                reason: RecoveryNonResumableReason::AwaitingHumanInput,
+            },
+        )
+    }
 
     #[test]
     fn resumed_permission_mode_preserves_supervised_for_code_sessions() {
@@ -548,5 +681,155 @@ mod tests {
             ),
             PermissionMode::Autonomous
         );
+    }
+
+    #[test]
+    fn resumed_tool_scope_preserves_none_empty_and_exact_names() {
+        assert_eq!(resumed_execution_tool_allowlist(None), None);
+        assert_eq!(
+            resumed_execution_tool_allowlist(Some(Vec::new())),
+            Some(HashSet::new())
+        );
+        assert_eq!(
+            resumed_execution_tool_allowlist(Some(vec![
+                "read".to_string(),
+                "tool_search".to_string(),
+            ])),
+            Some(HashSet::from([
+                "read".to_string(),
+                "tool_search".to_string(),
+            ]))
+        );
+    }
+
+    #[test]
+    fn continuation_recovery_claim_fails_closed_on_malformed_state() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory should be created");
+        let db_path = temp_dir.path().join("krusty.db");
+        let session_manager =
+            SessionManager::new(Database::new(&db_path).expect("database should initialize"));
+        let session_id = session_manager
+            .create_session("Malformed recovery", None, None)
+            .expect("session should be created");
+
+        let db = Database::new(&db_path).expect("database should reopen");
+        db.conn()
+            .execute(
+                "UPDATE sessions SET recovery_json = ?1 WHERE id = ?2",
+                ("{malformed", session_id.as_str()),
+            )
+            .expect("malformed recovery fixture should persist");
+
+        assert!(matches!(
+            claim_matching_continuation_recovery_state(
+                &session_manager,
+                &session_id,
+                "ask-1",
+                "answer"
+            ),
+            Err(AppError::Internal(_))
+        ));
+    }
+
+    #[test]
+    fn continuation_recovery_requires_present_matching_interaction() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory should be created");
+        let db_path = temp_dir.path().join("krusty.db");
+        let session_manager =
+            SessionManager::new(Database::new(&db_path).expect("database should initialize"));
+        let session_id = session_manager
+            .create_session("Matching recovery", None, None)
+            .expect("session should be created");
+
+        assert!(matches!(
+            claim_matching_continuation_recovery_state(
+                &session_manager,
+                &session_id,
+                "ask-1",
+                "answer"
+            ),
+            Err(AppError::Conflict(_))
+        ));
+
+        let scope = HashSet::from(["AskUserQuestion".to_string()]);
+        let recovery = awaiting_recovery(PendingInteractionSnapshot::ask_user_from_call(
+            "ask-1",
+            &json!({}),
+        ))
+        .with_permission_mode(PermissionMode::Supervised)
+        .with_execution_tool_allowlist(Some(&scope));
+        session_manager
+            .update_recovery_state(&session_id, &recovery)
+            .expect("recovery should persist");
+
+        let (loaded, pending) = claim_matching_continuation_recovery_state(
+            &session_manager,
+            &session_id,
+            "ask-1",
+            "answer",
+        )
+        .unwrap_or_else(|_| panic!("matching continuation should be claimed"));
+        assert_eq!(loaded.permission_mode, Some(PermissionMode::Supervised));
+        assert_eq!(
+            resumed_execution_tool_allowlist(loaded.execution_tool_allowlist),
+            Some(scope)
+        );
+        assert!(!is_plan_confirmation(&pending));
+        let durable_claim = session_manager
+            .load_recovery_state(&session_id)
+            .expect("recovery should load")
+            .expect("accepted response should remain durable");
+        assert_eq!(
+            durable_claim
+                .continuation_claim
+                .as_ref()
+                .map(|claim| claim.accepted_response.as_str()),
+            Some("answer")
+        );
+        session_manager
+            .yield_awaiting_interaction_claim(&session_id, "ask-1", "answer")
+            .expect("test claim lease should yield");
+
+        session_manager
+            .update_recovery_state(&session_id, &recovery)
+            .expect("recovery should be restored for mismatch test");
+        assert!(matches!(
+            claim_matching_continuation_recovery_state(
+                &session_manager,
+                &session_id,
+                "different-call",
+                "answer"
+            ),
+            Err(AppError::Conflict(_))
+        ));
+
+        let empty_scope = HashSet::new();
+        let plan_recovery = awaiting_recovery(PendingInteractionSnapshot::plan_confirm(
+            "opaque-id-without-plan-prefix",
+            "Plan",
+            0,
+            Vec::new(),
+        ))
+        .with_permission_mode(PermissionMode::Supervised)
+        .with_execution_tool_allowlist(Some(&empty_scope));
+        session_manager
+            .update_recovery_state(&session_id, &plan_recovery)
+            .expect("plan recovery should persist");
+        let (loaded, pending) = claim_matching_continuation_recovery_state(
+            &session_manager,
+            &session_id,
+            "opaque-id-without-plan-prefix",
+            "execute",
+        )
+        .unwrap_or_else(|_| panic!("matching plan continuation should be claimed"));
+        assert_eq!(
+            resumed_execution_tool_allowlist(loaded.execution_tool_allowlist),
+            Some(empty_scope)
+        );
+        assert!(is_plan_confirmation(&pending));
+
+        let prefixed_ask =
+            PendingInteractionSnapshot::ask_user_from_call("plan-confirm-spoofed", &json!({}));
+        assert!(!is_plan_confirmation(&prefixed_ask));
     }
 }

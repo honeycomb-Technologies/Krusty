@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,6 +38,7 @@ pub(super) async fn execute_regular_tool(
     event_tx: &mpsc::UnboundedSender<LoopEvent>,
     provider_call_trace: Option<&ProviderCallTraceContext>,
     subagent_max_turns_override: Option<usize>,
+    execution_tool_allowlist: Option<&HashSet<String>>,
     file_observations: Arc<FileObservationTracker>,
     extension_intercept_prepared: bool,
 ) -> ToolResult {
@@ -97,6 +99,7 @@ pub(super) async fn execute_regular_tool(
     }
     .with_permission_mode(permission_mode)
     .with_subagent_max_turns(subagent_max_turns_override)
+    .with_execution_tool_allowlist(execution_tool_allowlist)
     .with_ai_client(ai_client.clone())
     .with_skills_manager(Arc::clone(skills_manager))
     .with_tool_registry(Arc::clone(tool_registry))

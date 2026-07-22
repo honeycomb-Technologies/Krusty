@@ -8,7 +8,9 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 use krusty_core::agent::learning::{
     review_latest_completed_mako_turn, PostTurnLearningReviewRequest,
 };
-use krusty_core::agent::{LoopEvent, OrchestratorServices, RunProvenance, RunSpecBuilder};
+use krusty_core::agent::{
+    LoopEvent, OrchestratorServices, RunBudget, RunProvenance, RunSpecBuilder,
+};
 use krusty_core::ai::client::CallOptions;
 use krusty_core::ai::types::{Role, WebFetchConfig, WebSearchConfig};
 use krusty_core::plan::PlanManager;
@@ -253,7 +255,9 @@ pub(crate) async fn run_mako_session_inner(
     // Mako is persistent, but no individual autonomous tick is allowed an
     // unbounded parent loop. TickEngine clones this finite budget for each
     // subsequent tick in the same run.
-    .max_iterations(Some(mako_settings.max_turns_per_tick))
+    .run_budget(Some(RunBudget::with_max_turns(
+        mako_settings.max_turns_per_tick,
+    )))
     .user_id(session.user_id.clone())
     .initial_work_mode(work_mode)
     .generate_title(generate_title)

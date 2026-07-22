@@ -13,11 +13,14 @@ use krusty_core::storage::{
     Database, MakoRuntimeStateStore, ProjectSettings, SessionInfo, SessionType, WorkMode,
     WorkspaceMode,
 };
-use krusty_core::tools::registry::{MutationToolSurface, PermissionMode, ToolRequestPolicy};
+use krusty_core::tools::registry::PermissionMode;
 use krusty_core::SessionManager;
 
 use super::super::session_access::{current_user_id, load_owned_session, request_workspace_scope};
-use super::tools::{apply_thinking_config, chat_system_prompt, filter_tools_for_session_type};
+use super::tools::{
+    apply_thinking_config, chat_system_prompt, filter_code_tools_for_mode,
+    filter_tools_for_session_type,
+};
 use crate::ai_bootstrap::{
     persist_current_model_key_selection, persist_current_model_selection, resolve_preferred_model,
     resolve_preferred_model_key,
@@ -44,6 +47,7 @@ pub(super) struct ChatSessionContext {
     pub(super) work_mode: WorkMode,
     pub(super) session_type: SessionType,
     pub(super) permission_mode: PermissionMode,
+    pub(super) execution_tool_allowlist: Option<std::collections::HashSet<String>>,
     pub(super) mako_crew_slug: Option<String>,
     pub(super) user_id: Option<String>,
     pub(super) guard: OwnedMutexGuard<()>,
@@ -740,27 +744,31 @@ pub(super) async fn setup_chat_session(
         "Filtering tools for session type"
     );
     let all_tools = state.tool_registry.get_ai_tools_all().await;
+    let disabled_tool_names = project_settings
+        .disabled_tools
+        .as_deref()
+        .unwrap_or_default();
     let ai_tools = if session.session_type == SessionType::Code {
-        ToolRequestPolicy::code(
+        filter_code_tools_for_mode(
+            all_tools,
             session.permission_mode,
-            effective_work_mode == WorkMode::Plan,
+            effective_work_mode,
             has_active_plan,
-            true,
-            project_settings.disabled_tools.as_deref().unwrap_or(&[]),
-        )
-        .with_mutation_surface(MutationToolSurface::for_model(
+            disabled_tool_names,
             ai_client.provider_id(),
             &ai_client.config().model,
-        ))
-        .filter(all_tools)
+        )
     } else {
-        let disabled_tools = project_settings.disabled_tools.unwrap_or_default();
         filter_tools_for_session_type(all_tools, session.session_type)
             .into_iter()
-            .filter(|tool| !disabled_tools.iter().any(|name| name == &tool.name))
+            .filter(|tool| !disabled_tool_names.iter().any(|name| name == &tool.name))
             .collect()
     };
     let hosted_web_tools = session.session_type != SessionType::Code;
+    let hosted_web_search =
+        hosted_web_tools && !disabled_tool_names.iter().any(|name| name == "web_search");
+    let hosted_web_fetch =
+        hosted_web_tools && !disabled_tool_names.iter().any(|name| name == "web_fetch");
     let model_metadata = state.model_registry.get_model_by_key(&resolved_key).await;
     let effective_thinking_level =
         normalize_thinking_level_for_model(thinking_level, model_metadata.as_ref());
@@ -779,8 +787,8 @@ pub(super) async fn setup_chat_session(
         },
         session_id: Some(session_id.to_string()),
         codex_parallel_tool_calls: true,
-        web_search: hosted_web_tools.then(WebSearchConfig::default),
-        web_fetch: hosted_web_tools.then(WebFetchConfig::default),
+        web_search: hosted_web_search.then(WebSearchConfig::default),
+        web_fetch: hosted_web_fetch.then(WebFetchConfig::default),
         reasoning_format,
         reasoning_control,
         fast_mode: fast_mode && fast_mode_format.is_some(),
@@ -813,10 +821,56 @@ pub(super) async fn setup_chat_session(
         work_mode: effective_work_mode,
         session_type: session.session_type,
         permission_mode: session.permission_mode,
+        execution_tool_allowlist: None,
         mako_crew_slug: mako_runtime.and_then(|runtime| runtime.crew_slug),
         user_id,
         guard,
     })
+}
+
+/// Rebuild a Code request's direct schemas after an HTTP-owned mode change.
+/// Core repeats this derivation at run start and after in-loop transitions;
+/// doing it here is also required so `allowed_tools` is validated against the
+/// requested mode rather than the previously persisted mode.
+pub(super) async fn refresh_chat_code_tool_surface(
+    state: &AppState,
+    ctx: &mut ChatSessionContext,
+    work_mode: WorkMode,
+    permission_mode: PermissionMode,
+) {
+    if ctx.session_type != SessionType::Code {
+        return;
+    }
+
+    let project_settings = ctx
+        .project_dir
+        .as_deref()
+        .or(Some(ctx.working_dir.as_path()))
+        .map(ProjectSettings::load)
+        .unwrap_or_default();
+    let has_active_plan = PlanManager::new((*state.db_path).clone())
+        .ok()
+        .and_then(|manager| manager.get_active_plan(&ctx.session_id).ok())
+        .flatten()
+        .is_some();
+    let tools = filter_code_tools_for_mode(
+        state.tool_registry.get_ai_tools_all().await,
+        permission_mode,
+        work_mode,
+        has_active_plan,
+        project_settings
+            .disabled_tools
+            .as_deref()
+            .unwrap_or_default(),
+        ctx.ai_client.provider_id(),
+        &ctx.ai_client.config().model,
+    );
+    ctx.options.tools = (!tools.is_empty()).then_some(tools);
+    ctx.options.codex_parallel_tool_calls = ctx
+        .options
+        .tools
+        .as_ref()
+        .is_some_and(|tools| tools.len() > 1);
 }
 
 fn normalize_thinking_level_for_model(

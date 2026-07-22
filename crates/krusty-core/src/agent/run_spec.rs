@@ -236,13 +236,19 @@ impl RunSpecBuilder {
         self
     }
 
-    pub fn run_budget(mut self, run_budget: Option<RunBudget>) -> Self {
-        self.config.run_budget = run_budget;
+    /// Constrain execution to an explicit per-turn capability set. This is
+    /// intentionally separate from provider-advertised tools because an
+    /// unrestricted `tool_search` may normally dispatch hidden specialists.
+    pub fn execution_tool_allowlist(
+        mut self,
+        execution_tool_allowlist: Option<HashSet<String>>,
+    ) -> Self {
+        self.config.execution_tool_allowlist = execution_tool_allowlist;
         self
     }
 
-    pub fn max_iterations(mut self, max_iterations: Option<usize>) -> Self {
-        self.config.max_iterations = max_iterations;
+    pub fn run_budget(mut self, run_budget: Option<RunBudget>) -> Self {
+        self.config.run_budget = run_budget;
         self
     }
 
@@ -258,6 +264,18 @@ impl RunSpecBuilder {
 
     pub fn initial_work_mode(mut self, initial_work_mode: WorkMode) -> Self {
         self.config.initial_work_mode = initial_work_mode;
+        self
+    }
+
+    /// Declare that the caller's Code schemas came from the canonical mode
+    /// policy and may be rebuilt from the registry as work mode changes.
+    ///
+    /// This is deliberately opt-in: an arbitrary caller-provided subset stays
+    /// an immutable capability ceiling. An exact `execution_tool_allowlist`
+    /// remains an upper bound even for policy-derived callers that opt in.
+    pub fn mode_aware_code_tools(mut self, enabled: bool) -> Self {
+        self.config.refresh_code_tools_on_mode_change =
+            enabled && self.config.session_type == SessionType::Code;
         self
     }
 
@@ -307,6 +325,12 @@ impl RunSpecBuilder {
             Some(_) => {}
             None => self.call_options.session_id = Some(self.config.session_id.clone()),
         }
+        // Opt-in never overrides a deliberately tool-free request.
+        self.config.refresh_code_tools_on_mode_change &= self.call_options.tools.is_some();
+        apply_execution_tool_allowlist(
+            &mut self.call_options,
+            self.config.execution_tool_allowlist.as_ref(),
+        );
         validate_call_options(&mut self.call_options)?;
         self.call_options =
             ai_client.canonical_call_options(&ai_client.config().model, &self.call_options);
@@ -317,6 +341,31 @@ impl RunSpecBuilder {
             config: self.config,
             call_options: self.call_options,
         })
+    }
+}
+
+pub(crate) fn apply_execution_tool_allowlist(
+    options: &mut CallOptions,
+    execution_tool_allowlist: Option<&HashSet<String>>,
+) {
+    let Some(allowlist) = execution_tool_allowlist else {
+        return;
+    };
+
+    if let Some(tools) = options.tools.as_mut() {
+        tools.retain(|tool| allowlist.contains(&tool.name));
+        if tools.is_empty() {
+            options.tools = None;
+        }
+    }
+    if !allowlist.contains("web_search") {
+        options.web_search = None;
+    }
+    if !allowlist.contains("web_fetch") {
+        options.web_fetch = None;
+    }
+    if options.tools.as_ref().is_none_or(|tools| tools.len() <= 1) {
+        options.codex_parallel_tool_calls = false;
     }
 }
 
@@ -416,12 +465,15 @@ fn validate_call_options(options: &mut CallOptions) -> Result<(), RunSpecError> 
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::path::Path;
 
     use super::{validate_call_options, validate_session_id, validate_surface};
     use super::{RunKernel, RunProvenance, RunSpecBuilder, RunSpecError};
-    use crate::ai::client::{AiClient, CallOptions};
-    use crate::ai::types::AiTool;
+    use crate::ai::client::{AiClient, AiClientConfig, CallOptions};
+    use crate::ai::models::ApiFormat;
+    use crate::ai::providers::ProviderId;
+    use crate::ai::types::{AiTool, WebSearchConfig};
     use crate::storage::SessionType;
 
     #[test]
@@ -504,7 +556,15 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let project = workspace.path().join("project");
         std::fs::create_dir(&project).unwrap();
-        let client = AiClient::new(Default::default(), String::new());
+        let client = AiClient::new(
+            AiClientConfig {
+                model: "gpt-5.5".to_string(),
+                provider_id: ProviderId::OpenAI,
+                api_format: ApiFormat::OpenAIResponses,
+                ..Default::default()
+            },
+            String::new(),
+        );
 
         let spec = RunSpecBuilder::new(
             RunProvenance::Server,
@@ -513,8 +573,25 @@ mod tests {
             SessionType::Code,
         )
         .project_dir(Some(project.clone()))
+        .execution_tool_allowlist(Some(HashSet::from(["tool_search".to_string()])))
         .call_options(CallOptions {
             max_tokens: Some(usize::MAX),
+            tools: Some(vec![
+                AiTool {
+                    name: "tool_search".into(),
+                    description: "Deferred tool search".into(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    prompt: None,
+                },
+                AiTool {
+                    name: "read".into(),
+                    description: "Read".into(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    prompt: None,
+                },
+            ]),
+            web_search: Some(WebSearchConfig::default()),
+            codex_parallel_tool_calls: true,
             ..Default::default()
         })
         .build(&client)
@@ -532,6 +609,22 @@ mod tests {
             spec.config().project_dir.as_deref(),
             Some(project.canonicalize().unwrap().as_path())
         );
+        assert_eq!(
+            spec.config().execution_tool_allowlist,
+            Some(HashSet::from(["tool_search".to_string()]))
+        );
+        assert_eq!(
+            spec.call_options()
+                .tools
+                .as_deref()
+                .expect("exact scope should retain the wrapper")
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["tool_search"]
+        );
+        assert!(spec.call_options().web_search.is_none());
+        assert!(!spec.call_options().codex_parallel_tool_calls);
         assert!(
             spec.call_options().max_tokens.unwrap()
                 <= client.resolved_model().capabilities.max_output
@@ -598,5 +691,63 @@ mod tests {
                 actual: "server"
             })
         ));
+    }
+
+    #[test]
+    fn builder_keeps_mode_refresh_explicit_and_never_infers_it_from_a_subset() {
+        let workspace = tempfile::tempdir().unwrap();
+        let client = AiClient::new(Default::default(), String::new());
+        let tool = AiTool {
+            name: "read".into(),
+            description: "Read".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            prompt: None,
+        };
+
+        let tool_bearing = RunSpecBuilder::new(
+            RunProvenance::Server,
+            "tool-bearing",
+            workspace.path(),
+            SessionType::Code,
+        )
+        .call_options(CallOptions {
+            tools: Some(vec![tool]),
+            ..Default::default()
+        })
+        .build(&client)
+        .unwrap();
+        assert!(!tool_bearing.config().refresh_code_tools_on_mode_change);
+
+        let mode_aware = RunSpecBuilder::new(
+            RunProvenance::Server,
+            "mode-aware",
+            workspace.path(),
+            SessionType::Code,
+        )
+        .mode_aware_code_tools(true)
+        .call_options(CallOptions {
+            tools: Some(vec![AiTool {
+                name: "read".into(),
+                description: "Read".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                prompt: None,
+            }]),
+            ..Default::default()
+        })
+        .build(&client)
+        .unwrap();
+        assert!(mode_aware.config().refresh_code_tools_on_mode_change);
+
+        let tool_free = RunSpecBuilder::new(
+            RunProvenance::Server,
+            "tool-free",
+            workspace.path(),
+            SessionType::Code,
+        )
+        .mode_aware_code_tools(true)
+        .call_options(CallOptions::default())
+        .build(&client)
+        .unwrap();
+        assert!(!tool_free.config().refresh_code_tools_on_mode_change);
     }
 }

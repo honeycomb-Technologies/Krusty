@@ -109,11 +109,11 @@ impl PreToolHook for SafetyHook {
 ///
 /// When plan mode is active, blocks:
 /// - All write-category tools (file/process/system mutation)
-/// - Bash commands that modify (rm, mv, mkdir, git commit, etc.)
+/// - All free-form Bash/shell execution, including apparently read-only argv
 ///
 /// Allows:
 /// - Read, Glob, Grep, WebFetch, WebSearch
-/// - Read-only bash commands (ls, cat, git status, git diff, etc.)
+/// - Read-only delegated Explore/Plan agents
 pub struct PlanModeHook;
 
 impl Default for PlanModeHook {
@@ -150,10 +150,10 @@ impl PreToolHook for PlanModeHook {
                 tracing::info!(
                     tool = name,
                     command = command,
-                    "Plan mode blocked modifying bash command"
+                    "Plan mode blocked free-form shell command"
                 );
                 return HookResult::Block {
-                    reason: "Modifying bash commands are blocked in Plan mode. Call set_work_mode with mode='build' before implementation.".to_string(),
+                    reason: "Free-form Bash commands are blocked in Plan mode because shell argv cannot be proven read-only across tools, configs, and platforms. Use native read/search tools or call set_work_mode with mode='build'.".to_string(),
                 };
             }
 
@@ -268,14 +268,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_mode_allows_read_only_bash_command() {
+    async fn plan_mode_blocks_apparently_read_only_bash_command() {
         let hook = PlanModeHook::new();
         let ctx = plan_mode_context();
 
         let result = hook
             .before_execute("bash", &json!({ "command": "git status" }), &ctx)
             .await;
-        assert!(matches!(result, HookResult::Continue));
+        let HookResult::Block { reason } = result else {
+            panic!("expected Plan mode to block free-form Bash");
+        };
+        assert!(reason.contains("native read/search tools"));
+        assert!(reason.contains("mode='build'"));
     }
 
     #[tokio::test]
@@ -291,6 +295,26 @@ mod tests {
         };
         assert!(reason.contains("set_work_mode"));
         assert!(reason.contains("mode='build'"));
+    }
+
+    #[tokio::test]
+    async fn plan_mode_blocks_multiline_and_executable_read_flags() {
+        let hook = PlanModeHook::new();
+        let ctx = plan_mode_context();
+
+        for command in [
+            "echo ok\ntouch out",
+            "rg --pre 'sh -c touch-out' needle .",
+            "git grep --open-files-in-pager='sh -c touch-out' needle",
+        ] {
+            let result = hook
+                .before_execute("bash", &json!({ "command": command }), &ctx)
+                .await;
+            assert!(
+                matches!(result, HookResult::Block { .. }),
+                "Plan mode must block executable read surface: {command}"
+            );
+        }
     }
 
     #[tokio::test]

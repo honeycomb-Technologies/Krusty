@@ -63,7 +63,8 @@ impl AgentTool {
 
         let delegated_run_id = Uuid::new_v4().to_string();
         let delegation_policy =
-            DelegationPolicy::for_subagent_explore(ctx.permission_mode, ctx.subagent_max_turns);
+            DelegationPolicy::for_subagent_explore(ctx.permission_mode, ctx.subagent_max_turns)
+                .with_execution_tool_allowlist(ctx.execution_tool_allowlist.as_ref());
 
         let target_scope = vec![delegated_scope(
             &scope_label,
@@ -256,7 +257,8 @@ impl AgentTool {
 
         let delegated_run_id = Uuid::new_v4().to_string();
         let delegation_policy =
-            DelegationPolicy::for_subagent_plan(ctx.permission_mode, ctx.subagent_max_turns);
+            DelegationPolicy::for_subagent_plan(ctx.permission_mode, ctx.subagent_max_turns)
+                .with_execution_tool_allowlist(ctx.execution_tool_allowlist.as_ref());
 
         let target_scope = vec![DelegatedRunScope {
             label: "project".to_string(),
@@ -421,7 +423,8 @@ impl AgentTool {
 
         let delegated_run_id = Uuid::new_v4().to_string();
         let delegation_policy =
-            DelegationPolicy::for_subagent_verify(ctx.permission_mode, ctx.subagent_max_turns);
+            DelegationPolicy::for_subagent_verify(ctx.permission_mode, ctx.subagent_max_turns)
+                .with_execution_tool_allowlist(ctx.execution_tool_allowlist.as_ref());
 
         let target_scope = vec![DelegatedRunScope {
             label: "project".to_string(),

@@ -2,6 +2,7 @@
 
 mod execution;
 mod shell;
+mod state_delta;
 
 #[cfg(test)]
 mod tests;
@@ -72,7 +73,8 @@ async fn background_start_result(
             warnings,
             None,
             None,
-        ),
+        )
+        .with_changed(true),
         ProcessStatus::Suspended => ToolResult::success_data_with(
             json!({
                 "message": "Process started but is suspended",
@@ -83,7 +85,8 @@ async fn background_start_result(
             warnings,
             None,
             None,
-        ),
+        )
+        .with_changed(true),
         ProcessStatus::Completed {
             exit_code,
             duration_ms,
@@ -236,15 +239,14 @@ fn same_background_launch(
     }
 
     let requested_endpoints = background_endpoint_hints(command);
-    if requested_endpoints.is_empty() {
-        return false;
-    }
-    let existing_endpoints = background_endpoint_hints(&process.command);
-    if !requested_endpoints
-        .iter()
-        .any(|endpoint| existing_endpoints.contains(endpoint))
-    {
-        return false;
+    if !requested_endpoints.is_empty() {
+        let existing_endpoints = background_endpoint_hints(&process.command);
+        if !requested_endpoints
+            .iter()
+            .any(|endpoint| existing_endpoints.contains(endpoint))
+        {
+            return false;
+        }
     }
 
     launch_signature(command, working_dir)
@@ -273,6 +275,7 @@ fn existing_background_result(
         None,
         None,
     )
+    .with_changed(false)
 }
 
 fn output_spool_path(ctx: &ToolContext) -> PathBuf {
@@ -493,6 +496,19 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
             }
         }
 
+        // Shell commands are intentionally broad, so the agent cannot infer a
+        // durable state change from a zero exit code alone. Capture only
+        // explicit, workspace-scoped mutation targets before execution. The
+        // probe reports only a positive delta. Equality, timeout, or any
+        // unparsed/ambiguous surface remains opaque rather than risking a
+        // false no-change claim.
+        let state_delta_probe = state_delta::BashStateDeltaProbe::capture(
+            &params.command,
+            &ctx.working_dir,
+            ctx.sandbox_root.as_deref(),
+        )
+        .await;
+
         let mut cmd = build_shell_command(&effective_command, ctx);
         configure_foreground_process_group(&mut cmd);
         cmd.kill_on_drop(true);
@@ -512,7 +528,21 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
             _ => return ToolResult::error("Streaming context incomplete for bash tool"),
         };
 
-        execute_foreground(cmd, timeout_duration, stream, output_spool_path(ctx)).await
+        let result =
+            execute_foreground(cmd, timeout_duration, stream, output_spool_path(ctx)).await;
+        if result.is_error {
+            return result;
+        }
+
+        match state_delta_probe {
+            Some(probe) => match probe.changed().await {
+                Some(change_key) => result
+                    .with_changed(true)
+                    .with_progress_change_key(change_key),
+                None => result,
+            },
+            None => result,
+        }
     }
 }
 

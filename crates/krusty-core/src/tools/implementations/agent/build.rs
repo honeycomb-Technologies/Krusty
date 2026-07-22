@@ -181,7 +181,8 @@ impl AgentTool {
         let mut tasks: Vec<SubAgentTask> = Vec::new();
         let delegated_run_id = Uuid::new_v4().to_string();
         let delegation_policy =
-            DelegationPolicy::for_subagent_build(ctx.permission_mode, ctx.subagent_max_turns);
+            DelegationPolicy::for_subagent_build(ctx.permission_mode, ctx.subagent_max_turns)
+                .with_execution_tool_allowlist(ctx.execution_tool_allowlist.as_ref());
         let delegated_store = open_delegated_run_store(ctx);
         let mut target_scope = Vec::new();
 

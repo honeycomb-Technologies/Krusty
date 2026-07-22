@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 
 use krusty_core::ai::client::{AnthropicAdaptiveEffort, CallOptions, CodexReasoningEffort};
-use krusty_core::ai::providers::ReasoningControl;
+use krusty_core::ai::providers::{ProviderId, ReasoningControl};
 use krusty_core::ai::types::{AiTool, ThinkingConfig};
-use krusty_core::storage::SessionType;
+use krusty_core::storage::{SessionType, WorkMode};
+use krusty_core::tools::registry::{MutationToolSurface, PermissionMode, ToolRequestPolicy};
 
 use crate::types::ThinkingLevel;
 
@@ -180,6 +181,30 @@ pub(super) fn filter_tools_for_session_type(
     result
 }
 
+/// Build the canonical direct Code tool surface for an effective work mode.
+/// This is used both during session setup and immediately after an HTTP mode
+/// override so per-turn allowlist validation never runs against stale schemas.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn filter_code_tools_for_mode(
+    tools: Vec<AiTool>,
+    permission_mode: PermissionMode,
+    work_mode: WorkMode,
+    has_active_plan: bool,
+    disabled_tools: &[String],
+    provider: ProviderId,
+    model: &str,
+) -> Vec<AiTool> {
+    ToolRequestPolicy::code(
+        permission_mode,
+        work_mode == WorkMode::Plan,
+        has_active_plan,
+        true,
+        disabled_tools,
+    )
+    .with_mutation_surface(MutationToolSurface::for_model(provider, model))
+    .filter(tools)
+}
+
 /// Restrict an already-governed request tool surface to an explicit per-turn
 /// allowlist. The client can only remove tools: names that were not selected by
 /// session, project, permission, and model policy are rejected rather than
@@ -187,7 +212,7 @@ pub(super) fn filter_tools_for_session_type(
 pub(super) fn restrict_tools_to_allowlist(
     options: &mut CallOptions,
     requested: &[String],
-) -> Result<(), String> {
+) -> Result<HashSet<String>, String> {
     let mut requested_names = HashSet::with_capacity(requested.len());
     for name in requested {
         if name.is_empty() || name.trim() != name {
@@ -223,10 +248,16 @@ pub(super) fn restrict_tools_to_allowlist(
         .filter(|tool| requested_names.contains(&tool.name))
         .collect::<Vec<_>>();
     options.tools = (!restricted.is_empty()).then_some(restricted);
+    if !requested_names.contains("web_search") {
+        options.web_search = None;
+    }
+    if !requested_names.contains("web_fetch") {
+        options.web_fetch = None;
+    }
     if options.tools.as_ref().is_none_or(|tools| tools.len() <= 1) {
         options.codex_parallel_tool_calls = false;
     }
-    Ok(())
+    Ok(requested_names)
 }
 
 fn filter_tools_inner(tools: Vec<AiTool>, session_type: SessionType) -> Vec<AiTool> {
@@ -303,6 +334,7 @@ fn anthropic_effort_for_level(thinking_level: ThinkingLevel) -> Option<Anthropic
 
 #[cfg(test)]
 mod tests {
+    use krusty_core::ai::types::{WebFetchConfig, WebSearchConfig};
     use serde_json::json;
 
     use super::*;
@@ -416,6 +448,104 @@ mod tests {
     }
 
     #[test]
+    fn code_mode_refresh_switches_grok_from_plan_to_edit_write_surface() {
+        let catalog = vec![
+            tool("apply_patch"),
+            tool("edit"),
+            tool("read"),
+            tool("set_work_mode"),
+            tool("tool_search"),
+            tool("write"),
+        ];
+
+        let plan = filter_code_tools_for_mode(
+            catalog.clone(),
+            PermissionMode::Autonomous,
+            WorkMode::Plan,
+            false,
+            &[],
+            ProviderId::Grok,
+            "grok-4.5",
+        );
+        let build = filter_code_tools_for_mode(
+            catalog,
+            PermissionMode::Autonomous,
+            WorkMode::Build,
+            false,
+            &[],
+            ProviderId::Grok,
+            "grok-4.5",
+        );
+
+        let plan_names = plan
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        let build_names = build
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(plan_names.contains(&"set_work_mode"));
+        assert!(!plan_names.contains(&"edit"));
+        assert!(!plan_names.contains(&"write"));
+        assert!(!build_names.contains(&"set_work_mode"));
+        assert!(build_names.contains(&"edit"));
+        assert!(build_names.contains(&"write"));
+        assert!(!build_names.contains(&"apply_patch"));
+    }
+
+    #[test]
+    fn request_mode_refresh_precedes_exact_allowlist_validation() {
+        let catalog = vec![
+            tool("edit"),
+            tool("read"),
+            tool("set_work_mode"),
+            tool("tool_search"),
+            tool("write"),
+        ];
+        let build_tools = filter_code_tools_for_mode(
+            catalog.clone(),
+            PermissionMode::Autonomous,
+            WorkMode::Build,
+            false,
+            &[],
+            ProviderId::Grok,
+            "grok-4.5",
+        );
+        let mut build_options = CallOptions {
+            tools: Some(build_tools),
+            ..Default::default()
+        };
+        restrict_tools_to_allowlist(&mut build_options, &["write".to_string()])
+            .expect("Build override should expose Grok's governed write schema first");
+        assert_eq!(
+            build_options
+                .tools
+                .as_deref()
+                .expect("write remains")
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["write"]
+        );
+
+        let plan_tools = filter_code_tools_for_mode(
+            catalog,
+            PermissionMode::Autonomous,
+            WorkMode::Plan,
+            false,
+            &[],
+            ProviderId::Grok,
+            "grok-4.5",
+        );
+        let mut plan_options = CallOptions {
+            tools: Some(plan_tools),
+            ..Default::default()
+        };
+        assert!(restrict_tools_to_allowlist(&mut plan_options, &["write".to_string()]).is_err());
+    }
+
+    #[test]
     fn per_turn_allowlist_only_narrows_the_advertised_surface() {
         let mut options = CallOptions {
             tools: Some(vec![tool("bash"), tool("grep"), tool("read")]),
@@ -423,8 +553,13 @@ mod tests {
             ..Default::default()
         };
 
-        restrict_tools_to_allowlist(&mut options, &["grep".into(), "read".into()])
-            .expect("read-only subset should be accepted");
+        let execution_scope =
+            restrict_tools_to_allowlist(&mut options, &["grep".into(), "read".into()])
+                .expect("read-only subset should be accepted");
+        assert_eq!(
+            execution_scope,
+            HashSet::from(["grep".to_string(), "read".to_string()])
+        );
         assert_eq!(
             options
                 .tools
@@ -459,8 +594,9 @@ mod tests {
             codex_parallel_tool_calls: true,
             ..Default::default()
         };
-        restrict_tools_to_allowlist(&mut options, &[])
+        let execution_scope = restrict_tools_to_allowlist(&mut options, &[])
             .expect("an empty allowlist should explicitly disable tools");
+        assert!(execution_scope.is_empty());
         assert!(options.tools.is_none());
         assert!(!options.codex_parallel_tool_calls);
 
@@ -471,6 +607,33 @@ mod tests {
         assert!(restrict_tools_to_allowlist(&mut options, &[" read".into()]).is_err());
         assert!(
             restrict_tools_to_allowlist(&mut options, &["read".into(), "read".into()]).is_err()
+        );
+    }
+
+    #[test]
+    fn per_turn_allowlist_also_narrows_hosted_web_tools() {
+        let mut options = CallOptions {
+            tools: Some(vec![tool("web_search"), tool("web_fetch")]),
+            web_search: Some(WebSearchConfig::default()),
+            web_fetch: Some(WebFetchConfig::default()),
+            ..Default::default()
+        };
+
+        let execution_scope = restrict_tools_to_allowlist(&mut options, &["web_search".into()])
+            .expect("hosted web search subset should be accepted");
+
+        assert_eq!(execution_scope, HashSet::from(["web_search".to_string()]));
+        assert!(options.web_search.is_some());
+        assert!(options.web_fetch.is_none());
+        assert_eq!(
+            options
+                .tools
+                .as_deref()
+                .expect("portable tool remains until provider canonicalization")
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["web_search"]
         );
     }
 

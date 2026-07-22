@@ -3,6 +3,7 @@
 //! Keeps approval, retry, and result-shaping behavior in one place so the
 //! executor stays focused on dispatch.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -87,6 +88,38 @@ impl ToolControl {
     pub(crate) fn requires_approval(&self, call: &AiToolCall) -> bool {
         authorize_tool_call(&call.name, &call.arguments, self.permission_mode, false)
             .requires_approval()
+    }
+
+    /// Enforce an explicit run-scoped execution capability against the
+    /// effective operation represented by a wrapper call. `None` preserves
+    /// normal governed deferred dispatch.
+    pub(crate) fn execution_target_is_allowlisted(
+        &self,
+        call: &AiToolCall,
+        execution_tool_allowlist: Option<&HashSet<String>>,
+    ) -> bool {
+        let Some(allowlist) = execution_tool_allowlist else {
+            return true;
+        };
+        let (effective_name, _) = effective_tool_call(&call.name, &call.arguments);
+        allowlist.contains(&call.name) && allowlist.contains(effective_name)
+    }
+
+    pub(crate) fn execution_scope_denial(
+        &self,
+        call: &AiToolCall,
+        execution_tool_allowlist: Option<&HashSet<String>>,
+    ) -> Option<ToolResult> {
+        if self.execution_target_is_allowlisted(call, execution_tool_allowlist) {
+            return None;
+        }
+        let (effective_name, _) = effective_tool_call(&call.name, &call.arguments);
+        Some(ToolResult::error_with_code(
+            "tool_not_advertised",
+            format!(
+                "Tool '{effective_name}' was not included in this turn's explicit tool capability"
+            ),
+        ))
     }
 
     pub(crate) async fn authorize(
@@ -238,6 +271,7 @@ fn extract_error_code(output: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::progress::{ProgressGuardAction, ProgressLedger};
     use serde_json::json;
 
     fn read_call() -> AiToolCall {
@@ -389,6 +423,79 @@ mod tests {
         };
         assert_eq!(output["tool"], "bash");
         assert_eq!(output["retention"], "drop_after_compaction");
+    }
+
+    #[test]
+    fn published_producer_change_key_drives_progress_deduplication() {
+        let control = ToolControl::new(PermissionMode::Autonomous);
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let mut ledger = ProgressLedger::new();
+        let commands = [
+            "date +%s%N > state",
+            "printf '%s' \"$RANDOM\" > state",
+            "python3 -c 'open(\"state\", \"w\").write(\"x\")'",
+            "node -e 'require(\"fs\").writeFileSync(\"state\", \"y\")'",
+        ];
+
+        for (index, command) in commands.into_iter().enumerate() {
+            let call = AiToolCall {
+                id: format!("bash-change-{index}"),
+                name: "bash".to_string(),
+                arguments: json!({"command": command}),
+            };
+            let raw = ToolResult::success_data(json!({"output": "ok"}))
+                .with_changed(true)
+                .with_progress_change_key("same-workspace-target");
+            let published = control.publish_result(&call, &raw, &event_tx);
+            let telemetry = ledger.record_turn(
+                std::slice::from_ref(&call),
+                std::slice::from_ref(&published),
+            );
+            if index == 0 {
+                assert!(telemetry.is_none());
+            } else {
+                let telemetry = telemetry.expect("same producer target must converge");
+                assert_eq!(telemetry.no_progress_turns, index);
+                assert_eq!(
+                    telemetry.action,
+                    match index {
+                        1 => ProgressGuardAction::Warn,
+                        2 => ProgressGuardAction::Replan,
+                        _ => ProgressGuardAction::Stop,
+                    }
+                );
+            }
+        }
+
+        let new_target_call = AiToolCall {
+            id: "bash-new-target".to_string(),
+            name: "bash".to_string(),
+            arguments: json!({"command": "date +%s%N > other"}),
+        };
+        let new_target = ToolResult::success_data(json!({"output": "ok"}))
+            .with_changed(true)
+            .with_progress_change_key("different-workspace-target");
+        let published = control.publish_result(&new_target_call, &new_target, &event_tx);
+        assert!(ledger
+            .record_turn(&[new_target_call], &[published])
+            .is_none());
+    }
+
+    #[test]
+    fn explicit_execution_scope_checks_the_deferred_target() {
+        let control = ToolControl::new(PermissionMode::Autonomous);
+        let call = deferred_call("write", json!({"file_path": "sentinel.txt"}));
+        let wrapper_only = HashSet::from(["tool_search".to_string()]);
+        let target_only = HashSet::from(["write".to_string()]);
+        let wrapper_and_target = HashSet::from(["tool_search".to_string(), "write".to_string()]);
+
+        assert!(control.execution_target_is_allowlisted(&call, None));
+        assert!(!control.execution_target_is_allowlisted(&call, Some(&wrapper_only)));
+        assert!(control
+            .execution_scope_denial(&call, Some(&wrapper_only))
+            .is_some());
+        assert!(!control.execution_target_is_allowlisted(&call, Some(&target_only)));
+        assert!(control.execution_target_is_allowlisted(&call, Some(&wrapper_and_target)));
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 use super::create_test_db;
 use crate::storage::sessions::SessionManager;
+use crate::storage::Database;
 
 #[test]
 fn test_agent_state_management() {
@@ -168,6 +169,196 @@ fn test_recovery_state_round_trip() {
             .expect("Failed to reload recovery state")
             .is_none(),
         "Expected recovery state to be cleared"
+    );
+}
+
+#[test]
+fn awaiting_interaction_claim_is_single_use_and_survives_idle_restart_state() {
+    use crate::agent::loop_events::LoopStopReason;
+    use crate::storage::{
+        PartialAssistantState, PendingInteractionSnapshot, RecoveryDecision,
+        RecoveryNonResumableReason, RecoveryStatus, SessionRecoveryState,
+    };
+    use serde_json::json;
+    use std::sync::{Arc, Barrier};
+
+    let (db, temp) = create_test_db();
+    let manager = SessionManager::new(db);
+    let session_id = manager
+        .create_session("Awaiting answer", Some("gpt-5"), Some("/tmp"))
+        .expect("session should be created");
+    let recovery = SessionRecoveryState::new_with_pending_interactions(
+        RecoveryStatus::AwaitingInput,
+        Some(LoopStopReason::AwaitingInput),
+        None,
+        PartialAssistantState::default(),
+        vec![PendingInteractionSnapshot::ask_user_from_call(
+            "ask-1",
+            &json!({"questions": [{"header": "Choice", "question": "Continue?"}]}),
+        )],
+        RecoveryDecision::NonResumable {
+            reason: RecoveryNonResumableReason::AwaitingHumanInput,
+        },
+    );
+    manager
+        .update_recovery_state(&session_id, &recovery)
+        .expect("recovery should persist");
+    // This is the state produced by HTTP startup repair. Durable recovery,
+    // rather than transient runtime state, authorizes the continuation.
+    manager
+        .set_agent_state(&session_id, "idle")
+        .expect("runtime state should reset to idle");
+
+    let db_path = temp.path().join("test.db");
+    let manager_a = SessionManager::new(Database::new(&db_path).expect("first connection"));
+    let manager_b = SessionManager::new(Database::new(&db_path).expect("second connection"));
+    let barrier = Arc::new(Barrier::new(2));
+    let first_barrier = Arc::clone(&barrier);
+    let second_barrier = Arc::clone(&barrier);
+    let first_id = session_id.clone();
+    let second_id = session_id.clone();
+
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(move || {
+            first_barrier.wait();
+            manager_a.claim_awaiting_interaction(&first_id, "ask-1", "yes")
+        });
+        let second = scope.spawn(move || {
+            second_barrier.wait();
+            manager_b.claim_awaiting_interaction(&second_id, "ask-1", "yes")
+        });
+        (
+            first.join().expect("first claim thread should not panic"),
+            second.join().expect("second claim thread should not panic"),
+        )
+    });
+
+    let accepted = [first, second]
+        .into_iter()
+        .map(|claim| claim.expect("claim should not fail"))
+        .filter(Option::is_some)
+        .count();
+    assert_eq!(accepted, 1, "exactly one competing submission may claim");
+    let claimed_recovery = manager
+        .load_recovery_state(&session_id)
+        .expect("recovery should load")
+        .expect("accepted response must remain durable before run start");
+    let accepted_claim = claimed_recovery
+        .continuation_claim
+        .as_ref()
+        .expect("accepted response should be recorded");
+    assert_eq!(accepted_claim.interaction_id, "ask-1");
+    assert_eq!(accepted_claim.accepted_response, "yes");
+    assert_eq!(
+        manager
+            .get_agent_state(&session_id)
+            .expect("agent state should exist")
+            .state,
+        "resuming_input"
+    );
+
+    // Failpoint: the process exits after claim acceptance but before the run
+    // starts. Startup repair yields only transient state; the accepted answer
+    // and prompt remain durable and a different answer cannot replace it.
+    assert_eq!(
+        manager
+            .reset_transient_agent_states()
+            .expect("startup repair should reset transient state"),
+        1
+    );
+    assert!(manager
+        .claim_awaiting_interaction(&session_id, "ask-1", "different")
+        .expect("different response should be rejected normally")
+        .is_none());
+    assert!(manager
+        .claim_awaiting_interaction(&session_id, "ask-1", "yes")
+        .expect("same accepted response should reclaim after restart")
+        .is_some());
+    assert!(manager
+        .yield_awaiting_interaction_claim(&session_id, "ask-1", "yes")
+        .expect("failed run start should yield its lease"));
+    assert_eq!(
+        manager
+            .get_agent_state(&session_id)
+            .expect("agent state should exist")
+            .state,
+        "idle"
+    );
+    assert_eq!(
+        manager
+            .load_recovery_state(&session_id)
+            .expect("recovery should remain durable"),
+        Some(claimed_recovery)
+    );
+}
+
+#[test]
+fn awaiting_interaction_claim_mismatch_and_multi_pending_state_fail_without_consuming() {
+    use crate::agent::loop_events::LoopStopReason;
+    use crate::storage::{
+        PartialAssistantState, PendingInteractionSnapshot, RecoveryDecision,
+        RecoveryNonResumableReason, RecoveryStatus, SessionRecoveryState,
+    };
+    use serde_json::json;
+
+    let (db, _temp) = create_test_db();
+    let manager = SessionManager::new(db);
+    let session_id = manager
+        .create_session("Awaiting answers", Some("gpt-5"), Some("/tmp"))
+        .expect("session should be created");
+    let one_pending = SessionRecoveryState::new_with_pending_interactions(
+        RecoveryStatus::AwaitingInput,
+        Some(LoopStopReason::AwaitingInput),
+        None,
+        PartialAssistantState::default(),
+        vec![PendingInteractionSnapshot::ask_user_from_call(
+            "ask-1",
+            &json!({}),
+        )],
+        RecoveryDecision::NonResumable {
+            reason: RecoveryNonResumableReason::AwaitingHumanInput,
+        },
+    );
+    manager
+        .update_recovery_state(&session_id, &one_pending)
+        .expect("recovery should persist");
+
+    assert!(manager
+        .claim_awaiting_interaction(&session_id, "ask-other", "answer")
+        .expect("mismatch should be a normal rejection")
+        .is_none());
+    assert_eq!(
+        manager
+            .load_recovery_state(&session_id)
+            .expect("recovery should load"),
+        Some(one_pending)
+    );
+
+    let multi_pending = SessionRecoveryState::new_with_pending_interactions(
+        RecoveryStatus::AwaitingInput,
+        Some(LoopStopReason::AwaitingInput),
+        None,
+        PartialAssistantState::default(),
+        vec![
+            PendingInteractionSnapshot::ask_user_from_call("ask-1", &json!({})),
+            PendingInteractionSnapshot::ask_user_from_call("ask-2", &json!({})),
+        ],
+        RecoveryDecision::NonResumable {
+            reason: RecoveryNonResumableReason::AwaitingHumanInput,
+        },
+    );
+    manager
+        .update_recovery_state(&session_id, &multi_pending)
+        .expect("multi-pending recovery should persist for the fixture");
+
+    assert!(manager
+        .claim_awaiting_interaction(&session_id, "ask-1", "answer")
+        .is_err());
+    assert_eq!(
+        manager
+            .load_recovery_state(&session_id)
+            .expect("invalid recovery should remain inspectable"),
+        Some(multi_pending)
     );
 }
 

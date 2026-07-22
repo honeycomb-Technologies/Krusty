@@ -21,6 +21,19 @@ pub const NO_PROGRESS_TURN_THRESHOLD: usize = 3;
 /// Inject a model-visible change-of-strategy instruction before the terminal
 /// threshold, giving a capable model one clean opportunity to recover.
 pub const NO_PROGRESS_REPLAN_THRESHOLD: usize = 2;
+/// A single observation intent may reveal a few changing outcomes (for
+/// example, a growing log), but raw stdout churn is not unbounded proof of
+/// progress. This closes random/timestamp output loops without imposing a
+/// global turn limit.
+pub const MAX_OUTCOME_VARIANTS_PER_INTENT: usize = 6;
+/// Likewise, one identical outcome may be discovered through a bounded number
+/// of distinct semantic intents (for example, several equal files). Varying
+/// arguments around unchanged output cannot buy unlimited progress.
+pub const MAX_INTENTS_PER_IDENTICAL_OUTCOME: usize = 8;
+/// Opaque shell effects do not provide a trustworthy state delta. Permit a
+/// short sequence of distinct build steps, then require independent evidence
+/// before more unverified effects can keep the run alive.
+pub const MAX_CONSECUTIVE_UNVERIFIED_EFFECT_TURNS: usize = 6;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -65,7 +78,7 @@ impl ProgressGuardTelemetry {
     pub fn diagnostic(&self) -> Option<String> {
         self.triggered.then(|| {
             format!(
-                "Stopping no-progress loop: semantically repeated observation work produced no new evidence for {} consecutive turns. Synthesize the evidence already gathered, change strategy, or ask the user for direction.",
+                "Stopping no-progress loop: repeated work produced no verified state change or bounded new evidence for {} consecutive turns. Synthesize the evidence already gathered, change strategy, or ask the user for direction.",
                 self.no_progress_turns
             )
         })
@@ -82,7 +95,11 @@ impl ProgressGuardTelemetry {
 pub struct ProgressLedger {
     mutation_epoch: u64,
     seen_evidence: HashSet<String>,
-    seen_effects: HashSet<String>,
+    seen_changed_effects: HashSet<String>,
+    seen_unverified_effects: HashSet<String>,
+    outcome_variants: HashMap<String, HashSet<String>>,
+    outcome_intents: HashMap<String, HashSet<String>>,
+    consecutive_unverified_effect_turns: usize,
     no_progress_turns: usize,
 }
 
@@ -94,7 +111,11 @@ impl ProgressLedger {
     pub fn reset_for_steering(&mut self) {
         self.mutation_epoch = self.mutation_epoch.saturating_add(1);
         self.seen_evidence.clear();
-        self.seen_effects.clear();
+        self.seen_changed_effects.clear();
+        self.seen_unverified_effects.clear();
+        self.outcome_variants.clear();
+        self.outcome_intents.clear();
+        self.consecutive_unverified_effect_turns = 0;
         self.no_progress_turns = 0;
     }
 
@@ -116,117 +137,139 @@ impl ProgressLedger {
             .collect::<Vec<_>>();
         let results = results_by_call_id(tool_results);
 
-        let mut successful_effects = tool_calls
-            .iter()
-            .zip(&fingerprints)
-            .filter_map(|(call, fingerprint)| {
-                if !matches!(
-                    fingerprint.class,
-                    ActionClass::Mutate | ActionClass::Communicate | ActionClass::Control
-                ) {
-                    return None;
-                }
-                let result = results.get(call.id.as_str())?;
-                (!result.is_error).then(|| {
-                    (
-                        fingerprint.class,
-                        // A repeated successful mutation intent is not fresh
-                        // progress merely because its output includes a new
-                        // timestamp, PID, or presentation detail. A different
-                        // real mutation advances the epoch and permits later
-                        // validation/observation to run again.
-                        fingerprint.intent.clone(),
-                        result.changed,
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        if !successful_effects.is_empty() {
-            successful_effects.sort_by(|left, right| left.1.cmp(&right.1));
-            successful_effects.dedup_by(|left, right| left.1 == right.1);
-            let explicit_state_delta = successful_effects
-                .iter()
-                .any(|(_, _, changed)| *changed == Some(true));
-            let discovered_new_effect = explicit_state_delta
-                || successful_effects.iter().any(|(_, effect, changed)| {
-                    changed.is_none() && !self.seen_effects.contains(effect)
-                });
-            self.seen_effects.extend(
-                successful_effects
-                    .iter()
-                    .map(|(_, effect, _)| effect.clone()),
-            );
+        let mut evidence_candidates = Vec::new();
+        let mut action_classes = Vec::new();
+        let mut discovered_new_changed_effect = false;
+        let mut discovered_new_unverified_effect = false;
 
-            if discovered_new_effect {
-                self.mutation_epoch = self.mutation_epoch.saturating_add(1);
-                self.seen_evidence.clear();
-                self.no_progress_turns = 0;
-                return None;
+        for (call, fingerprint) in tool_calls.iter().zip(&fingerprints) {
+            let Some(result) = results.get(call.id.as_str()) else {
+                continue;
+            };
+            // Failed mutations and validations have dedicated outcome-aware
+            // guards. Do not let this ledger race or double-count them.
+            if result.is_error {
+                continue;
             }
 
-            self.no_progress_turns = self.no_progress_turns.saturating_add(1);
-            let mut action_classes = successful_effects
-                .iter()
-                .map(|(class, _, _)| *class)
-                .collect::<Vec<_>>();
-            action_classes.sort_by_key(|class| action_class_order(*class));
-            action_classes.dedup();
-            return Some(
-                self.telemetry(
-                    action_classes,
-                    &successful_effects
-                        .iter()
-                        .map(|(_, effect, _)| effect.as_str())
-                        .collect::<Vec<_>>()
-                        .join("|"),
-                ),
+            let producer_declares_effect = result.changed.is_some();
+            let effect_class = matches!(
+                fingerprint.class,
+                ActionClass::Mutate | ActionClass::Communicate | ActionClass::Control
             );
+            let evidence_class = matches!(
+                fingerprint.class,
+                ActionClass::Observe | ActionClass::Delegate | ActionClass::Validate
+            );
+            if !producer_declares_effect && !effect_class && !evidence_class {
+                continue;
+            }
+
+            action_classes.push(if result.changed == Some(true) {
+                ActionClass::Mutate
+            } else {
+                fingerprint.class
+            });
+
+            // A physical delta is semantic progress only once for the same
+            // normalized intent in the current steering window. This contains
+            // timestamp churn, random rewrites, and repeated background starts
+            // without reintroducing an arbitrary global turn cap.
+            let effect_identity = result
+                .progress_change_key
+                .as_ref()
+                .unwrap_or(&fingerprint.intent);
+            if result.changed == Some(true)
+                && self.seen_changed_effects.insert(effect_identity.clone())
+            {
+                discovered_new_changed_effect = true;
+            } else if result.changed.is_none()
+                && effect_class
+                && self
+                    .seen_unverified_effects
+                    .insert(fingerprint.intent.clone())
+            {
+                discovered_new_unverified_effect = true;
+            }
+
+            // Intent spelling never proves progress by itself. Successful
+            // observations, delegated work, and validations need a materially
+            // new outcome. Opaque effects do not get outcome credit: a command
+            // can manufacture arbitrary random stdout without advancing the
+            // task, so it must be followed by independently observed evidence.
+            if evidence_class && result.changed != Some(true) {
+                let (effective_name, _) = effective_tool_call(&call.name, &call.arguments);
+                evidence_candidates.push((
+                    fingerprint.intent.clone(),
+                    outcome_evidence_key(call, result),
+                    matches!(effective_name, "bash" | "shell" | "execute"),
+                ));
+            }
         }
 
-        // Validation has its own outcome-aware semantic guard, and repeated
-        // mutation failures have the failure-signature guard. This ledger owns
-        // observation/delegated evidence only.
-        if !fingerprints.iter().all(|fingerprint| {
-            matches!(
-                fingerprint.class,
-                ActionClass::Observe | ActionClass::Delegate
-            )
-        }) {
+        if action_classes.is_empty() {
             return None;
         }
 
-        let mut turn_evidence = tool_calls
-            .iter()
-            .zip(&fingerprints)
-            .map(|(call, fingerprint)| {
-                let outcome = results
-                    .get(call.id.as_str())
-                    .map(|result| observation_signature(call, fingerprint.class, result))
-                    .unwrap_or_default();
-                format!("{}:{}", fingerprint.intent, outcome)
-            })
-            .collect::<Vec<_>>();
-        turn_evidence.sort();
-        turn_evidence.dedup();
+        evidence_candidates.sort();
+        evidence_candidates.dedup();
+        if discovered_new_changed_effect {
+            self.mutation_epoch = self.mutation_epoch.saturating_add(1);
+            self.seen_evidence.clear();
+            self.outcome_variants.clear();
+            self.outcome_intents.clear();
+            self.seen_unverified_effects.clear();
+            self.consecutive_unverified_effect_turns = 0;
+        }
 
-        let discovered_new_evidence = turn_evidence
-            .iter()
-            .any(|evidence| !self.seen_evidence.contains(evidence));
-        self.seen_evidence.extend(turn_evidence.iter().cloned());
-        if discovered_new_evidence {
+        let mut accepted_evidence = Vec::new();
+        for (intent, evidence, bound_cross_intent_churn) in evidence_candidates {
+            let evidence_identity = format!("{intent}:{evidence}");
+            if self.seen_evidence.contains(&evidence_identity) {
+                continue;
+            }
+            let variants = self.outcome_variants.entry(intent).or_default();
+            if variants.len() >= MAX_OUTCOME_VARIANTS_PER_INTENT {
+                continue;
+            }
+            if bound_cross_intent_churn {
+                let intents = self.outcome_intents.entry(evidence.clone()).or_default();
+                if intents.len() >= MAX_INTENTS_PER_IDENTICAL_OUTCOME {
+                    continue;
+                }
+                intents.insert(evidence_identity.clone());
+            }
+            variants.insert(evidence.clone());
+            self.seen_evidence.insert(evidence_identity.clone());
+            accepted_evidence.push(evidence_identity);
+        }
+
+        if discovered_new_changed_effect {
             self.no_progress_turns = 0;
             return None;
         }
 
+        if !accepted_evidence.is_empty() {
+            self.seen_unverified_effects.clear();
+            self.consecutive_unverified_effect_turns = 0;
+            self.no_progress_turns = 0;
+            return None;
+        }
+
+        if discovered_new_unverified_effect {
+            self.consecutive_unverified_effect_turns =
+                self.consecutive_unverified_effect_turns.saturating_add(1);
+            if self.consecutive_unverified_effect_turns <= MAX_CONSECUTIVE_UNVERIFIED_EFFECT_TURNS {
+                self.no_progress_turns = 0;
+                return None;
+            }
+        }
+
         self.no_progress_turns = self.no_progress_turns.saturating_add(1);
-        let mut action_classes = fingerprints
-            .iter()
-            .map(|fingerprint| fingerprint.class)
-            .collect::<Vec<_>>();
         action_classes.sort_by_key(|class| action_class_order(*class));
         action_classes.dedup();
 
-        Some(self.telemetry(action_classes, &turn_evidence.join("|")))
+        Some(self.telemetry(action_classes, &accepted_evidence.join("|")))
     }
 
     fn telemetry(
@@ -256,9 +299,11 @@ impl ProgressLedger {
 #[derive(Debug, Clone)]
 struct ResultEvidence {
     is_error: bool,
+    output: Value,
     signature: String,
     status_signature: String,
     changed: Option<bool>,
+    progress_change_key: Option<String>,
 }
 
 fn results_by_call_id(tool_results: &[Content]) -> HashMap<&str, ResultEvidence> {
@@ -273,9 +318,11 @@ fn results_by_call_id(tool_results: &[Content]) -> HashMap<&str, ResultEvidence>
                 tool_use_id.as_str(),
                 ResultEvidence {
                     is_error: is_error.unwrap_or(false),
+                    output: output.clone(),
                     signature: hash_value(output),
                     status_signature: stable_status_signature(output, is_error.unwrap_or(false)),
                     changed: changed_value(output),
+                    progress_change_key: progress_change_key(output),
                 },
             )),
             _ => None,
@@ -283,17 +330,53 @@ fn results_by_call_id(tool_results: &[Content]) -> HashMap<&str, ResultEvidence>
         .collect()
 }
 
-fn observation_signature(call: &AiToolCall, class: ActionClass, result: &ResultEvidence) -> String {
-    let (name, _) = effective_tool_call(&call.name, &call.arguments);
-    if class == ActionClass::Observe && matches!(name, "bash" | "shell" | "execute") {
-        // Re-running the same read-only shell intent must not look productive
-        // merely because stdout contains a different timestamp, PID, elapsed
-        // time, log prefix, or presentation detail. Preserve only explicit
-        // lifecycle/error state; a real mutation epoch permits observation
-        // again through the normal ledger reset.
-        result.status_signature.clone()
+fn outcome_evidence_key(call: &AiToolCall, result: &ResultEvidence) -> String {
+    let (name, arguments) = effective_tool_call(&call.name, &call.arguments);
+    let signature = if matches!(name, "bash" | "shell" | "execute") {
+        let background = arguments
+            .get("run_in_background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if background {
+            result.status_signature.clone()
+        } else {
+            bash_output_signature(result)
+        }
     } else {
         result.signature.clone()
+    };
+    format!("{name}:{signature}")
+}
+
+fn bash_output_signature(result: &ResultEvidence) -> String {
+    let output = extract_output_text(&result.output).unwrap_or_default();
+    hash_text(&format!("{}:{output}", result.status_signature))
+}
+
+fn extract_output_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|decoded| extract_output_text(&decoded))
+            .or_else(|| Some(text.clone())),
+        Value::Object(object) => object
+            .get("output")
+            .and_then(extract_output_text)
+            .or_else(|| {
+                ["data", "result", "summary"]
+                    .into_iter()
+                    .filter_map(|key| object.get(key))
+                    .find_map(extract_output_text)
+            }),
+        Value::Array(values) => {
+            let parts = values
+                .iter()
+                .filter_map(extract_output_text)
+                .collect::<Vec<_>>();
+            (!parts.is_empty()).then(|| parts.join("\n"))
+        }
+        Value::Null => None,
+        scalar => Some(scalar.to_string()),
     }
 }
 
@@ -322,11 +405,7 @@ fn stable_status_signature(output: &Value, is_error: bool) -> String {
 
 fn changed_value(output: &Value) -> Option<bool> {
     match output {
-        Value::Object(object) => object
-            .get("changed")
-            .and_then(Value::as_bool)
-            .or_else(|| object.get("metadata").and_then(changed_value))
-            .or_else(|| object.get("data").and_then(changed_value)),
+        Value::Object(object) => object.get("changed").and_then(Value::as_bool),
         Value::String(serialized) => serde_json::from_str::<Value>(serialized)
             .ok()
             .as_ref()
@@ -335,15 +414,39 @@ fn changed_value(output: &Value) -> Option<bool> {
     }
 }
 
+fn progress_change_key(output: &Value) -> Option<String> {
+    match output {
+        Value::Object(object) => object
+            .get("progress_change_key")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        Value::String(serialized) => serde_json::from_str::<Value>(serialized)
+            .ok()
+            .as_ref()
+            .and_then(progress_change_key),
+        _ => None,
+    }
+}
+
 pub fn action_fingerprint(call: &AiToolCall) -> ActionFingerprint {
     let (name, arguments) = effective_tool_call(&call.name, &call.arguments);
     let class = action_class(name, arguments, call);
     let normalized = if matches!(name, "bash" | "shell" | "execute") {
-        arguments
+        let command = arguments
             .get("command")
             .and_then(Value::as_str)
             .map(semantic_bash_signature)
-            .unwrap_or_else(|| "missing-command".to_string())
+            .unwrap_or_else(|| "missing-command".to_string());
+        let mode = if arguments
+            .get("run_in_background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "background"
+        } else {
+            "foreground"
+        };
+        format!("{mode}:{command}")
     } else {
         normalized_arguments(name, arguments)
     };
@@ -361,12 +464,17 @@ fn action_class(name: &str, arguments: &Value, call: &AiToolCall) -> ActionClass
 
     match name {
         "bash" | "shell" | "execute" => {
-            let mutates = arguments
-                .get("command")
-                .and_then(Value::as_str)
-                .is_some_and(|command| {
-                    classify_bash_command(command).modifies_filesystem_or_process
-                });
+            let background = arguments
+                .get("run_in_background")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let mutates = background
+                || arguments
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .is_some_and(|command| {
+                        classify_bash_command(command).modifies_filesystem_or_process
+                    });
             if mutates {
                 ActionClass::Mutate
             } else {
@@ -450,9 +558,32 @@ mod tests {
     fn result_with_changed(id: &str, changed: bool) -> Content {
         Content::ToolResult {
             tool_use_id: id.to_string(),
-            output: json!({ "ok": true, "metadata": { "changed": changed } }),
+            output: json!({ "ok": true, "changed": changed }),
             is_error: None,
         }
+    }
+
+    fn result_with_changed_key(id: &str, key: &str) -> Content {
+        Content::ToolResult {
+            tool_use_id: id.to_string(),
+            output: json!({
+                "ok": true,
+                "changed": true,
+                "progress_change_key": key
+            }),
+            is_error: None,
+        }
+    }
+
+    #[test]
+    fn nested_payload_cannot_spoof_producer_change_metadata() {
+        assert_eq!(changed_value(&json!({"data": {"changed": true}})), None);
+        assert_eq!(
+            progress_change_key(&json!({
+                "data": {"progress_change_key": "untrusted-nested-key"}
+            })),
+            None
+        );
     }
 
     #[test]
@@ -504,6 +635,57 @@ mod tests {
     }
 
     #[test]
+    fn effectful_shell_cosmetics_do_not_evade_bash_intent() {
+        let calls = [
+            "mkdir -p out",
+            "mkdir  -p out",
+            "mkdir -p ./out",
+            "command mkdir -p out",
+            "true && mkdir -p out",
+        ];
+        let fingerprints = calls
+            .into_iter()
+            .map(|command| action_fingerprint(&call("bash", "bash", json!({ "command": command }))))
+            .collect::<Vec<_>>();
+
+        assert!(fingerprints.windows(2).all(|pair| pair[0] == pair[1]));
+        assert!(fingerprints
+            .iter()
+            .all(|fingerprint| fingerprint.class == ActionClass::Mutate));
+    }
+
+    #[test]
+    fn interpreter_and_background_bash_calls_are_effectful() {
+        for command in [
+            "python3 -c 'open(\"out\", \"w\").write(\"x\")'",
+            "node -e 'require(\"fs\").writeFileSync(\"out\", \"x\")'",
+            "sh -c 'touch out'",
+            "echo ok\ntouch out",
+            "printf '%s' ok\nrm -f victim",
+        ] {
+            assert_eq!(
+                action_fingerprint(&call("bash", "bash", json!({"command": command}))).class,
+                ActionClass::Mutate,
+                "{command}"
+            );
+        }
+
+        let foreground = action_fingerprint(&call(
+            "foreground",
+            "bash",
+            json!({"command": "ps -axo pid,command"}),
+        ));
+        let background = action_fingerprint(&call(
+            "background",
+            "bash",
+            json!({"command": "ps -axo pid,command", "run_in_background": true}),
+        ));
+        assert_eq!(foreground.class, ActionClass::Observe);
+        assert_eq!(background.class, ActionClass::Mutate);
+        assert_ne!(foreground.intent, background.intent);
+    }
+
+    #[test]
     fn repeated_semantic_observations_converge_after_three_no_progress_turns() {
         let mut ledger = ProgressLedger::new();
         let commands = [
@@ -542,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_evidence_and_successful_mutation_reset_no_progress() {
+    fn changed_evidence_and_positive_mutation_reset_no_progress() {
         let mut ledger = ProgressLedger::new();
         let read = vec![call("read-1", "read", json!({ "file_path": "src/lib.rs" }))];
         assert!(ledger
@@ -561,7 +743,7 @@ mod tests {
             json!({ "file_path": "src/lib.rs", "content": "after" }),
         )];
         assert!(ledger
-            .record_turn(&write, &[result("write-1", "written", false)])
+            .record_turn(&write, &[result_with_changed("write-1", true)])
             .is_none());
         assert!(ledger
             .record_turn(&read, &[result("read-1", "after", false)])
@@ -596,6 +778,148 @@ mod tests {
     }
 
     #[test]
+    fn distinct_producer_change_keys_progress_and_exact_repeats_converge() {
+        let mut ledger = ProgressLedger::new();
+        for (index, (command, change_key)) in [
+            ("echo a > a.txt", "target-a"),
+            ("echo b > b.txt", "target-b"),
+            ("echo c > c.txt", "target-c"),
+            ("echo d > d.txt", "target-d"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("write-{index}");
+            assert!(
+                ledger
+                    .record_turn(
+                        &[call(&id, "bash", json!({"command": command}))],
+                        &[result_with_changed_key(&id, change_key)],
+                    )
+                    .is_none(),
+                "distinct mutation must be progress: {command}"
+            );
+        }
+
+        for (attempt, expected) in [
+            ProgressGuardAction::Warn,
+            ProgressGuardAction::Replan,
+            ProgressGuardAction::Stop,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("repeat-{attempt}");
+            let telemetry = ledger
+                .record_turn(
+                    &[call(
+                        &id,
+                        "bash",
+                        json!({"command": format!("echo repeat-{attempt} > d.txt")}),
+                    )],
+                    &[result_with_changed_key(&id, "target-d")],
+                )
+                .expect("a repeated producer change target must converge");
+            assert_eq!(telemetry.action, expected);
+            assert_eq!(telemetry.triggered, expected == ProgressGuardAction::Stop);
+        }
+    }
+
+    #[test]
+    fn opaque_mutation_batches_do_not_gain_novelty_from_order_or_multiplicity() {
+        let mut ledger = ProgressLedger::new();
+        let batch = |prefix: &str, commands: &[&str]| {
+            let calls = commands
+                .iter()
+                .enumerate()
+                .map(|(index, command)| {
+                    call(
+                        &format!("{prefix}-{index}"),
+                        "bash",
+                        json!({"command": command}),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let results = calls
+                .iter()
+                .map(|call| result(&call.id, "ok", false))
+                .collect::<Vec<_>>();
+            (calls, results)
+        };
+
+        let (first_calls, first_results) = batch("first", &["touch a", "touch b"]);
+        assert!(ledger.record_turn(&first_calls, &first_results).is_none());
+
+        let (reordered_calls, reordered_results) = batch("reordered", &["touch b", "touch a"]);
+        let telemetry = ledger
+            .record_turn(&reordered_calls, &reordered_results)
+            .expect("reordering known opaque effects is not progress");
+        assert_eq!(telemetry.action, ProgressGuardAction::Warn);
+
+        let (repeated_calls, repeated_results) = batch("repeat", &["touch b", "touch a"]);
+        let telemetry = ledger
+            .record_turn(&repeated_calls, &repeated_results)
+            .expect("repeating an ordered opaque effect sequence is not progress");
+        assert_eq!(telemetry.action, ProgressGuardAction::Replan);
+
+        let (duplicate_calls, duplicate_results) = batch("duplicate", &["touch a", "touch a"]);
+        let telemetry = ledger
+            .record_turn(&duplicate_calls, &duplicate_results)
+            .expect("multiplicity alone must not create a new effect sequence");
+        assert_eq!(telemetry.action, ProgressGuardAction::Stop);
+        assert!(telemetry.triggered);
+    }
+
+    #[test]
+    fn growing_single_effect_batches_cannot_evade_guard() {
+        let mut ledger = ProgressLedger::new();
+
+        for (turn, multiplicity) in (1..=4).enumerate() {
+            let calls = (0..multiplicity)
+                .map(|index| {
+                    call(
+                        &format!("turn-{turn}-{index}"),
+                        "bash",
+                        json!({"command": "touch same"}),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let results = calls
+                .iter()
+                .map(|call| result(&call.id, "ok", false))
+                .collect::<Vec<_>>();
+            let telemetry = ledger.record_turn(&calls, &results);
+
+            if turn == 0 {
+                assert!(telemetry.is_none(), "the first opaque effect is novel");
+            } else {
+                let telemetry = telemetry.expect("multiplicity-only turn must be no-progress");
+                assert_eq!(telemetry.no_progress_turns, turn);
+                assert_eq!(telemetry.triggered, turn == 3);
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_no_change_overrides_novel_mutation_intent() {
+        let mut ledger = ProgressLedger::new();
+        for (index, command) in ["mkdir one", "mkdir two", "mkdir three"]
+            .into_iter()
+            .enumerate()
+        {
+            let id = format!("noop-{index}");
+            let telemetry = ledger
+                .record_turn(
+                    &[call(&id, "bash", json!({"command": command}))],
+                    &[result_with_changed(&id, false)],
+                )
+                .expect("producer-declared no-change must not count as progress");
+            assert_eq!(telemetry.no_progress_turns, index + 1);
+            assert_eq!(telemetry.triggered, index == 2);
+        }
+    }
+
+    #[test]
     fn repeated_opaque_mutation_cannot_evade_guard_with_volatile_output() {
         let mut ledger = ProgressLedger::new();
 
@@ -623,28 +947,225 @@ mod tests {
     }
 
     #[test]
-    fn volatile_read_only_bash_output_cannot_evade_guard() {
+    fn shell_parameter_churn_is_unverified_and_converges() {
+        let mut ledger = ProgressLedger::new();
+        for attempt in 0..=NO_PROGRESS_TURN_THRESHOLD {
+            let id = format!("random-{attempt}");
+            let calls = vec![call(&id, "bash", json!({"command": "echo \"$RANDOM\""}))];
+            assert_eq!(action_fingerprint(&calls[0]).class, ActionClass::Mutate);
+            let telemetry =
+                ledger.record_turn(&calls, &[result(&id, &format!("random-{attempt}"), false)]);
+            if attempt == 0 {
+                assert!(telemetry.is_none());
+            } else {
+                let telemetry = telemetry.expect("random stdout must not prove progress");
+                assert_eq!(telemetry.no_progress_turns, attempt);
+                assert_eq!(telemetry.triggered, attempt == NO_PROGRESS_TURN_THRESHOLD);
+            }
+        }
+    }
+
+    #[test]
+    fn distinct_opaque_effects_require_evidence_after_a_bounded_runway() {
+        let mut ledger = ProgressLedger::new();
+        let total = MAX_CONSECUTIVE_UNVERIFIED_EFFECT_TURNS + NO_PROGRESS_TURN_THRESHOLD;
+
+        for attempt in 0..total {
+            let id = format!("opaque-{attempt}");
+            let telemetry = ledger.record_turn(
+                &[call(
+                    &id,
+                    "bash",
+                    json!({"command": format!("sh -c 'printf step-{attempt}'")}),
+                )],
+                &[result(&id, "ok", false)],
+            );
+            if attempt < MAX_CONSECUTIVE_UNVERIFIED_EFFECT_TURNS {
+                assert!(telemetry.is_none(), "bounded build runway: {attempt}");
+            } else {
+                let telemetry = telemetry.expect("unverified effect streak must converge");
+                let no_progress = attempt - MAX_CONSECUTIVE_UNVERIFIED_EFFECT_TURNS + 1;
+                assert_eq!(telemetry.no_progress_turns, no_progress);
+                assert_eq!(
+                    telemetry.triggered,
+                    no_progress == NO_PROGRESS_TURN_THRESHOLD
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cosmetic_observation_intents_cannot_recredit_identical_output() {
+        let mut ledger = ProgressLedger::new();
+        let total = MAX_INTENTS_PER_IDENTICAL_OUTCOME + NO_PROGRESS_TURN_THRESHOLD;
+        for attempt in 0..total {
+            let id = format!("rg-{attempt}");
+            let telemetry = ledger.record_turn(
+                &[call(
+                    &id,
+                    "bash",
+                    json!({
+                        "command": format!("rg needle . --glob '!__noop_{attempt}__'")
+                    }),
+                )],
+                &[result(&id, "same match", false)],
+            );
+            if attempt < MAX_INTENTS_PER_IDENTICAL_OUTCOME {
+                assert!(telemetry.is_none());
+            } else {
+                let telemetry = telemetry.expect("identical evidence must converge");
+                let no_progress = attempt - MAX_INTENTS_PER_IDENTICAL_OUTCOME + 1;
+                assert_eq!(telemetry.no_progress_turns, no_progress);
+                assert_eq!(
+                    telemetry.triggered,
+                    no_progress == NO_PROGRESS_TURN_THRESHOLD
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn distinct_resources_with_equal_output_are_distinct_evidence() {
+        let mut ledger = ProgressLedger::new();
+        for index in 0..(MAX_INTENTS_PER_IDENTICAL_OUTCOME + 5) {
+            let id = format!("read-equal-{index}");
+            assert!(ledger
+                .record_turn(
+                    &[call(
+                        &id,
+                        "read",
+                        json!({"file_path": format!("file-{index}.txt")}),
+                    )],
+                    &[result(&id, "same file contents", false)],
+                )
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn materially_changing_log_and_listing_outcomes_count_within_the_bound() {
+        let mut ledger = ProgressLedger::new();
+        for (index, output) in ["line one", "line one\nline two", "line two\nline three"]
+            .into_iter()
+            .enumerate()
+        {
+            let id = format!("tail-{index}");
+            assert!(ledger
+                .record_turn(
+                    &[call(
+                        &id,
+                        "bash",
+                        json!({"command": "tail -n 20 server.log"}),
+                    )],
+                    &[result(&id, output, false)],
+                )
+                .is_none());
+        }
+
+        for (index, (command, output)) in [
+            ("ls src", "a"),
+            ("ls -d src", "src"),
+            ("ls -R src", "src:\\na"),
+            ("ls -A src", ".hidden\\na"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("ls-{index}");
+            assert!(ledger
+                .record_turn(
+                    &[call(&id, "bash", json!({"command": command}))],
+                    &[result(&id, output, false)],
+                )
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn repeated_effect_plus_new_observation_evidence_is_progress() {
+        let mut ledger = ProgressLedger::new();
+        let effect = call("effect-1", "bash", json!({"command": "mkdir -p out"}));
+        assert!(ledger
+            .record_turn(
+                std::slice::from_ref(&effect),
+                &[result("effect-1", "ok", false)],
+            )
+            .is_none());
+
+        let repeated_effect = call("effect-2", "bash", json!({"command": "mkdir -p out"}));
+        let observation = call("read-1", "read", json!({"file_path": "out/state"}));
+        assert!(ledger
+            .record_turn(
+                &[repeated_effect, observation],
+                &[
+                    result("effect-2", "ok", false),
+                    result("read-1", "new state", false),
+                ],
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn repeated_positive_delta_for_same_intent_converges_but_distinct_intents_progress() {
+        let mut ledger = ProgressLedger::new();
+        for (index, path) in ["a", "b", "c"].into_iter().enumerate() {
+            let id = format!("distinct-{index}");
+            assert!(ledger
+                .record_turn(
+                    &[call(
+                        &id,
+                        "bash",
+                        json!({"command": format!("date +%s%N > {path}")}),
+                    )],
+                    &[result_with_changed_key(&id, &format!("target-{path}"))],
+                )
+                .is_none());
+        }
+
+        for (attempt, command) in [
+            "printf '%s' \"$RANDOM\" > c",
+            "python3 -c 'open(\"c\", \"w\").write(\"new\")'",
+            "date +%s%N > c",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let attempt = attempt + 1;
+            let id = format!("repeat-{attempt}");
+            let telemetry = ledger
+                .record_turn(
+                    &[call(&id, "bash", json!({"command": command}))],
+                    &[result_with_changed_key(&id, "target-c")],
+                )
+                .expect("repeated physical churn is not fresh semantic progress");
+            assert_eq!(telemetry.no_progress_turns, attempt);
+            assert_eq!(telemetry.triggered, attempt == NO_PROGRESS_TURN_THRESHOLD);
+        }
+    }
+
+    #[test]
+    fn changing_observation_output_has_a_bounded_novelty_allowance() {
         let mut ledger = ProgressLedger::new();
 
-        for attempt in 0..=3 {
+        for attempt in 0..(MAX_OUTCOME_VARIANTS_PER_INTENT + NO_PROGRESS_TURN_THRESHOLD) {
             let id = format!("bash-{attempt}");
             let calls = vec![call(
                 &id,
                 "bash",
-                json!({ "command": "ps -axo pid,command" }),
+                json!({ "command": "tail -n 20 changing.log" }),
             )];
-            let results = vec![result(
-                &id,
-                &format!("pid={} timestamp={attempt}", 10_000 + attempt),
-                false,
-            )];
+            let results = vec![result(&id, &format!("random-outcome-{attempt}"), false)];
             let telemetry = ledger.record_turn(&calls, &results);
-            if attempt == 0 {
+            if attempt < MAX_OUTCOME_VARIANTS_PER_INTENT {
                 assert!(telemetry.is_none());
-            } else if attempt < 3 {
-                assert!(!telemetry.expect("warning").triggered);
             } else {
-                assert!(telemetry.expect("terminal guard").triggered);
+                let telemetry = telemetry.expect("outcome churn must converge");
+                let no_progress = attempt - MAX_OUTCOME_VARIANTS_PER_INTENT + 1;
+                assert_eq!(telemetry.no_progress_turns, no_progress);
+                assert_eq!(
+                    telemetry.triggered,
+                    no_progress == NO_PROGRESS_TURN_THRESHOLD
+                );
             }
         }
     }
@@ -652,11 +1173,7 @@ mod tests {
     #[test]
     fn explicit_process_status_change_is_new_evidence() {
         let mut ledger = ProgressLedger::new();
-        let calls = vec![call(
-            "bash",
-            "bash",
-            json!({ "command": "check-worker-status" }),
-        )];
+        let calls = vec![call("bash", "bash", json!({ "command": "ps -p 123" }))];
         let running = Content::ToolResult {
             tool_use_id: "bash".to_string(),
             output: json!({ "result": { "status": "running", "process_id": "123" } }),

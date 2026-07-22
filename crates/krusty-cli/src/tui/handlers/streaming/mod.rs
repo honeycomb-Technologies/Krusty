@@ -347,6 +347,7 @@ impl App {
             fast_mode_format,
             ..Default::default()
         };
+        let mode_aware_code_tools = options.tools.is_some();
 
         // Determine if this is a new session (first user message → generate title)
         let is_new_session = self.runtime.chat.conversation.len() <= 1;
@@ -366,6 +367,7 @@ impl App {
         .run_budget(self.runtime.agent_config.primary_run_budget_override())
         .stream_idle_timeout(self.runtime.agent_config.stream_idle_timeout())
         .initial_work_mode(self.ui.work_mode.into())
+        .mode_aware_code_tools(mode_aware_code_tools)
         .generate_title(is_new_session)
         .delegated_progress_tx(Some(delegated_progress_tx))
         .call_options(options)

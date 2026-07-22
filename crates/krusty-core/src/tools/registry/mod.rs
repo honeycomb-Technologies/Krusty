@@ -13,7 +13,7 @@ pub use policy::{
     DelegationPolicy, DelegationSurface, MutationToolSurface, PermissionMode, ToolAuthorization,
     ToolCategory, ToolPolicy, ToolRequestPolicy, DEFAULT_CODE_TOOL_LIMIT,
 };
-pub use result::{parse_params, ToolResult};
+pub use result::{parse_params, progress_change_key_for_paths, ToolResult};
 pub use runtime::{Tool, ToolRegistry};
 
 #[cfg(test)]

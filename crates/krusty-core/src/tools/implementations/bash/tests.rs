@@ -255,6 +255,82 @@ fn output_spool_prefers_runtime_state_over_the_project_workspace() {
     assert!(!path.starts_with(working_dir));
 }
 
+fn changed_value(result: &crate::tools::ToolResult) -> Option<bool> {
+    serde_json::from_str::<serde_json::Value>(&result.output)
+        .ok()
+        .and_then(|value| value.get("changed").and_then(serde_json::Value::as_bool))
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn foreground_bash_reports_real_file_state_deltas() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let working_dir = temp.path().canonicalize().expect("canonical tempdir");
+    let state_dir = temp.path().join("state");
+    std::fs::create_dir(&state_dir).expect("state dir");
+    let ctx = ToolContext {
+        working_dir: working_dir.clone(),
+        sandbox_root: Some(working_dir.clone()),
+        db_path: Some(state_dir.join("krusty.db")),
+        ..Default::default()
+    };
+
+    let first_append = BashTool
+        .execute(json!({"command": "printf x >> log"}), &ctx)
+        .await;
+    let second_append = BashTool
+        .execute(json!({"command": "printf x >> log"}), &ctx)
+        .await;
+    assert!(!first_append.is_error, "{}", first_append.output);
+    assert!(!second_append.is_error, "{}", second_append.output);
+    assert_eq!(changed_value(&first_append), Some(true));
+    assert_eq!(changed_value(&second_append), Some(true));
+    assert_eq!(
+        std::fs::read_to_string(working_dir.join("log")).unwrap(),
+        "xx"
+    );
+
+    let first_overwrite = BashTool
+        .execute(json!({"command": "printf stable > output"}), &ctx)
+        .await;
+    let repeated_overwrite = BashTool
+        .execute(json!({"command": "printf stable > output"}), &ctx)
+        .await;
+    assert_eq!(changed_value(&first_overwrite), Some(true));
+    assert_eq!(changed_value(&repeated_overwrite), None);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn foreground_bash_never_claims_equal_directory_or_symlink_is_unchanged() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let working_dir = temp.path().canonicalize().expect("canonical tempdir");
+    let state_dir = temp.path().join("state");
+    std::fs::create_dir(&state_dir).expect("state dir");
+    std::fs::create_dir(working_dir.join("existing")).expect("existing dir");
+    std::fs::write(working_dir.join("target"), "value").expect("target");
+    symlink("target", working_dir.join("link")).expect("symlink");
+    let ctx = ToolContext {
+        working_dir: working_dir.clone(),
+        sandbox_root: Some(working_dir.clone()),
+        db_path: Some(state_dir.join("krusty.db")),
+        ..Default::default()
+    };
+
+    let directory = BashTool
+        .execute(json!({"command": "command mkdir -p ./existing"}), &ctx)
+        .await;
+    let symlink = BashTool
+        .execute(json!({"command": "printf value > link"}), &ctx)
+        .await;
+    assert!(!directory.is_error, "{}", directory.output);
+    assert!(!symlink.is_error, "{}", symlink.output);
+    assert_eq!(changed_value(&directory), None);
+    assert_eq!(changed_value(&symlink), None);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn truncated_output_keeps_recoverable_full_log() {
@@ -474,6 +550,57 @@ async fn equivalent_background_launch_reuses_owner_scoped_process() {
         .kill(&unscoped_process_id)
         .await
         .expect("kill default-owner process");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exact_non_endpoint_background_launch_is_reused_and_not_recredited() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let working_dir = temp.path().canonicalize().expect("canonical tempdir");
+    let registry = Arc::new(ProcessRegistry::new());
+    let ctx = ToolContext::with_process_registry(working_dir, Arc::clone(&registry))
+        .with_user_id("plain-background-owner".to_string());
+
+    let first = BashTool
+        .execute(
+            json!({"command": "sleep 30", "run_in_background": true}),
+            &ctx,
+        )
+        .await;
+    let repeated = BashTool
+        .execute(
+            json!({"command": "sleep 30", "run_in_background": true}),
+            &ctx,
+        )
+        .await;
+    assert!(!first.is_error, "{}", first.output);
+    assert!(!repeated.is_error, "{}", repeated.output);
+    assert_eq!(changed_value(&first), Some(true));
+    assert_eq!(changed_value(&repeated), Some(false));
+
+    let first_envelope: serde_json::Value =
+        serde_json::from_str(&first.output).expect("first tool JSON");
+    let repeated_envelope: serde_json::Value =
+        serde_json::from_str(&repeated.output).expect("repeated tool JSON");
+    assert_eq!(
+        first_envelope["data"]["process_id"],
+        repeated_envelope["data"]["process_id"]
+    );
+    assert_eq!(repeated_envelope["data"]["reused_existing"], json!(true));
+    assert_eq!(
+        registry.list_for_user("plain-background-owner").await.len(),
+        1
+    );
+
+    registry
+        .kill_for_user(
+            "plain-background-owner",
+            first_envelope["data"]["process_id"]
+                .as_str()
+                .expect("process id"),
+        )
+        .await
+        .expect("kill plain background process");
 }
 
 #[cfg(unix)]

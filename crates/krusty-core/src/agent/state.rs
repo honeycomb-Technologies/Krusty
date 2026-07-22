@@ -43,7 +43,8 @@ impl RunBudget {
 pub enum RunBudgetSource {
     /// Typed per-run override supplied by the caller.
     ExplicitRun,
-    /// Compatibility path for callers still using `max_iterations`.
+    /// Historical trace value retained for backward-compatible replay. New
+    /// runs resolve bounded callers through `ExplicitRun`.
     LegacyMaxIterations,
     /// Repository-owned `.krusty/settings.json` override.
     ProjectSettings,
@@ -61,24 +62,13 @@ pub struct RunBudgetResolution {
 impl RunBudgetResolution {
     /// Resolve exactly once at the core execution boundary.
     ///
-    /// Per-run overrides are strongest. The legacy field remains ahead of
-    /// project settings so bounded Mako tick execution keeps its existing
-    /// semantics while callers migrate to the typed surface.
-    pub fn resolve(
-        explicit_run: Option<RunBudget>,
-        legacy_max_iterations: Option<usize>,
-        project: Option<RunBudget>,
-    ) -> Self {
+    /// Per-run overrides are strongest, followed by repository policy and the
+    /// unlimited interactive default.
+    pub fn resolve(explicit_run: Option<RunBudget>, project: Option<RunBudget>) -> Self {
         if let Some(budget) = explicit_run {
             return Self {
                 budget,
                 source: RunBudgetSource::ExplicitRun,
-            };
-        }
-        if let Some(max_turns) = legacy_max_iterations {
-            return Self {
-                budget: RunBudget::with_max_turns(max_turns),
-                source: RunBudgetSource::LegacyMaxIterations,
             };
         }
         if let Some(budget) = project {
@@ -225,7 +215,7 @@ mod tests {
 
     #[test]
     fn unlimited_primary_budget_allows_progress_beyond_fifty_turns() {
-        let resolution = RunBudgetResolution::resolve(None, None, None);
+        let resolution = RunBudgetResolution::resolve(None, None);
 
         assert_eq!(resolution.source, RunBudgetSource::UnlimitedDefault);
         for completed_turns in 0..=100 {
@@ -236,12 +226,11 @@ mod tests {
     #[test]
     fn run_budget_resolution_preserves_precedence_and_provenance() {
         let project = RunBudget::with_max_turns(80);
-        let legacy = RunBudgetResolution::resolve(None, Some(32), Some(project));
-        assert_eq!(legacy.budget.max_turns, Some(32));
-        assert_eq!(legacy.source, RunBudgetSource::LegacyMaxIterations);
+        let project_resolution = RunBudgetResolution::resolve(None, Some(project));
+        assert_eq!(project_resolution.budget.max_turns, Some(80));
+        assert_eq!(project_resolution.source, RunBudgetSource::ProjectSettings);
 
-        let explicit =
-            RunBudgetResolution::resolve(Some(RunBudget::unlimited()), Some(32), Some(project));
+        let explicit = RunBudgetResolution::resolve(Some(RunBudget::unlimited()), Some(project));
         assert_eq!(explicit.budget.max_turns, None);
         assert_eq!(explicit.source, RunBudgetSource::ExplicitRun);
     }

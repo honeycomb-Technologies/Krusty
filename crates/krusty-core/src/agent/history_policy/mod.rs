@@ -85,6 +85,18 @@ pub(crate) fn build_history_tool_result(
             object.insert("changed".to_string(), Value::Bool(changed));
         }
     }
+    if let Some(progress_change_key) = parsed_output
+        .get("metadata")
+        .and_then(|metadata| metadata.get("progress_change_key"))
+        .and_then(Value::as_str)
+    {
+        if let Some(object) = history.as_object_mut() {
+            object.insert(
+                "progress_change_key".to_string(),
+                Value::String(progress_change_key.to_string()),
+            );
+        }
+    }
     history
 }
 
@@ -230,7 +242,7 @@ pub(crate) fn truncate_utf8_head_tail(text: &str, head_limit: usize, tail_limit:
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::{build_history_tool_result, tool_retention, truncate_utf8, ToolRetention};
 
@@ -472,6 +484,7 @@ mod tests {
                 "line_count": 3,
                 "file_path": "src/lib.rs"
             },
+            "metadata": { "progress_change_key": "hashed-target" },
             "diff": "--- src/lib.rs\n+++ src/lib.rs\n@@\n+fn main() {}\n"
         })
         .to_string();
@@ -484,6 +497,10 @@ mod tests {
         assert_eq!(
             history.get("changed").and_then(|value| value.as_bool()),
             Some(true)
+        );
+        assert_eq!(
+            history.get("progress_change_key").and_then(Value::as_str),
+            Some("hashed-target")
         );
         assert_eq!(
             history

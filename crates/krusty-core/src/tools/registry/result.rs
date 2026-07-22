@@ -1,4 +1,36 @@
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+/// Hash a canonical set of workspace resources for semantic progress
+/// accounting. Payload bytes are deliberately excluded: repeatedly rewriting
+/// one target is one effect intent even when the generated content changes.
+pub fn progress_change_key_for_paths(
+    paths: &[std::path::PathBuf],
+    scope_root: &std::path::Path,
+) -> String {
+    let canonical_root = scope_root
+        .canonicalize()
+        .unwrap_or_else(|_| scope_root.to_path_buf());
+    let mut resources = paths
+        .iter()
+        .map(|path| {
+            path.strip_prefix(&canonical_root)
+                .or_else(|_| path.strip_prefix(scope_root))
+                .unwrap_or(path)
+        })
+        .map(|path| path.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    resources.sort();
+    resources.dedup();
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"workspace-path-set-v1\0");
+    for resource in resources {
+        hasher.update(resource.as_bytes());
+        hasher.update([0]);
+    }
+    format!("{:x}", hasher.finalize())
+}
 
 /// Tool execution result
 #[derive(Debug, Clone)]
@@ -103,6 +135,40 @@ impl ToolResult {
         envelope.insert("changed".to_string(), Value::Bool(changed));
         self.output = Value::Object(envelope).to_string();
         self
+    }
+
+    /// Attach a producer-owned, already-hashed identity for the state surface
+    /// that changed. The progress ledger uses this instead of attempting to
+    /// infer shell semantics from command text.
+    pub fn with_progress_change_key(mut self, key: impl Into<String>) -> Self {
+        let mut envelope = serde_json::from_str::<Value>(&self.output)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_else(|| {
+                let mut object = serde_json::Map::new();
+                object.insert("ok".to_string(), Value::Bool(!self.is_error));
+                object.insert("data".to_string(), Value::String(self.output.clone()));
+                object
+            });
+        let metadata = envelope
+            .entry("metadata".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if !metadata.is_object() {
+            *metadata = Value::Object(serde_json::Map::new());
+        }
+        if let Some(metadata) = metadata.as_object_mut() {
+            metadata.insert("progress_change_key".to_string(), Value::String(key.into()));
+        }
+        self.output = Value::Object(envelope).to_string();
+        self
+    }
+
+    pub fn with_progress_change_paths(
+        self,
+        paths: &[std::path::PathBuf],
+        scope_root: &std::path::Path,
+    ) -> Self {
+        self.with_progress_change_key(progress_change_key_for_paths(paths, scope_root))
     }
 
     /// Create an invalid-parameters error.

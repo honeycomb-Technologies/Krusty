@@ -143,7 +143,17 @@ impl AgentConfig for BuilderConfig {
     }
 
     fn get_ai_tools(&self) -> Vec<AiTool> {
-        self.tools.get_ai_tools()
+        let Some(policy) = self.task.delegation_policy.as_ref() else {
+            // Execution also fails closed without delegated policy metadata;
+            // keep the provider schema aligned with that runtime boundary.
+            return Vec::new();
+        };
+
+        self.tools
+            .get_ai_tools()
+            .into_iter()
+            .filter(|tool| policy.authorize_tool(&tool.name, false).is_ok())
+            .collect()
     }
 
     async fn execute_tool(
@@ -330,4 +340,54 @@ Build your component, then summarize what you created with file paths."#,
         working_dir.display(),
         context_injection
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::registry::PermissionMode;
+    use std::collections::HashSet;
+
+    #[test]
+    fn builder_schema_intersects_with_exact_parent_execution_scope() {
+        let scope = HashSet::from(["agent".to_string(), "read".to_string()]);
+        let policy = DelegationPolicy::for_subagent_build(PermissionMode::Autonomous, Some(7))
+            .with_execution_tool_allowlist(Some(&scope));
+        let task = SubAgentTask::new("builder", "work").with_delegation_policy(policy);
+        let config = BuilderConfig::new(task, Arc::new(SharedBuildContext::new()));
+
+        let names = config
+            .get_ai_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["read"]);
+        assert!(!names
+            .iter()
+            .any(|name| { matches!(name.as_str(), "bash" | "write" | "edit" | "apply_patch") }));
+    }
+
+    #[test]
+    fn builder_schema_is_empty_for_agent_only_parent_scope() {
+        let scope = HashSet::from(["agent".to_string()]);
+        let policy = DelegationPolicy::for_subagent_build(PermissionMode::Autonomous, Some(7))
+            .with_execution_tool_allowlist(Some(&scope));
+        let task = SubAgentTask::new("builder", "work").with_delegation_policy(policy);
+        let config = BuilderConfig::new(task, Arc::new(SharedBuildContext::new()));
+
+        assert!(config.get_ai_tools().is_empty());
+    }
+
+    #[test]
+    fn builder_schema_preserves_explicit_empty_scope_as_tool_free() {
+        let scope = HashSet::new();
+        let policy = DelegationPolicy::for_subagent_build(PermissionMode::Autonomous, Some(7))
+            .with_execution_tool_allowlist(Some(&scope));
+        let task = SubAgentTask::new("builder", "work").with_delegation_policy(policy.clone());
+        let config = BuilderConfig::new(task, Arc::new(SharedBuildContext::new()));
+
+        assert_eq!(policy.execution_tool_allowlist, Some(Default::default()));
+        assert!(config.get_ai_tools().is_empty());
+    }
 }

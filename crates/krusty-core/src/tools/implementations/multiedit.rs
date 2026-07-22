@@ -177,6 +177,11 @@ Edits apply sequentially, so later edits see earlier changes. Prefer this over m
                 );
                 // Partial success still writes the file, so keep success with warnings.
                 ToolResult::success_data_with(data, errors, Some(diff), None)
+                    .with_changed(content != original)
+                    .with_progress_change_paths(
+                        std::slice::from_ref(&path),
+                        ctx.sandbox_root.as_deref().unwrap_or(&ctx.working_dir),
+                    )
             }
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
         }
@@ -260,6 +265,12 @@ mod tests {
             "unexpected multiedit error: {}",
             result.output
         );
+        let envelope: serde_json::Value =
+            serde_json::from_str(&result.output).expect("structured result");
+        assert_eq!(envelope["changed"], json!(true));
+        assert!(envelope["metadata"]["progress_change_key"]
+            .as_str()
+            .is_some_and(|key| !key.is_empty()));
         let updated = fs::read_to_string(&file_path)
             .await
             .expect("updated file should read");

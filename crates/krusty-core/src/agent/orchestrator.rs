@@ -23,6 +23,7 @@ mod persistence;
 mod plan_flow;
 mod recovery;
 mod title;
+mod tool_surface;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -62,8 +63,8 @@ use super::DelegatedProgressEvent;
 
 use self::message_builder::{build_assistant_message, finalize_explore_only_turn};
 use self::persistence::{
-    clear_recovery_state, persist_context_state, persist_recovery_state, save_message,
-    set_agent_state, update_token_count,
+    clear_recovery_state, persist_context_state, persist_recovery_state,
+    persist_required_recovery_state, save_message, set_agent_state, update_token_count,
 };
 use self::plan_flow::{handle_plan_detection, PlanDetectionOutcome};
 use self::recovery::{
@@ -71,8 +72,11 @@ use self::recovery::{
     continuation_recovery_message,
 };
 use self::title::maybe_generate_title;
+use self::tool_surface::{advertised_names, has_active_plan, ModeAwareToolSurface};
 
 const EMPTY_COMPLETION_RECOVERY_INSTRUCTION: &str = "[EMPTY RESPONSE RECOVERY]\nThe previous model completion contained no user-visible text or tool call. Continue the same turn from the existing conversation and provide the response requested by the user now, or make a necessary new tool call. Do not repeat a completed tool call merely because the prior completion was empty, and do not mention this recovery instruction.";
+const AWAITING_INPUT_PERSISTENCE_ERROR: &str =
+    "Unable to safely pause for user input because the continuation policy could not be persisted.";
 const EMPTY_COMPLETION_ERROR: &str = "The AI provider completed twice without producing user-visible text or a tool call. Try again or choose another model.";
 const EMPTY_COMPLETION_AFTER_SERVER_TOOL_ERROR: &str = "The AI provider completed after hosted tool activity without producing a user-visible response. The hosted tool was not replayed; try again or choose another model.";
 
@@ -98,12 +102,41 @@ fn empty_completion_action(
     }
 }
 
+fn split_single_pending_ask_user_call<'a>(
+    calls: &'a [&'a AiToolCall],
+) -> Option<(&'a AiToolCall, &'a [&'a AiToolCall])> {
+    calls
+        .split_first()
+        .map(|(primary, rejected)| (*primary, rejected))
+}
+
 fn terminal_agent_state_after_interruption(stop_reason: &LoopStopReason) -> &'static str {
     match stop_reason {
         LoopStopReason::StreamIdleTimeout | LoopStopReason::UserAbort => "idle",
         LoopStopReason::ProviderError | LoopStopReason::PinchFailed => "error",
         _ => "idle",
     }
+}
+
+fn fail_required_recovery_persistence(
+    db_path: &Path,
+    session_id: &str,
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+    error: &anyhow::Error,
+) {
+    tracing::error!(
+        session_id = %session_id,
+        %error,
+        "Failed to persist required awaiting-input continuation policy"
+    );
+    set_agent_state(db_path, session_id, "error");
+    let _ = event_tx.send(LoopEvent::Error {
+        error: AWAITING_INPUT_PERSISTENCE_ERROR.to_string(),
+    });
+    let _ = event_tx.send(LoopEvent::Finished {
+        session_id: session_id.to_string(),
+        stop_reason: LoopStopReason::ProviderError,
+    });
 }
 
 fn should_retry_empty_stream_interruption(
@@ -133,12 +166,16 @@ pub(crate) struct OrchestratorConfig {
     pub(crate) mako_profile: Option<Arc<MakoProfileSnapshot>>,
     pub(crate) session_type: SessionType,
     pub(crate) permission_mode: PermissionMode,
+    /// Optional explicit per-turn execution capability. `None` preserves the
+    /// normal governed deferred-tool surface; `Some`, including an empty set,
+    /// also constrains effective wrapper targets such as `tool_search`.
+    pub(crate) execution_tool_allowlist: Option<HashSet<String>>,
+    /// Rebuild the governed Code tool schemas whenever effective work mode
+    /// changes. Disabled for intentionally tool-free turns and non-Code runs.
+    pub(crate) refresh_code_tools_on_mode_change: bool,
     /// Typed parent-run budget. `Some(RunBudget::unlimited())` explicitly
     /// overrides repository limits; `None` allows project/default resolution.
     pub(crate) run_budget: Option<RunBudget>,
-    /// Compatibility surface for bounded callers such as Mako ticks.
-    /// New primary callers should use `run_budget`.
-    pub(crate) max_iterations: Option<usize>,
     pub(crate) stream_idle_timeout: std::time::Duration,
     pub(crate) user_id: Option<String>,
     pub(crate) initial_work_mode: WorkMode,
@@ -159,8 +196,9 @@ impl Default for OrchestratorConfig {
             mako_profile: None,
             session_type: SessionType::Code,
             permission_mode: PermissionMode::default(),
+            execution_tool_allowlist: None,
+            refresh_code_tools_on_mode_change: false,
             run_budget: None,
-            max_iterations: None,
             stream_idle_timeout: constants::http::STREAM_TIMEOUT,
             user_id: None,
             initial_work_mode: WorkMode::default(),
@@ -345,8 +383,9 @@ impl AgenticOrchestrator {
             mako_profile,
             session_type,
             permission_mode,
+            execution_tool_allowlist,
+            refresh_code_tools_on_mode_change,
             run_budget,
-            max_iterations,
             stream_idle_timeout,
             user_id,
             initial_work_mode,
@@ -355,27 +394,38 @@ impl AgenticOrchestrator {
         } = self.config;
 
         // Load per-project settings from .krusty/settings.json
-        let project_settings = project_dir
-            .as_deref()
-            .map(ProjectSettings::load)
-            .unwrap_or_default();
+        let project_settings =
+            ProjectSettings::load(project_dir.as_deref().unwrap_or(&working_dir));
 
-        let run_budget =
-            RunBudgetResolution::resolve(run_budget, max_iterations, project_settings.run_limits);
+        let run_budget = RunBudgetResolution::resolve(run_budget, project_settings.run_limits);
 
         let permission_mode = resolve_project_permission_mode(permission_mode, &project_settings);
-        // Freeze the exact function-tool capability sent to the provider. This
-        // same set is enforced at execution time so a hallucinated registered
-        // tool cannot escape the request contract.
-        let advertised_tool_names = options
-            .tools
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .map(|tool| tool.name.clone())
-            .collect::<HashSet<_>>();
-
+        let mut options = options;
+        let mode_tool_surface = ModeAwareToolSurface::capture(
+            refresh_code_tools_on_mode_change,
+            &options,
+            tool_registry.as_ref(),
+        )
+        .await;
         let mut work_mode = initial_work_mode;
+        // Freeze the complete registry catalog once, then derive the exact
+        // provider-facing surface for the effective initial mode. The same
+        // helper runs at every later transition, so request schemas and
+        // execution authorization cannot drift apart.
+        let mut advertised_tool_names = advertised_names(&options);
+        mode_tool_surface.refresh(
+            &mut options,
+            &mut advertised_tool_names,
+            ai_client.as_ref(),
+            permission_mode,
+            work_mode,
+            has_active_plan(&db_path, &session_id),
+            project_settings
+                .disabled_tools
+                .as_deref()
+                .unwrap_or_default(),
+            execution_tool_allowlist.as_ref(),
+        );
         let mut last_token_count = 0usize;
         let mut last_usage_prompt_tokens = None::<usize>;
         let mut messages_at_last_usage = 0usize;
@@ -627,16 +677,21 @@ impl AgenticOrchestrator {
                 turn: iteration,
                 diagnostics: Box::new(request_diagnostics.into()),
             });
-            let streaming_setup = ai_client.call_streaming(conversation_with_context, &options);
-            tokio::pin!(streaming_setup);
-            let mut setup_input_closed = false;
-            let setup_result = loop {
-                tokio::select! {
-                    result = &mut streaming_setup => break Some(result),
-                    cancelled = input_inbox.recv_cancel(), if !setup_input_closed => {
-                        match cancelled {
-                            Some(()) => break None,
-                            None => setup_input_closed = true,
+            // Keep the request future in a nested scope so its immutable
+            // borrow of `options` ends as soon as setup resolves. Later mode
+            // transitions must be able to replace the governed schemas.
+            let setup_result = {
+                let streaming_setup = ai_client.call_streaming(conversation_with_context, &options);
+                tokio::pin!(streaming_setup);
+                let mut setup_input_closed = false;
+                loop {
+                    tokio::select! {
+                        result = &mut streaming_setup => break Some(result),
+                        cancelled = input_inbox.recv_cancel(), if !setup_input_closed => {
+                            match cancelled {
+                                Some(()) => break None,
+                                None => setup_input_closed = true,
+                            }
                         }
                     }
                 }
@@ -1104,15 +1159,44 @@ impl AgenticOrchestrator {
                             if last_token_count > 0 {
                                 update_token_count(&db_path, &session_id, last_token_count);
                             }
-                            persist_recovery_state(
-                                &db_path,
-                                &session_id,
-                                &build_awaiting_input_recovery_state(
-                                    build_partial_assistant_state(&result.recovery_checkpoint),
-                                    vec![pending_interaction],
-                                    permission_mode,
-                                ),
+                            let plan_confirmation = match &pending_interaction {
+                                PendingInteractionSnapshot::PlanConfirm {
+                                    tool_call_id,
+                                    title,
+                                    task_count,
+                                    ..
+                                } => Some((tool_call_id.clone(), title.clone(), *task_count)),
+                                _ => None,
+                            };
+                            let recovery = build_awaiting_input_recovery_state(
+                                build_partial_assistant_state(&result.recovery_checkpoint),
+                                vec![pending_interaction],
+                                permission_mode,
+                                execution_tool_allowlist.as_ref(),
                             );
+                            if let Err(error) =
+                                persist_required_recovery_state(&db_path, &session_id, &recovery)
+                            {
+                                fail_required_recovery_persistence(
+                                    &db_path,
+                                    &session_id,
+                                    &event_tx,
+                                    &error,
+                                );
+                                return;
+                            }
+
+                            if let Some((tool_call_id, title, task_count)) = plan_confirmation {
+                                let _ = event_tx.send(LoopEvent::PlanComplete {
+                                    tool_call_id: tool_call_id.clone(),
+                                    title,
+                                    task_count,
+                                });
+                                let _ = event_tx.send(LoopEvent::AwaitingInput {
+                                    tool_call_id,
+                                    tool_name: "PlanConfirm".to_string(),
+                                });
+                            }
                             set_agent_state(&db_path, &session_id, "awaiting_input");
                             let _ = event_tx.send(LoopEvent::Finished {
                                 session_id: session_id.clone(),
@@ -1122,6 +1206,19 @@ impl AgenticOrchestrator {
                         }
                         PlanDetectionOutcome::ContinueInBuildMode => {
                             work_mode = WorkMode::Build;
+                            mode_tool_surface.refresh(
+                                &mut options,
+                                &mut advertised_tool_names,
+                                ai_client.as_ref(),
+                                permission_mode,
+                                work_mode,
+                                has_active_plan(&db_path, &session_id),
+                                project_settings
+                                    .disabled_tools
+                                    .as_deref()
+                                    .unwrap_or_default(),
+                                execution_tool_allowlist.as_ref(),
+                            );
                             if result.tool_calls.is_empty() {
                                 if last_token_count > 0 {
                                     update_token_count(&db_path, &session_id, last_token_count);
@@ -1188,18 +1285,30 @@ impl AgenticOrchestrator {
             // AskUser partition
             let (ask_user_calls, non_ask_user_calls): (Vec<_>, Vec<_>) =
                 result.tool_calls.iter().partition::<Vec<_>, _>(|t| {
-                    t.name == "AskUserQuestion" && advertised_tool_names.contains(&t.name)
+                    t.name == "AskUserQuestion"
+                        && advertised_tool_names.contains(&t.name)
+                        && execution_tool_allowlist
+                            .as_ref()
+                            .is_none_or(|allowlist| allowlist.contains(&t.name))
                 });
 
             if !ask_user_calls.is_empty() {
                 let ask_user_partial_assistant =
                     build_partial_assistant_state(&result.recovery_checkpoint);
-                let ask_user_pending_interactions = ask_user_calls
-                    .iter()
-                    .map(|call| {
-                        PendingInteractionSnapshot::ask_user_from_call(&call.id, &call.arguments)
-                    })
-                    .collect::<Vec<_>>();
+                // One tool call may contain multiple questions, but one model
+                // turn must never create multiple independently resumable
+                // AskUser calls. A continuation resumes the model after one
+                // response, so persisting several calls would silently discard
+                // the unanswered remainder. Keep the first as the sole durable
+                // interaction and return explicit tool errors for the extras.
+                let (pending_ask_user_call, rejected_ask_user_calls) =
+                    split_single_pending_ask_user_call(&ask_user_calls)
+                        .expect("non-empty AskUser partition must have a primary call");
+                let ask_user_pending_interactions =
+                    vec![PendingInteractionSnapshot::ask_user_from_call(
+                        &pending_ask_user_call.id,
+                        &pending_ask_user_call.arguments,
+                    )];
                 let mut all_results: Vec<Content> = Vec::new();
 
                 // Execute non-AskUser tools first
@@ -1226,6 +1335,7 @@ impl AgenticOrchestrator {
                         &mut input_inbox,
                         project_settings.subagent_max_turns,
                         &advertised_tool_names,
+                        execution_tool_allowlist.as_ref(),
                         project_settings.disabled_tools.as_deref(),
                         Arc::clone(&file_observations),
                     )
@@ -1242,12 +1352,21 @@ impl AgenticOrchestrator {
                     }
                 }
 
-                // Add placeholder results for AskUser calls
-                for call in &ask_user_calls {
+                // Add one resumable placeholder and terminal errors for any
+                // extra calls so every provider tool call still has a result.
+                all_results.push(Content::ToolResult {
+                    tool_use_id: pending_ask_user_call.id.clone(),
+                    output: serde_json::Value::String("Awaiting user response...".to_string()),
+                    is_error: None,
+                });
+                for call in rejected_ask_user_calls {
                     all_results.push(Content::ToolResult {
                         tool_use_id: call.id.clone(),
-                        output: serde_json::Value::String("Awaiting user response...".to_string()),
-                        is_error: None,
+                        output: serde_json::Value::String(
+                            "Only one AskUserQuestion tool call is allowed per model turn. Combine all questions into the first call's questions array."
+                                .to_string(),
+                        ),
+                        is_error: Some(true),
                     });
                 }
 
@@ -1279,25 +1398,27 @@ impl AgenticOrchestrator {
                 );
                 emit_steering_events(&event_tx, injected_steering);
 
-                for call in &ask_user_calls {
-                    let _ = event_tx.send(LoopEvent::AwaitingInput {
-                        tool_call_id: call.id.clone(),
-                        tool_name: call.name.clone(),
-                    });
-                }
-
                 if last_token_count > 0 {
                     update_token_count(&db_path, &session_id, last_token_count);
                 }
-                persist_recovery_state(
-                    &db_path,
-                    &session_id,
-                    &build_awaiting_input_recovery_state(
-                        ask_user_partial_assistant,
-                        ask_user_pending_interactions,
-                        permission_mode,
-                    ),
+                let recovery = build_awaiting_input_recovery_state(
+                    ask_user_partial_assistant,
+                    ask_user_pending_interactions,
+                    permission_mode,
+                    execution_tool_allowlist.as_ref(),
                 );
+                if let Err(error) =
+                    persist_required_recovery_state(&db_path, &session_id, &recovery)
+                {
+                    fail_required_recovery_persistence(&db_path, &session_id, &event_tx, &error);
+                    return;
+                }
+
+                let _ = event_tx.send(LoopEvent::AwaitingInput {
+                    tool_call_id: pending_ask_user_call.id.clone(),
+                    tool_name: pending_ask_user_call.name.clone(),
+                });
+
                 set_agent_state(&db_path, &session_id, "awaiting_input");
                 let _ = event_tx.send(LoopEvent::Finished {
                     session_id: session_id.clone(),
@@ -1341,11 +1462,28 @@ impl AgenticOrchestrator {
                 &mut input_inbox,
                 project_settings.subagent_max_turns,
                 &advertised_tool_names,
+                execution_tool_allowlist.as_ref(),
                 project_settings.disabled_tools.as_deref(),
                 Arc::clone(&file_observations),
             )
             .await;
             work_mode = tool_batch.next_work_mode;
+            // A tool batch can change either work mode (`set_work_mode`) or
+            // plan lifecycle state (for example, completing the final task).
+            // Refresh both dimensions before the next provider request.
+            mode_tool_surface.refresh(
+                &mut options,
+                &mut advertised_tool_names,
+                ai_client.as_ref(),
+                permission_mode,
+                work_mode,
+                has_active_plan(&db_path, &session_id),
+                project_settings
+                    .disabled_tools
+                    .as_deref()
+                    .unwrap_or_default(),
+                execution_tool_allowlist.as_ref(),
+            );
             let tool_results = tool_batch.results;
 
             if tool_batch.cancelled {
@@ -1812,6 +1950,7 @@ mod tests {
     use super::resolve_project_permission_mode;
     use super::should_detect_plan_transition;
     use super::should_retry_empty_stream_interruption;
+    use super::split_single_pending_ask_user_call;
     use super::terminal_agent_state_after_interruption;
     use super::update_validation_state;
     use super::EmptyCompletionAction;
@@ -2171,6 +2310,28 @@ mod tests {
             empty_completion_action("", &[tool_call], false, false),
             EmptyCompletionAction::None
         );
+    }
+
+    #[test]
+    fn multiple_ask_user_calls_create_one_pending_call_and_reject_the_rest() {
+        let first = AiToolCall {
+            id: "ask-1".into(),
+            name: "AskUserQuestion".into(),
+            arguments: json!({"questions": [{"question": "First?"}]}),
+        };
+        let second = AiToolCall {
+            id: "ask-2".into(),
+            name: "AskUserQuestion".into(),
+            arguments: json!({"questions": [{"question": "Second?"}]}),
+        };
+        let calls = vec![&first, &second];
+
+        let (pending, rejected) = split_single_pending_ask_user_call(&calls)
+            .expect("two AskUser calls should still select one primary");
+
+        assert_eq!(pending.id, "ask-1");
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].id, "ask-2");
     }
 
     #[test]

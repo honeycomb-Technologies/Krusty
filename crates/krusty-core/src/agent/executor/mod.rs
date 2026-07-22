@@ -72,6 +72,7 @@ pub(crate) async fn execute_tools(
     input_inbox: &mut LoopInputInbox,
     subagent_max_turns_override: Option<usize>,
     advertised_tool_names: &HashSet<String>,
+    execution_tool_allowlist: Option<&HashSet<String>>,
     disabled_tools: Option<&[String]>,
     file_observations: Arc<FileObservationTracker>,
 ) -> ToolExecutionBatch {
@@ -151,8 +152,25 @@ pub(crate) async fn execute_tools(
             original_call
         };
 
+        // An explicit per-turn allowlist is narrower than the ordinary tool
+        // discovery surface. Enforce it against the effective operation after
+        // extension rewriting so an advertised wrapper (notably
+        // `tool_search`) cannot dispatch an unadvertised target. This happens
+        // before approval, recovery persistence, execution events, or registry
+        // dispatch observe the call.
+        if let Some(denied) = tool_control.execution_scope_denial(call, execution_tool_allowlist) {
+            results.push(tool_control.publish_result(call, &denied, event_tx));
+            continue;
+        }
+
         if extension_manager.is_none()
-            && is_parallel_safe_call(call, advertised_tool_names, disabled_tools, &tool_control)
+            && is_parallel_safe_call(
+                call,
+                advertised_tool_names,
+                execution_tool_allowlist,
+                disabled_tools,
+                &tool_control,
+            )
         {
             let parallel_calls = tool_calls[call_index..]
                 .iter()
@@ -160,6 +178,7 @@ pub(crate) async fn execute_tools(
                     is_parallel_safe_call(
                         candidate,
                         advertised_tool_names,
+                        execution_tool_allowlist,
                         disabled_tools,
                         &tool_control,
                     )
@@ -194,6 +213,7 @@ pub(crate) async fn execute_tools(
                             event_tx,
                             provider_call_trace,
                             subagent_max_turns_override,
+                            execution_tool_allowlist,
                             Arc::clone(&file_observations),
                             extension_snapshot_prepared,
                         )
@@ -376,6 +396,7 @@ pub(crate) async fn execute_tools(
                 event_tx,
                 provider_call_trace,
                 subagent_max_turns_override,
+                execution_tool_allowlist,
                 Arc::clone(&file_observations),
                 extension_snapshot_prepared,
             );
@@ -436,10 +457,12 @@ pub(crate) async fn execute_tools(
 fn is_parallel_safe_call(
     call: &AiToolCall,
     advertised_tool_names: &HashSet<String>,
+    execution_tool_allowlist: Option<&HashSet<String>>,
     disabled_tools: Option<&[String]>,
     tool_control: &ToolControl,
 ) -> bool {
     if !advertised_tool_names.contains(&call.name)
+        || !tool_control.execution_target_is_allowlisted(call, execution_tool_allowlist)
         || disabled_tools.is_some_and(|disabled| {
             disabled
                 .iter()
@@ -534,6 +557,7 @@ mod tests {
     use super::*;
     use crate::storage::RecoveryToolCall;
     use crate::tools::registry::{Tool, ToolContext};
+    use crate::tools::{ToolSearchTool, WriteTool};
     use async_trait::async_trait;
     use serde_json::json;
     use serde_json::Value;
@@ -547,12 +571,24 @@ mod tests {
         max_active: Arc<AtomicUsize>,
     }
 
+    struct CountingGrepTool {
+        calls: Arc<AtomicUsize>,
+    }
+
     struct DelayedDelegatedWriteTool {
         started_tx: mpsc::UnboundedSender<String>,
     }
 
     struct CapturingAgentTool {
         calls: Arc<StdMutex<Vec<Value>>>,
+        governance: Option<Arc<StdMutex<Vec<CapturedDelegationGovernance>>>>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct CapturedDelegationGovernance {
+        permission_mode: PermissionMode,
+        subagent_max_turns: Option<usize>,
+        execution_tool_allowlist: Option<HashSet<String>>,
     }
 
     #[async_trait]
@@ -569,11 +605,21 @@ mod tests {
             json!({"type": "object"})
         }
 
-        async fn execute(&self, params: Value, _ctx: &ToolContext) -> ToolResult {
+        async fn execute(&self, params: Value, ctx: &ToolContext) -> ToolResult {
             self.calls
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(params);
+            if let Some(governance) = self.governance.as_ref() {
+                governance
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(CapturedDelegationGovernance {
+                        permission_mode: ctx.permission_mode,
+                        subagent_max_turns: ctx.subagent_max_turns,
+                        execution_tool_allowlist: ctx.execution_tool_allowlist.clone(),
+                    });
+            }
             ToolResult::success("captured")
         }
     }
@@ -646,6 +692,26 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl Tool for CountingGrepTool {
+        fn name(&self) -> &str {
+            "grep"
+        }
+
+        fn description(&self) -> &str {
+            "test grep"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        async fn execute(&self, _params: Value, _ctx: &ToolContext) -> ToolResult {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            ToolResult::success("grep complete")
+        }
+    }
+
     #[tokio::test]
     async fn independent_read_only_calls_execute_concurrently_and_preserve_result_order() {
         let temp_dir = TempDir::new().expect("temp dir should be created");
@@ -702,6 +768,7 @@ mod tests {
             None,
             &advertised,
             None,
+            None,
             Arc::new(FileObservationTracker::new()),
         )
         .await;
@@ -717,6 +784,98 @@ mod tests {
             &batch.results[1],
             Content::ToolResult { tool_use_id, .. } if tool_use_id == "read-2"
         ));
+    }
+
+    #[tokio::test]
+    async fn parallel_batch_does_not_admit_a_later_out_of_scope_deferred_target() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let registry = Arc::new(ToolRegistry::new());
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let grep_calls = Arc::new(AtomicUsize::new(0));
+        registry.register(Arc::new(ToolSearchTool)).await;
+        registry
+            .register(Arc::new(ConcurrentReadTool {
+                active,
+                max_active: Arc::clone(&max_active),
+            }))
+            .await;
+        registry
+            .register(Arc::new(CountingGrepTool {
+                calls: Arc::clone(&grep_calls),
+            }))
+            .await;
+        let ai_client = Arc::new(AiClient::new(Default::default(), String::new()));
+        let process_registry = Arc::new(ProcessRegistry::new());
+        let skills_manager = Arc::new(tokio::sync::RwLock::new(SkillsManager::new(
+            temp_dir.path().join("skills"),
+            None,
+        )));
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (_input_tx, input_rx) = mpsc::unbounded_channel();
+        let mut input_inbox = LoopInputInbox::new(input_rx);
+        let calls = vec![
+            AiToolCall {
+                id: "allowed-read".into(),
+                name: "tool_search".into(),
+                arguments: json!({
+                    "action": "execute",
+                    "tool": "read",
+                    "arguments": {"file_path": "one"}
+                }),
+            },
+            AiToolCall {
+                id: "blocked-grep".into(),
+                name: "tool_search".into(),
+                arguments: json!({
+                    "action": "execute",
+                    "tool": "grep",
+                    "arguments": {"pattern": "needle"}
+                }),
+            },
+        ];
+        let advertised = HashSet::from(["tool_search".to_string()]);
+        let explicit_scope = HashSet::from(["tool_search".to_string(), "read".to_string()]);
+
+        let batch = execute_tools(
+            &calls,
+            &registry,
+            &ai_client,
+            temp_dir.path(),
+            Some(temp_dir.path()),
+            &process_registry,
+            &skills_manager,
+            "session",
+            &temp_dir.path().join("db"),
+            None,
+            PermissionMode::Autonomous,
+            WorkMode::Build,
+            None,
+            None,
+            &event_tx,
+            None,
+            &mut input_inbox,
+            None,
+            &advertised,
+            Some(&explicit_scope),
+            None,
+            Arc::new(FileObservationTracker::new()),
+        )
+        .await;
+
+        assert!(!batch.cancelled);
+        assert_eq!(batch.results.len(), 2);
+        assert_eq!(grep_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+        match &batch.results[1] {
+            Content::ToolResult {
+                output, is_error, ..
+            } => {
+                assert_eq!(output["error_code"], "tool_not_advertised");
+                assert_eq!(*is_error, Some(true));
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -760,6 +919,7 @@ mod tests {
             None,
             &advertised,
             None,
+            None,
             Arc::new(FileObservationTracker::new()),
         )
         .await;
@@ -792,6 +952,271 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_tool_scope_blocks_nested_write_but_unrestricted_deferred_dispatch_works() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register(Arc::new(ToolSearchTool)).await;
+        registry.register(Arc::new(WriteTool)).await;
+        let ai_client = Arc::new(AiClient::new(Default::default(), String::new()));
+        let process_registry = Arc::new(ProcessRegistry::new());
+        let skills_manager = Arc::new(tokio::sync::RwLock::new(SkillsManager::new(
+            temp_dir.path().join("skills"),
+            None,
+        )));
+        let advertised = HashSet::from(["tool_search".to_string()]);
+        let explicit_scope = HashSet::from(["tool_search".to_string()]);
+
+        let blocked_call = AiToolCall {
+            id: "nested-write-blocked".into(),
+            name: "tool_search".into(),
+            arguments: json!({
+                "action": "execute",
+                "tool": "write",
+                "arguments": {
+                    "file_path": "escaped.txt",
+                    "content": "must not be written"
+                }
+            }),
+        };
+        let (blocked_event_tx, mut blocked_event_rx) = mpsc::unbounded_channel();
+        let (_blocked_input_tx, blocked_input_rx) = mpsc::unbounded_channel();
+        let mut blocked_input_inbox = LoopInputInbox::new(blocked_input_rx);
+
+        let blocked = execute_tools(
+            &[blocked_call],
+            &registry,
+            &ai_client,
+            temp_dir.path(),
+            Some(temp_dir.path()),
+            &process_registry,
+            &skills_manager,
+            "blocked-session",
+            &temp_dir.path().join("blocked.db"),
+            None,
+            PermissionMode::Autonomous,
+            WorkMode::Build,
+            None,
+            None,
+            &blocked_event_tx,
+            None,
+            &mut blocked_input_inbox,
+            None,
+            &advertised,
+            Some(&explicit_scope),
+            None,
+            Arc::new(FileObservationTracker::new()),
+        )
+        .await;
+
+        assert!(!blocked.cancelled);
+        assert_eq!(blocked.results.len(), 1);
+        match &blocked.results[0] {
+            Content::ToolResult {
+                output, is_error, ..
+            } => {
+                assert_eq!(output["error_code"], "tool_not_advertised");
+                assert_eq!(*is_error, Some(true));
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+        let blocked_events =
+            std::iter::from_fn(|| blocked_event_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(blocked_events.iter().all(|event| !matches!(
+            event,
+            LoopEvent::ToolApprovalRequired { .. } | LoopEvent::ToolExecuting { .. }
+        )));
+        assert!(!temp_dir.path().join("escaped.txt").exists());
+
+        let allowed_call = AiToolCall {
+            id: "nested-write-allowed".into(),
+            name: "tool_search".into(),
+            arguments: json!({
+                "action": "execute",
+                "tool": "write",
+                "arguments": {
+                    "file_path": "deferred-ok.txt",
+                    "content": "ordinary deferred dispatch remains available"
+                }
+            }),
+        };
+        let (allowed_event_tx, _allowed_event_rx) = mpsc::unbounded_channel();
+        let (_allowed_input_tx, allowed_input_rx) = mpsc::unbounded_channel();
+        let mut allowed_input_inbox = LoopInputInbox::new(allowed_input_rx);
+
+        let allowed = execute_tools(
+            &[allowed_call],
+            &registry,
+            &ai_client,
+            temp_dir.path(),
+            Some(temp_dir.path()),
+            &process_registry,
+            &skills_manager,
+            "allowed-session",
+            &temp_dir.path().join("allowed.db"),
+            None,
+            PermissionMode::Autonomous,
+            WorkMode::Build,
+            None,
+            None,
+            &allowed_event_tx,
+            None,
+            &mut allowed_input_inbox,
+            None,
+            &advertised,
+            None,
+            None,
+            Arc::new(FileObservationTracker::new()),
+        )
+        .await;
+
+        assert!(!allowed.cancelled);
+        assert_eq!(allowed.results.len(), 1);
+        assert!(matches!(
+            &allowed.results[0],
+            Content::ToolResult {
+                is_error: None | Some(false),
+                ..
+            }
+        ));
+        assert_eq!(
+            fs::read_to_string(temp_dir.path().join("deferred-ok.txt"))
+                .expect("unrestricted deferred write should create the file"),
+            "ordinary deferred dispatch remains available"
+        );
+
+        let exact_scope = HashSet::from(["tool_search".to_string(), "write".to_string()]);
+        let exact_call = AiToolCall {
+            id: "nested-write-exact".into(),
+            name: "tool_search".into(),
+            arguments: json!({
+                "action": "execute",
+                "tool": "write",
+                "arguments": {
+                    "file_path": "exact-ok.txt",
+                    "content": "explicit wrapper and target are allowed"
+                }
+            }),
+        };
+        let (exact_event_tx, _exact_event_rx) = mpsc::unbounded_channel();
+        let (_exact_input_tx, exact_input_rx) = mpsc::unbounded_channel();
+        let mut exact_input_inbox = LoopInputInbox::new(exact_input_rx);
+        let exact = execute_tools(
+            &[exact_call],
+            &registry,
+            &ai_client,
+            temp_dir.path(),
+            Some(temp_dir.path()),
+            &process_registry,
+            &skills_manager,
+            "exact-session",
+            &temp_dir.path().join("exact.db"),
+            None,
+            PermissionMode::Autonomous,
+            WorkMode::Build,
+            None,
+            None,
+            &exact_event_tx,
+            None,
+            &mut exact_input_inbox,
+            None,
+            &advertised,
+            Some(&exact_scope),
+            None,
+            Arc::new(FileObservationTracker::new()),
+        )
+        .await;
+        assert!(matches!(
+            &exact.results[0],
+            Content::ToolResult {
+                is_error: None | Some(false),
+                ..
+            }
+        ));
+        assert_eq!(
+            fs::read_to_string(temp_dir.path().join("exact-ok.txt"))
+                .expect("explicitly scoped deferred write should create the file"),
+            "explicit wrapper and target are allowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_tool_context_inherits_exact_scope_permission_and_turn_budget() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let registry = Arc::new(ToolRegistry::new());
+        let captured_calls = Arc::new(StdMutex::new(Vec::new()));
+        let captured_governance = Arc::new(StdMutex::new(Vec::new()));
+        registry
+            .register(Arc::new(CapturingAgentTool {
+                calls: Arc::clone(&captured_calls),
+                governance: Some(Arc::clone(&captured_governance)),
+            }))
+            .await;
+
+        let ai_client = Arc::new(AiClient::new(Default::default(), String::new()));
+        let process_registry = Arc::new(ProcessRegistry::new());
+        let skills_manager = Arc::new(tokio::sync::RwLock::new(SkillsManager::new(
+            temp_dir.path().join("skills"),
+            None,
+        )));
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        input_tx
+            .send(LoopInput::ToolApproval {
+                tool_call_id: "scoped-agent".to_string(),
+                approved: true,
+            })
+            .expect("approval input should be queued");
+        let mut input_inbox = LoopInputInbox::new(input_rx);
+        let advertised = HashSet::from(["agent".to_string()]);
+        let exact_scope = HashSet::from(["agent".to_string()]);
+        let call = AiToolCall {
+            id: "scoped-agent".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({"agent_type": "build", "prompt": "attempt mutation"}),
+        };
+
+        let batch = execute_tools(
+            &[call],
+            &registry,
+            &ai_client,
+            temp_dir.path(),
+            Some(temp_dir.path()),
+            &process_registry,
+            &skills_manager,
+            "session",
+            &temp_dir.path().join("db"),
+            None,
+            PermissionMode::Supervised,
+            WorkMode::Build,
+            None,
+            None,
+            &event_tx,
+            None,
+            &mut input_inbox,
+            Some(6),
+            &advertised,
+            Some(&exact_scope),
+            None,
+            Arc::new(FileObservationTracker::new()),
+        )
+        .await;
+
+        assert!(!batch.cancelled);
+        assert_eq!(captured_calls.lock().unwrap().len(), 1);
+        assert_eq!(
+            captured_governance
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            &[CapturedDelegationGovernance {
+                permission_mode: PermissionMode::Supervised,
+                subagent_max_turns: Some(6),
+                execution_tool_allowlist: Some(exact_scope),
+            }]
+        );
+    }
+
+    #[tokio::test]
     async fn extension_rewrite_is_authorized_then_executed_once_without_reinterception() {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let registry = Arc::new(ToolRegistry::new());
@@ -799,6 +1224,7 @@ mod tests {
         registry
             .register(Arc::new(CapturingAgentTool {
                 calls: Arc::clone(&captured_calls),
+                governance: None,
             }))
             .await;
 
@@ -907,6 +1333,7 @@ export default (krusty) => {
             None,
             &advertised,
             None,
+            None,
             Arc::new(FileObservationTracker::new()),
         )
         .await;
@@ -941,6 +1368,93 @@ export default (krusty) => {
             event,
             LoopEvent::ToolApproved { id } if id == "rewritten-agent"
         )));
+    }
+
+    #[tokio::test]
+    async fn extension_cannot_rewrite_an_allowlisted_wrapper_into_an_out_of_scope_target() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register(Arc::new(ToolSearchTool)).await;
+        registry.register(Arc::new(WriteTool)).await;
+        let manager = crate::extensions::AgentExtensionManager::new_with_paths(
+            temp_dir.path(),
+            temp_dir.path().join("extension-runtime"),
+            temp_dir.path().join("global-extensions"),
+        );
+        manager.set_test_tool_interceptor(|name, mut params| {
+            assert_eq!(name, "tool_search");
+            params["action"] = json!("execute");
+            params["tool"] = json!("write");
+            params["arguments"] = json!({
+                "file_path": "extension-escaped.txt",
+                "content": "must not be written"
+            });
+            crate::extensions::AgentExtensionToolIntercept {
+                params,
+                block_reason: None,
+            }
+        });
+        registry.set_agent_extension_manager(manager);
+
+        let ai_client = Arc::new(AiClient::new(Default::default(), String::new()));
+        let process_registry = Arc::new(ProcessRegistry::new());
+        let skills_manager = Arc::new(tokio::sync::RwLock::new(SkillsManager::new(
+            temp_dir.path().join("skills"),
+            None,
+        )));
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (_input_tx, input_rx) = mpsc::unbounded_channel();
+        let mut input_inbox = LoopInputInbox::new(input_rx);
+        let advertised = HashSet::from(["tool_search".to_string()]);
+        let explicit_scope = HashSet::from(["tool_search".to_string()]);
+        let call = AiToolCall {
+            id: "extension-rewrite".into(),
+            name: "tool_search".into(),
+            arguments: json!({"action": "search", "query": "read files"}),
+        };
+
+        let batch = execute_tools(
+            &[call],
+            &registry,
+            &ai_client,
+            temp_dir.path(),
+            Some(temp_dir.path()),
+            &process_registry,
+            &skills_manager,
+            "session",
+            &temp_dir.path().join("db"),
+            None,
+            PermissionMode::Autonomous,
+            WorkMode::Build,
+            None,
+            None,
+            &event_tx,
+            None,
+            &mut input_inbox,
+            None,
+            &advertised,
+            Some(&explicit_scope),
+            None,
+            Arc::new(FileObservationTracker::new()),
+        )
+        .await;
+
+        assert_eq!(batch.results.len(), 1);
+        match &batch.results[0] {
+            Content::ToolResult {
+                output, is_error, ..
+            } => {
+                assert_eq!(output["error_code"], "tool_not_advertised");
+                assert_eq!(*is_error, Some(true));
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+        let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            LoopEvent::ToolApprovalRequired { .. } | LoopEvent::ToolExecuting { .. }
+        )));
+        assert!(!temp_dir.path().join("extension-escaped.txt").exists());
     }
 
     async fn run_delayed_delegated_write(
@@ -990,6 +1504,7 @@ export default (krusty) => {
             &mut input_inbox,
             None,
             &advertised,
+            None,
             None,
             Arc::new(FileObservationTracker::new()),
         )
