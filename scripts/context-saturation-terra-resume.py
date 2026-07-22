@@ -73,8 +73,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             prior_summary.get("last_stop_reason") == "provider_error",
             f"Terra session did not retain the transport failure: {prior_summary}",
         )
+    finished_stop_reasons = [
+        event.get("stop_reason")
+        for event in prior_trace.get("events", [])
+        if event.get("event_type") == "finished"
+    ]
+    HARNESS.require(
+        "provider_error" in finished_stop_reasons,
+        f"Terra trace did not retain the original provider failure: {finished_stop_reasons}",
+    )
     result["terra_transport_recovery"] = {
-        "failed_run_stop_reason": prior_summary.get("last_stop_reason"),
+        "failed_run_stop_reason": "provider_error",
+        "completed_run_stop_reason": (
+            "completed" if "completed" in finished_stop_reasons else None
+        ),
         "provider_failures": prior_summary.get("provider_failures"),
         "resumed_after_fix": True,
     }
