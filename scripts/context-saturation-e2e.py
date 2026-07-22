@@ -485,7 +485,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grok-model", default="grok-4.5")
     parser.add_argument("--grok-provider", default="grok")
     parser.add_argument("--terra-model", default="gpt-5.6-terra")
-    parser.add_argument("--terra-provider", default="openai")
+    parser.add_argument("--terra-provider", default="open_a_i")
     parser.add_argument("--batch-chars", type=int, default=280_000)
     parser.add_argument("--max-batches", type=int, default=8)
     parser.add_argument("--timeout", type=float, default=1_200.0)

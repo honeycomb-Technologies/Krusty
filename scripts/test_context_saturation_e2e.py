@@ -79,7 +79,7 @@ class ContextSaturationUnitTests(unittest.TestCase):
         )
 
     def test_require_terra_high_accepts_exact_high_request(self):
-        terra = {"key": {"provider": "openai", "model_id": "gpt-5.6-terra"}}
+        terra = {"key": {"provider": "open_a_i", "model_id": "gpt-5.6-terra"}}
         trace = {
             "events": [
                 {
