@@ -41,6 +41,9 @@ impl ModelProfile {
             PromptFamily::OpenAiReasoning => {
                 "Turn reasoning into the next concrete action; reassess after tool results and continue."
             }
+            PromptFamily::Grok => {
+                "Reassess the latest user instruction after every tool result. If it asks for a direct reply or says not to call another tool, reply immediately without a tool. Never issue a no-op, placeholder, or redundant tool call merely to bridge from a tool result to text."
+            }
             PromptFamily::GoogleGemini => {
                 "Ground decisions in tool evidence, keep calls narrow, and preserve the active task across long contexts."
             }

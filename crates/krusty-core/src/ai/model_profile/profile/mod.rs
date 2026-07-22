@@ -8,6 +8,7 @@ pub enum PromptFamily {
     AnthropicClaude,
     OpenAiCodex,
     OpenAiReasoning,
+    Grok,
     GoogleGemini,
     #[default]
     GenericCoding,

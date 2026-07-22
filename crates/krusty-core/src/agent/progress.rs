@@ -11,7 +11,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::ai::types::{AiToolCall, Content};
-use crate::tools::registry::{effective_tool_call, tool_policy_for_call, ToolCategory};
+use crate::tools::registry::{
+    effective_tool_call, tool_policy_for_call, trusted_changed, ToolCategory,
+};
 
 use super::failure;
 use super::hooks::shell_policy::{classify_bash_command, semantic_bash_signature};
@@ -404,14 +406,7 @@ fn stable_status_signature(output: &Value, is_error: bool) -> String {
 }
 
 fn changed_value(output: &Value) -> Option<bool> {
-    match output {
-        Value::Object(object) => object.get("changed").and_then(Value::as_bool),
-        Value::String(serialized) => serde_json::from_str::<Value>(serialized)
-            .ok()
-            .as_ref()
-            .and_then(changed_value),
-        _ => None,
-    }
+    trusted_changed(output)
 }
 
 fn progress_change_key(output: &Value) -> Option<String> {

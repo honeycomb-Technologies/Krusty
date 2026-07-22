@@ -44,7 +44,9 @@ use crate::storage::{
     ProjectSettings, RecoveryStatus, SessionManager, SessionType, WorkMode,
 };
 use crate::tools::registry::effective_tool_call;
-use crate::tools::registry::{FileObservationTracker, PermissionMode, ToolRegistry};
+use crate::tools::registry::{
+    trusted_changed, FileObservationTracker, PermissionMode, ToolRegistry,
+};
 
 use super::compaction::{
     effective_context_window_for_runtime, is_context_overflow_error,
@@ -1809,26 +1811,30 @@ fn update_validation_state(
     tool_calls: &[crate::ai::types::AiToolCall],
     tool_results: &[Content],
 ) -> bool {
-    let successful_ids = tool_results
+    let successful_results = tool_results
         .iter()
         .filter_map(|result| match result {
             Content::ToolResult {
                 tool_use_id,
+                output,
                 is_error,
-                ..
-            } if !is_error.unwrap_or(false) => Some(tool_use_id.as_str()),
+            } if !is_error.unwrap_or(false) => {
+                Some((tool_use_id.as_str(), trusted_changed(output)))
+            }
             _ => None,
         })
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<HashMap<_, _>>();
     let was_pending = *mutation_needs_validation;
 
     for call in tool_calls
         .iter()
-        .filter(|call| successful_ids.contains(call.id.as_str()))
+        .filter(|call| successful_results.contains_key(call.id.as_str()))
     {
         if failure::is_validation_call(call) {
             *mutation_needs_validation = false;
-        } else if is_mutation_call(call) {
+        } else if successful_results.get(call.id.as_str()) == Some(&Some(true))
+            && is_mutation_call(call)
+        {
             *mutation_needs_validation = true;
         }
     }
@@ -2153,9 +2159,12 @@ mod tests {
             name: "bash".into(),
             arguments: json!({"command": "cargo test -p krusty-core"}),
         };
-        let success = |id: &str| Content::ToolResult {
+        let success = |id: &str, changed: Option<bool>| Content::ToolResult {
             tool_use_id: id.into(),
-            output: json!({"ok": true}),
+            output: match changed {
+                Some(changed) => json!({"ok": true, "changed": changed}),
+                None => json!({"ok": true}),
+            },
             is_error: None,
         };
         let mut pending = false;
@@ -2163,13 +2172,46 @@ mod tests {
         assert!(update_validation_state(
             &mut pending,
             std::slice::from_ref(&mutation),
-            &[success("edit-1")],
+            &[success("edit-1", Some(true))],
         ));
         assert!(pending);
         assert!(!update_validation_state(
             &mut pending,
             std::slice::from_ref(&validation),
-            &[success("check-1")],
+            &[success("check-1", None)],
+        ));
+        assert!(!pending);
+    }
+
+    #[test]
+    fn opaque_or_noop_mutation_results_do_not_invent_validation_work() {
+        let python = AiToolCall {
+            id: "bash-1".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "python3 probe.py"}),
+        };
+        let edit = AiToolCall {
+            id: "edit-1".into(),
+            name: "edit".into(),
+            arguments: json!({"file_path": "src/lib.rs"}),
+        };
+        let result = |id: &str, output| Content::ToolResult {
+            tool_use_id: id.into(),
+            output,
+            is_error: None,
+        };
+        let mut pending = false;
+
+        assert!(!update_validation_state(
+            &mut pending,
+            &[python],
+            &[result("bash-1", json!({"ok": true}))],
+        ));
+        assert!(!pending);
+        assert!(!update_validation_state(
+            &mut pending,
+            &[edit],
+            &[result("edit-1", json!({"ok": true, "changed": false}))],
         ));
         assert!(!pending);
     }

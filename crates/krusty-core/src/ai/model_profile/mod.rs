@@ -43,6 +43,29 @@ mod tests {
     }
 
     #[test]
+    fn resolves_grok_family_before_openai_responses_transport_family() {
+        let profile =
+            ModelProfile::resolve(ProviderId::Grok, ApiFormat::OpenAIResponses, "grok-4.5");
+
+        assert_eq!(profile.prompt_family, PromptFamily::Grok);
+    }
+
+    #[test]
+    fn grok_overlay_forbids_placeholder_tools_after_direct_steering() {
+        let sections = build_system_prompt_sections(
+            ProviderId::Grok,
+            ApiFormat::OpenAIResponses,
+            "grok-4.5",
+            &[],
+            None,
+            &[],
+        );
+
+        assert!(sections.base_prompt.contains("latest user instruction"));
+        assert!(sections.base_prompt.contains("Never issue a no-op"));
+    }
+
+    #[test]
     fn partitions_project_and_session_system_messages() {
         let messages = vec![
             text_message(Role::System, "[PROJECT INSTRUCTIONS]\nUse Rust."),

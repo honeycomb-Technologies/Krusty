@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -349,6 +350,104 @@ class RunBudgetTraceTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(HARNESS.AcceptanceFailure, "hidden or non-default"):
             HARNESS.validate_trace_run_budgets(capped, "capped trace")
+
+
+class FailedBashValidationTests(unittest.TestCase):
+    command = 'python3 -c "import sys; print(\'EXPECTED\', file=sys.stderr); sys.exit(7)"'
+    marker = "EXPECTED"
+    reply = "FAILED-BASH-HANDLED"
+
+    def events(self) -> list[dict[str, object]]:
+        envelope = {
+            "ok": False,
+            "data": {"output": self.marker},
+            "error": {"code": "command_failed", "message": "exit 7"},
+            "metadata": {"exit_code": 7, "killed": False},
+        }
+        return [
+            {"type": "tool_call_start", "id": "call-1", "name": "bash"},
+            {
+                "type": "tool_call_complete",
+                "id": "call-1",
+                "name": "bash",
+                "arguments": {
+                    "command": self.command,
+                    "timeout": 60_000,
+                    "run_in_background": False,
+                },
+            },
+            {"type": "tool_executing", "id": "call-1", "name": "bash"},
+            {"type": "tool_executing", "id": "call-1", "name": "bash"},
+            {
+                "type": "tool_result",
+                "id": "call-1",
+                "output": json.dumps(envelope),
+                "is_error": True,
+            },
+            {"type": "text_delta", "delta": self.reply},
+            {"type": "turn_complete", "turn": 1, "has_more": False},
+            {
+                "type": "finish",
+                "session_id": "session-1",
+                "stop_reason": "completed",
+            },
+        ]
+
+    def test_accepts_multiple_matching_execution_heartbeats(self) -> None:
+        text, call_id, envelope = HARNESS.validate_failed_bash_stream(
+            self.events(),
+            "failed Bash",
+            self.command,
+            self.marker,
+            self.reply,
+        )
+
+        self.assertEqual(text, self.reply)
+        self.assertEqual(call_id, "call-1")
+        self.assertEqual(envelope["metadata"]["exit_code"], 7)
+
+    def test_trace_accepts_multiple_matching_execution_heartbeats(self) -> None:
+        trace_events = [
+            {
+                "event_type": event["type"],
+                "payload": {
+                    key: value
+                    for key, value in event.items()
+                    if key in {"id", "name", "arguments", "is_error"}
+                },
+            }
+            for event in self.events()
+            if event["type"]
+            in {
+                "tool_call_start",
+                "tool_call_complete",
+                "tool_executing",
+                "tool_result",
+            }
+        ]
+
+        call_ids = HARNESS.validate_trace_tool_lifecycles(
+            trace_events,
+            "failed Bash trace",
+            exact_calls=1,
+            expected_name="bash",
+        )
+
+        self.assertEqual(call_ids, ["call-1"])
+
+    def test_rejects_heartbeat_after_the_result(self) -> None:
+        events = self.events()
+        heartbeat = events.pop(3)
+        events.insert(5, heartbeat)
+
+        with self.assertRaisesRegex(HARNESS.AcceptanceFailure, "out of order"):
+            HARNESS.validate_failed_bash_stream(
+                events,
+                "failed Bash",
+                self.command,
+                self.marker,
+                self.reply,
+            )
 
 
 class LiveSteeringValidationTests(unittest.TestCase):

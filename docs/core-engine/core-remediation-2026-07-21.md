@@ -160,6 +160,14 @@ controls until explicit metadata says otherwise. Static vision/tool support is
 declared on the model row, not guessed from a substring. Fractional provider
 sampling parameters remain JSON fractions and are gated by provider identity.
 
+OpenAI-compatible transport does not imply OpenAI-identical behavior. Grok now
+resolves to its own prompt family before the shared Responses transport family,
+including an explicit prohibition on placeholder/no-op tool calls after a tool
+result when the latest user steering asks for a direct reply. Automated
+validation reminders likewise require a successful producer-owned root
+`changed: true`; a conservative "possibly effectful" shell classification is
+not treated as proof that files changed.
+
 ## Why this is smaller than a rewrite
 
 The retained pieces—provider parsers, tools, SQLite, compaction, permission
@@ -190,6 +198,10 @@ Release evidence must include:
 - repeated real Grok 4.5 project builds through the candidate server;
 - a real read-only audit with zero mutations and an adversarial repeated-Bash
   run that converges with trace-backed evidence;
+- resilience coverage for SSE disconnect, failed-Bash recovery, live steering,
+  explicit cancellation, and direct-tool policy rejection. Repeated
+  `tool_executing` liveness heartbeats may share one call ID, while start,
+  complete, and result identities remain unique;
 - cleanup proof for candidate processes and confirmation that production was
   never repointed during acceptance.
 

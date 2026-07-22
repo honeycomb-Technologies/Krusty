@@ -775,24 +775,29 @@ def validate_failed_bash_stream(
     executing = [event for event in events if event.get("type") == "tool_executing"]
     results = [event for event in events if event.get("type") == "tool_result"]
     require(
-        len(starts) == len(executing) == len(results) == 1,
+        len(starts) == len(results) == 1 and len(executing) >= 1,
         f"{label}: duplicated or missing tool lifecycle; "
         f"starts={starts}, executing={executing}, results={results}",
     )
     for lifecycle_name, lifecycle_event in (
         ("start", starts[0]),
-        ("executing", executing[0]),
         ("result", results[0]),
     ):
         require(
             lifecycle_event.get("id") == call_id,
             f"{label}: {lifecycle_name} id did not match {call_id}: {lifecycle_event}",
         )
+    for lifecycle_event in executing:
+        require(
+            lifecycle_event.get("id") == call_id,
+            f"{label}: executing id did not match {call_id}: {lifecycle_event}",
+        )
     require(starts[0].get("name") == "bash", f"{label}: start was not Bash: {starts[0]}")
-    require(
-        executing[0].get("name") == "bash",
-        f"{label}: executing event was not Bash: {executing[0]}",
-    )
+    for lifecycle_event in executing:
+        require(
+            lifecycle_event.get("name") == "bash",
+            f"{label}: executing event was not Bash: {lifecycle_event}",
+        )
     require(
         results[0].get("is_error") is True,
         f"{label}: expected failed tool result: {results[0]}",
@@ -828,15 +833,20 @@ def validate_failed_bash_stream(
         for event_type in (
             "tool_call_start",
             "tool_call_complete",
-            "tool_executing",
             "tool_result",
             "finish",
         )
     }
+    executing_positions = [
+        index for index, event in enumerate(events) if event.get("type") == "tool_executing"
+    ]
+    positions["tool_executing_first"] = executing_positions[0]
+    positions["tool_executing_last"] = executing_positions[-1]
     require(
         positions["tool_call_start"]
         < positions["tool_call_complete"]
-        < positions["tool_executing"]
+        < positions["tool_executing_first"]
+        <= positions["tool_executing_last"]
         < positions["tool_result"]
         < positions["finish"],
         f"{label}: tool lifecycle was out of order: {positions}",
@@ -3132,19 +3142,29 @@ expected failure, reply exactly {failure_reply}"""
                 for index, event in enumerate(failed_delta)
                 if event.get("event_type") == event_type
             ]
-            require(
-                len(trace_lifecycle[event_type]) == 1,
-                f"{lane}: trace expected one {event_type}, got "
-                f"{trace_lifecycle[event_type]}",
-            )
+            if event_type == "tool_executing":
+                require(
+                    bool(trace_lifecycle[event_type]),
+                    f"{lane}: trace expected at least one {event_type}, got []",
+                )
+            else:
+                require(
+                    len(trace_lifecycle[event_type]) == 1,
+                    f"{lane}: trace expected one {event_type}, got "
+                    f"{trace_lifecycle[event_type]}",
+                )
         trace_positions = {
             event_type: matches[0][0]
             for event_type, matches in trace_lifecycle.items()
+            if event_type != "tool_executing"
         }
+        trace_positions["tool_executing_first"] = trace_lifecycle["tool_executing"][0][0]
+        trace_positions["tool_executing_last"] = trace_lifecycle["tool_executing"][-1][0]
         require(
             trace_positions["tool_call_start"]
             < trace_positions["tool_call_complete"]
-            < trace_positions["tool_executing"]
+            < trace_positions["tool_executing_first"]
+            <= trace_positions["tool_executing_last"]
             < trace_positions["tool_result"]
             < trace_positions["finished"],
             f"{lane}: failed-turn trace lifecycle was out of order: {trace_positions}",
@@ -3152,13 +3172,19 @@ expected failure, reply exactly {failure_reply}"""
         for event_type in (
             "tool_call_start",
             "tool_call_complete",
-            "tool_executing",
             "tool_result",
         ):
             payload = trace_lifecycle[event_type][0][1].get("payload", {})
             require(
                 payload.get("id") == tool_call_id,
                 f"{lane}: trace {event_type} id did not match {tool_call_id}: {payload}",
+            )
+        for _, executing_event in trace_lifecycle["tool_executing"]:
+            payload = executing_event.get("payload", {})
+            require(
+                payload.get("id") == tool_call_id and payload.get("name") == "bash",
+                f"{lane}: trace tool_executing did not match Bash call "
+                f"{tool_call_id}: {payload}",
             )
         require(
             trace_lifecycle["tool_call_complete"][0][1]
@@ -3203,10 +3229,16 @@ expected failure, reply exactly {failure_reply}"""
         ):
             count = trace_event_count(failed_summary, event_type)
             if count is not None:
-                require(
-                    count == 1,
-                    f"{lane}: trace count {event_type}={count}, expected 1",
-                )
+                if event_type == "tool_executing":
+                    require(
+                        count >= 1,
+                        f"{lane}: trace count {event_type}={count}, expected at least 1",
+                    )
+                else:
+                    require(
+                        count == 1,
+                        f"{lane}: trace count {event_type}={count}, expected 1",
+                    )
 
         failed_messages_snapshot = canonical_json_bytes(failed_messages)
         recovery_events = api.chat(

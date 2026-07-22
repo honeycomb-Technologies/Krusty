@@ -1,6 +1,21 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+/// Read producer-owned semantic change evidence from the result envelope.
+///
+/// Only the root field is trusted. Nested tool payloads are arbitrary data and
+/// must not be able to spoof orchestration progress or validation state.
+pub fn trusted_changed(value: &Value) -> Option<bool> {
+    match value {
+        Value::Object(object) => object.get("changed").and_then(Value::as_bool),
+        Value::String(serialized) => serde_json::from_str::<Value>(serialized)
+            .ok()
+            .as_ref()
+            .and_then(trusted_changed),
+        _ => None,
+    }
+}
+
 /// Hash a canonical set of workspace resources for semantic progress
 /// accounting. Payload bytes are deliberately excluded: repeatedly rewriting
 /// one target is one effect intent even when the generated content changes.

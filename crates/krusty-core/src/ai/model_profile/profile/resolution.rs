@@ -22,6 +22,19 @@ impl ModelProfile {
             };
         }
 
+        // Grok uses the OpenAI Responses wire format, but its behavioral
+        // prompt must remain provider-specific. Resolve it before the generic
+        // Responses family so transport compatibility does not erase model
+        // steering that is required for reliable tool convergence.
+        if matches!(provider, ProviderId::Grok)
+            || normalized.starts_with("xai/")
+            || normalized.contains("grok")
+        {
+            return Self {
+                prompt_family: PromptFamily::Grok,
+            };
+        }
+
         if normalized.contains("codex") {
             return Self {
                 prompt_family: PromptFamily::OpenAiCodex,
@@ -36,10 +49,7 @@ impl ModelProfile {
             };
         }
 
-        if matches!(provider, ProviderId::OpenAI | ProviderId::Grok)
-            || normalized.starts_with("openai/")
-            || normalized.contains("grok")
-        {
+        if matches!(provider, ProviderId::OpenAI) || normalized.starts_with("openai/") {
             return Self {
                 prompt_family: PromptFamily::OpenAiReasoning,
             };
