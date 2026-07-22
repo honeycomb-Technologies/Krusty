@@ -67,6 +67,18 @@ def trace_event(
     return event
 
 
+def budget_event(
+    sequence: int,
+    run_id: str,
+    *,
+    max_turns: int | None = None,
+    source: str = "unlimited_default",
+) -> dict[str, Any]:
+    event = trace_event(sequence, "run_budget_resolved", run_id=run_id)
+    event["payload"] = {"max_turns": max_turns, "source": source}
+    return event
+
+
 class CandidateSafetyTests(unittest.TestCase):
     def test_candidate_url_requires_loopback_nonproduction_port(self) -> None:
         self.assertEqual(
@@ -145,6 +157,58 @@ class TraceConvergenceTests(unittest.TestCase):
             )
 
         self.assertEqual(api.calls, 1)
+
+
+class RunBudgetTraceTests(unittest.TestCase):
+    def test_accepts_one_unlimited_default_budget_per_completed_run(self) -> None:
+        trace = trace_response(
+            [
+                budget_event(1, "run-1"),
+                trace_event(2, "finished", run_id="run-1", stop_reason="completed"),
+                budget_event(3, "run-2"),
+                trace_event(4, "finished", run_id="run-2", stop_reason="completed"),
+                budget_event(5, "run-3"),
+                trace_event(6, "finished", run_id="run-3", stop_reason="completed"),
+            ]
+        )
+
+        budgets = HARNESS.validate_trace_run_budgets(trace, "multi-run trace")
+
+        self.assertEqual(
+            [budget["run_id"] for budget in budgets],
+            ["run-1", "run-2", "run-3"],
+        )
+        self.assertTrue(all(budget["max_turns"] is None for budget in budgets))
+        self.assertTrue(
+            all(budget["source"] == "unlimited_default" for budget in budgets)
+        )
+
+    def test_rejects_duplicate_or_missing_budget_events_by_run_id(self) -> None:
+        duplicate = trace_response(
+            [
+                budget_event(1, "run-1"),
+                budget_event(2, "run-1"),
+                trace_event(3, "finished", run_id="run-1", stop_reason="completed"),
+            ]
+        )
+        with self.assertRaisesRegex(HARNESS.AcceptanceFailure, "emitted 2 budget events"):
+            HARNESS.validate_trace_run_budgets(duplicate, "duplicate trace")
+
+        missing = trace_response(
+            [trace_event(1, "finished", run_id="run-1", stop_reason="completed")]
+        )
+        with self.assertRaisesRegex(HARNESS.AcceptanceFailure, "run ids did not match"):
+            HARNESS.validate_trace_run_budgets(missing, "missing trace")
+
+    def test_rejects_a_hidden_or_non_default_cap(self) -> None:
+        capped = trace_response(
+            [
+                budget_event(1, "run-1", max_turns=50, source="explicit_run"),
+                trace_event(2, "finished", run_id="run-1", stop_reason="completed"),
+            ]
+        )
+        with self.assertRaisesRegex(HARNESS.AcceptanceFailure, "hidden or non-default"):
+            HARNESS.validate_trace_run_budgets(capped, "capped trace")
 
 
 class LiveSteeringValidationTests(unittest.TestCase):

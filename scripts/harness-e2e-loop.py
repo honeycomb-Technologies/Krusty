@@ -2020,13 +2020,75 @@ def collect_failed_cycle_evidence(
     return evidence
 
 
+def validate_trace_run_budgets(
+    trace: dict[str, Any],
+    label: str,
+) -> list[dict[str, Any]]:
+    """Require one explicit unlimited-default budget for every terminal run."""
+    budget_events_by_run: dict[str, list[dict[str, Any]]] = {}
+    finished_run_ids: list[str] = []
+
+    for event in trace.get("events", []):
+        event_type = event.get("event_type")
+        if event_type not in {"run_budget_resolved", "finished"}:
+            continue
+
+        run_id = event.get("run_id")
+        require(
+            isinstance(run_id, str) and bool(run_id),
+            f"{label}: {event_type} event lacked a run id: {event}",
+        )
+        if event_type == "finished":
+            require(
+                run_id not in finished_run_ids,
+                f"{label}: run {run_id} emitted duplicate terminal events",
+            )
+            finished_run_ids.append(run_id)
+            continue
+
+        payload = event.get("payload")
+        require(
+            isinstance(payload, dict),
+            f"{label}: run {run_id} budget payload was malformed: {payload}",
+        )
+        budget_events_by_run.setdefault(run_id, []).append(payload)
+
+    require(finished_run_ids, f"{label}: trace omitted terminal runs")
+    require(
+        set(budget_events_by_run) == set(finished_run_ids),
+        f"{label}: budget run ids did not match terminal run ids: "
+        f"budgets={sorted(budget_events_by_run)}, finished={sorted(finished_run_ids)}",
+    )
+
+    resolved: list[dict[str, Any]] = []
+    for run_id in finished_run_ids:
+        budgets = budget_events_by_run[run_id]
+        require(
+            len(budgets) == 1,
+            f"{label}: run {run_id} emitted {len(budgets)} budget events: {budgets}",
+        )
+        budget = budgets[0]
+        require(
+            budget.get("max_turns") is None
+            and budget.get("source") == "unlimited_default",
+            f"{label}: run {run_id} retained a hidden or non-default turn cap: {budget}",
+        )
+        resolved.append(
+            {
+                "run_id": run_id,
+                "max_turns": budget.get("max_turns"),
+                "source": budget.get("source"),
+            }
+        )
+    return resolved
+
+
 def validate_trace_exact_runtime(
     trace: dict[str, Any],
     model: dict[str, Any],
     label: str,
 ) -> dict[str, Any]:
     snapshots: list[dict[str, Any]] = []
-    budget_events: list[dict[str, Any]] = []
     for event in trace.get("events", []):
         payload = event.get("payload")
         if not isinstance(payload, dict):
@@ -2035,8 +2097,6 @@ def validate_trace_exact_runtime(
             diagnostics = payload.get("diagnostics")
             if isinstance(diagnostics, dict):
                 snapshots.append(diagnostics)
-        elif event.get("event_type") == "run_budget_resolved":
-            budget_events.append(payload)
 
     require(snapshots, f"{label}: trace omitted provider request snapshots")
     for index, snapshot in enumerate(snapshots):
@@ -2062,17 +2122,12 @@ def validate_trace_exact_runtime(
             f"{label}: request {index} lacked a redacted prompt hash: {snapshot}",
         )
 
-    require(len(budget_events) == 1, f"{label}: bad durable budget events: {budget_events}")
-    require(
-        budget_events[0].get("max_turns") is None
-        and budget_events[0].get("source") == "unlimited",
-        f"{label}: interactive run retained a hidden turn cap: {budget_events[0]}",
-    )
+    run_budgets = validate_trace_run_budgets(trace, label)
     return {
         "model_key": model["key"],
         "catalog_revision": model.get("catalog_revision"),
         "request_count": len(snapshots),
-        "run_budget": budget_events[0],
+        "run_budgets": run_budgets,
         "prompt_hashes": [
             snapshot.get("prompt_manifest", {}).get("prompt_hash")
             for snapshot in snapshots
