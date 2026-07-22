@@ -3,7 +3,11 @@ use std::time::Instant;
 use tracing::info;
 
 use crate::ai::client::AiClient;
-use crate::ai::types::{AiTool, ModelMessage};
+use crate::ai::types::{AiTool, ModelMessage, Usage};
+use crate::ai::usage::{
+    parse_anthropic_usage, parse_google_usage, parse_openai_chat_usage,
+    parse_openai_responses_usage,
+};
 
 use super::super::types::{SubAgentApiError, ToolCall};
 
@@ -45,6 +49,13 @@ pub(super) async fn call_subagent_api(
         "SubAgent API call completed"
     );
     result
+}
+
+pub(super) fn parse_response_usage(response: &Value) -> Option<Usage> {
+    parse_openai_responses_usage(response)
+        .or_else(|| parse_openai_chat_usage(response))
+        .or_else(|| parse_anthropic_usage(response))
+        .or_else(|| parse_google_usage(response))
 }
 
 /// Parse API response to extract text, tool calls, and stop reason.

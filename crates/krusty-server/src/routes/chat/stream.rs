@@ -35,6 +35,7 @@ fn loop_event_requires_delivery(event: &LoopEvent) -> bool {
             | LoopEvent::ClassifierDecision { .. }
             | LoopEvent::RunBudgetResolved { .. }
             | LoopEvent::ProviderRequestPrepared { .. }
+            | LoopEvent::MicrocompactionApplied { .. }
             | LoopEvent::ProgressGuard { .. }
             | LoopEvent::Usage { .. }
             | LoopEvent::Finished { .. }

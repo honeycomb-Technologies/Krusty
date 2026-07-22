@@ -147,6 +147,7 @@ fn provider_request_trace_keeps_contract_metadata_but_redacts_request_contents()
     const USER_SECRET: &str = "never-persist-user-message";
     const TOOL_SECRET: &str = "never-persist-tool-schema";
     const CREDENTIAL_SECRET: &str = "never-persist-provider-credential";
+    const CACHE_KEY_SECRET: &str = "never-persist-cache-key-source";
 
     let client = AiClient::new(
         AiClientConfig::for_grok("grok-4.5"),
@@ -178,6 +179,7 @@ fn provider_request_trace_keeps_contract_metadata_but_redacts_request_contents()
             }),
             prompt: Some(TOOL_SECRET.to_string()),
         }]),
+        session_id: Some(CACHE_KEY_SECRET.to_string()),
         ..CallOptions::default()
     };
     let diagnostics = client.request_diagnostics(&messages, &options);
@@ -207,6 +209,21 @@ fn provider_request_trace_keeps_contract_metadata_but_redacts_request_contents()
             .map(str::len),
         Some(64)
     );
+    assert_eq!(
+        diagnostics["stable_request_fingerprint"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
+    assert_eq!(diagnostics["cache_key_present"], true);
+    assert_eq!(diagnostics["cache_mode"], "session_key");
+    assert!(
+        diagnostics["stable_instruction_bytes"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
+    assert!(diagnostics["tool_schema_bytes"].as_u64().unwrap_or(0) > 0);
 
     let (db, _temp_dir, session_id) = create_test_db();
     let store = RuntimeTraceStore::new(&db);
@@ -221,7 +238,13 @@ fn provider_request_trace_keeps_contract_metadata_but_redacts_request_contents()
 
     let loop_json = serde_json::to_string(&loop_event).expect("loop event should serialize");
     let trace_json = serde_json::to_string(&persisted[0].payload).expect("trace should serialize");
-    for secret in [SYSTEM_SECRET, USER_SECRET, TOOL_SECRET, CREDENTIAL_SECRET] {
+    for secret in [
+        SYSTEM_SECRET,
+        USER_SECRET,
+        TOOL_SECRET,
+        CREDENTIAL_SECRET,
+        CACHE_KEY_SECRET,
+    ] {
         assert!(!loop_json.contains(secret));
         assert!(!trace_json.contains(secret));
     }

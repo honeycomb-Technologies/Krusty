@@ -233,7 +233,8 @@ impl AgentTool {
                         ctx.process_registry.clone(),
                         ctx.user_id.clone(),
                         ctx.session_id.clone(),
-                    );
+                    )
+                    .with_provider_call_trace(ctx.provider_call_trace.clone());
                 if let Some(sandbox_root) = ctx.sandbox_root.clone() {
                     task = task.with_sandbox_root(sandbox_root);
                 }
@@ -271,7 +272,8 @@ impl AgentTool {
                     ctx.process_registry.clone(),
                     ctx.user_id.clone(),
                     ctx.session_id.clone(),
-                );
+                )
+                .with_provider_call_trace(ctx.provider_call_trace.clone());
             if let Some(sandbox_root) = ctx.sandbox_root.clone() {
                 task = task.with_sandbox_root(sandbox_root);
             }

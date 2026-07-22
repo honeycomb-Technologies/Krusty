@@ -9,34 +9,59 @@ use serde_json::Value;
 const KEEP_RECENT_MESSAGES: usize = 6;
 const KEEP_RECENT_THINKING_ASSISTANTS: usize = 2;
 const MAX_COMPLETED_TOOL_INPUT_CHARS: usize = 4_000;
+/// Batch rolling history rewrites so a warm prefix is not invalidated on every
+/// turn as one more message crosses the retention boundary.
+pub(crate) const MICROCOMPACT_HISTORY_BATCH_MESSAGES: usize = 12;
 
 pub(crate) struct MicrocompactResult {
     pub messages: Vec<ModelMessage>,
     pub changed: bool,
+    pub history_rewritten: bool,
+    pub tool_inputs_rewritten: bool,
 }
 
 pub(crate) fn microcompact_messages(conversation: &[ModelMessage]) -> MicrocompactResult {
+    microcompact_messages_cache_aware(conversation, true)
+}
+
+pub(crate) fn should_rewrite_microcompact_history(
+    message_count: usize,
+    last_rewrite_message_count: usize,
+) -> bool {
+    message_count > KEEP_RECENT_MESSAGES
+        && message_count.saturating_sub(last_rewrite_message_count)
+            >= MICROCOMPACT_HISTORY_BATCH_MESSAGES
+}
+
+pub(crate) fn microcompact_messages_cache_aware(
+    conversation: &[ModelMessage],
+    rewrite_history: bool,
+) -> MicrocompactResult {
     if conversation.is_empty() {
         return MicrocompactResult {
             messages: Vec::new(),
             changed: false,
+            history_rewritten: false,
+            tool_inputs_rewritten: false,
         };
     }
 
     let mut messages = conversation.to_vec();
-    let mut changed = false;
+    let mut history_rewritten = false;
+    if rewrite_history {
+        let thinking_changed = strip_old_thinking(&mut messages);
+        let tool_results_changed = compact_old_tool_results(&mut messages);
+        history_rewritten = thinking_changed || tool_results_changed;
+    }
+    let tool_inputs_rewritten = compact_large_tool_inputs(&mut messages);
+    let changed = history_rewritten || tool_inputs_rewritten;
 
-    if strip_old_thinking(&mut messages) {
-        changed = true;
+    MicrocompactResult {
+        messages,
+        changed,
+        history_rewritten,
+        tool_inputs_rewritten,
     }
-    if compact_old_tool_results(&mut messages) {
-        changed = true;
-    }
-    if compact_large_tool_inputs(&mut messages) {
-        changed = true;
-    }
-
-    MicrocompactResult { messages, changed }
 }
 
 fn compact_large_tool_inputs(messages: &mut [ModelMessage]) -> bool {
@@ -371,5 +396,44 @@ mod tests {
         assert!(output["result"]["data"]["content"]
             .as_str()
             .is_some_and(|content| content.contains("Old read content cleared")));
+    }
+    #[test]
+    fn rolling_history_rewrites_are_batched() {
+        let baseline = KEEP_RECENT_MESSAGES;
+        assert!(!should_rewrite_microcompact_history(
+            baseline + MICROCOMPACT_HISTORY_BATCH_MESSAGES - 1,
+            baseline
+        ));
+        assert!(should_rewrite_microcompact_history(
+            baseline + MICROCOMPACT_HISTORY_BATCH_MESSAGES,
+            baseline
+        ));
+    }
+
+    #[test]
+    fn cache_aware_microcompact_defers_old_history_rewrites() {
+        let mut messages = vec![ModelMessage {
+            role: Role::User,
+            content: vec![Content::ToolResult {
+                tool_use_id: "old".to_string(),
+                output: json!({
+                    "retention": "drop_after_compaction",
+                    "summary": "old result",
+                    "result": "large old result"
+                }),
+                is_error: None,
+            }],
+        }];
+        messages.extend((0..KEEP_RECENT_MESSAGES).map(|index| ModelMessage {
+            role: Role::Assistant,
+            content: vec![Content::Text {
+                text: format!("later {index}"),
+            }],
+        }));
+
+        let deferred = microcompact_messages_cache_aware(&messages, false);
+        assert!(!deferred.changed);
+        let rewritten = microcompact_messages_cache_aware(&messages, true);
+        assert!(rewritten.history_rewritten);
     }
 }

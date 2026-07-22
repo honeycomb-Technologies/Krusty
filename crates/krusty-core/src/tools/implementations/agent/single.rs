@@ -125,7 +125,8 @@ impl AgentTool {
                 ctx.process_registry.clone(),
                 ctx.user_id.clone(),
                 ctx.session_id.clone(),
-            );
+            )
+            .with_provider_call_trace(ctx.provider_call_trace.clone());
         if let Some(max_turns) = params.max_turns {
             task = task.with_max_turns(max_turns);
         }
@@ -310,7 +311,8 @@ impl AgentTool {
                 ctx.process_registry.clone(),
                 ctx.user_id.clone(),
                 ctx.session_id.clone(),
-            );
+            )
+            .with_provider_call_trace(ctx.provider_call_trace.clone());
         if let Some(max_turns) = params.max_turns {
             task = task.with_max_turns(max_turns);
         }
@@ -484,7 +486,8 @@ impl AgentTool {
                 ctx.process_registry.clone(),
                 ctx.user_id.clone(),
                 ctx.session_id.clone(),
-            );
+            )
+            .with_provider_call_trace(ctx.provider_call_trace.clone());
         if let Some(max_turns) = params.max_turns {
             task = task.with_max_turns(max_turns);
         }

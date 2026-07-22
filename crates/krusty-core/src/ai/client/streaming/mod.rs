@@ -7,7 +7,7 @@ pub(crate) mod codex;
 mod google;
 mod openai;
 mod request_options;
-mod shared;
+pub(crate) mod shared;
 
 use anyhow::Result;
 use std::fmt;

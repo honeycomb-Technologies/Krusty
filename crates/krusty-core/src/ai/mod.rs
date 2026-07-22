@@ -32,7 +32,7 @@ pub mod title;
 pub mod transform;
 pub mod transport_policy;
 pub mod types;
-mod usage;
+pub(crate) mod usage;
 
 // Re-export main types from new module
 pub use client::{

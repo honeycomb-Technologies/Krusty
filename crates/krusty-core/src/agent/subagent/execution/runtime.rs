@@ -18,7 +18,7 @@ use super::super::types::{
     parse_explore_report, AgentProgress, AgentProgressStatus, DelegatedProcessArtifact,
     SubAgentResult, SubAgentTask,
 };
-use super::api::{call_subagent_api, parse_response};
+use super::api::{call_subagent_api, parse_response, parse_response_usage};
 use super::config::AgentConfig;
 use super::explorer::{
     collect_paths_from_tool_result, completion_summary_preview, normalize_explorer_result,
@@ -194,6 +194,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     let mut background_processes = Vec::new();
     let mut loop_guard = LoopGuard::new();
     let mut overflow_compact_retry_attempted = false;
+    let mut last_dynamic_context: Option<String> = None;
 
     let send_progress = |status: AgentProgressStatus,
                          action: &str,
@@ -314,6 +315,21 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
         }
         turns += 1;
 
+        if let Some(context) = config
+            .dynamic_context()
+            .filter(|context| !context.trim().is_empty())
+        {
+            if last_dynamic_context.as_deref() != Some(context.as_str()) {
+                messages.push(ModelMessage {
+                    role: Role::User,
+                    content: vec![Content::Text {
+                        text: context.clone(),
+                    }],
+                });
+                last_dynamic_context = Some(context);
+            }
+        }
+
         let system_prompt = config.system_prompt(turns);
 
         let thinking_action = if total_tool_calls > 0 {
@@ -330,6 +346,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             config,
         );
 
+        let provider_call_started = Instant::now();
         let api_future = call_subagent_api(
             client,
             model,
@@ -341,7 +358,29 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             &cache_session_id,
         );
 
-        let response = match tokio::time::timeout(config.api_call_timeout(), api_future).await {
+        let api_result = tokio::time::timeout(config.api_call_timeout(), api_future).await;
+        let (provider_outcome, provider_usage) = match &api_result {
+            Ok(Ok(response)) => ("completed", parse_response_usage(response)),
+            Ok(Err(_)) => ("error", None),
+            Err(_) => ("timeout", None),
+        };
+        if let Some(trace) = task.provider_call_trace.as_ref() {
+            trace
+                .record_delegated_call(
+                    "delegated_agent_turn",
+                    client.provider_id(),
+                    model,
+                    task.delegated_run_id.as_deref(),
+                    &task_id,
+                    turns,
+                    provider_call_started,
+                    provider_outcome,
+                    provider_usage.clone(),
+                )
+                .await;
+        }
+
+        let response = match api_result {
             Ok(Ok(r)) => r,
             Ok(Err(e))
                 if !overflow_compact_retry_attempted
@@ -444,13 +483,8 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             }
         };
 
-        if let Some(usage) = response.get("usage") {
-            if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
-                estimated_tokens += input as usize;
-            }
-            if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
-                estimated_tokens += output as usize;
-            }
+        if let Some(usage) = provider_usage {
+            estimated_tokens = estimated_tokens.saturating_add(usage.logical_total_tokens());
         }
 
         let (text_parts, tool_calls, stop_reason) = parse_response(&response);

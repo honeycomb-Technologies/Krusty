@@ -188,6 +188,14 @@ pub enum AgenticEvent {
         turn: usize,
         diagnostics: Box<ProviderRequestSnapshot>,
     },
+    /// A local history rewrite changed the provider-visible cache prefix.
+    MicrocompactionApplied {
+        turn: usize,
+        generation: usize,
+        message_count: usize,
+        history_rewritten: bool,
+        tool_inputs_rewritten: bool,
+    },
     /// Semantic no-progress warning or terminal guard telemetry.
     ProgressGuard { telemetry: ProgressGuardTelemetry },
     /// The server injected a synthetic tick to continue autonomous work.
@@ -333,6 +341,13 @@ impl AgenticEvent {
                 diagnostics: Box::new(
                     serde_json::from_value(payload.get("diagnostics")?.clone()).ok()?,
                 ),
+            }),
+            "microcompaction_applied" => Some(Self::MicrocompactionApplied {
+                turn: payload.get("turn")?.as_u64()?.try_into().ok()?,
+                generation: payload.get("generation")?.as_u64()?.try_into().ok()?,
+                message_count: payload.get("message_count")?.as_u64()?.try_into().ok()?,
+                history_rewritten: payload.get("history_rewritten")?.as_bool()?,
+                tool_inputs_rewritten: payload.get("tool_inputs_rewritten")?.as_bool()?,
             }),
             "agent_sleeping" => Some(Self::AgentSleeping {
                 duration_secs: payload.get("duration_secs")?.as_u64()?,
@@ -516,6 +531,19 @@ impl From<krusty_core::agent::LoopEvent> for AgenticEvent {
             LoopEvent::ProviderRequestPrepared { turn, diagnostics } => {
                 Self::ProviderRequestPrepared { turn, diagnostics }
             }
+            LoopEvent::MicrocompactionApplied {
+                turn,
+                generation,
+                message_count,
+                history_rewritten,
+                tool_inputs_rewritten,
+            } => Self::MicrocompactionApplied {
+                turn,
+                generation,
+                message_count,
+                history_rewritten,
+                tool_inputs_rewritten,
+            },
             LoopEvent::ProgressGuard { telemetry } => Self::ProgressGuard { telemetry },
             LoopEvent::TickInjected { tick_number } => Self::TickInjected { tick_number },
             LoopEvent::Usage {

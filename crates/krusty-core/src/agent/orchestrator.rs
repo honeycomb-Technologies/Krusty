@@ -50,8 +50,9 @@ use crate::tools::registry::{
 
 use super::compaction::{
     effective_context_window_for_runtime, is_context_overflow_error,
-    microcompact::microcompact_messages, run_compaction_pipeline_observed, CompactionManager,
-    CompactionRequest, CompactionRequestBudget, CompactionResult, CompactionTrigger,
+    microcompact::{microcompact_messages_cache_aware, should_rewrite_microcompact_history},
+    run_compaction_pipeline_observed, CompactionManager, CompactionRequest,
+    CompactionRequestBudget, CompactionResult, CompactionTrigger,
 };
 use super::context;
 use super::context_ledger::ContextLedger;
@@ -451,6 +452,8 @@ impl AgenticOrchestrator {
         let mut provider_tool_activity_seen = false;
         let mut overflow_compact_retry_attempted = false;
         let mut mutation_needs_validation = false;
+        let mut last_microcompact_history_message_count = conversation.len();
+        let mut microcompaction_generation = 0usize;
         let project_dir_key = project_dir
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned());
@@ -527,8 +530,27 @@ impl AgenticOrchestrator {
                 iteration,
             );
 
-            let micro = microcompact_messages(&conversation);
+            if conversation.len() < last_microcompact_history_message_count {
+                last_microcompact_history_message_count = conversation.len();
+            }
+            let rewrite_history = should_rewrite_microcompact_history(
+                conversation.len(),
+                last_microcompact_history_message_count,
+            );
+            let message_count = conversation.len();
+            let micro = microcompact_messages_cache_aware(&conversation, rewrite_history);
+            if rewrite_history {
+                last_microcompact_history_message_count = message_count;
+            }
             if micro.changed {
+                microcompaction_generation = microcompaction_generation.saturating_add(1);
+                let _ = event_tx.send(LoopEvent::MicrocompactionApplied {
+                    turn: iteration,
+                    generation: microcompaction_generation,
+                    message_count,
+                    history_rewritten: micro.history_rewritten,
+                    tool_inputs_rewritten: micro.tool_inputs_rewritten,
+                });
                 conversation = micro.messages;
                 context_ledger.update_from_conversation(&conversation);
                 persist_context_state(&db_path, &session_id, &context_ledger);

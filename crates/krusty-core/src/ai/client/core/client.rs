@@ -20,6 +20,22 @@ pub struct PreparedRequestDiagnostics {
     #[serde(default)]
     pub tool_names: Vec<String>,
     pub prompt_manifest: serde_json::Value,
+    #[serde(default)]
+    pub stable_request_fingerprint: String,
+    #[serde(default)]
+    pub stable_instruction_bytes: usize,
+    #[serde(default)]
+    pub volatile_session_bytes: usize,
+    #[serde(default)]
+    pub tool_schema_bytes: usize,
+    #[serde(default)]
+    pub history_bytes: usize,
+    #[serde(default)]
+    pub cache_key_present: bool,
+    #[serde(default)]
+    pub cache_mode: String,
+    #[serde(default)]
+    pub continuation_mode: Option<String>,
     pub message_count: usize,
     pub system_message_count: usize,
     pub user_message_count: usize,
@@ -156,12 +172,42 @@ impl AiClient {
             .map(|tool| tool.name.clone())
             .collect::<Vec<_>>();
         tool_names.sort();
+        let component_metrics = crate::ai::client::streaming::shared::request_component_metrics(
+            &prompt_sections,
+            messages,
+            canonical.tools.as_deref(),
+        );
+        let cache_key_present = canonical
+            .session_id
+            .as_deref()
+            .is_some_and(|session_id| !session_id.is_empty());
+        let cache_mode = if !canonical.enable_caching {
+            "disabled"
+        } else if cache_key_present {
+            "session_key"
+        } else {
+            "automatic"
+        };
 
         PreparedRequestDiagnostics {
             model: self.resolved_model.clone(),
             effective_request,
             tool_names,
             prompt_manifest: prompt_sections.diagnostic_manifest(),
+            stable_request_fingerprint: component_metrics.request_shape_fingerprint,
+            stable_instruction_bytes: component_metrics
+                .base_bytes
+                .saturating_add(component_metrics.identity_bytes)
+                .saturating_add(component_metrics.project_bytes),
+            volatile_session_bytes: component_metrics.session_bytes,
+            tool_schema_bytes: component_metrics.tool_schema_bytes,
+            history_bytes: component_metrics.history_bytes,
+            cache_key_present,
+            cache_mode: cache_mode.to_string(),
+            continuation_mode: self
+                .config
+                .uses_chatgpt_codex_format()
+                .then(|| "delta".to_string()),
             message_count: messages.len(),
             system_message_count: messages
                 .iter()

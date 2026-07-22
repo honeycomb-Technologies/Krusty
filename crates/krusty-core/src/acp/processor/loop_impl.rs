@@ -303,6 +303,7 @@ impl PromptProcessor {
                 | LoopEvent::TurnComplete { .. }
                 | LoopEvent::RunBudgetResolved { .. }
                 | LoopEvent::ProviderRequestPrepared { .. }
+                | LoopEvent::MicrocompactionApplied { .. }
                 | LoopEvent::ProgressGuard { .. }
                 | LoopEvent::TickInjected { .. }
                 | LoopEvent::AgentSleeping { .. }

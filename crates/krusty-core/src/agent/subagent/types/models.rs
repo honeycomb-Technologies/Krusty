@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::agent::subagent::AgentIdentity;
 use crate::agent::subagent::AgentMailbox;
+use crate::agent::ProviderCallTraceContext;
 use crate::process::ProcessRegistry;
 use crate::tools::registry::DelegationPolicy;
 
@@ -83,6 +84,8 @@ pub struct SubAgentTask {
     pub process_owner_id: Option<String>,
     /// Parent session used for tool-output scoping and delegated provenance.
     pub parent_session_id: Option<String>,
+    /// Parent run's canonical provider-call accounting sink.
+    pub provider_call_trace: Option<ProviderCallTraceContext>,
     /// Parent-to-child steering delivered between model turns.
     pub mailbox: Option<AgentMailbox>,
 }
@@ -106,6 +109,7 @@ impl SubAgentTask {
             process_registry: None,
             process_owner_id: None,
             parent_session_id: None,
+            provider_call_trace: None,
             mailbox: None,
         }
     }
@@ -175,6 +179,14 @@ impl SubAgentTask {
 
     pub fn with_mailbox(mut self, mailbox: AgentMailbox) -> Self {
         self.mailbox = Some(mailbox);
+        self
+    }
+
+    pub fn with_provider_call_trace(
+        mut self,
+        provider_call_trace: Option<ProviderCallTraceContext>,
+    ) -> Self {
+        self.provider_call_trace = provider_call_trace;
         self
     }
 

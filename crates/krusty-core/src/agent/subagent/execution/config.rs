@@ -15,6 +15,12 @@ pub(crate) trait AgentConfig: Send + Sync {
     /// Get system prompt (can be static or dynamic per turn).
     fn system_prompt(&self, turn: usize) -> String;
 
+    /// Append-only runtime context. The loop persists a new tail message only
+    /// when this value changes, preserving every previously cached prefix.
+    fn dynamic_context(&self) -> Option<String> {
+        None
+    }
+
     /// Tool timeout in seconds.
     fn timeout_secs(&self) -> u64;
 
@@ -127,7 +133,19 @@ impl BuilderConfig {
 #[async_trait::async_trait]
 impl AgentConfig for BuilderConfig {
     fn system_prompt(&self, _turn: usize) -> String {
-        builder_system_prompt(&self.task.working_dir, &self.context)
+        builder_system_prompt(&self.task.working_dir)
+    }
+
+    fn dynamic_context(&self) -> Option<String> {
+        let context = self.context.generate_context_injection();
+        let body = if context.trim().is_empty() {
+            "No active shared coordination metadata.".to_string()
+        } else {
+            context
+        };
+        Some(format!(
+            "[COORDINATION UPDATE]\n{body}\n[/COORDINATION UPDATE]"
+        ))
     }
 
     fn timeout_secs(&self) -> u64 {
@@ -286,8 +304,7 @@ impl AgentConfig for SingleExplorerConfig {
 }
 
 /// Generate builder system prompt with context injection.
-fn builder_system_prompt(working_dir: &std::path::Path, context: &SharedBuildContext) -> String {
-    let context_injection = context.generate_context_injection();
+fn builder_system_prompt(working_dir: &std::path::Path) -> String {
     format!(
         r#"You are a builder agent. Your task is to implement code changes.
 
@@ -334,11 +351,8 @@ Always end with this structured summary:
 Any problems encountered (or "None")
 ```
 
-{}
-
 Build your component, then summarize what you created with file paths."#,
-        working_dir.display(),
-        context_injection
+        working_dir.display()
     )
 }
 
@@ -389,5 +403,23 @@ mod tests {
 
         assert_eq!(policy.execution_tool_allowlist, Some(Default::default()));
         assert!(config.get_ai_tools().is_empty());
+    }
+    #[test]
+    fn builder_system_prompt_stays_stable_while_coordination_updates() {
+        let context = Arc::new(SharedBuildContext::new());
+        let task = SubAgentTask::new("builder", "work")
+            .with_working_dir(std::path::PathBuf::from("/workspace"));
+        let config = BuilderConfig::new(task, context.clone());
+
+        let original_prompt = config.system_prompt(1);
+        let original_context = config.dynamic_context();
+        context.set_conventions(vec!["Keep provider prefixes stable".to_string()]);
+        let updated_context = config.dynamic_context();
+
+        assert_eq!(config.system_prompt(2), original_prompt);
+        assert_ne!(updated_context, original_context);
+        assert!(updated_context
+            .as_deref()
+            .is_some_and(|value| value.contains("Keep provider prefixes stable")));
     }
 }

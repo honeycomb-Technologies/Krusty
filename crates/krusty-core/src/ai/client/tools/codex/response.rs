@@ -25,6 +25,7 @@ impl AiClient {
         let mut item_to_call_id: HashMap<String, String> = HashMap::new();
         let mut saw_completion = false;
         let mut finish_reason = "end_turn";
+        let mut final_usage: Option<Value> = None;
 
         while let Some(msg) = stream.next().await {
             let message = match msg {
@@ -149,6 +150,7 @@ impl AiClient {
                 }
                 "response.usage" => {
                     let usage_obj = json.get("usage").unwrap_or(&json);
+                    final_usage = Some(usage_obj.clone());
                     let input_tokens = usage_obj
                         .get("input_tokens")
                         .or_else(|| usage_obj.get("input"))
@@ -168,6 +170,12 @@ impl AiClient {
                 }
                 "response.done" | "response.completed" => {
                     saw_completion = true;
+                    if let Some(usage) = json
+                        .get("response")
+                        .and_then(|response| response.get("usage"))
+                    {
+                        final_usage = Some(usage.clone());
+                    }
                     if let Some(response) = json.get("response") {
                         if response.get("status").and_then(|s| s.as_str()) == Some("incomplete") {
                             let reason = response
@@ -238,10 +246,12 @@ impl AiClient {
             ));
         }
 
+        let usage = final_usage.unwrap_or(Value::Null);
         Ok(serde_json::json!({
             "content": content,
             "stop_reason": finish_reason,
-            "model": model
+            "model": model,
+            "usage": usage
         }))
     }
 }

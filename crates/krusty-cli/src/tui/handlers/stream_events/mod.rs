@@ -203,6 +203,20 @@ impl App {
                 tool_count = diagnostics.effective_request.tool_count,
                 "Prepared redacted provider request contract"
             ),
+            LoopEvent::MicrocompactionApplied {
+                turn,
+                generation,
+                message_count,
+                history_rewritten,
+                tool_inputs_rewritten,
+            } => tracing::debug!(
+                turn,
+                generation,
+                message_count,
+                history_rewritten,
+                tool_inputs_rewritten,
+                "Applied cache-aware local microcompaction"
+            ),
             LoopEvent::ProgressGuard { telemetry } => tracing::info!(
                 no_progress_turns = telemetry.no_progress_turns,
                 threshold = telemetry.threshold,

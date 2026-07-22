@@ -31,6 +31,7 @@ pub(super) fn loop_event_type(event: &LoopEvent) -> &'static str {
         LoopEvent::TurnComplete { .. } => "turn_complete",
         LoopEvent::RunBudgetResolved { .. } => "run_budget_resolved",
         LoopEvent::ProviderRequestPrepared { .. } => "provider_request_prepared",
+        LoopEvent::MicrocompactionApplied { .. } => "microcompaction_applied",
         LoopEvent::ProgressGuard { .. } => "progress_guard",
         LoopEvent::TickInjected { .. } => "tick_injected",
         LoopEvent::Usage { .. } => "usage",
@@ -151,6 +152,19 @@ pub(super) fn summarize_loop_event(event: &LoopEvent) -> Value {
         LoopEvent::ProviderRequestPrepared { turn, diagnostics } => json!({
             "turn": turn,
             "diagnostics": diagnostics,
+        }),
+        LoopEvent::MicrocompactionApplied {
+            turn,
+            generation,
+            message_count,
+            history_rewritten,
+            tool_inputs_rewritten,
+        } => json!({
+            "turn": turn,
+            "generation": generation,
+            "message_count": message_count,
+            "history_rewritten": history_rewritten,
+            "tool_inputs_rewritten": tool_inputs_rewritten,
         }),
         LoopEvent::ProgressGuard { telemetry } => json!({
             "guard": telemetry.guard,

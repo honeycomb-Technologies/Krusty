@@ -1219,6 +1219,7 @@ fn loop_event_name(event: &LoopEvent) -> &'static str {
         LoopEvent::TurnComplete { .. } => "turn_complete",
         LoopEvent::RunBudgetResolved { .. } => "run_budget_resolved",
         LoopEvent::ProviderRequestPrepared { .. } => "provider_request_prepared",
+        LoopEvent::MicrocompactionApplied { .. } => "microcompaction_applied",
         LoopEvent::ProgressGuard { .. } => "progress_guard",
         LoopEvent::TickInjected { .. } => "tick_injected",
         LoopEvent::Usage { .. } => "usage",
