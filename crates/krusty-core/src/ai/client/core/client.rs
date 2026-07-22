@@ -1,7 +1,9 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use crate::ai::client::config::{AiClientConfig, CallOptions, EffectiveRequestSettings};
+use crate::ai::client::config::{
+    normalized_prompt_cache_key, AiClientConfig, CallOptions, EffectiveRequestSettings,
+};
 use crate::ai::client::streaming::codex::session::CodexWsPool;
 use crate::ai::model_profile::{build_system_prompt_sections, SystemPromptSections};
 use crate::ai::models::{resolve_model_metadata, ResolvedModelRuntime};
@@ -177,10 +179,7 @@ impl AiClient {
             messages,
             canonical.tools.as_deref(),
         );
-        let cache_key_present = canonical
-            .session_id
-            .as_deref()
-            .is_some_and(|session_id| !session_id.is_empty());
+        let cache_key_present = normalized_prompt_cache_key(&canonical).is_some();
         let cache_mode = if !canonical.enable_caching {
             "disabled"
         } else if cache_key_present {

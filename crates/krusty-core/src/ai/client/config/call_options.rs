@@ -110,8 +110,13 @@ pub struct CallOptions {
     pub web_search: Option<WebSearchConfig>,
     /// Web fetch configuration (server-executed, beta)
     pub web_fetch: Option<WebFetchConfig>,
-    /// Session-scoped identifier for provider-level caching (Codex prompt cache key)
+    /// Transport/conversation identity used for provider affinity and stateful continuation.
     pub session_id: Option<String>,
+    /// Optional prompt-cache routing scope. When omitted, `session_id` remains
+    /// the backward-compatible cache key. Keeping this separate allows related
+    /// requests to share an immutable prompt prefix without sharing transport
+    /// or continuation state.
+    pub prompt_cache_key: Option<String>,
     /// Codex-specific reasoning effort
     pub codex_reasoning_effort: Option<CodexReasoningEffort>,
     /// Codex tool parallelism toggle (disabled by default until parser hardening)
@@ -142,6 +147,7 @@ impl Default for CallOptions {
             web_search: None,
             web_fetch: None,
             session_id: None,
+            prompt_cache_key: None,
             codex_reasoning_effort: None,
             codex_parallel_tool_calls: false,
             anthropic_adaptive_effort: None,
@@ -482,8 +488,9 @@ pub(crate) fn normalized_prompt_cache_key(options: &CallOptions) -> Option<Strin
         return None;
     }
     options
-        .session_id
+        .prompt_cache_key
         .as_deref()
+        .or(options.session_id.as_deref())
         .and_then(normalize_prompt_cache_key)
 }
 
@@ -664,6 +671,38 @@ mod tests {
             ..Default::default()
         };
         assert!(normalized_prompt_cache_key(&disabled).is_none());
+    }
+
+    #[test]
+    fn explicit_prompt_cache_scope_is_independent_from_transport_session() {
+        let first = CallOptions {
+            session_id: Some("transport-child-a".into()),
+            prompt_cache_key: Some("shared-parent-builder-prefix".into()),
+            ..Default::default()
+        };
+        let second = CallOptions {
+            session_id: Some("transport-child-b".into()),
+            prompt_cache_key: Some("shared-parent-builder-prefix".into()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            normalized_prompt_cache_key(&first),
+            normalized_prompt_cache_key(&second)
+        );
+        assert_eq!(
+            normalized_prompt_cache_key(&first).as_deref(),
+            Some("shared-parent-builder-prefix")
+        );
+
+        let legacy = CallOptions {
+            session_id: Some("transport-child-a".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            normalized_prompt_cache_key(&legacy).as_deref(),
+            Some("transport-child-a")
+        );
     }
 
     #[test]

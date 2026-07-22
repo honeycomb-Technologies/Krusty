@@ -21,6 +21,7 @@ pub(super) async fn call_subagent_api(
     max_tokens: usize,
     thinking_enabled: bool,
     session_id: &str,
+    prompt_cache_key: Option<&str>,
 ) -> Result<Value, SubAgentApiError> {
     info!(
         model = model,
@@ -38,6 +39,7 @@ pub(super) async fn call_subagent_api(
             max_tokens,
             thinking_enabled,
             Some(session_id),
+            prompt_cache_key,
         )
         .await
         .map_err(SubAgentApiError::from);

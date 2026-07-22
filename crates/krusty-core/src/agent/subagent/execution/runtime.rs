@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -11,7 +12,7 @@ use crate::agent::history_policy::build_history_tool_result;
 use crate::agent::progress::LoopGuard;
 use crate::agent::RunProvenance;
 use crate::ai::client::AiClient;
-use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
+use crate::ai::types::{AiTool, AiToolCall, Content, ModelMessage, Role};
 use crate::tools::ToolResult;
 
 use super::super::types::{
@@ -30,6 +31,62 @@ use super::governance::{build_subagent_tool_context, delegated_is_explore, deleg
 const MAX_DELEGATED_POLICY_VIOLATIONS: usize = 3;
 const EXPLORER_STALE_SEQUENCE_THRESHOLD: usize = 3;
 const EXPLORER_SYNTHESIS_FILE_THRESHOLD: usize = 8;
+
+fn hash_cache_scope_component(hasher: &mut Sha256, label: &str, value: &[u8]) {
+    hasher.update(label.len().to_be_bytes());
+    hasher.update(label.as_bytes());
+    hasher.update(value.len().to_be_bytes());
+    hasher.update(value);
+}
+
+/// Build a parent-scoped routing key for immutable delegated prompt prefixes.
+///
+/// The task objective is intentionally excluded because it is the volatile
+/// user tail. Conversation and websocket identity remain task-scoped. Any
+/// difference in provider, model, owner, workspace, system prompt, tools, or
+/// inherited governance produces a different cache scope.
+fn delegated_prompt_cache_scope(
+    task: &SubAgentTask,
+    provider: &str,
+    model: &str,
+    system_prompt: &str,
+    tools: &[AiTool],
+) -> Option<String> {
+    let parent_scope = task
+        .parent_session_id
+        .as_deref()
+        .or(task.delegated_run_id.as_deref())?;
+    let policy = task.delegation_policy.as_ref()?;
+    let policy = serde_json::to_vec(policy).ok()?;
+    let mut canonical_tools = tools.iter().collect::<Vec<_>>();
+    canonical_tools.sort_by(|left, right| left.name.cmp(&right.name));
+    let canonical_tools = serde_json::to_vec(&canonical_tools).ok()?;
+
+    let mut hasher = Sha256::new();
+    hash_cache_scope_component(&mut hasher, "contract", b"delegated-prefix-v1");
+    hash_cache_scope_component(&mut hasher, "parent", parent_scope.as_bytes());
+    hash_cache_scope_component(
+        &mut hasher,
+        "owner",
+        task.process_owner_id.as_deref().unwrap_or("").as_bytes(),
+    );
+    hash_cache_scope_component(
+        &mut hasher,
+        "workspace",
+        task.working_dir.to_string_lossy().as_bytes(),
+    );
+    hash_cache_scope_component(&mut hasher, "provider", provider.as_bytes());
+    hash_cache_scope_component(&mut hasher, "model", model.as_bytes());
+    hash_cache_scope_component(
+        &mut hasher,
+        "thinking",
+        if task.thinking_enabled { b"on" } else { b"off" },
+    );
+    hash_cache_scope_component(&mut hasher, "system", system_prompt.as_bytes());
+    hash_cache_scope_component(&mut hasher, "tools", &canonical_tools);
+    hash_cache_scope_component(&mut hasher, "governance", &policy);
+    Some(format!("{:x}", hasher.finalize()))
+}
 
 fn delegated_process_artifact(
     tool_name: &str,
@@ -161,7 +218,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     let task_id = task.id.clone();
     let task_name = task.display_name();
     let plan_task_id = task.plan_task_id.clone();
-    let cache_session_id = task
+    let transport_session_id = task
         .delegated_run_id
         .as_deref()
         .map(|run_id| format!("{run_id}:{task_id}"))
@@ -331,6 +388,13 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
         }
 
         let system_prompt = config.system_prompt(turns);
+        let prompt_cache_scope = delegated_prompt_cache_scope(
+            task,
+            client.provider_id().storage_key(),
+            model,
+            &system_prompt,
+            &ai_tools,
+        );
 
         let thinking_action = if total_tool_calls > 0 {
             format!("{}...", last_action)
@@ -355,7 +419,8 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             &ai_tools,
             config.max_tokens(),
             task.thinking_enabled,
-            &cache_session_id,
+            &transport_session_id,
+            prompt_cache_scope.as_deref(),
         );
 
         let api_result = tokio::time::timeout(config.api_call_timeout(), api_future).await;
@@ -969,6 +1034,82 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::registry::{DelegationPolicy, PermissionMode};
+    use serde_json::json;
+
+    fn cache_scope_task(id: &str, prompt: &str, parent: &str) -> SubAgentTask {
+        SubAgentTask::new(id, prompt)
+            .with_working_dir(std::path::PathBuf::from("/workspace"))
+            .with_delegation_policy(DelegationPolicy::for_subagent_build(
+                PermissionMode::Autonomous,
+                Some(6),
+            ))
+            .with_process_context(None, Some("owner-a".to_string()), Some(parent.to_string()))
+    }
+
+    fn cache_scope_tools() -> Vec<AiTool> {
+        vec![AiTool {
+            name: "read".to_string(),
+            description: "Read a file".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}}
+            }),
+            prompt: None,
+        }]
+    }
+
+    #[test]
+    fn delegated_cache_scope_is_shared_by_compatible_siblings() {
+        let first = cache_scope_task("builder-a", "implement metrics", "parent-a");
+        let second = cache_scope_task("builder-b", "implement rendering", "parent-a");
+        let tools = cache_scope_tools();
+
+        let first_scope = delegated_prompt_cache_scope(
+            &first,
+            "openai",
+            "gpt-5.6-terra",
+            "stable builder prompt",
+            &tools,
+        );
+        let second_scope = delegated_prompt_cache_scope(
+            &second,
+            "openai",
+            "gpt-5.6-terra",
+            "stable builder prompt",
+            &tools,
+        );
+
+        assert_eq!(first_scope, second_scope);
+        assert_eq!(first_scope.unwrap().len(), 64);
+    }
+
+    #[test]
+    fn delegated_cache_scope_invalidates_on_safety_or_prefix_changes() {
+        let base = cache_scope_task("builder-a", "implement metrics", "parent-a");
+        let different_parent = cache_scope_task("builder-b", "implement metrics", "parent-b");
+        let tools = cache_scope_tools();
+        let scope = |task: &SubAgentTask, model: &str, system: &str, tools: &[AiTool]| {
+            delegated_prompt_cache_scope(task, "openai", model, system, tools).unwrap()
+        };
+
+        assert_ne!(
+            scope(&base, "gpt-5.6-terra", "stable", &tools),
+            scope(&different_parent, "gpt-5.6-terra", "stable", &tools)
+        );
+        assert_ne!(
+            scope(&base, "gpt-5.6-terra", "stable", &tools),
+            scope(&base, "gpt-5.6-terra", "changed", &tools)
+        );
+        assert_ne!(
+            scope(&base, "gpt-5.6-terra", "stable", &tools),
+            scope(&base, "gpt-5.6", "stable", &tools)
+        );
+        assert_ne!(
+            scope(&base, "gpt-5.6-terra", "stable", &tools),
+            scope(&base, "gpt-5.6-terra", "stable", &[])
+        );
+    }
 
     #[test]
     fn delegated_compaction_keeps_objective_checkpoint_and_complete_tail() {

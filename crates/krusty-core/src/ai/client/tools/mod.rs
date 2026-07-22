@@ -107,6 +107,7 @@ impl AiClient {
         max_tokens: usize,
         thinking_enabled: bool,
         session_id: Option<&str>,
+        prompt_cache_key: Option<&str>,
     ) -> Result<Value> {
         self.ensure_run_model(model)?;
         let requested_tool_count = tools.len();
@@ -120,6 +121,7 @@ impl AiClient {
                 codex_reasoning_effort: thinking_enabled.then_some(CodexReasoningEffort::Medium),
                 codex_parallel_tool_calls: true,
                 session_id: session_id.map(ToString::to_string),
+                prompt_cache_key: prompt_cache_key.map(ToString::to_string),
                 ..Default::default()
             },
         );
