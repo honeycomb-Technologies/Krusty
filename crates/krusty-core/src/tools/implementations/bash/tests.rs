@@ -238,6 +238,23 @@ fn output_spool_is_workspace_local_and_session_scoped() {
     );
 }
 
+#[test]
+fn output_spool_prefers_runtime_state_over_the_project_workspace() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let working_dir = temp.path().join("workspace");
+    let state_dir = temp.path().join("state");
+    let ctx = ToolContext {
+        working_dir: working_dir.clone(),
+        db_path: Some(state_dir.join("krusty.db")),
+        session_id: Some("session-1".to_string()),
+        ..Default::default()
+    };
+
+    let path = output_spool_path(&ctx);
+    assert!(path.starts_with(state_dir.join("tool-output/session-1")));
+    assert!(!path.starts_with(working_dir));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn truncated_output_keeps_recoverable_full_log() {

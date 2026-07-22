@@ -37,6 +37,8 @@ Independent read-only calls execute concurrently while results remain in provide
 
 Successful edits run bounded mutation diagnostics before their result is returned: JSON/TOML/YAML syntax is parsed and `git diff --check` is run for changed paths. A successful mutation also activates a loop-local verification reminder until a relevant test, build, lint, typecheck, `git diff --check`, or verify-agent call succeeds. These checks provide immediate feedback without silently running a project-wide formatter or expensive test suite after every keystroke.
 
+Foreground Bash keeps a recoverable full-output spool only when the model-facing preview is truncated. Canonical runs place that runtime spool beside the session database rather than under the project workspace; standalone direct-tool contexts without a database retain the legacy `.krusty/tool-output` fallback. Read-only commands in a normal agent run therefore do not create diagnostic directories in user source trees.
+
 ## Stable prompt and continuation layers
 
 The repeated instruction prefix has three layers:

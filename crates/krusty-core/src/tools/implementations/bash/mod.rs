@@ -291,8 +291,15 @@ fn output_spool_path(ctx: &ToolContext) -> PathBuf {
         })
         .collect::<String>();
 
-    ctx.working_dir
-        .join(".krusty")
+    // Durable command output is runtime state, not project source. Canonical
+    // agent runs always provide a database path, so keep their recoverable
+    // spools beside that database. Standalone/direct tool contexts without a
+    // state database retain the legacy workspace-local fallback.
+    ctx.db_path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ctx.working_dir.join(".krusty"))
         .join("tool-output")
         .join(session)
         .join(format!("tool_{}.log", uuid::Uuid::new_v4()))
