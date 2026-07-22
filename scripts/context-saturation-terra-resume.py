@@ -48,24 +48,31 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         api, args.terra_model, provider_id="open_a_i", timeout=60
     )
     HARNESS.require_session_model(api, args.terra_session_id, terra, "Terra resumed session")
-    retry_state = api.json_request("GET", f"/api/sessions/{args.terra_session_id}/state")
-    retry_recovery = retry_state.get("recovery", {})
-    HARNESS.require(
-        retry_state.get("agent_state") == "error"
-        and retry_recovery.get("status") == "interrupted"
-        and retry_recovery.get("stop_reason") == "provider_error"
-        and retry_recovery.get("decision", {}).get("kind") == "resumable",
-        f"Terra session was not in the exact resumable provider-error state: {retry_state}",
-    )
     prior_trace = api.json_request(
         "GET", f"/api/sessions/{args.terra_session_id}/trace?limit=1000"
     )
-    cursor = prior_trace.get("latest_sequence", 0)
     prior_summary = prior_trace.get("summary", {})
-    HARNESS.require(
-        prior_summary.get("last_stop_reason") == "provider_error",
-        f"Terra session did not retain the transport failure: {prior_summary}",
-    )
+    retry_state = api.json_request("GET", f"/api/sessions/{args.terra_session_id}/state")
+    if args.finalize_completed:
+        HARNESS.require_clean_idle_state(retry_state, "completed Terra recovery")
+        HARNESS.require(
+            prior_summary.get("last_stop_reason") == "completed"
+            and prior_summary.get("provider_failures", 0) >= 1,
+            f"Terra session did not retain a recovered provider failure: {prior_summary}",
+        )
+    else:
+        retry_recovery = retry_state.get("recovery", {})
+        HARNESS.require(
+            retry_state.get("agent_state") == "error"
+            and retry_recovery.get("status") == "interrupted"
+            and retry_recovery.get("stop_reason") == "provider_error"
+            and retry_recovery.get("decision", {}).get("kind") == "resumable",
+            f"Terra session was not in the exact resumable provider-error state: {retry_state}",
+        )
+        HARNESS.require(
+            prior_summary.get("last_stop_reason") == "provider_error",
+            f"Terra session did not retain the transport failure: {prior_summary}",
+        )
     result["terra_transport_recovery"] = {
         "failed_run_stop_reason": prior_summary.get("last_stop_reason"),
         "provider_failures": prior_summary.get("provider_failures"),
@@ -77,29 +84,89 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     result.pop("failure_type", None)
     output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
 
-    events = api.chat(
-        SATURATION.chat_payload(
-            args.terra_session_id,
-            "Retry the audit now that the provider transport is corrected. Audit and extend the "
-            "existing Context Atlas project without replacing its architecture. Implement "
-            "`report --index atlas-index.json --format json`; it must verify first and emit "
-            "exactly `total_batches`, `total_records`, `origin_axiom`, and `integrity_status`. "
-            f"origin_axiom is `{SATURATION.ORIGIN_AXIOM}` and integrity_status must be `ok`. "
-            "Add tests, update README.md, create docs/TERRA_AUDIT.md with concrete findings, run "
-            "all tests, demonstrate the report, and finish with `TERRA-HIGH-AUDIT-OK`.",
-            terra,
-            thinking="high",
+    if args.finalize_completed:
+        session = api.json_request("GET", f"/api/sessions/{args.terra_session_id}")
+        messages = session.get("messages", [])
+        assistant_messages = [message for message in messages if message.get("role") == "assistant"]
+        HARNESS.require(assistant_messages, "Terra session had no persisted assistant message")
+        text = "".join(
+            content.get("text", "")
+            for content in assistant_messages[-1].get("content", [])
+            if content.get("type") == "text"
         )
-    )
-    text = SATURATION.completed_text(events, "Terra High resumed audit")
+        trace = prior_trace
+        run_ids = [
+            event.get("run_id")
+            for event in trace.get("events", [])
+            if event.get("event_type") == "finished"
+            and event.get("stop_reason") == "completed"
+        ]
+        HARNESS.require(run_ids, "Terra trace had no completed recovery run")
+        completed_run_id = run_ids[-1]
+        run_events = [
+            event for event in trace.get("events", []) if event.get("run_id") == completed_run_id
+        ]
+        failed_indexes = [
+            index
+            for index, event in enumerate(run_events)
+            if event.get("event_type") == "tool_result"
+            and event.get("payload", {}).get("is_error") is True
+        ]
+        if failed_indexes:
+            HARNESS.require(
+                any(
+                    index > failed_indexes[-1]
+                    and event.get("event_type") == "tool_result"
+                    and event.get("payload", {}).get("is_error") is not True
+                    for index, event in enumerate(run_events)
+                ),
+                "Terra tool failure was not followed by successful tool evidence",
+            )
+        tool_names = [
+            event.get("payload", {}).get("name")
+            for event in run_events
+            if event.get("event_type") == "tool_call_start"
+        ]
+        usage_events = [
+            event.get("payload", {})
+            for event in run_events
+            if event.get("event_type") == "provider_call"
+            and event.get("payload", {}).get("usage_available") is True
+        ]
+        usage = {
+            key: sum(value.get(key, 0) or 0 for value in usage_events)
+            for key in ("input_tokens", "prompt_tokens", "completion_tokens", "reasoning_tokens")
+        }
+        recovered_tool_errors = len(failed_indexes)
+    else:
+        cursor = prior_trace.get("latest_sequence", 0)
+        events = api.chat(
+            SATURATION.chat_payload(
+                args.terra_session_id,
+                "Retry the audit now that the provider transport is corrected. Audit and extend "
+                "the existing Context Atlas project without replacing its architecture. Implement "
+                "`report --index atlas-index.json --format json`; it must verify first and emit "
+                "exactly `total_batches`, `total_records`, `origin_axiom`, and `integrity_status`. "
+                f"origin_axiom is `{SATURATION.ORIGIN_AXIOM}` and integrity_status must be `ok`. "
+                "Add tests, update README.md, create docs/TERRA_AUDIT.md with concrete findings, "
+                "run all tests, demonstrate the report, and finish with `TERRA-HIGH-AUDIT-OK`.",
+                terra,
+                thinking="high",
+            )
+        )
+        text, recovered_tool_errors = SATURATION.completed_text_with_recovered_tool_errors(
+            events, "Terra High resumed audit"
+        )
+        trace, _ = HARNESS.wait_for_completed_trace_run(
+            api,
+            args.terra_session_id,
+            "Terra High resumed trace",
+            after_sequence=cursor,
+            timeout=20,
+        )
+        tool_names = [call.get("name") for call in HARNESS.tool_calls(events)]
+        usage = SATURATION.usage_summary(events)
     HARNESS.require("TERRA-HIGH-AUDIT-OK" in text, "Terra marker absent")
-    trace, _ = HARNESS.wait_for_completed_trace_run(
-        api,
-        args.terra_session_id,
-        "Terra High resumed trace",
-        after_sequence=cursor,
-        timeout=20,
-    )
     effective_request = SATURATION.require_terra_high(trace, terra)
     report = subprocess.run(
         [
@@ -133,8 +200,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     result["terra_high"] = {
         "status": "pass",
         "effective_request": effective_request,
-        "tool_calls": [call.get("name") for call in HARNESS.tool_calls(events)],
-        "usage": SATURATION.usage_summary(events),
+        "tool_calls": tool_names,
+        "recovered_tool_errors": recovered_tool_errors,
+        "usage": usage,
         "tests": SATURATION.run_project_tests(project_dir),
         "report": report_json,
     }
@@ -151,6 +219,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--terra-session-id", required=True)
     parser.add_argument("--terra-model", default="gpt-5.6-terra")
+    parser.add_argument("--finalize-completed", action="store_true")
     parser.add_argument("--timeout", type=float, default=1_200.0)
     return parser.parse_args()
 
