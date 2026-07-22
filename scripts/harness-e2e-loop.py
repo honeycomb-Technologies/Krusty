@@ -1342,14 +1342,34 @@ def wait_for_completed_trace_run(
             break
         time.sleep(max(0.0, poll_interval))
 
-    latest_types = (
-        [event.get("event_type") for event in latest_trace["events"]]
+    latest_new_events = (
+        [
+            event
+            for event in latest_trace["events"]
+            if event.get("sequence", 0) > after_sequence
+        ]
         if latest_trace is not None
         else []
     )
+    latest_types = [event.get("event_type") for event in latest_new_events]
+
+    def run_ids_for(event_type: str) -> list[str]:
+        return sorted(
+            {
+                event["run_id"]
+                for event in latest_new_events
+                if event.get("event_type") == event_type
+                and isinstance(event.get("run_id"), str)
+                and event.get("run_id")
+            }
+        )
+
     raise AcceptanceFailure(
         f"{label}: trace did not durably expose a newly completed, provider-accounted "
         f"run after sequence {after_sequence} within {timeout:.1f}s; "
+        f"budget_run_ids={run_ids_for('run_budget_resolved')}, "
+        f"finished_run_ids={run_ids_for('finished')}, "
+        f"provider_call_run_ids={run_ids_for('provider_call')}, "
         f"latest_summary={latest_summary}, latest_event_types={latest_types}"
     )
 
@@ -2402,6 +2422,7 @@ def run_cycle(
     run_dir.mkdir(parents=True, exist_ok=False)
     session_id: str | None = None
     process_id: str | None = None
+    trace_cursor = 0
     result: dict[str, Any] = {
         "cycle": cycle,
         "session_id": None,
@@ -2423,6 +2444,13 @@ def run_cycle(
         greeting_text = validate_stream(
             greeting_events, "greeting", expect_tools=False
         )
+        greeting_trace, _ = wait_for_completed_trace_run(
+            api,
+            session_id,
+            "greeting trace",
+            after_sequence=trace_cursor,
+        )
+        trace_cursor = greeting_trace["latest_sequence"]
 
         build_prompt = f"""Build and run a tiny dependency-free Python HTTP service in this empty demo workspace.
 
@@ -2448,6 +2476,13 @@ Work autonomously. Do not install packages and do not ask styling or product que
         build_events = api.chat(chat_payload(session_id, build_prompt, model))
         result["build_stream"] = summarize_stream_evidence(build_events)
         build_text = validate_stream(build_events, "build", expect_tools=True)
+        build_trace, _ = wait_for_completed_trace_run(
+            api,
+            session_id,
+            "build trace",
+            after_sequence=trace_cursor,
+        )
+        trace_cursor = build_trace["latest_sequence"]
         require(marker in build_text, "build response omitted marker")
         require(str(port) in build_text, "build response omitted port")
 
@@ -2489,6 +2524,13 @@ Work autonomously. Do not install packages and do not ask styling or product que
         continuity_text = validate_stream(
             continuity_events, "continuity", expect_tools=False
         )
+        continuity_trace, _ = wait_for_completed_trace_run(
+            api,
+            session_id,
+            "continuity trace",
+            after_sequence=trace_cursor,
+        )
+        trace_cursor = continuity_trace["latest_sequence"]
         for expected in (marker, str(port), process_id):
             require(expected in continuity_text, f"continuity response omitted {expected}")
         persisted_model_after = require_session_model(

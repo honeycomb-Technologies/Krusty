@@ -141,6 +141,61 @@ class TraceConvergenceTests(unittest.TestCase):
         self.assertEqual(api.calls, 2)
         self.assertEqual(trace["latest_sequence"], 4)
 
+    def test_cursor_waits_through_budget_finished_and_accounting_batches(self) -> None:
+        prior = [
+            budget_event(1, "run-1"),
+            trace_event(2, "finished", run_id="run-1", stop_reason="completed"),
+            trace_event(3, "provider_call", run_id="run-1"),
+        ]
+        next_budget = budget_event(4, "run-2")
+        next_finished = trace_event(
+            5, "finished", run_id="run-2", stop_reason="completed"
+        )
+        next_provider_call = trace_event(6, "provider_call", run_id="run-2")
+        api = SequenceTraceApi(
+            [
+                trace_response(prior),
+                trace_response(prior + [next_budget]),
+                trace_response(prior + [next_budget, next_finished]),
+                trace_response(
+                    prior + [next_budget, next_finished, next_provider_call]
+                ),
+            ]
+        )
+
+        trace, _ = HARNESS.wait_for_completed_trace_run(
+            api,
+            "session-1",
+            "batched trace cursor",
+            after_sequence=3,
+            timeout=1.0,
+            poll_interval=0.0,
+        )
+
+        self.assertEqual(api.calls, 4)
+        self.assertEqual(trace["latest_sequence"], 6)
+
+    def test_incomplete_run_timeout_reports_boundary_run_ids(self) -> None:
+        incomplete = [
+            budget_event(1, "run-1"),
+            trace_event(2, "finished", run_id="run-1", stop_reason="completed"),
+        ]
+        api = SequenceTraceApi([trace_response(incomplete)])
+
+        with self.assertRaisesRegex(
+            HARNESS.AcceptanceFailure,
+            "finished_run_ids=\\['run-1'\\].*provider_call_run_ids=\\[\\]",
+        ):
+            HARNESS.wait_for_completed_trace_run(
+                api,
+                "session-1",
+                "incomplete trace",
+                timeout=0.0,
+                poll_interval=0.0,
+            )
+
+        self.assertEqual(api.calls, 1)
+
     def test_fails_immediately_on_new_non_completed_terminal(self) -> None:
         failed = trace_event(1, "finished", stop_reason="provider_error")
         api = SequenceTraceApi([trace_response([failed])])
