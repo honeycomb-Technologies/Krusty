@@ -33,6 +33,19 @@ class SequenceTraceApi:
         return self.responses[index]
 
 
+class FinalProcessDispositionTests(unittest.TestCase):
+    def test_reports_retained_only_from_explicit_result_evidence(self) -> None:
+        self.assertEqual(
+            HARNESS.final_process_disposition({"process_retained": True}),
+            "retained",
+        )
+        self.assertEqual(
+            HARNESS.final_process_disposition({"process_retained": False}),
+            "cleaned",
+        )
+        self.assertEqual(HARNESS.final_process_disposition({}), "cleaned")
+
+
 def trace_response(events: list[dict[str, Any]]) -> dict[str, Any]:
     stop_reason = next(
         (

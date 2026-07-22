@@ -146,6 +146,11 @@ def failure_status(error: BaseException) -> str:
     return "fail"
 
 
+def final_process_disposition(result: dict[str, Any]) -> str:
+    """Describe the verified final-cycle process state without overclaiming."""
+    return "retained" if result.get("process_retained") is True else "cleaned"
+
+
 def classified_failure(
     message: str,
     details: Any,
@@ -4396,7 +4401,8 @@ def main() -> int:
         persist_summaries()
         print(
             f"\nPASS {len(clean_results)} consecutive real-agent cycles; "
-            f"final process {clean_results[-1]['process_id']} retained"
+            f"final process {clean_results[-1]['process_id']} "
+            f"{final_process_disposition(clean_results[-1])}"
             + ("; resilience lanes passed" if not args.skip_resilience else ""),
             flush=True,
         )
