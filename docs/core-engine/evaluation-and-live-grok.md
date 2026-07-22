@@ -172,3 +172,37 @@ Keep these together for the candidate:
 - final-process cleanup confirmation;
 - any provider request IDs, with credentials and authorization headers
   redacted.
+
+## Single-project context saturation and Terra High continuation
+
+`scripts/context-saturation-e2e.py` is the expensive live endurance gate. It
+builds one dependency-free Context Atlas project, stages deterministic NDJSON
+corpus shards, and includes each shard in a successive Grok user turn until the
+canonical SSE stream and durable runtime trace both record an automatic
+`context_compacted` event. The corpus is structured fixture data consumed by
+the project, not repeated filler.
+
+The gate requires the checkpoint to reduce estimated context, proves the
+first-turn origin axiom remains available afterward without a tool call, then
+has Grok add and independently validate another feature. Finally it creates a
+new session over the same workspace using exact native `gpt-5.6-terra` at high
+reasoning, requires persisted request diagnostics to report
+`reasoning_effort: High`, and has Terra audit and extend the project.
+
+Run only against the isolated evaluation server; the runner refuses production
+port 3000:
+
+```bash
+KRUSTY_BASE_URL=http://127.0.0.1:3100 \
+KRUSTY_EVAL_ROOT=/home/burgess/Work/krusty-evals/context-saturation-<candidate-sha> \
+KRUSTY_GROK_LIVE_MODEL=grok-4.5 \
+KRUSTY_TERRA_LIVE_MODEL=gpt-5.6-terra \
+KRUSTY_EVAL_TIMEOUT=1200 \
+  bash scripts/core-eval.sh context-saturation-live
+```
+
+The default shard is approximately 280,000 characters and the maximum is eight
+shards. Those are safety bounds, not the success criterion: success requires a
+real automatic compaction, post-compaction project continuity, passing project
+tests, and a trace-proven Terra High request. The runner writes
+`context-saturation-summary.json` and retains no background project process.
