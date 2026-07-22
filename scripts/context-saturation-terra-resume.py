@@ -48,8 +48,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         api, args.terra_model, provider_id="open_a_i", timeout=60
     )
     HARNESS.require_session_model(api, args.terra_session_id, terra, "Terra resumed session")
-    HARNESS.require_clean_idle_state(
-        HARNESS.wait_for_session_idle(api, args.terra_session_id), "Terra session before retry"
+    retry_state = api.json_request("GET", f"/api/sessions/{args.terra_session_id}/state")
+    retry_recovery = retry_state.get("recovery", {})
+    HARNESS.require(
+        retry_state.get("agent_state") == "error"
+        and retry_recovery.get("status") == "interrupted"
+        and retry_recovery.get("stop_reason") == "provider_error"
+        and retry_recovery.get("decision", {}).get("kind") == "resumable",
+        f"Terra session was not in the exact resumable provider-error state: {retry_state}",
     )
     prior_trace = api.json_request(
         "GET", f"/api/sessions/{args.terra_session_id}/trace?limit=1000"
