@@ -7,10 +7,7 @@ pub(super) use continuation::{assistant_fingerprint_from_response, prepare_codex
 use serde_json::Value;
 use tracing::debug;
 
-use super::super::super::config::{
-    normalized_prompt_cache_key, openai_prompt_cache_options, openai_prompt_cache_retention,
-    CallOptions, CodexReasoningEffort, OpenAiPromptCacheMode,
-};
+use super::super::super::config::{normalized_prompt_cache_key, CallOptions, CodexReasoningEffort};
 use super::super::super::core::AiClient;
 use crate::ai::format::openai::OpenAIFormat;
 use crate::ai::format::FormatHandler;
@@ -178,16 +175,11 @@ impl AiClient {
         if let Some(cache_key) = prompt_cache_key {
             body["prompt_cache_key"] = serde_json::json!(cache_key);
         }
-        if let Some(cache_options) = openai_prompt_cache_options(
-            options,
-            &self.config().model,
-            OpenAiPromptCacheMode::Implicit,
-        ) {
-            body["prompt_cache_options"] = cache_options;
-        }
-        if let Some(retention) = openai_prompt_cache_retention(options, &self.config().model) {
-            body["prompt_cache_retention"] = retention;
-        }
+        // The ChatGPT Codex OAuth endpoint follows the upstream Codex wire
+        // contract: it accepts a stable prompt_cache_key, but not the
+        // API-key Responses prompt_cache_options/prompt_cache_retention
+        // controls. Keep those controls isolated to the direct OpenAI
+        // Responses path.
 
         if let Some(service_tier) = options.service_tier_for_provider(self.provider_id()) {
             body["service_tier"] = serde_json::json!(service_tier);
@@ -329,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn gpt_5_6_codex_body_uses_current_prompt_cache_contract() {
+    fn gpt_5_6_codex_body_uses_chatgpt_prompt_cache_contract() {
         let client = AiClient::new(
             AiClientConfig {
                 model: "gpt-5.6".to_string(),
@@ -363,8 +355,7 @@ mod tests {
         );
 
         assert_eq!(body["prompt_cache_key"], "session-1");
-        assert_eq!(body["prompt_cache_options"]["mode"], "implicit");
-        assert_eq!(body["prompt_cache_options"]["ttl"], "30m");
+        assert!(body.get("prompt_cache_options").is_none());
         assert!(body.get("prompt_cache_retention").is_none());
     }
 
