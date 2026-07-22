@@ -18,7 +18,7 @@ Krusty follows these principles without copying either product's exact prompt or
 
 `ToolRequestPolicy` selects and alphabetically sorts the function tools placed on the wire:
 
-- Normal code sessions expose at most nine direct tools. GPT/Codex families receive `apply_patch` plus direct discovery tools. Grok, Claude, Gemini, Kimi, and generic families receive `edit` and `write` instead of the GPT-shaped patch grammar; `glob` moves behind `tool_search` on that surface to keep the same fixed tool count.
+- Normal code sessions expose at most ten direct tools. GPT/Codex families receive `apply_patch` plus direct discovery tools and currently use nine slots. Grok, Claude, Gemini, Kimi, and generic families receive `edit` and `write` instead of the GPT-shaped patch grammar while retaining direct `glob`, so they can discover files without falling back to Bash.
 - Read-only plan mode exposes at most eight tools selected for inspection, questions, delegation, and leaving plan mode.
 - An active implementation plan exposes eleven direct tools so canonical task lifecycle operations cannot become unreachable behind a generic dispatcher.
 - Chat, ACP, Mako, disabled-tool, permission, and delegation rules apply their own surface-specific registrations and filters at their boundaries.
@@ -30,6 +30,8 @@ The registry still owns the complete built-in, MCP, extension, and plugin catalo
 3. `execute` dispatches the target through the same registry hooks, timeout, filesystem scope, plan-mode rule, inherited delegation policy, and supervised-approval classification as a direct call.
 
 Lifecycle and interactive tools are deliberately non-deferred. Approval text, retry policy, and model-history retention are computed from the effective target of a deferred call, not from the harmless-looking `tool_search` wrapper. The tradeoff is explicit: a rare specialist operation may require a discovery or description round trip, while every ordinary turn avoids serializing dozens of schemas and manuals.
+
+Server callers may supply an explicit per-turn `allowed_tools` subset. The server rejects unknown or unavailable names instead of widening the governed surface, and the canonical request trace records the exact sorted names placed on the wire. Independently, the orchestrator freezes that advertised set and the executor rejects any model-emitted function outside it before extension interception, approval persistence, or execution. Provider adherence is therefore not treated as the capability boundary.
 
 Independent read-only calls execute concurrently while results remain in provider call order. Mutations, interactive operations, approvals, and delegated agents remain serialized; this prevents same-path races while removing avoidable read latency. Autonomous governance uses deterministic local fast paths for safe reads, common project build/test commands, in-workspace edits, and inherited delegated contracts. The small LLM classifier is reserved for ambiguous commands such as unrecognized network or external-system operations, and obvious unsafe payloads still fail closed locally.
 

@@ -31,6 +31,8 @@ pub struct ProviderRequestSnapshot {
     pub catalog_source: ModelCatalogSource,
     pub catalog_revision: Option<String>,
     pub effective_request: EffectiveRequestSettings,
+    #[serde(default)]
+    pub tool_names: Vec<String>,
     pub prompt_manifest: serde_json::Value,
     pub message_count: usize,
     pub system_message_count: usize,
@@ -45,6 +47,7 @@ impl From<PreparedRequestDiagnostics> for ProviderRequestSnapshot {
             catalog_source: diagnostics.model.catalog_source,
             catalog_revision: diagnostics.model.catalog_revision,
             effective_request: diagnostics.effective_request,
+            tool_names: diagnostics.tool_names,
             prompt_manifest: diagnostics.prompt_manifest,
             message_count: diagnostics.message_count,
             system_message_count: diagnostics.system_message_count,

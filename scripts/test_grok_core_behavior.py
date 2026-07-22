@@ -27,6 +27,17 @@ class FakeApi:
 
 
 class GrokCoreBehaviorTests(unittest.TestCase):
+    def test_exact_chat_payload_preserves_explicit_tool_allowlist(self):
+        payload = BEHAVIOR.exact_chat_payload(
+            "session",
+            "audit",
+            {"id": "grok-4.5", "key": {"provider": "grok"}},
+            mode="build",
+            permission_mode="supervised",
+            allowed_tools=["glob", "grep", "read"],
+        )
+        self.assertEqual(payload["allowed_tools"], ["glob", "grep", "read"])
+
     def test_progress_guard_action_reads_nested_sse_telemetry(self):
         event = {
             "type": "progress_guard",

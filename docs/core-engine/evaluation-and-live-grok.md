@@ -121,10 +121,11 @@ KRUSTY_EVAL_TIMEOUT=900 \
 directory, requires an explicit loopback candidate URL, and refuses port 3000.
 It first runs two focused core-behavior lanes:
 
-- a supervised project audit restricted to read/grep/glob/list whose complete
+- a supervised project audit restricted to read/grep/glob whose complete
   file, directory, symlink, mode, timestamp, size, and content snapshot is
   identical before and after, proving useful read-only evidence with zero
-  executable mutation surface;
+  executable mutation surface; both SSE and durable traces must report exactly
+  those three advertised tool names;
 - an adversarial sequence of cosmetically different Grok Bash calls, proving
   that canonical intent reaches replan or typed loop termination within the
   semantic policy bound rather than repeating forever.

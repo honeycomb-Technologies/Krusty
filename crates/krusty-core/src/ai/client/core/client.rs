@@ -15,6 +15,10 @@ use crate::ai::types::{AiTool, ModelMessage};
 pub struct PreparedRequestDiagnostics {
     pub model: ResolvedModelRuntime,
     pub effective_request: EffectiveRequestSettings,
+    /// Exact sorted function-tool names advertised on the provider request.
+    /// Names are safe diagnostics; descriptions and schemas remain redacted.
+    #[serde(default)]
+    pub tool_names: Vec<String>,
     pub prompt_manifest: serde_json::Value,
     pub message_count: usize,
     pub system_message_count: usize,
@@ -144,10 +148,19 @@ impl AiClient {
             options.effective_request_settings_for_runtime(&self.resolved_model);
         effective_request.max_tokens = canonical.max_tokens;
         effective_request.tool_count = canonical.tools.as_ref().map_or(0, Vec::len);
+        let mut tool_names = canonical
+            .tools
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        tool_names.sort();
 
         PreparedRequestDiagnostics {
             model: self.resolved_model.clone(),
             effective_request,
+            tool_names,
             prompt_manifest: prompt_sections.diagnostic_manifest(),
             message_count: messages.len(),
             system_message_count: messages

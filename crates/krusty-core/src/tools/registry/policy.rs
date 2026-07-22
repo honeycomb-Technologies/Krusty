@@ -13,7 +13,7 @@ pub(crate) const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const DELEGATED_TOOL_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// Maximum number of function tools in the default coding-agent request.
-pub const DEFAULT_CODE_TOOL_LIMIT: usize = 9;
+pub const DEFAULT_CODE_TOOL_LIMIT: usize = 10;
 
 const STANDARD_CODE_TOOLS: &[&str] = &[
     "AskUserQuestion",
@@ -33,6 +33,7 @@ const STANDARD_EDIT_WRITE_TOOLS: &[&str] = &[
     "bash",
     "edit",
     "enter_plan_mode",
+    "glob",
     "grep",
     "read",
     "tool_search",

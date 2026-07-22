@@ -291,8 +291,8 @@ fn non_gpt_models_receive_edit_and_write_instead_of_apply_patch() {
     assert_eq!(names.len(), DEFAULT_CODE_TOOL_LIMIT);
     assert!(names.iter().any(|name| name == "edit"));
     assert!(names.iter().any(|name| name == "write"));
+    assert!(names.iter().any(|name| name == "glob"));
     assert!(!names.iter().any(|name| name == "apply_patch"));
-    assert!(!names.iter().any(|name| name == "glob"));
 }
 
 #[test]

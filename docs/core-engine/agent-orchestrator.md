@@ -114,12 +114,13 @@ Before executing tools, the orchestrator checks for repeated read-only explorati
 
 Tool calls go through `crates/krusty-core/src/agent/executor/mod.rs`. For each tool call in the batch:
 
-1. **Disabled tool check** — if the tool is listed in the project's `disabled_tools`, it's denied immediately
-2. **Authorization** — the `ToolControl` module checks the permission mode. In autonomous mode, tools execute without approval. In supervised mode, write-category tools emit a `ToolApprovalRequired` event and wait for the user to approve or deny. Read-only tools run without approval regardless of mode. There's a five-minute timeout on approval requests.
-3. **Special tool interception** — mode switch tools (`set_work_mode`, `enter_plan_mode`) and plan task tools (`task_start`, `task_complete`, `add_subtask`, `set_dependency`) are handled directly by the orchestrator rather than going through the tool registry, because they mutate the loop's own state.
-4. **Regular execution** — the tool runs through the `ToolRegistry`, which handles argument validation, path and permission policy enforcement, and output streaming. These policies are not an OS sandbox for Bash. Tool output gets streamed back via `ToolOutputDelta` events (so bash output, for example, appears in real time).
-5. **Retry policy** — read-only tools that time out get one automatic retry. Everything else stops on failure.
-6. **Result shaping** — the `ToolControl` module truncates oversized tool outputs (over 30,000 characters), wraps the result with history metadata for later compaction, and publishes the `ToolResult` event.
+1. **Advertised capability check** — the call name must exist in the exact function-tool set frozen from the canonical provider request. An unadvertised or hallucinated call returns a structured `tool_not_advertised` result before extensions, approvals, recovery interaction persistence, or registry execution.
+2. **Disabled tool check** — if the tool is listed in the project's `disabled_tools`, it's denied immediately.
+3. **Authorization** — the `ToolControl` module checks the permission mode. In autonomous mode, tools execute without approval. In supervised mode, write-category tools emit a `ToolApprovalRequired` event and wait for the user to approve or deny. Read-only tools run without approval regardless of mode. There's a five-minute timeout on approval requests.
+4. **Special tool interception** — mode switch tools (`set_work_mode`, `enter_plan_mode`) and plan task tools (`task_start`, `task_complete`, `add_subtask`, `set_dependency`) are handled directly by the orchestrator rather than going through the tool registry, because they mutate the loop's own state.
+5. **Regular execution** — the tool runs through the `ToolRegistry`, which handles argument validation, path and permission policy enforcement, and output streaming. These policies are not an OS sandbox for Bash. Tool output gets streamed back via `ToolOutputDelta` events (so bash output, for example, appears in real time).
+6. **Retry policy** — read-only tools that time out get one automatic retry. Everything else stops on failure.
+7. **Result shaping** — the `ToolControl` module truncates oversized tool outputs (over 30,000 characters), wraps the result with history metadata for later compaction, and publishes the `ToolResult` event.
 
 During execution of sub-agent tools (the `agent` tool), the executor sets up a progress channel so delegated progress events flow back to the parent session's event stream.
 

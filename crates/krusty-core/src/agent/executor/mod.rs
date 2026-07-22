@@ -10,6 +10,7 @@ mod plan_updates;
 mod regular;
 mod user_message;
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -70,6 +71,7 @@ pub(crate) async fn execute_tools(
     provider_call_trace: Option<&ProviderCallTraceContext>,
     input_inbox: &mut LoopInputInbox,
     subagent_max_turns_override: Option<usize>,
+    advertised_tool_names: &HashSet<String>,
     disabled_tools: Option<&[String]>,
     file_observations: Arc<FileObservationTracker>,
 ) -> ToolExecutionBatch {
@@ -85,6 +87,22 @@ pub(crate) async fn execute_tools(
     for (call_index, original_call) in tool_calls.iter().enumerate() {
         if parallel_calls_to_skip > 0 {
             parallel_calls_to_skip -= 1;
+            continue;
+        }
+
+        // Treat the frozen provider request as an execution capability. A
+        // provider may hallucinate a registered tool that was not included in
+        // this run's schema; reject it before extensions, approvals, recovery
+        // interaction persistence, or registry execution can observe it.
+        if !advertised_tool_names.contains(&original_call.name) {
+            let denied = ToolResult::error_with_code(
+                "tool_not_advertised",
+                format!(
+                    "Tool '{}' was not advertised for this agent run",
+                    original_call.name
+                ),
+            );
+            results.push(tool_control.publish_result(original_call, &denied, event_tx));
             continue;
         }
 
@@ -133,12 +151,18 @@ pub(crate) async fn execute_tools(
             original_call
         };
 
-        if extension_manager.is_none() && is_parallel_safe_call(call, disabled_tools, &tool_control)
+        if extension_manager.is_none()
+            && is_parallel_safe_call(call, advertised_tool_names, disabled_tools, &tool_control)
         {
             let parallel_calls = tool_calls[call_index..]
                 .iter()
                 .take_while(|candidate| {
-                    is_parallel_safe_call(candidate, disabled_tools, &tool_control)
+                    is_parallel_safe_call(
+                        candidate,
+                        advertised_tool_names,
+                        disabled_tools,
+                        &tool_control,
+                    )
                 })
                 .collect::<Vec<_>>();
 
@@ -411,14 +435,17 @@ pub(crate) async fn execute_tools(
 /// approval ordering and same-path writes remain deterministic.
 fn is_parallel_safe_call(
     call: &AiToolCall,
+    advertised_tool_names: &HashSet<String>,
     disabled_tools: Option<&[String]>,
     tool_control: &ToolControl,
 ) -> bool {
-    if disabled_tools.is_some_and(|disabled| {
-        disabled
-            .iter()
-            .any(|name| name.as_str() == call.name.as_str())
-    }) || tool_control.requires_approval(call)
+    if !advertised_tool_names.contains(&call.name)
+        || disabled_tools.is_some_and(|disabled| {
+            disabled
+                .iter()
+                .any(|name| name.as_str() == call.name.as_str())
+        })
+        || tool_control.requires_approval(call)
     {
         return false;
     }
@@ -652,6 +679,7 @@ mod tests {
                 arguments: json!({"file_path": "two"}),
             },
         ];
+        let advertised = HashSet::from(["read".to_string()]);
 
         let batch = execute_tools(
             &calls,
@@ -672,6 +700,7 @@ mod tests {
             None,
             &mut input_inbox,
             None,
+            &advertised,
             None,
             Arc::new(FileObservationTracker::new()),
         )
@@ -688,6 +717,78 @@ mod tests {
             &batch.results[1],
             Content::ToolResult { tool_use_id, .. } if tool_use_id == "read-2"
         ));
+    }
+
+    #[tokio::test]
+    async fn unadvertised_supervised_write_is_rejected_without_approval_or_execution() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let registry = Arc::new(ToolRegistry::new());
+        let ai_client = Arc::new(AiClient::new(Default::default(), String::new()));
+        let process_registry = Arc::new(ProcessRegistry::new());
+        let skills_manager = Arc::new(tokio::sync::RwLock::new(SkillsManager::new(
+            temp_dir.path().join("skills"),
+            None,
+        )));
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (_input_tx, input_rx) = mpsc::unbounded_channel();
+        let mut input_inbox = LoopInputInbox::new(input_rx);
+        let advertised = HashSet::from(["read".to_string()]);
+        let call = AiToolCall {
+            id: "hallucinated-bash".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "touch should-not-exist"}),
+        };
+
+        let batch = execute_tools(
+            &[call],
+            &registry,
+            &ai_client,
+            temp_dir.path(),
+            Some(temp_dir.path()),
+            &process_registry,
+            &skills_manager,
+            "session",
+            &temp_dir.path().join("db"),
+            None,
+            PermissionMode::Supervised,
+            WorkMode::Build,
+            None,
+            None,
+            &event_tx,
+            None,
+            &mut input_inbox,
+            None,
+            &advertised,
+            None,
+            Arc::new(FileObservationTracker::new()),
+        )
+        .await;
+
+        assert!(!batch.cancelled);
+        assert_eq!(batch.results.len(), 1);
+        match &batch.results[0] {
+            Content::ToolResult {
+                tool_use_id,
+                output,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "hallucinated-bash");
+                assert_eq!(output["error_code"], "tool_not_advertised");
+                assert_eq!(*is_error, Some(true));
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+
+        let events = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            LoopEvent::ToolApprovalRequired { .. } | LoopEvent::ToolExecuting { .. }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            LoopEvent::ToolResult { id, is_error: true, .. } if id == "hallucinated-bash"
+        )));
+        assert!(!temp_dir.path().join("should-not-exist").exists());
     }
 
     #[tokio::test]
@@ -783,6 +884,7 @@ export default (krusty) => {
             })
             .expect("approval input should be queued");
         let mut input_inbox = LoopInputInbox::new(input_rx);
+        let advertised = HashSet::from(["agent".to_string()]);
 
         let batch = execute_tools(
             &[original_call],
@@ -803,6 +905,7 @@ export default (krusty) => {
             None,
             &mut input_inbox,
             None,
+            &advertised,
             None,
             Arc::new(FileObservationTracker::new()),
         )
@@ -866,6 +969,7 @@ export default (krusty) => {
         };
 
         let mut input_inbox = LoopInputInbox::new(input_rx);
+        let advertised = HashSet::from(["agent".to_string()]);
         execute_tools(
             &[call],
             &registry,
@@ -885,6 +989,7 @@ export default (krusty) => {
             None,
             &mut input_inbox,
             None,
+            &advertised,
             None,
             Arc::new(FileObservationTracker::new()),
         )

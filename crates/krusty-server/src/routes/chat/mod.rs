@@ -37,7 +37,7 @@ use self::session::{
 use self::stream::start_orchestrator_sse;
 #[cfg(test)]
 use self::stream::{forward_loop_event, run_orchestrator_event_bridge};
-use self::tools::should_suppress_code_tools;
+use self::tools::{restrict_tools_to_allowlist, should_suppress_code_tools};
 use super::session_access::{current_user_id, load_owned_session};
 use crate::ai_bootstrap::{persist_current_model_key_selection, persist_current_model_selection};
 use crate::auth::CurrentUser;
@@ -219,6 +219,11 @@ async fn chat(
         );
         ctx.options.tools = None;
         ctx.options.codex_parallel_tool_calls = false;
+    }
+
+    if let Some(allowed_tools) = req.allowed_tools.as_deref() {
+        restrict_tools_to_allowlist(&mut ctx.options, allowed_tools)
+            .map_err(AppError::BadRequest)?;
     }
 
     let user_content = build_user_content(&req.message, &req.content)?;

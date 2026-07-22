@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use krusty_core::ai::client::{AnthropicAdaptiveEffort, CallOptions, CodexReasoningEffort};
 use krusty_core::ai::providers::ReasoningControl;
 use krusty_core::ai::types::{AiTool, ThinkingConfig};
@@ -176,6 +178,55 @@ pub(super) fn filter_tools_for_session_type(
         "Tool filter applied"
     );
     result
+}
+
+/// Restrict an already-governed request tool surface to an explicit per-turn
+/// allowlist. The client can only remove tools: names that were not selected by
+/// session, project, permission, and model policy are rejected rather than
+/// silently expanding the request surface.
+pub(super) fn restrict_tools_to_allowlist(
+    options: &mut CallOptions,
+    requested: &[String],
+) -> Result<(), String> {
+    let mut requested_names = HashSet::with_capacity(requested.len());
+    for name in requested {
+        if name.is_empty() || name.trim() != name {
+            return Err("allowed_tools entries must be non-empty exact tool names".to_string());
+        }
+        if !requested_names.insert(name.clone()) {
+            return Err(format!(
+                "allowed_tools contains duplicate tool name '{name}'"
+            ));
+        }
+    }
+
+    let current_tools = options.tools.take().unwrap_or_default();
+    let current_names = current_tools
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect::<HashSet<_>>();
+    let mut unavailable = requested_names
+        .difference(&current_names)
+        .cloned()
+        .collect::<Vec<_>>();
+    unavailable.sort_unstable();
+    if !unavailable.is_empty() {
+        options.tools = (!current_tools.is_empty()).then_some(current_tools);
+        return Err(format!(
+            "allowed_tools may only narrow the current tool surface; unavailable: {}",
+            unavailable.join(", ")
+        ));
+    }
+
+    let restricted = current_tools
+        .into_iter()
+        .filter(|tool| requested_names.contains(&tool.name))
+        .collect::<Vec<_>>();
+    options.tools = (!restricted.is_empty()).then_some(restricted);
+    if options.tools.as_ref().is_none_or(|tools| tools.len() <= 1) {
+        options.codex_parallel_tool_calls = false;
+    }
+    Ok(())
 }
 
 fn filter_tools_inner(tools: Vec<AiTool>, session_type: SessionType) -> Vec<AiTool> {
@@ -362,6 +413,65 @@ mod tests {
             .map(|tool| tool.name)
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["bash"]);
+    }
+
+    #[test]
+    fn per_turn_allowlist_only_narrows_the_advertised_surface() {
+        let mut options = CallOptions {
+            tools: Some(vec![tool("bash"), tool("grep"), tool("read")]),
+            codex_parallel_tool_calls: true,
+            ..Default::default()
+        };
+
+        restrict_tools_to_allowlist(&mut options, &["grep".into(), "read".into()])
+            .expect("read-only subset should be accepted");
+        assert_eq!(
+            options
+                .tools
+                .as_ref()
+                .expect("subset should retain tools")
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["grep", "read"]
+        );
+        assert!(options.codex_parallel_tool_calls);
+
+        let error = restrict_tools_to_allowlist(&mut options, &["bash".into()])
+            .expect_err("allowlist must not restore a tool removed by prior policy");
+        assert!(error.contains("unavailable: bash"));
+        assert_eq!(
+            options
+                .tools
+                .as_ref()
+                .expect("failed restriction must preserve current tools")
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["grep", "read"]
+        );
+    }
+
+    #[test]
+    fn per_turn_allowlist_can_disable_all_tools_and_rejects_ambiguous_names() {
+        let mut options = CallOptions {
+            tools: Some(vec![tool("read")]),
+            codex_parallel_tool_calls: true,
+            ..Default::default()
+        };
+        restrict_tools_to_allowlist(&mut options, &[])
+            .expect("an empty allowlist should explicitly disable tools");
+        assert!(options.tools.is_none());
+        assert!(!options.codex_parallel_tool_calls);
+
+        let mut options = CallOptions {
+            tools: Some(vec![tool("read")]),
+            ..Default::default()
+        };
+        assert!(restrict_tools_to_allowlist(&mut options, &[" read".into()]).is_err());
+        assert!(
+            restrict_tools_to_allowlist(&mut options, &["read".into(), "read".into()]).is_err()
+        );
     }
 
     #[test]

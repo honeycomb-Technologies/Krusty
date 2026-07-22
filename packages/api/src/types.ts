@@ -215,6 +215,8 @@ export interface ChatRequest {
 	thinking_enabled?: boolean | string;
 	fast_mode?: boolean;
 	permission_mode?: PermissionMode;
+	/** Optional per-turn subset of the tools selected by server policy. */
+	allowed_tools?: string[];
 	mode?: SessionMode;
 }
 

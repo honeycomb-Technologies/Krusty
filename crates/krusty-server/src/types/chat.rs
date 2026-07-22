@@ -132,6 +132,10 @@ pub struct ChatRequest {
     /// the server uses the session's persisted mode.
     #[serde(default)]
     pub permission_mode: Option<PermissionMode>,
+    /// Optional per-turn tool allowlist. This may only narrow the tool surface
+    /// already selected by the server's session and project policy.
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
     /// Request provider fast/priority service tier without changing the selected model
     #[serde(default)]
     pub fast_mode: bool,
@@ -213,6 +217,20 @@ mod tests {
         assert!(req.fast_mode);
         assert_eq!(req.thinking_enabled, ThinkingLevel::Off);
         assert_eq!(req.permission_mode, None);
+    }
+
+    #[test]
+    fn chat_request_preserves_explicit_tool_allowlist() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "message": "audit",
+            "allowed_tools": ["glob", "grep", "read"]
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(
+            req.allowed_tools,
+            Some(vec!["glob".into(), "grep".into(), "read".into()])
+        );
     }
 
     #[test]

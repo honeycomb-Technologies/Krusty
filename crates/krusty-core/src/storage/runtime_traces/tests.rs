@@ -194,6 +194,10 @@ fn provider_request_trace_keeps_contract_metadata_but_redacts_request_contents()
     assert_eq!(diagnostics["model_key"]["model_id"], "grok-4.5");
     assert!(diagnostics["catalog_source"].is_string());
     assert_eq!(diagnostics["effective_request"]["tool_count"], 1);
+    assert_eq!(
+        diagnostics["tool_names"],
+        serde_json::json!(["secret_tool"])
+    );
     assert_eq!(diagnostics["message_count"], 2);
     assert_eq!(diagnostics["system_message_count"], 1);
     assert_eq!(diagnostics["user_message_count"], 1);

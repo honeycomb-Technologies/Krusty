@@ -24,7 +24,7 @@ mod plan_flow;
 mod recovery;
 mod title;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -364,6 +364,16 @@ impl AgenticOrchestrator {
             RunBudgetResolution::resolve(run_budget, max_iterations, project_settings.run_limits);
 
         let permission_mode = resolve_project_permission_mode(permission_mode, &project_settings);
+        // Freeze the exact function-tool capability sent to the provider. This
+        // same set is enforced at execution time so a hallucinated registered
+        // tool cannot escape the request contract.
+        let advertised_tool_names = options
+            .tools
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<HashSet<_>>();
 
         let mut work_mode = initial_work_mode;
         let mut last_token_count = 0usize;
@@ -1177,10 +1187,9 @@ impl AgenticOrchestrator {
 
             // AskUser partition
             let (ask_user_calls, non_ask_user_calls): (Vec<_>, Vec<_>) =
-                result
-                    .tool_calls
-                    .iter()
-                    .partition::<Vec<_>, _>(|t| t.name == "AskUserQuestion");
+                result.tool_calls.iter().partition::<Vec<_>, _>(|t| {
+                    t.name == "AskUserQuestion" && advertised_tool_names.contains(&t.name)
+                });
 
             if !ask_user_calls.is_empty() {
                 let ask_user_partial_assistant =
@@ -1216,6 +1225,7 @@ impl AgenticOrchestrator {
                         Some(&provider_call_trace),
                         &mut input_inbox,
                         project_settings.subagent_max_turns,
+                        &advertised_tool_names,
                         project_settings.disabled_tools.as_deref(),
                         Arc::clone(&file_observations),
                     )
@@ -1330,6 +1340,7 @@ impl AgenticOrchestrator {
                 Some(&provider_call_trace),
                 &mut input_inbox,
                 project_settings.subagent_max_turns,
+                &advertised_tool_names,
                 project_settings.disabled_tools.as_deref(),
                 Arc::clone(&file_observations),
             )

@@ -137,8 +137,10 @@ describe("KrustyClient provider-aware model identity", () => {
 			message: "Build the project",
 			model: exactGrokKey.model_id,
 			model_key: exactGrokKey,
+			allowed_tools: ["read", "grep"],
 		};
 
 		expect(request.model_key).toEqual(exactGrokKey);
+		expect(request.allowed_tools).toEqual(["read", "grep"]);
 	});
 });

@@ -239,6 +239,7 @@ async fn chat_rejects_mako_creation_and_daemon_owned_metadata_overrides() {
             permission_mode: None,
             fast_mode: false,
             research_enabled: None,
+            allowed_tools: None,
         }),
     )
     .await;
@@ -264,6 +265,7 @@ async fn chat_rejects_mako_creation_and_daemon_owned_metadata_overrides() {
             permission_mode: None,
             fast_mode: false,
             research_enabled: None,
+            allowed_tools: None,
         }),
     )
     .await;
@@ -307,6 +309,7 @@ async fn chat_new_session_contract_includes_target_branch_intent() {
             mode: None,
             permission_mode: Some(krusty_core::tools::registry::PermissionMode::default()),
             research_enabled: None,
+            allowed_tools: None,
         },
     )
     .await
@@ -386,6 +389,7 @@ async fn chat_existing_session_uses_persisted_target_branch_intent_when_request_
             mode: None,
             permission_mode: None,
             research_enabled: None,
+            allowed_tools: None,
         },
     )
     .await
@@ -460,6 +464,7 @@ async fn chat_existing_session_allows_explicit_target_branch_intent_override() {
             mode: None,
             permission_mode: Some(krusty_core::tools::registry::PermissionMode::default()),
             research_enabled: None,
+            allowed_tools: None,
         },
     )
     .await
@@ -715,6 +720,7 @@ async fn new_empty_session_uses_project_model_before_user_preference_and_persist
             mode: None,
             permission_mode: None,
             research_enabled: None,
+            allowed_tools: None,
         },
     )
     .await
@@ -1332,6 +1338,7 @@ async fn chat_does_not_persist_model_override_when_setup_fails() {
             mode: None,
             permission_mode: Some(krusty_core::tools::registry::PermissionMode::default()),
             research_enabled: None,
+            allowed_tools: None,
         }),
     )
     .await;
@@ -1380,6 +1387,7 @@ async fn chat_rejects_missing_model_before_creating_session() {
             mode: None,
             permission_mode: Some(krusty_core::tools::registry::PermissionMode::default()),
             research_enabled: None,
+            allowed_tools: None,
         }),
     )
     .await;
@@ -1432,6 +1440,7 @@ async fn chat_rejects_unsupported_image_before_creating_session() {
             mode: None,
             permission_mode: Some(krusty_core::tools::registry::PermissionMode::default()),
             research_enabled: None,
+            allowed_tools: None,
         }),
     )
     .await;

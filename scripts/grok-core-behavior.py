@@ -123,6 +123,7 @@ def exact_chat_payload(
     *,
     mode: str | None = None,
     permission_mode: str = "autonomous",
+    allowed_tools: list[str] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "session_id": session_id,
@@ -134,6 +135,8 @@ def exact_chat_payload(
     }
     if mode is not None:
         payload["mode"] = mode
+    if allowed_tools is not None:
+        payload["allowed_tools"] = allowed_tools
     return payload
 
 
@@ -279,11 +282,12 @@ def run_read_only_audit(
     prompt = """Audit this project deeply in read-only mode.
 
 Inspect the implementation, tests, and documentation using only the read, grep,
-glob, and list tools. Do not call Bash, delegate, change work mode, create a plan,
+and glob tools. Do not call Bash, delegate, change work mode, create a plan,
 or invoke any other tool. Report concrete correctness, security, and test-coverage
 findings with file and line evidence, ordered by severity. Do not edit, create,
 delete, rename, format, or execute anything. Return the audit report directly and
 finish when it is complete; do not repeatedly run equivalent discovery calls."""
+    allowed = {"read", "grep", "glob"}
     events = api.chat(
         exact_chat_payload(
             session_id,
@@ -291,6 +295,7 @@ finish when it is complete; do not repeatedly run equivalent discovery calls."""
             model,
             mode="build",
             permission_mode="supervised",
+            allowed_tools=sorted(allowed),
         )
     )
     text = HARNESS.validate_stream(events, "read-only audit", expect_tools=True)
@@ -299,7 +304,6 @@ finish when it is complete; do not repeatedly run equivalent discovery calls."""
     require("app.py" in text, f"audit did not cite app.py: {text!r}")
     require("test_app.py" in text, f"audit did not cite test_app.py: {text!r}")
     calls = HARNESS.tool_calls(events)
-    allowed = {"read", "grep", "glob", "list"}
     require(
         all(call.get("name") in allowed for call in calls),
         f"audit escaped its hard read-only tool surface: {calls}",
@@ -309,6 +313,15 @@ finish when it is complete; do not repeatedly run equivalent discovery calls."""
     for key in ("tool_errors", "server_tool_errors", "agent_errors", "provider_failures"):
         require(summary.get(key) == 0, f"audit trace {key}={summary.get(key)}")
     runtime = validate_runtime_contract(events, trace, model, "read-only audit")
+    for source, snapshots in (
+        ("stream", prepared_snapshots_from_stream(events)),
+        ("trace", prepared_snapshots_from_trace(trace)),
+    ):
+        for index, snapshot in enumerate(snapshots):
+            require(
+                snapshot.get("tool_names") == sorted(allowed),
+                f"read-only audit: {source} request {index} advertised the wrong tools: {snapshot}",
+            )
     return {
         "status": "pass",
         "session_id": session_id,
