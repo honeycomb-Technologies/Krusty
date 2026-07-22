@@ -517,7 +517,7 @@ async fn wait_for(condition: impl Fn() -> bool) {
     // The runtime polls every 20ms in tests, but a full workspace test run can
     // initialize many isolated SQLite databases concurrently. Keep this bound
     // finite while allowing slow CI hosts to make durable scheduler progress.
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         while !condition() {
             // Most predicates reopen SQLite. Poll slowly enough that the
             // observation connection cannot starve the writer transaction it
@@ -1520,9 +1520,12 @@ async fn takeover_reconciles_a_worker_lease_that_expires_after_acquisition() {
     let _test_guard = runtime_test_guard().await;
     let temp = TempDir::new().unwrap();
     let mut runtime_config = config(&temp);
-    runtime_config.daemon_lease_duration = Duration::from_millis(150);
-    runtime_config.worker_lease_duration = Duration::from_millis(500);
-    runtime_config.worker_heartbeat_interval = Duration::from_millis(50);
+    // Shutdown releases the daemon lease, so the replacement still acquires
+    // immediately. Keep the worker lease longer than ordinary CI scheduling
+    // jitter while leaving ample room for it to expire inside `wait_for`.
+    runtime_config.daemon_lease_duration = Duration::from_secs(2);
+    runtime_config.worker_lease_duration = Duration::from_secs(1);
+    runtime_config.worker_heartbeat_interval = Duration::from_millis(100);
 
     let first_backend = Arc::new(BlockingBackend::default());
     let first = start_runtime(runtime_config.clone(), "daemon-a", first_backend.clone())

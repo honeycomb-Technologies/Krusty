@@ -1,4 +1,6 @@
 use chrono::Utc;
+use std::sync::{Arc, Barrier};
+use std::time::Duration;
 use tempfile::TempDir;
 
 use super::MessageStore;
@@ -303,4 +305,66 @@ fn orphaned_steering_recovers_after_the_interrupted_runs_final_assistant() {
         vec!["user", "assistant", "user"]
     );
     assert!(messages[2].1.contains("redirect"));
+}
+
+#[test]
+fn orphaned_steering_waits_for_a_concurrent_writer_instead_of_losing_its_snapshot() {
+    let (db, temp) = create_test_db();
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    db.conn()
+        .execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![session_id, "Test", now, now],
+        )
+        .expect("Failed to create session");
+    MessageStore::new(&db)
+        .queue_pending_steering(
+            &session_id,
+            "steer-1",
+            r#"[{"type":"text","text":"redirect"}]"#,
+        )
+        .expect("steering should stage");
+
+    let promotion_db = Database::new(&temp.path().join("test.db"))
+        .expect("promotion connection should initialize before contention");
+    let blocker = Database::new(&temp.path().join("test.db"))
+        .expect("blocker connection should initialize before contention");
+    let blocker_tx = rusqlite::Transaction::new_unchecked(
+        blocker.conn(),
+        rusqlite::TransactionBehavior::Immediate,
+    )
+    .expect("blocker should reserve the writer");
+    blocker_tx
+        .execute(
+            "UPDATE sessions SET title = 'Concurrent writer' WHERE id = ?1",
+            [&session_id],
+        )
+        .expect("blocker should create a real WAL write");
+
+    let barrier = Arc::new(Barrier::new(2));
+    let worker_barrier = Arc::clone(&barrier);
+    let worker_session_id = session_id.clone();
+    let worker = std::thread::spawn(move || {
+        worker_barrier.wait();
+        MessageStore::new(&promotion_db).promote_orphaned_pending_steering(&worker_session_id)
+    });
+
+    barrier.wait();
+    // Give the promotion connection time to contend for the writer. An
+    // immediate transaction waits here; the former deferred transaction read
+    // a snapshot and then failed its write upgrade with SQLITE_BUSY_SNAPSHOT.
+    std::thread::sleep(Duration::from_millis(100));
+    blocker_tx
+        .commit()
+        .expect("blocker should release the writer");
+
+    assert_eq!(
+        worker
+            .join()
+            .expect("promotion worker should not panic")
+            .expect("promotion should wait for the writer and then succeed"),
+        1
+    );
 }
