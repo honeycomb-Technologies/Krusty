@@ -2,10 +2,7 @@ use anyhow::Result;
 use serde_json::Value;
 use url::Url;
 
-use super::super::super::config::{
-    normalized_prompt_cache_key, openai_prompt_cache_options, openai_prompt_cache_retention,
-    CallOptions, CodexReasoningEffort, OpenAiPromptCacheMode,
-};
+use super::super::super::config::{normalized_prompt_cache_key, CallOptions, CodexReasoningEffort};
 use super::super::super::core::AiClient;
 use crate::ai::format::response::extract_text_from_content;
 use crate::ai::retry::safe_provider_event_error;
@@ -163,14 +160,6 @@ impl AiClient {
         if let Some(cache_key) = normalized_prompt_cache_key(options) {
             body["prompt_cache_key"] = serde_json::json!(cache_key);
         }
-        if let Some(cache_options) =
-            openai_prompt_cache_options(options, model, OpenAiPromptCacheMode::Implicit)
-        {
-            body["prompt_cache_options"] = cache_options;
-        }
-        if let Some(retention) = openai_prompt_cache_retention(options, model) {
-            body["prompt_cache_retention"] = retention;
-        }
 
         if thinking_enabled {
             body["reasoning"] = serde_json::json!({
@@ -274,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn chatgpt_codex_subagent_body_uses_session_cache_contract() {
+    fn chatgpt_codex_subagent_body_uses_oauth_cache_contract() {
         let client = openai_responses_client();
         let options = CallOptions {
             session_id: Some("subagent-1".to_string()),
@@ -293,6 +282,10 @@ mod tests {
         );
 
         assert_eq!(body["prompt_cache_key"], "subagent-1");
-        assert_eq!(body["prompt_cache_options"]["mode"], "implicit");
+        assert!(body.get("prompt_cache_options").is_none());
+        assert!(body.get("prompt_cache_retention").is_none());
+        assert_eq!(body["store"], false);
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["model"], "gpt-5.6");
     }
 }

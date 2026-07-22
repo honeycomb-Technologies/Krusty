@@ -26,7 +26,7 @@
 //! ## Autonomy (Mako)
 //! - `TickEngine` - Autonomous wake/sleep driver for Mako sessions
 //! - `coordinator_prompt` - Mako coordinator system prompt surface
-//! - `team` - Background teammate orchestration
+//! - dynamic delegated agents - Background work through AgentSpec and lifecycle controls
 //! - `AutoClassifierHook` - Autonomous tool-call guardrail hook
 //!
 //! ## Builder Swarm (Octopod)
@@ -66,7 +66,7 @@ use serde::{Deserialize, Serialize};
 
 pub use autonomy::auto_classifier;
 pub use autonomy::auto_classifier::AutoClassifierHook;
-pub use autonomy::{coordinator_prompt, team, tick_engine};
+pub use autonomy::{coordinator_prompt, tick_engine};
 pub use cancellation::AgentCancellation;
 pub(crate) use compaction::estimate_with_usage as estimate_tokens_with_usage;
 pub use compaction::{

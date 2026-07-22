@@ -232,6 +232,7 @@ fn is_stable_project_context(text: &str) -> bool {
         "[PROJECT INSTRUCTIONS",
         "[PROJECT SETTINGS]",
         "[MAKO PROJECT OVERLAY",
+        "[DELEGATION MODE:",
     ]
     .iter()
     .any(|prefix| text.starts_with(prefix))

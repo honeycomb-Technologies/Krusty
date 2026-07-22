@@ -16,7 +16,9 @@
 pub mod build_context;
 mod execution;
 mod identity;
+mod lifecycle;
 mod scheduler;
+mod spec;
 mod tools;
 mod types;
 
@@ -38,10 +40,12 @@ use self::build_context::SharedBuildContext;
 
 // Re-export public types
 pub use identity::AgentIdentity;
+pub use lifecycle::{AgentMailbox, AgentRuntimeManager, AgentRuntimeSnapshot, AgentRuntimeStatus};
 pub use scheduler::{
     AdaptiveConcurrencyPolicy, AgentScheduler, BackpressureSignal, ScheduleRequest,
     SchedulerSnapshot, SchedulingClass,
 };
+pub use spec::{AgentCapability, AgentContextMode, AgentExecutionProfile, AgentSpec};
 pub use tools::BuilderTools;
 pub use types::{
     AgentProgress, AgentProgressStatus, DelegatedProcessArtifact, SubAgentApiError, SubAgentResult,
@@ -50,7 +54,7 @@ pub use types::{
 
 // Re-export single agent entry points
 pub use execution::execute_single_explorer;
-pub(crate) use execution::{execute_single_agent, AgentConfig, SingleExplorerConfig};
+pub(crate) use execution::{execute_single_agent, AgentConfig};
 
 // Internal execution functions
 use execution::execute_builder_with_progress;

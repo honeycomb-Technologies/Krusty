@@ -245,9 +245,8 @@ def completed_text_with_recovered_tool_errors(
         if event.get("type") == "tool_result" and event.get("is_error") is True
     ]
     filtered = [
-        event
-        for event in events
-        if not (event.get("type") == "tool_result" and event.get("is_error") is True)
+        {**event, "is_error": False} if index in failed_indexes else event
+        for index, event in enumerate(events)
     ]
     text = HARNESS.validate_stream(filtered, label, expect_tools=None)
     if failed_indexes:
@@ -470,7 +469,9 @@ Implement `report --index atlas-index.json --format json`. It must verify first 
     terra_events = api.chat(
         chat_payload(terra_session, terra_prompt, terra, thinking="high")
     )
-    terra_text = completed_text(terra_events, "Terra High project audit")
+    terra_text, terra_recovered_tool_errors = completed_text_with_recovered_tool_errors(
+        terra_events, "Terra High project audit"
+    )
     HARNESS.require("TERRA-HIGH-AUDIT-OK" in terra_text, "Terra marker absent")
     terra_trace, _ = HARNESS.wait_for_completed_trace_run(
         api, terra_session, "Terra High trace", after_sequence=0, timeout=15
@@ -499,6 +500,7 @@ Implement `report --index atlas-index.json --format json`. It must verify first 
     summary["terra_high"] = {
         "status": "pass",
         "tool_calls": [call.get("name") for call in HARNESS.tool_calls(terra_events)],
+        "recovered_tool_errors": terra_recovered_tool_errors,
         "usage": usage_summary(terra_events),
         "effective_request": effective_request,
         "tests": run_project_tests(project_dir),

@@ -178,3 +178,48 @@ fn find_related_run_matches_scope_key() {
         .expect("related run");
     assert_eq!(found.delegated_run_id, "run-1");
 }
+
+#[test]
+fn cancelled_run_cannot_be_overwritten_by_late_child_finalization() {
+    let (store, _tmp) = create_store();
+    store
+        .create_run(&DelegatedRunStartInput {
+            delegated_run_id: "run-cancel".to_string(),
+            parent_session_id: "session-1".to_string(),
+            parent_tool_call_id: Some("tool-1".to_string()),
+            role: DelegatedRunRole::Build,
+            stage: DelegatedRunStage::Running,
+            provider: None,
+            model: None,
+            resumable: true,
+            resumed_from_run_id: None,
+            target_scope: vec![scope("main", ".", "project")],
+        })
+        .expect("create run");
+
+    store
+        .finalize_run(
+            "run-cancel",
+            DelegatedRunStage::Cancelled,
+            &serde_json::json!({"outcome": "cancelled"}),
+            Some("parent interrupt"),
+            true,
+        )
+        .expect("cancel run");
+    store
+        .finalize_run(
+            "run-cancel",
+            DelegatedRunStage::Failed,
+            &serde_json::json!({"outcome": "failed"}),
+            Some("late child result"),
+            true,
+        )
+        .expect("late finalization is ignored");
+
+    let record = store
+        .get_run("run-cancel")
+        .expect("load run")
+        .expect("record");
+    assert_eq!(record.stage, DelegatedRunStage::Cancelled);
+    assert_eq!(record.artifact.unwrap()["outcome"], "cancelled");
+}

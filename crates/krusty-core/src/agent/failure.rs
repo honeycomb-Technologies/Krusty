@@ -8,7 +8,9 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
-use crate::tools::registry::{effective_tool_call, tool_policy_for_call, ToolCategory};
+use crate::tools::registry::{
+    agent_call_execution_profile, effective_tool_call, tool_policy_for_call, ToolCategory,
+};
 
 /// Default threshold: stop after this many identical failures.
 pub const REPEATED_FAILURE_THRESHOLD: usize = 2;
@@ -212,7 +214,7 @@ pub fn detect_repeated_validation_sequence(
 pub(crate) fn is_validation_call(call: &AiToolCall) -> bool {
     let (name, arguments) = effective_tool_call(&call.name, &call.arguments);
     if name == "agent" {
-        return arguments.get("agent_type").and_then(|value| value.as_str()) == Some("verify");
+        return agent_call_execution_profile(arguments) == "verify";
     }
     if !matches!(name, "bash" | "shell" | "execute") {
         return false;
@@ -275,8 +277,7 @@ pub fn detect_terminal_explore_failure(
     let explore_ids = tool_calls
         .iter()
         .filter(|call| {
-            call.name == "agent"
-                && (call.arguments.get("agent_type").and_then(|v| v.as_str()) == Some("explore"))
+            call.name == "agent" && agent_call_execution_profile(&call.arguments) == "explore"
         })
         .map(|call| call.id.as_str())
         .collect::<Vec<_>>();
@@ -309,6 +310,13 @@ pub fn detect_terminal_explore_failure(
             .and_then(|value| value.as_str())
             .unwrap_or("explore returned degraded results");
         let result_payload = parsed.get("result").unwrap_or(&parsed);
+        let status = result_payload
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if status == "background_started" {
+            continue;
+        }
         let outcome = result_payload
             .get("outcome")
             .and_then(|value| value.as_str())
@@ -934,6 +942,33 @@ mod tests {
         let diagnostic = detect_terminal_explore_failure(&tool_calls, &tool_results)
             .expect("zero-evidence explore should stop");
         assert!(diagnostic.contains("degraded exploration"));
+    }
+
+    #[test]
+    fn terminal_explore_failure_allows_background_start_to_continue() {
+        let tool_calls = vec![AiToolCall {
+            id: "tool-1".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({
+                "profile": "audit-specialist",
+                "capabilities": ["read"],
+                "prompt": "audit"
+            }),
+        }];
+        let tool_results = vec![Content::ToolResult {
+            tool_use_id: "tool-1".to_string(),
+            output: json!({
+                "summary": "explore agent background_started",
+                "result": {
+                    "status": "background_started",
+                    "delegated_run_id": "run-1"
+                }
+            }),
+            is_error: None,
+        }];
+
+        let diagnostic = detect_terminal_explore_failure(&tool_calls, &tool_results);
+        assert!(diagnostic.is_none());
     }
 
     #[test]

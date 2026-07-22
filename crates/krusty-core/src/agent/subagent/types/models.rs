@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::agent::subagent::AgentIdentity;
+use crate::agent::subagent::AgentMailbox;
 use crate::process::ProcessRegistry;
 use crate::tools::registry::DelegationPolicy;
 
@@ -82,6 +83,8 @@ pub struct SubAgentTask {
     pub process_owner_id: Option<String>,
     /// Parent session used for tool-output scoping and delegated provenance.
     pub parent_session_id: Option<String>,
+    /// Parent-to-child steering delivered between model turns.
+    pub mailbox: Option<AgentMailbox>,
 }
 
 impl SubAgentTask {
@@ -103,6 +106,7 @@ impl SubAgentTask {
             process_registry: None,
             process_owner_id: None,
             parent_session_id: None,
+            mailbox: None,
         }
     }
 
@@ -166,6 +170,11 @@ impl SubAgentTask {
 
     pub fn with_max_turns(mut self, max_turns: usize) -> Self {
         self.max_turns_override = Some(max_turns);
+        self
+    }
+
+    pub fn with_mailbox(mut self, mailbox: AgentMailbox) -> Self {
+        self.mailbox = Some(mailbox);
         self
     }
 

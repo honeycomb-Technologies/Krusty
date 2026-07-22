@@ -106,9 +106,31 @@ fn test_tool_policy_contracts() {
     assert!(!agent_explore_policy.requires_supervised_approval);
     assert!(agent_explore_policy.allowed_in_plan_mode);
 
-    let agent_unknown_policy = tool_policy_for_call("agent", &json!({ "agent_type": "unknown" }));
-    assert_eq!(agent_unknown_policy.category, ToolCategory::Write);
-    assert!(agent_unknown_policy.requires_supervised_approval);
+    let custom_read_policy = tool_policy_for_call("agent", &json!({ "profile": "security-audit" }));
+    assert_eq!(custom_read_policy.category, ToolCategory::ReadOnly);
+    assert!(!custom_read_policy.requires_supervised_approval);
+
+    let custom_write_policy = tool_policy_for_call(
+        "agent",
+        &json!({ "profile": "refactor", "capabilities": ["read", "write"] }),
+    );
+    assert_eq!(custom_write_policy.category, ToolCategory::Write);
+    assert!(custom_write_policy.requires_supervised_approval);
+
+    for action in ["list", "status", "wait"] {
+        let policy = tool_policy_for_call("agent", &json!({ "action": action }));
+        assert_eq!(policy.category, ToolCategory::ReadOnly, "{action}");
+        assert!(!agent_call_starts_run(&json!({ "action": action })));
+    }
+    for action in ["message", "followup", "interrupt"] {
+        let policy = tool_policy_for_call("agent", &json!({ "action": action }));
+        assert_eq!(policy.category, ToolCategory::Interactive, "{action}");
+        assert!(!policy.requires_supervised_approval);
+    }
+    let resume_policy = tool_policy_for_call("agent", &json!({ "action": "resume" }));
+    assert_eq!(resume_policy.category, ToolCategory::Write);
+    assert!(resume_policy.requires_supervised_approval);
+    assert!(agent_call_starts_run(&json!({ "action": "resume" })));
 
     let deferred_read_policy = tool_policy_for_call(
         "tool_search",

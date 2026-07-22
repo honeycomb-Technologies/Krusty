@@ -7,6 +7,7 @@ use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::agent::hooks::{HookResult, PostToolHook, PreToolHook};
+use crate::agent::subagent::AgentRuntimeManager;
 use crate::ai::types::AiTool;
 
 use super::policy::DEFAULT_TOOL_TIMEOUT;
@@ -92,8 +93,9 @@ pub struct ToolRegistry {
     /// A standard lock keeps lookup available from the synchronous orchestrator
     /// startup boundary; extension work itself remains fully async.
     agent_extension_manager: StdRwLock<Option<Arc<crate::extensions::AgentExtensionManager>>>,
+    /// Live delegated-run control shared across agent tool re-registration.
+    agent_runtime_manager: AgentRuntimeManager,
 }
-
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
@@ -108,6 +110,7 @@ impl ToolRegistry {
             pre_hooks: Vec::new(),
             post_hooks: Vec::new(),
             agent_extension_manager: StdRwLock::new(None),
+            agent_runtime_manager: AgentRuntimeManager::default(),
         }
     }
 
@@ -148,6 +151,10 @@ impl ToolRegistry {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    pub fn agent_runtime_manager(&self) -> AgentRuntimeManager {
+        self.agent_runtime_manager.clone()
     }
 
     /// Add a pre-execution hook

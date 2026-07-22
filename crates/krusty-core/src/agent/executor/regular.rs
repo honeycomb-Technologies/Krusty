@@ -14,7 +14,8 @@ use crate::process::ProcessRegistry;
 use crate::skills::SkillsManager;
 use crate::storage::{WorkMode, WorkspaceMode};
 use crate::tools::registry::{
-    FileObservationTracker, PermissionMode, ToolContext, ToolRegistry, ToolResult,
+    agent_call_execution_profile, agent_call_starts_run, FileObservationTracker, PermissionMode,
+    ToolContext, ToolRegistry, ToolResult,
 };
 
 use super::super::loop_events::LoopEvent;
@@ -42,7 +43,9 @@ pub(super) async fn execute_regular_tool(
     file_observations: Arc<FileObservationTracker>,
     extension_intercept_prepared: bool,
 ) -> ToolResult {
-    let background_agent = call.name == "agent" && agent_runs_in_background(&call.arguments);
+    let background_agent = call.name == "agent"
+        && agent_call_starts_run(&call.arguments)
+        && agent_runs_in_background(&call.arguments);
     let (output_tx, mut output_rx) =
         mpsc::unbounded_channel::<crate::tools::registry::ToolOutputChunk>();
 
@@ -112,7 +115,7 @@ pub(super) async fn execute_regular_tool(
     }
 
     let mut delegated_forwarder_handle = None;
-    if matches!(call.name.as_str(), "agent") {
+    if call.name == "agent" && agent_call_starts_run(&call.arguments) {
         if let Some(parent_tx) = delegated_progress_tx.cloned() {
             let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<AgentProgress>();
             ctx = ctx.with_agent_progress(progress_tx);
@@ -177,11 +180,7 @@ fn agent_runs_in_background(arguments: &serde_json::Value) -> bool {
 }
 
 fn delegated_kind_from_agent_call(arguments: &serde_json::Value) -> DelegatedToolKind {
-    match arguments
-        .get("agent_type")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default()
-    {
+    match agent_call_execution_profile(arguments) {
         "plan" => DelegatedToolKind::Plan,
         "verify" => DelegatedToolKind::Verify,
         "build" => DelegatedToolKind::Build,

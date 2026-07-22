@@ -74,8 +74,9 @@ pub async fn register_agent_tool(
     client: Arc<AiClient>,
     cancellation: AgentCancellation,
 ) {
+    let runtime = registry.agent_runtime_manager();
     registry
-        .register(Arc::new(AgentTool::new(client, cancellation)))
+        .register(Arc::new(AgentTool::new(client, cancellation, runtime)))
         .await;
 }
 
@@ -137,10 +138,31 @@ mod tests {
         assert!(wire_tools.iter().any(|tool| tool.name == "tool_search"));
         assert!(catalog.len() > wire_tools.len());
         assert!(catalog.iter().any(|tool| tool.name == "memory"));
-        assert!(catalog.iter().all(|tool| tool.prompt.is_none()));
+        let agent = catalog
+            .iter()
+            .find(|tool| tool.name == "agent")
+            .expect("agent tool should be registered");
+        assert!(agent.description.contains("parallel"));
+        assert!(agent.description.contains("avoid simple lookups"));
+        assert_eq!(
+            agent.input_schema["properties"]["action"]["enum"][7],
+            "resume"
+        );
+        assert!(agent.input_schema.get("required").is_none());
+        assert!(agent.input_schema["properties"].get("agent_type").is_none());
+        assert_eq!(
+            agent.input_schema["properties"]["task_ids"]["items"]["type"],
+            "string"
+        );
+        assert!(agent.input_schema["properties"]["task_ids"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("build components")));
 
         let provider_tools =
             get_format_handler(ApiFormat::OpenAIResponses).convert_tools(&wire_tools);
+        assert!(serde_json::to_string(&provider_tools)
+            .expect("serialize provider tools")
+            .contains("tightly coupled work"));
         for (tool, provider_tool) in wire_tools.iter().zip(provider_tools.iter()) {
             println!(
                 "tool_schema name={} bytes={}",
@@ -161,8 +183,8 @@ mod tests {
             estimated_tokens
         );
         assert!(
-            estimated_tokens <= 2_000,
-            "fixed no-project budget exceeded: tool_count={} base_prompt_bytes={} tool_bytes={} fixed_bytes={} estimated_tokens={} ceiling=2000",
+            estimated_tokens <= 2_600,
+            "fixed no-project budget exceeded: tool_count={} base_prompt_bytes={} tool_bytes={} fixed_bytes={} estimated_tokens={} ceiling=2600",
             wire_tools.len(),
             base_prompt_bytes,
             tool_bytes,

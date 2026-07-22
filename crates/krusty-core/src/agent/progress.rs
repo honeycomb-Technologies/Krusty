@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 
 use crate::ai::types::{AiToolCall, Content};
 use crate::tools::registry::{
-    effective_tool_call, tool_policy_for_call, trusted_changed, ToolCategory,
+    agent_call_action, agent_call_requests_write, effective_tool_call, tool_policy_for_call,
+    trusted_changed, ToolCategory,
 };
 
 use super::failure;
@@ -90,6 +91,52 @@ impl ProgressGuardTelemetry {
         matches!(self.action, ProgressGuardAction::Replan).then_some(
             "[PROGRESS GUARD]\nThe last actions repeated existing evidence or produced no state change. Do not repeat the same command with cosmetic variations. Reassess the current evidence, choose a materially different action, finish with the answer if the task is already complete, or ask for missing input.",
         )
+    }
+}
+
+#[derive(Debug)]
+pub struct LoopGuardOutcome {
+    pub repeated_failure: Option<String>,
+    pub repeated_validation: Option<String>,
+    pub progress: Option<ProgressGuardTelemetry>,
+}
+
+#[derive(Debug, Default)]
+pub struct LoopGuard {
+    progress: ProgressLedger,
+    failure_signatures: HashMap<String, usize>,
+    validation_signatures: HashMap<String, usize>,
+}
+
+impl LoopGuard {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn reset_for_steering(&mut self) {
+        self.progress.reset_for_steering();
+        self.failure_signatures.clear();
+        self.validation_signatures.clear();
+    }
+
+    pub fn evaluate(
+        &mut self,
+        tool_calls: &[AiToolCall],
+        tool_results: &[Content],
+    ) -> LoopGuardOutcome {
+        LoopGuardOutcome {
+            repeated_failure: failure::detect_repeated_failures(
+                &mut self.failure_signatures,
+                tool_calls,
+                tool_results,
+            ),
+            repeated_validation: failure::detect_repeated_validation_sequence(
+                &mut self.validation_signatures,
+                tool_calls,
+                tool_results,
+            ),
+            progress: self.progress.record_turn(tool_calls, tool_results),
+        }
     }
 }
 
@@ -476,8 +523,11 @@ fn action_class(name: &str, arguments: &Value, call: &AiToolCall) -> ActionClass
                 ActionClass::Observe
             }
         }
-        "agent" => match arguments.get("agent_type").and_then(Value::as_str) {
-            Some("build") => ActionClass::Mutate,
+        "agent" => match agent_call_action(arguments) {
+            "list" | "status" | "wait" => ActionClass::Observe,
+            "message" | "followup" => ActionClass::Communicate,
+            "interrupt" => ActionClass::Control,
+            _ if agent_call_requests_write(arguments) => ActionClass::Mutate,
             _ => ActionClass::Delegate,
         },
         "send_user_message" | "report" => ActionClass::Communicate,

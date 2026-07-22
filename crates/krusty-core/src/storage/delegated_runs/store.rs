@@ -93,6 +93,17 @@ impl DelegatedRunStore {
         human_review: Option<&str>,
         resumable: bool,
     ) -> Result<()> {
+        // An explicit parent interrupt is authoritative. A child may observe
+        // cancellation slightly later and attempt normal failure finalization;
+        // never let that race erase the durable cancelled state.
+        if stage != DelegatedRunStage::Cancelled
+            && self
+                .get_run(delegated_run_id)?
+                .is_some_and(|record| record.stage == DelegatedRunStage::Cancelled)
+        {
+            return Ok(());
+        }
+
         let updated_at = Utc::now().to_rfc3339();
         let artifact_json = serde_json::to_string(artifact)?;
         let completed_at = if matches!(

@@ -633,13 +633,62 @@ fn tool_search_policy(params: &Value) -> ToolPolicy {
 }
 
 fn agent_tool_policy(params: &Value) -> ToolPolicy {
-    match params.get("agent_type").and_then(Value::as_str) {
-        Some("explore" | "plan" | "verify") => {
-            ToolPolicy::read_only_with_timeout(DELEGATED_TOOL_TIMEOUT)
+    match agent_call_action(params) {
+        "message" | "followup" | "interrupt" => ToolPolicy::interactive(),
+        "list" | "status" | "wait" => ToolPolicy::read_only_with_timeout(DELEGATED_TOOL_TIMEOUT),
+        "resume" => ToolPolicy::write_with_timeout(DELEGATED_TOOL_TIMEOUT),
+        _ if agent_call_requests_write(params) => {
+            ToolPolicy::write_with_timeout(DELEGATED_TOOL_TIMEOUT)
         }
-        Some("build") => ToolPolicy::write_with_timeout(DELEGATED_TOOL_TIMEOUT),
-        _ => ToolPolicy::write_with_timeout(DELEGATED_TOOL_TIMEOUT),
+        _ => ToolPolicy::read_only_with_timeout(DELEGATED_TOOL_TIMEOUT),
     }
+}
+
+pub fn agent_call_action(params: &Value) -> &str {
+    params
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("spawn")
+}
+
+pub fn agent_call_starts_run(params: &Value) -> bool {
+    matches!(agent_call_action(params), "spawn" | "resume")
+}
+
+pub fn agent_call_requests_write(params: &Value) -> bool {
+    agent_call_action(params) == "resume"
+        || ["profile", "agent_type"]
+            .iter()
+            .any(|field| params.get(field).and_then(Value::as_str) == Some("build"))
+        || agent_call_has_capability(params, "write")
+}
+
+pub fn agent_call_execution_profile(params: &Value) -> &'static str {
+    let profile = params
+        .get("profile")
+        .and_then(Value::as_str)
+        .or_else(|| params.get("agent_type").and_then(Value::as_str));
+    match profile {
+        Some("plan") => "plan",
+        Some("verify") => "verify",
+        Some("build") => "build",
+        Some("explore") => "explore",
+        _ if agent_call_requests_write(params) => "build",
+        _ if agent_call_has_capability(params, "execute") => "verify",
+        _ => "explore",
+    }
+}
+
+fn agent_call_has_capability(params: &Value, expected: &str) -> bool {
+    params
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|capability| capability == expected)
+        })
 }
 
 /// Resolve the canonical policy for a tool name.

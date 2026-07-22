@@ -43,7 +43,7 @@ use crate::storage::{
     Database, MakoProfileSnapshot, PartialAssistantState, PendingInteractionSnapshot,
     ProjectSettings, RecoveryStatus, SessionManager, SessionType, WorkMode,
 };
-use crate::tools::registry::effective_tool_call;
+use crate::tools::registry::{agent_call_requests_write, effective_tool_call};
 use crate::tools::registry::{
     trusted_changed, FileObservationTracker, PermissionMode, ToolRegistry,
 };
@@ -58,7 +58,7 @@ use super::context_ledger::ContextLedger;
 use super::executor;
 use super::failure;
 use super::loop_events::{LoopEvent, LoopInput, LoopInputInbox, LoopStopReason};
-use super::progress::ProgressLedger;
+use super::progress::LoopGuard;
 use super::state::{RunBudget, RunBudgetResolution};
 use super::stream;
 use super::DelegatedProgressEvent;
@@ -431,9 +431,7 @@ impl AgenticOrchestrator {
         let mut last_token_count = 0usize;
         let mut last_usage_prompt_tokens = None::<usize>;
         let mut messages_at_last_usage = 0usize;
-        let mut progress_ledger = ProgressLedger::new();
-        let mut tool_failure_signatures: HashMap<String, usize> = HashMap::new();
-        let mut validation_pattern_signatures: HashMap<String, usize> = HashMap::new();
+        let mut loop_guard = LoopGuard::new();
         let mut title_generated = !generate_title;
         let mut iteration = 0usize;
         let model_context_window = effective_context_window_for_runtime(
@@ -502,9 +500,7 @@ impl AgenticOrchestrator {
                 empty_completion_recovery_pending = false;
                 provider_tool_activity_seen = false;
                 overflow_compact_retry_attempted = false;
-                progress_ledger.reset_for_steering();
-                tool_failure_signatures.clear();
-                validation_pattern_signatures.clear();
+                loop_guard.reset_for_steering();
             }
 
             if run_budget.budget.is_exhausted(iteration) {
@@ -1122,9 +1118,7 @@ impl AgenticOrchestrator {
                     empty_completion_recovery_pending = false;
                     provider_tool_activity_seen = false;
                     overflow_compact_retry_attempted = false;
-                    progress_ledger.reset_for_steering();
-                    tool_failure_signatures.clear();
-                    validation_pattern_signatures.clear();
+                    loop_guard.reset_for_steering();
                     clear_recovery_state(&db_path, &session_id);
                     set_agent_state(&db_path, &session_id, "streaming");
                     let _ = event_tx.send(LoopEvent::TurnComplete {
@@ -1503,20 +1497,13 @@ impl AgenticOrchestrator {
                 return;
             }
 
-            // Failure detection
-            let fail_diagnostic = failure::detect_repeated_failures(
-                &mut tool_failure_signatures,
-                &result.tool_calls,
-                &tool_results,
-            );
+            // Canonical failure and semantic-progress evaluation shared with children.
+            let guard = loop_guard.evaluate(&result.tool_calls, &tool_results);
+            let fail_diagnostic = guard.repeated_failure;
             let explore_diagnostic =
                 failure::detect_terminal_explore_failure(&result.tool_calls, &tool_results);
-            let validation_diagnostic = failure::detect_repeated_validation_sequence(
-                &mut validation_pattern_signatures,
-                &result.tool_calls,
-                &tool_results,
-            );
-            let progress_telemetry = progress_ledger.record_turn(&result.tool_calls, &tool_results);
+            let validation_diagnostic = guard.repeated_validation;
+            let progress_telemetry = guard.progress;
             let progress_diagnostic = progress_telemetry
                 .as_ref()
                 .and_then(|telemetry| telemetry.diagnostic());
@@ -1604,9 +1591,7 @@ impl AgenticOrchestrator {
                 empty_completion_recovery_pending = false;
                 provider_tool_activity_seen = false;
                 overflow_compact_retry_attempted = false;
-                progress_ledger.reset_for_steering();
-                tool_failure_signatures.clear();
-                validation_pattern_signatures.clear();
+                loop_guard.reset_for_steering();
                 set_agent_state(&db_path, &session_id, "streaming");
                 let _ = event_tx.send(LoopEvent::TurnComplete {
                     turn: iteration,
@@ -1857,7 +1842,7 @@ fn is_mutation_call(call: &crate::ai::types::AiToolCall) -> bool {
     let (name, arguments) = effective_tool_call(&call.name, &call.arguments);
     match name {
         "edit" | "write" | "multiedit" | "apply_patch" => true,
-        "agent" => arguments.get("agent_type").and_then(|value| value.as_str()) == Some("build"),
+        "agent" => agent_call_requests_write(arguments),
         "bash" | "shell" | "execute" => arguments
             .get("command")
             .and_then(|value| value.as_str())

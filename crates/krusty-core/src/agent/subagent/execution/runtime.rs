@@ -1,14 +1,15 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::Instant;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::agent::compaction::is_context_overflow_error;
 use crate::agent::constants::subagent;
-use crate::agent::failure;
 use crate::agent::history_policy::build_history_tool_result;
-use crate::agent::{ProgressLedger, RunProvenance};
+use crate::agent::progress::LoopGuard;
+use crate::agent::RunProvenance;
 use crate::ai::client::AiClient;
 use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
 use crate::tools::ToolResult;
@@ -95,10 +96,51 @@ fn record_delegated_process(
     }
 }
 
-/// Unified delegated, non-streaming tool loop for explorer/builder agents.
-///
-/// This kernel intentionally does not consume `RunSpec`: it has a separate
-/// message/tool protocol and inherits governance through `SubAgentTask`.
+fn compact_delegated_history(
+    messages: &mut Vec<ModelMessage>,
+    files_examined: &[String],
+    final_output: &str,
+    trigger: &str,
+) -> bool {
+    if messages.len() <= 3 {
+        return false;
+    }
+
+    // Retain a bounded complete tail beginning at an assistant turn so tool
+    // result messages never survive without their corresponding tool calls.
+    let mut tail_start = messages.len().saturating_sub(16).max(1);
+    while tail_start < messages.len() && !matches!(messages[tail_start].role, Role::Assistant) {
+        tail_start += 1;
+    }
+    if tail_start <= 1 {
+        return false;
+    }
+
+    let removed = messages.drain(1..tail_start).count();
+    let paths = files_examined
+        .iter()
+        .take(32)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let last_output = final_output.chars().take(2_000).collect::<String>();
+    messages.insert(
+        1,
+        ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: format!(
+                    "[DELEGATED COMPACTION CHECKPOINT]\nTrigger: {trigger}\nCompacted messages: {removed}\nEvidence paths: {paths}\nLatest synthesis: {last_output}\nContinue the original objective from this checkpoint; do not repeat completed work.\n[/DELEGATED COMPACTION CHECKPOINT]"
+                ),
+            }],
+        },
+    );
+    true
+}
+
+/// Delegated agents use a specialized non-streaming transport, while sharing
+/// canonical governance, semantic progress, failure, compaction, and history
+/// policies with the parent loop.
 pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     client: &AiClient,
     task: &SubAgentTask,
@@ -150,9 +192,8 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     let mut forced_read_before_completion = false;
     let mut structured_report_repair_requested = false;
     let mut background_processes = Vec::new();
-    let mut progress_ledger = ProgressLedger::new();
-    let mut tool_failure_signatures = HashMap::new();
-    let mut validation_pattern_signatures = HashMap::new();
+    let mut loop_guard = LoopGuard::new();
+    let mut overflow_compact_retry_attempted = false;
 
     let send_progress = |status: AgentProgressStatus,
                          action: &str,
@@ -221,6 +262,21 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
         }
 
         let max_turns_budget = delegated_turn_budget(task);
+        if let Some(mailbox) = task.mailbox.as_ref() {
+            let parent_messages = mailbox.drain();
+            if !parent_messages.is_empty() {
+                loop_guard.reset_for_steering();
+            }
+            for message in parent_messages {
+                messages.push(ModelMessage {
+                    role: Role::User,
+                    content: vec![Content::Text {
+                        text: format!("[PARENT MESSAGE]\n{message}\n[/PARENT MESSAGE]"),
+                    }],
+                });
+            }
+        }
+
         if let Some(max_turns) = max_turns_budget {
             if turns >= max_turns {
                 warn!(
@@ -287,6 +343,32 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
 
         let response = match tokio::time::timeout(config.api_call_timeout(), api_future).await {
             Ok(Ok(r)) => r,
+            Ok(Err(e))
+                if !overflow_compact_retry_attempted
+                    && is_context_overflow_error(&e.to_string())
+                    && compact_delegated_history(
+                        &mut messages,
+                        &files_examined,
+                        &final_output,
+                        "provider_overflow",
+                    ) =>
+            {
+                overflow_compact_retry_attempted = true;
+                turns = turns.saturating_sub(1);
+                warn!(
+                    task_id = %task_id,
+                    "Provider rejected delegated context; compacted in place and retrying once"
+                );
+                send_progress(
+                    AgentProgressStatus::Running,
+                    "compacted context; retrying",
+                    total_tool_calls,
+                    estimated_tokens,
+                    completion_summary_preview(&final_output),
+                    config,
+                );
+                continue;
+            }
             Ok(Err(e)) => {
                 send_progress(
                     AgentProgressStatus::Failed,
@@ -702,22 +784,16 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 arguments: call.input.clone(),
             })
             .collect::<Vec<_>>();
-        let repeated_failure = failure::detect_repeated_failures(
-            &mut tool_failure_signatures,
-            &progress_calls,
-            &tool_results,
-        );
-        let repeated_validation = failure::detect_repeated_validation_sequence(
-            &mut validation_pattern_signatures,
-            &progress_calls,
-            &tool_results,
-        );
-        let progress_telemetry = progress_ledger.record_turn(&progress_calls, &tool_results);
-        let guard_diagnostic = repeated_failure.or(repeated_validation).or_else(|| {
-            progress_telemetry
-                .as_ref()
-                .and_then(|telemetry| telemetry.diagnostic())
-        });
+        let guard = loop_guard.evaluate(&progress_calls, &tool_results);
+        let progress_telemetry = guard.progress;
+        let guard_diagnostic = guard
+            .repeated_failure
+            .or(guard.repeated_validation)
+            .or_else(|| {
+                progress_telemetry
+                    .as_ref()
+                    .and_then(|telemetry| telemetry.diagnostic())
+            });
 
         messages.push(ModelMessage {
             role: Role::User,
@@ -839,17 +915,65 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             stale_readonly_cycles = 0;
         }
 
-        if messages.len() > subagent::MAX_MESSAGES {
-            let to_remove = messages.len() - subagent::MAX_MESSAGES;
-            for _ in 0..to_remove {
-                messages.remove(1);
-            }
+        if messages.len() > subagent::MAX_MESSAGES
+            && compact_delegated_history(
+                &mut messages,
+                &files_examined,
+                &final_output,
+                "history_budget",
+            )
+        {
             tracing::debug!(
                 task_id = %task_id,
-                removed = to_remove,
                 remaining = messages.len(),
-                "Pruned messages to stay within limit"
+                "Compacted delegated history in place"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delegated_compaction_keeps_objective_checkpoint_and_complete_tail() {
+        let mut messages = vec![ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "original objective".to_string(),
+            }],
+        }];
+        for index in 0..20 {
+            messages.push(ModelMessage {
+                role: if index % 2 == 0 {
+                    Role::Assistant
+                } else {
+                    Role::User
+                },
+                content: vec![Content::Text {
+                    text: format!("turn {index}"),
+                }],
+            });
+        }
+        let original_len = messages.len();
+
+        assert!(compact_delegated_history(
+            &mut messages,
+            &["src/lib.rs".to_string()],
+            "latest finding",
+            "test",
+        ));
+        assert!(messages.len() < original_len);
+        assert!(matches!(messages[0].role, Role::User));
+        assert!(matches!(messages[1].role, Role::User));
+        assert!(matches!(messages[2].role, Role::Assistant));
+        let checkpoint = match &messages[1].content[0] {
+            Content::Text { text } => text,
+            _ => panic!("checkpoint must be text"),
+        };
+        assert!(checkpoint.contains("DELEGATED COMPACTION CHECKPOINT"));
+        assert!(checkpoint.contains("src/lib.rs"));
+        assert!(checkpoint.contains("latest finding"));
     }
 }

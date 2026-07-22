@@ -8,7 +8,7 @@ use crate::agent::subagent::{
     build_context::SharedBuildContext, AgentProgress, AgentProgressStatus,
     DelegatedProcessArtifact, SubAgentPool, SubAgentTask,
 };
-use crate::agent::DelegatedRunStage;
+use crate::agent::{AgentCancellation, DelegatedRunStage};
 use crate::storage::{
     Database, DelegatedRunRole, DelegatedRunScope, DelegatedRunStartInput, DelegatedRunStore,
     ProjectSettings,
@@ -181,7 +181,7 @@ impl AgentTool {
         let mut tasks: Vec<SubAgentTask> = Vec::new();
         let delegated_run_id = Uuid::new_v4().to_string();
         let delegation_policy =
-            DelegationPolicy::for_subagent_build(ctx.permission_mode, ctx.subagent_max_turns)
+            DelegationPolicy::for_subagent_build(ctx.permission_mode, params.max_turns)
                 .with_execution_tool_allowlist(ctx.execution_tool_allowlist.as_ref());
         let delegated_store = open_delegated_run_store(ctx);
         let mut target_scope = Vec::new();
@@ -237,7 +237,7 @@ impl AgentTool {
                 if let Some(sandbox_root) = ctx.sandbox_root.clone() {
                     task = task.with_sandbox_root(sandbox_root);
                 }
-                if let Some(max_turns) = ctx.subagent_max_turns {
+                if let Some(max_turns) = params.max_turns {
                     task = task.with_max_turns(max_turns);
                 }
 
@@ -275,7 +275,7 @@ impl AgentTool {
             if let Some(sandbox_root) = ctx.sandbox_root.clone() {
                 task = task.with_sandbox_root(sandbox_root);
             }
-            if let Some(max_turns) = ctx.subagent_max_turns {
+            if let Some(max_turns) = params.max_turns {
                 task = task.with_max_turns(max_turns);
             }
             tasks.push(task);
@@ -304,8 +304,32 @@ impl AgentTool {
             debug!("Builder {}: id={}, name={}", i, task.id, task.name);
         }
 
+        // Create one cancellation root and one broadcast mailbox per background run.
+        let background = params.run_in_background.unwrap_or(false);
+        let pool_cancellation = if background {
+            let run_cancellation = self.cancellation.child_token();
+            let first_mailbox = self.runtime.register(
+                delegated_run_id.clone(),
+                params.name.as_deref().unwrap_or("build"),
+                run_cancellation.clone(),
+            );
+            for (index, task) in tasks.iter_mut().enumerate() {
+                let mailbox = if index == 0 {
+                    first_mailbox.clone()
+                } else {
+                    self.runtime
+                        .subscribe(&delegated_run_id)
+                        .expect("registered build runtime")
+                };
+                *task = task.clone().with_mailbox(mailbox);
+            }
+            AgentCancellation::from_token(run_cancellation)
+        } else {
+            self.cancellation.clone()
+        };
+
         // Create pool and execute with build context
-        let mut pool = SubAgentPool::new(client, self.cancellation.clone())
+        let mut pool = SubAgentPool::new(client, pool_cancellation)
             .with_override_model(ctx.current_model.clone());
         if let Some(ceiling) = concurrency {
             pool = pool.with_concurrency(ceiling);
@@ -317,13 +341,14 @@ impl AgentTool {
         );
 
         // ── Background mode ──────────────────────────────────────────
-        if params.run_in_background.unwrap_or(false) {
+        if background {
             let bg_delegated_run_id = delegated_run_id.clone();
             let bg_db_path = ctx.db_path.clone();
             let bg_delegation_policy = delegation_policy.clone();
             let bg_process_registry = ctx.process_registry.clone();
             let bg_process_owner_id = ctx.user_id.clone();
             let progress_tx = ctx.agent_progress_tx.clone();
+            let bg_runtime = self.runtime.clone();
 
             tokio::spawn(async move {
                 // Keep a clone for the completion event after execute_builders consumes the tx
@@ -494,6 +519,7 @@ impl AgentTool {
                         debug!("Background build progress channel disconnected (parent returned)");
                     }
                 }
+                bg_runtime.finish(&bg_delegated_run_id, outcome == "success");
             });
 
             return background_started_result(&delegated_run_id, "build", params.name.as_deref());
