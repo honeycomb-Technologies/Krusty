@@ -45,6 +45,34 @@ class GrokCoreBehaviorTests(unittest.TestCase):
         }
         self.assertEqual(BEHAVIOR.progress_guard_action(event), "replan")
 
+    def test_loop_convergence_accepts_natural_replan_and_terminal_paths(self):
+        self.assertEqual(
+            BEHAVIOR.validate_loop_convergence_outcome(
+                "completed", 2, ["warn"]
+            ),
+            "model_completed_after_repeat_warning",
+        )
+        self.assertEqual(
+            BEHAVIOR.validate_loop_convergence_outcome(
+                "completed", 3, ["warn", "replan"]
+            ),
+            "guard_replan_then_completed",
+        )
+        self.assertEqual(
+            BEHAVIOR.validate_loop_convergence_outcome(
+                "loop_guard_triggered", 4, ["warn", "replan", "stop"]
+            ),
+            "guard_stop",
+        )
+
+    def test_loop_convergence_rejects_missing_telemetry_and_out_of_bound_calls(self):
+        with self.assertRaises(BEHAVIOR.AcceptanceFailure):
+            BEHAVIOR.validate_loop_convergence_outcome("completed", 2, [])
+        with self.assertRaises(BEHAVIOR.AcceptanceFailure):
+            BEHAVIOR.validate_loop_convergence_outcome(
+                "loop_guard_triggered", 5, ["warn", "replan", "stop"]
+            )
+
     def test_tree_snapshot_detects_content_and_path_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

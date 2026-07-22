@@ -127,8 +127,10 @@ It first runs two focused core-behavior lanes:
   executable mutation surface; both SSE and durable traces must report exactly
   those three advertised tool names;
 - an adversarial sequence of cosmetically different Grok Bash calls, proving
-  that canonical intent reaches replan or typed loop termination within the
-  semantic policy bound rather than repeating forever.
+  that canonical intent emits repeat telemetry and then reaches natural model
+  completion, replan, or typed loop termination within the semantic policy
+  bound rather than repeating forever. Deterministic fixtures force the full
+  `warn -> replan -> stop` sequence even when a live model sensibly stops early.
 
 Both lanes submit the exact catalog `ModelKey`, require an unlimited resolved
 interactive budget, and compare every redacted provider-request snapshot in SSE

@@ -54,6 +54,42 @@ def progress_guard_action(event: dict[str, Any]) -> str:
     return str(action)
 
 
+def validate_loop_convergence_outcome(
+    stop_reason: str,
+    bash_call_count: int,
+    actions: list[str],
+) -> str:
+    """Accept natural early convergence or the full warn/replan/stop policy."""
+    require(
+        2 <= bash_call_count <= 4,
+        f"semantic loop did not converge within the policy bound: "
+        f"bash_call_count={bash_call_count}",
+    )
+    expected_actions = ["warn", "replan", "stop"][: bash_call_count - 1]
+    require(
+        actions == expected_actions,
+        f"semantic loop progress sequence drifted: "
+        f"expected={expected_actions}, actual={actions}",
+    )
+
+    if bash_call_count == 4:
+        require(
+            stop_reason == "loop_guard_triggered",
+            f"terminal semantic guard used the wrong stop reason: {stop_reason}",
+        )
+        return "guard_stop"
+
+    require(
+        stop_reason == "completed",
+        f"early semantic convergence used the wrong stop reason: {stop_reason}",
+    )
+    return (
+        "model_completed_after_repeat_warning"
+        if bash_call_count == 2
+        else "guard_replan_then_completed"
+    )
+
+
 def tree_snapshot(root: Path) -> dict[str, str]:
     snapshot: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
@@ -379,19 +415,22 @@ forever."""
     calls = HARNESS.tool_calls(events)
     bash_calls = [call for call in calls if call.get("name") == "bash"]
     require(len(calls) == len(bash_calls), f"loop used non-Bash tools: {calls}")
-    require(
-        3 <= len(bash_calls) <= 4,
-        f"semantic loop did not converge within the policy bound: {bash_calls}",
-    )
     progress = [event for event in events if event.get("type") == "progress_guard"]
     require(progress, f"loop emitted no semantic progress telemetry: {types}")
     actions = [progress_guard_action(event) for event in progress]
-    require(
-        "replan" in actions or "stop" in actions,
-        f"loop never reached replan/stop policy: {progress}",
+    convergence_mode = validate_loop_convergence_outcome(
+        str(stop_reason), len(bash_calls), actions
     )
-    if stop_reason == "loop_guard_triggered":
-        require(actions[-1] == "stop", f"typed loop stop lacked stop telemetry: {progress}")
+    HARNESS.validate_usage_events(events, "semantic loop")
+    HARNESS.validate_complete_tool_lifecycles(
+        events,
+        "semantic loop",
+        exact_calls=len(bash_calls),
+        expected_name="bash",
+    )
+    response_text = HARNESS.event_text(events).strip()
+    if stop_reason == "completed":
+        require(response_text, "semantic loop completed without a user-visible conclusion")
     after = tree_snapshot(run_dir)
     require(before == after, f"loop scenario mutated its fixture: before={before}, after={after}")
 
@@ -420,12 +459,14 @@ forever."""
         "session_id": session_id,
         "run_dir": str(run_dir),
         "stop_reason": stop_reason,
+        "convergence_mode": convergence_mode,
         "bash_call_count": len(bash_calls),
         "commands": [call.get("arguments", {}).get("command") for call in bash_calls],
         "progress_guard_actions": actions,
         "tree_before": before,
         "tree_after": after,
         "duplicate_side_effects": 0,
+        "response_sha256": hashlib.sha256(response_text.encode()).hexdigest(),
         "trace_summary": summary,
         "runtime_contract": runtime,
     }
