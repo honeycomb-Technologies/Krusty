@@ -1623,10 +1623,51 @@ impl AgenticOrchestrator {
                 continue;
             }
 
+            // Repeating an already-successful validation pattern is positive
+            // convergence, not a runtime error. Complete deterministically
+            // here so the model cannot issue the same validation call again.
+            if let Some(completion) = validation_diagnostic {
+                tracing::info!(
+                    iteration,
+                    session_id = %session_id,
+                    completion = %completion,
+                    "Completing after repeated successful validation"
+                );
+                let _ = event_tx.send(LoopEvent::TextDelta {
+                    delta: completion.clone(),
+                });
+
+                let assistant_msg = ModelMessage {
+                    role: Role::Assistant,
+                    content: vec![Content::Text { text: completion }],
+                };
+                conversation.push(assistant_msg.clone());
+                context_ledger.update_from_conversation(&conversation);
+                persist_context_state(&db_path, &session_id, &context_ledger);
+                save_message(&db_path, &session_id, &assistant_msg);
+
+                if !title_generated {
+                    maybe_generate_title(&conversation, &event_tx, &session_id, &db_path);
+                }
+                if last_token_count > 0 {
+                    update_token_count(&db_path, &session_id, last_token_count);
+                }
+                clear_recovery_state(&db_path, &session_id);
+                set_agent_state(&db_path, &session_id, "idle");
+                let _ = event_tx.send(LoopEvent::TurnComplete {
+                    turn: iteration,
+                    has_more: false,
+                });
+                let _ = event_tx.send(LoopEvent::Finished {
+                    session_id: session_id.clone(),
+                    stop_reason: LoopStopReason::Completed,
+                });
+                return;
+            }
+
             // Check fail-fast
             if let Some(diagnostic) = fail_diagnostic
                 .or(explore_diagnostic)
-                .or(validation_diagnostic)
                 .or(progress_diagnostic)
             {
                 tracing::warn!(

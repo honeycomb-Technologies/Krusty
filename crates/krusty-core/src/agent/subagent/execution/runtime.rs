@@ -885,14 +885,12 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             .collect::<Vec<_>>();
         let guard = loop_guard.evaluate(&progress_calls, &tool_results);
         let progress_telemetry = guard.progress;
-        let guard_diagnostic = guard
-            .repeated_failure
-            .or(guard.repeated_validation)
-            .or_else(|| {
-                progress_telemetry
-                    .as_ref()
-                    .and_then(|telemetry| telemetry.diagnostic())
-            });
+        let validation_completion = guard.repeated_validation;
+        let guard_diagnostic = guard.repeated_failure.or_else(|| {
+            progress_telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.diagnostic())
+        });
 
         messages.push(ModelMessage {
             role: Role::User,
@@ -908,6 +906,41 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                     text: instruction.to_string(),
                 }],
             });
+        }
+        if let Some(completion) = validation_completion {
+            info!(
+                task_id = %task_id,
+                turns,
+                completion = %completion,
+                "Delegated run completed after repeated successful validation"
+            );
+            let output = if final_output.trim().is_empty() {
+                completion
+            } else {
+                format!("{}\n\n{}", final_output.trim(), completion)
+            };
+            send_progress(
+                AgentProgressStatus::Complete,
+                "validated",
+                total_tool_calls,
+                estimated_tokens,
+                completion_summary_preview(&output),
+                config,
+            );
+            config.cleanup();
+            return SubAgentResult {
+                task_id,
+                agent_name: task_name.clone(),
+                delegated_run_id: task.delegated_run_id.clone(),
+                success: true,
+                output,
+                files_examined,
+                duration_ms: start.elapsed().as_millis() as u64,
+                turns_used: turns,
+                error: None,
+                policy_violations,
+                background_processes: background_processes.clone(),
+            };
         }
         if let Some(diagnostic) = guard_diagnostic {
             warn!(

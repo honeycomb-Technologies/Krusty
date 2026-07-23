@@ -203,8 +203,8 @@ pub fn detect_repeated_validation_sequence(
 
     if *count >= REPEATED_VALIDATION_SEQUENCE_THRESHOLD {
         return Some(format!(
-            "Stopping validation loop: the same successful validation pattern repeated {} times without new changes. The work is already validated; summarize the result instead of running it again.",
-            *count
+            "Validation completed successfully. Krusty stopped the same successful validation pattern after {} consecutive runs without new changes; no further validation was necessary.",
+            *count,
         ));
     }
 
@@ -819,7 +819,8 @@ mod tests {
         )
         .expect("third equivalent validation turn should stop");
 
-        assert!(diagnostic.contains("already validated"));
+        assert!(diagnostic.starts_with("Validation completed successfully."));
+        assert!(diagnostic.contains("3 consecutive runs"));
     }
 
     #[test]
