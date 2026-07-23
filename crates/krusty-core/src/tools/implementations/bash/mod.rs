@@ -40,6 +40,27 @@ const BACKGROUND_STARTUP_GRACE_MS: u64 = 250;
 
 pub struct BashTool;
 
+fn normalize_tailscale_serve_result(command: &str, result: ToolResult) -> ToolResult {
+    if !crate::tailscale::command_contains_serve(command)
+        || !crate::tailscale::is_permission_denied(&result.output)
+    {
+        return result;
+    }
+
+    let original_result =
+        serde_json::from_str::<Value>(&result.output).unwrap_or(Value::String(result.output));
+    ToolResult::error_with_details(
+        "tailscale_operator_required",
+        "Tailscale Serve requires one-time operator authorization for the Krusty service account",
+        Some(json!({
+            "status": "operator_required",
+            "detail": original_result,
+            "next_action": "Ask the machine owner to configure the Krusty service account as a Tailscale operator. Do not retry with sudo, bind the preview to a non-loopback address, or replace an unrelated existing preview. After authorization, retry Tailscale Serve as its own command."
+        })),
+        None,
+    )
+}
+
 async fn background_start_result(
     registry: &ProcessRegistry,
     user_id: Option<&str>,

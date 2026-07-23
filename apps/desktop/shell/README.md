@@ -25,11 +25,11 @@ Build outputs:
 
 ## Linux Install + Run
 - Debian/Ubuntu:
-  - `sudo apt install "./src-tauri/target/release/bundle/deb/Krusty Desktop_0.8.2_amd64.deb"`
+  - `sudo apt install "./src-tauri/target/release/bundle/deb/Krusty Desktop_0.9.9_amd64.deb"`
 - Fedora/RHEL:
-  - `sudo dnf install "./src-tauri/target/release/bundle/rpm/Krusty Desktop-0.8.2-1.x86_64.rpm"`
+  - `sudo dnf install "./src-tauri/target/release/bundle/rpm/Krusty Desktop-0.9.9-1.x86_64.rpm"`
 - openSUSE:
-  - `sudo zypper install "./src-tauri/target/release/bundle/rpm/Krusty Desktop-0.8.2-1.x86_64.rpm"`
+  - `sudo zypper install "./src-tauri/target/release/bundle/rpm/Krusty Desktop-0.9.9-1.x86_64.rpm"`
 
 After install, launch with:
 - `krusty-desktop`
