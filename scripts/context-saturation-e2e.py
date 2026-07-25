@@ -314,7 +314,9 @@ The deterministic JSON index must contain a top-level `batches` list and `total_
 
 Create meaningful tests in tests/test_context_atlas.py, create README.md with exact commands, run the tests, and report files and results. Do not install packages or start a background process."""
     build_events = api.chat(chat_payload(grok_session, build_prompt, grok, thinking="off"))
-    build_text = completed_text(build_events, "Grok Context Atlas build")
+    build_text, build_recovered_tool_errors = completed_text_with_recovered_tool_errors(
+        build_events, "Grok Context Atlas build"
+    )
     build_trace, _ = HARNESS.wait_for_completed_trace_run(
         api, grok_session, "Grok Context Atlas build trace", after_sequence=0, timeout=10
     )
@@ -324,6 +326,7 @@ Create meaningful tests in tests/test_context_atlas.py, create README.md with ex
             "kind": "build",
             "assistant_text_sha256": hashlib.sha256(build_text.encode()).hexdigest(),
             "tool_calls": [call.get("name") for call in HARNESS.tool_calls(build_events)],
+            "recovered_tool_errors": build_recovered_tool_errors,
             "usage": usage_summary(build_events),
         }
     )
