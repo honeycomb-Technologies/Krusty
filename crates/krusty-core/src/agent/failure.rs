@@ -9,7 +9,8 @@ use std::hash::{Hash, Hasher};
 
 use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
 use crate::tools::registry::{
-    agent_call_execution_profile, effective_tool_call, tool_policy_for_call, ToolCategory,
+    agent_call_execution_profile, agent_call_starts_run, effective_tool_call, tool_policy_for_call,
+    ToolCategory,
 };
 
 /// Default threshold: stop after this many identical failures.
@@ -277,7 +278,9 @@ pub fn detect_terminal_explore_failure(
     let explore_ids = tool_calls
         .iter()
         .filter(|call| {
-            call.name == "agent" && agent_call_execution_profile(&call.arguments) == "explore"
+            call.name == "agent"
+                && agent_call_starts_run(&call.arguments)
+                && agent_call_execution_profile(&call.arguments) == "explore"
         })
         .map(|call| call.id.as_str())
         .collect::<Vec<_>>();
@@ -989,6 +992,33 @@ mod tests {
                     "successful_agents": 2,
                     "failed_agents": 0,
                     "files_examined_count": 24
+                }
+            }),
+            is_error: None,
+        }];
+
+        let diagnostic = detect_terminal_explore_failure(&tool_calls, &tool_results);
+        assert!(diagnostic.is_none());
+    }
+
+    #[test]
+    fn terminal_explore_failure_ignores_status_control_result() {
+        let tool_calls = vec![AiToolCall {
+            id: "tool-1".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({
+                "action": "status",
+                "profile": "explore",
+                "delegated_run_id": "run-1"
+            }),
+        }];
+        let tool_results = vec![Content::ToolResult {
+            tool_use_id: "tool-1".to_string(),
+            output: json!({
+                "summary": "delegated agent completed",
+                "result": {
+                    "status": "completed",
+                    "delegated_run_id": "run-1"
                 }
             }),
             is_error: None,
