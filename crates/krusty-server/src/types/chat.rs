@@ -1,3 +1,4 @@
+use krusty_core::ai::models::ModelKey;
 use krusty_core::storage::{SessionType, WorkMode, WorkspaceMode};
 use krusty_core::tools::registry::PermissionMode;
 use serde::{de, Deserialize, Deserializer};
@@ -118,6 +119,10 @@ pub struct ChatRequest {
     pub session_type: Option<SessionType>,
     /// Model override
     pub model: Option<String>,
+    /// Exact provider/auth/transport identity for the model override.
+    /// Modern clients should send this alongside the legacy `model` slug.
+    #[serde(default)]
+    pub model_key: Option<ModelKey>,
     /// Enable extended thinking
     #[serde(default, deserialize_with = "deserialize_thinking_level")]
     pub thinking_enabled: ThinkingLevel,
@@ -127,6 +132,10 @@ pub struct ChatRequest {
     /// the server uses the session's persisted mode.
     #[serde(default)]
     pub permission_mode: Option<PermissionMode>,
+    /// Optional per-turn tool allowlist. This may only narrow the tool surface
+    /// already selected by the server's session and project policy.
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
     /// Request provider fast/priority service tier without changing the selected model
     #[serde(default)]
     pub fast_mode: bool,
@@ -208,6 +217,43 @@ mod tests {
         assert!(req.fast_mode);
         assert_eq!(req.thinking_enabled, ThinkingLevel::Off);
         assert_eq!(req.permission_mode, None);
+    }
+
+    #[test]
+    fn chat_request_preserves_explicit_tool_allowlist() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "message": "audit",
+            "allowed_tools": ["glob", "grep", "read"]
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(
+            req.allowed_tools,
+            Some(vec!["glob".into(), "grep".into(), "read".into()])
+        );
+    }
+
+    #[test]
+    fn chat_request_accepts_provider_aware_model_key() {
+        let req: ChatRequest = serde_json::from_value(json!({
+            "message": "hello",
+            "model": "grok-4.5",
+            "model_key": {
+                "provider": "grok",
+                "model_id": "grok-4.5",
+                "auth_scope": "oauth",
+                "api_format": "open_ai_responses"
+            }
+        }))
+        .expect("request should deserialize");
+
+        let key = req.model_key.expect("model key should be retained");
+        assert_eq!(key.provider, krusty_core::ai::providers::ProviderId::Grok);
+        assert_eq!(key.model_id, "grok-4.5");
+        assert_eq!(
+            key.api_format,
+            krusty_core::ai::models::ApiFormat::OpenAIResponses
+        );
     }
 
     #[test]

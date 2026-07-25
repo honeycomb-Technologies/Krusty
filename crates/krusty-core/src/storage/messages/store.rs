@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::storage::database::Database;
 use crate::storage::episodes::EpisodeStore;
@@ -73,7 +73,11 @@ impl<'a> MessageStore<'a> {
     ) -> Result<Option<String>> {
         let role = format!("pending_user:{pending_id}");
         let now = Utc::now().to_rfc3339();
-        let tx = self.db.conn().unchecked_transaction()?;
+        // Reserve the writer before reading the pending row. With a deferred
+        // transaction another connection can commit after this read, making
+        // the read snapshot impossible to upgrade and surfacing an immediate
+        // SQLITE_BUSY_SNAPSHOT despite the connection busy timeout.
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
         let content = tx
             .query_row(
                 "SELECT content FROM messages WHERE session_id = ?1 AND role = ?2 LIMIT 1",
@@ -127,7 +131,9 @@ impl<'a> MessageStore<'a> {
     /// persisted its final assistant message after the steering was staged.
     pub fn promote_orphaned_pending_steering(&self, session_id: &str) -> Result<usize> {
         let now = Utc::now().to_rfc3339();
-        let tx = self.db.conn().unchecked_transaction()?;
+        // This read-then-write sequence must reserve the writer up front; see
+        // `promote_pending_steering` for the WAL snapshot-upgrade race.
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
         let pending = {
             let mut stmt = tx.prepare(
                 "SELECT content FROM messages
@@ -185,7 +191,10 @@ impl<'a> MessageStore<'a> {
         messages: &[(String, String)],
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
-        let tx = self.db.conn().unchecked_transaction()?;
+        // Preserve pending rows and replace canonical history from one stable
+        // writer snapshot. A deferred transaction can lose its write upgrade
+        // when the scheduler commits between the SELECT and DELETE.
+        let tx = Transaction::new_unchecked(self.db.conn(), TransactionBehavior::Immediate)?;
 
         let pending = {
             let mut stmt = tx.prepare(

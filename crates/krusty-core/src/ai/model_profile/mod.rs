@@ -6,8 +6,12 @@
 mod profile;
 mod prompts;
 
-pub use profile::{CompactionBudgets, ModelProfile, PromptFamily, StreamDrainPolicy};
-pub use prompts::{build_system_prompt_sections, partition_system_messages, SystemPromptSections};
+pub use crate::ai::transport_policy::StreamDrainPolicy;
+pub use profile::{ModelProfile, PromptFamily};
+pub use prompts::{
+    build_system_prompt_sections, partition_system_messages, PromptSection, PromptSectionKind,
+    PromptStability, SystemPromptSections,
+};
 
 #[cfg(test)]
 mod tests {
@@ -36,7 +40,29 @@ mod tests {
         );
 
         assert_eq!(profile.prompt_family, PromptFamily::OpenAiCodex);
-        assert!(profile.supports_reasoning_summary);
+    }
+
+    #[test]
+    fn resolves_grok_family_before_openai_responses_transport_family() {
+        let profile =
+            ModelProfile::resolve(ProviderId::Grok, ApiFormat::OpenAIResponses, "grok-4.5");
+
+        assert_eq!(profile.prompt_family, PromptFamily::Grok);
+    }
+
+    #[test]
+    fn grok_overlay_forbids_placeholder_tools_after_direct_steering() {
+        let sections = build_system_prompt_sections(
+            ProviderId::Grok,
+            ApiFormat::OpenAIResponses,
+            "grok-4.5",
+            &[],
+            None,
+            &[],
+        );
+
+        assert!(sections.base_prompt.contains("latest user instruction"));
+        assert!(sections.base_prompt.contains("Never issue a no-op"));
     }
 
     #[test]
@@ -67,25 +93,6 @@ mod tests {
         assert!(!sections.base_prompt.contains("## Provider Guidance"));
         assert!(!sections.base_prompt.contains("## Capability Guidance"));
         assert!(sections.base_prompt.len() <= 5_000);
-    }
-
-    #[test]
-    fn codex_profiles_use_more_aggressive_stream_drain_policy() {
-        let codex = ModelProfile::resolve(
-            ProviderId::OpenAI,
-            ApiFormat::OpenAIResponses,
-            "gpt-5.3-codex",
-        )
-        .stream_drain_policy();
-        let generic = ModelProfile::resolve(
-            ProviderId::Anthropic,
-            ApiFormat::Anthropic,
-            "claude-sonnet-4.5",
-        )
-        .stream_drain_policy();
-
-        assert!(codex.catch_up_batch_limit > generic.catch_up_batch_limit);
-        assert!(codex.hard_queue_limit > generic.hard_queue_limit);
     }
 
     #[test]

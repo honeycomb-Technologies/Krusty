@@ -9,10 +9,11 @@ use krusty_core::storage::RuntimeTraceEvent;
 use krusty_mako_protocol::MakoIpcClientConfig;
 use krusty_mako_protocol::{
     AckResponse, Actor, ClientError, Command, CreateScheduleCommand, DaemonStats, DispatchCommand,
-    EventEnvelope, EventSubscription, MakoEvent, MakoIpcClient, MessageCommand, RecoverCommand,
-    ReplaceScheduleCommand, RequestEnvelope, ResponsePayload, ScheduleCommand, ScheduleDefinition,
-    ScheduleResponse, SessionCommand, SetCrewCommand, SetPriorityCommand, SetScheduleStatusCommand,
-    SteerCommand, SubscribeCommand, ToolApprovalCommand, UserResponseCommand,
+    EventEnvelope, EventSubscription, MakoEvent, MakoIpcClient, MessageCommand, ModelKey,
+    RecoverCommand, ReplaceScheduleCommand, RequestEnvelope, ResponsePayload, ScheduleCommand,
+    ScheduleDefinition, ScheduleResponse, SessionCommand, SetCrewCommand, SetPriorityCommand,
+    SetScheduleStatusCommand, SteerCommand, SubscribeCommand, ToolApprovalCommand,
+    UserResponseCommand, MODEL_IDENTITY_PROTOCOL_MINOR, PROTOCOL_MAJOR,
 };
 
 use super::MakoRuntimeStats;
@@ -96,6 +97,17 @@ impl MakoDaemonControl {
             .await?
         {
             ResponsePayload::Stats(stats) => {
+                if stats.protocol.major != PROTOCOL_MAJOR
+                    || stats.protocol.minor < MODEL_IDENTITY_PROTOCOL_MINOR
+                {
+                    bail!(
+                        "Mako daemon protocol {}.{} cannot preserve exact model identity; upgrade and restart the daemon (requires {}.{})",
+                        stats.protocol.major,
+                        stats.protocol.minor,
+                        PROTOCOL_MAJOR,
+                        MODEL_IDENTITY_PROTOCOL_MINOR
+                    )
+                }
                 let pump_alive = stats.runtime.pump_alive;
                 let scheduler_ready = stats.runtime.scheduler_ready;
                 if pump_alive && scheduler_ready {
@@ -137,6 +149,8 @@ impl MakoDaemonControl {
         working_dir: &str,
         project_dir: Option<&str>,
         model: Option<&str>,
+        model_key: Option<&ModelKey>,
+        model_catalog_revision: Option<&str>,
         start_at_unix_ms: Option<i64>,
         priority: Option<&str>,
         crew_slug: Option<&str>,
@@ -147,6 +161,8 @@ impl MakoDaemonControl {
             working_dir,
             project_dir,
             model,
+            model_key,
+            model_catalog_revision,
             start_at_unix_ms,
             priority,
             crew_slug,
@@ -560,6 +576,8 @@ fn dispatch_command(
     working_dir: &str,
     project_dir: Option<&str>,
     model: Option<&str>,
+    model_key: Option<&ModelKey>,
+    model_catalog_revision: Option<&str>,
     start_at_unix_ms: Option<i64>,
     priority: Option<&str>,
     crew_slug: Option<&str>,
@@ -569,6 +587,8 @@ fn dispatch_command(
         working_dir: working_dir.to_string(),
         project_dir: project_dir.map(ToOwned::to_owned),
         model: model.map(ToOwned::to_owned),
+        model_key: model_key.cloned(),
+        model_catalog_revision: model_catalog_revision.map(ToOwned::to_owned),
         start_at_unix_ms,
         priority: priority.map(ToOwned::to_owned),
         crew_slug: crew_slug.map(ToOwned::to_owned),
@@ -927,10 +947,19 @@ mod tests {
 
     #[cfg(unix)]
     fn scheduler_stats(pump_alive: bool, scheduler_ready: bool) -> ResponsePayload {
+        scheduler_stats_at_protocol(pump_alive, scheduler_ready, ProtocolVersion::CURRENT)
+    }
+
+    #[cfg(unix)]
+    fn scheduler_stats_at_protocol(
+        pump_alive: bool,
+        scheduler_ready: bool,
+        protocol: ProtocolVersion,
+    ) -> ResponsePayload {
         ResponsePayload::Stats(DaemonStats {
             instance_id: "test-daemon-instance".to_string(),
             daemon_version: "test-daemon-version".to_string(),
-            protocol: ProtocolVersion::CURRENT,
+            protocol,
             uptime_secs: 1,
             active_connections: 1,
             handled_requests: 1,
@@ -1070,6 +1099,44 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn healthcheck_rejects_daemon_that_cannot_preserve_exact_model_identity() {
+        let temp = tempfile::tempdir().expect("temp directory should exist");
+        let socket_path = temp.path().join("mako.sock");
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let key = IpcKey::generate();
+        let server_key = key.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, request) = accept_authenticated_request(&listener, &server_key).await;
+            assert!(matches!(request.command, Command::Stats));
+            respond(
+                &mut stream,
+                &request,
+                scheduler_stats_at_protocol(
+                    true,
+                    true,
+                    ProtocolVersion {
+                        major: PROTOCOL_MAJOR,
+                        minor: MODEL_IDENTITY_PROTOCOL_MINOR - 1,
+                    },
+                ),
+            )
+            .await;
+        });
+
+        let error = MakoDaemonControl::connect_client(MakoIpcClient::new(
+            MakoIpcClientConfig::new(socket_path, "protocol-health-test"),
+            key,
+        ))
+        .await
+        .expect_err("an old daemon must not silently discard exact model identity");
+        assert!(error
+            .to_string()
+            .contains("cannot preserve exact model identity"));
+        server.await.expect("test daemon should finish");
+    }
+
+    #[cfg(unix)]
     fn accepted() -> ResponsePayload {
         ResponsePayload::Ack(AckResponse {
             accepted: true,
@@ -1086,6 +1153,8 @@ mod tests {
                 "/work",
                 Some("/project"),
                 Some("model"),
+                None,
+                None,
                 Some(42),
                 Some("high"),
                 Some("reviewers")

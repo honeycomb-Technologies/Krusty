@@ -3,6 +3,7 @@ use crate::tui::app::{App, Popup, View};
 impl App {
     pub(super) fn open_home_view(&mut self) {
         self.runtime.current_session_id = None;
+        self.runtime.model_selection_explicit = false;
         self.runtime.chat.messages.clear();
         self.runtime.chat.streaming_assistant_idx = None;
         self.runtime.chat.conversation.clear();
@@ -91,7 +92,7 @@ impl App {
                 let working_dir = self.runtime.working_dir.clone();
                 let cmd = shell_cmd.to_string();
                 tokio::spawn(async move {
-                    registry
+                    if let Err(error) = registry
                         .register_external(
                             process_id,
                             format!("terminal: {}", cmd),
@@ -99,7 +100,10 @@ impl App {
                             pid,
                             working_dir,
                         )
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(%error, "Interactive terminal rejected by process registry");
+                    }
                 });
 
                 self.runtime.blocks.terminal.push(pane);

@@ -4,10 +4,12 @@ use super::execution::{join_reader_with_timeout, BoundedOutputBuffer};
 #[cfg(unix)]
 use super::shell::{build_shell_command, configure_foreground_process_group};
 use super::shell::{normalize_tracked_background_command, strip_shell_background_suffix};
-use super::{background_endpoint_hints, output_spool_path, BashTool};
+use super::{
+    background_endpoint_hints, normalize_tailscale_serve_result, output_spool_path, BashTool,
+};
 use crate::process::ProcessRegistry;
 use crate::tools::registry::Tool;
-use crate::tools::ToolContext;
+use crate::tools::{ToolContext, ToolResult};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -15,6 +17,42 @@ use std::sync::Arc;
 use std::process::Stdio;
 #[cfg(unix)]
 use std::time::Duration;
+
+#[test]
+fn tailscale_operator_denial_overrides_masked_compound_success() {
+    let result = ToolResult::success_data(json!({
+        "output": "sending serve config: 401 Unauthorized: must be root, or be an operator and able to run 'sudo tailscale' to serve a path\nafter-command-ok"
+    }));
+
+    let normalized = normalize_tailscale_serve_result(
+        "tailscale serve --bg --https=9443 http://127.0.0.1:5180; echo after-command-ok",
+        result,
+    );
+
+    assert!(normalized.is_error, "{}", normalized.output);
+    let envelope: serde_json::Value = serde_json::from_str(&normalized.output).expect("tool JSON");
+    assert_eq!(
+        envelope["error"]["code"].as_str(),
+        Some("tailscale_operator_required")
+    );
+    assert_eq!(
+        envelope["data"]["status"].as_str(),
+        Some("operator_required")
+    );
+    assert!(envelope["data"]["next_action"]
+        .as_str()
+        .is_some_and(|message| message.contains("Do not retry with sudo")));
+}
+
+#[test]
+fn unrelated_permission_text_is_not_reclassified_as_tailscale_serve() {
+    let result = ToolResult::success_data(json!({
+        "output": "401 Unauthorized: must be root, or be an operator"
+    }));
+
+    let normalized = normalize_tailscale_serve_result("curl https://example.com", result);
+    assert!(!normalized.is_error, "{}", normalized.output);
+}
 
 #[cfg(unix)]
 struct TestProcessCleanup {
@@ -238,6 +276,99 @@ fn output_spool_is_workspace_local_and_session_scoped() {
     );
 }
 
+#[test]
+fn output_spool_prefers_runtime_state_over_the_project_workspace() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let working_dir = temp.path().join("workspace");
+    let state_dir = temp.path().join("state");
+    let ctx = ToolContext {
+        working_dir: working_dir.clone(),
+        db_path: Some(state_dir.join("krusty.db")),
+        session_id: Some("session-1".to_string()),
+        ..Default::default()
+    };
+
+    let path = output_spool_path(&ctx);
+    assert!(path.starts_with(state_dir.join("tool-output/session-1")));
+    assert!(!path.starts_with(working_dir));
+}
+
+fn changed_value(result: &crate::tools::ToolResult) -> Option<bool> {
+    serde_json::from_str::<serde_json::Value>(&result.output)
+        .ok()
+        .and_then(|value| value.get("changed").and_then(serde_json::Value::as_bool))
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn foreground_bash_reports_real_file_state_deltas() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let working_dir = temp.path().canonicalize().expect("canonical tempdir");
+    let state_dir = temp.path().join("state");
+    std::fs::create_dir(&state_dir).expect("state dir");
+    let ctx = ToolContext {
+        working_dir: working_dir.clone(),
+        sandbox_root: Some(working_dir.clone()),
+        db_path: Some(state_dir.join("krusty.db")),
+        ..Default::default()
+    };
+
+    let first_append = BashTool
+        .execute(json!({"command": "printf x >> log"}), &ctx)
+        .await;
+    let second_append = BashTool
+        .execute(json!({"command": "printf x >> log"}), &ctx)
+        .await;
+    assert!(!first_append.is_error, "{}", first_append.output);
+    assert!(!second_append.is_error, "{}", second_append.output);
+    assert_eq!(changed_value(&first_append), Some(true));
+    assert_eq!(changed_value(&second_append), Some(true));
+    assert_eq!(
+        std::fs::read_to_string(working_dir.join("log")).unwrap(),
+        "xx"
+    );
+
+    let first_overwrite = BashTool
+        .execute(json!({"command": "printf stable > output"}), &ctx)
+        .await;
+    let repeated_overwrite = BashTool
+        .execute(json!({"command": "printf stable > output"}), &ctx)
+        .await;
+    assert_eq!(changed_value(&first_overwrite), Some(true));
+    assert_eq!(changed_value(&repeated_overwrite), None);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn foreground_bash_never_claims_equal_directory_or_symlink_is_unchanged() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let working_dir = temp.path().canonicalize().expect("canonical tempdir");
+    let state_dir = temp.path().join("state");
+    std::fs::create_dir(&state_dir).expect("state dir");
+    std::fs::create_dir(working_dir.join("existing")).expect("existing dir");
+    std::fs::write(working_dir.join("target"), "value").expect("target");
+    symlink("target", working_dir.join("link")).expect("symlink");
+    let ctx = ToolContext {
+        working_dir: working_dir.clone(),
+        sandbox_root: Some(working_dir.clone()),
+        db_path: Some(state_dir.join("krusty.db")),
+        ..Default::default()
+    };
+
+    let directory = BashTool
+        .execute(json!({"command": "command mkdir -p ./existing"}), &ctx)
+        .await;
+    let symlink = BashTool
+        .execute(json!({"command": "printf value > link"}), &ctx)
+        .await;
+    assert!(!directory.is_error, "{}", directory.output);
+    assert!(!symlink.is_error, "{}", symlink.output);
+    assert_eq!(changed_value(&directory), None);
+    assert_eq!(changed_value(&symlink), None);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn truncated_output_keeps_recoverable_full_log() {
@@ -457,6 +588,57 @@ async fn equivalent_background_launch_reuses_owner_scoped_process() {
         .kill(&unscoped_process_id)
         .await
         .expect("kill default-owner process");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exact_non_endpoint_background_launch_is_reused_and_not_recredited() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let working_dir = temp.path().canonicalize().expect("canonical tempdir");
+    let registry = Arc::new(ProcessRegistry::new());
+    let ctx = ToolContext::with_process_registry(working_dir, Arc::clone(&registry))
+        .with_user_id("plain-background-owner".to_string());
+
+    let first = BashTool
+        .execute(
+            json!({"command": "sleep 30", "run_in_background": true}),
+            &ctx,
+        )
+        .await;
+    let repeated = BashTool
+        .execute(
+            json!({"command": "sleep 30", "run_in_background": true}),
+            &ctx,
+        )
+        .await;
+    assert!(!first.is_error, "{}", first.output);
+    assert!(!repeated.is_error, "{}", repeated.output);
+    assert_eq!(changed_value(&first), Some(true));
+    assert_eq!(changed_value(&repeated), Some(false));
+
+    let first_envelope: serde_json::Value =
+        serde_json::from_str(&first.output).expect("first tool JSON");
+    let repeated_envelope: serde_json::Value =
+        serde_json::from_str(&repeated.output).expect("repeated tool JSON");
+    assert_eq!(
+        first_envelope["data"]["process_id"],
+        repeated_envelope["data"]["process_id"]
+    );
+    assert_eq!(repeated_envelope["data"]["reused_existing"], json!(true));
+    assert_eq!(
+        registry.list_for_user("plain-background-owner").await.len(),
+        1
+    );
+
+    registry
+        .kill_for_user(
+            "plain-background-owner",
+            first_envelope["data"]["process_id"]
+                .as_str()
+                .expect("process id"),
+        )
+        .await
+        .expect("kill plain background process");
 }
 
 #[cfg(unix)]

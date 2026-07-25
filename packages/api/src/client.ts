@@ -34,6 +34,7 @@ import type {
 	MemorySnapshotResponse,
 	PromoteReportToMemoryResponse,
 	MakoAttentionResponse,
+	MakoDispatchOptions,
 	MakoDispatchResponse,
 	MakoBootstrapResponse,
 	MakoCrewDocumentKind,
@@ -47,6 +48,7 @@ import type {
 	MakoSessionSummary,
 	PermissionMode,
 	MakoSessionStatus,
+	ModelKey,
 	ApnsRegisterResponse,
 	ApnsStatusResponse,
 		SimpleOkResponse,
@@ -228,6 +230,7 @@ export class KrustyClient {
 			title: string;
 			mode: string;
 			model: string | null;
+			model_key: ModelKey | null;
 			target_branch: string | null;
 			targetBranch: string | null;
 			permission_mode: PermissionMode;
@@ -275,10 +278,16 @@ export class KrustyClient {
 		return this.request("/models");
 	}
 
-	async setCurrentModel(model: string | null): Promise<SimpleOkResponse> {
+	async setCurrentModel(
+		model: string | null,
+		modelKey?: ModelKey | null,
+	): Promise<SimpleOkResponse> {
 		return this.request("/models/current", {
 			method: "PUT",
-			body: JSON.stringify({ model }),
+			body: JSON.stringify({
+				model,
+				model_key: modelKey ?? undefined,
+			}),
 		});
 	}
 
@@ -632,13 +641,7 @@ export class KrustyClient {
 	// Mako
 	async dispatchMako(
 		task: string,
-		options?: {
-			projectDir?: string;
-			model?: string;
-			startAt?: string;
-			priority?: MakoRunPriority;
-			crewSlug?: string | null;
-		},
+		options?: MakoDispatchOptions,
 	): Promise<MakoDispatchResponse> {
 		return this.request("/mako/dispatch", {
 			method: "POST",
@@ -646,6 +649,7 @@ export class KrustyClient {
 				task,
 				project_dir: options?.projectDir ?? undefined,
 				model: options?.model ?? undefined,
+				model_key: options?.modelKey ?? undefined,
 				start_at: options?.startAt ?? undefined,
 				priority: options?.priority ?? undefined,
 				crew_slug: options?.crewSlug ?? undefined,

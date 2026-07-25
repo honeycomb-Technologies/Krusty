@@ -34,6 +34,7 @@ impl TeammateRole {
                 max_turns,
                 read_only_only: false,
                 bash_allowed: false,
+                execution_tool_allowlist: None,
             },
             Self::Reviewer | Self::Tester => DelegationPolicy {
                 surface: DelegationSurface::SubagentVerify,
@@ -41,6 +42,7 @@ impl TeammateRole {
                 max_turns,
                 read_only_only: true,
                 bash_allowed: true,
+                execution_tool_allowlist: None,
             },
         }
     }

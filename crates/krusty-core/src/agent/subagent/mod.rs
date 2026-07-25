@@ -5,8 +5,7 @@
 //! They cannot modify files or execute arbitrary commands.
 //!
 //! ## Provider-Agnostic Design
-//! Sub-agents use the user's current model by default. Set override_model
-//! when creating SubAgentPool to use the same model as the main agent.
+//! Sub-agents inherit the parent's immutable resolved model runtime.
 //!
 //! ## Module Structure
 //! - `build_context`: Shared builder coordination context
@@ -17,7 +16,9 @@
 pub mod build_context;
 mod execution;
 mod identity;
+mod lifecycle;
 mod scheduler;
+mod spec;
 mod tools;
 mod types;
 
@@ -39,10 +40,12 @@ use self::build_context::SharedBuildContext;
 
 // Re-export public types
 pub use identity::AgentIdentity;
+pub use lifecycle::{AgentMailbox, AgentRuntimeManager, AgentRuntimeSnapshot, AgentRuntimeStatus};
 pub use scheduler::{
     AdaptiveConcurrencyPolicy, AgentScheduler, BackpressureSignal, ScheduleRequest,
     SchedulerSnapshot, SchedulingClass,
 };
+pub use spec::{AgentCapability, AgentContextMode, AgentExecutionProfile, AgentSpec};
 pub use tools::BuilderTools;
 pub use types::{
     AgentProgress, AgentProgressStatus, DelegatedProcessArtifact, SubAgentApiError, SubAgentResult,
@@ -51,7 +54,7 @@ pub use types::{
 
 // Re-export single agent entry points
 pub use execution::execute_single_explorer;
-pub(crate) use execution::{execute_single_agent, AgentConfig, SingleExplorerConfig};
+pub(crate) use execution::{execute_single_agent, AgentConfig};
 
 // Internal execution functions
 use execution::execute_builder_with_progress;
@@ -63,8 +66,6 @@ pub struct SubAgentPool {
     /// Optional user ceiling. The default scheduler limit is derived from host
     /// capacity and adapts to observed provider health.
     concurrency_ceiling: Option<usize>,
-    /// Override model for non-Anthropic providers (uses user's selected model)
-    override_model: Option<String>,
     /// Delay between spawning agents (prevents rate limit storms)
     stagger_delay: Duration,
 }
@@ -75,7 +76,6 @@ impl SubAgentPool {
             client,
             cancellation,
             concurrency_ceiling: None,
-            override_model: None,
             stagger_delay: Duration::from_millis(DEFAULT_STAGGER_MS),
         }
     }
@@ -85,12 +85,20 @@ impl SubAgentPool {
         self
     }
 
-    /// Set the model for sub-agent tasks
-    ///
-    /// This should be set to the user's current model for provider-agnostic behavior.
-    /// If not set, falls back to the client's configured model.
-    pub fn with_override_model(mut self, model: Option<String>) -> Self {
-        self.override_model = model;
+    /// Backward-compatible confirmation of the inherited model. A delegated
+    /// model change needs its own exactly resolved `AiClient`; silently
+    /// reusing this client's credentials and transport would be unsafe.
+    pub fn with_override_model(self, model: Option<String>) -> Self {
+        if model
+            .as_deref()
+            .is_some_and(|model| model != self.client.resolved_model().wire_model_id.as_str())
+        {
+            warn!(
+                requested_model = ?model,
+                inherited_model = %self.client.resolved_model().wire_model_id,
+                "Ignoring delegated model override without an exact resolved client"
+            );
+        }
         self
     }
 
@@ -102,13 +110,8 @@ impl SubAgentPool {
 
     /// Get the model to use for sub-agent tasks
     ///
-    /// Returns the override_model (user's current model). This must be set
-    /// when creating the SubAgentPool via `with_override_model()`.
-    /// Falls back to the client's configured model if not set.
     fn resolve_model(&self) -> String {
-        self.override_model
-            .clone()
-            .unwrap_or_else(|| self.client.config().model.clone())
+        self.client.resolved_model().wire_model_id.clone()
     }
 
     fn scheduler(&self) -> AgentScheduler {

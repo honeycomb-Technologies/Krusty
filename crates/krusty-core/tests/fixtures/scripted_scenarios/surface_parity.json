@@ -1,0 +1,104 @@
+{
+  "fixtures": [
+    {
+      "name": "grok_4_5_build_runtime",
+      "expected": {
+        "provider": "grok",
+        "model": "grok-4.5",
+        "transport": "openai_responses",
+        "reasoning_effort": "high",
+        "permission_mode": "autonomous",
+        "max_turns": null,
+        "tools": ["bash", "edit", "grep", "read", "write"]
+      },
+      "surfaces": [
+        {
+          "surface": "server",
+          "resolved": {
+            "provider": "grok",
+            "model": "grok-4.5",
+            "transport": "openai_responses",
+            "reasoning_effort": "high",
+            "permission_mode": "autonomous",
+            "max_turns": null,
+            "tools": ["read", "grep", "write", "edit", "bash"]
+          }
+        },
+        {
+          "surface": "tui",
+          "resolved": {
+            "provider": "grok",
+            "model": "grok-4.5",
+            "transport": "openai_responses",
+            "reasoning_effort": "high",
+            "permission_mode": "autonomous",
+            "max_turns": null,
+            "tools": ["bash", "edit", "grep", "read", "write"]
+          }
+        },
+        {
+          "surface": "acp",
+          "resolved": {
+            "provider": "grok",
+            "model": "grok-4.5",
+            "transport": "openai_responses",
+            "reasoning_effort": "high",
+            "permission_mode": "autonomous",
+            "max_turns": null,
+            "tools": ["write", "read", "bash", "grep", "edit"]
+          }
+        }
+      ]
+    },
+    {
+      "name": "read_only_audit_runtime",
+      "expected": {
+        "provider": "openai",
+        "model": "gpt-5.6",
+        "transport": "responses",
+        "reasoning_effort": "high",
+        "permission_mode": "supervised",
+        "max_turns": null,
+        "tools": ["glob", "grep", "read"]
+      },
+      "surfaces": [
+        {
+          "surface": "server",
+          "resolved": {
+            "provider": "openai",
+            "model": "gpt-5.6",
+            "transport": "responses",
+            "reasoning_effort": "high",
+            "permission_mode": "supervised",
+            "max_turns": null,
+            "tools": ["read", "glob", "grep"]
+          }
+        },
+        {
+          "surface": "tui",
+          "resolved": {
+            "provider": "openai",
+            "model": "gpt-5.6",
+            "transport": "responses",
+            "reasoning_effort": "high",
+            "permission_mode": "supervised",
+            "max_turns": null,
+            "tools": ["grep", "read", "glob"]
+          }
+        },
+        {
+          "surface": "acp",
+          "resolved": {
+            "provider": "openai",
+            "model": "gpt-5.6",
+            "transport": "responses",
+            "reasoning_effort": "high",
+            "permission_mode": "supervised",
+            "max_turns": null,
+            "tools": ["glob", "grep", "read"]
+          }
+        }
+      ]
+    }
+  ]
+}

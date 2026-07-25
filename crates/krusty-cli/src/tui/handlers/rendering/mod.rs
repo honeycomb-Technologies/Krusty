@@ -46,7 +46,7 @@ impl App {
                 f,
                 &self.ui.theme,
                 self.runtime.active_provider,
-                &self.runtime.current_model,
+                self.runtime.current_model_key.as_ref(),
                 self.runtime.context_tokens_used,
             ),
             Popup::SessionList => self.ui.popups.session.render(f, &self.ui.theme),

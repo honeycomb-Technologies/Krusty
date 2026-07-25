@@ -16,7 +16,7 @@ use super::common::{
     scroll_indicator, PopupSize,
 };
 use crate::ai::format_detection::detect_api_format;
-use crate::ai::models::{infer_model_metadata, ModelMetadata};
+use crate::ai::models::{infer_model_metadata, ModelKey, ModelMetadata};
 use crate::ai::providers::ProviderId;
 use crate::tui::themes::Theme;
 
@@ -405,7 +405,7 @@ impl ModelSelectPopup {
         f: &mut Frame,
         theme: &Theme,
         active_provider: ProviderId,
-        current_model: &str,
+        current_model_key: Option<&ModelKey>,
         context_tokens_used: usize,
     ) {
         let (w, h) = PopupSize::Large.dimensions();
@@ -532,7 +532,8 @@ impl ModelSelectPopup {
                     }
                     ModelEntry::Model { metadata } => {
                         let is_selected = display_idx == self.selected_index;
-                        let is_current = metadata.id == current_model;
+                        let is_current =
+                            current_model_key.is_some_and(|key| metadata.key() == *key);
                         let is_too_small = context_tokens_used > metadata.context_window;
 
                         // Fixed-width prefix (6 chars)

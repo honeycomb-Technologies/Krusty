@@ -30,18 +30,140 @@ pub enum ModelAuthScope {
 /// API format for model requests
 ///
 /// Different model families route to different provider endpoints based on format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiFormat {
     /// Anthropic Messages API (/v1/messages)
     #[default]
     Anthropic,
     /// OpenAI Chat Completions API (/v1/chat/completions)
+    #[serde(rename = "open_ai", alias = "open_a_i")]
     OpenAI,
     /// OpenAI Responses API (/v1/responses) - GPT-5 models
+    #[serde(rename = "open_ai_responses", alias = "open_a_i_responses")]
     OpenAIResponses,
     /// Google AI API (/v1/models/{model})
     Google,
+}
+
+/// Stable source classification for a model-catalog row.
+///
+/// Keeping this on the row makes it possible to distinguish a bundled safety
+/// fallback from a credential-scoped live discovery result without inferring
+/// provenance from the model name later in the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCatalogSource {
+    Curated,
+    CachedDynamic,
+    LiveDynamic,
+    Custom,
+    /// Rows written before provenance became explicit.
+    #[default]
+    Legacy,
+}
+
+/// Provider-aware identity for one executable model transport.
+///
+/// A bare model slug is not globally unique. The same slug may be advertised
+/// by multiple providers, credential surfaces, or wire APIs. This key is used
+/// by the registry, preferences, and session persistence so those variants do
+/// not overwrite or silently impersonate one another.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ModelKey {
+    pub provider: ProviderId,
+    pub model_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_scope: Option<ModelAuthScope>,
+    pub api_format: ApiFormat,
+}
+
+impl ModelKey {
+    pub fn new(provider: ProviderId, model_id: impl Into<String>, api_format: ApiFormat) -> Self {
+        Self {
+            provider,
+            model_id: model_id.into(),
+            auth_scope: None,
+            api_format,
+        }
+    }
+
+    pub fn with_auth_scope(mut self, auth_scope: ModelAuthScope) -> Self {
+        self.auth_scope = Some(auth_scope);
+        self
+    }
+
+    pub fn from_metadata(metadata: &ModelMetadata) -> Self {
+        Self {
+            provider: metadata.provider,
+            model_id: metadata.id.clone(),
+            auth_scope: metadata.auth_scope,
+            api_format: metadata.api_format,
+        }
+    }
+}
+
+/// Project-owned model selection.
+///
+/// Legacy settings stored a bare model slug. New settings may store the full
+/// provider/auth/transport key so routing stays exact when multiple catalogs
+/// advertise the same slug. The untagged representation preserves existing
+/// `.krusty/settings.json` files without guessing when a slug is ambiguous.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ProjectModelRef {
+    Exact(ModelKey),
+    Legacy(String),
+}
+
+impl ProjectModelRef {
+    pub fn model_id(&self) -> &str {
+        match self {
+            Self::Exact(key) => &key.model_id,
+            Self::Legacy(model_id) => model_id,
+        }
+    }
+
+    pub fn exact_key(&self) -> Option<&ModelKey> {
+        match self {
+            Self::Exact(key) => Some(key),
+            Self::Legacy(_) => None,
+        }
+    }
+}
+
+/// Capability snapshot used for the lifetime of one run.
+///
+/// This is deliberately separate from mutable catalog storage. Once resolved,
+/// a catalog refresh cannot change the request contract under an active run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCapabilities {
+    pub context_window: usize,
+    pub max_output: usize,
+    pub supports_thinking: bool,
+    pub reasoning_format: Option<ReasoningFormat>,
+    pub supported_reasoning_levels: Vec<ReasoningEffort>,
+    pub default_reasoning_level: Option<ReasoningEffort>,
+    pub reasoning_is_mandatory: bool,
+    pub reasoning_control: Option<ReasoningControl>,
+    pub fast_mode: Option<FastMode>,
+    pub supports_tools: bool,
+    pub supports_vision: bool,
+}
+
+/// Immutable executable model selection resolved from one exact catalog row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedModelRuntime {
+    pub key: ModelKey,
+    /// Exact model identifier sent on the wire. Kept separate from future UI
+    /// aliases even though it currently matches `key.model_id`.
+    pub wire_model_id: String,
+    pub display_name: String,
+    pub capabilities: ModelCapabilities,
+    pub catalog_source: ModelCatalogSource,
+    pub catalog_revision: Option<String>,
+    pub input_price: Option<f64>,
+    pub output_price: Option<f64>,
 }
 
 /// Rich model metadata
@@ -102,6 +224,12 @@ pub struct ModelMetadata {
     /// API format for this model, used for provider routing.
     #[serde(default)]
     pub api_format: ApiFormat,
+    /// Where this exact catalog row came from.
+    #[serde(default)]
+    pub catalog_source: ModelCatalogSource,
+    /// Opaque revision/fingerprint for the catalog snapshot that supplied it.
+    #[serde(default)]
+    pub catalog_revision: Option<String>,
 }
 
 impl ModelMetadata {
@@ -127,7 +255,60 @@ impl ModelMetadata {
             output_price: None,
             sub_provider: None,
             is_free: false,
-            api_format: ApiFormat::default(),
+            api_format: match provider {
+                ProviderId::Anthropic | ProviderId::MiniMax | ProviderId::OpenRouter => {
+                    ApiFormat::Anthropic
+                }
+                ProviderId::OpenAI | ProviderId::ZAi => ApiFormat::OpenAI,
+                ProviderId::Grok => ApiFormat::OpenAIResponses,
+            },
+            catalog_source: ModelCatalogSource::Legacy,
+            catalog_revision: None,
+        }
+    }
+
+    pub fn key(&self) -> ModelKey {
+        ModelKey::from_metadata(self)
+    }
+
+    pub fn with_transport(mut self, api_format: ApiFormat) -> Self {
+        self.api_format = api_format;
+        self
+    }
+
+    pub fn with_catalog_provenance(
+        mut self,
+        source: ModelCatalogSource,
+        revision: Option<String>,
+    ) -> Self {
+        self.catalog_source = source;
+        self.catalog_revision = revision;
+        self
+    }
+
+    /// Freeze this mutable catalog row into a run-scoped capability snapshot.
+    pub fn resolve_runtime(&self) -> ResolvedModelRuntime {
+        ResolvedModelRuntime {
+            key: self.key(),
+            wire_model_id: self.id.clone(),
+            display_name: self.display_name.clone(),
+            capabilities: ModelCapabilities {
+                context_window: self.context_window,
+                max_output: self.max_output,
+                supports_thinking: self.supports_thinking,
+                reasoning_format: self.reasoning_format,
+                supported_reasoning_levels: self.supported_reasoning_levels.clone(),
+                default_reasoning_level: self.default_reasoning_level,
+                reasoning_is_mandatory: self.reasoning_is_mandatory,
+                reasoning_control: self.reasoning_control,
+                fast_mode: self.fast_mode,
+                supports_tools: self.supports_tools,
+                supports_vision: self.supports_vision,
+            },
+            catalog_source: self.catalog_source,
+            catalog_revision: self.catalog_revision.clone(),
+            input_price: self.input_price,
+            output_price: self.output_price,
         }
     }
 

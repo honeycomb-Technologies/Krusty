@@ -8,7 +8,9 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 use krusty_core::agent::learning::{
     review_latest_completed_mako_turn, PostTurnLearningReviewRequest,
 };
-use krusty_core::agent::{LoopEvent, OrchestratorConfig, OrchestratorServices};
+use krusty_core::agent::{
+    LoopEvent, OrchestratorServices, RunBudget, RunProvenance, RunSpecBuilder,
+};
 use krusty_core::ai::client::CallOptions;
 use krusty_core::ai::types::{Role, WebFetchConfig, WebSearchConfig};
 use krusty_core::plan::PlanManager;
@@ -133,11 +135,44 @@ pub(crate) async fn run_mako_session_inner(
     let claimed_model = execution_spec
         .as_ref()
         .map(|spec| Some(spec.model.as_str()))
-        .unwrap_or(session.model.as_deref());
+        .unwrap_or(session.model.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("Mako execution has no frozen model"))?;
+    let claimed_model_key = execution_spec
+        .as_ref()
+        .map(|spec| spec.model_key.as_ref())
+        .unwrap_or(session.model_key.as_ref());
+    let model_key = match claimed_model_key {
+        Some(key) => {
+            anyhow::ensure!(
+                key.model_id == claimed_model,
+                "Mako frozen model does not match its exact model key"
+            );
+            key.clone()
+        }
+        None => state
+            .model_registry
+            .resolve_legacy_key(claimed_model)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "legacy Mako model cannot be resolved to one exact runtime: {error}"
+                )
+            })?,
+    };
     let ai_client = state
-        .resolve_ai_client_for_user(claimed_model, session.user_id.as_deref())
+        .resolve_ai_client_for_key_for_user(&model_key, session.user_id.as_deref())
         .await
         .ok_or_else(|| anyhow::anyhow!("No AI credentials configured"))?;
+    let claimed_catalog_revision = execution_spec
+        .as_ref()
+        .map(|spec| spec.model_catalog_revision.as_deref())
+        .unwrap_or(session.model_catalog_revision.as_deref());
+    tracing::info!(
+        model_key = ?model_key,
+        claimed_catalog_revision,
+        resolved_catalog_revision = ai_client.resolved_model().catalog_revision.as_deref(),
+        "Resolved exact Mako model runtime"
+    );
     let learning_ai_client = Arc::clone(&ai_client);
     let learning_model = ai_client.config().model.clone();
 
@@ -197,6 +232,37 @@ pub(crate) async fn run_mako_session_inner(
         ..Default::default()
     };
 
+    let run_spec = RunSpecBuilder::new(
+        RunProvenance::Mako,
+        session_id.clone(),
+        working_dir,
+        SessionType::Mako,
+    )
+    .project_dir(project_dir)
+    .mako_crew_slug(
+        execution_spec
+            .as_ref()
+            .map(|spec| spec.crew_slug.clone())
+            .unwrap_or_else(|| runtime_state.and_then(|state| state.crew_slug)),
+    )
+    .mako_profile(Some(mako_profile))
+    .permission_mode(
+        execution_spec
+            .as_ref()
+            .map(|spec| spec.permission_mode)
+            .unwrap_or(session.permission_mode),
+    )
+    // Mako is persistent, but no individual autonomous tick is allowed an
+    // unbounded parent loop. TickEngine clones this finite budget for each
+    // subsequent tick in the same run.
+    .run_budget(Some(RunBudget::with_max_turns(
+        mako_settings.max_turns_per_tick,
+    )))
+    .user_id(session.user_id.clone())
+    .initial_work_mode(work_mode)
+    .generate_title(generate_title)
+    .call_options(options)
+    .build(ai_client.as_ref())?;
     let services = OrchestratorServices {
         ai_client,
         tool_registry: Arc::clone(&state.tool_registry),
@@ -204,43 +270,19 @@ pub(crate) async fn run_mako_session_inner(
         db_path: (*state.db_path).clone(),
         skills_manager,
     };
-    let config = OrchestratorConfig {
-        session_id: session_id.clone(),
-        working_dir,
-        project_dir,
-        mako_crew_slug: execution_spec
-            .as_ref()
-            .map(|spec| spec.crew_slug.clone())
-            .unwrap_or_else(|| runtime_state.and_then(|state| state.crew_slug)),
-        mako_profile: Some(mako_profile),
-        session_type: SessionType::Mako,
-        permission_mode: execution_spec
-            .as_ref()
-            .map(|spec| spec.permission_mode)
-            .unwrap_or(session.permission_mode),
-        // Mako is persistent, but no individual autonomous tick is allowed an
-        // unbounded parent loop. TickEngine clones this finite budget for each
-        // subsequent tick in the same run.
-        max_iterations: Some(mako_settings.max_turns_per_tick),
-        user_id: session.user_id.clone(),
-        initial_work_mode: work_mode,
-        generate_title,
-        ..Default::default()
-    };
 
     let (mut event_rx, input_tx) = {
         use krusty_core::agent::autonomy::tick_engine::{TickEngine, TickEngineConfig};
         TickEngine::run(
             services,
-            config,
+            run_spec,
             TickEngineConfig {
                 tick_interval: Duration::from_secs(mako_settings.tick_interval_secs),
                 max_ticks: mako_settings.max_ticks,
                 enabled: true,
             },
             conversation,
-            options,
-        )
+        )?
     };
 
     let session_inputs = Arc::clone(&state.session_inputs);

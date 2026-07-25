@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use krusty_core::ai::providers::ProviderId;
 use krusty_core::mako::{
     canonical_timestamp, DstPolicy, MakoRunStatus, MisfireConfig, MisfireDispatch,
     MisfireResolution, RecurrenceV1, RetryPolicy,
@@ -15,9 +16,9 @@ use krusty_core::storage::{
 };
 use krusty_mako_protocol::{
     Actor, Command, CreateScheduleCommand, DispatchCommand, ExtensionCommand, MakoEvent,
-    MessageCommand, PeerIdentity, ReplaceScheduleCommand, ResponsePayload, ScheduleCommand,
-    ScheduleDefinition, SessionCommand, SetPriorityCommand, SteerCommand, SubscribeCommand,
-    ToolApprovalCommand, UserResponseCommand,
+    MessageCommand, ModelKey, PeerIdentity, ReplaceScheduleCommand, ResponsePayload,
+    ScheduleCommand, ScheduleDefinition, SessionCommand, SetPriorityCommand, SteerCommand,
+    SubscribeCommand, ToolApprovalCommand, UserResponseCommand,
 };
 use tempfile::TempDir;
 use tokio::sync::Notify;
@@ -481,6 +482,13 @@ fn dispatch_command() -> Command {
         working_dir: "/work/repo".into(),
         project_dir: Some("/work/repo".into()),
         model: Some("test:model".into()),
+        model_key: Some(ModelKey {
+            provider: "grok".into(),
+            model_id: "test:model".into(),
+            auth_scope: Some("oauth".into()),
+            api_format: "open_ai_responses".into(),
+        }),
+        model_catalog_revision: Some("catalog-42".into()),
         start_at_unix_ms: None,
         priority: Some("normal".into()),
         crew_slug: None,
@@ -509,7 +517,7 @@ async fn wait_for(condition: impl Fn() -> bool) {
     // The runtime polls every 20ms in tests, but a full workspace test run can
     // initialize many isolated SQLite databases concurrently. Keep this bound
     // finite while allowing slow CI hosts to make durable scheduler progress.
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         while !condition() {
             // Most predicates reopen SQLite. Poll slowly enough that the
             // observation connection cannot starve the writer transaction it
@@ -870,6 +878,8 @@ async fn recurring_schedule_inherits_frozen_session_config_and_rejects_stale_rev
         priority: 0,
         project_dir: None,
         model: None,
+        model_key: None,
+        model_catalog_revision: None,
         crew_slug: None,
         misfire: serde_json::to_value(MisfireConfig::default()).unwrap(),
         overlap_policy: "queue_one".into(),
@@ -927,6 +937,14 @@ async fn recurring_schedule_inherits_frozen_session_config_and_rejects_stale_rev
         .unwrap();
     assert_eq!(schedule.project_dir.as_deref(), Some("/work/repo"));
     assert_eq!(schedule.model.as_deref(), Some("test:model"));
+    assert_eq!(
+        schedule.model_key.as_ref().map(|key| key.provider),
+        Some(ProviderId::Grok)
+    );
+    assert_eq!(
+        schedule.model_catalog_revision.as_deref(),
+        Some("catalog-42")
+    );
     assert_eq!(schedule.crew_slug.as_deref(), Some("ops"));
 
     let error = handler
@@ -1085,6 +1103,20 @@ async fn message_after_completion_queues_exactly_one_idempotent_followup_run() {
     assert_eq!(
         db.conn()
             .query_row(
+                "SELECT COUNT(*) FROM sessions
+                 WHERE id = ?1
+                   AND json_extract(model_key_json, '$.provider') = 'grok'
+                   AND model_catalog_revision = 'catalog-42'",
+                [&session_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1,
+        "dispatch must freeze exact identity on the session",
+    );
+    assert_eq!(
+        db.conn()
+            .query_row(
                 "SELECT COUNT(*) FROM mako_runs WHERE session_id = ?1",
                 [&session_id],
                 |row| row.get::<_, i64>(0),
@@ -1097,6 +1129,8 @@ async fn message_after_completion_queues_exactly_one_idempotent_followup_run() {
             .query_row(
                 "SELECT COUNT(*) FROM mako_runs
                  WHERE json_extract(config_json, '$.model') = 'test:model'
+                   AND json_extract(config_json, '$.model_key.provider') = 'grok'
+                   AND json_extract(config_json, '$.model_catalog_revision') = 'catalog-42'
                    AND json_extract(config_json, '$.permission_mode') = 'autonomous'",
                 [],
                 |row| row.get::<_, i64>(0),
@@ -1333,6 +1367,8 @@ async fn queue_claim_execution_and_once_schedule_survive_the_process_boundary() 
             .query_row(
                 "SELECT COUNT(*) FROM mako_runs
                  WHERE json_extract(config_json, '$.model') = 'test:model'
+                   AND json_extract(config_json, '$.model_key.provider') = 'grok'
+                   AND json_extract(config_json, '$.model_catalog_revision') = 'catalog-42'
                    AND json_extract(config_json, '$.permission_mode') = 'autonomous'",
                 [],
                 |row| row.get::<_, i64>(0),
@@ -1484,9 +1520,12 @@ async fn takeover_reconciles_a_worker_lease_that_expires_after_acquisition() {
     let _test_guard = runtime_test_guard().await;
     let temp = TempDir::new().unwrap();
     let mut runtime_config = config(&temp);
-    runtime_config.daemon_lease_duration = Duration::from_millis(150);
-    runtime_config.worker_lease_duration = Duration::from_millis(500);
-    runtime_config.worker_heartbeat_interval = Duration::from_millis(50);
+    // Shutdown releases the daemon lease, so the replacement still acquires
+    // immediately. Keep the worker lease longer than ordinary CI scheduling
+    // jitter while leaving ample room for it to expire inside `wait_for`.
+    runtime_config.daemon_lease_duration = Duration::from_secs(2);
+    runtime_config.worker_lease_duration = Duration::from_secs(1);
+    runtime_config.worker_heartbeat_interval = Duration::from_millis(100);
 
     let first_backend = Arc::new(BlockingBackend::default());
     let first = start_runtime(runtime_config.clone(), "daemon-a", first_backend.clone())
@@ -2507,22 +2546,23 @@ async fn noncooperative_cancel_terminalizes_after_grace_and_rejects_late_worker_
     );
     wait_for(|| backend.execution_dropped.load(Ordering::SeqCst)).await;
 
-    let controls = backend.controls.lock().unwrap();
-    assert!(controls.iter().any(|(controlled_session, control)| {
-        controlled_session == &session_id
-            && matches!(control, ExecutionControl::Cancel { reason } if reason == "cancelled by user")
-    }));
-    assert!(controls.iter().any(|(controlled_session, control)| {
-        controlled_session == &session_id
-            && matches!(control, ExecutionControl::CancelRun { run_id: controlled_run, reason }
-                if controlled_run == &run_id && reason == "cancelled by user")
-    }));
-    assert!(controls.iter().any(|(controlled_session, control)| {
-        controlled_session == &session_id
-            && matches!(control, ExecutionControl::AbortRun { run_id: controlled_run, reason }
-                if controlled_run == &run_id && reason == "cancellation grace elapsed")
-    }));
-    drop(controls);
+    {
+        let controls = backend.controls.lock().unwrap();
+        assert!(controls.iter().any(|(controlled_session, control)| {
+            controlled_session == &session_id
+                && matches!(control, ExecutionControl::Cancel { reason } if reason == "cancelled by user")
+        }));
+        assert!(controls.iter().any(|(controlled_session, control)| {
+            controlled_session == &session_id
+                && matches!(control, ExecutionControl::CancelRun { run_id: controlled_run, reason }
+                    if controlled_run == &run_id && reason == "cancelled by user")
+        }));
+        assert!(controls.iter().any(|(controlled_session, control)| {
+            controlled_session == &session_id
+                && matches!(control, ExecutionControl::AbortRun { run_id: controlled_run, reason }
+                    if controlled_run == &run_id && reason == "cancellation grace elapsed")
+        }));
+    }
 
     response(
         handler.as_ref(),
@@ -2858,7 +2898,7 @@ async fn execution_events_are_bounded_ordered_replayable_and_drained_before_comp
     let mut runtime_config = config(&temp);
     runtime_config.execution_event_capacity = 1;
     runtime_config.max_execution_event_bytes = 512;
-    let backend = Arc::new(EventBackend::default());
+    let backend = Arc::new(EventBackend);
     let runtime = start_runtime(runtime_config.clone(), "daemon-a", backend.clone())
         .await
         .unwrap();

@@ -19,6 +19,7 @@ use serde_json::Value;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::agent::LoopEvent;
+use crate::ai::models::{ModelKey, ResolvedModelRuntime};
 use crate::extensions::bun_runtime::BunRuntime;
 use crate::tools::{ToolContext, ToolRegistry};
 
@@ -97,6 +98,10 @@ pub struct ExtensionCallContext {
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_key: Option<ModelKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_catalog_revision: Option<String>,
     pub permission_mode: String,
     pub plan_mode: bool,
 }
@@ -108,6 +113,11 @@ impl ExtensionCallContext {
             project_dir: context.project_dir.clone(),
             session_id: context.session_id.clone(),
             model: context.current_model.clone(),
+            model_key: context.current_model_key.clone(),
+            model_catalog_revision: context
+                .ai_client
+                .as_ref()
+                .and_then(|client| client.resolved_model().catalog_revision.clone()),
             permission_mode: format!("{:?}", context.permission_mode).to_ascii_lowercase(),
             plan_mode: context.plan_mode,
         }
@@ -126,6 +136,28 @@ impl ExtensionCallContext {
             project_dir,
             session_id,
             model,
+            model_key: None,
+            model_catalog_revision: None,
+            permission_mode: permission_mode.into(),
+            plan_mode,
+        }
+    }
+
+    pub fn for_resolved_turn(
+        working_dir: PathBuf,
+        project_dir: Option<PathBuf>,
+        session_id: Option<String>,
+        runtime: &ResolvedModelRuntime,
+        permission_mode: impl Into<String>,
+        plan_mode: bool,
+    ) -> Self {
+        Self {
+            working_dir,
+            project_dir,
+            session_id,
+            model: Some(runtime.wire_model_id.clone()),
+            model_key: Some(runtime.key.clone()),
+            model_catalog_revision: runtime.catalog_revision.clone(),
             permission_mode: permission_mode.into(),
             plan_mode,
         }
@@ -1185,6 +1217,10 @@ fn loop_event_name(event: &LoopEvent) -> &'static str {
         LoopEvent::PlanComplete { .. } => "plan_complete",
         LoopEvent::AgentSleeping { .. } => "agent_sleeping",
         LoopEvent::TurnComplete { .. } => "turn_complete",
+        LoopEvent::RunBudgetResolved { .. } => "run_budget_resolved",
+        LoopEvent::ProviderRequestPrepared { .. } => "provider_request_prepared",
+        LoopEvent::MicrocompactionApplied { .. } => "microcompaction_applied",
+        LoopEvent::ProgressGuard { .. } => "progress_guard",
         LoopEvent::TickInjected { .. } => "tick_injected",
         LoopEvent::Usage { .. } => "usage",
         LoopEvent::SessionPinched { .. } => "session_pinched",

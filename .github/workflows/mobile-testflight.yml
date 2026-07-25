@@ -43,11 +43,19 @@ jobs:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
 
-      - name: Build iOS
-        run: eas build --platform ios --profile production --non-interactive
+      - name: Build exact iOS candidate
+        id: eas-build
+        run: |
+          eas build --platform ios --profile production --non-interactive --wait --json > eas-build.json
+          build_id=$(bun -e 'const value = JSON.parse(await Bun.file("eas-build.json").text()); const build = Array.isArray(value) ? value[0] : value; if (!build?.id) process.exit(1); process.stdout.write(build.id)')
+          if [[ -z "$build_id" ]]; then
+            echo "EAS did not return an exact build id" >&2
+            exit 1
+          fi
+          echo "build_id=$build_id" >> "$GITHUB_OUTPUT"
 
-      - name: Submit to TestFlight
-        run: eas submit --platform ios --latest --non-interactive
+      - name: Submit exact build to TestFlight
+        run: eas submit --platform ios --id "${{ steps.eas-build.outputs.build_id }}" --non-interactive
         env:
           EXPO_APPLE_ID: ${{ secrets.EXPO_APPLE_ID }}
           EXPO_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.EXPO_APPLE_APP_SPECIFIC_PASSWORD }}

@@ -24,6 +24,7 @@ function assertEquals(actual: unknown, expected: unknown, message: string) {
 
 function testHarness() {
   const ref = { current: createStreamingAssistantMessage() };
+  let setCount = 0;
   let state: any = {
     messages: [ref.current],
     queuedMessages: [],
@@ -33,6 +34,7 @@ function testHarness() {
     thinkingContent: '',
   };
   const set = (partial: any) => {
+    setCount += 1;
     const update = typeof partial === 'function' ? partial(state) : partial;
     state = { ...state, ...update };
   };
@@ -42,7 +44,7 @@ function testHarness() {
     persistSessionMode: async () => {},
   });
 
-  return { callbacks, ref, state: () => state };
+  return { callbacks, ref, state: () => state, setCount: () => setCount };
 }
 
 Deno.test('duplicate tool starts remain one live tool block', () => {
@@ -60,6 +62,43 @@ Deno.test('duplicate tool starts remain one live tool block', () => {
     'tool render part should be idempotent',
   );
   assertEquals(ref.current.toolCalls?.[0]?.status, 'success', 'result updates the tool');
+});
+
+Deno.test('bursty thinking and tool output deltas commit once per frame', async () => {
+  const thinking = testHarness();
+  const thinkingBaseline = thinking.setCount();
+  thinking.callbacks.onThinkingDelta('one ');
+  thinking.callbacks.onThinkingDelta('two');
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  assertEquals(
+    thinking.setCount() - thinkingBaseline,
+    1,
+    'thinking deltas should share one presentation update',
+  );
+  assertEquals(
+    thinking.ref.current.thinking,
+    'one two',
+    'thinking content should retain every delta',
+  );
+
+  const tools = testHarness();
+  tools.callbacks.onToolCallStart('tool-stream', 'bash');
+  const toolBaseline = tools.setCount();
+  tools.callbacks.onToolOutputDelta?.('tool-stream', 'one ');
+  tools.callbacks.onToolOutputDelta?.('tool-stream', 'two');
+  await new Promise((resolve) => setTimeout(resolve, 25));
+
+  assertEquals(
+    tools.setCount() - toolBaseline,
+    1,
+    'tool output deltas should share one presentation update',
+  );
+  assertEquals(
+    tools.ref.current.toolCalls?.[0]?.output,
+    'one two',
+    'tool output should retain every delta',
+  );
 });
 
 Deno.test('tool-loop completion starts a distinct live assistant subturn', () => {

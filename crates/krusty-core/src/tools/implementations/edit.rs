@@ -126,6 +126,11 @@ Preserve exact indentation and prefer small replacements. Use replace_all:true o
                     });
 
                     ToolResult::success_data_with(data, warnings, Some(diff), None)
+                        .with_changed(new_content != content)
+                        .with_progress_change_paths(
+                            std::slice::from_ref(&path),
+                            ctx.sandbox_root.as_deref().unwrap_or(&ctx.working_dir),
+                        )
                 }
                 Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
             }
@@ -182,6 +187,11 @@ Preserve exact indentation and prefer small replacements. Use replace_all:true o
                             });
 
                             ToolResult::success_data_with(data, warnings, Some(diff), None)
+                                .with_changed(new_content != content)
+                                .with_progress_change_paths(
+                                    std::slice::from_ref(&path),
+                                    ctx.sandbox_root.as_deref().unwrap_or(&ctx.working_dir),
+                                )
                         }
                         Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
                     }

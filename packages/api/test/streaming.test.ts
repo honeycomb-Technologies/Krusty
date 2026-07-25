@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { KrustyClient, type StreamCallbacks } from "../src";
+import { KrustyClient, type ModelKey, type StreamCallbacks } from "../src";
 
 function streamResponse(...chunks: string[]): Response {
 	const encoder = new TextEncoder();
@@ -53,6 +53,40 @@ function clientFor(response: Response): KrustyClient {
 }
 
 describe("KrustyClient streaming lifecycle", () => {
+	test("sends an exact model key when a chat stream starts", async () => {
+		const modelKey: ModelKey = {
+			provider: "grok",
+			model_id: "grok-4.5",
+			auth_scope: "oauth",
+			api_format: "open_ai_responses",
+		};
+		let requestBody: unknown;
+		const client = new KrustyClient({
+			baseUrl: "https://krusty.test",
+			fetchImpl: (async (_input, init) => {
+				requestBody = JSON.parse(String(init?.body));
+				return streamResponse(
+					'data: {"type":"finish","session_id":"session-key","stop_reason":"end_turn"}\n\n',
+				);
+			}) as typeof fetch,
+		});
+
+		await client.streamChat(
+			{
+				message: "Build the project",
+				model: modelKey.model_id,
+				model_key: modelKey,
+			},
+			createCallbacks(),
+		);
+
+		expect(requestBody).toEqual({
+			message: "Build the project",
+			model: "grok-4.5",
+			model_key: modelKey,
+		});
+	});
+
 	test("surfaces a readable 402 provider limit error before streaming starts", async () => {
 		const errors: string[] = [];
 		const client = clientFor(

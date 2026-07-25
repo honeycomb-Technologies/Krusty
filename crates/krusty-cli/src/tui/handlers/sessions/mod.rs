@@ -10,7 +10,7 @@ mod tests;
 mod title;
 
 use crate::ai::types::{ModelMessage, Role};
-use crate::storage::SessionManager;
+use crate::storage::{ProjectSettings, SessionManager};
 use crate::tui::app::App;
 
 pub(crate) fn storage_role_to_api_role(role: &str) -> Role {
@@ -26,6 +26,16 @@ pub(crate) fn storage_role_to_api_role(role: &str) -> Role {
 impl App {
     /// Create a new session
     pub fn create_session(&mut self, first_message: &str) -> Option<String> {
+        let project_settings = ProjectSettings::load(&self.runtime.working_dir);
+        if let Err(error) = self.prepare_primary_run_model(&project_settings) {
+            tracing::warn!(%error, "Failed to resolve model before creating a session");
+            self.runtime
+                .chat
+                .messages
+                .push(("system".to_string(), error.to_string()));
+            return None;
+        }
+
         let Some(sm) = &self.services.session_manager else {
             return None;
         };
@@ -35,12 +45,31 @@ impl App {
         let working_dir_str = self.runtime.working_dir.to_string_lossy().into_owned();
 
         let selected_model = self.runtime.current_model.trim();
+        let selected_key = self.runtime.current_model_key.clone().filter(|key| {
+            key.model_id == selected_model && key.provider == self.runtime.active_provider
+        });
+        let catalog_revision = self
+            .selected_model_metadata()
+            .and_then(|metadata| metadata.catalog_revision);
         match sm.create_session(
             &fallback_title,
             (!selected_model.is_empty()).then_some(selected_model),
             Some(&working_dir_str),
         ) {
             Ok(id) => {
+                if let Some(key) = selected_key.as_ref() {
+                    if let Err(error) = sm.update_session_model_selection(
+                        &id,
+                        Some(key),
+                        catalog_revision.as_deref(),
+                    ) {
+                        tracing::warn!(
+                            %error,
+                            session_id = %id,
+                            "Failed to persist exact model identity for new session"
+                        );
+                    }
+                }
                 if let Err(error) =
                     sm.update_session_permission_mode(&id, self.runtime.permission_mode)
                 {

@@ -4,7 +4,7 @@
 //! Used by both ACP and TUI to route requests correctly.
 
 use super::models::ApiFormat;
-use super::providers::ProviderId;
+use super::providers::{get_provider, ProviderId};
 
 /// Detect the appropriate API format for a provider/model combination
 ///
@@ -15,15 +15,23 @@ use super::providers::ProviderId;
 /// - Z.ai Coding Plan: OpenAI chat/completions format
 /// - OpenRouter and MiniMax: Anthropic format
 pub fn detect_api_format(provider: ProviderId, model: &str) -> ApiFormat {
+    if let Some(api_format) = get_provider(provider)
+        .and_then(|config| {
+            config
+                .models
+                .iter()
+                .find(|candidate| candidate.id.eq_ignore_ascii_case(model))
+        })
+        .and_then(|model| model.api_format)
+    {
+        return api_format;
+    }
+
     match provider {
-        ProviderId::Grok => grok_api_format(model),
+        ProviderId::Grok => ApiFormat::OpenAIResponses,
         ProviderId::OpenAI | ProviderId::ZAi => ApiFormat::OpenAI,
         _ => ApiFormat::Anthropic,
     }
-}
-
-fn grok_api_format(_model: &str) -> ApiFormat {
-    ApiFormat::OpenAIResponses
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-# Extensibility parity: OpenCode, Pi, Codex, and Krusty
+# Extensibility parity: OpenCode, Pi, Goose, Codex, and Krusty
 
 This audit compares the plugin/package, Agent Skills, hook/extension, and MCP
 surfaces that are useful to a coding-agent harness. It is based on the current
@@ -7,9 +7,12 @@ official documentation for [OpenCode plugins](https://opencode.ai/docs/plugins/)
 [OpenCode MCP](https://opencode.ai/docs/mcp-servers/),
 [Pi extensions](https://pi.dev/docs/latest/extensions),
 [Pi packages](https://pi.dev/docs/latest/packages),
-[Pi skills](https://pi.dev/docs/latest/skills),
-[Pi usage and MCP stance](https://pi.dev/docs/latest/usage), and the official Codex
-documentation for [plugins](https://learn.chatgpt.com/docs/build-plugins),
+[Pi skills](https://pi.dev/docs/latest/skills), and
+[Pi usage and MCP stance](https://pi.dev/docs/latest/usage). Goose evidence is
+pinned to revision `3065c97`: the [extension guide](https://github.com/block/goose/blob/3065c9701fdccd020f86f263c74ae4934a1333b8/documentation/docs/getting-started/using-extensions.md),
+[extension design](https://github.com/block/goose/blob/3065c9701fdccd020f86f263c74ae4934a1333b8/documentation/docs/goose-architecture/extensions-design.md), and
+[skills guide](https://github.com/block/goose/blob/3065c9701fdccd020f86f263c74ae4934a1333b8/documentation/docs/guides/context-engineering/using-skills.md).
+Codex evidence uses the official documentation for [plugins](https://learn.chatgpt.com/docs/build-plugins),
 [skills](https://learn.chatgpt.com/docs/build-skills),
 [hooks](https://learn.chatgpt.com/docs/hooks), and
 [MCP](https://learn.chatgpt.com/docs/extend/mcp).
@@ -50,15 +53,15 @@ focused test. Merely parsing a manifest field does not count.
 
 ## Capability comparison
 
-| Area | OpenCode | Pi | Codex | Krusty |
-|---|---|---|---|---|
-| Distribution | Local JS/TS and npm plugins installed with Bun | npm, git, and local packages bundle extensions, skills, prompts, and themes | Marketplace plugin with `.codex-plugin/plugin.json`; may bundle skills, hooks, apps, MCP, and assets | Cross-platform publisher-signed ZIP bundles and catalogs plus Unix npm/local snapshots; one immutable snapshot can bundle TUI, agent, skill, hook, MCP, and asset resources |
-| Executable API | JS/TS hook object, events, custom tools, SDK client, Bun shell | Broad TypeScript API for tools, events, commands, sessions, providers, shortcuts, and custom TUI | Skills and declarative lifecycle hooks are the portable executable/workflow surfaces; MCP/apps add external actions | Persistent JS/TS agent runtime plus executable native/JS TUI runtimes; tools, commands, events, state, context, and before/after interception. Installable WASM TUI entries are descriptor-only today |
-| Skills | On-demand Agent Skills with upward and cross-harness discovery plus wildcard policy | On-demand Agent Skills; deliberately lenient validation and cross-harness locations | Agent Skills with progressive disclosure, implicit/explicit activation, scripts, references, and plugin distribution | Strict Agent Skills validation, progressive disclosure, upward and cross-harness discovery, recursive resources, package roots, diagnostics, and per-skill policy |
-| Hooks | Rich in-process event and dot-hook surface | Rich in-process event interception with UI access | Declarative command hooks from managed, user, project, session, and plugin sources | Persistent worker-hosted agent observers/interceptors plus bounded declarative package command hooks on the shared tool pipeline |
-| MCP | Built-in local/remote servers, OAuth, enable/disable, and tool policy | Intentionally no built-in MCP; packages can add an implementation | Built-in stdio/HTTP, bearer/OAuth, server instructions, shared host configuration, and plugin MCP | Built-in stdio/HTTP, layered packages/config, tool policy, complete context surface, bearer/OAuth, server instructions, and management API |
-| Security posture | General tool/skill permissions; plugins execute trusted local code | Project trust; packages explicitly run with full system access | Sandboxing/approval plus hook trust and workspace/plugin administration | User-owned project trust, release-envelope signatures, immutable installs, path/source validation, explicit script consent and grants, exact approvals, and a separate isolated Zed-compatible WASM editor/language host |
-| Failure behavior | Sequential hooks and normal startup loading | Hot reload and extension error handling | Managed configuration and trusted hook loading | Transaction rollback, reconciliation, fail-closed hook replacement, process-tree cleanup, bounded output, per-server timeouts/reconnect, and last-known-good workers |
+| Area | OpenCode | Pi | Goose | Codex | Krusty |
+|---|---|---|---|---|---|
+| Distribution | Local JS/TS and npm plugins installed with Bun | npm, git, and local packages bundle extensions, skills, prompts, and themes | Extension configuration points at built-in or external MCP servers; recipes and Agent Skills are separate reusable units rather than one signed multi-resource package | Marketplace plugin with `.codex-plugin/plugin.json`; may bundle skills, hooks, apps, MCP, and assets | Cross-platform publisher-signed ZIP bundles and catalogs plus Unix npm/local snapshots; one immutable snapshot can bundle TUI, agent, skill, hook, MCP, and asset resources |
+| Executable API | JS/TS hook object, events, custom tools, SDK client, Bun shell | Broad TypeScript API for tools, events, commands, sessions, providers, shortcuts, and custom TUI | MCP tools/resources/prompts are the public extension boundary; built-in Rust platform extensions and recipes provide first-party executable workflows | Skills and declarative lifecycle hooks are the portable executable/workflow surfaces; MCP/apps add external actions | Persistent JS/TS agent runtime plus executable native/JS TUI runtimes; tools, commands, events, state, context, and before/after interception. Installable WASM TUI entries are descriptor-only today |
+| Skills | On-demand Agent Skills with upward and cross-harness discovery plus wildcard policy | On-demand Agent Skills; deliberately lenient validation and cross-harness locations | The built-in skills extension loads Agent Skills and exposes them through the agent; the skills marketplace/distribution path remains separate from MCP extension configuration | Agent Skills with progressive disclosure, implicit/explicit activation, scripts, references, and plugin distribution | Strict Agent Skills validation, progressive disclosure, upward and cross-harness discovery, recursive resources, package roots, diagnostics, and per-skill policy |
+| Hooks | Rich in-process event and dot-hook surface | Rich in-process event interception with UI access | No general third-party in-process hook API in the audited revision; extension behavior enters through MCP, recipes, built-in platform extensions, and the central tool-inspection chain | Declarative command hooks from managed, user, project, session, and plugin sources | Persistent worker-hosted agent observers/interceptors plus bounded declarative package command hooks on the shared tool pipeline |
+| MCP | Built-in local/remote servers, OAuth, enable/disable, and tool policy | Intentionally no built-in MCP; packages can add an implementation | MCP is the primary extension model: the extension manager owns configuration, validation, client lifecycle, tools, prompts, resources, cancellation, and platform extensions | Built-in stdio/HTTP, bearer/OAuth, server instructions, shared host configuration, and plugin MCP | Built-in stdio/HTTP, layered packages/config, tool policy, complete context surface, bearer/OAuth, server instructions, and management API |
+| Security posture | General tool/skill permissions; plugins execute trusted local code | Project trust; packages explicitly run with full system access | Extension validation and malware checks precede activation; permission and tool inspectors govern effective calls, while external MCP servers retain the authority of their configured process or endpoint | Sandboxing/approval plus hook trust and workspace/plugin administration | User-owned project trust, release-envelope signatures, immutable installs, path/source validation, explicit script consent and grants, exact approvals, and a separate isolated Zed-compatible WASM editor/language host |
+| Failure behavior | Sequential hooks and normal startup loading | Hot reload and extension error handling | The extension manager reports startup/validation failures, scopes client lifecycle, and propagates cancellation/timeouts through MCP calls; built-in platform extensions remain separately managed | Managed configuration and trusted hook loading | Transaction rollback, reconciliation, fail-closed hook replacement, process-tree cleanup, bounded output, per-server timeouts/reconnect, and last-known-good workers |
 
 ## Deliberate differences
 
@@ -75,10 +78,15 @@ Krusty targets equivalent outcomes without copying every API shape:
   workspace. Krusty's analogous external-action boundary is MCP and its
   self-host server API; it does not reproduce the hosted ChatGPT marketplace
   or its installed ecosystem.
-- OpenCode and Pi already have visible community package ecosystems. Krusty's
-  catalog and source format are implemented, but catalog population and
-  publisher adoption are product/ecosystem work rather than missing runtime
-  contracts.
+- Goose treats MCP servers as extensions and keeps recipes and skills as
+  adjacent units. Krusty deliberately distinguishes MCP connection lifecycle
+  from installable packages: one Krusty package may contribute MCP config,
+  skills, hooks, agent code, TUI code, and assets, but an ordinary MCP server is
+  not silently granted in-process hook or package authority.
+- OpenCode, Pi, and Goose already have visible community extension/package/skill
+  ecosystems. Krusty's catalog and source format are implemented, but catalog
+  population and publisher adoption are product/ecosystem work rather than
+  missing runtime contracts.
 - Pi intentionally omits built-in MCP. Krusty keeps MCP in core because shared
   CLI, server, mobile, and desktop clients need one typed connection and
   governance boundary.

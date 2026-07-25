@@ -63,7 +63,8 @@ impl AgentTool {
 
         let delegated_run_id = Uuid::new_v4().to_string();
         let delegation_policy =
-            DelegationPolicy::for_subagent_explore(ctx.permission_mode, ctx.subagent_max_turns);
+            DelegationPolicy::for_subagent_explore(ctx.permission_mode, params.max_turns)
+                .with_execution_tool_allowlist(ctx.execution_tool_allowlist.as_ref());
 
         let target_scope = vec![delegated_scope(
             &scope_label,
@@ -124,8 +125,9 @@ impl AgentTool {
                 ctx.process_registry.clone(),
                 ctx.user_id.clone(),
                 ctx.session_id.clone(),
-            );
-        if let Some(max_turns) = ctx.subagent_max_turns {
+            )
+            .with_provider_call_trace(ctx.provider_call_trace.clone());
+        if let Some(max_turns) = params.max_turns {
             task = task.with_max_turns(max_turns);
         }
 
@@ -136,10 +138,12 @@ impl AgentTool {
         // Build project context for the subagent, with optional parent conversation brief
         let mut project_context =
             build_subagent_project_context(&ctx.working_dir, ctx.project_dir.as_deref());
-        if let Some(ref parent_conversation) = ctx.parent_conversation {
-            let brief = build_parent_context_brief(parent_conversation, 10);
-            if !brief.is_empty() {
-                project_context = format!("{}\n\n{}", brief, project_context);
+        if !params.parent_context_applied {
+            if let Some(ref parent_conversation) = ctx.parent_conversation {
+                let brief = build_parent_context_brief(parent_conversation, 10);
+                if !brief.is_empty() {
+                    project_context = format!("{}\n\n{}", brief, project_context);
+                }
             }
         }
 
@@ -159,6 +163,13 @@ impl AgentTool {
             let bg_delegation_policy = delegation_policy.clone();
             let bg_delegated_run_id = delegated_run_id.clone();
             let bg_db_path = ctx.db_path.clone();
+            let bg_runtime = self.runtime.clone();
+            let mailbox = bg_runtime.register(
+                bg_delegated_run_id.clone(),
+                params.name.as_deref().unwrap_or("explore"),
+                cancellation_token.clone(),
+            );
+            task = task.with_mailbox(mailbox);
 
             tokio::spawn(async move {
                 let result = execute_single_explorer(
@@ -196,6 +207,7 @@ impl AgentTool {
                     &result,
                     &artifact.review_summary,
                 );
+                bg_runtime.finish(&bg_delegated_run_id, result.success);
             });
 
             return background_started_result(&delegated_run_id, "explore", params.name.as_deref());
@@ -256,7 +268,8 @@ impl AgentTool {
 
         let delegated_run_id = Uuid::new_v4().to_string();
         let delegation_policy =
-            DelegationPolicy::for_subagent_plan(ctx.permission_mode, ctx.subagent_max_turns);
+            DelegationPolicy::for_subagent_plan(ctx.permission_mode, params.max_turns)
+                .with_execution_tool_allowlist(ctx.execution_tool_allowlist.as_ref());
 
         let target_scope = vec![DelegatedRunScope {
             label: "project".to_string(),
@@ -298,8 +311,9 @@ impl AgentTool {
                 ctx.process_registry.clone(),
                 ctx.user_id.clone(),
                 ctx.session_id.clone(),
-            );
-        if let Some(max_turns) = ctx.subagent_max_turns {
+            )
+            .with_provider_call_trace(ctx.provider_call_trace.clone());
+        if let Some(max_turns) = params.max_turns {
             task = task.with_max_turns(max_turns);
         }
 
@@ -324,6 +338,13 @@ impl AgentTool {
             let bg_delegation_policy = delegation_policy.clone();
             let bg_delegated_run_id = delegated_run_id.clone();
             let bg_db_path = ctx.db_path.clone();
+            let bg_runtime = self.runtime.clone();
+            let mailbox = bg_runtime.register(
+                bg_delegated_run_id.clone(),
+                params.name.as_deref().unwrap_or("plan"),
+                cancellation_token.clone(),
+            );
+            task = task.with_mailbox(mailbox);
 
             tokio::spawn(async move {
                 let config =
@@ -362,6 +383,7 @@ impl AgentTool {
                     &result,
                     &artifact.review_summary,
                 );
+                bg_runtime.finish(&bg_delegated_run_id, result.success);
             });
 
             return background_started_result(&delegated_run_id, "plan", params.name.as_deref());
@@ -421,7 +443,8 @@ impl AgentTool {
 
         let delegated_run_id = Uuid::new_v4().to_string();
         let delegation_policy =
-            DelegationPolicy::for_subagent_verify(ctx.permission_mode, ctx.subagent_max_turns);
+            DelegationPolicy::for_subagent_verify(ctx.permission_mode, params.max_turns)
+                .with_execution_tool_allowlist(ctx.execution_tool_allowlist.as_ref());
 
         let target_scope = vec![DelegatedRunScope {
             label: "project".to_string(),
@@ -463,8 +486,9 @@ impl AgentTool {
                 ctx.process_registry.clone(),
                 ctx.user_id.clone(),
                 ctx.session_id.clone(),
-            );
-        if let Some(max_turns) = ctx.subagent_max_turns {
+            )
+            .with_provider_call_trace(ctx.provider_call_trace.clone());
+        if let Some(max_turns) = params.max_turns {
             task = task.with_max_turns(max_turns);
         }
 
@@ -489,6 +513,13 @@ impl AgentTool {
             let bg_delegation_policy = delegation_policy.clone();
             let bg_delegated_run_id = delegated_run_id.clone();
             let bg_db_path = ctx.db_path.clone();
+            let bg_runtime = self.runtime.clone();
+            let mailbox = bg_runtime.register(
+                bg_delegated_run_id.clone(),
+                params.name.as_deref().unwrap_or("verify"),
+                cancellation_token.clone(),
+            );
+            task = task.with_mailbox(mailbox);
 
             tokio::spawn(async move {
                 let config =
@@ -528,6 +559,7 @@ impl AgentTool {
                     &result,
                     &artifact.review_summary,
                 );
+                bg_runtime.finish(&bg_delegated_run_id, result.success);
             });
 
             return background_started_result(&delegated_run_id, "verify", params.name.as_deref());

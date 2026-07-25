@@ -7,6 +7,7 @@
 pub mod anthropic_catalog;
 pub mod catalog;
 pub mod client;
+pub mod context_policy;
 pub mod format;
 pub mod format_detection;
 pub mod grok;
@@ -29,8 +30,9 @@ pub mod stream_buffer;
 pub mod streaming;
 pub mod title;
 pub mod transform;
+pub mod transport_policy;
 pub mod types;
-mod usage;
+pub(crate) mod usage;
 
 // Re-export main types from new module
 pub use client::{

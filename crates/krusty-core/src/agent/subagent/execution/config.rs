@@ -15,6 +15,12 @@ pub(crate) trait AgentConfig: Send + Sync {
     /// Get system prompt (can be static or dynamic per turn).
     fn system_prompt(&self, turn: usize) -> String;
 
+    /// Append-only runtime context. The loop persists a new tail message only
+    /// when this value changes, preserving every previously cached prefix.
+    fn dynamic_context(&self) -> Option<String> {
+        None
+    }
+
     /// Tool timeout in seconds.
     fn timeout_secs(&self) -> u64;
 
@@ -127,7 +133,19 @@ impl BuilderConfig {
 #[async_trait::async_trait]
 impl AgentConfig for BuilderConfig {
     fn system_prompt(&self, _turn: usize) -> String {
-        builder_system_prompt(&self.task.working_dir, &self.context)
+        builder_system_prompt(&self.task.working_dir)
+    }
+
+    fn dynamic_context(&self) -> Option<String> {
+        let context = self.context.generate_context_injection();
+        let body = if context.trim().is_empty() {
+            "No active shared coordination metadata.".to_string()
+        } else {
+            context
+        };
+        Some(format!(
+            "[COORDINATION UPDATE]\n{body}\n[/COORDINATION UPDATE]"
+        ))
     }
 
     fn timeout_secs(&self) -> u64 {
@@ -143,7 +161,17 @@ impl AgentConfig for BuilderConfig {
     }
 
     fn get_ai_tools(&self) -> Vec<AiTool> {
-        self.tools.get_ai_tools()
+        let Some(policy) = self.task.delegation_policy.as_ref() else {
+            // Execution also fails closed without delegated policy metadata;
+            // keep the provider schema aligned with that runtime boundary.
+            return Vec::new();
+        };
+
+        self.tools
+            .get_ai_tools()
+            .into_iter()
+            .filter(|tool| policy.authorize_tool(&tool.name, false).is_ok())
+            .collect()
     }
 
     async fn execute_tool(
@@ -276,8 +304,7 @@ impl AgentConfig for SingleExplorerConfig {
 }
 
 /// Generate builder system prompt with context injection.
-fn builder_system_prompt(working_dir: &std::path::Path, context: &SharedBuildContext) -> String {
-    let context_injection = context.generate_context_injection();
+fn builder_system_prompt(working_dir: &std::path::Path) -> String {
     format!(
         r#"You are a builder agent. Your task is to implement code changes.
 
@@ -324,10 +351,75 @@ Always end with this structured summary:
 Any problems encountered (or "None")
 ```
 
-{}
-
 Build your component, then summarize what you created with file paths."#,
-        working_dir.display(),
-        context_injection
+        working_dir.display()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::registry::PermissionMode;
+    use std::collections::HashSet;
+
+    #[test]
+    fn builder_schema_intersects_with_exact_parent_execution_scope() {
+        let scope = HashSet::from(["agent".to_string(), "read".to_string()]);
+        let policy = DelegationPolicy::for_subagent_build(PermissionMode::Autonomous, Some(7))
+            .with_execution_tool_allowlist(Some(&scope));
+        let task = SubAgentTask::new("builder", "work").with_delegation_policy(policy);
+        let config = BuilderConfig::new(task, Arc::new(SharedBuildContext::new()));
+
+        let names = config
+            .get_ai_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["read"]);
+        assert!(!names
+            .iter()
+            .any(|name| { matches!(name.as_str(), "bash" | "write" | "edit" | "apply_patch") }));
+    }
+
+    #[test]
+    fn builder_schema_is_empty_for_agent_only_parent_scope() {
+        let scope = HashSet::from(["agent".to_string()]);
+        let policy = DelegationPolicy::for_subagent_build(PermissionMode::Autonomous, Some(7))
+            .with_execution_tool_allowlist(Some(&scope));
+        let task = SubAgentTask::new("builder", "work").with_delegation_policy(policy);
+        let config = BuilderConfig::new(task, Arc::new(SharedBuildContext::new()));
+
+        assert!(config.get_ai_tools().is_empty());
+    }
+
+    #[test]
+    fn builder_schema_preserves_explicit_empty_scope_as_tool_free() {
+        let scope = HashSet::new();
+        let policy = DelegationPolicy::for_subagent_build(PermissionMode::Autonomous, Some(7))
+            .with_execution_tool_allowlist(Some(&scope));
+        let task = SubAgentTask::new("builder", "work").with_delegation_policy(policy.clone());
+        let config = BuilderConfig::new(task, Arc::new(SharedBuildContext::new()));
+
+        assert_eq!(policy.execution_tool_allowlist, Some(Default::default()));
+        assert!(config.get_ai_tools().is_empty());
+    }
+    #[test]
+    fn builder_system_prompt_stays_stable_while_coordination_updates() {
+        let context = Arc::new(SharedBuildContext::new());
+        let task = SubAgentTask::new("builder", "work")
+            .with_working_dir(std::path::PathBuf::from("/workspace"));
+        let config = BuilderConfig::new(task, context.clone());
+
+        let original_prompt = config.system_prompt(1);
+        let original_context = config.dynamic_context();
+        context.set_conventions(vec!["Keep provider prefixes stable".to_string()]);
+        let updated_context = config.dynamic_context();
+
+        assert_eq!(config.system_prompt(2), original_prompt);
+        assert_ne!(updated_context, original_context);
+        assert!(updated_context
+            .as_deref()
+            .is_some_and(|value| value.contains("Keep provider prefixes stable")));
+    }
 }

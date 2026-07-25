@@ -1,8 +1,9 @@
 use std::collections::VecDeque;
 
 use krusty_client::{
-    ChatRequest, ChatStreamEvent, ContentBlock, ImageSource, ModelInfo, PermissionMode, PlanItem,
-    SessionStateResponse, SessionType, SessionWithMessages, ThinkingLevel, WorkMode, WorkspaceMode,
+    ChatRequest, ChatStreamEvent, ContentBlock, ImageSource, ModelInfo, ModelKey, PermissionMode,
+    PlanItem, SessionStateResponse, SessionType, SessionWithMessages, ThinkingLevel, WorkMode,
+    WorkspaceMode,
 };
 
 use crate::stored::{pending_approval_from_state, transcript_from_session};
@@ -44,6 +45,7 @@ pub struct ChatControls {
     pub fast_mode: bool,
     pub work_mode: WorkMode,
     pub selected_model: Option<String>,
+    pub selected_model_key: Option<ModelKey>,
 }
 
 impl Default for ChatControls {
@@ -54,6 +56,7 @@ impl Default for ChatControls {
             fast_mode: false,
             work_mode: WorkMode::Build,
             selected_model: None,
+            selected_model_key: None,
         }
     }
 }
@@ -239,24 +242,50 @@ impl ChatStore {
         }
     }
 
-    pub fn set_models(&mut self, models: Vec<ModelInfo>, default_model: Option<String>) {
+    pub fn set_models(
+        &mut self,
+        models: Vec<ModelInfo>,
+        default_model: Option<String>,
+        default_model_key: Option<ModelKey>,
+    ) {
         self.state.models = models;
-        let selection_is_available = self
-            .state
-            .controls
-            .selected_model
-            .as_deref()
-            .is_some_and(|selected| self.state.models.iter().any(|model| model.id == selected));
+        let selection_is_available = self.selected_model_info().is_some();
         if !selection_is_available {
-            self.state.controls.selected_model = default_model
-                .filter(|default| self.state.models.iter().any(|model| model.id == *default))
-                .or_else(|| self.state.models.first().map(|model| model.id.clone()));
+            let selected = default_model_key
+                .as_ref()
+                .and_then(|key| {
+                    self.state
+                        .models
+                        .iter()
+                        .find(|model| model.key.as_ref() == Some(key))
+                })
+                .or_else(|| {
+                    default_model.as_ref().and_then(|default| {
+                        self.state.models.iter().find(|model| model.id == *default)
+                    })
+                })
+                .or_else(|| self.state.models.first());
+            self.state.controls.selected_model = selected.map(|model| model.id.clone());
+            self.state.controls.selected_model_key = selected.and_then(|model| model.key.clone());
         }
         self.normalize_model_controls();
     }
 
     pub fn select_model(&mut self, model_id: impl Into<String>) {
+        let model_id = model_id.into();
+        self.state.controls.selected_model_key = self
+            .state
+            .models
+            .iter()
+            .find(|model| model.id == model_id)
+            .and_then(|model| model.key.clone());
+        self.state.controls.selected_model = Some(model_id);
+        self.normalize_model_controls();
+    }
+
+    pub fn select_model_key(&mut self, model_id: impl Into<String>, key: Option<ModelKey>) {
         self.state.controls.selected_model = Some(model_id.into());
+        self.state.controls.selected_model_key = key;
         self.normalize_model_controls();
     }
 
@@ -272,6 +301,7 @@ impl ChatStore {
     pub fn load_session_snapshot(&mut self, snapshot: &SessionWithMessages) {
         self.state.session_id = Some(snapshot.session.id.clone());
         self.state.controls.selected_model = snapshot.session.model.clone();
+        self.state.controls.selected_model_key = snapshot.session.model_key.clone();
         self.state.controls.permission_mode = snapshot.session.permission_mode;
         self.state.controls.work_mode = snapshot.session.mode;
         self.state.workspace.project_dir = snapshot.session.project_dir.clone();
@@ -366,6 +396,13 @@ impl ChatStore {
     }
 
     fn selected_model_info(&self) -> Option<&ModelInfo> {
+        if let Some(key) = self.state.controls.selected_model_key.as_ref() {
+            return self
+                .state
+                .models
+                .iter()
+                .find(|model| model.key.as_ref() == Some(key));
+        }
         let selected = self.state.controls.selected_model.as_deref()?;
         self.state.models.iter().find(|model| model.id == selected)
     }
@@ -430,6 +467,7 @@ impl ChatStore {
             target_branch: None,
             session_type: Some(self.state.surface.session_type()),
             model: self.state.controls.selected_model.clone(),
+            model_key: self.state.controls.selected_model_key.clone(),
             thinking_enabled: self
                 .state
                 .controls
@@ -866,6 +904,7 @@ mod tests {
         supports_fast_mode: bool,
     ) -> ModelInfo {
         ModelInfo {
+            key: None,
             id: id.to_owned(),
             display_name: id.to_owned(),
             provider: "test".to_owned(),
@@ -1011,6 +1050,7 @@ mod tests {
                 false,
             )],
             Some("current-model".to_owned()),
+            None,
         );
 
         assert_eq!(
@@ -1029,7 +1069,7 @@ mod tests {
         let mut store = ChatStore::default();
         store.state.controls.thinking_level = ThinkingLevel::High;
 
-        store.set_models(vec![output_only], Some("grok-build".to_owned()));
+        store.set_models(vec![output_only], Some("grok-build".to_owned()), None);
 
         assert_eq!(store.state.controls.thinking_level, ThinkingLevel::Off);
         assert!(!store.supports_thinking_control());
@@ -1051,6 +1091,8 @@ mod tests {
                 session_type: SessionType::Code,
                 mode: WorkMode::Plan,
                 model: Some("model-a".to_owned()),
+                model_key: None,
+                model_catalog_revision: None,
                 target_branch: None,
                 permission_mode: PermissionMode::Supervised,
             },

@@ -1,6 +1,8 @@
 use chrono::{NaiveDate, NaiveTime};
 use tempfile::TempDir;
 
+use crate::ai::models::{ApiFormat, ModelAuthScope, ModelKey};
+use crate::ai::providers::ProviderId;
 use crate::mako::{DstPolicy, MisfireConfig, RecurrenceV1, RetryJitter, RetryPolicy};
 use crate::storage::Database;
 
@@ -48,7 +50,16 @@ fn schedule() -> MakoSchedule {
         status: MakoScheduleStatus::Enabled,
         priority: 0,
         project_dir: Some("/work/repo".into()),
-        model: None,
+        model: Some("grok-code-fast-1".into()),
+        model_key: Some(
+            ModelKey::new(
+                ProviderId::Grok,
+                "grok-code-fast-1",
+                ApiFormat::OpenAIResponses,
+            )
+            .with_auth_scope(ModelAuthScope::OAuth),
+        ),
+        model_catalog_revision: Some("catalog-42".into()),
         crew_slug: Some("reviewer".into()),
         misfire: MisfireConfig::default(),
         overlap_policy: OverlapPolicy::QueueOne,
@@ -71,6 +82,8 @@ fn schedule_round_trips_typed_recurrence_and_policies() {
     assert_eq!(loaded.recurrence.kind_name(), "weekdays");
     assert_eq!(loaded.overlap_policy, OverlapPolicy::QueueOne);
     assert_eq!(loaded.timezone, "America/Los_Angeles");
+    assert_eq!(loaded.model_key, schedule().model_key);
+    assert_eq!(loaded.model_catalog_revision.as_deref(), Some("catalog-42"));
 }
 
 #[test]

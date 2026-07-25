@@ -39,6 +39,9 @@ pub(crate) struct ProviderCallTrace {
     pub outcome: String,
     pub usage: Option<Usage>,
     pub duration_ms: u64,
+    pub delegated_run_id: Option<String>,
+    pub delegated_task_id: Option<String>,
+    pub delegated_turn: Option<usize>,
 }
 
 impl ProviderCallTrace {
@@ -61,11 +64,14 @@ impl ProviderCallTrace {
             outcome: outcome.to_string(),
             usage,
             duration_ms: duration_millis(elapsed),
+            delegated_run_id: None,
+            delegated_task_id: None,
+            delegated_turn: None,
         }
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 enum ProviderCallTraceTarget {
     Channel(mpsc::UnboundedSender<ProviderCallTrace>),
     Standalone {
@@ -79,7 +85,7 @@ enum ProviderCallTraceTarget {
 ///
 /// Orchestrated calls share the run's non-blocking writer. Standalone flows
 /// such as manual pinch use a one-shot writer and their own auxiliary run id.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ProviderCallTraceContext {
     target: ProviderCallTraceTarget,
     turn: usize,
@@ -129,8 +135,41 @@ impl ProviderCallTraceContext {
                 .ok()
                 .and_then(|response| response.usage.clone()),
             duration_ms: duration_millis(started_at.elapsed()),
+            delegated_run_id: None,
+            delegated_task_id: None,
+            delegated_turn: None,
         };
         self.emit(trace).await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn record_delegated_call(
+        &self,
+        operation: &str,
+        provider: ProviderId,
+        model: &str,
+        delegated_run_id: Option<&str>,
+        delegated_task_id: &str,
+        delegated_turn: usize,
+        started_at: Instant,
+        outcome: &str,
+        usage: Option<Usage>,
+    ) {
+        self.emit(ProviderCallTrace {
+            provider_call_id: uuid::Uuid::new_v4().to_string(),
+            turn: self.turn,
+            call_kind: "delegated".to_string(),
+            operation: operation.to_string(),
+            provider: provider.storage_key().to_string(),
+            model: model.to_string(),
+            outcome: outcome.to_string(),
+            usage,
+            duration_ms: duration_millis(started_at.elapsed()),
+            delegated_run_id: delegated_run_id.map(ToOwned::to_owned),
+            delegated_task_id: Some(delegated_task_id.to_string()),
+            delegated_turn: Some(delegated_turn),
+        })
+        .await;
     }
 
     async fn emit(&self, trace: ProviderCallTrace) {
@@ -287,6 +326,9 @@ fn provider_call_trace_event(
             "cache_creation_input_tokens": usage.map(|usage| usage.cache_creation_input_tokens),
             "cache_read_input_tokens": usage.map(|usage| usage.cache_read_input_tokens),
             "total_tokens": usage.map(Usage::logical_total_tokens),
+            "delegated_run_id": provider_call.delegated_run_id,
+            "delegated_task_id": provider_call.delegated_task_id,
+            "delegated_turn": provider_call.delegated_turn,
         }),
         failure_category: None,
         stop_reason: None,
@@ -577,6 +619,9 @@ mod tests {
                     cache_read_input_tokens: 700,
                 }),
                 duration_ms: 25,
+                delegated_run_id: None,
+                delegated_task_id: None,
+                delegated_turn: None,
             })
             .expect("provider call send");
         source_tx
@@ -671,10 +716,30 @@ mod tests {
             )
             .await;
 
+        context
+            .record_delegated_call(
+                "delegated_agent_turn",
+                ProviderId::Grok,
+                "grok-4.5",
+                Some("delegated-run-1"),
+                "builder-1",
+                3,
+                Instant::now(),
+                "completed",
+                Some(Usage {
+                    prompt_tokens: 1_000,
+                    completion_tokens: 100,
+                    reasoning_tokens: 25,
+                    total_tokens: 1_100,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 900,
+                }),
+            )
+            .await;
         let events = RuntimeTraceStore::new(&db)
             .list_events(&session_id, None)
             .expect("traces should load");
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         assert_eq!(events[0].call_kind.as_deref(), Some("auxiliary"));
         assert_eq!(events[0].operation.as_deref(), Some("compaction_summary"));
         assert_eq!(events[0].payload["usage_available"], true);
@@ -685,5 +750,12 @@ mod tests {
         );
         assert_eq!(events[1].payload["usage_available"], false);
         assert!(events[1].payload["total_tokens"].is_null());
+        assert_eq!(events[2].call_kind.as_deref(), Some("delegated"));
+        assert_eq!(events[2].payload["provider"], "grok");
+        assert_eq!(events[2].payload["delegated_run_id"], "delegated-run-1");
+        assert_eq!(events[2].payload["delegated_task_id"], "builder-1");
+        assert_eq!(events[2].payload["delegated_turn"], 3);
+        assert_eq!(events[2].payload["cache_read_input_tokens"], 900);
+        assert_eq!(events[2].payload["input_tokens"], 1_900);
     }
 }

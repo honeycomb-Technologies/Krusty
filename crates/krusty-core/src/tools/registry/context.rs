@@ -9,6 +9,7 @@ use crate::agent::loop_events::LoopEvent;
 use crate::agent::subagent::AgentProgress;
 use crate::agent::ProviderCallTraceContext;
 use crate::ai::client::AiClient;
+use crate::ai::models::ModelKey;
 use crate::ai::types::ModelMessage;
 use crate::mcp::McpManager;
 use crate::process::ProcessRegistry;
@@ -131,6 +132,8 @@ pub struct ToolContext {
     pub agent_progress_tx: Option<mpsc::UnboundedSender<AgentProgress>>,
     /// Current user-selected model (for non-Anthropic providers, subagents use this)
     pub current_model: Option<String>,
+    /// Exact provider/auth/transport identity for the current run.
+    pub current_model_key: Option<ModelKey>,
     /// Session-scoped AI client (used by tools that spawn sub-agents)
     pub ai_client: Option<Arc<AiClient>>,
     /// Git identity for commit attribution
@@ -141,6 +144,10 @@ pub struct ToolContext {
     pub subagent_max_turns: Option<usize>,
     /// Optional delegated execution policy contract for downstream calls.
     pub delegation_policy: Option<DelegationPolicy>,
+    /// Exact run-scoped tool capability inherited by delegated execution.
+    /// `None` uses normal governed defaults; `Some(empty)` is intentionally
+    /// tool-free and must remain distinguishable from `None`.
+    pub execution_tool_allowlist: Option<HashSet<String>>,
     /// Tool registry for subagent delegation (explore/build use this to give subagents real tools).
     pub tool_registry: Option<Arc<ToolRegistry>>,
     /// Parent conversation context for delegated agents that need upstream history.
@@ -173,11 +180,13 @@ impl Default for ToolContext {
             plan_mode: false,
             agent_progress_tx: None,
             current_model: None,
+            current_model_key: None,
             ai_client: None,
             git_identity: None,
             permission_mode: PermissionMode::default(),
             subagent_max_turns: None,
             delegation_policy: None,
+            execution_tool_allowlist: None,
             tool_registry: None,
             parent_conversation: None,
             loop_event_tx: None,
@@ -303,6 +312,8 @@ impl ToolContext {
 
     /// Add session-scoped AI client to context
     pub fn with_ai_client(mut self, client: Arc<AiClient>) -> Self {
+        self.current_model = Some(client.resolved_model().wire_model_id.clone());
+        self.current_model_key = Some(client.resolved_model().key.clone());
         self.ai_client = Some(client);
         self
     }
@@ -328,6 +339,16 @@ impl ToolContext {
     /// Attach delegated execution policy metadata.
     pub fn with_delegation_policy(mut self, policy: DelegationPolicy) -> Self {
         self.delegation_policy = Some(policy);
+        self
+    }
+
+    /// Attach the exact per-run execution capability. Delegated tools copy
+    /// this ceiling into their child policy rather than rebuilding defaults.
+    pub fn with_execution_tool_allowlist(
+        mut self,
+        execution_tool_allowlist: Option<&HashSet<String>>,
+    ) -> Self {
+        self.execution_tool_allowlist = execution_tool_allowlist.cloned();
         self
     }
 

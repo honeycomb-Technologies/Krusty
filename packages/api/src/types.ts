@@ -14,6 +14,10 @@ export interface SessionResponse {
 	mode: SessionMode;
 	updated_at: string;
 	model?: string | null;
+	/** Exact provider/auth/transport identity selected for this session. */
+	model_key?: ModelKey | null;
+	/** Catalog revision observed when model_key was selected. */
+	model_catalog_revision?: string | null;
 	target_branch?: string | null;
 	permission_mode: PermissionMode;
 }
@@ -204,10 +208,15 @@ export interface ChatRequest {
 	session_type?: SessionType;
 	/** @deprecated Research is automatic in Chat; this compatibility field is ignored. */
 	research_enabled?: boolean;
+	/** Legacy model slug. Prefer model_key when it is available. */
 	model?: string;
+	/** Exact provider/auth/transport identity for a new or continued turn. */
+	model_key?: ModelKey;
 	thinking_enabled?: boolean | string;
 	fast_mode?: boolean;
 	permission_mode?: PermissionMode;
+	/** Optional per-turn subset of the tools selected by server policy. */
+	allowed_tools?: string[];
 	mode?: SessionMode;
 }
 
@@ -426,6 +435,17 @@ export type MakoQueuePressure = "calm" | "busy" | "attention";
 export interface MakoDispatchResponse {
 	session_id: string;
 	status: string;
+}
+
+export interface MakoDispatchOptions {
+	projectDir?: string;
+	/** Legacy model slug retained for older servers. */
+	model?: string;
+	/** Exact provider/auth/transport identity for the durable Mako run. */
+	modelKey?: ModelKey;
+	startAt?: string;
+	priority?: MakoRunPriority;
+	crewSlug?: string | null;
 }
 
 export interface SimpleOkResponse {
@@ -1066,7 +1086,22 @@ export interface SessionPresenceResponse {
 // Model Types
 // ============================================================================
 
+/**
+ * Provider-aware executable model identity.
+ *
+ * String-valued wire fields keep this client forward-compatible with new
+ * providers, auth scopes, and API transports added by the server.
+ */
+export interface ModelKey {
+	provider: string;
+	model_id: string;
+	auth_scope?: string | null;
+	api_format: string;
+}
+
 export interface ModelInfo {
+	/** Absent only when reading an older Krusty server response. */
+	key?: ModelKey | null;
 	id: string;
 	display_name: string;
 	provider: string;
@@ -1106,6 +1141,8 @@ export type FastMode = "priority" | "anthropic_fast";
 export interface ModelsResponse {
 	models: ModelInfo[];
 	default_model: string | null;
+	/** Exact default selection; absent only on older Krusty servers. */
+	default_model_key?: ModelKey | null;
 }
 
 // ============================================================================

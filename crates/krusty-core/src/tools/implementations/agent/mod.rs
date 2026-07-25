@@ -1,9 +1,10 @@
 //! Unified agent tool — dispatches explore, plan, verify, and build agents.
 //!
-//! Replaces the separate `explore` and `build` tools with a single tool that
-//! accepts an `agent_type` parameter to select the sub-agent flavor.
+//! Replaces separate rigid agent tools with one dynamic profile and capability
+//! contract. Legacy agent_type input remains internal compatibility only.
 
 mod build;
+mod control;
 mod helpers;
 mod single;
 
@@ -16,6 +17,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::{info, warn};
 
+use crate::agent::subagent::{AgentExecutionProfile, AgentRuntimeManager, AgentSpec};
 use crate::agent::AgentCancellation;
 use crate::ai::client::AiClient;
 use crate::tools::registry::Tool;
@@ -27,25 +29,94 @@ use helpers::*;
 pub struct AgentTool {
     client: Arc<AiClient>,
     cancellation: AgentCancellation,
+    runtime: AgentRuntimeManager,
 }
 
 impl AgentTool {
-    pub fn new(client: Arc<AiClient>, cancellation: AgentCancellation) -> Self {
+    pub fn new(
+        client: Arc<AiClient>,
+        cancellation: AgentCancellation,
+        runtime: AgentRuntimeManager,
+    ) -> Self {
         Self {
             client,
             cancellation,
+            runtime,
         }
     }
 }
 
-#[derive(Deserialize)]
-struct Params {
-    /// Sub-agent type: "explore", "plan", "verify", "build"
-    agent_type: String,
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AgentAction {
+    #[default]
+    Spawn,
+    List,
+    Status,
+    Wait,
+    Message,
+    Followup,
+    Interrupt,
+    Resume,
+}
 
-    /// The main question or task for the sub-agent
+#[derive(Deserialize, Default)]
+struct Params {
+    /// Lifecycle operation. Spawn is the default.
+    #[serde(default)]
+    action: AgentAction,
+
+    /// Existing delegated run targeted by lifecycle operations.
+    #[serde(default)]
+    delegated_run_id: Option<String>,
+
+    /// Parent steering for message/followup.
+    #[serde(default)]
+    message: Option<String>,
+
+    /// Bounded wait duration.
+    #[serde(default)]
+    wait_timeout_ms: Option<u64>,
+
+    /// Maximum records returned by list.
+    #[serde(default)]
+    limit: Option<usize>,
+
+    /// Backward-compatible built-in profile.
+    #[serde(default)]
+    agent_type: Option<String>,
+
+    /// Optional built-in or custom profile.
+    #[serde(default)]
+    profile: Option<String>,
+
+    /// The main objective for the sub-agent.
+    #[serde(default)]
     prompt: String,
 
+    /// Requested result shape or proof contract.
+    #[serde(default)]
+    expected_output: Option<String>,
+
+    /// Concise reason delegation improves this task.
+    #[serde(default)]
+    delegation_reason: Option<String>,
+
+    /// Requested capabilities, clamped by the parent policy.
+    #[serde(default)]
+    capabilities: Vec<String>,
+
+    /// Parent context strategy: auto, project, brief, or full.
+    #[serde(default)]
+    context: Option<String>,
+
+    /// Optional per-agent turn budget. Parent ceiling still wins.
+    #[serde(default)]
+    max_turns: Option<usize>,
+
+    /// Internal marker preventing duplicate parent context injection.
+    #[serde(skip)]
+    parent_context_applied: bool,
     /// Optional: path hint to scope exploration (explore only)
     #[serde(default)]
     scope: Option<String>,
@@ -87,23 +158,12 @@ impl Tool for AgentTool {
     }
 
     fn description(&self) -> &str {
-        "Delegate multi-step work to an explore, plan, verify, or build sub-agent."
+        "Spawn and supervise independent agents. Delegate parallel, deep multi-file, or background work; avoid simple lookups, one-file edits, and tightly coupled work. Profiles: explore, plan, verify, build, or custom. Actions: spawn, list, status, wait, message, followup, interrupt, resume. Followup delivers to a live child or resumes a completed resumable child from durable evidence. The parent verifies results."
     }
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            r#"Dispatches work to specialized sub-agents by type:
-
-- **explore**: Deep codebase investigation with read-only tools. Use for multi-file analysis or understanding unfamiliar code. Pass 'scope' to narrow focus. Inherits parent conversation context.
-- **plan**: Generate implementation plans — steps, critical files, trade-offs, dependencies. Read-only. Fresh context.
-- **verify**: Run tests, builds, linters and validate changes. Outputs VERDICT: PASS|FAIL|PARTIAL. Fresh context.
-- **build**: Parallel code implementation. Pass 'components' array and optionally 'conventions'. Fresh context.
-
-**Background mode:** Pass `run_in_background: true` to spawn the agent asynchronously. You get back a `delegated_run_id` immediately and can continue working. The agent writes its result to the delegated run store when finished; completed results appear in delegated context on a later turn. Use this for long-running tasks where you don't need the result right away.
-
-**Named background agents:** Pass `name` to give a background run a stable label in status/progress views. Use with `run_in_background: true`. Example: `agent(agent_type: "build", prompt: "Implement task T-12", name: "builder-1", run_in_background: true)`.
-
-For simple file lookups, use Glob/Grep/Read directly — agent is for deeper multi-step work."#,
+            "Use action=spawn for substantial independent work. Set run_in_background=true when the parent can continue concurrently. Use list/status/wait to observe, message to steer a live child, followup for another child turn (automatically resumed from durable evidence after completion), interrupt to cancel, and resume for an explicit new run from durable prior evidence. The parent remains responsible for integration and verification.",
         )
     }
 
@@ -111,13 +171,64 @@ For simple file lookups, use Glob/Grep/Read directly — agent is for deeper mul
         json!({
             "type": "object",
             "properties": {
-                "agent_type": {
+                "action": {
                     "type": "string",
-                    "enum": ["explore", "plan", "verify", "build"]
+                    "enum": ["spawn", "list", "status", "wait", "message", "followup", "interrupt", "resume"],
+                    "description": "Spawn or supervise a delegated run; defaults to spawn"
+                },
+                "delegated_run_id": {
+                    "type": "string",
+                    "description": "Run targeted by status, wait, message, followup, interrupt, or resume"
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Steering for a live child, or the next objective when followup resumes a completed child"
+                },
+                "wait_timeout_ms": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 300000,
+                    "description": "Maximum status wait"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Maximum runs returned by list"
+                },
+                "profile": {
+                    "type": "string",
+                    "description": "Optional built-in or custom agent profile"
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "Task for the sub-agent"
+                    "description": "Objective for the sub-agent"
+                },
+                "expected_output": {
+                    "type": "string",
+                    "description": "Expected result or proof contract"
+                },
+                "delegation_reason": {
+                    "type": "string",
+                    "description": "Why delegation improves this task"
+                },
+                "capabilities": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["read", "write", "execute"]
+                    },
+                    "description": "Requested capabilities; parent governance is the ceiling"
+                },
+                "context": {
+                    "type": "string",
+                    "enum": ["auto", "project", "brief", "full"],
+                    "description": "Parent context inherited by the child"
+                },
+                "max_turns": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional child budget; omitted means inherited or unlimited"
                 },
                 "scope": {
                     "type": "string",
@@ -138,6 +249,11 @@ For simple file lookups, use Glob/Grep/Read directly — agent is for deeper mul
                     "description": "Optional parallel builder ceiling",
                     "minimum": 1
                 },
+                "task_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional plan task IDs corresponding to build components"
+                },
                 "run_in_background": {
                     "type": "boolean",
                     "description": "Return immediately and run in background"
@@ -151,7 +267,6 @@ For simple file lookups, use Glob/Grep/Read directly — agent is for deeper mul
                     "description": "Short status label"
                 }
             },
-            "required": ["agent_type", "prompt"],
             "additionalProperties": false
         })
     }
@@ -167,27 +282,68 @@ For simple file lookups, use Glob/Grep/Read directly — agent is for deeper mul
             }
         };
 
-        if let Some(ref name) = params.name {
-            info!(
-                name = %name,
-                description = ?params.description,
-                agent_type = %params.agent_type,
-                "Named background agent requested"
-            );
+        if params.action == AgentAction::Spawn {
+            self.execute_spawn(params, ctx).await
+        } else {
+            self.execute_control(params, ctx).await
+        }
+    }
+}
+
+impl AgentTool {
+    async fn execute_spawn(&self, mut params: Params, ctx: &ToolContext) -> ToolResult {
+        let spec = match AgentSpec::resolve(
+            params.profile.as_deref(),
+            params.agent_type.as_deref(),
+            params.name.as_deref(),
+            &params.prompt,
+            params.expected_output.as_deref(),
+            params.delegation_reason.as_deref(),
+            &params.capabilities,
+            params.context.as_deref(),
+            params.max_turns,
+            ctx.subagent_max_turns,
+        ) {
+            Ok(spec) => spec,
+            Err(error) => return ToolResult::error_with_code("invalid_agent_spec", error),
+        };
+        let execution_profile = spec.execution_profile();
+        params.prompt = spec.rendered_objective();
+        params.profile = Some(spec.profile.clone());
+        params.agent_type = Some(execution_profile.as_str().to_string());
+        params.max_turns = spec.max_turns;
+        params.name.get_or_insert_with(|| spec.task_name.clone());
+        if let Some(turns) = spec.parent_context_turns() {
+            if let Some(parent_conversation) = ctx.parent_conversation.as_ref() {
+                let brief = build_parent_context_brief(parent_conversation, turns);
+                if !brief.is_empty() {
+                    params.prompt = format!("{}\n\n{}", brief, params.prompt);
+                }
+            }
+        }
+        params.parent_context_applied = true;
+        if execution_profile == AgentExecutionProfile::Build
+            && params.components.as_ref().is_none_or(Vec::is_empty)
+        {
+            params.components = Some(vec![spec.objective.clone()]);
         }
 
-        match params.agent_type.as_str() {
-            "explore" => self.execute_explore(params, ctx).await,
-            "plan" => self.execute_plan(params, ctx).await,
-            "verify" => self.execute_verify(params, ctx).await,
-            "build" => self.execute_build(params, ctx).await,
-            other => ToolResult::error_with_code(
-                "invalid_parameters",
-                format!(
-                    "Unknown agent_type '{}'. Must be one of: explore, plan, verify, build",
-                    other
-                ),
-            ),
+        info!(
+            name = %spec.task_name,
+            description = ?params.description,
+            profile = %spec.profile,
+            execution_profile = %execution_profile.as_str(),
+            capabilities = ?spec.capabilities,
+            max_turns = ?spec.max_turns,
+            background = params.run_in_background.unwrap_or(false),
+            "Resolved delegated AgentSpec"
+        );
+
+        match execution_profile {
+            AgentExecutionProfile::Explore => self.execute_explore(params, ctx).await,
+            AgentExecutionProfile::Plan => self.execute_plan(params, ctx).await,
+            AgentExecutionProfile::Verify => self.execute_verify(params, ctx).await,
+            AgentExecutionProfile::Build => self.execute_build(params, ctx).await,
         }
     }
 }
@@ -213,23 +369,21 @@ impl AgentTool {
         }
     }
 
-    /// Resolve the model — use the user's current model or the provider default.
-    fn resolve_model(&self, ctx: &ToolContext, client: &AiClient) -> String {
-        ctx.current_model
-            .clone()
-            .unwrap_or_else(|| client.config().model.clone())
+    /// Resolve the immutable model owned by the session client.
+    ///
+    /// `ToolContext::current_model` is retained as legacy UI metadata. It is a
+    /// bare slug and therefore cannot safely override the exact provider/auth/
+    /// transport identity frozen into `AiClient` for this run.
+    fn resolve_model(&self, _ctx: &ToolContext, client: &AiClient) -> String {
+        client.resolved_model().wire_model_id.clone()
     }
 
-    /// Resolve a fast/cheap model for lightweight agent tasks (e.g., explore).
-    /// Only downgrades for providers that have a known compatible fast tier — otherwise
-    /// inherits the parent model. OpenAI ChatGPT/Codex accounts do not support every
-    /// "mini" model on the websocket tool path, so keep OpenAI delegated runs on the
-    /// selected parent model instead of silently switching to a mini variant.
+    /// Resolve a model for lightweight delegated work.
+    ///
+    /// A different fast model requires its own exact catalog resolution,
+    /// credentials, transport, and `AiClient`. Until that typed boundary is
+    /// supplied, inherit the parent runtime instead of changing only a slug.
     fn resolve_fast_model(&self, ctx: &ToolContext, client: &AiClient) -> String {
-        use crate::ai::providers::ProviderId;
-        match client.provider_id() {
-            ProviderId::Anthropic => "claude-haiku-4-5-20251001".to_string(),
-            _ => self.resolve_model(ctx, client),
-        }
+        self.resolve_model(ctx, client)
     }
 }

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::agent::{PackageHookConfig, UserHookManager, UserPostToolHook, UserPreToolHook};
-use crate::ai::models::{create_model_registry, ModelMetadata, SharedModelRegistry};
+use crate::ai::models::{create_model_registry, ModelKey, ModelMetadata, SharedModelRegistry};
 use crate::ai::providers::{builtin_providers, ProviderId};
 use crate::extensions::WasmHost;
 use crate::paths;
@@ -31,6 +31,7 @@ pub async fn init_services(
     AsyncChannels,
     Arc<ProcessRegistry>,
     String,
+    Option<ModelKey>,
     Arc<Theme>,
     String,
     ProviderId,
@@ -222,15 +223,38 @@ pub async fn init_services(
     // Model registry
     let model_registry = init_model_registry(&preferences);
 
-    // Current model from preferences (empty until user selects one)
-    let current_model = preferences
+    // Exact selections win over the legacy slug. Older unambiguous
+    // preferences are migrated once; ambiguous bare IDs remain non-runnable
+    // until the user explicitly selects a catalog row.
+    let persisted_model_key = preferences
         .as_ref()
-        .and_then(|p| p.get_current_model())
+        .and_then(|preferences| preferences.get_current_model_key())
+        .filter(|key| !key.model_id.trim().is_empty());
+    let legacy_model = preferences
+        .as_ref()
+        .and_then(|preferences| preferences.get_current_model())
         .map(|model| model.trim().to_string())
-        .filter(|model| !model.is_empty())
+        .filter(|model| !model.is_empty());
+    let current_model_key = persisted_model_key.clone().or_else(|| {
+        legacy_model
+            .as_deref()
+            .and_then(|model| model_registry.try_resolve_legacy_key(model).ok())
+    });
+    let current_model = current_model_key
+        .as_ref()
+        .map(|key| key.model_id.clone())
+        .or(legacy_model)
         .unwrap_or_default();
+    if persisted_model_key.is_none() {
+        if let (Some(preferences), Some(key)) = (&preferences, &current_model_key) {
+            if let Err(error) = preferences.set_current_model_key(key) {
+                tracing::warn!(%error, "Failed to migrate current model preference to an exact key");
+            }
+        }
+    }
     let active_provider = resolve_initial_provider(
         saved_active_provider,
+        current_model_key.as_ref(),
         &current_model,
         &credential_store,
         &model_registry,
@@ -296,6 +320,7 @@ pub async fn init_services(
         channels,
         process_registry,
         current_model,
+        current_model_key,
         Arc::new(theme.clone()),
         theme_name,
         active_provider,
@@ -350,11 +375,14 @@ fn init_preferences(db_path: &Path) -> (Option<Preferences>, String) {
 
 fn resolve_initial_provider(
     saved_active_provider: Option<ProviderId>,
+    current_model_key: Option<&ModelKey>,
     current_model: &str,
     credential_store: &CredentialStore,
     model_registry: &SharedModelRegistry,
 ) -> ProviderId {
-    crate::tui::auth::infer_provider_for_model(model_registry, current_model)
+    current_model_key
+        .map(|key| key.provider)
+        .or_else(|| crate::tui::auth::infer_provider_for_model(model_registry, current_model))
         .or(saved_active_provider)
         .or_else(|| credential_store.providers_with_auth().into_iter().next())
         .unwrap_or(ProviderId::MiniMax)
@@ -473,10 +501,17 @@ fn init_model_registry(preferences: &Option<Preferences>) -> SharedModelRegistry
 
     // Load recent models
     if let Some(ref prefs) = preferences {
-        let recent_ids = prefs.get_recent_models();
-        if !recent_ids.is_empty() {
-            futures::executor::block_on(model_registry.set_recent_ids(recent_ids.clone()));
-            tracing::info!("Loaded {} recent models from preferences", recent_ids.len());
+        let recent_keys = prefs.get_recent_model_keys();
+        if !recent_keys.is_empty() {
+            let count = recent_keys.len();
+            futures::executor::block_on(model_registry.set_recent_keys(recent_keys));
+            tracing::info!("Loaded {} provider-aware recent models", count);
+        } else {
+            let recent_ids = prefs.get_recent_models();
+            if !recent_ids.is_empty() {
+                futures::executor::block_on(model_registry.set_recent_ids(recent_ids.clone()));
+                tracing::info!("Loaded {} recent models from preferences", recent_ids.len());
+            }
         }
     }
 

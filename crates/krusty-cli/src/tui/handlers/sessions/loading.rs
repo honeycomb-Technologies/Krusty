@@ -10,6 +10,7 @@ impl App {
     /// Load a session by ID
     pub fn load_session(&mut self, session_id: &str) -> Result<()> {
         tracing::info!("Loading session: {}", session_id);
+        self.runtime.model_selection_explicit = false;
 
         // Load all data from database upfront to avoid borrow conflicts
         let (messages, session_info, ui_states, recovery_state) = {
@@ -35,16 +36,76 @@ impl App {
             self.runtime.permission_mode = info.permission_mode;
         }
         let stored_token_count = session_info.as_ref().and_then(|i| i.token_count);
-        if let Some(model) = session_info
-            .as_ref()
-            .and_then(|info| info.model.as_deref())
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-        {
-            self.runtime.current_model = model.to_string();
-            self.persist_current_model_selection();
-            self.sync_active_provider_to_current_model();
-            let _ = futures::executor::block_on(self.try_load_auth());
+        if let Some(info) = session_info.as_ref() {
+            let legacy_model = info
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|model| !model.is_empty());
+            let exact_key = info
+                .model_key
+                .clone()
+                .filter(|key| !key.model_id.trim().is_empty())
+                .or_else(|| {
+                    legacy_model.and_then(|model| {
+                        self.services
+                            .model_registry
+                            .try_resolve_legacy_key(model)
+                            .ok()
+                    })
+                });
+
+            if let Some(key) = exact_key.as_ref() {
+                self.runtime.current_model = key.model_id.clone();
+                self.runtime.current_model_key = Some(key.clone());
+                self.runtime.active_provider = key.provider;
+                if let Some(metadata) = self.selected_model_metadata() {
+                    self.reconcile_model_controls(&metadata);
+                } else {
+                    self.runtime.fast_mode = false;
+                    self.runtime.thinking_level = crate::tui::app::ThinkingLevel::Off;
+                }
+                if let Err(error) =
+                    crate::storage::credentials::ActiveProviderStore::save(key.provider)
+                {
+                    tracing::warn!(%error, "Failed to persist session model provider");
+                }
+                self.persist_current_model_selection();
+
+                // Additively migrate an unambiguous legacy session. Existing
+                // exact session keys are retained verbatim, even while their
+                // dynamic catalog is temporarily unavailable.
+                if info.model_key.is_none() {
+                    let catalog_revision = self
+                        .services
+                        .model_registry
+                        .try_get_model_by_key(key)
+                        .and_then(|metadata| metadata.catalog_revision);
+                    if let Some(session_manager) = self.services.session_manager.as_ref() {
+                        if let Err(error) = session_manager.update_session_model_selection(
+                            session_id,
+                            Some(key),
+                            catalog_revision.as_deref(),
+                        ) {
+                            tracing::warn!(%error, %session_id, "Failed to migrate legacy session model identity");
+                        }
+                    }
+                }
+                let _ = futures::executor::block_on(self.try_load_auth());
+            } else if let Some(model) = legacy_model {
+                self.runtime.current_model = model.to_string();
+                self.runtime.current_model_key = None;
+                self.runtime.fast_mode = false;
+                self.runtime.thinking_level = crate::tui::app::ThinkingLevel::Off;
+                self.persist_current_model_selection();
+                self.runtime.api_key = None;
+                self.runtime.ai_client = None;
+                tracing::warn!(
+                    %session_id,
+                    %model,
+                    "Legacy session model is ambiguous or unavailable; explicit model selection is required"
+                );
+            }
         }
 
         // Clear current state

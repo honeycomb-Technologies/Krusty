@@ -25,7 +25,9 @@ pub(super) fn determine_post_turn_action(
     }
 
     let next_tick_number = tick_count.saturating_add(1);
-    if next_tick_number > tick_config.max_ticks {
+    // `max_ticks` is the maximum number of inner orchestrator runs, including
+    // the initial run whose zero-based index is `tick_count == 0`.
+    if next_tick_number >= tick_config.max_ticks {
         return PostTurnAction::Finish(LoopStopReason::BudgetExhausted);
     }
 
@@ -153,7 +155,7 @@ mod tests {
             },
             LoopStopReason::Completed,
             None,
-            1,
+            0,
         );
 
         match action {
@@ -162,6 +164,25 @@ mod tests {
             }
             _ => panic!("expected finish action"),
         }
+    }
+
+    #[test]
+    fn max_ticks_counts_the_initial_inner_run() {
+        let action = determine_post_turn_action(
+            &TickEngineConfig {
+                tick_interval: Duration::from_secs(30),
+                max_ticks: 4,
+                enabled: true,
+            },
+            LoopStopReason::Completed,
+            None,
+            3,
+        );
+
+        assert!(matches!(
+            action,
+            PostTurnAction::Finish(LoopStopReason::BudgetExhausted)
+        ));
     }
 
     #[test]

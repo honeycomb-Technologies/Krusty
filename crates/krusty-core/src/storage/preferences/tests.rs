@@ -2,7 +2,8 @@ use tempfile::TempDir;
 
 use super::Preferences;
 use crate::ai::models::{
-    dynamic_model_cache_ttl, model_catalog_fingerprint, DynamicModelCacheMetadata, ModelMetadata,
+    dynamic_model_cache_ttl, model_catalog_fingerprint, ApiFormat, DynamicModelCacheMetadata,
+    ModelAuthScope, ModelKey, ModelMetadata,
 };
 use crate::ai::providers::ProviderId;
 use crate::storage::{database::Database, unix_timestamp};
@@ -76,4 +77,31 @@ fn clearing_model_cache_removes_snapshot_and_metadata() {
     assert!(prefs.get_cached_models(ProviderId::OpenAI).is_none());
     assert!(prefs.get_model_cache_metadata(ProviderId::OpenAI).is_none());
     assert!(prefs.is_model_cache_stale(ProviderId::OpenAI));
+}
+
+#[test]
+fn provider_aware_model_preferences_dual_write_legacy_ids() {
+    let (prefs, _temp) = create_preferences();
+    let key = ModelKey::new(ProviderId::OpenAI, "gpt-shared", ApiFormat::OpenAIResponses)
+        .with_auth_scope(ModelAuthScope::OAuth);
+
+    prefs.set_current_model_key(&key).unwrap();
+    prefs.add_recent_model_key(&key).unwrap();
+
+    assert_eq!(prefs.get_current_model_key(), Some(key.clone()));
+    assert_eq!(prefs.get_current_model().as_deref(), Some("gpt-shared"));
+    assert_eq!(prefs.get_recent_model_keys(), vec![key]);
+    assert_eq!(prefs.get_recent_models(), vec!["gpt-shared"]);
+}
+
+#[test]
+fn legacy_model_write_clears_stale_exact_identity() {
+    let (prefs, _temp) = create_preferences();
+    let key = ModelKey::new(ProviderId::OpenAI, "gpt-shared", ApiFormat::OpenAIResponses);
+    prefs.set_current_model_key(&key).unwrap();
+
+    prefs.set_current_model("legacy-model").unwrap();
+
+    assert!(prefs.get_current_model_key().is_none());
+    assert_eq!(prefs.get_current_model().as_deref(), Some("legacy-model"));
 }

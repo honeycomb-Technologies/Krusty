@@ -1,0 +1,189 @@
+{
+  "scenarios": [
+    {
+      "name": "grok_bash_cosmetic_variants_do_not_evade_loop_guard",
+      "policy": {"max_no_progress_cycles": 3},
+      "steps": [
+        {
+          "kind": "tool_batch",
+          "calls": [
+            {
+              "id": "grok-rg-1",
+              "tool": "bash",
+              "arguments": {"command": "rg -n TODO src"},
+              "intent": "observe:search:TODO:src",
+              "effect": {"class": "observe"}
+            }
+          ]
+        },
+        {
+          "kind": "tool_batch",
+          "calls": [
+            {
+              "id": "grok-rg-2",
+              "tool": "bash",
+              "arguments": {"command": "rg --line-number 'TODO' ./src/"},
+              "intent": "observe:search:TODO:src",
+              "effect": {"class": "observe"}
+            }
+          ]
+        },
+        {
+          "kind": "tool_batch",
+          "calls": [
+            {
+              "id": "grok-rg-3",
+              "tool": "bash",
+              "arguments": {"command": "cd . && command rg -n TODO src/"},
+              "intent": "observe:search:TODO:src",
+              "effect": {"class": "observe"}
+            }
+          ]
+        },
+        {"kind": "complete", "text": "This must not be reached."}
+      ],
+      "expect": {
+        "stop_reason": "loop_guard_triggered",
+        "provider_calls": 3,
+        "tool_calls": 3,
+        "mutation_attempts": 0,
+        "side_effects": 0,
+        "evidence_deltas": 0,
+        "progress_events": 0,
+        "no_progress_cycles": 3,
+        "max_no_progress_streak": 3
+      }
+    },
+    {
+      "name": "grok_successful_noop_mutations_do_not_count_as_progress",
+      "policy": {"max_no_progress_cycles": 3},
+      "steps": [
+        {
+          "kind": "tool_batch",
+          "calls": [
+            {
+              "id": "grok-noop-1",
+              "tool": "bash",
+              "arguments": {"command": "touch already-present.txt"},
+              "intent": "mutate:ensure-file:already-present.txt",
+              "effect": {
+                "class": "mutate",
+                "resource": "already-present.txt",
+                "changed": false
+              }
+            }
+          ]
+        },
+        {
+          "kind": "tool_batch",
+          "calls": [
+            {
+              "id": "grok-noop-2",
+              "tool": "bash",
+              "arguments": {"command": "test -e already-present.txt || touch already-present.txt"},
+              "intent": "mutate:ensure-file:already-present.txt",
+              "effect": {
+                "class": "mutate",
+                "resource": "already-present.txt",
+                "changed": false
+              }
+            }
+          ]
+        },
+        {
+          "kind": "tool_batch",
+          "calls": [
+            {
+              "id": "grok-noop-3",
+              "tool": "bash",
+              "arguments": {"command": "[ -f ./already-present.txt ] || : > ./already-present.txt"},
+              "intent": "mutate:ensure-file:already-present.txt",
+              "effect": {
+                "class": "mutate",
+                "resource": "already-present.txt",
+                "changed": false
+              }
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "stop_reason": "loop_guard_triggered",
+        "provider_calls": 3,
+        "tool_calls": 3,
+        "mutation_attempts": 3,
+        "side_effects": 0,
+        "duplicate_side_effects": 0,
+        "state_deltas": 0,
+        "progress_events": 0,
+        "no_progress_cycles": 3,
+        "max_no_progress_streak": 3
+      }
+    },
+    {
+      "name": "grok_repeated_successful_validation_stops_without_new_state",
+      "policy": {"max_no_progress_cycles": 3},
+      "steps": [
+        {
+          "kind": "tool_batch",
+          "calls": [
+            {
+              "id": "grok-test-1",
+              "tool": "bash",
+              "arguments": {"command": "cargo test --workspace"},
+              "intent": "validate:workspace-tests",
+              "effect": {"class": "validate", "result": "pass"}
+            }
+          ]
+        },
+        {
+          "kind": "tool_batch",
+          "calls": [
+            {
+              "id": "grok-test-2",
+              "tool": "bash",
+              "arguments": {"command": "cargo test --workspace --quiet"},
+              "intent": "validate:workspace-tests",
+              "effect": {"class": "validate", "result": "pass"}
+            }
+          ]
+        },
+        {
+          "kind": "tool_batch",
+          "calls": [
+            {
+              "id": "grok-test-3",
+              "tool": "bash",
+              "arguments": {"command": "env RUST_BACKTRACE=1 cargo test --workspace"},
+              "intent": "validate:workspace-tests",
+              "effect": {"class": "validate", "result": "pass"}
+            }
+          ]
+        },
+        {
+          "kind": "tool_batch",
+          "calls": [
+            {
+              "id": "grok-test-4",
+              "tool": "bash",
+              "arguments": {"command": "cargo test --all"},
+              "intent": "validate:workspace-tests",
+              "effect": {"class": "validate", "result": "pass"}
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "stop_reason": "loop_guard_triggered",
+        "provider_calls": 4,
+        "tool_calls": 4,
+        "validation_calls": 4,
+        "validation_deltas": 1,
+        "progress_events": 1,
+        "no_progress_cycles": 3,
+        "max_no_progress_streak": 3,
+        "side_effects": 0
+      }
+    }
+  ]
+}

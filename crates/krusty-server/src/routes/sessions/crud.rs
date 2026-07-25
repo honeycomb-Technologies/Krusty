@@ -7,10 +7,11 @@ use axum::{
 };
 use serde::Deserialize;
 
+use krusty_core::ai::models::{ModelKey, ModelLookupError, ModelMetadata};
 use krusty_core::storage::{SessionType, WorkspaceMode};
 
 use super::{current_user_id, load_owned_session, open_session_manager, request_workspace_scope};
-use crate::ai_bootstrap::persist_current_model_selection;
+use crate::ai_bootstrap::{persist_current_model_key_selection, persist_current_model_selection};
 use crate::auth::CurrentUser;
 use crate::error::AppError;
 use crate::types::{
@@ -38,6 +39,79 @@ pub(super) struct GetSessionQuery {
     pub limit: Option<usize>,
     /// Number of messages to skip (from the beginning)
     pub offset: Option<usize>,
+}
+
+struct RequestedModelSelection {
+    model_id: Option<String>,
+    metadata: Option<ModelMetadata>,
+}
+
+impl RequestedModelSelection {
+    fn key(&self) -> Option<ModelKey> {
+        self.metadata.as_ref().map(ModelMetadata::key)
+    }
+
+    fn catalog_revision(&self) -> Option<&str> {
+        self.metadata
+            .as_ref()
+            .and_then(|metadata| metadata.catalog_revision.as_deref())
+    }
+}
+
+async fn resolve_requested_model_selection(
+    state: &AppState,
+    model: Option<&str>,
+    key: Option<&ModelKey>,
+) -> Result<RequestedModelSelection, AppError> {
+    let normalized = trimmed_nonempty(model);
+    if let Some(key) = key {
+        if model.is_some() && normalized.is_none() {
+            return Err(AppError::BadRequest(
+                "model_key cannot be combined with an empty model override".to_string(),
+            ));
+        }
+        if normalized.is_some_and(|model| model != key.model_id.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "Model '{}' does not match provider-aware key '{}'",
+                normalized.unwrap_or_default(),
+                key.model_id
+            )));
+        }
+        let metadata = state
+            .model_registry
+            .get_model_by_key(key)
+            .await
+            .ok_or_else(|| AppError::BadRequest(format!("Model key {key:?} is not available")))?;
+        return Ok(RequestedModelSelection {
+            model_id: Some(key.model_id.clone()),
+            metadata: Some(metadata),
+        });
+    }
+
+    let Some(model_id) = normalized else {
+        return Ok(RequestedModelSelection {
+            model_id: None,
+            metadata: None,
+        });
+    };
+    match state.model_registry.resolve_legacy_key(model_id).await {
+        Ok(key) => Ok(RequestedModelSelection {
+            model_id: Some(model_id.to_string()),
+            metadata: state.model_registry.get_model_by_key(&key).await,
+        }),
+        // Preserve compatibility with custom legacy slugs that rely on an
+        // explicit KRUSTY_PROVIDER at execution time.
+        Err(ModelLookupError::NotFound { .. }) => Ok(RequestedModelSelection {
+            model_id: Some(model_id.to_string()),
+            metadata: None,
+        }),
+        Err(ModelLookupError::Ambiguous {
+            model_id,
+            candidates,
+        }) => Err(AppError::BadRequest(format!(
+            "Model '{model_id}' is ambiguous; submit one of these provider-aware keys: {candidates:?}"
+        ))),
+    }
 }
 
 /// List all sessions, optionally filtered by working directory
@@ -98,7 +172,9 @@ pub(super) async fn create_session(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("New Session");
-    let requested_model = trimmed_nonempty(req.model.as_deref());
+    let requested_model =
+        resolve_requested_model_selection(&state, req.model.as_deref(), req.model_key.as_ref())
+            .await?;
     let workspace = normalize_resolved_requested_workspace(
         req.working_dir.as_deref(),
         req.project_dir.as_deref(),
@@ -122,7 +198,7 @@ pub(super) async fn create_session(
         .filter(|branch| !branch.is_empty());
     let session_id = session_manager.create_session_for_user_with_config_and_permission(
         title,
-        requested_model,
+        requested_model.model_id.as_deref(),
         workspace.working_dir.as_deref(),
         workspace.project_dir.as_deref(),
         workspace.workspace_mode,
@@ -132,7 +208,23 @@ pub(super) async fn create_session(
         req.permission_mode.unwrap_or_default(),
     )?;
 
-    if let Some(model) = requested_model {
+    if let Some(key) = requested_model.key() {
+        session_manager.update_session_model_selection(
+            &session_id,
+            Some(&key),
+            requested_model.catalog_revision(),
+        )?;
+    }
+
+    if let Some(key) = requested_model.key() {
+        persist_current_model_key_selection(
+            &state.model_registry,
+            state.db_path.as_ref().as_path(),
+            current_user_id(user.as_ref()),
+            &key,
+        )
+        .await?;
+    } else if let Some(model) = requested_model.model_id.as_deref() {
         persist_current_model_selection(
             &state.model_registry,
             state.db_path.as_ref().as_path(),
@@ -210,13 +302,23 @@ pub(super) async fn update_session(
         && req.workspace_mode.is_none()
         && req.mode.is_none()
         && req.model.is_none()
+        && req.model_key.is_none()
         && req.target_branch.is_none()
         && req.permission_mode.is_none()
     {
         return Err(AppError::BadRequest(
-            "At least one of title, working_dir, project_dir, workspace_mode, mode, model, target_branch, or permission_mode must be provided".to_string(),
+            "At least one of title, working_dir, project_dir, workspace_mode, mode, model, model_key, target_branch, or permission_mode must be provided".to_string(),
         ));
     }
+
+    let requested_model = if req.model.is_some() || req.model_key.is_some() {
+        Some(
+            resolve_requested_model_selection(&state, req.model.as_deref(), req.model_key.as_ref())
+                .await?,
+        )
+    } else {
+        None
+    };
 
     if let Some(title) = req.title.as_deref() {
         session_manager.update_session_title(&id, title)?;
@@ -251,17 +353,33 @@ pub(super) async fn update_session(
         session_manager.update_session_work_mode(&id, mode)?;
     }
 
-    if let Some(model) = req.model.as_deref() {
-        let normalized = trimmed_nonempty(Some(model));
-        session_manager.update_session_model(&id, normalized)?;
-        if let Some(model) = normalized {
-            persist_current_model_selection(
+    if let Some(selection) = requested_model.as_ref() {
+        if let Some(key) = selection.key() {
+            session_manager.update_session_model_selection(
+                &id,
+                Some(&key),
+                selection.catalog_revision(),
+            )?;
+            persist_current_model_key_selection(
                 &state.model_registry,
                 state.db_path.as_ref().as_path(),
                 current_user_id(user.as_ref()),
-                model,
+                &key,
             )
             .await?;
+        } else {
+            session_manager.update_session_model(&id, selection.model_id.as_deref())?;
+        }
+        if selection.key().is_none() {
+            if let Some(model) = selection.model_id.as_deref() {
+                persist_current_model_selection(
+                    &state.model_registry,
+                    state.db_path.as_ref().as_path(),
+                    current_user_id(user.as_ref()),
+                    model,
+                )
+                .await?;
+            }
         }
     }
 

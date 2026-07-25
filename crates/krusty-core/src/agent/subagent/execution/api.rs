@@ -3,8 +3,11 @@ use std::time::Instant;
 use tracing::info;
 
 use crate::ai::client::AiClient;
-use crate::ai::retry::{with_retry, RetryConfig};
-use crate::ai::types::{AiTool, Content, ModelMessage, Role};
+use crate::ai::types::{AiTool, ModelMessage, Usage};
+use crate::ai::usage::{
+    parse_anthropic_usage, parse_google_usage, parse_openai_chat_usage,
+    parse_openai_responses_usage,
+};
 
 use super::super::types::{SubAgentApiError, ToolCall};
 
@@ -18,6 +21,7 @@ pub(super) async fn call_subagent_api(
     max_tokens: usize,
     thinking_enabled: bool,
     session_id: &str,
+    prompt_cache_key: Option<&str>,
 ) -> Result<Value, SubAgentApiError> {
     info!(
         model = model,
@@ -26,78 +30,19 @@ pub(super) async fn call_subagent_api(
     );
     let start = Instant::now();
 
-    let messages_json: Vec<Value> = messages
-        .iter()
-        .map(|m| {
-            let role = match m.role {
-                Role::User => "user",
-                Role::Assistant => "assistant",
-                Role::System => "user",
-                Role::Tool => "user",
-            };
-
-            let content: Vec<Value> = m
-                .content
-                .iter()
-                .map(|c| match c {
-                    Content::Text { text } => json!({"type": "text", "text": text}),
-                    Content::ToolUse { id, name, input } => {
-                        json!({"type": "tool_use", "id": id, "name": name, "input": input})
-                    }
-                    Content::ToolResult {
-                        tool_use_id,
-                        output,
-                        is_error,
-                    } => {
-                        let content_str = match output {
-                            Value::String(s) => Value::String(s.clone()),
-                            other => Value::String(other.to_string()),
-                        };
-                        json!({
-                            "type": "tool_result",
-                            "tool_use_id": tool_use_id,
-                            "content": content_str,
-                            "is_error": is_error.unwrap_or(false)
-                        })
-                    }
-                    _ => json!({"type": "text", "text": "[unsupported content]"}),
-                })
-                .collect();
-
-            json!({"role": role, "content": content})
-        })
-        .collect();
-
-    let mut sorted_tools: Vec<_> = tools.iter().collect();
-    sorted_tools.sort_by(|a, b| a.name.cmp(&b.name));
-    let tools_json: Vec<Value> = sorted_tools
-        .iter()
-        .map(|t| {
-            json!({
-                "name": t.name,
-                "description": t.description,
-                "input_schema": t.input_schema
-            })
-        })
-        .collect();
-
-    let config = RetryConfig::aggressive();
-
-    let result = with_retry(&config, || async {
-        client
-            .call_with_tools(
-                model,
-                system,
-                messages_json.clone(),
-                tools_json.clone(),
-                max_tokens,
-                thinking_enabled,
-                Some(session_id),
-            )
-            .await
-            .map_err(SubAgentApiError::from)
-    })
-    .await;
+    let result = client
+        .call_with_tools(
+            model,
+            system,
+            messages,
+            tools,
+            max_tokens,
+            thinking_enabled,
+            Some(session_id),
+            prompt_cache_key,
+        )
+        .await
+        .map_err(SubAgentApiError::from);
 
     let elapsed = start.elapsed();
     info!(
@@ -106,6 +51,13 @@ pub(super) async fn call_subagent_api(
         "SubAgent API call completed"
     );
     result
+}
+
+pub(super) fn parse_response_usage(response: &Value) -> Option<Usage> {
+    parse_openai_responses_usage(response)
+        .or_else(|| parse_openai_chat_usage(response))
+        .or_else(|| parse_anthropic_usage(response))
+        .or_else(|| parse_google_usage(response))
 }
 
 /// Parse API response to extract text, tool calls, and stop reason.

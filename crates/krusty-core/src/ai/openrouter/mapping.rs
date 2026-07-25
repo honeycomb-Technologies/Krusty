@@ -1,4 +1,4 @@
-use crate::ai::models::{ApiFormat, ModelMetadata};
+use crate::ai::models::{ApiFormat, ModelCatalogSource, ModelMetadata};
 use crate::ai::providers::{
     FastMode, ProviderId, ReasoningControl, ReasoningEffort, ReasoningFormat,
 };
@@ -167,6 +167,8 @@ pub(super) fn parse_model(raw: OpenRouterModel) -> ModelMetadata {
         sub_provider,
         is_free,
         api_format: ApiFormat::Anthropic,
+        catalog_source: ModelCatalogSource::Legacy,
+        catalog_revision: None,
     }
 }
 

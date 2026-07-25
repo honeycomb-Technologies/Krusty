@@ -5,5 +5,7 @@
 
 pub mod auto_classifier;
 pub mod coordinator_prompt;
-pub mod team;
+// The unused rigid TeamManager/TeammateRole prototype is intentionally not
+// compiled. Dynamic delegated work is owned by AgentSpec plus the unified
+// agent lifecycle control plane.
 pub mod tick_engine;

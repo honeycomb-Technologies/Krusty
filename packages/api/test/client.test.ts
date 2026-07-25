@@ -1,6 +1,19 @@
 import { describe, expect, it } from "bun:test";
 
-import { KrustyApiError, KrustyClient } from "../src";
+import {
+	KrustyApiError,
+	KrustyClient,
+	type ChatRequest,
+	type ModelKey,
+	type ModelsResponse,
+} from "../src";
+
+const exactGrokKey: ModelKey = {
+	provider: "grok",
+	model_id: "grok-4.5",
+	auth_scope: "oauth",
+	api_format: "open_ai_responses",
+};
 
 describe("KrustyClient request errors", () => {
 	it("preserves HTTP status and response body in a typed error", async () => {
@@ -42,5 +55,92 @@ describe("KrustyClient request errors", () => {
 			status: 402,
 			message: "API 402: Grok Build usage balance exhausted",
 		});
+	});
+});
+
+describe("KrustyClient provider-aware model identity", () => {
+	it("sends the exact key and legacy model mirror when dispatching Mako", async () => {
+		let requestUrl = "";
+		let requestInit: RequestInit | undefined;
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
+			fetchImpl: (async (input, init) => {
+				requestUrl = String(input);
+				requestInit = init;
+				return Response.json({ session_id: "mako-1", status: "started" });
+			}) as typeof fetch,
+		});
+
+		await client.dispatchMako("Audit this project", {
+			model: exactGrokKey.model_id,
+			modelKey: exactGrokKey,
+			projectDir: "/work/project",
+		});
+
+		expect(requestUrl).toBe("http://krusty.test/api/mako/dispatch");
+		expect(requestInit?.method).toBe("POST");
+		expect(JSON.parse(String(requestInit?.body))).toEqual({
+			task: "Audit this project",
+			project_dir: "/work/project",
+			model: "grok-4.5",
+			model_key: exactGrokKey,
+		});
+	});
+
+	it("keeps legacy Mako dispatches compatible by omitting model_key", async () => {
+		let body: unknown;
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
+			fetchImpl: (async (_input, init) => {
+				body = JSON.parse(String(init?.body));
+				return Response.json({ session_id: "mako-legacy", status: "started" });
+			}) as typeof fetch,
+		});
+
+		await client.dispatchMako("Continue", { model: "grok-4.5" });
+
+		expect(body).toEqual({ task: "Continue", model: "grok-4.5" });
+	});
+
+	it("persists and reads an exact default model selection", async () => {
+		const requests: Array<{ url: string; body?: unknown }> = [];
+		const response: ModelsResponse = {
+			models: [],
+			default_model: exactGrokKey.model_id,
+			default_model_key: exactGrokKey,
+		};
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
+			fetchImpl: (async (input, init) => {
+				requests.push({
+					url: String(input),
+					body: init?.body ? JSON.parse(String(init.body)) : undefined,
+				});
+				return String(input).endsWith("/models")
+					? Response.json(response)
+					: Response.json({ ok: true });
+			}) as typeof fetch,
+		});
+
+		await client.setCurrentModel(exactGrokKey.model_id, exactGrokKey);
+		const models = await client.getModels();
+
+		expect(requests[0]).toEqual({
+			url: "http://krusty.test/api/models/current",
+			body: { model: "grok-4.5", model_key: exactGrokKey },
+		});
+		expect(models.default_model_key).toEqual(exactGrokKey);
+	});
+
+	it("types a chat start with the same exact model identity", () => {
+		const request: ChatRequest = {
+			message: "Build the project",
+			model: exactGrokKey.model_id,
+			model_key: exactGrokKey,
+			allowed_tools: ["read", "grep"],
+		};
+
+		expect(request.model_key).toEqual(exactGrokKey);
+		expect(request.allowed_tools).toEqual(["read", "grep"]);
 	});
 });

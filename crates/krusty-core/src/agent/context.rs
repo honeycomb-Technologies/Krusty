@@ -25,7 +25,7 @@ use tracing::warn;
 
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::skills::SkillsManager;
-use crate::storage::{Database, MakoProfileSnapshot, ProjectSettings, WorkMode};
+use crate::storage::{Database, DelegationMode, MakoProfileSnapshot, ProjectSettings, WorkMode};
 
 pub use plan::build_plan_context;
 pub use project::build_project_context;
@@ -222,6 +222,17 @@ pub fn inject_context_with_mako_profile(
             content: vec![Content::Text { text }],
         });
     }
+    let delegation_mode = project_settings.delegation_mode.unwrap_or(if is_mako {
+        DelegationMode::Proactive
+    } else {
+        DelegationMode::Balanced
+    });
+    injected.push(ModelMessage {
+        role: Role::System,
+        content: vec![Content::Text {
+            text: delegation_mode.prompt_contract(),
+        }],
+    });
     if let Some(ref append) = project_settings.system_prompt_append {
         if !append.is_empty() {
             injected.push(ModelMessage {
@@ -366,6 +377,7 @@ fn dynamic_context_priority(text: &str) -> u8 {
         || text.starts_with("[AUTONOMOUS TASKS]")
         || text.starts_with("[WORKSPACE MODE:")
         || text.starts_with("[ENVIRONMENT]")
+        || text.starts_with("[DELEGATION MODE:")
     {
         120
     } else if text.starts_with("[PROJECT INSTRUCTIONS")

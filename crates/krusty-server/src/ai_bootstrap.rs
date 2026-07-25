@@ -8,7 +8,8 @@ use krusty_core::ai::catalog::{CatalogAuthKind, CatalogCredential};
 use krusty_core::ai::client::{AiClient, AiClientConfig};
 use krusty_core::ai::format_detection::detect_api_format;
 use krusty_core::ai::models::{
-    resolve_model_metadata, ModelAuthScope, ModelMetadata, SharedModelRegistry,
+    resolve_model_metadata, ModelAuthScope, ModelCatalogSource, ModelKey, ModelLookupError,
+    ModelMetadata, SharedModelRegistry,
 };
 use krusty_core::ai::providers::{builtin_providers, get_provider, ProviderId};
 use krusty_core::auth::{OpenAIAuthResolution, OpenAIAuthType};
@@ -80,6 +81,14 @@ impl AiBootstrapPolicy {
         load_current_model_preference(db_path, user_id)
     }
 
+    fn current_model_key_preference(
+        self,
+        db_path: &Path,
+        user_id: Option<&str>,
+    ) -> Option<ModelKey> {
+        load_current_model_key_preference(db_path, user_id)
+    }
+
     fn credential_env_key(self, provider: ProviderId) -> &'static str {
         match provider {
             ProviderId::MiniMax => "MINIMAX_API_KEY",
@@ -96,10 +105,21 @@ impl AiBootstrapPolicy {
         model_registry: &SharedModelRegistry,
         model: &str,
     ) -> Option<ProviderId> {
-        if let Some(metadata) = model_registry.get_model(model).await {
-            return Some(metadata.provider);
+        match model_registry.resolve_legacy_key(model).await {
+            Ok(key) => return Some(key.provider),
+            Err(ModelLookupError::Ambiguous { candidates, .. }) => {
+                tracing::warn!(
+                    %model,
+                    ?candidates,
+                    "Refusing to infer an active provider for an ambiguous model slug"
+                );
+                return None;
+            }
+            Err(ModelLookupError::NotFound { .. }) => {}
         }
 
+        // Compatibility for curated static rows that have not yet been loaded
+        // into the registry. This is deliberately unreachable for ambiguity.
         builtin_providers()
             .iter()
             .filter(|provider| !provider.dynamic_models)
@@ -118,20 +138,64 @@ impl AiBootstrapPolicy {
         db_path: &Path,
         requested_model: Option<&str>,
         user_id: Option<&str>,
-    ) -> Option<(ProviderId, String)> {
+    ) -> Option<ModelKey> {
         let requested_model = requested_model
             .map(str::trim)
             .filter(|model| !model.is_empty())
             .map(ToOwned::to_owned);
         let env_provider = self.explicit_provider_from_env();
-        let model = requested_model
-            .or_else(|| self.explicit_model_from_env())
-            .or_else(|| self.current_model_preference(db_path, user_id))?;
-        let provider = self
-            .provider_for_model(model_registry, &model)
-            .await
-            .or(env_provider)?;
-        Some((provider, model))
+        if let Some(model) = requested_model.or_else(|| self.explicit_model_from_env()) {
+            match model_registry.resolve_legacy_key(&model).await {
+                Ok(key) => return Some(key),
+                Err(ModelLookupError::Ambiguous { candidates, .. }) => {
+                    let provider = env_provider?;
+                    let mut matching = candidates
+                        .into_iter()
+                        .filter(|candidate| candidate.provider == provider);
+                    let key = matching.next()?;
+                    if matching.next().is_none() {
+                        return Some(key);
+                    }
+                    tracing::warn!(
+                        %model,
+                        ?provider,
+                        "Explicit provider still leaves multiple auth/transport model rows; exact model_key required"
+                    );
+                    return None;
+                }
+                Err(ModelLookupError::NotFound { .. }) => {}
+            }
+            let provider = env_provider?;
+            return Some(ModelKey::new(
+                provider,
+                model.clone(),
+                detect_api_format(provider, &model),
+            ));
+        }
+
+        if let Some(key) = self.current_model_key_preference(db_path, user_id) {
+            if model_registry.get_model_by_key(&key).await.is_some() {
+                return Some(key);
+            }
+            tracing::warn!(?key, "Refusing unavailable persisted model key");
+            return None;
+        }
+
+        let model = self.current_model_preference(db_path, user_id)?;
+        match model_registry.resolve_legacy_key(&model).await {
+            Ok(key) => Some(key),
+            Err(ModelLookupError::Ambiguous { candidates, .. }) => {
+                let provider = env_provider?;
+                let mut matching = candidates
+                    .into_iter()
+                    .filter(|candidate| candidate.provider == provider);
+                let key = matching.next()?;
+                matching.next().is_none().then_some(key)
+            }
+            Err(ModelLookupError::NotFound { .. }) => env_provider.map(|provider| {
+                ModelKey::new(provider, model.clone(), detect_api_format(provider, &model))
+            }),
+        }
     }
 }
 
@@ -152,11 +216,31 @@ pub(crate) fn load_current_model_preference(
         .filter(|model| !model.is_empty())
 }
 
+pub(crate) fn load_current_model_key_preference(
+    db_path: &Path,
+    user_id: Option<&str>,
+) -> Option<ModelKey> {
+    let db = Database::new(db_path).ok()?;
+    let prefs = if let Some(user_id) = user_id {
+        Preferences::for_user(db, user_id)
+    } else {
+        Preferences::new(db)
+    };
+    prefs.get_current_model_key()
+}
+
 pub(crate) fn resolve_preferred_model(db_path: &Path, user_id: Option<&str>) -> Option<String> {
     let policy = AiBootstrapPolicy;
     policy
         .explicit_model_from_env()
         .or_else(|| policy.current_model_preference(db_path, user_id))
+}
+
+pub(crate) fn resolve_preferred_model_key(
+    db_path: &Path,
+    user_id: Option<&str>,
+) -> Option<ModelKey> {
+    AiBootstrapPolicy.current_model_key_preference(db_path, user_id)
 }
 
 pub(crate) async fn persist_current_model_selection(
@@ -174,6 +258,25 @@ pub(crate) async fn persist_current_model_selection(
         ActiveProviderStore::save(provider)?;
     }
 
+    Ok(())
+}
+
+pub(crate) async fn persist_current_model_key_selection(
+    model_registry: &SharedModelRegistry,
+    db_path: &Path,
+    user_id: Option<&str>,
+    key: &ModelKey,
+) -> Result<()> {
+    if model_registry.get_model_by_key(key).await.is_none() {
+        anyhow::bail!("model key {key:?} is not available");
+    }
+    let db = Database::new(db_path)?;
+    if let Some(user_id) = user_id {
+        Preferences::for_user(db, user_id).set_current_model_key(key)?;
+    } else {
+        Preferences::new(db).set_current_model_key(key)?;
+    }
+    ActiveProviderStore::save(key.provider)?;
     Ok(())
 }
 
@@ -198,9 +301,9 @@ pub(crate) fn persist_current_model_preference(
 pub(crate) fn clear_current_model_preference(db_path: &Path, user_id: Option<&str>) -> Result<()> {
     let db = Database::new(db_path)?;
     if let Some(user_id) = user_id {
-        Preferences::for_user(db, user_id).delete("current_model")
+        Preferences::for_user(db, user_id).clear_current_model()
     } else {
-        Preferences::new(db).delete("current_model")
+        Preferences::new(db).clear_current_model()
     }
 }
 
@@ -241,16 +344,36 @@ pub async fn create_ai_client_for_model(
     requested_model: Option<&str>,
     user_id: Option<&str>,
 ) -> Option<AiClient> {
-    let (provider, model) = AiBootstrapPolicy
+    let key = AiBootstrapPolicy
         .resolve_model_selection(model_registry, db_path, requested_model, user_id)
         .await?;
+    let metadata = model_registry.get_model_by_key(&key).await;
 
-    let auth_scope = model_registry
-        .get_model(&model)
-        .await
-        .and_then(|metadata| metadata.auth_scope);
+    create_ai_client_for_provider_with_metadata(
+        credentials,
+        key.provider,
+        key.model_id,
+        metadata.as_ref(),
+    )
+}
 
-    create_ai_client_for_provider_with_scope(credentials, provider, model, auth_scope)
+/// Build an AI client from one exact provider/auth/transport catalog identity.
+///
+/// Unlike the legacy slug resolver, this never guesses between providers or
+/// credential surfaces. A stale or unavailable key is rejected rather than
+/// silently rebound to a different catalog row.
+pub async fn create_ai_client_for_key(
+    credentials: &CredentialStore,
+    model_registry: &SharedModelRegistry,
+    key: &ModelKey,
+) -> Option<AiClient> {
+    let metadata = model_registry.get_model_by_key(key).await?;
+    create_ai_client_for_provider_with_metadata(
+        credentials,
+        key.provider,
+        key.model_id.clone(),
+        Some(&metadata),
+    )
 }
 
 fn create_ai_client_for_provider(
@@ -258,15 +381,16 @@ fn create_ai_client_for_provider(
     provider: ProviderId,
     model: String,
 ) -> Option<AiClient> {
-    create_ai_client_for_provider_with_scope(credentials, provider, model, None)
+    create_ai_client_for_provider_with_metadata(credentials, provider, model, None)
 }
 
-fn create_ai_client_for_provider_with_scope(
+fn create_ai_client_for_provider_with_metadata(
     credentials: &CredentialStore,
     provider: ProviderId,
     model: String,
-    auth_scope: Option<ModelAuthScope>,
+    metadata: Option<&ModelMetadata>,
 ) -> Option<AiClient> {
+    let auth_scope = metadata.and_then(|metadata| metadata.auth_scope);
     let policy = AiBootstrapPolicy;
     let auth = if provider == ProviderId::Grok {
         credentials.get_auth(&provider)
@@ -316,7 +440,9 @@ fn create_ai_client_for_provider_with_scope(
             (config, api_key)
         }
         ProviderId::Grok => {
-            let config = AiClientConfig::for_grok(&model);
+            let config = metadata
+                .map(AiClientConfig::for_grok_with_metadata)
+                .unwrap_or_else(|| AiClientConfig::for_grok(&model));
             let resolved = krusty_core::auth::resolve_grok_auth(credentials);
             let api_key = match resolved.credential {
                 Some(key) => key,
@@ -340,7 +466,9 @@ fn create_ai_client_for_provider_with_scope(
                     return None;
                 }
             };
-            let api_format = detect_api_format(provider, &model);
+            let api_format = metadata
+                .map(|metadata| metadata.api_format)
+                .unwrap_or_else(|| detect_api_format(provider, &model));
             (
                 AiClientConfig {
                     model,
@@ -356,7 +484,35 @@ fn create_ai_client_for_provider_with_scope(
         }
     };
 
-    Some(AiClient::new(config, api_key))
+    let owned_metadata;
+    let metadata = if let Some(metadata) = metadata {
+        metadata
+    } else {
+        let mut resolved =
+            resolve_model_metadata(config.provider_id, &config.model, config.api_format);
+        if config.provider_id == ProviderId::OpenAI {
+            resolved.auth_scope = Some(if config.uses_chatgpt_codex_format() {
+                ModelAuthScope::OAuth
+            } else {
+                ModelAuthScope::ApiKey
+            });
+        }
+        owned_metadata = resolved;
+        &owned_metadata
+    };
+
+    match AiClient::new_with_resolved_model(config, api_key, metadata.resolve_runtime()) {
+        Ok(client) => Some(client),
+        Err(error) => {
+            tracing::error!(
+                provider = ?provider,
+                model = %metadata.id,
+                %error,
+                "Refusing AI client whose transport disagrees with catalog metadata"
+            );
+            None
+        }
+    }
 }
 
 fn resolve_openai_auth_for_model(
@@ -427,7 +583,12 @@ async fn install_curated_catalog(
     provider: ProviderId,
 ) {
     registry
-        .set_models(provider, curated_model_metadata(provider))
+        .set_models_with_catalog(
+            provider,
+            curated_model_metadata(provider),
+            Some(ModelCatalogSource::Curated),
+            Some("bundled".to_string()),
+        )
         .await;
     if let Ok(db) = Database::new(db_path) {
         let preferences = Preferences::new(db);
@@ -443,7 +604,12 @@ async fn install_curated_catalog(
 pub async fn initialize_models(registry: &SharedModelRegistry, db_path: &Path) {
     for provider in builtin_providers() {
         registry
-            .set_models(provider.id, curated_model_metadata(provider.id))
+            .set_models_with_catalog(
+                provider.id,
+                curated_model_metadata(provider.id),
+                Some(ModelCatalogSource::Curated),
+                Some("bundled".to_string()),
+            )
             .await;
     }
 
@@ -451,7 +617,17 @@ pub async fn initialize_models(registry: &SharedModelRegistry, db_path: &Path) {
         let preferences = Preferences::new(db);
         for provider in krusty_core::ai::catalog::dynamic_model_providers() {
             if let Some(models) = preferences.get_cached_models(provider) {
-                registry.set_models(provider, models).await;
+                let revision = preferences
+                    .get_model_cache_metadata(provider)
+                    .map(|metadata| format!("{:016x}", metadata.fingerprint));
+                registry
+                    .set_models_with_catalog(
+                        provider,
+                        models,
+                        Some(ModelCatalogSource::CachedDynamic),
+                        revision,
+                    )
+                    .await;
             }
             for custom in preferences.get_custom_models(provider) {
                 registry.upsert_model(custom).await;
@@ -535,7 +711,18 @@ pub(crate) async fn refresh_provider_model_catalog(
     let preferences = Preferences::new(Database::new(db_path)?);
     preferences.cache_models(provider, &models)?;
     let custom_models = preferences.get_custom_models(provider);
-    registry.set_models(provider, models.clone()).await;
+    let revision = format!(
+        "{:016x}",
+        krusty_core::ai::models::model_catalog_fingerprint(&models)
+    );
+    registry
+        .set_models_with_catalog(
+            provider,
+            models.clone(),
+            Some(ModelCatalogSource::LiveDynamic),
+            Some(revision),
+        )
+        .await;
     for custom in custom_models {
         registry.upsert_model(custom).await;
     }
@@ -641,7 +828,17 @@ pub fn spawn_model_catalog_refresh(
 
 #[cfg(test)]
 mod catalog_refresh_tests {
-    use super::{openai_resolution_for_catalog_identity, CatalogCredential, OpenAIAuthType};
+    use std::sync::Arc;
+
+    use super::{
+        openai_resolution_for_catalog_identity, AiBootstrapPolicy, CatalogCredential,
+        OpenAIAuthType,
+    };
+    use krusty_core::ai::models::{
+        ApiFormat, ModelAuthScope, ModelKey, ModelMetadata, ModelRegistry,
+    };
+    use krusty_core::ai::providers::ProviderId;
+    use krusty_core::storage::{Database, Preferences};
 
     #[test]
     fn catalog_identity_selects_matching_openai_transport() {
@@ -657,5 +854,76 @@ mod catalog_refresh_tests {
         ));
         assert_eq!(oauth.auth_type, OpenAIAuthType::ChatGptOAuth);
         assert_eq!(oauth.account_id.as_deref(), Some("account-1"));
+    }
+
+    #[tokio::test]
+    async fn ambiguous_bare_model_never_chooses_an_auth_surface() {
+        let registry = Arc::new(ModelRegistry::new());
+        let mut api = ModelMetadata::new("shared", "API", ProviderId::OpenAI)
+            .with_transport(ApiFormat::OpenAIResponses);
+        api.auth_scope = Some(ModelAuthScope::ApiKey);
+        let mut oauth = ModelMetadata::new("shared", "OAuth", ProviderId::OpenAI)
+            .with_transport(ApiFormat::OpenAIResponses);
+        oauth.auth_scope = Some(ModelAuthScope::OAuth);
+        registry
+            .set_models(ProviderId::OpenAI, vec![api, oauth])
+            .await;
+
+        let temp = tempfile::tempdir().unwrap();
+        let selected = AiBootstrapPolicy
+            .resolve_model_selection(
+                &registry,
+                &temp.path().join("krusty.db"),
+                Some("shared"),
+                None,
+            )
+            .await;
+
+        assert!(selected.is_none());
+    }
+
+    #[tokio::test]
+    async fn ambiguous_bare_model_never_falls_back_to_builtin_provider_inference() {
+        let registry = Arc::new(ModelRegistry::new());
+        let minimax = ModelMetadata::new("MiniMax-M2.5", "MiniMax", ProviderId::MiniMax)
+            .with_transport(ApiFormat::Anthropic);
+        let router = ModelMetadata::new("MiniMax-M2.5", "Router", ProviderId::OpenRouter)
+            .with_transport(ApiFormat::Anthropic);
+        registry
+            .set_models(ProviderId::MiniMax, vec![minimax])
+            .await;
+        registry
+            .set_models(ProviderId::OpenRouter, vec![router])
+            .await;
+
+        let provider = AiBootstrapPolicy
+            .provider_for_model(&registry, "MiniMax-M2.5")
+            .await;
+
+        assert_eq!(provider, None);
+    }
+
+    #[tokio::test]
+    async fn unavailable_persisted_exact_key_is_not_rebound_through_legacy_slug() {
+        let registry = Arc::new(ModelRegistry::new());
+        let available = ModelMetadata::new("shared", "API", ProviderId::OpenAI)
+            .with_transport(ApiFormat::OpenAIResponses);
+        registry
+            .set_models(ProviderId::OpenAI, vec![available])
+            .await;
+
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("krusty.db");
+        let preferences = Preferences::new(Database::new(&db_path).unwrap());
+        preferences.set_current_model("shared").unwrap();
+        let stale = ModelKey::new(ProviderId::OpenAI, "shared", ApiFormat::OpenAIResponses)
+            .with_auth_scope(ModelAuthScope::OAuth);
+        preferences.set_current_model_key(&stale).unwrap();
+
+        let selected = AiBootstrapPolicy
+            .resolve_model_selection(&registry, &db_path, None, None)
+            .await;
+
+        assert!(selected.is_none());
     }
 }

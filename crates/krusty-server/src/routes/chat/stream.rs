@@ -7,12 +7,11 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 
-use krusty_core::agent::{
-    AgenticOrchestrator, LoopEvent, OrchestratorConfig, OrchestratorServices,
-};
-use krusty_core::ai::model_profile::ModelProfile;
-use krusty_core::storage::{SessionType, WorkMode};
+use krusty_core::agent::{LoopEvent, OrchestratorServices, RunProvenance, RunSpecBuilder};
+use krusty_core::ai::transport_policy::StreamTransportPolicy;
+use krusty_core::storage::{Database, SessionType, WorkMode};
 use krusty_core::tools::registry::PermissionMode;
+use krusty_core::SessionManager;
 
 use super::stream_notify::ChatStreamRunOutcome;
 use super::{ChatSessionContext, SSE_CHANNEL_BUFFER};
@@ -34,6 +33,10 @@ fn loop_event_requires_delivery(event: &LoopEvent) -> bool {
             | LoopEvent::AgentSleeping { .. }
             | LoopEvent::UserMessage { .. }
             | LoopEvent::ClassifierDecision { .. }
+            | LoopEvent::RunBudgetResolved { .. }
+            | LoopEvent::ProviderRequestPrepared { .. }
+            | LoopEvent::MicrocompactionApplied { .. }
+            | LoopEvent::ProgressGuard { .. }
             | LoopEvent::Usage { .. }
             | LoopEvent::Finished { .. }
             | LoopEvent::Error { .. }
@@ -122,7 +125,27 @@ pub(super) async fn start_orchestrator_sse(
 
     let (sse_tx, sse_rx) = mpsc::channel::<Result<Event, Infallible>>(SSE_CHANNEL_BUFFER);
     let stream_idle_timeout = model_stream_idle_timeout(&ctx.ai_client);
+    let mode_aware_code_tools =
+        ctx.session_type == SessionType::Code && ctx.options.tools.is_some();
 
+    let run_spec = RunSpecBuilder::new(
+        RunProvenance::Server,
+        ctx.session_id.clone(),
+        ctx.working_dir,
+        ctx.session_type,
+    )
+    .project_dir(ctx.project_dir)
+    .mako_crew_slug(ctx.mako_crew_slug.clone())
+    .permission_mode(permission_mode)
+    .execution_tool_allowlist(ctx.execution_tool_allowlist)
+    .user_id(ctx.user_id.clone())
+    .initial_work_mode(work_mode)
+    .mode_aware_code_tools(mode_aware_code_tools)
+    .stream_idle_timeout(stream_idle_timeout)
+    .generate_title(generate_title)
+    .call_options(ctx.options)
+    .build(ctx.ai_client.as_ref())
+    .map_err(|error| AppError::BadRequest(error.to_string()))?;
     let services = OrchestratorServices {
         ai_client: ctx.ai_client,
         tool_registry: Arc::clone(&state.tool_registry),
@@ -130,23 +153,8 @@ pub(super) async fn start_orchestrator_sse(
         db_path: (*state.db_path).clone(),
         skills_manager: Arc::clone(&state.skills_manager),
     };
-    let config = OrchestratorConfig {
-        session_id: ctx.session_id.clone(),
-        working_dir: ctx.working_dir,
-        project_dir: ctx.project_dir,
-        mako_crew_slug: ctx.mako_crew_slug.clone(),
-        session_type: ctx.session_type,
-        permission_mode,
-        user_id: ctx.user_id.clone(),
-        initial_work_mode: work_mode,
-        stream_idle_timeout,
-        generate_title,
-        max_iterations: krusty_core::agent::AgentConfig::default().primary_max_turns(),
-        ..Default::default()
-    };
 
-    let orchestrator = AgenticOrchestrator::new(services, config);
-    let (event_rx, input_tx) = orchestrator.run(ctx.conversation, ctx.options);
+    let (event_rx, input_tx) = run_spec.start(services, ctx.conversation);
 
     let session_id = ctx.session_id;
     {
@@ -184,12 +192,8 @@ pub(super) async fn start_orchestrator_sse(
 }
 
 fn model_stream_idle_timeout(ai_client: &Arc<krusty_core::ai::client::AiClient>) -> Duration {
-    let profile = ModelProfile::resolve(
-        ai_client.provider_id(),
-        ai_client.config().api_format,
-        &ai_client.config().model,
-    );
-    Duration::from_secs(profile.stream_idle_timeout_secs)
+    StreamTransportPolicy::resolve(ai_client.provider_id(), ai_client.config().api_format)
+        .idle_timeout
 }
 
 pub(super) async fn run_orchestrator_event_bridge(
@@ -239,5 +243,36 @@ pub(super) async fn run_orchestrator_event_bridge(
         &session_id,
         db_path.as_ref(),
     );
+    yield_orphaned_continuation_claim(db_path.as_ref(), &session_id);
     session_inputs.write().await.remove(&session_id);
+}
+
+/// `RunSpec::start` spawns the orchestrator before returning its event stream.
+/// If that task exits before its initial recovery handoff, no event can clear
+/// the durable `resuming_input` lease. Yield the transient lease here while
+/// retaining the accepted response, allowing an exact retry instead of a
+/// permanently busy session or a lost prompt.
+fn yield_orphaned_continuation_claim(db_path: &std::path::Path, session_id: &str) {
+    let result = (|| -> anyhow::Result<()> {
+        let session_manager = SessionManager::new(Database::new(db_path)?);
+        let Some(recovery) = session_manager.load_recovery_state(session_id)? else {
+            return Ok(());
+        };
+        let Some(claim) = recovery.continuation_claim else {
+            return Ok(());
+        };
+        session_manager.yield_awaiting_interaction_claim(
+            session_id,
+            &claim.interaction_id,
+            &claim.accepted_response,
+        )?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        tracing::error!(
+            session_id,
+            %error,
+            "Failed to yield orphaned continuation execution lease"
+        );
+    }
 }

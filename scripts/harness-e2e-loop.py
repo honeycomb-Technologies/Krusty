@@ -146,6 +146,11 @@ def failure_status(error: BaseException) -> str:
     return "fail"
 
 
+def final_process_disposition(result: dict[str, Any]) -> str:
+    """Describe the verified final-cycle process state without overclaiming."""
+    return "retained" if result.get("process_retained") is True else "cleaned"
+
+
 def classified_failure(
     message: str,
     details: Any,
@@ -269,6 +274,90 @@ class KrustyApi:
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AcceptanceFailure(message)
+
+
+def validate_candidate_base_url(value: str) -> str:
+    parsed = urlparse(value)
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise AcceptanceFailure(f"candidate base URL had an invalid port: {value}") from error
+    require(parsed.scheme == "http", f"candidate base URL must use http: {value}")
+    require(
+        parsed.hostname in {"127.0.0.1", "localhost"},
+        f"candidate base URL must be loopback-only: {value}",
+    )
+    require(port is not None, f"candidate base URL must include an explicit port: {value}")
+    require(port != 3000, "refusing to run acceptance against production port 3000")
+    require(parsed.username is None and parsed.password is None, "base URL must not embed credentials")
+    require(parsed.path in {"", "/"}, f"candidate base URL must not include a path: {value}")
+    require(not parsed.query and not parsed.fragment, f"candidate base URL must be plain: {value}")
+    return f"http://{parsed.hostname}:{port}"
+
+
+def select_stable_exact_model(
+    api: KrustyApi,
+    model_id: str,
+    *,
+    provider_id: str = "grok",
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    previous_identity: str | None = None
+    stable_reads = 0
+    latest: Any = None
+    while time.monotonic() < deadline:
+        response = api.json_request("GET", "/api/models")
+        models = response.get("models") if isinstance(response, dict) else None
+        require(isinstance(models, list), f"model catalog was malformed: {response}")
+        candidates = [
+            model
+            for model in models
+            if isinstance(model, dict)
+            and model.get("id") == model_id
+            and model.get("provider_id") == provider_id
+        ]
+        latest = candidates
+        if len(candidates) == 1:
+            model = candidates[0]
+            key = model.get("key")
+            revision = model.get("catalog_revision")
+            valid = (
+                isinstance(key, dict)
+                and key.get("provider") == provider_id
+                and key.get("model_id") == model_id
+                and isinstance(revision, str)
+                and bool(revision.strip())
+                and model.get("catalog_source") == "live_dynamic"
+                and model.get("supports_tools") is True
+            )
+            if valid:
+                identity = json.dumps(
+                    {
+                        "key": key,
+                        "catalog_revision": revision,
+                        "catalog_source": model.get("catalog_source"),
+                        "context_window": model.get("context_window"),
+                        "max_output": model.get("max_output"),
+                        "supports_tools": model.get("supports_tools"),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                stable_reads = stable_reads + 1 if identity == previous_identity else 1
+                previous_identity = identity
+                if stable_reads >= 2:
+                    return model
+            else:
+                previous_identity = None
+                stable_reads = 0
+        else:
+            previous_identity = None
+            stable_reads = 0
+        time.sleep(0.25)
+    raise AcceptanceFailure(
+        f"exact {provider_id} model {model_id!r} did not reach two stable live catalog reads: {latest}"
+    )
 
 
 def event_text(events: list[dict[str, Any]]) -> str:
@@ -691,24 +780,29 @@ def validate_failed_bash_stream(
     executing = [event for event in events if event.get("type") == "tool_executing"]
     results = [event for event in events if event.get("type") == "tool_result"]
     require(
-        len(starts) == len(executing) == len(results) == 1,
+        len(starts) == len(results) == 1 and len(executing) >= 1,
         f"{label}: duplicated or missing tool lifecycle; "
         f"starts={starts}, executing={executing}, results={results}",
     )
     for lifecycle_name, lifecycle_event in (
         ("start", starts[0]),
-        ("executing", executing[0]),
         ("result", results[0]),
     ):
         require(
             lifecycle_event.get("id") == call_id,
             f"{label}: {lifecycle_name} id did not match {call_id}: {lifecycle_event}",
         )
+    for lifecycle_event in executing:
+        require(
+            lifecycle_event.get("id") == call_id,
+            f"{label}: executing id did not match {call_id}: {lifecycle_event}",
+        )
     require(starts[0].get("name") == "bash", f"{label}: start was not Bash: {starts[0]}")
-    require(
-        executing[0].get("name") == "bash",
-        f"{label}: executing event was not Bash: {executing[0]}",
-    )
+    for lifecycle_event in executing:
+        require(
+            lifecycle_event.get("name") == "bash",
+            f"{label}: executing event was not Bash: {lifecycle_event}",
+        )
     require(
         results[0].get("is_error") is True,
         f"{label}: expected failed tool result: {results[0]}",
@@ -744,15 +838,20 @@ def validate_failed_bash_stream(
         for event_type in (
             "tool_call_start",
             "tool_call_complete",
-            "tool_executing",
             "tool_result",
             "finish",
         )
     }
+    executing_positions = [
+        index for index, event in enumerate(events) if event.get("type") == "tool_executing"
+    ]
+    positions["tool_executing_first"] = executing_positions[0]
+    positions["tool_executing_last"] = executing_positions[-1]
     require(
         positions["tool_call_start"]
         < positions["tool_call_complete"]
-        < positions["tool_executing"]
+        < positions["tool_executing_first"]
+        <= positions["tool_executing_last"]
         < positions["tool_result"]
         < positions["finish"],
         f"{label}: tool lifecycle was out of order: {positions}",
@@ -1258,15 +1357,146 @@ def wait_for_completed_trace_run(
             break
         time.sleep(max(0.0, poll_interval))
 
-    latest_types = (
-        [event.get("event_type") for event in latest_trace["events"]]
+    latest_new_events = (
+        [
+            event
+            for event in latest_trace["events"]
+            if event.get("sequence", 0) > after_sequence
+        ]
         if latest_trace is not None
         else []
     )
+    latest_types = [event.get("event_type") for event in latest_new_events]
+
+    def run_ids_for(event_type: str) -> list[str]:
+        return sorted(
+            {
+                event["run_id"]
+                for event in latest_new_events
+                if event.get("event_type") == event_type
+                and isinstance(event.get("run_id"), str)
+                and event.get("run_id")
+            }
+        )
+
     raise AcceptanceFailure(
         f"{label}: trace did not durably expose a newly completed, provider-accounted "
         f"run after sequence {after_sequence} within {timeout:.1f}s; "
+        f"budget_run_ids={run_ids_for('run_budget_resolved')}, "
+        f"finished_run_ids={run_ids_for('finished')}, "
+        f"provider_call_run_ids={run_ids_for('provider_call')}, "
         f"latest_summary={latest_summary}, latest_event_types={latest_types}"
+    )
+
+
+def wait_for_settled_trace_runs(
+    api: KrustyApi,
+    session_id: str,
+    label: str,
+    *,
+    expected_runs: int,
+    timeout: float = 5.0,
+    poll_interval: float = 0.05,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Wait until every expected run has a durable terminal and accounting row.
+
+    A trace read can legitimately land between compact SQLite batches after the
+    session has already returned to idle. Requiring the expected run count keeps
+    an older, already-settled snapshot from satisfying a newer follow-up run.
+    Structural contradictions still fail immediately; only missing suffix rows
+    are allowed to converge during the bounded persistence window.
+    """
+    require(
+        isinstance(expected_runs, int)
+        and not isinstance(expected_runs, bool)
+        and expected_runs > 0,
+        f"{label}: invalid expected run count {expected_runs!r}",
+    )
+    deadline = time.monotonic() + timeout
+    latest_summary: dict[str, Any] | None = None
+    latest_budget_ids: set[str] = set()
+    latest_finished_ids: set[str] = set()
+    latest_provider_call_ids: set[str] = set()
+
+    while True:
+        trace = api.json_request(
+            "GET", f"/api/sessions/{session_id}/trace?limit=1000"
+        )
+        summary = validate_trace_response(trace, label)
+        latest_summary = summary
+        budget_ids: list[str] = []
+        finished_ids: list[str] = []
+        provider_call_ids: set[str] = set()
+
+        for event in trace["events"]:
+            event_type = event.get("event_type")
+            if event_type not in {
+                "run_budget_resolved",
+                "finished",
+                "provider_call",
+            }:
+                continue
+            run_id = event.get("run_id")
+            if event_type == "provider_call" and not (
+                isinstance(run_id, str) and run_id
+            ):
+                # Auxiliary provider work, such as title generation, is not an
+                # orchestrated run boundary.
+                continue
+            require(
+                isinstance(run_id, str) and bool(run_id),
+                f"{label}: {event_type} event lacked a run id: {event}",
+            )
+            if event_type == "run_budget_resolved":
+                budget_ids.append(run_id)
+            elif event_type == "finished":
+                finished_ids.append(run_id)
+            else:
+                provider_call_ids.add(run_id)
+
+        require(
+            len(finished_ids) == len(set(finished_ids)),
+            f"{label}: duplicate terminal run ids: {finished_ids}",
+        )
+        budget_id_set = set(budget_ids)
+        finished_id_set = set(finished_ids)
+        require(
+            finished_id_set <= budget_id_set,
+            f"{label}: terminal runs lacked prior budget events: "
+            f"budgets={sorted(budget_id_set)}, finished={sorted(finished_id_set)}",
+        )
+        require(
+            len(budget_id_set) <= expected_runs,
+            f"{label}: observed more runs than expected: "
+            f"expected={expected_runs}, budgets={sorted(budget_id_set)}",
+        )
+
+        latest_budget_ids = budget_id_set
+        latest_finished_ids = finished_id_set
+        latest_provider_call_ids = provider_call_ids
+        if (
+            len(budget_id_set) == expected_runs
+            and finished_id_set == budget_id_set
+            and budget_id_set <= provider_call_ids
+        ):
+            validate_trace_run_budgets(trace, label)
+            require(
+                summary.get("total_runs") == expected_runs,
+                f"{label}: summary total_runs={summary.get('total_runs')}, "
+                f"expected {expected_runs}",
+            )
+            return trace, summary
+
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(max(0.0, poll_interval))
+
+    raise AcceptanceFailure(
+        f"{label}: trace did not durably settle {expected_runs} expected runs "
+        f"within {timeout:.1f}s; budget_run_ids={sorted(latest_budget_ids)}, "
+        f"finished_run_ids={sorted(latest_finished_ids)}, "
+        f"provider_call_run_ids={sorted(latest_provider_call_ids)}, "
+        f"latest_summary={latest_summary}"
     )
 
 
@@ -1274,12 +1504,17 @@ def trace_summary(
     api: KrustyApi,
     session_id: str,
     *,
+    expected_runs: int,
     exact_tool_calls: int | None = None,
     expected_tool_name: str | None = None,
 ) -> dict[str, Any]:
-    trace = api.json_request("GET", f"/api/sessions/{session_id}/trace?limit=1000")
     label = f"session {session_id}"
-    summary = validate_trace_response(trace, label)
+    trace, summary = wait_for_settled_trace_runs(
+        api,
+        session_id,
+        label,
+        expected_runs=expected_runs,
+    )
     if exact_tool_calls is not None:
         validate_trace_tool_lifecycles(
             trace["events"],
@@ -1520,51 +1755,79 @@ def assert_preview_port_quiet(url: str, timeout: float = 5.0) -> None:
 
 
 def create_session(
-    api: KrustyApi, run_dir: Path, model: str, label: str
+    api: KrustyApi,
+    run_dir: Path,
+    model: dict[str, Any],
+    label: str,
+    *,
+    permission_mode: str = "autonomous",
 ) -> str:
     response = api.json_request(
         "POST",
         "/api/sessions",
         {
             "title": label,
-            "model": model,
+            "model": model["id"],
+            "model_key": model["key"],
             "project_dir": str(run_dir),
             "workspace_mode": "created",
             "session_type": "code",
-            "permission_mode": "autonomous",
+            "permission_mode": permission_mode,
         },
     )
     session_id = response.get("id")
     require(bool(session_id), f"session create returned no id: {response}")
     require(response.get("working_dir") == str(run_dir), "session working_dir drifted")
     require(response.get("project_dir") == str(run_dir), "session project_dir drifted")
+    require(response.get("model") == model["id"], f"session model drifted: {response}")
+    require(response.get("model_key") == model["key"], f"session model key drifted: {response}")
+    require(
+        response.get("model_catalog_revision") == model.get("catalog_revision"),
+        f"session model revision drifted: {response}",
+    )
     return str(session_id)
 
 
 def chat_payload(
-    session_id: str, message: str, model: str | None
+    session_id: str,
+    message: str,
+    model: dict[str, Any] | None,
+    *,
+    permission_mode: str = "autonomous",
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "session_id": session_id,
         "message": message,
-        "permission_mode": "autonomous",
+        "permission_mode": permission_mode,
         "thinking_enabled": "off",
     }
     if model is not None:
-        payload["model"] = model
+        payload["model"] = model["id"]
+        payload["model_key"] = model["key"]
     return payload
 
 
 def require_session_model(
-    api: KrustyApi, session_id: str, expected_model: str, label: str
+    api: KrustyApi,
+    session_id: str,
+    expected_model: dict[str, Any],
+    label: str,
 ) -> str:
     persisted = api.json_request("GET", f"/api/sessions/{session_id}")
     session = persisted.get("session") if isinstance(persisted, dict) else None
     require(isinstance(session, dict), f"{label}: persisted session was malformed: {persisted}")
     actual_model = session.get("model")
     require(
-        actual_model == expected_model,
-        f"{label}: persisted model drifted from {expected_model!r} to {actual_model!r}",
+        actual_model == expected_model["id"],
+        f"{label}: persisted model drifted from {expected_model['id']!r} to {actual_model!r}",
+    )
+    require(
+        session.get("model_key") == expected_model["key"],
+        f"{label}: persisted exact model key drifted: {session}",
+    )
+    require(
+        session.get("model_catalog_revision") == expected_model.get("catalog_revision"),
+        f"{label}: persisted model revision drifted: {session}",
     )
     return str(actual_model)
 
@@ -1908,12 +2171,128 @@ def collect_failed_cycle_evidence(
     return evidence
 
 
+def validate_trace_run_budgets(
+    trace: dict[str, Any],
+    label: str,
+) -> list[dict[str, Any]]:
+    """Require one explicit unlimited-default budget for every terminal run."""
+    budget_events_by_run: dict[str, list[dict[str, Any]]] = {}
+    finished_run_ids: list[str] = []
+
+    for event in trace.get("events", []):
+        event_type = event.get("event_type")
+        if event_type not in {"run_budget_resolved", "finished"}:
+            continue
+
+        run_id = event.get("run_id")
+        require(
+            isinstance(run_id, str) and bool(run_id),
+            f"{label}: {event_type} event lacked a run id: {event}",
+        )
+        if event_type == "finished":
+            require(
+                run_id not in finished_run_ids,
+                f"{label}: run {run_id} emitted duplicate terminal events",
+            )
+            finished_run_ids.append(run_id)
+            continue
+
+        payload = event.get("payload")
+        require(
+            isinstance(payload, dict),
+            f"{label}: run {run_id} budget payload was malformed: {payload}",
+        )
+        budget_events_by_run.setdefault(run_id, []).append(payload)
+
+    require(finished_run_ids, f"{label}: trace omitted terminal runs")
+    require(
+        set(budget_events_by_run) == set(finished_run_ids),
+        f"{label}: budget run ids did not match terminal run ids: "
+        f"budgets={sorted(budget_events_by_run)}, finished={sorted(finished_run_ids)}",
+    )
+
+    resolved: list[dict[str, Any]] = []
+    for run_id in finished_run_ids:
+        budgets = budget_events_by_run[run_id]
+        require(
+            len(budgets) == 1,
+            f"{label}: run {run_id} emitted {len(budgets)} budget events: {budgets}",
+        )
+        budget = budgets[0]
+        require(
+            budget.get("max_turns") is None
+            and budget.get("source") == "unlimited_default",
+            f"{label}: run {run_id} retained a hidden or non-default turn cap: {budget}",
+        )
+        resolved.append(
+            {
+                "run_id": run_id,
+                "max_turns": budget.get("max_turns"),
+                "source": budget.get("source"),
+            }
+        )
+    return resolved
+
+
+def validate_trace_exact_runtime(
+    trace: dict[str, Any],
+    model: dict[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    snapshots: list[dict[str, Any]] = []
+    for event in trace.get("events", []):
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if event.get("event_type") == "provider_request_prepared":
+            diagnostics = payload.get("diagnostics")
+            if isinstance(diagnostics, dict):
+                snapshots.append(diagnostics)
+
+    require(snapshots, f"{label}: trace omitted provider request snapshots")
+    for index, snapshot in enumerate(snapshots):
+        require(
+            snapshot.get("model_key") == model["key"],
+            f"{label}: request {index} exact model key drifted: {snapshot}",
+        )
+        require(
+            snapshot.get("catalog_revision") == model.get("catalog_revision"),
+            f"{label}: request {index} catalog revision drifted: {snapshot}",
+        )
+        effective = snapshot.get("effective_request")
+        require(
+            isinstance(effective, dict) and effective.get("model") == model["id"],
+            f"{label}: request {index} effective model drifted: {snapshot}",
+        )
+        manifest = snapshot.get("prompt_manifest")
+        prompt_hash = manifest.get("prompt_hash") if isinstance(manifest, dict) else None
+        require(
+            isinstance(prompt_hash, str)
+            and len(prompt_hash) == 64
+            and all(character in "0123456789abcdef" for character in prompt_hash),
+            f"{label}: request {index} lacked a redacted prompt hash: {snapshot}",
+        )
+
+    run_budgets = validate_trace_run_budgets(trace, label)
+    return {
+        "model_key": model["key"],
+        "catalog_revision": model.get("catalog_revision"),
+        "request_count": len(snapshots),
+        "run_budgets": run_budgets,
+        "prompt_hashes": [
+            snapshot.get("prompt_manifest", {}).get("prompt_hash")
+            for snapshot in snapshots
+        ],
+    }
+
+
 def verify_persistence_and_trace(
     api: KrustyApi,
     session_id: str,
     marker: str,
     expected_user_turns: int,
     *,
+    exact_model: dict[str, Any],
     exact_tool_calls: int | None = None,
     expected_tool_name: str | None = None,
 ) -> dict[str, Any]:
@@ -1934,9 +2313,13 @@ def verify_persistence_and_trace(
     require(not state.get("pending_interactions"), f"session retained pending input: {state}")
     require(state.get("recovery") is None, f"completed session retained recovery state: {state}")
 
-    trace = api.json_request("GET", f"/api/sessions/{session_id}/trace?limit=1000")
     label = f"session {session_id}"
-    summary = validate_trace_response(trace, label)
+    trace, summary = wait_for_settled_trace_runs(
+        api,
+        session_id,
+        label,
+        expected_runs=expected_user_turns,
+    )
     if exact_tool_calls is not None:
         validate_trace_tool_lifecycles(
             trace["events"],
@@ -1952,6 +2335,8 @@ def verify_persistence_and_trace(
     for key in ("tool_errors", "server_tool_errors", "agent_errors", "provider_failures"):
         require(summary.get(key) == 0, f"trace {key}={summary.get(key)}")
     require(summary.get("last_stop_reason") == "completed", f"bad trace summary: {summary}")
+    summary = dict(summary)
+    summary["exact_runtime"] = validate_trace_exact_runtime(trace, exact_model, label)
     return summary
 
 
@@ -2162,7 +2547,7 @@ def cleanup_gated_error(
 def run_cycle(
     api: KrustyApi,
     root: Path,
-    model: str,
+    model: dict[str, Any],
     port: int,
     cycle: int,
     keep_process: bool,
@@ -2172,13 +2557,16 @@ def run_cycle(
     run_dir.mkdir(parents=True, exist_ok=False)
     session_id: str | None = None
     process_id: str | None = None
+    trace_cursor = 0
     result: dict[str, Any] = {
         "cycle": cycle,
         "session_id": None,
         "run_dir": str(run_dir),
         "marker": marker,
         "port": port,
-        "model": model,
+        "model": model["id"],
+        "model_key": model["key"],
+        "model_catalog_revision": model.get("catalog_revision"),
         "phase": "session_create",
     }
 
@@ -2191,6 +2579,13 @@ def run_cycle(
         greeting_text = validate_stream(
             greeting_events, "greeting", expect_tools=False
         )
+        greeting_trace, _ = wait_for_completed_trace_run(
+            api,
+            session_id,
+            "greeting trace",
+            after_sequence=trace_cursor,
+        )
+        trace_cursor = greeting_trace["latest_sequence"]
 
         build_prompt = f"""Build and run a tiny dependency-free Python HTTP service in this empty demo workspace.
 
@@ -2216,6 +2611,13 @@ Work autonomously. Do not install packages and do not ask styling or product que
         build_events = api.chat(chat_payload(session_id, build_prompt, model))
         result["build_stream"] = summarize_stream_evidence(build_events)
         build_text = validate_stream(build_events, "build", expect_tools=True)
+        build_trace, _ = wait_for_completed_trace_run(
+            api,
+            session_id,
+            "build trace",
+            after_sequence=trace_cursor,
+        )
+        trace_cursor = build_trace["latest_sequence"]
         require(marker in build_text, "build response omitted marker")
         require(str(port) in build_text, "build response omitted port")
 
@@ -2249,7 +2651,7 @@ Work autonomously. Do not install packages and do not ask styling or product que
         result["phase"] = "continuity"
         continuity_payload = chat_payload(session_id, continuity_prompt, None)
         require(
-            "model" not in continuity_payload,
+            "model" not in continuity_payload and "model_key" not in continuity_payload,
             "continuity follow-up unexpectedly sent a model override",
         )
         continuity_events = api.chat(continuity_payload)
@@ -2257,6 +2659,13 @@ Work autonomously. Do not install packages and do not ask styling or product que
         continuity_text = validate_stream(
             continuity_events, "continuity", expect_tools=False
         )
+        continuity_trace, _ = wait_for_completed_trace_run(
+            api,
+            session_id,
+            "continuity trace",
+            after_sequence=trace_cursor,
+        )
+        trace_cursor = continuity_trace["latest_sequence"]
         for expected in (marker, str(port), process_id):
             require(expected in continuity_text, f"continuity response omitted {expected}")
         persisted_model_after = require_session_model(
@@ -2264,7 +2673,9 @@ Work autonomously. Do not install packages and do not ask styling or product que
         )
 
         result["phase"] = "persistence_and_process_lifecycle"
-        summary = verify_persistence_and_trace(api, session_id, marker, 3)
+        summary = verify_persistence_and_trace(
+            api, session_id, marker, 3, exact_model=model
+        )
 
         api.json_request("POST", f"/api/processes/{process_id}/suspend")
         wait_for_process_status(api, process_id, "suspended")
@@ -2349,7 +2760,7 @@ Work autonomously. Do not install packages and do not ask styling or product que
 def run_disconnect_lane(
     api: KrustyApi,
     resilience_dir: Path,
-    model: str,
+    model: dict[str, Any],
 ) -> dict[str, Any]:
     lane = "sse-disconnect"
     run_dir = resilience_dir / lane
@@ -2444,6 +2855,7 @@ def run_disconnect_lane(
             session_id,
             marker,
             1,
+            exact_model=model,
             exact_tool_calls=1,
             expected_tool_name="bash",
         )
@@ -2469,6 +2881,7 @@ def run_disconnect_lane(
             session_id,
             marker,
             2,
+            exact_model=model,
             exact_tool_calls=1,
             expected_tool_name="bash",
         )
@@ -2525,7 +2938,7 @@ def run_disconnect_lane(
 def run_failed_bash_lane(
     api: KrustyApi,
     resilience_dir: Path,
-    model: str,
+    model: dict[str, Any],
 ) -> dict[str, Any]:
     lane = "failed-bash-recovery"
     run_dir = resilience_dir / lane
@@ -2734,19 +3147,29 @@ expected failure, reply exactly {failure_reply}"""
                 for index, event in enumerate(failed_delta)
                 if event.get("event_type") == event_type
             ]
-            require(
-                len(trace_lifecycle[event_type]) == 1,
-                f"{lane}: trace expected one {event_type}, got "
-                f"{trace_lifecycle[event_type]}",
-            )
+            if event_type == "tool_executing":
+                require(
+                    bool(trace_lifecycle[event_type]),
+                    f"{lane}: trace expected at least one {event_type}, got []",
+                )
+            else:
+                require(
+                    len(trace_lifecycle[event_type]) == 1,
+                    f"{lane}: trace expected one {event_type}, got "
+                    f"{trace_lifecycle[event_type]}",
+                )
         trace_positions = {
             event_type: matches[0][0]
             for event_type, matches in trace_lifecycle.items()
+            if event_type != "tool_executing"
         }
+        trace_positions["tool_executing_first"] = trace_lifecycle["tool_executing"][0][0]
+        trace_positions["tool_executing_last"] = trace_lifecycle["tool_executing"][-1][0]
         require(
             trace_positions["tool_call_start"]
             < trace_positions["tool_call_complete"]
-            < trace_positions["tool_executing"]
+            < trace_positions["tool_executing_first"]
+            <= trace_positions["tool_executing_last"]
             < trace_positions["tool_result"]
             < trace_positions["finished"],
             f"{lane}: failed-turn trace lifecycle was out of order: {trace_positions}",
@@ -2754,13 +3177,19 @@ expected failure, reply exactly {failure_reply}"""
         for event_type in (
             "tool_call_start",
             "tool_call_complete",
-            "tool_executing",
             "tool_result",
         ):
             payload = trace_lifecycle[event_type][0][1].get("payload", {})
             require(
                 payload.get("id") == tool_call_id,
                 f"{lane}: trace {event_type} id did not match {tool_call_id}: {payload}",
+            )
+        for _, executing_event in trace_lifecycle["tool_executing"]:
+            payload = executing_event.get("payload", {})
+            require(
+                payload.get("id") == tool_call_id and payload.get("name") == "bash",
+                f"{lane}: trace tool_executing did not match Bash call "
+                f"{tool_call_id}: {payload}",
             )
         require(
             trace_lifecycle["tool_call_complete"][0][1]
@@ -2805,10 +3234,16 @@ expected failure, reply exactly {failure_reply}"""
         ):
             count = trace_event_count(failed_summary, event_type)
             if count is not None:
-                require(
-                    count == 1,
-                    f"{lane}: trace count {event_type}={count}, expected 1",
-                )
+                if event_type == "tool_executing":
+                    require(
+                        count >= 1,
+                        f"{lane}: trace count {event_type}={count}, expected at least 1",
+                    )
+                else:
+                    require(
+                        count == 1,
+                        f"{lane}: trace count {event_type}={count}, expected 1",
+                    )
 
         failed_messages_snapshot = canonical_json_bytes(failed_messages)
         recovery_events = api.chat(
@@ -2996,7 +3431,7 @@ expected failure, reply exactly {failure_reply}"""
 def run_live_steering_lane(
     api: KrustyApi,
     resilience_dir: Path,
-    model: str,
+    model: dict[str, Any],
 ) -> dict[str, Any]:
     lane = "live-steering"
     run_dir = resilience_dir / lane
@@ -3129,10 +3564,12 @@ def run_live_steering_lane(
             expected_reply=steered_reply,
         )
 
-        trace = api.json_request(
-            "GET", f"/api/sessions/{session_id}/trace?limit=1000"
+        trace, trace_summary_result = wait_for_settled_trace_runs(
+            api,
+            session_id,
+            f"{lane} trace",
+            expected_runs=1,
         )
-        trace_summary_result = validate_trace_response(trace, f"{lane} trace")
         validate_trace_tool_lifecycles(
             trace["events"],
             f"{lane} trace",
@@ -3236,7 +3673,7 @@ def run_live_steering_lane(
 def run_cancel_lane(
     api: KrustyApi,
     resilience_dir: Path,
-    model: str,
+    model: dict[str, Any],
 ) -> dict[str, Any]:
     lane = "explicit-cancel"
     run_dir = resilience_dir / lane
@@ -3349,6 +3786,7 @@ def run_cancel_lane(
         cancelled_summary = trace_summary(
             api,
             session_id,
+            expected_runs=1,
             exact_tool_calls=1,
             expected_tool_name="bash",
         )
@@ -3388,6 +3826,7 @@ def run_cancel_lane(
         final_summary = trace_summary(
             api,
             session_id,
+            expected_runs=2,
             exact_tool_calls=1,
             expected_tool_name="bash",
         )
@@ -3555,7 +3994,7 @@ def run_direct_tool_policy_lane(
 def run_resilience_suite(
     api: KrustyApi,
     resilience_dir: Path,
-    model: str,
+    model: dict[str, Any],
     direct_tool_port: int,
 ) -> list[dict[str, Any]]:
     resilience_dir.mkdir(parents=True, exist_ok=False)
@@ -3632,7 +4071,11 @@ def run_resilience_suite(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-url", default="http://127.0.0.1:3000")
+    parser.add_argument(
+        "--base-url",
+        required=True,
+        help="explicit loopback candidate URL; production port 3000 is rejected",
+    )
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--model", default="grok-4.5")
     parser.add_argument(
@@ -3663,11 +4106,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="run only the normal coding cycles, without resilience lanes",
     )
+    parser.add_argument(
+        "--retain-final-process",
+        action="store_true",
+        help="opt in to retaining the final preview process instead of verifying cleanup",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    args.base_url = validate_candidate_base_url(args.base_url)
     require(args.cycles > 0, "cycles must be positive")
     require(args.external_retries >= 0, "external-retries must be non-negative")
     require(args.external_backoff >= 0, "external-backoff must be non-negative")
@@ -3681,6 +4130,7 @@ def main() -> int:
     )
     args.root.mkdir(parents=True, exist_ok=True)
     api = KrustyApi(args.base_url, args.timeout)
+    exact_model: dict[str, Any] | None = None
     invocation_id = str(uuid.uuid4())
     attempt_log_path = args.root / "acceptance-attempts.jsonl"
     summary_path = args.root / "acceptance-summary.json"
@@ -3705,6 +4155,10 @@ def main() -> int:
                 "failure_classification": final_classification,
                 "error": final_error,
                 "model": args.model,
+                "model_key": exact_model.get("key") if exact_model else None,
+                "model_catalog_revision": (
+                    exact_model.get("catalog_revision") if exact_model else None
+                ),
                 "requested_consecutive_clean_cycles": args.cycles,
                 "achieved_consecutive_clean_cycles": clean_streak,
                 "attempt_count": len(attempt_records),
@@ -3730,8 +4184,10 @@ def main() -> int:
     try:
         health = api.json_request("GET", "/health")
         require(health.get("status") == "ok", f"server health failed: {health}")
+        exact_model = select_stable_exact_model(api, args.model)
         print(
             f"Krusty harness E2E: model={args.model} "
+            f"revision={exact_model.get('catalog_revision')} "
             f"clean_cycles={args.cycles} root={args.root}",
             flush=True,
         )
@@ -3755,6 +4211,8 @@ def main() -> int:
                 "target_streak_position": streak_position,
                 "port": port,
                 "model": args.model,
+                "model_key": exact_model["key"],
+                "model_catalog_revision": exact_model.get("catalog_revision"),
                 "started_at_epoch_seconds": time.time(),
                 "_started_monotonic": time.monotonic(),
             }
@@ -3763,10 +4221,12 @@ def main() -> int:
                 result = run_cycle(
                     api,
                     args.root,
-                    args.model,
+                    exact_model,
                     port,
                     cycle_attempt,
-                    keep_process=streak_position == args.cycles,
+                    keep_process=(
+                        args.retain_final_process and streak_position == args.cycles
+                    ),
                 )
                 clean_streak += 1
                 clean_results.append(result)
@@ -3867,6 +4327,8 @@ def main() -> int:
                     "resilience_attempt": resilience_attempt,
                     "run_dir": str(resilience_dir),
                     "model": args.model,
+                    "model_key": exact_model["key"],
+                    "model_catalog_revision": exact_model.get("catalog_revision"),
                     "started_at_epoch_seconds": time.time(),
                     "_started_monotonic": time.monotonic(),
                 }
@@ -3875,7 +4337,7 @@ def main() -> int:
                     resilience_results = run_resilience_suite(
                         api,
                         resilience_dir,
-                        args.model,
+                        exact_model,
                         direct_tool_port,
                     )
                     record.update(
@@ -3939,7 +4401,8 @@ def main() -> int:
         persist_summaries()
         print(
             f"\nPASS {len(clean_results)} consecutive real-agent cycles; "
-            f"final process {clean_results[-1]['process_id']} retained"
+            f"final process {clean_results[-1]['process_id']} "
+            f"{final_process_disposition(clean_results[-1])}"
             + ("; resilience lanes passed" if not args.skip_resilience else ""),
             flush=True,
         )

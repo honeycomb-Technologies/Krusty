@@ -7,8 +7,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::agent::loop_events::{LoopEvent, LoopInput};
-use crate::agent::orchestrator::{OrchestratorConfig, OrchestratorServices};
-use crate::ai::client::CallOptions;
+use crate::agent::orchestrator::OrchestratorServices;
+use crate::agent::{RunProvenance, RunSpec, RunSpecError};
 use crate::ai::types::ModelMessage;
 use crate::storage::ProjectSettings;
 
@@ -18,6 +18,7 @@ pub const TICK_EVENT_CHANNEL_CAPACITY: usize = 64;
 
 pub struct TickEngineConfig {
     pub tick_interval: Duration,
+    /// Maximum total inner orchestrator runs, including the initial run.
     pub max_ticks: usize,
     pub enabled: bool,
 }
@@ -38,11 +39,16 @@ pub struct TickEngine;
 impl TickEngine {
     pub fn run(
         services: OrchestratorServices,
-        config: OrchestratorConfig,
+        run_spec: RunSpec,
         tick_config: TickEngineConfig,
         initial_conversation: Vec<ModelMessage>,
-        options: CallOptions,
-    ) -> (mpsc::Receiver<LoopEvent>, mpsc::UnboundedSender<LoopInput>) {
+    ) -> Result<(mpsc::Receiver<LoopEvent>, mpsc::UnboundedSender<LoopInput>), RunSpecError> {
+        let (config, options) = run_spec.into_parts_for(RunProvenance::Mako)?;
+        tracing::info!(
+            surface = RunProvenance::Mako.as_str(),
+            session_id = %config.session_id,
+            "Starting resolved Mako tick run"
+        );
         let (outer_tx, outer_rx) = mpsc::channel(TICK_EVENT_CHANNEL_CAPACITY);
         let (outer_input_tx, outer_input_rx) = mpsc::unbounded_channel();
 
@@ -56,7 +62,7 @@ impl TickEngine {
             outer_input_rx,
         ));
 
-        (outer_rx, outer_input_tx)
+        Ok((outer_rx, outer_input_tx))
     }
 }
 
@@ -70,6 +76,6 @@ mod tests {
         assert_eq!(config.tick_interval, Duration::from_secs(30));
         assert_eq!(config.max_ticks, 1000);
         assert!(!config.enabled);
-        assert!(TICK_EVENT_CHANNEL_CAPACITY > 0);
+        const { assert!(TICK_EVENT_CHANNEL_CAPACITY > 0) };
     }
 }

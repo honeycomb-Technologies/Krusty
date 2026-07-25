@@ -12,7 +12,7 @@ use crate::ai::streaming::StreamPart;
 use crate::ai::types::{AiTool, ModelMessage, Role};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct RequestComponentMetrics {
+pub(crate) struct RequestComponentMetrics {
     pub base_bytes: usize,
     pub identity_bytes: usize,
     pub project_bytes: usize,
@@ -31,7 +31,7 @@ fn estimate_tokens(bytes: usize) -> usize {
     bytes.saturating_add(3) / 4
 }
 
-pub(super) fn request_component_metrics(
+pub(crate) fn request_component_metrics(
     sections: &SystemPromptSections,
     messages: &[ModelMessage],
     tools: Option<&[AiTool]>,

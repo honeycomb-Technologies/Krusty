@@ -12,7 +12,74 @@ use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use crate::ai::client::config::EffectiveRequestSettings;
+use crate::ai::client::PreparedRequestDiagnostics;
+use crate::ai::models::{ModelCatalogSource, ModelKey};
 use crate::ai::types::{Citation, Content, WebFetchContent, WebSearchResult};
+
+use super::progress::ProgressGuardTelemetry;
+use super::state::RunBudgetSource;
+
+/// Stable, minimal projection of `PreparedRequestDiagnostics` that is safe to
+/// cross persistence, extension, ACP, TUI, and HTTP/SSE boundaries.
+///
+/// Keeping the projection separate means a future field added to the internal
+/// prepared request cannot accidentally expose request contents to observers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProviderRequestSnapshot {
+    pub model_key: ModelKey,
+    pub catalog_source: ModelCatalogSource,
+    pub catalog_revision: Option<String>,
+    pub effective_request: EffectiveRequestSettings,
+    #[serde(default)]
+    pub tool_names: Vec<String>,
+    pub prompt_manifest: serde_json::Value,
+    #[serde(default)]
+    pub stable_request_fingerprint: String,
+    #[serde(default)]
+    pub stable_instruction_bytes: usize,
+    #[serde(default)]
+    pub volatile_session_bytes: usize,
+    #[serde(default)]
+    pub tool_schema_bytes: usize,
+    #[serde(default)]
+    pub history_bytes: usize,
+    #[serde(default)]
+    pub cache_key_present: bool,
+    #[serde(default)]
+    pub cache_mode: String,
+    #[serde(default)]
+    pub continuation_mode: Option<String>,
+    pub message_count: usize,
+    pub system_message_count: usize,
+    pub user_message_count: usize,
+    pub assistant_message_count: usize,
+}
+
+impl From<PreparedRequestDiagnostics> for ProviderRequestSnapshot {
+    fn from(diagnostics: PreparedRequestDiagnostics) -> Self {
+        Self {
+            model_key: diagnostics.model.key,
+            catalog_source: diagnostics.model.catalog_source,
+            catalog_revision: diagnostics.model.catalog_revision,
+            effective_request: diagnostics.effective_request,
+            tool_names: diagnostics.tool_names,
+            prompt_manifest: diagnostics.prompt_manifest,
+            stable_request_fingerprint: diagnostics.stable_request_fingerprint,
+            stable_instruction_bytes: diagnostics.stable_instruction_bytes,
+            volatile_session_bytes: diagnostics.volatile_session_bytes,
+            tool_schema_bytes: diagnostics.tool_schema_bytes,
+            history_bytes: diagnostics.history_bytes,
+            cache_key_present: diagnostics.cache_key_present,
+            cache_mode: diagnostics.cache_mode,
+            continuation_mode: diagnostics.continuation_mode,
+            message_count: diagnostics.message_count,
+            system_message_count: diagnostics.system_message_count,
+            user_message_count: diagnostics.user_message_count,
+            assistant_message_count: diagnostics.assistant_message_count,
+        }
+    }
+}
 
 /// Structured terminal reason for an agentic loop.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -153,6 +220,35 @@ pub enum LoopEvent {
     // ── Turn lifecycle ─────────────────────────────────────────────────
     /// An agentic turn completed.
     TurnComplete { turn: usize, has_more: bool },
+
+    /// Effective parent-run budget resolved once at the core boundary.
+    RunBudgetResolved {
+        max_turns: Option<usize>,
+        source: RunBudgetSource,
+    },
+
+    /// Redacted request contract frozen immediately before a provider turn.
+    /// Prompt/user contents, tool schemas, and credentials are intentionally
+    /// absent; consumers may safely persist or expose this diagnostic event.
+    ProviderRequestPrepared {
+        turn: usize,
+        diagnostics: Box<ProviderRequestSnapshot>,
+    },
+
+    /// A local history rewrite changed the provider-visible prefix. This is a
+    /// first-class cache boundary so misses can be attributed rather than
+    /// appearing as unexplained provider behavior.
+    MicrocompactionApplied {
+        turn: usize,
+        generation: usize,
+        message_count: usize,
+        history_rewritten: bool,
+        tool_inputs_rewritten: bool,
+    },
+
+    /// Semantic no-progress telemetry. `triggered=false` is an early warning;
+    /// `triggered=true` is immediately followed by the typed terminal event.
+    ProgressGuard { telemetry: ProgressGuardTelemetry },
 
     /// Tick engine injected a synthetic tick message to continue autonomous work.
     TickInjected { tick_number: usize },

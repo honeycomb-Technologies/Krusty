@@ -10,7 +10,7 @@ pub(crate) mod tool_execution;
 
 use std::sync::Arc;
 
-use crate::agent::{AgentEvent, InterruptReason, OrchestratorConfig, OrchestratorServices};
+use crate::agent::{AgentEvent, OrchestratorServices, RunProvenance, RunSpecBuilder};
 use crate::ai::client::config::AnthropicAdaptiveEffort;
 use crate::ai::client::{CallOptions, CodexReasoningEffort};
 use crate::ai::types::{Content, ContextManagement, ModelMessage, Role, ThinkingConfig};
@@ -45,6 +45,16 @@ impl App {
             self.ui.view = View::Chat;
         }
 
+        let project_settings = ProjectSettings::load(&self.runtime.working_dir);
+        if let Err(error) = self.prepare_primary_run_model(&project_settings) {
+            self.ui.input.insert_text(&text);
+            self.runtime
+                .chat
+                .messages
+                .push(("system".to_string(), error.to_string()));
+            return;
+        }
+
         if !self.has_selected_model() {
             self.ui.input.insert_text(&text);
             self.runtime.chat.messages.push((
@@ -63,8 +73,8 @@ impl App {
             return;
         }
 
-        if self.runtime.current_session_id.is_none() {
-            self.create_session(&text);
+        if self.runtime.current_session_id.is_none() && self.create_session(&text).is_none() {
+            return;
         }
 
         let (content_blocks, display_text) = match self.build_user_content(&text) {
@@ -223,32 +233,17 @@ impl App {
         // later agent tool calls do not inherit an already-cancelled token.
         self.runtime.cancellation.reset();
 
-        if self
-            .runtime
-            .agent_config
-            .exceeded_max_turns(self.runtime.agent_state.current_turn)
-        {
-            self.runtime.event_bus.emit(AgentEvent::Interrupt {
-                turn: self.runtime.agent_state.current_turn,
-                reason: InterruptReason::MaxTurnsReached,
-            });
-            self.runtime.chat.messages.push((
-                "system".to_string(),
+        let project_settings = ProjectSettings::load(&self.runtime.working_dir);
+        let selected_model_metadata = match self.prepare_primary_run_model(&project_settings) {
+            Ok(metadata) => metadata,
+            Err(error) => {
                 self.runtime
-                    .agent_config
-                    .primary_max_turns()
-                    .map(|limit| {
-                        format!(
-                            "Max turns ({}) reached. Use /home to start a new session.",
-                            limit
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        "Agent turn budget reached. Use /home to start a new session.".to_string()
-                    }),
-            ));
-            return;
-        }
+                    .chat
+                    .messages
+                    .push(("system".to_string(), error.to_string()));
+                return;
+            }
+        };
 
         let client = match self.create_ai_client() {
             Some(c) => c,
@@ -274,17 +269,7 @@ impl App {
             return;
         };
 
-        self.start_streaming();
-        self.runtime.chat.streaming_assistant_idx = None;
-
-        self.runtime.agent_state.start_turn();
-        self.runtime.event_bus.emit(AgentEvent::TurnStart {
-            turn: self.runtime.agent_state.current_turn,
-            message_count: self.runtime.chat.conversation.len(),
-        });
-
         // Build CallOptions (thinking, web tools, etc.)
-        let project_settings = ProjectSettings::load(&self.runtime.working_dir);
         let has_active_plan = self
             .services
             .plan_manager
@@ -302,19 +287,9 @@ impl App {
         .filter(self.services.cached_ai_tools.clone());
         // Keep the request controls on one live registry snapshot. Dynamic
         // catalogs can change wire semantics without changing the model slug.
-        let selected_model_metadata = self
-            .services
-            .model_registry
-            .try_get_model(&self.runtime.current_model);
-        let reasoning_format = selected_model_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.reasoning_format);
-        let reasoning_control = selected_model_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.reasoning_control);
-        let fast_mode_format = selected_model_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.fast_mode);
+        let reasoning_format = selected_model_metadata.reasoning_format;
+        let reasoning_control = selected_model_metadata.reasoning_control;
+        let fast_mode_format = selected_model_metadata.fast_mode;
         let can_use_thinking = self.runtime.thinking_level.is_enabled()
             && reasoning_control != Some(crate::ai::providers::ReasoningControl::OutputOnly);
         let thinking = can_use_thinking.then(ThinkingConfig::default);
@@ -372,38 +347,58 @@ impl App {
             fast_mode_format,
             ..Default::default()
         };
+        let mode_aware_code_tools = options.tools.is_some();
 
         // Determine if this is a new session (first user message → generate title)
         let is_new_session = self.runtime.chat.conversation.len() <= 1;
 
-        // Create orchestrator services and config
+        // Resolve one canonical run contract before mutating live TUI state.
         let db_path = paths::config_dir().join("krusty.db");
+        let ai_client = Arc::new(client);
+        let (delegated_progress_tx, delegated_progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let run_spec = match RunSpecBuilder::new(
+            RunProvenance::Tui,
+            session_id,
+            self.runtime.working_dir.clone(),
+            SessionType::Code,
+        )
+        .project_dir(Some(self.runtime.working_dir.clone()))
+        .permission_mode(self.runtime.permission_mode)
+        .run_budget(self.runtime.agent_config.primary_run_budget_override())
+        .stream_idle_timeout(self.runtime.agent_config.stream_idle_timeout())
+        .initial_work_mode(self.ui.work_mode.into())
+        .mode_aware_code_tools(mode_aware_code_tools)
+        .generate_title(is_new_session)
+        .delegated_progress_tx(Some(delegated_progress_tx))
+        .call_options(options)
+        .build(ai_client.as_ref())
+        {
+            Ok(run_spec) => run_spec,
+            Err(error) => {
+                tracing::error!(%error, "Failed to resolve TUI agent run");
+                self.runtime.chat.messages.push((
+                    "system".to_string(),
+                    format!("Cannot start agent run: {error}"),
+                ));
+                return;
+            }
+        };
         let services = OrchestratorServices {
-            ai_client: Arc::new(client),
+            ai_client,
             tool_registry: self.services.tool_registry.clone(),
             process_registry: self.runtime.process_registry.clone(),
             db_path,
             skills_manager: self.services.skills_manager.clone(),
         };
 
-        let (delegated_progress_tx, delegated_progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.start_streaming();
+        self.runtime.chat.streaming_assistant_idx = None;
+        self.runtime.agent_state.start_turn();
+        self.runtime.event_bus.emit(AgentEvent::TurnStart {
+            turn: self.runtime.agent_state.current_turn,
+            message_count: self.runtime.chat.conversation.len(),
+        });
         self.runtime.channels.delegated_progress = Some(delegated_progress_rx);
-
-        let config = OrchestratorConfig {
-            session_id,
-            working_dir: self.runtime.working_dir.clone(),
-            project_dir: Some(self.runtime.working_dir.clone()),
-            mako_crew_slug: None,
-            mako_profile: None,
-            session_type: SessionType::Code,
-            permission_mode: self.runtime.permission_mode,
-            max_iterations: self.runtime.agent_config.primary_max_turns(),
-            stream_idle_timeout: self.runtime.agent_config.stream_idle_timeout(),
-            user_id: None,
-            initial_work_mode: self.ui.work_mode.into(),
-            generate_title: is_new_session,
-            delegated_progress_tx: Some(delegated_progress_tx),
-        };
 
         self.persist_current_work_mode();
         if let (Some(sm), Some(session_id)) = (
@@ -418,8 +413,7 @@ impl App {
         }
 
         let conversation = self.runtime.chat.conversation.clone();
-        let orchestrator = crate::agent::AgenticOrchestrator::new(services, config);
-        let (event_rx, input_tx) = orchestrator.run(conversation, options);
+        let (event_rx, input_tx) = run_spec.start(services, conversation);
 
         // Store channels for the event loop to poll
         self.runtime.channels.loop_events = Some(event_rx);

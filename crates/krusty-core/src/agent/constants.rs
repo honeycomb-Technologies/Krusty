@@ -42,10 +42,8 @@ pub mod retry {
     pub const LOG_THRESHOLD: Duration = Duration::from_millis(100);
 }
 
-/// Sub-agent execution limits
+/// Sub-agent execution context limits
 pub mod subagent {
-    /// Default maximum turns before failing a sub-agent loop.
-    pub const DEFAULT_MAX_TURNS: usize = 200;
     /// Maximum messages to keep in context before pruning
     pub const MAX_MESSAGES: usize = 100;
 }

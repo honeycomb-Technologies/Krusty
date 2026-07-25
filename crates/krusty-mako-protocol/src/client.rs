@@ -101,7 +101,11 @@ impl MakoIpcClient {
         request.validate(crate::unix_time_millis())?;
         let request_id = request.request_id.clone();
         let timeout = request_timeout(&self.config, request.deadline_unix_ms)?;
-        let mut stream = self.connect_and_authenticate().await?;
+        let command_name = request.command.name();
+        let minimum_protocol_minor = request.command.minimum_protocol_minor();
+        let mut stream = self
+            .connect_and_authenticate(command_name, minimum_protocol_minor)
+            .await?;
 
         tokio::time::timeout(
             timeout,
@@ -161,7 +165,11 @@ impl MakoIpcClient {
         request.validate(crate::unix_time_millis())?;
         let request_id = request.request_id.clone();
         let timeout = request_timeout(&self.config, request.deadline_unix_ms)?;
-        let mut stream = self.connect_and_authenticate().await?;
+        let command_name = request.command.name();
+        let minimum_protocol_minor = request.command.minimum_protocol_minor();
+        let mut stream = self
+            .connect_and_authenticate(command_name, minimum_protocol_minor)
+            .await?;
         tokio::time::timeout(
             timeout,
             crate::write_frame(&mut stream, &crate::ClientFrame::Request(Box::new(request))),
@@ -221,7 +229,11 @@ impl MakoIpcClient {
     }
 
     #[cfg(unix)]
-    async fn connect_and_authenticate(&self) -> Result<tokio::net::UnixStream, ClientError> {
+    async fn connect_and_authenticate(
+        &self,
+        command_name: &'static str,
+        minimum_protocol_minor: u16,
+    ) -> Result<tokio::net::UnixStream, ClientError> {
         let mut stream = tokio::time::timeout(
             self.config.connect_timeout,
             tokio::net::UnixStream::connect(&self.config.socket_path),
@@ -241,13 +253,21 @@ impl MakoIpcClient {
 
         match response {
             ServerFrame::HelloAck(ack) => {
-                ack.version.negotiate()?;
+                let negotiated = ack.version.negotiate()?;
                 self.key.verify_hello_ack(
                     &ack,
                     &expected_nonce,
                     self.config.auth_policy,
                     crate::unix_time_millis(),
                 )?;
+                if negotiated.minor < minimum_protocol_minor {
+                    return Err(ProtocolViolation::FeatureRequiresMinor {
+                        command: command_name,
+                        required_minor: minimum_protocol_minor,
+                        actual_minor: negotiated.minor,
+                    }
+                    .into());
+                }
                 Ok(stream)
             }
             ServerFrame::Error(error) => Err(ClientError::Remote {

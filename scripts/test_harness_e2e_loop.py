@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -30,6 +31,19 @@ class SequenceTraceApi:
         index = min(self.calls, len(self.responses) - 1)
         self.calls += 1
         return self.responses[index]
+
+
+class FinalProcessDispositionTests(unittest.TestCase):
+    def test_reports_retained_only_from_explicit_result_evidence(self) -> None:
+        self.assertEqual(
+            HARNESS.final_process_disposition({"process_retained": True}),
+            "retained",
+        )
+        self.assertEqual(
+            HARNESS.final_process_disposition({"process_retained": False}),
+            "cleaned",
+        )
+        self.assertEqual(HARNESS.final_process_disposition({}), "cleaned")
 
 
 def trace_response(events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -65,6 +79,30 @@ def trace_event(
         event["stop_reason"] = stop_reason
         event["payload"] = {"stop_reason": stop_reason}
     return event
+
+
+def budget_event(
+    sequence: int,
+    run_id: str,
+    *,
+    max_turns: int | None = None,
+    source: str = "unlimited_default",
+) -> dict[str, Any]:
+    event = trace_event(sequence, "run_budget_resolved", run_id=run_id)
+    event["payload"] = {"max_turns": max_turns, "source": source}
+    return event
+
+
+class CandidateSafetyTests(unittest.TestCase):
+    def test_candidate_url_requires_loopback_nonproduction_port(self) -> None:
+        self.assertEqual(
+            HARNESS.validate_candidate_base_url("http://127.0.0.1:3100"),
+            "http://127.0.0.1:3100",
+        )
+        with self.assertRaises(HARNESS.AcceptanceFailure):
+            HARNESS.validate_candidate_base_url("http://127.0.0.1:3000")
+        with self.assertRaises(HARNESS.AcceptanceFailure):
+            HARNESS.validate_candidate_base_url("http://honey:3100")
 
 
 class TraceConvergenceTests(unittest.TestCase):
@@ -117,6 +155,61 @@ class TraceConvergenceTests(unittest.TestCase):
         self.assertEqual(api.calls, 2)
         self.assertEqual(trace["latest_sequence"], 4)
 
+    def test_cursor_waits_through_budget_finished_and_accounting_batches(self) -> None:
+        prior = [
+            budget_event(1, "run-1"),
+            trace_event(2, "finished", run_id="run-1", stop_reason="completed"),
+            trace_event(3, "provider_call", run_id="run-1"),
+        ]
+        next_budget = budget_event(4, "run-2")
+        next_finished = trace_event(
+            5, "finished", run_id="run-2", stop_reason="completed"
+        )
+        next_provider_call = trace_event(6, "provider_call", run_id="run-2")
+        api = SequenceTraceApi(
+            [
+                trace_response(prior),
+                trace_response(prior + [next_budget]),
+                trace_response(prior + [next_budget, next_finished]),
+                trace_response(
+                    prior + [next_budget, next_finished, next_provider_call]
+                ),
+            ]
+        )
+
+        trace, _ = HARNESS.wait_for_completed_trace_run(
+            api,
+            "session-1",
+            "batched trace cursor",
+            after_sequence=3,
+            timeout=1.0,
+            poll_interval=0.0,
+        )
+
+        self.assertEqual(api.calls, 4)
+        self.assertEqual(trace["latest_sequence"], 6)
+
+    def test_incomplete_run_timeout_reports_boundary_run_ids(self) -> None:
+        incomplete = [
+            budget_event(1, "run-1"),
+            trace_event(2, "finished", run_id="run-1", stop_reason="completed"),
+        ]
+        api = SequenceTraceApi([trace_response(incomplete)])
+
+        with self.assertRaisesRegex(
+            HARNESS.AcceptanceFailure,
+            "finished_run_ids=\\['run-1'\\].*provider_call_run_ids=\\[\\]",
+        ):
+            HARNESS.wait_for_completed_trace_run(
+                api,
+                "session-1",
+                "incomplete trace",
+                timeout=0.0,
+                poll_interval=0.0,
+            )
+
+        self.assertEqual(api.calls, 1)
+
     def test_fails_immediately_on_new_non_completed_terminal(self) -> None:
         failed = trace_event(1, "finished", stop_reason="provider_error")
         api = SequenceTraceApi([trace_response([failed])])
@@ -133,6 +226,241 @@ class TraceConvergenceTests(unittest.TestCase):
             )
 
         self.assertEqual(api.calls, 1)
+
+    def test_settled_trace_waits_for_expected_followup_and_accounting(self) -> None:
+        prior = [
+            budget_event(1, "run-1"),
+            trace_event(2, "finished", run_id="run-1", stop_reason="completed"),
+            trace_event(3, "provider_call", run_id="run-1"),
+        ]
+        next_budget = budget_event(4, "run-2")
+        next_finished = trace_event(
+            5, "finished", run_id="run-2", stop_reason="completed"
+        )
+        next_provider_call = trace_event(6, "provider_call", run_id="run-2")
+        responses = [
+            trace_response(prior),
+            trace_response(prior + [next_budget]),
+            trace_response(prior + [next_budget, next_finished]),
+            trace_response(prior + [next_budget, next_finished, next_provider_call]),
+        ]
+        for response in responses:
+            response["summary"]["total_runs"] = len(
+                {
+                    event["run_id"]
+                    for event in response["events"]
+                    if event.get("event_type") == "run_budget_resolved"
+                }
+            )
+        api = SequenceTraceApi(responses)
+
+        trace, summary = HARNESS.wait_for_settled_trace_runs(
+            api,
+            "session-1",
+            "settled trace",
+            expected_runs=2,
+            timeout=1.0,
+            poll_interval=0.0,
+        )
+
+        self.assertEqual(api.calls, 4)
+        self.assertEqual(trace["latest_sequence"], 6)
+        self.assertEqual(summary["total_runs"], 2)
+
+    def test_settled_trace_rejects_terminal_without_budget_immediately(self) -> None:
+        terminal = trace_event(1, "finished", stop_reason="completed")
+        response = trace_response([terminal])
+        response["summary"]["total_runs"] = 1
+        api = SequenceTraceApi([response])
+
+        with self.assertRaisesRegex(
+            HARNESS.AcceptanceFailure, "terminal runs lacked prior budget events"
+        ):
+            HARNESS.wait_for_settled_trace_runs(
+                api,
+                "session-1",
+                "contradictory trace",
+                expected_runs=1,
+                timeout=1.0,
+                poll_interval=0.0,
+            )
+
+        self.assertEqual(api.calls, 1)
+
+    def test_settled_trace_timeout_reports_all_run_boundaries(self) -> None:
+        incomplete = [
+            budget_event(1, "run-1"),
+            trace_event(2, "finished", run_id="run-1", stop_reason="completed"),
+        ]
+        response = trace_response(incomplete)
+        response["summary"]["total_runs"] = 1
+        api = SequenceTraceApi([response])
+
+        with self.assertRaisesRegex(
+            HARNESS.AcceptanceFailure,
+            "budget_run_ids=\\['run-1'\\].*finished_run_ids=\\['run-1'\\].*"
+            "provider_call_run_ids=\\[\\]",
+        ):
+            HARNESS.wait_for_settled_trace_runs(
+                api,
+                "session-1",
+                "incomplete settled trace",
+                expected_runs=1,
+                timeout=0.0,
+                poll_interval=0.0,
+            )
+
+        self.assertEqual(api.calls, 1)
+
+
+class RunBudgetTraceTests(unittest.TestCase):
+    def test_accepts_one_unlimited_default_budget_per_completed_run(self) -> None:
+        trace = trace_response(
+            [
+                budget_event(1, "run-1"),
+                trace_event(2, "finished", run_id="run-1", stop_reason="completed"),
+                budget_event(3, "run-2"),
+                trace_event(4, "finished", run_id="run-2", stop_reason="completed"),
+                budget_event(5, "run-3"),
+                trace_event(6, "finished", run_id="run-3", stop_reason="completed"),
+            ]
+        )
+
+        budgets = HARNESS.validate_trace_run_budgets(trace, "multi-run trace")
+
+        self.assertEqual(
+            [budget["run_id"] for budget in budgets],
+            ["run-1", "run-2", "run-3"],
+        )
+        self.assertTrue(all(budget["max_turns"] is None for budget in budgets))
+        self.assertTrue(
+            all(budget["source"] == "unlimited_default" for budget in budgets)
+        )
+
+    def test_rejects_duplicate_or_missing_budget_events_by_run_id(self) -> None:
+        duplicate = trace_response(
+            [
+                budget_event(1, "run-1"),
+                budget_event(2, "run-1"),
+                trace_event(3, "finished", run_id="run-1", stop_reason="completed"),
+            ]
+        )
+        with self.assertRaisesRegex(HARNESS.AcceptanceFailure, "emitted 2 budget events"):
+            HARNESS.validate_trace_run_budgets(duplicate, "duplicate trace")
+
+        missing = trace_response(
+            [trace_event(1, "finished", run_id="run-1", stop_reason="completed")]
+        )
+        with self.assertRaisesRegex(HARNESS.AcceptanceFailure, "run ids did not match"):
+            HARNESS.validate_trace_run_budgets(missing, "missing trace")
+
+    def test_rejects_a_hidden_or_non_default_cap(self) -> None:
+        capped = trace_response(
+            [
+                budget_event(1, "run-1", max_turns=50, source="explicit_run"),
+                trace_event(2, "finished", run_id="run-1", stop_reason="completed"),
+            ]
+        )
+        with self.assertRaisesRegex(HARNESS.AcceptanceFailure, "hidden or non-default"):
+            HARNESS.validate_trace_run_budgets(capped, "capped trace")
+
+
+class FailedBashValidationTests(unittest.TestCase):
+    command = 'python3 -c "import sys; print(\'EXPECTED\', file=sys.stderr); sys.exit(7)"'
+    marker = "EXPECTED"
+    reply = "FAILED-BASH-HANDLED"
+
+    def events(self) -> list[dict[str, object]]:
+        envelope = {
+            "ok": False,
+            "data": {"output": self.marker},
+            "error": {"code": "command_failed", "message": "exit 7"},
+            "metadata": {"exit_code": 7, "killed": False},
+        }
+        return [
+            {"type": "tool_call_start", "id": "call-1", "name": "bash"},
+            {
+                "type": "tool_call_complete",
+                "id": "call-1",
+                "name": "bash",
+                "arguments": {
+                    "command": self.command,
+                    "timeout": 60_000,
+                    "run_in_background": False,
+                },
+            },
+            {"type": "tool_executing", "id": "call-1", "name": "bash"},
+            {"type": "tool_executing", "id": "call-1", "name": "bash"},
+            {
+                "type": "tool_result",
+                "id": "call-1",
+                "output": json.dumps(envelope),
+                "is_error": True,
+            },
+            {"type": "text_delta", "delta": self.reply},
+            {"type": "turn_complete", "turn": 1, "has_more": False},
+            {
+                "type": "finish",
+                "session_id": "session-1",
+                "stop_reason": "completed",
+            },
+        ]
+
+    def test_accepts_multiple_matching_execution_heartbeats(self) -> None:
+        text, call_id, envelope = HARNESS.validate_failed_bash_stream(
+            self.events(),
+            "failed Bash",
+            self.command,
+            self.marker,
+            self.reply,
+        )
+
+        self.assertEqual(text, self.reply)
+        self.assertEqual(call_id, "call-1")
+        self.assertEqual(envelope["metadata"]["exit_code"], 7)
+
+    def test_trace_accepts_multiple_matching_execution_heartbeats(self) -> None:
+        trace_events = [
+            {
+                "event_type": event["type"],
+                "payload": {
+                    key: value
+                    for key, value in event.items()
+                    if key in {"id", "name", "arguments", "is_error"}
+                },
+            }
+            for event in self.events()
+            if event["type"]
+            in {
+                "tool_call_start",
+                "tool_call_complete",
+                "tool_executing",
+                "tool_result",
+            }
+        ]
+
+        call_ids = HARNESS.validate_trace_tool_lifecycles(
+            trace_events,
+            "failed Bash trace",
+            exact_calls=1,
+            expected_name="bash",
+        )
+
+        self.assertEqual(call_ids, ["call-1"])
+
+    def test_rejects_heartbeat_after_the_result(self) -> None:
+        events = self.events()
+        heartbeat = events.pop(3)
+        events.insert(5, heartbeat)
+
+        with self.assertRaisesRegex(HARNESS.AcceptanceFailure, "out of order"):
+            HARNESS.validate_failed_bash_stream(
+                events,
+                "failed Bash",
+                self.command,
+                self.marker,
+                self.reply,
+            )
 
 
 class LiveSteeringValidationTests(unittest.TestCase):

@@ -1,4 +1,4 @@
-import type { KrustyClient } from '@krusty/api';
+import type { KrustyClient, ModelKey } from '@krusty/api';
 import type { createSessionsStore } from '../sessions';
 import type { PermissionMode, SessionMode, SessionStoreState } from './types';
 
@@ -62,12 +62,16 @@ export async function persistSessionModel(
   sessionsStore: ReturnType<typeof createSessionsStore>,
   getState: () => SessionStoreState,
   model: string | null,
+  modelKey?: ModelKey | null,
 ) {
   const state = getState();
   if (!state.sessionId) return;
 
   try {
-    await client.updateSession(state.sessionId, { model });
+    await client.updateSession(state.sessionId, {
+      model,
+      model_key: modelKey ?? undefined,
+    });
     sessionsStore.getState().loadSessions();
   } catch {
     // Failed to persist
@@ -77,9 +81,10 @@ export async function persistSessionModel(
 export async function persistCurrentModel(
   client: KrustyClient,
   model: string | null,
+  modelKey?: ModelKey | null,
 ) {
   try {
-    await client.setCurrentModel(model);
+    await client.setCurrentModel(model, modelKey);
   } catch {
     // Failed to persist
   }

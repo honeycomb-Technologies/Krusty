@@ -15,6 +15,12 @@ use super::signals::{resume_process_tree, suspend_process_tree, terminate_proces
 
 /// Default user ID for single-tenant mode
 const DEFAULT_USER: &str = "default";
+/// Hard resource boundary for one owner. Unlimited agent turns must never
+/// imply unlimited child processes; completed/killed entries do not count.
+pub(crate) const MAX_ACTIVE_PROCESSES_PER_OWNER: usize = 16;
+/// Retain a bounded diagnostic tail for completed, failed, and killed
+/// processes. Active entries are never evicted by history pruning.
+pub(crate) const MAX_TERMINAL_PROCESSES_PER_OWNER: usize = 64;
 const STDERR_TAIL_BYTES: usize = 8 * 1024;
 const OUTPUT_TAIL_BYTES: usize = 64 * 1024;
 
@@ -70,6 +76,23 @@ impl ProcessRegistry {
         user_id: &str,
     ) -> &'a mut HashMap<ProcessId, ProcessEntry> {
         map.entry(user_id.to_string()).or_default()
+    }
+
+    fn prune_terminal_history(user_map: &mut HashMap<ProcessId, ProcessEntry>) {
+        let mut terminal = user_map
+            .iter()
+            .filter(|(_, entry)| !entry.info.is_active())
+            .map(|(id, entry)| (id.clone(), entry.info.started_at))
+            .collect::<Vec<_>>();
+        if terminal.len() <= MAX_TERMINAL_PROCESSES_PER_OWNER {
+            return;
+        }
+
+        terminal.sort_by_key(|(_, started_at)| *started_at);
+        let remove_count = terminal.len() - MAX_TERMINAL_PROCESSES_PER_OWNER;
+        for (id, _) in terminal.into_iter().take(remove_count) {
+            user_map.remove(&id);
+        }
     }
 
     async fn launch_gate_for_user(&self, user_id: &str) -> Arc<Mutex<()>> {
@@ -191,6 +214,23 @@ impl ProcessRegistry {
         working_dir: PathBuf,
         description: Option<String>,
     ) -> Result<ProcessId> {
+        let active_count = self
+            .processes
+            .read()
+            .await
+            .get(user_id)
+            .map(|user_map| {
+                user_map
+                    .values()
+                    .filter(|entry| entry.info.is_active())
+                    .count()
+            })
+            .unwrap_or_default();
+        anyhow::ensure!(
+            active_count < MAX_ACTIVE_PROCESSES_PER_OWNER,
+            "active background process limit reached for owner {user_id} ({MAX_ACTIVE_PROCESSES_PER_OWNER}); stop or reuse a tracked process before starting another"
+        );
+
         let id = uuid::Uuid::new_v4().to_string();
 
         let mut cmd = if cfg!(windows) {
@@ -276,7 +316,9 @@ impl ProcessRegistry {
                 _handle: None,
             };
             let mut processes = self.processes.write().await;
-            Self::ensure_user_map(&mut processes, user_id).insert(id.clone(), entry);
+            let user_map = Self::ensure_user_map(&mut processes, user_id);
+            Self::prune_terminal_history(user_map);
+            user_map.insert(id.clone(), entry);
         }
 
         let registry = self.clone();
@@ -372,6 +414,8 @@ impl ProcessRegistry {
 
         let duration_ms = elapsed_millis_u64(entry.info.started_at);
         entry.info.status = ProcessStatus::Killed { duration_ms };
+
+        Self::prune_terminal_history(user_map);
 
         tracing::info!(id = %id, user_id = %user_id, pid, "Process killed");
         Ok(())
@@ -534,6 +578,7 @@ impl ProcessRegistry {
                 tracing::info!(id = %id, user_id = %user_id, status = ?status, "Process status updated");
                 entry.info.status = status;
             }
+            Self::prune_terminal_history(user_map);
         }
     }
 
@@ -558,6 +603,7 @@ impl ProcessRegistry {
                 tracing::info!(id = %id, user_id = %user_id, status = ?status, "Process status updated by monitor");
                 entry.info.status = status;
             }
+            Self::prune_terminal_history(user_map);
         }
     }
 
@@ -593,9 +639,9 @@ impl ProcessRegistry {
         description: Option<String>,
         pid: Option<u32>,
         working_dir: PathBuf,
-    ) {
+    ) -> Result<()> {
         self.register_external_for_user(DEFAULT_USER, id, command, description, pid, working_dir)
-            .await;
+            .await
     }
 
     pub async fn register_external_for_user(
@@ -606,7 +652,40 @@ impl ProcessRegistry {
         description: Option<String>,
         pid: Option<u32>,
         working_dir: PathBuf,
-    ) {
+    ) -> Result<()> {
+        let launch_gate = self.launch_gate_for_user(user_id).await;
+        let _launch_guard = launch_gate.lock().await;
+        let active_count = self
+            .processes
+            .read()
+            .await
+            .get(user_id)
+            .map(|user_map| {
+                user_map
+                    .values()
+                    .filter(|entry| entry.info.is_active())
+                    .count()
+            })
+            .unwrap_or_default();
+        if active_count >= MAX_ACTIVE_PROCESSES_PER_OWNER {
+            if let Some(pid) = pid {
+                // External registration transfers lifecycle ownership to the
+                // registry. If the reservation is rejected, terminate the
+                // just-created tree rather than leave an untracked process.
+                if let Err(error) = terminate_process_tree(pid) {
+                    tracing::error!(
+                        user_id = %user_id,
+                        pid,
+                        %error,
+                        "Failed to terminate external process rejected by owner cap"
+                    );
+                }
+            }
+            anyhow::bail!(
+                "active background process limit reached for owner {user_id} ({MAX_ACTIVE_PROCESSES_PER_OWNER}); stop or reuse a tracked process before registering another"
+            );
+        }
+
         let info = ProcessInfo {
             id: id.clone(),
             command,
@@ -622,8 +701,11 @@ impl ProcessRegistry {
             _handle: None,
         };
         let mut processes = self.processes.write().await;
-        Self::ensure_user_map(&mut processes, user_id).insert(id.clone(), entry);
+        let user_map = Self::ensure_user_map(&mut processes, user_id);
+        Self::prune_terminal_history(user_map);
+        user_map.insert(id.clone(), entry);
         tracing::info!(id = %id, user_id = %user_id, pid = ?pid, "External process registered");
+        Ok(())
     }
 
     pub async fn unregister(&self, id: &str) {
@@ -642,7 +724,10 @@ impl ProcessRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProcessRegistry, ProcessStatus};
+    use super::{
+        ProcessRegistry, ProcessStatus, MAX_ACTIVE_PROCESSES_PER_OWNER,
+        MAX_TERMINAL_PROCESSES_PER_OWNER,
+    };
     use tempfile::TempDir;
 
     #[cfg(unix)]
@@ -803,7 +888,8 @@ mod tests {
                 None,
                 directory.path().to_path_buf(),
             )
-            .await;
+            .await
+            .expect("register default process");
         registry
             .register_external_for_user(
                 "alice",
@@ -813,7 +899,8 @@ mod tests {
                 None,
                 directory.path().to_path_buf(),
             )
-            .await;
+            .await
+            .expect("register alice process");
 
         let unscoped = registry.list().await;
         assert_eq!(unscoped.len(), 1);
@@ -847,6 +934,118 @@ mod tests {
         assert!(registry.get(&shared_id).await.is_none());
         assert!(registry.output(&shared_id).await.is_none());
         assert!(registry.get_for_user("alice", &shared_id).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn active_process_cap_is_enforced_per_owner() {
+        let registry = ProcessRegistry::new();
+        let directory = TempDir::new().expect("temp dir");
+        for index in 0..MAX_ACTIVE_PROCESSES_PER_OWNER {
+            registry
+                .register_external_for_user(
+                    "alice",
+                    format!("active-{index}"),
+                    "externally tracked".to_string(),
+                    None,
+                    None,
+                    directory.path().to_path_buf(),
+                )
+                .await
+                .expect("register active process");
+        }
+
+        let error = registry
+            .spawn_for_user(
+                "alice",
+                "echo should-not-launch".to_string(),
+                directory.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect_err("the seventeenth active process must be rejected");
+        assert!(error
+            .to_string()
+            .contains("active background process limit"));
+
+        let external_error = registry
+            .register_external_for_user(
+                "alice",
+                "active-overflow".to_string(),
+                "externally tracked overflow".to_string(),
+                None,
+                None,
+                directory.path().to_path_buf(),
+            )
+            .await
+            .expect_err("external registration must share the same owner cap");
+        assert!(external_error
+            .to_string()
+            .contains("active background process limit"));
+
+        let bob = registry
+            .spawn_for_user(
+                "bob",
+                "echo independent-owner".to_string(),
+                directory.path().to_path_buf(),
+                None,
+            )
+            .await;
+        assert!(bob.is_ok(), "one owner's cap must not block another owner");
+    }
+
+    #[tokio::test]
+    async fn terminal_history_is_bounded_without_evicting_active_entries() {
+        let registry = ProcessRegistry::new();
+        let directory = TempDir::new().expect("temp dir");
+        registry
+            .register_external_for_user(
+                "alice",
+                "active".to_string(),
+                "still running".to_string(),
+                None,
+                None,
+                directory.path().to_path_buf(),
+            )
+            .await
+            .expect("register active history sentinel");
+
+        for index in 0..(MAX_TERMINAL_PROCESSES_PER_OWNER + 12) {
+            let id = format!("finished-{index:03}");
+            registry
+                .register_external_for_user(
+                    "alice",
+                    id.clone(),
+                    "quick task".to_string(),
+                    None,
+                    None,
+                    directory.path().to_path_buf(),
+                )
+                .await
+                .expect("register quick process");
+            registry
+                .update_status_for_user(
+                    "alice",
+                    &id,
+                    ProcessStatus::Completed {
+                        exit_code: 0,
+                        duration_ms: 1,
+                    },
+                )
+                .await;
+        }
+
+        let entries = registry.list_for_user("alice").await;
+        assert_eq!(
+            entries.iter().filter(|entry| !entry.is_active()).count(),
+            MAX_TERMINAL_PROCESSES_PER_OWNER
+        );
+        assert!(entries
+            .iter()
+            .any(|entry| entry.id == "active" && entry.is_active()));
+        assert!(registry
+            .get_for_user("alice", "finished-000")
+            .await
+            .is_none());
     }
 
     #[cfg(unix)]
@@ -943,7 +1142,8 @@ mod tests {
                 Some(u32::MAX),
                 directory.path().to_path_buf(),
             )
-            .await;
+            .await
+            .expect("register invalid signal target");
 
         let suspend_error = registry
             .suspend(&id)

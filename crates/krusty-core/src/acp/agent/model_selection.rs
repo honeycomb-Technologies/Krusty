@@ -1,11 +1,13 @@
 use crate::ai::catalog::{CatalogAuthKind, CatalogCredential};
-use crate::ai::models::ModelAuthScope;
+use crate::ai::format_detection::detect_api_format;
+use crate::ai::models::{resolve_model_metadata, ModelAuthScope, ModelCatalogSource, ModelKey};
 use crate::ai::providers::{get_provider, ProviderId};
 use crate::auth::{resolve_anthropic_auth, resolve_grok_auth, resolve_openai_auth};
 use crate::storage::credentials::CredentialStore;
 
 use super::{
-    persist_shared_current_model, AcpError, AvailableModelRecord, KrustyAgent, ModelConfig,
+    acp_model_id_for_key, decode_acp_model_id, persist_shared_current_model, AcpError,
+    AvailableModelRecord, KrustyAgent, ModelConfig,
 };
 use crate::acp::session::{SessionModelSelection, SessionState};
 
@@ -82,19 +84,40 @@ fn push_static_provider_models(
     };
 
     for model_info in &provider_config.models {
-        let Some(credential) = credential_for_model(store, provider, &model_info.id, None) else {
-            continue;
-        };
-        let model_id = format!("{}:{}", provider.storage_key(), model_info.id);
-        models.push(AvailableModelRecord {
-            acp_model_id: model_id,
-            provider,
-            model_id: model_info.id.clone(),
-            credential: credential.value,
-            display_name: model_info.display_name.clone(),
-            auth_scope: None,
-            account_id: credential.account_id,
-        });
+        let api_format = model_info
+            .api_format
+            .unwrap_or_else(|| detect_api_format(provider, &model_info.id));
+        let mut metadata = resolve_model_metadata(provider, &model_info.id, api_format);
+        metadata.catalog_source = ModelCatalogSource::Curated;
+
+        // OpenAI API-key and OAuth rows can share the same wire slug while
+        // requiring different endpoints and headers. Preserve both surfaces
+        // even when live discovery falls back to the curated catalog.
+        if provider == ProviderId::OpenAI {
+            let identities = crate::ai::catalog::credentials_for_dynamic_models(provider, store);
+            for auth_scope in [ModelAuthScope::ApiKey, ModelAuthScope::OAuth] {
+                let Some(credential) = openai_credential_for_scope(&identities, auth_scope) else {
+                    continue;
+                };
+                let mut scoped_metadata = metadata.clone();
+                scoped_metadata.auth_scope = Some(auth_scope);
+                if auth_scope == ModelAuthScope::OAuth {
+                    scoped_metadata.api_format = crate::ai::models::ApiFormat::OpenAIResponses;
+                }
+                models.push(AvailableModelRecord::new(
+                    scoped_metadata,
+                    credential.value,
+                    credential.account_id,
+                ));
+            }
+        } else if let Some(credential) = credential_for_model(store, provider, &model_info.id, None)
+        {
+            models.push(AvailableModelRecord::new(
+                metadata,
+                credential.value,
+                credential.account_id,
+            ));
+        }
         tracing::debug!(
             "Added model: {} from {:?}",
             model_info.display_name,
@@ -158,16 +181,11 @@ impl KrustyAgent {
                         let Some(model_credential) = model_credential else {
                             continue;
                         };
-                        let model_id = format!("{}:{}", provider.storage_key(), model.id);
-                        models.push(AvailableModelRecord {
-                            acp_model_id: model_id,
-                            provider,
-                            model_id: model.id,
-                            credential: model_credential.value,
-                            display_name: model.display_name,
-                            auth_scope: model.auth_scope,
-                            account_id: model_credential.account_id,
-                        });
+                        models.push(AvailableModelRecord::new(
+                            model,
+                            model_credential.value,
+                            model_credential.account_id,
+                        ));
                     }
                     tracing::info!("Added {} models from {:?}", fetched_count, provider);
                 }
@@ -185,8 +203,7 @@ impl KrustyAgent {
     /// Set the current model and reinitialize the processor.
     pub async fn set_model(&self, model_id: &str) -> Result<(), AcpError> {
         let model_config = self.resolve_model_record(model_id).await?;
-        let provider = model_config.provider;
-        let actual_model_id = model_config.model_id.clone();
+        let key = model_config.key().clone();
         let listed_credential = SelectedCredential {
             value: model_config.credential,
             account_id: model_config.account_id,
@@ -194,29 +211,30 @@ impl KrustyAgent {
         let selected_credential = CredentialStore::load()
             .ok()
             .and_then(|store| {
-                credential_for_model(&store, provider, &actual_model_id, model_config.auth_scope)
+                credential_for_model(&store, key.provider, &key.model_id, key.auth_scope)
             })
             .unwrap_or(listed_credential);
 
         tracing::info!(
             "Switching to model: {} (provider: {:?})",
-            actual_model_id,
-            provider
+            key.model_id,
+            key.provider
         );
 
-        *self.current_model.write().await = Some(ModelConfig {
-            provider,
-            model_id: actual_model_id.clone(),
-        });
-        persist_shared_current_model(provider, &actual_model_id);
-
-        self.processor.write().await.init_ai_client_with_auth_scope(
+        let initialized = self.processor.write().await.init_ai_client_for_metadata(
             selected_credential.value,
-            provider,
-            Some(actual_model_id),
-            model_config.auth_scope,
+            &model_config.metadata,
+            model_config.runtime,
             selected_credential.account_id,
         );
+        if !initialized {
+            return Err(AcpError::NotAuthenticated(format!(
+                "Unable to initialize exact model {}",
+                key.model_id
+            )));
+        }
+        *self.current_model.write().await = Some(ModelConfig { key: key.clone() });
+        persist_shared_current_model(&key);
 
         Ok(())
     }
@@ -230,8 +248,7 @@ impl KrustyAgent {
         persist: bool,
     ) -> Result<(), AcpError> {
         let model_config = self.resolve_model_record(model_id).await?;
-        let provider = model_config.provider;
-        let actual_model_id = model_config.model_id.clone();
+        let key = model_config.key().clone();
         let listed_credential = SelectedCredential {
             value: model_config.credential,
             account_id: model_config.account_id,
@@ -239,7 +256,7 @@ impl KrustyAgent {
         let selected_credential = CredentialStore::load()
             .ok()
             .and_then(|store| {
-                credential_for_model(&store, provider, &actual_model_id, model_config.auth_scope)
+                credential_for_model(&store, key.provider, &key.model_id, key.auth_scope)
             })
             .unwrap_or(listed_credential);
 
@@ -247,41 +264,72 @@ impl KrustyAgent {
             .processor
             .read()
             .await
-            .build_ai_client_with_auth_scope(
+            .build_ai_client_for_metadata(
                 selected_credential.value,
-                provider,
-                Some(actual_model_id.clone()),
-                model_config.auth_scope,
+                &model_config.metadata,
+                model_config.runtime.clone(),
                 selected_credential.account_id,
             )
             .ok_or_else(|| {
-                AcpError::NotAuthenticated(format!(
-                    "Unable to initialize model {}",
-                    actual_model_id
-                ))
+                AcpError::NotAuthenticated(format!("Unable to initialize model {}", key.model_id))
             })?;
         session
             .set_model_client(
                 SessionModelSelection {
-                    provider,
-                    model_id: actual_model_id,
+                    key,
                     acp_model_id: model_config.acp_model_id.clone(),
+                    catalog_revision: model_config.runtime.catalog_revision.clone(),
                 },
                 client,
             )
             .await;
         if persist {
-            session.persist_model(&model_config.acp_model_id).await;
+            session.persist_model_selection().await;
         }
         Ok(())
     }
 
     pub(super) async fn resolve_persisted_model_id(&self, persisted: &str) -> Option<String> {
+        let models = self.available_models.read().await;
+
+        if let Some(record) = models
+            .iter()
+            .find(|record| record.acp_model_id == persisted)
+        {
+            return Some(record.acp_model_id.clone());
+        }
+        if let Some(key) = decode_acp_model_id(persisted) {
+            return models
+                .iter()
+                .find(|record| record.key() == &key)
+                .map(|record| record.acp_model_id.clone());
+        }
+
+        // Legacy ACP versions persisted either a bare slug or provider:slug.
+        // Restore only when that lossy identifier maps to one exact key.
+        let mut matches = models
+            .iter()
+            .filter(|record| {
+                record.key().model_id == persisted
+                    || format!(
+                        "{}:{}",
+                        record.key().provider.storage_key(),
+                        record.key().model_id
+                    ) == persisted
+            })
+            .map(|record| record.acp_model_id.clone())
+            .collect::<Vec<_>>();
+        matches.sort();
+        matches.dedup();
+        (matches.len() == 1).then(|| matches.remove(0))
+    }
+
+    pub(super) async fn resolve_model_key(&self, key: &ModelKey) -> Option<String> {
         self.available_models
             .read()
             .await
             .iter()
-            .find(|record| record.acp_model_id == persisted || record.model_id == persisted)
+            .find(|record| record.key() == key)
             .map(|record| record.acp_model_id.clone())
     }
 
@@ -301,6 +349,6 @@ impl KrustyAgent {
             .read()
             .await
             .as_ref()
-            .map(|m| format!("{}:{}", m.provider.storage_key(), m.model_id))
+            .map(|model| acp_model_id_for_key(&model.key))
     }
 }

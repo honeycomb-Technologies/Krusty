@@ -21,7 +21,7 @@ The orchestrator emits `LoopEvent` values for every state change — text deltas
 
 ## Configuration and Services
 
-An orchestrator is built from two structs: `OrchestratorConfig` and `OrchestratorServices`.
+Product surfaces build a validated `RunSpec`, which owns the per-run configuration and starts the crate-private orchestrator with shared `OrchestratorServices`.
 
 **OrchestratorConfig** captures everything specific to a single run:
 
@@ -42,7 +42,7 @@ An orchestrator is built from two structs: `OrchestratorConfig` and `Orchestrato
 - `db_path` — where the SQLite database lives for persistence
 - `skills_manager` — available slash-command-style skills
 
-The consumer constructs both structs, passes them to `AgenticOrchestrator::new()`, then calls `run()` with the conversation history and call options. The `run()` method returns a pair of channels — an event receiver and an input sender — and spawns the loop as a tokio task. From that point on, the consumer just listens for events and occasionally sends input.
+The consumer resolves a frozen model runtime and constructs a `RunSpec` through `RunSpecBuilder`, then calls `run()` with the shared services, conversation history, and call options. Direct orchestrator construction is crate-private. The run returns a pair of channels — an event receiver and an input sender — and spawns the loop as a tokio task. From that point on, the consumer listens for canonical events and occasionally sends input.
 
 ## The Main Loop
 
@@ -114,12 +114,13 @@ Before executing tools, the orchestrator checks for repeated read-only explorati
 
 Tool calls go through `crates/krusty-core/src/agent/executor/mod.rs`. For each tool call in the batch:
 
-1. **Disabled tool check** — if the tool is listed in the project's `disabled_tools`, it's denied immediately
-2. **Authorization** — the `ToolControl` module checks the permission mode. In autonomous mode, tools execute without approval. In supervised mode, write-category tools emit a `ToolApprovalRequired` event and wait for the user to approve or deny. Read-only tools run without approval regardless of mode. There's a five-minute timeout on approval requests.
-3. **Special tool interception** — mode switch tools (`set_work_mode`, `enter_plan_mode`) and plan task tools (`task_start`, `task_complete`, `add_subtask`, `set_dependency`) are handled directly by the orchestrator rather than going through the tool registry, because they mutate the loop's own state.
-4. **Regular execution** — the tool runs through the `ToolRegistry`, which handles argument validation, path and permission policy enforcement, and output streaming. These policies are not an OS sandbox for Bash. Tool output gets streamed back via `ToolOutputDelta` events (so bash output, for example, appears in real time).
-5. **Retry policy** — read-only tools that time out get one automatic retry. Everything else stops on failure.
-6. **Result shaping** — the `ToolControl` module truncates oversized tool outputs (over 30,000 characters), wraps the result with history metadata for later compaction, and publishes the `ToolResult` event.
+1. **Advertised capability check** — the call name must exist in the exact function-tool set frozen from the canonical provider request. An unadvertised or hallucinated call returns a structured `tool_not_advertised` result before extensions, approvals, recovery interaction persistence, or registry execution.
+2. **Disabled tool check** — if the tool is listed in the project's `disabled_tools`, it's denied immediately.
+3. **Authorization** — the `ToolControl` module checks the permission mode. In autonomous mode, tools execute without approval. In supervised mode, write-category tools emit a `ToolApprovalRequired` event and wait for the user to approve or deny. Read-only tools run without approval regardless of mode. There's a five-minute timeout on approval requests.
+4. **Special tool interception** — mode switch tools (`set_work_mode`, `enter_plan_mode`) and plan task tools (`task_start`, `task_complete`, `add_subtask`, `set_dependency`) are handled directly by the orchestrator rather than going through the tool registry, because they mutate the loop's own state.
+5. **Regular execution** — the tool runs through the `ToolRegistry`, which handles argument validation, path and permission policy enforcement, and output streaming. These policies are not an OS sandbox for Bash. Tool output gets streamed back via `ToolOutputDelta` events (so bash output, for example, appears in real time).
+6. **Retry policy** — read-only tools that time out get one automatic retry. Everything else stops on failure.
+7. **Result shaping** — the `ToolControl` module truncates oversized tool outputs (over 30,000 characters), wraps the result with history metadata for later compaction, and publishes the `ToolResult` event.
 
 During execution of sub-agent tools (the `agent` tool), the executor sets up a progress channel so delegated progress events flow back to the parent session's event stream.
 
@@ -144,7 +145,7 @@ Tool results are saved as a user message (since tool results go in the user role
 
 Every pass through the main loop is a "turn" — one AI call and its resulting tool executions. The iteration counter increments at the top of each loop pass. The turn budget (`max_iterations`) provides a hard ceiling.
 
-`AgentState` in `crates/krusty-core/src/agent/state.rs` tracks turn count, timing, and interruption status. `AgentConfig` provides three separate turn budgets: `primary_max_turns` for interactive sessions, `subagent_max_turns` for sub-agents (default 200), and `acp_max_turns` for editor integrations. The legacy `max_turns` field serves as a fallback.
+`AgentState` in `crates/krusty-core/src/agent/state.rs` tracks turn count, timing, and interruption status. Interactive, ACP, and delegated runs are unlimited by default. `AgentConfig` can provide separate explicit `primary_max_turns`, `subagent_max_turns`, and `acp_max_turns` resource ceilings; the legacy `max_turns` field remains a lower-precedence migration fallback. Semantic repetition is handled by the progress ledger rather than a hidden turn count.
 
 ## The Hook System
 

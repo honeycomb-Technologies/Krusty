@@ -1425,3 +1425,83 @@ fn inject_context_includes_recent_delegated_run_guidance() {
         )
     }));
 }
+
+#[test]
+fn inject_context_adds_balanced_delegation_contract_for_code_sessions() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    let skills = RwLock::new(SkillsManager::with_defaults(repo));
+    let conversation = vec![ModelMessage {
+        role: Role::User,
+        content: vec![Content::Text {
+            text: "hello".to_string(),
+        }],
+    }];
+
+    let injected = inject_context(
+        &conversation,
+        repo.join("krusty.db").as_path(),
+        "session-id",
+        repo,
+        Some(repo),
+        WorkMode::Build,
+        &skills,
+        None,
+        Some("code"),
+        None,
+        None,
+    );
+
+    assert!(injected.iter().any(|message| {
+        matches!(
+            &message.content[0],
+            Content::Text { text }
+                if text.contains("[DELEGATION MODE: BALANCED]")
+                    && text.contains("simple, tightly coupled, or sequential")
+        )
+    }));
+}
+
+#[test]
+fn inject_context_honors_explicit_only_delegation_setting() {
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path();
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::create_dir_all(repo.join(".krusty")).unwrap();
+    fs::write(
+        repo.join(".krusty").join("settings.json"),
+        r#"{ "delegation_mode": "explicit_only" }"#,
+    )
+    .unwrap();
+    let skills = RwLock::new(SkillsManager::with_defaults(repo));
+    let conversation = vec![ModelMessage {
+        role: Role::User,
+        content: vec![Content::Text {
+            text: "hello".to_string(),
+        }],
+    }];
+
+    let injected = inject_context(
+        &conversation,
+        repo.join("krusty.db").as_path(),
+        "session-id",
+        repo,
+        Some(repo),
+        WorkMode::Build,
+        &skills,
+        None,
+        Some("code"),
+        None,
+        None,
+    );
+
+    assert!(injected.iter().any(|message| {
+        matches!(
+            &message.content[0],
+            Content::Text { text }
+                if text.contains("[DELEGATION MODE: EXPLICIT_ONLY]")
+                    && text.contains("only when the user explicitly requests")
+        )
+    }));
+}

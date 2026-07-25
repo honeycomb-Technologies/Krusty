@@ -70,7 +70,8 @@ fn normalize_chat_completions_response(response: &Value) -> Value {
     serde_json::json!({
         "content": content,
         "stop_reason": stop_reason,
-        "model": response.get("model").cloned().unwrap_or(Value::Null)
+        "model": response.get("model").cloned().unwrap_or(Value::Null),
+        "usage": normalized_usage(response)
     })
 }
 
@@ -147,8 +148,21 @@ fn normalize_responses_api_response(response: &Value) -> Value {
     serde_json::json!({
         "content": content,
         "stop_reason": stop_reason,
-        "model": response.get("model").cloned().unwrap_or(Value::Null)
+        "model": response.get("model").cloned().unwrap_or(Value::Null),
+        "usage": normalized_usage(response)
     })
+}
+
+fn normalized_usage(response: &Value) -> Value {
+    response
+        .get("usage")
+        .or_else(|| {
+            response
+                .get("response")
+                .and_then(|value| value.get("usage"))
+        })
+        .cloned()
+        .unwrap_or(Value::Null)
 }
 
 fn responses_stop_reason(response: &Value, has_tool_calls: bool) -> &'static str {
@@ -179,6 +193,11 @@ mod tests {
         let response = json!({
             "model": "gpt-5.5",
             "status": "completed",
+            "usage": {
+                "input_tokens": 1000,
+                "output_tokens": 50,
+                "input_tokens_details": {"cached_tokens": 700}
+            },
             "output": [
                 {
                     "type": "message",
@@ -204,5 +223,11 @@ mod tests {
         assert_eq!(normalized["content"][1]["id"], "call_read");
         assert_eq!(normalized["content"][1]["name"], "read");
         assert_eq!(normalized["content"][1]["input"]["path"], "Cargo.toml");
+        assert_eq!(normalized["usage"]["input_tokens"], 1000);
+        assert_eq!(normalized["usage"]["output_tokens"], 50);
+        assert_eq!(
+            normalized["usage"]["input_tokens_details"]["cached_tokens"],
+            700
+        );
     }
 }

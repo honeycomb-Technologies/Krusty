@@ -15,13 +15,14 @@ use agent_client_protocol::{
     Implementation, McpCapabilities, PromptCapabilities, SessionCapabilities, SessionId,
     SessionNotification, SessionUpdate,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use tokio::sync::{mpsc, Mutex, RwLock};
 
 use super::bridge::AcpOutbound;
 use super::error::AcpError;
 use super::processor::PromptProcessor;
 use super::session::{SessionManager, SessionState};
-use crate::ai::models::ModelAuthScope;
+use crate::ai::models::{ModelKey, ModelMetadata, ResolvedModelRuntime};
 use crate::ai::providers::ProviderId;
 use crate::storage::credentials::ActiveProviderStore;
 use crate::storage::{Database, Preferences, SessionManager as StorageSessionManager};
@@ -30,8 +31,7 @@ use crate::tools::ToolRegistry;
 /// Current model configuration.
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
-    pub provider: ProviderId,
-    pub model_id: String,
+    pub key: ModelKey,
 }
 
 /// ACP picker row plus the exact transport that advertised it.
@@ -41,27 +41,65 @@ pub struct ModelConfig {
 #[derive(Clone)]
 struct AvailableModelRecord {
     acp_model_id: String,
-    provider: ProviderId,
-    model_id: String,
+    metadata: ModelMetadata,
+    runtime: ResolvedModelRuntime,
     credential: String,
-    display_name: String,
-    auth_scope: Option<ModelAuthScope>,
     account_id: Option<String>,
 }
 
-fn persist_shared_current_model(provider: ProviderId, model_id: &str) {
-    let model_id = model_id.trim();
-    if model_id.is_empty() {
+impl AvailableModelRecord {
+    fn new(metadata: ModelMetadata, credential: String, account_id: Option<String>) -> Self {
+        let runtime = metadata.resolve_runtime();
+        let acp_model_id = acp_model_id_for_key(&runtime.key);
+        Self {
+            acp_model_id,
+            metadata,
+            runtime,
+            credential,
+            account_id,
+        }
+    }
+
+    fn key(&self) -> &ModelKey {
+        &self.runtime.key
+    }
+}
+
+const ACP_MODEL_KEY_PREFIX: &str = "krusty:model-key:";
+
+/// ACP model identifiers are opaque. Encode the complete executable key so
+/// rows that share a provider and wire slug cannot collide in the picker.
+fn acp_model_id_for_key(key: &ModelKey) -> String {
+    let encoded = URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(key).expect("serializing a ModelKey cannot fail"));
+    format!("{ACP_MODEL_KEY_PREFIX}{encoded}")
+}
+
+fn decode_acp_model_id(model_id: &str) -> Option<ModelKey> {
+    let encoded = model_id.strip_prefix(ACP_MODEL_KEY_PREFIX)?;
+    let bytes = URL_SAFE_NO_PAD.decode(encoded).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn persist_current_model_preference(
+    preferences: &Preferences,
+    key: &ModelKey,
+) -> anyhow::Result<()> {
+    preferences.set_current_model_key(key)
+}
+
+fn persist_shared_current_model(key: &ModelKey) {
+    if key.model_id.trim().is_empty() {
         return;
     }
 
     let db_path = crate::paths::config_dir().join("krusty.db");
     match Database::new(&db_path) {
         Ok(db) => {
-            if let Err(error) = Preferences::new(db).set_current_model(model_id) {
+            if let Err(error) = persist_current_model_preference(&Preferences::new(db), key) {
                 tracing::warn!(
-                    "Failed to persist ACP current model preference '{}': {}",
-                    model_id,
+                    "Failed to persist exact ACP current model preference '{}': {}",
+                    key.model_id,
                     error
                 );
             }
@@ -74,10 +112,10 @@ fn persist_shared_current_model(provider: ProviderId, model_id: &str) {
         }
     }
 
-    if let Err(error) = ActiveProviderStore::save(provider) {
+    if let Err(error) = ActiveProviderStore::save(key.provider) {
         tracing::warn!(
             "Failed to persist ACP active provider {:?}: {}",
-            provider,
+            key.provider,
             error
         );
     }
@@ -183,12 +221,21 @@ impl KrustyAgent {
         let selected_model = model
             .map(|model| model.trim().to_string())
             .filter(|model| !model.is_empty());
-        self.processor
-            .write()
-            .await
-            .init_ai_client(api_key, provider, selected_model.clone());
-        *self.current_model.write().await =
-            selected_model.map(|model_id| ModelConfig { provider, model_id });
+        let resolved_key = {
+            let mut processor = self.processor.write().await;
+            processor.init_ai_client(api_key, provider, selected_model);
+            processor
+                .default_ai_client()
+                .map(|client| client.resolved_model().key.clone())
+        };
+        *self.current_model.write().await = resolved_key.map(|key| ModelConfig { key });
+    }
+
+    /// Retain an exact persisted default before catalog discovery. No client is
+    /// constructed from the key alone because doing so would have to infer the
+    /// capability row that originally supplied it.
+    pub async fn set_current_model_key(&self, key: ModelKey) {
+        *self.current_model.write().await = Some(ModelConfig { key });
     }
 
     fn agent_capabilities(&self) -> AgentCapabilities {

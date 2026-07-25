@@ -11,6 +11,7 @@ impl App {
             channels,
             process_registry,
             current_model,
+            current_model_key,
             theme,
             theme_name,
             active_provider,
@@ -19,6 +20,7 @@ impl App {
         let ui = AppUi::new(theme, theme_name, working_dir.clone());
         let runtime = AppRuntime::new(
             current_model,
+            current_model_key,
             active_provider,
             working_dir,
             process_registry,
@@ -35,6 +37,9 @@ impl App {
             runtime,
             services,
         };
+        if let Some(metadata) = app.selected_model_metadata() {
+            app.reconcile_model_controls(&metadata);
+        }
 
         // Prime installable plugin catalog before first render.
         app.refresh_plugin_catalog(false);

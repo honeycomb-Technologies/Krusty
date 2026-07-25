@@ -266,7 +266,8 @@ impl SharedBuildContext {
         let mut lines = Vec::new();
 
         // Conventions
-        let conventions = self.get_conventions();
+        let mut conventions = self.get_conventions();
+        conventions.sort();
         if !conventions.is_empty() {
             lines.push("[CONVENTIONS]".to_string());
             for conv in conventions {
@@ -276,11 +277,12 @@ impl SharedBuildContext {
         }
 
         // Current locks (so builders know what's being worked on)
-        let locks: Vec<_> = self
+        let mut locks: Vec<_> = self
             .file_locks
             .iter()
             .map(|r| (r.key().display().to_string(), r.value().clone()))
             .collect();
+        locks.sort();
         if !locks.is_empty() {
             lines.push("[FILES IN PROGRESS]".to_string());
             for (path, agent) in locks {
@@ -290,10 +292,15 @@ impl SharedBuildContext {
         }
 
         // Registered interfaces from other builders
-        let interfaces = self.get_interfaces();
+        let mut interfaces = self.get_interfaces();
+        interfaces.sort_by(|left, right| {
+            left.builder_id
+                .cmp(&right.builder_id)
+                .then_with(|| left.file_path.cmp(&right.file_path))
+        });
         if !interfaces.is_empty() {
             lines.push("[AVAILABLE INTERFACES]".to_string());
-            for iface in interfaces {
+            for mut iface in interfaces {
                 lines.push(format!(
                     "- {} ({}): {}",
                     iface.builder_id,
@@ -301,6 +308,7 @@ impl SharedBuildContext {
                     iface.description
                 ));
                 if !iface.exports.is_empty() {
+                    iface.exports.sort();
                     lines.push(format!("  Exports: {}", iface.exports.join(", ")));
                 }
             }
@@ -648,6 +656,50 @@ mod tests {
         assert!(injection.contains("[AVAILABLE INTERFACES]"));
     }
 
+    #[test]
+    fn context_injection_is_deterministic_across_insertion_order() {
+        fn populate(context: &SharedBuildContext, reverse: bool) {
+            let conventions = if reverse {
+                vec!["Zulu".to_string(), "Alpha".to_string()]
+            } else {
+                vec!["Alpha".to_string(), "Zulu".to_string()]
+            };
+            context.set_conventions(conventions);
+
+            let interfaces = vec![
+                BuilderInterface {
+                    builder_id: "builder-b".to_string(),
+                    file_path: PathBuf::from("/workspace/b.rs"),
+                    exports: vec!["Zulu".to_string(), "Alpha".to_string()],
+                    description: "B".to_string(),
+                },
+                BuilderInterface {
+                    builder_id: "builder-a".to_string(),
+                    file_path: PathBuf::from("/workspace/a.rs"),
+                    exports: vec!["Beta".to_string()],
+                    description: "A".to_string(),
+                },
+            ];
+            let iterator: Box<dyn Iterator<Item = BuilderInterface>> = if reverse {
+                Box::new(interfaces.into_iter().rev())
+            } else {
+                Box::new(interfaces.into_iter())
+            };
+            for interface in iterator {
+                context.register_interface(interface);
+            }
+        }
+
+        let first = SharedBuildContext::new();
+        let second = SharedBuildContext::new();
+        populate(&first, false);
+        populate(&second, true);
+
+        assert_eq!(
+            first.generate_context_injection(),
+            second.generate_context_injection()
+        );
+    }
     #[test]
     fn test_concurrent_lock_access() {
         use std::sync::Arc;

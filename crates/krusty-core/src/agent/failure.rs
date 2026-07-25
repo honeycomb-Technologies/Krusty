@@ -8,7 +8,10 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
-use crate::tools::registry::{effective_tool_call, tool_policy_for_call, ToolCategory};
+use crate::tools::registry::{
+    agent_call_execution_profile, agent_call_starts_run, effective_tool_call, tool_policy_for_call,
+    ToolCategory,
+};
 
 /// Default threshold: stop after this many identical failures.
 pub const REPEATED_FAILURE_THRESHOLD: usize = 2;
@@ -201,8 +204,8 @@ pub fn detect_repeated_validation_sequence(
 
     if *count >= REPEATED_VALIDATION_SEQUENCE_THRESHOLD {
         return Some(format!(
-            "Stopping validation loop: the same successful validation pattern repeated {} times without new changes. The work is already validated; summarize the result instead of running it again.",
-            *count
+            "Validation completed successfully. Krusty stopped the same successful validation pattern after {} consecutive runs without new changes; no further validation was necessary.",
+            *count,
         ));
     }
 
@@ -212,7 +215,7 @@ pub fn detect_repeated_validation_sequence(
 pub(crate) fn is_validation_call(call: &AiToolCall) -> bool {
     let (name, arguments) = effective_tool_call(&call.name, &call.arguments);
     if name == "agent" {
-        return arguments.get("agent_type").and_then(|value| value.as_str()) == Some("verify");
+        return agent_call_execution_profile(arguments) == "verify";
     }
     if !matches!(name, "bash" | "shell" | "execute") {
         return false;
@@ -276,7 +279,8 @@ pub fn detect_terminal_explore_failure(
         .iter()
         .filter(|call| {
             call.name == "agent"
-                && (call.arguments.get("agent_type").and_then(|v| v.as_str()) == Some("explore"))
+                && agent_call_starts_run(&call.arguments)
+                && agent_call_execution_profile(&call.arguments) == "explore"
         })
         .map(|call| call.id.as_str())
         .collect::<Vec<_>>();
@@ -289,13 +293,19 @@ pub fn detect_terminal_explore_failure(
         let Content::ToolResult {
             tool_use_id,
             output,
-            ..
+            is_error,
         } = result
         else {
             continue;
         };
 
         if !explore_ids.contains(&tool_use_id.as_str()) {
+            continue;
+        }
+        // Tool-validation and execution errors have their own retry and
+        // repeated-failure policy. Only a successfully returned delegated-run
+        // result can prove that exploration completed without usable evidence.
+        if is_error.unwrap_or(false) {
             continue;
         }
 
@@ -309,6 +319,13 @@ pub fn detect_terminal_explore_failure(
             .and_then(|value| value.as_str())
             .unwrap_or("explore returned degraded results");
         let result_payload = parsed.get("result").unwrap_or(&parsed);
+        let status = result_payload
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if status == "background_started" {
+            continue;
+        }
         let outcome = result_payload
             .get("outcome")
             .and_then(|value| value.as_str())
@@ -811,7 +828,8 @@ mod tests {
         )
         .expect("third equivalent validation turn should stop");
 
-        assert!(diagnostic.contains("already validated"));
+        assert!(diagnostic.starts_with("Validation completed successfully."));
+        assert!(diagnostic.contains("3 consecutive runs"));
     }
 
     #[test]
@@ -937,6 +955,33 @@ mod tests {
     }
 
     #[test]
+    fn terminal_explore_failure_allows_background_start_to_continue() {
+        let tool_calls = vec![AiToolCall {
+            id: "tool-1".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({
+                "profile": "audit-specialist",
+                "capabilities": ["read"],
+                "prompt": "audit"
+            }),
+        }];
+        let tool_results = vec![Content::ToolResult {
+            tool_use_id: "tool-1".to_string(),
+            output: json!({
+                "summary": "explore agent background_started",
+                "result": {
+                    "status": "background_started",
+                    "delegated_run_id": "run-1"
+                }
+            }),
+            is_error: None,
+        }];
+
+        let diagnostic = detect_terminal_explore_failure(&tool_calls, &tool_results);
+        assert!(diagnostic.is_none());
+    }
+
+    #[test]
     fn terminal_explore_failure_does_not_stop_successful_usable_run() {
         let tool_calls = vec![AiToolCall {
             id: "tool-1".to_string(),
@@ -956,6 +1001,57 @@ mod tests {
                 }
             }),
             is_error: None,
+        }];
+
+        let diagnostic = detect_terminal_explore_failure(&tool_calls, &tool_results);
+        assert!(diagnostic.is_none());
+    }
+
+    #[test]
+    fn terminal_explore_failure_ignores_status_control_result() {
+        let tool_calls = vec![AiToolCall {
+            id: "tool-1".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({
+                "action": "status",
+                "profile": "explore",
+                "delegated_run_id": "run-1"
+            }),
+        }];
+        let tool_results = vec![Content::ToolResult {
+            tool_use_id: "tool-1".to_string(),
+            output: json!({
+                "summary": "delegated agent completed",
+                "result": {
+                    "status": "completed",
+                    "delegated_run_id": "run-1"
+                }
+            }),
+            is_error: None,
+        }];
+
+        let diagnostic = detect_terminal_explore_failure(&tool_calls, &tool_results);
+        assert!(diagnostic.is_none());
+    }
+
+    #[test]
+    fn terminal_explore_failure_ignores_tool_validation_error() {
+        let tool_calls = vec![AiToolCall {
+            id: "tool-1".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({
+                "action": "spawn",
+                "profile": "explore",
+                "capabilities": ["read", "write"]
+            }),
+        }];
+        let tool_results = vec![Content::ToolResult {
+            tool_use_id: "tool-1".to_string(),
+            output: json!({
+                "error_code": "invalid_agent_spec",
+                "summary": "Profile 'explore' is read-only and cannot request write or execute"
+            }),
+            is_error: Some(true),
         }];
 
         let diagnostic = detect_terminal_explore_failure(&tool_calls, &tool_results);

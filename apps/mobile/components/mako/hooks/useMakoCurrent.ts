@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { useConnection } from "../../../hooks/useConnection";
-import type { MakoCurrentResponse, MakoRunPriority } from "@krusty/api";
+import type {
+  MakoCurrentResponse,
+  MakoRunPriority,
+  ModelKey,
+} from "@krusty/api";
 
 export function useMakoCurrent(enabled: boolean) {
   const { client, isConnected } = useConnection();
@@ -41,6 +45,7 @@ export function useMakoCurrent(enabled: boolean) {
         options?: {
           projectDir?: string | null;
           model?: string | null;
+          modelKey?: ModelKey | null;
           startAt?: string | null;
           priority?: MakoRunPriority | null;
           crewSlug?: string | null;
@@ -56,6 +61,7 @@ export function useMakoCurrent(enabled: boolean) {
         const response = await client.dispatchMako(task, {
           projectDir: options?.projectDir ?? undefined,
           model: options?.model ?? undefined,
+          modelKey: options?.modelKey ?? undefined,
           startAt: options?.startAt ?? undefined,
           priority: options?.priority ?? undefined,
           crewSlug: options?.crewSlug ?? undefined,

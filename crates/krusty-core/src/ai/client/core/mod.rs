@@ -7,5 +7,5 @@ mod client;
 mod system_prompt;
 mod transport;
 
-pub use client::AiClient;
+pub use client::{AiClient, PreparedRequestDiagnostics};
 pub use system_prompt::KRUSTY_SYSTEM_PROMPT;

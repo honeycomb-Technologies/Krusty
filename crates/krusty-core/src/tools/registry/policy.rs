@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -13,7 +13,7 @@ pub(crate) const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
 pub(crate) const DELEGATED_TOOL_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// Maximum number of function tools in the default coding-agent request.
-pub const DEFAULT_CODE_TOOL_LIMIT: usize = 9;
+pub const DEFAULT_CODE_TOOL_LIMIT: usize = 10;
 
 const STANDARD_CODE_TOOLS: &[&str] = &[
     "AskUserQuestion",
@@ -33,6 +33,7 @@ const STANDARD_EDIT_WRITE_TOOLS: &[&str] = &[
     "bash",
     "edit",
     "enter_plan_mode",
+    "glob",
     "grep",
     "read",
     "tool_search",
@@ -42,7 +43,6 @@ const STANDARD_EDIT_WRITE_TOOLS: &[&str] = &[
 const PLAN_MODE_TOOLS: &[&str] = &[
     "AskUserQuestion",
     "agent",
-    "bash",
     "glob",
     "grep",
     "read",
@@ -365,6 +365,11 @@ pub struct DelegationPolicy {
     pub max_turns: Option<usize>,
     pub read_only_only: bool,
     pub bash_allowed: bool,
+    /// Immutable tool-capability ceiling inherited from an explicit parent
+    /// execution scope. `None` preserves the ordinary governed delegation
+    /// surface; `Some(empty)` deliberately creates a tool-free child.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_tool_allowlist: Option<BTreeSet<String>>,
 }
 
 impl DelegationPolicy {
@@ -378,6 +383,7 @@ impl DelegationPolicy {
             max_turns,
             read_only_only: true,
             bash_allowed: false,
+            execution_tool_allowlist: None,
         }
     }
 
@@ -391,6 +397,7 @@ impl DelegationPolicy {
             max_turns,
             read_only_only: false,
             bash_allowed: false,
+            execution_tool_allowlist: None,
         }
     }
 
@@ -404,6 +411,7 @@ impl DelegationPolicy {
             max_turns,
             read_only_only: true,
             bash_allowed: false,
+            execution_tool_allowlist: None,
         }
     }
 
@@ -417,10 +425,26 @@ impl DelegationPolicy {
             max_turns,
             read_only_only: true,
             bash_allowed: true,
+            execution_tool_allowlist: None,
         }
     }
 
+    /// Intersect delegated execution with the parent's exact per-turn tool
+    /// scope. The parent scope is already the narrowest run-level capability,
+    /// so a child may retain only names present in it; it must never reconstruct
+    /// the default build/explore surface.
+    pub fn with_execution_tool_allowlist(
+        mut self,
+        execution_tool_allowlist: Option<&HashSet<String>>,
+    ) -> Self {
+        self.execution_tool_allowlist = execution_tool_allowlist
+            .map(|allowlist| allowlist.iter().cloned().collect::<BTreeSet<String>>());
+        self
+    }
+
     pub fn authorize_tool(&self, tool_name: &str, plan_mode: bool) -> Result<(), String> {
+        self.authorize_non_recursive_tool(tool_name)?;
+        self.authorize_execution_scope(tool_name, tool_name)?;
         self.authorize_tool_policy(tool_name, tool_policy(tool_name), plan_mode)
     }
 
@@ -431,11 +455,55 @@ impl DelegationPolicy {
         plan_mode: bool,
     ) -> Result<(), String> {
         let (effective_name, effective_params) = effective_tool_call(tool_name, params);
+        self.authorize_non_recursive_tool(tool_name)?;
+        self.authorize_non_recursive_tool(effective_name)?;
+        self.authorize_execution_scope(tool_name, effective_name)?;
         self.authorize_tool_policy(
             effective_name,
             tool_policy_for_call(effective_name, effective_params),
             plan_mode,
         )
+    }
+
+    fn authorize_execution_scope(
+        &self,
+        wrapper_name: &str,
+        effective_name: &str,
+    ) -> Result<(), String> {
+        let Some(allowlist) = self.execution_tool_allowlist.as_ref() else {
+            return Ok(());
+        };
+
+        if allowlist.contains(wrapper_name) && allowlist.contains(effective_name) {
+            return Ok(());
+        }
+
+        Err(format!(
+            "Delegated policy blocked tool '{}': it exceeds the parent run's explicit tool capability",
+            effective_name
+        ))
+    }
+
+    fn authorize_non_recursive_tool(&self, tool_name: &str) -> Result<(), String> {
+        let is_subagent = matches!(
+            self.surface,
+            DelegationSurface::SubagentExplore
+                | DelegationSurface::SubagentBuild
+                | DelegationSurface::SubagentPlan
+                | DelegationSurface::SubagentVerify
+        );
+        if is_subagent
+            && matches!(
+                tool_name,
+                "agent" | "skill" | "enter_plan_mode" | "set_work_mode" | "set_workspace_context"
+            )
+        {
+            return Err(format!(
+                "Delegated policy blocked tool '{}': delegated agents cannot recursively delegate or change parent runtime mode",
+                tool_name
+            ));
+        }
+        Ok(())
     }
 
     fn authorize_tool_policy(
@@ -490,6 +558,7 @@ impl DelegationPolicy {
             "max_turns": self.max_turns,
             "read_only_only": self.read_only_only,
             "bash_allowed": self.bash_allowed,
+            "execution_tool_allowlist": self.execution_tool_allowlist,
         })
     }
 }
@@ -564,13 +633,62 @@ fn tool_search_policy(params: &Value) -> ToolPolicy {
 }
 
 fn agent_tool_policy(params: &Value) -> ToolPolicy {
-    match params.get("agent_type").and_then(Value::as_str) {
-        Some("explore" | "plan" | "verify") => {
-            ToolPolicy::read_only_with_timeout(DELEGATED_TOOL_TIMEOUT)
+    match agent_call_action(params) {
+        "message" | "followup" | "interrupt" => ToolPolicy::interactive(),
+        "list" | "status" | "wait" => ToolPolicy::read_only_with_timeout(DELEGATED_TOOL_TIMEOUT),
+        "resume" => ToolPolicy::write_with_timeout(DELEGATED_TOOL_TIMEOUT),
+        _ if agent_call_requests_write(params) => {
+            ToolPolicy::write_with_timeout(DELEGATED_TOOL_TIMEOUT)
         }
-        Some("build") => ToolPolicy::write_with_timeout(DELEGATED_TOOL_TIMEOUT),
-        _ => ToolPolicy::write_with_timeout(DELEGATED_TOOL_TIMEOUT),
+        _ => ToolPolicy::read_only_with_timeout(DELEGATED_TOOL_TIMEOUT),
     }
+}
+
+pub fn agent_call_action(params: &Value) -> &str {
+    params
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("spawn")
+}
+
+pub fn agent_call_starts_run(params: &Value) -> bool {
+    matches!(agent_call_action(params), "spawn" | "resume")
+}
+
+pub fn agent_call_requests_write(params: &Value) -> bool {
+    agent_call_action(params) == "resume"
+        || ["profile", "agent_type"]
+            .iter()
+            .any(|field| params.get(field).and_then(Value::as_str) == Some("build"))
+        || agent_call_has_capability(params, "write")
+}
+
+pub fn agent_call_execution_profile(params: &Value) -> &'static str {
+    let profile = params
+        .get("profile")
+        .and_then(Value::as_str)
+        .or_else(|| params.get("agent_type").and_then(Value::as_str));
+    match profile {
+        Some("plan") => "plan",
+        Some("verify") => "verify",
+        Some("build") => "build",
+        Some("explore") => "explore",
+        _ if agent_call_requests_write(params) => "build",
+        _ if agent_call_has_capability(params, "execute") => "verify",
+        _ => "explore",
+    }
+}
+
+fn agent_call_has_capability(params: &Value, expected: &str) -> bool {
+    params
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|capability| capability == expected)
+        })
 }
 
 /// Resolve the canonical policy for a tool name.

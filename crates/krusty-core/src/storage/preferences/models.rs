@@ -1,7 +1,8 @@
 use anyhow::Result;
 
 use crate::ai::models::{
-    dynamic_model_cache_ttl, model_catalog_fingerprint, DynamicModelCacheMetadata, ModelMetadata,
+    dynamic_model_cache_ttl, model_catalog_fingerprint, DynamicModelCacheMetadata, ModelKey,
+    ModelMetadata,
 };
 use crate::ai::providers::ProviderId;
 use crate::storage::unix_timestamp;
@@ -20,6 +21,33 @@ impl Preferences {
         self.set("recent_models", &json)
     }
 
+    /// Exact provider-aware recents. The legacy string list remains populated
+    /// for older clients during the additive migration window.
+    pub fn get_recent_model_keys(&self) -> Vec<ModelKey> {
+        self.get("recent_model_keys")
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn set_recent_model_keys(&self, keys: &[ModelKey]) -> Result<()> {
+        let keys = keys.iter().take(10).cloned().collect::<Vec<_>>();
+        self.set("recent_model_keys", &serde_json::to_string(&keys)?)?;
+        self.set_recent_models(
+            &keys
+                .iter()
+                .map(|key| key.model_id.clone())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    pub fn add_recent_model_key(&self, key: &ModelKey) -> Result<()> {
+        let mut recent = self.get_recent_model_keys();
+        recent.retain(|candidate| candidate != key);
+        recent.insert(0, key.clone());
+        recent.truncate(10);
+        self.set_recent_model_keys(&recent)
+    }
+
     pub fn add_recent_model(&self, model_id: &str) -> Result<()> {
         let mut recent = self.get_recent_models();
         recent.retain(|id| id != model_id);
@@ -33,7 +61,26 @@ impl Preferences {
     }
 
     pub fn set_current_model(&self, model_id: &str) -> Result<()> {
+        // A legacy write cannot prove provider/auth/transport identity. Clear
+        // any exact selection so a stale key is never paired with a new slug.
+        self.delete("current_model_key")?;
         self.set("current_model", model_id)
+    }
+
+    pub fn get_current_model_key(&self) -> Option<ModelKey> {
+        self.get("current_model_key")
+            .and_then(|value| serde_json::from_str(&value).ok())
+    }
+
+    /// Persist exact identity while dual-writing the model slug for old clients.
+    pub fn set_current_model_key(&self, key: &ModelKey) -> Result<()> {
+        self.set("current_model_key", &serde_json::to_string(key)?)?;
+        self.set("current_model", &key.model_id)
+    }
+
+    pub fn clear_current_model(&self) -> Result<()> {
+        self.delete("current_model_key")?;
+        self.delete("current_model")
     }
 
     pub fn get_cached_openrouter_models(&self) -> Option<Vec<ModelMetadata>> {
@@ -104,7 +151,8 @@ impl Preferences {
 
     pub fn save_custom_model(&self, model: &ModelMetadata) -> Result<()> {
         let mut models = self.get_custom_models(model.provider);
-        models.retain(|existing| existing.id != model.id);
+        let key = model.key();
+        models.retain(|existing| existing.key() != key);
         models.insert(0, model.clone());
         models.truncate(32);
         self.set_custom_models(model.provider, &models)

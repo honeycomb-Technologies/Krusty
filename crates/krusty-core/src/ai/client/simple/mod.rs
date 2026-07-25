@@ -51,6 +51,7 @@ impl AiClient {
         user_message: &str,
         max_tokens: usize,
     ) -> Result<SimpleCallResult> {
+        self.ensure_run_model(model)?;
         let options = self.canonical_call_options(
             model,
             &CallOptions {
@@ -130,6 +131,7 @@ impl AiClient {
         appended_user_message: &str,
         max_tokens: usize,
     ) -> Result<SimpleCallResult> {
+        self.ensure_run_model(model)?;
         let options = self.canonical_call_options(
             model,
             &CallOptions {

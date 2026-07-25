@@ -131,6 +131,11 @@ Prefer edit/multiedit for targeted 1-2 file changes."#,
                     "errors": errors,
                 })),
                 None,
+            )
+            .with_changed(
+                !files_modified.is_empty()
+                    || !files_created.is_empty()
+                    || !files_deleted.is_empty(),
             );
         }
 
@@ -146,6 +151,12 @@ Prefer edit/multiedit for targeted 1-2 file changes."#,
             .chain(files_created.iter())
             .filter_map(|path| ctx.sandboxed_resolve(path).ok())
             .collect::<Vec<_>>();
+        let progress_paths = files_modified
+            .iter()
+            .chain(files_created.iter())
+            .chain(files_deleted.iter())
+            .filter_map(|path| ctx.sandboxed_resolve_new_path(path).ok())
+            .collect::<Vec<_>>();
         let warnings = collect_mutation_warnings(&diagnostic_paths, &ctx.working_dir).await;
 
         ToolResult::success_data_with(
@@ -158,6 +169,11 @@ Prefer edit/multiedit for targeted 1-2 file changes."#,
             warnings,
             None,
             None,
+        )
+        .with_changed(true)
+        .with_progress_change_paths(
+            &progress_paths,
+            ctx.sandbox_root.as_deref().unwrap_or(&ctx.working_dir),
         )
     }
 }

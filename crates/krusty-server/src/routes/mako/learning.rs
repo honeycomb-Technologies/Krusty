@@ -147,6 +147,6 @@ mod tests {
         assert_eq!(label, "pending");
         assert!(matches!(parse_status(Some("all")), Ok((None, _))));
         assert!(parse_status(Some("unknown")).is_err());
-        assert!(DEFAULT_LIST_LIMIT <= MAX_LIST_LIMIT);
+        const { assert!(DEFAULT_LIST_LIMIT <= MAX_LIST_LIMIT) };
     }
 }

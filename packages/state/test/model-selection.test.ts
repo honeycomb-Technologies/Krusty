@@ -1,6 +1,8 @@
-import type { ModelInfo } from '@krusty/api';
+import type { ModelInfo, ModelKey } from '@krusty/api';
 import {
+  findModelByKey,
   isModelUsable,
+  modelKeysEqual,
   resolveUsableModel,
 } from '../src/session/modelSelection.ts';
 
@@ -14,8 +16,9 @@ function assertEquals(actual: unknown, expected: unknown, message: string) {
   }
 }
 
-function model(id: string, provider: string): ModelInfo {
+function model(id: string, provider: string, key?: ModelKey): ModelInfo {
   return {
+    key,
     id,
     provider,
     display_name: id,
@@ -26,6 +29,19 @@ function model(id: string, provider: string): ModelInfo {
     supports_vision: false,
   };
 }
+
+const openAiSharedKey: ModelKey = {
+  provider: 'openai',
+  model_id: 'shared-model',
+  auth_scope: 'api_key',
+  api_format: 'open_ai_responses',
+};
+const grokSharedKey: ModelKey = {
+  provider: 'grok',
+  model_id: 'shared-model',
+  auth_scope: 'oauth',
+  api_format: 'open_ai_responses',
+};
 
 const catalog = [
   model('grok', 'xAI'),
@@ -66,5 +82,42 @@ Deno.test('model resolution keeps current selection then falls through safely', 
     resolveUsableModel('missing', null, catalog, ['google']),
     null,
     'never return a model whose provider cannot send',
+  );
+});
+
+Deno.test('model resolution preserves exact provider identity for duplicate slugs', () => {
+  const sharedCatalog = [
+    model('shared-model', 'OpenAI', openAiSharedKey),
+    model('shared-model', 'Grok', grokSharedKey),
+  ];
+
+  assertEquals(
+    modelKeysEqual(findModelByKey(sharedCatalog, grokSharedKey)?.key, grokSharedKey),
+    true,
+    'exact lookup should retain provider, auth, and transport identity',
+  );
+  assertEquals(
+    resolveUsableModel(
+      'shared-model',
+      'shared-model',
+      sharedCatalog,
+      ['openai', 'grok'],
+      grokSharedKey,
+      openAiSharedKey,
+    )?.key?.provider,
+    'grok',
+    'the current exact key must win over an identical default slug',
+  );
+  assertEquals(
+    resolveUsableModel(
+      'missing',
+      'shared-model',
+      sharedCatalog,
+      ['openai', 'grok'],
+      null,
+      openAiSharedKey,
+    )?.key?.provider,
+    'openai',
+    'the exact server default must select its provider row',
   );
 });

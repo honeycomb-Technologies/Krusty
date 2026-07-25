@@ -1,0 +1,141 @@
+{
+  "scenarios": [
+    {
+      "name": "build_project_happy_path",
+      "steps": [
+        {
+          "kind": "tool_batch",
+          "calls": [
+            {
+              "id": "build-read-1",
+              "tool": "read",
+              "arguments": {"file_path": "README.md"},
+              "intent": "inspect:project-contract",
+              "effect": {
+                "class": "observe",
+                "evidence": "README.md:project-contract-v1"
+              }
+            }
+          ]
+        },
+        {
+          "kind": "tool_batch",
+          "calls": [
+            {
+              "id": "build-write-1",
+              "tool": "write",
+              "arguments": {"file_path": "src/main.rs"},
+              "intent": "create:src/main.rs",
+              "effect": {
+                "class": "mutate",
+                "resource": "src/main.rs",
+                "changed": true,
+                "side_effect_key": "create:src/main.rs:v1"
+              }
+            }
+          ]
+        },
+        {
+          "kind": "tool_batch",
+          "calls": [
+            {
+              "id": "build-test-1",
+              "tool": "bash",
+              "arguments": {"command": "cargo test --workspace"},
+              "intent": "validate:workspace-tests",
+              "effect": {
+                "class": "validate",
+                "result": "pass"
+              }
+            }
+          ]
+        },
+        {"kind": "complete", "text": "Build complete and tests pass."}
+      ],
+      "expect": {
+        "stop_reason": "completed",
+        "provider_calls": 4,
+        "provider_retries": 0,
+        "tool_calls": 3,
+        "tool_errors": 0,
+        "mutation_attempts": 1,
+        "side_effects": 1,
+        "duplicate_side_effects": 0,
+        "validation_calls": 1,
+        "evidence_deltas": 1,
+        "state_deltas": 1,
+        "validation_deltas": 1,
+        "progress_events": 3,
+        "no_progress_cycles": 0,
+        "max_no_progress_streak": 0
+      }
+    },
+    {
+      "name": "read_only_audit_gathers_new_evidence_without_mutation",
+      "steps": [
+        {
+          "kind": "tool_batch",
+          "calls": [
+            {
+              "id": "audit-read-1",
+              "tool": "grep",
+              "arguments": {"pattern": "unwrap\\("},
+              "intent": "audit:panic-sites",
+              "effect": {
+                "class": "observe",
+                "evidence": "src/api.rs:91:unchecked-unwrap"
+              }
+            }
+          ]
+        },
+        {
+          "kind": "tool_batch",
+          "calls": [
+            {
+              "id": "audit-read-2",
+              "tool": "read",
+              "arguments": {"file_path": "src/auth.rs"},
+              "intent": "audit:auth-boundary",
+              "effect": {
+                "class": "observe",
+                "evidence": "src/auth.rs:44:missing-ownership-check"
+              }
+            }
+          ]
+        },
+        {
+          "kind": "tool_batch",
+          "calls": [
+            {
+              "id": "audit-delegate-1",
+              "tool": "agent",
+              "arguments": {"agent_type": "explore"},
+              "intent": "delegate:audit-storage",
+              "effect": {
+                "class": "delegate",
+                "evidence": "src/store.rs:217:non-transactional-write"
+              }
+            }
+          ]
+        },
+        {"kind": "complete", "text": "Audit complete with three cited findings."}
+      ],
+      "expect": {
+        "stop_reason": "completed",
+        "provider_calls": 4,
+        "tool_calls": 3,
+        "tool_errors": 0,
+        "mutation_attempts": 0,
+        "side_effects": 0,
+        "duplicate_side_effects": 0,
+        "validation_calls": 0,
+        "evidence_deltas": 3,
+        "state_deltas": 0,
+        "validation_deltas": 0,
+        "progress_events": 3,
+        "no_progress_cycles": 0,
+        "max_no_progress_streak": 0
+      }
+    }
+  ]
+}

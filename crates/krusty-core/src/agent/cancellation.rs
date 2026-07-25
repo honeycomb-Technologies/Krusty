@@ -23,6 +23,12 @@ impl AgentCancellation {
         }
     }
 
+    pub(crate) fn from_token(token: CancellationToken) -> Self {
+        Self {
+            token: Arc::new(Mutex::new(token)),
+        }
+    }
+
     /// Cancel all tasks using the current token.
     pub fn cancel(&self) {
         self.token

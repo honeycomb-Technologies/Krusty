@@ -1,7 +1,7 @@
 //! Token budgeting and compaction trigger thresholds.
 
 use crate::ai::client::{AiClient, CallOptions};
-use crate::ai::model_profile::ModelProfile;
+use crate::ai::context_policy::ContextBudgetPolicy;
 use crate::ai::models::ApiFormat;
 use crate::ai::providers::{ProviderCapabilities, ProviderId};
 use crate::ai::types::{AiTool, Content, ModelMessage, Role};
@@ -84,8 +84,9 @@ impl CompactionManager {
         model_id: &str,
         context_window: usize,
     ) -> Self {
-        let budgets = ModelProfile::resolve(provider, api_format, model_id)
-            .compaction_budgets(context_window);
+        let _model_id = model_id;
+        let budgets =
+            ContextBudgetPolicy::resolve(provider, api_format).compaction_budgets(context_window);
 
         Self {
             trigger_tokens: budgets.trigger_tokens,

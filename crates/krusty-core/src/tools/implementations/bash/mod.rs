@@ -2,6 +2,7 @@
 
 mod execution;
 mod shell;
+mod state_delta;
 
 #[cfg(test)]
 mod tests;
@@ -39,6 +40,27 @@ const BACKGROUND_STARTUP_GRACE_MS: u64 = 250;
 
 pub struct BashTool;
 
+fn normalize_tailscale_serve_result(command: &str, result: ToolResult) -> ToolResult {
+    if !crate::tailscale::command_contains_serve(command)
+        || !crate::tailscale::is_permission_denied(&result.output)
+    {
+        return result;
+    }
+
+    let original_result =
+        serde_json::from_str::<Value>(&result.output).unwrap_or(Value::String(result.output));
+    ToolResult::error_with_details(
+        "tailscale_operator_required",
+        "Tailscale Serve requires one-time operator authorization for the Krusty service account",
+        Some(json!({
+            "status": "operator_required",
+            "detail": original_result,
+            "next_action": "Ask the machine owner to configure the Krusty service account as a Tailscale operator. Do not retry with sudo, bind the preview to a non-loopback address, or replace an unrelated existing preview. After authorization, retry Tailscale Serve as its own command."
+        })),
+        None,
+    )
+}
+
 async fn background_start_result(
     registry: &ProcessRegistry,
     user_id: Option<&str>,
@@ -72,7 +94,8 @@ async fn background_start_result(
             warnings,
             None,
             None,
-        ),
+        )
+        .with_changed(true),
         ProcessStatus::Suspended => ToolResult::success_data_with(
             json!({
                 "message": "Process started but is suspended",
@@ -83,7 +106,8 @@ async fn background_start_result(
             warnings,
             None,
             None,
-        ),
+        )
+        .with_changed(true),
         ProcessStatus::Completed {
             exit_code,
             duration_ms,
@@ -236,15 +260,14 @@ fn same_background_launch(
     }
 
     let requested_endpoints = background_endpoint_hints(command);
-    if requested_endpoints.is_empty() {
-        return false;
-    }
-    let existing_endpoints = background_endpoint_hints(&process.command);
-    if !requested_endpoints
-        .iter()
-        .any(|endpoint| existing_endpoints.contains(endpoint))
-    {
-        return false;
+    if !requested_endpoints.is_empty() {
+        let existing_endpoints = background_endpoint_hints(&process.command);
+        if !requested_endpoints
+            .iter()
+            .any(|endpoint| existing_endpoints.contains(endpoint))
+        {
+            return false;
+        }
     }
 
     launch_signature(command, working_dir)
@@ -273,6 +296,7 @@ fn existing_background_result(
         None,
         None,
     )
+    .with_changed(false)
 }
 
 fn output_spool_path(ctx: &ToolContext) -> PathBuf {
@@ -291,8 +315,15 @@ fn output_spool_path(ctx: &ToolContext) -> PathBuf {
         })
         .collect::<String>();
 
-    ctx.working_dir
-        .join(".krusty")
+    // Durable command output is runtime state, not project source. Canonical
+    // agent runs always provide a database path, so keep their recoverable
+    // spools beside that database. Standalone/direct tool contexts without a
+    // state database retain the legacy workspace-local fallback.
+    ctx.db_path
+        .as_ref()
+        .and_then(|path| path.parent())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ctx.working_dir.join(".krusty"))
         .join("tool-output")
         .join(session)
         .join(format!("tool_{}.log", uuid::Uuid::new_v4()))
@@ -486,6 +517,19 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
             }
         }
 
+        // Shell commands are intentionally broad, so the agent cannot infer a
+        // durable state change from a zero exit code alone. Capture only
+        // explicit, workspace-scoped mutation targets before execution. The
+        // probe reports only a positive delta. Equality, timeout, or any
+        // unparsed/ambiguous surface remains opaque rather than risking a
+        // false no-change claim.
+        let state_delta_probe = state_delta::BashStateDeltaProbe::capture(
+            &params.command,
+            &ctx.working_dir,
+            ctx.sandbox_root.as_deref(),
+        )
+        .await;
+
         let mut cmd = build_shell_command(&effective_command, ctx);
         configure_foreground_process_group(&mut cmd);
         cmd.kill_on_drop(true);
@@ -505,7 +549,22 @@ If a validation/preflight command fails with actionable file diagnostics (for ex
             _ => return ToolResult::error("Streaming context incomplete for bash tool"),
         };
 
-        execute_foreground(cmd, timeout_duration, stream, output_spool_path(ctx)).await
+        let result =
+            execute_foreground(cmd, timeout_duration, stream, output_spool_path(ctx)).await;
+        let result = normalize_tailscale_serve_result(&effective_command, result);
+        if result.is_error {
+            return result;
+        }
+
+        match state_delta_probe {
+            Some(probe) => match probe.changed().await {
+                Some(change_key) => result
+                    .with_changed(true)
+                    .with_progress_change_key(change_key),
+                None => result,
+            },
+            None => result,
+        }
     }
 }
 

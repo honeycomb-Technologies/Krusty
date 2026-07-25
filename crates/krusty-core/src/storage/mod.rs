@@ -111,16 +111,16 @@ pub(crate) use memories::{
 pub use messages::{MessageStore, StoredMessageRecord};
 pub use plans::{PlanStore, PlanSummary};
 pub use preferences::Preferences;
-pub use project_settings::{ProjectAgentExtensionSettings, ProjectSettings};
+pub use project_settings::{DelegationMode, ProjectAgentExtensionSettings, ProjectSettings};
 pub use push_delivery_attempts::{
     PushDeliveryAttempt, PushDeliveryAttemptInput, PushDeliveryAttemptStore, PushDeliverySummary,
 };
 pub use push_subscriptions::{PushSubscription, PushSubscriptionStore};
 pub use recovery::{
-    PartialAssistantState, PendingInteractionSnapshot, PendingPlanTaskSnapshot,
-    PendingQuestionOptionSnapshot, PendingQuestionSnapshot, RecoveryDecision,
-    RecoveryNonResumableReason, RecoveryStatus, RecoveryToolArguments, RecoveryToolCall,
-    SessionRecoveryState, REDACTED_ARGUMENT_VALUE,
+    ContinuationClaimSnapshot, PartialAssistantState, PendingInteractionSnapshot,
+    PendingPlanTaskSnapshot, PendingQuestionOptionSnapshot, PendingQuestionSnapshot,
+    RecoveryDecision, RecoveryNonResumableReason, RecoveryStatus, RecoveryToolArguments,
+    RecoveryToolCall, SessionRecoveryState, REDACTED_ARGUMENT_VALUE,
 };
 pub use reports::{Report, ReportStore};
 pub use runtime_traces::{

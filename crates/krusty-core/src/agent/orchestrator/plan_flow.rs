@@ -52,6 +52,9 @@ pub(super) fn handle_plan_detection(
             Some(format!("Failed to initialize plan manager: {e}"))
         }
     };
+    if let Some(error) = save_error {
+        return Some(PlanDetectionOutcome::Failed(error));
+    }
 
     let tasks: Vec<PlanTaskInfo> = plan
         .tasks
@@ -67,10 +70,6 @@ pub(super) fn handle_plan_detection(
     });
 
     if permission_mode == PermissionMode::Autonomous {
-        if let Some(error) = save_error {
-            return Some(PlanDetectionOutcome::Failed(error));
-        }
-
         let mode_update = Database::new(db_path)
             .map(SessionManager::new)
             .and_then(|manager| manager.update_session_work_mode(session_id, WorkMode::Build));
@@ -94,17 +93,6 @@ pub(super) fn handle_plan_detection(
 
     let tool_call_id = format!("plan-confirm-{}", uuid::Uuid::new_v4());
     let title = plan.title.clone();
-    let _ = event_tx.send(LoopEvent::PlanComplete {
-        tool_call_id: tool_call_id.clone(),
-        title: title.clone(),
-        task_count: tasks.len(),
-    });
-
-    let _ = event_tx.send(LoopEvent::AwaitingInput {
-        tool_call_id: tool_call_id.clone(),
-        tool_name: "PlanConfirm".to_string(),
-    });
-
     let pending_tasks = tasks
         .into_iter()
         .map(|task| PendingPlanTaskSnapshot {
@@ -186,12 +174,14 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, LoopEvent::PlanUpdate { .. })));
-        assert!(events
+        // The orchestrator emits the interactive events only after its exact
+        // continuation policy has been durably persisted.
+        assert!(!events
             .iter()
             .any(|event| matches!(event, LoopEvent::PlanComplete { .. })));
-        assert!(events
+        assert!(!events
             .iter()
-            .any(|event| matches!(event, LoopEvent::AwaitingInput { tool_name, .. } if tool_name == "PlanConfirm")));
+            .any(|event| matches!(event, LoopEvent::AwaitingInput { .. })));
         assert!(!events
             .iter()
             .any(|event| matches!(event, LoopEvent::ModeChange { .. })));
@@ -237,5 +227,45 @@ mod tests {
         assert!(!events
             .iter()
             .any(|event| matches!(event, LoopEvent::AwaitingInput { .. })));
+    }
+
+    #[test]
+    fn supervised_plan_fails_closed_before_events_when_persistence_fails() {
+        let temp = tempdir().expect("tempdir");
+        let invalid_db_path = temp.path().join("missing-parent").join("krusty.db");
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        let outcome = handle_plan_detection(
+            PLAN,
+            "session-with-unwritable-plan-store",
+            temp.path(),
+            &invalid_db_path,
+            PermissionMode::Supervised,
+            &event_tx,
+        )
+        .expect("plan detected");
+
+        assert!(matches!(outcome, PlanDetectionOutcome::Failed(_)));
+        assert!(collect_events(&mut event_rx).is_empty());
+    }
+
+    #[test]
+    fn autonomous_plan_fails_closed_before_events_when_persistence_fails() {
+        let temp = tempdir().expect("tempdir");
+        let invalid_db_path = temp.path().join("missing-parent").join("krusty.db");
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+
+        let outcome = handle_plan_detection(
+            PLAN,
+            "autonomous-session-with-unwritable-plan-store",
+            temp.path(),
+            &invalid_db_path,
+            PermissionMode::Autonomous,
+            &event_tx,
+        )
+        .expect("plan detected");
+
+        assert!(matches!(outcome, PlanDetectionOutcome::Failed(_)));
+        assert!(collect_events(&mut event_rx).is_empty());
     }
 }

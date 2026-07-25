@@ -3,46 +3,47 @@ use chrono::{DateTime, Utc};
 use rusqlite::params;
 use rusqlite::types::ValueRef;
 
+use crate::ai::models::ModelKey;
 use crate::tools::registry::PermissionMode;
 
 use super::{SessionInfo, SessionManager, SessionType, WorkspaceMode};
 
 const LIST_SESSIONS_SQL_ALL: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
              FROM sessions
              ORDER BY updated_at DESC";
 const LIST_SESSIONS_SQL_BY_DIR: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
              FROM sessions
              WHERE working_dir = ?1
              ORDER BY updated_at DESC";
 const LIST_SESSIONS_SQL_BY_USER: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
              FROM sessions
              WHERE user_id = ?1
              ORDER BY updated_at DESC";
 const LIST_SESSIONS_SQL_BY_DIR_AND_USER: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
              FROM sessions
              WHERE working_dir = ?1 AND user_id = ?2
              ORDER BY updated_at DESC";
 const LIST_SESSIONS_SQL_BY_TYPE: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
              FROM sessions
              WHERE session_type = ?1
              ORDER BY updated_at DESC";
 const LIST_SESSIONS_SQL_BY_DIR_AND_TYPE: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
              FROM sessions
              WHERE working_dir = ?1 AND session_type = ?2
              ORDER BY updated_at DESC";
 const LIST_SESSIONS_SQL_BY_USER_AND_TYPE: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
              FROM sessions
              WHERE user_id = ?1 AND session_type = ?2
              ORDER BY updated_at DESC";
 const LIST_SESSIONS_SQL_BY_DIR_USER_AND_TYPE: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
              FROM sessions
              WHERE working_dir = ?1 AND user_id = ?2 AND session_type = ?3
              ORDER BY updated_at DESC";
@@ -53,12 +54,12 @@ const LIST_SESSION_DIRS_SQL_BY_USER: &str = "SELECT DISTINCT working_dir FROM se
                  WHERE working_dir IS NOT NULL AND user_id = ?1
                  ORDER BY working_dir";
 const LIST_SESSIONS_BY_DIRECTORY_SQL: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
              FROM sessions
              WHERE working_dir IS NOT NULL
              ORDER BY working_dir, updated_at DESC";
 const GET_SESSION_SQL: &str =
-    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode
+    "SELECT id, title, updated_at, token_count, parent_session_id, working_dir, user_id, work_mode, model, target_branch, project_dir, workspace_mode, session_type, permission_mode, model_key_json, model_catalog_revision
              FROM sessions
              WHERE id = ?1";
 
@@ -141,6 +142,10 @@ impl SessionManager {
         let workspace_mode_raw: String = row.get(11)?;
         let session_type_raw: String = row.get(12)?;
         let permission_mode_raw: String = row.get(13).unwrap_or_else(|_| "autonomous".to_string());
+        let model_key = row
+            .get::<_, Option<String>>(14)?
+            .and_then(|value| serde_json::from_str::<ModelKey>(&value).ok());
+        let model_catalog_revision: Option<String> = row.get(15)?;
         let working_dir: Option<String> = row.get(5)?;
         let workspace_mode = workspace_mode_raw.parse().unwrap_or_else(|_| {
             if project_dir.is_some() || working_dir.is_some() {
@@ -164,6 +169,8 @@ impl SessionManager {
             user_id: row.get(6)?,
             work_mode: work_mode_raw.parse().unwrap_or_default(),
             model,
+            model_key,
+            model_catalog_revision,
             target_branch,
             permission_mode: match permission_mode_raw.as_str() {
                 "supervised" => PermissionMode::Supervised,
@@ -192,9 +199,9 @@ impl SessionManager {
     ) -> rusqlite::Result<(SessionInfo, super::super::agent_state::AgentState)> {
         let session = Self::map_session_row(row)?;
         let agent_state = super::super::agent_state::AgentState {
-            state: row.get(14)?,
-            started_at: row.get(15)?,
-            last_event_at: row.get(16)?,
+            state: row.get(16)?,
+            started_at: row.get(17)?,
+            last_event_at: row.get(18)?,
         };
         Ok((session, agent_state))
     }

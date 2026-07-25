@@ -3,6 +3,8 @@ use tempfile::TempDir;
 
 use super::{ReplayExpectations, RuntimeTraceEvent, RuntimeTraceStore, TraceFailureCategory};
 use crate::agent::loop_events::{LoopEvent, LoopStopReason};
+use crate::ai::client::{AiClient, AiClientConfig, CallOptions};
+use crate::ai::types::{AiTool, Content, ModelMessage, Role};
 use crate::storage::database::Database;
 
 fn create_test_db() -> (Database, TempDir, String) {
@@ -137,6 +139,115 @@ fn runtime_trace_usage_keeps_logical_and_cache_buckets() {
     assert_eq!(event.payload["completion_tokens"], 50);
     assert_eq!(event.payload["reasoning_tokens"], 40);
     assert_eq!(event.payload["total_tokens"], 1_050);
+}
+
+#[test]
+fn provider_request_trace_keeps_contract_metadata_but_redacts_request_contents() {
+    const SYSTEM_SECRET: &str = "never-persist-system-prompt";
+    const USER_SECRET: &str = "never-persist-user-message";
+    const TOOL_SECRET: &str = "never-persist-tool-schema";
+    const CREDENTIAL_SECRET: &str = "never-persist-provider-credential";
+    const CACHE_KEY_SECRET: &str = "never-persist-cache-key-source";
+
+    let client = AiClient::new(
+        AiClientConfig::for_grok("grok-4.5"),
+        CREDENTIAL_SECRET.to_string(),
+    );
+    let messages = vec![
+        ModelMessage {
+            role: Role::System,
+            content: vec![Content::Text {
+                text: SYSTEM_SECRET.to_string(),
+            }],
+        },
+        ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: USER_SECRET.to_string(),
+            }],
+        },
+    ];
+    let options = CallOptions {
+        system_prompt: Some(SYSTEM_SECRET.to_string()),
+        tools: Some(vec![AiTool {
+            name: "secret_tool".to_string(),
+            description: TOOL_SECRET.to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "value": { "type": "string" } },
+                "sentinel": TOOL_SECRET,
+            }),
+            prompt: Some(TOOL_SECRET.to_string()),
+        }]),
+        session_id: Some(CACHE_KEY_SECRET.to_string()),
+        ..CallOptions::default()
+    };
+    let diagnostics = client.request_diagnostics(&messages, &options);
+    let loop_event = LoopEvent::ProviderRequestPrepared {
+        turn: 7,
+        diagnostics: Box::new(diagnostics.into()),
+    };
+    let trace = RuntimeTraceEvent::from_loop_event("run-request", 1, 7, &loop_event);
+
+    assert_eq!(trace.event_type, "provider_request_prepared");
+    assert_eq!(trace.payload["turn"], 7);
+    let diagnostics = &trace.payload["diagnostics"];
+    assert_eq!(diagnostics["model_key"]["provider"], "grok");
+    assert_eq!(diagnostics["model_key"]["model_id"], "grok-4.5");
+    assert!(diagnostics["catalog_source"].is_string());
+    assert_eq!(diagnostics["effective_request"]["tool_count"], 1);
+    assert_eq!(
+        diagnostics["tool_names"],
+        serde_json::json!(["secret_tool"])
+    );
+    assert_eq!(diagnostics["message_count"], 2);
+    assert_eq!(diagnostics["system_message_count"], 1);
+    assert_eq!(diagnostics["user_message_count"], 1);
+    assert_eq!(
+        diagnostics["prompt_manifest"]["prompt_hash"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
+    assert_eq!(
+        diagnostics["stable_request_fingerprint"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
+    assert_eq!(diagnostics["cache_key_present"], true);
+    assert_eq!(diagnostics["cache_mode"], "session_key");
+    assert!(
+        diagnostics["stable_instruction_bytes"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
+    assert!(diagnostics["tool_schema_bytes"].as_u64().unwrap_or(0) > 0);
+
+    let (db, _temp_dir, session_id) = create_test_db();
+    let store = RuntimeTraceStore::new(&db);
+    store
+        .append_event(&session_id, &trace)
+        .expect("redacted request trace should persist");
+    let persisted = store
+        .list_events(&session_id, None)
+        .expect("redacted request trace should load");
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].payload, trace.payload);
+
+    let loop_json = serde_json::to_string(&loop_event).expect("loop event should serialize");
+    let trace_json = serde_json::to_string(&persisted[0].payload).expect("trace should serialize");
+    for secret in [
+        SYSTEM_SECRET,
+        USER_SECRET,
+        TOOL_SECRET,
+        CREDENTIAL_SECRET,
+        CACHE_KEY_SECRET,
+    ] {
+        assert!(!loop_json.contains(secret));
+        assert!(!trace_json.contains(secret));
+    }
 }
 
 #[test]

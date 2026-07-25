@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
 
+use crate::agent::state::RunBudget;
+use crate::ai::models::ProjectModelRef;
+
 pub const DEFAULT_MAKO_TICK_INTERVAL_SECS: u64 = 30;
 pub const MIN_MAKO_TICK_INTERVAL_SECS: u64 = 5;
 pub const MAX_MAKO_TICK_INTERVAL_SECS: u64 = 86_400;
@@ -14,6 +17,54 @@ pub const DEFAULT_MAKO_MAX_TICKS: usize = 1_000;
 pub const MAX_MAKO_MAX_TICKS: usize = 10_000;
 pub const DEFAULT_MAKO_MAX_TURNS_PER_TICK: usize = 32;
 pub const MAX_MAKO_MAX_TURNS_PER_TICK: usize = 128;
+
+/// How strongly the primary model should prefer delegated execution.
+///
+/// This controls model guidance only. The core remains the authority for
+/// permissions, tool scope, budgets, concurrency, and recursion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationMode {
+    ExplicitOnly,
+    #[default]
+    Balanced,
+    Proactive,
+    Orchestrator,
+}
+
+impl DelegationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitOnly => "explicit_only",
+            Self::Balanced => "balanced",
+            Self::Proactive => "proactive",
+            Self::Orchestrator => "orchestrator",
+        }
+    }
+
+    pub fn prompt_contract(self) -> String {
+        let guidance = match self {
+            Self::ExplicitOnly => {
+                "Use the agent tool only when the user explicitly requests delegation or asks to continue an existing delegated run. Otherwise work directly."
+            }
+            Self::Balanced => {
+                "Delegate substantial independent work when parallelism, a fresh focused context, or background execution clearly improves the outcome. Work directly for simple, tightly coupled, or sequential tasks."
+            }
+            Self::Proactive => {
+                "Actively identify substantial independent work that benefits from parallel agents, fresh context, or background execution. Do not delegate trivial, tightly coupled, or coordination-heavy work."
+            }
+            Self::Orchestrator => {
+                "For substantial decomposable objectives, coordinate through focused agents early. Keep tightly coupled decisions in the parent, avoid duplicate work, and do not delegate trivial actions."
+            }
+        };
+
+        format!(
+            "[DELEGATION MODE: {}]\n{} The parent must coordinate, inspect evidence, and verify delegated results.",
+            self.as_str().to_ascii_uppercase(),
+            guidance
+        )
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MakoSettingsError {
@@ -119,8 +170,9 @@ impl ProjectMakoSettings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProjectSettings {
-    /// Override model for this project (e.g. "claude-opus-4-6-20250320").
-    pub model: Option<String>,
+    /// Override model for this project. Legacy strings remain supported, while
+    /// an exact key avoids cross-provider/auth/transport ambiguity.
+    pub model: Option<ProjectModelRef>,
 
     /// Override permission mode: `"supervised"` or `"autonomous"`.
     pub permission_mode: Option<String>,
@@ -130,6 +182,14 @@ pub struct ProjectSettings {
 
     /// Max turns for subagents in this project.
     pub subagent_max_turns: Option<usize>,
+
+    /// Primary-agent delegation preference. Defaults to balanced.
+    pub delegation_mode: Option<DelegationMode>,
+
+    /// Optional parent-run resource limits for this project.
+    /// Omit `max_turns` (or this object) for unlimited interactive runs.
+    #[serde(alias = "run_budget")]
+    pub run_limits: Option<RunBudget>,
 
     /// Custom conventions for builder agents.
     pub conventions: Option<Vec<String>>,
@@ -167,6 +227,8 @@ impl ProjectSettings {
             && self.permission_mode.is_none()
             && self.system_prompt_append.is_none()
             && self.subagent_max_turns.is_none()
+            && self.delegation_mode.is_none()
+            && self.run_limits.is_none()
             && self.conventions.is_none()
             && self.disabled_tools.is_none()
             && self.mako.as_ref().is_none_or(ProjectMakoSettings::is_empty)
@@ -305,7 +367,10 @@ mod tests {
         .unwrap();
 
         let settings = ProjectSettings::load(temp.path());
-        assert_eq!(settings.model.as_deref(), Some("claude-opus-4-6-20250320"));
+        assert_eq!(
+            settings.model.as_ref().map(ProjectModelRef::model_id),
+            Some("claude-opus-4-6-20250320")
+        );
         assert_eq!(settings.subagent_max_turns, Some(50));
         assert_eq!(
             settings
@@ -348,7 +413,10 @@ mod tests {
         .unwrap();
 
         let settings = ProjectSettings::load(temp.path());
-        assert_eq!(settings.model.as_deref(), Some("gpt-5"));
+        assert_eq!(
+            settings.model.as_ref().map(ProjectModelRef::model_id),
+            Some("gpt-5")
+        );
     }
 
     #[test]
@@ -363,6 +431,7 @@ mod tests {
                 "permission_mode": "autonomous",
                 "system_prompt_append": "Always use Rust idioms.",
                 "subagent_max_turns": 100,
+                "run_limits": { "max_turns": 75 },
                 "conventions": ["no-unwrap", "error-chain"],
                 "disabled_tools": ["bash"],
                 "mako": {
@@ -375,13 +444,17 @@ mod tests {
         .unwrap();
 
         let settings = ProjectSettings::load(temp.path());
-        assert_eq!(settings.model.as_deref(), Some("claude-opus-4-6-20250320"));
+        assert_eq!(
+            settings.model.as_ref().map(ProjectModelRef::model_id),
+            Some("claude-opus-4-6-20250320")
+        );
         assert_eq!(settings.permission_mode.as_deref(), Some("autonomous"));
         assert_eq!(
             settings.system_prompt_append.as_deref(),
             Some("Always use Rust idioms.")
         );
         assert_eq!(settings.subagent_max_turns, Some(100));
+        assert_eq!(settings.run_limits, Some(RunBudget::with_max_turns(75)));
         assert_eq!(
             settings.conventions.as_deref(),
             Some(&["no-unwrap".to_string(), "error-chain".to_string()][..])
@@ -400,6 +473,32 @@ mod tests {
         let settings = ProjectSettings::default();
 
         assert_eq!(settings.mako_settings(), MakoSettings::default());
+    }
+
+    #[test]
+    fn parses_exact_project_model_key_without_breaking_legacy_strings() {
+        let legacy: ProjectSettings = serde_json::from_str(r#"{ "model": "grok-4.5" }"#).unwrap();
+        assert_eq!(
+            legacy.model,
+            Some(ProjectModelRef::Legacy("grok-4.5".to_string()))
+        );
+
+        let exact: ProjectSettings = serde_json::from_str(
+            r#"{
+                "model": {
+                    "provider": "grok",
+                    "model_id": "grok-4.5",
+                    "api_format": "open_ai_responses"
+                }
+            }"#,
+        )
+        .unwrap();
+        let key = exact.model.as_ref().and_then(ProjectModelRef::exact_key);
+        assert_eq!(
+            key.map(|key| key.provider),
+            Some(crate::ai::providers::ProviderId::Grok)
+        );
+        assert_eq!(key.map(|key| key.model_id.as_str()), Some("grok-4.5"));
     }
 
     #[test]

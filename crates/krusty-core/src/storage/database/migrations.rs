@@ -1203,6 +1203,8 @@ impl Database {
                     priority INTEGER NOT NULL DEFAULT 0,
                     project_dir TEXT,
                     model TEXT,
+                    model_key_json TEXT,
+                    model_catalog_revision TEXT,
                     crew_slug TEXT,
                     misfire_policy TEXT NOT NULL
                         CHECK (misfire_policy IN ('fire_once', 'skip', 'catch_up')),
@@ -2150,6 +2152,69 @@ impl Database {
             )
             .context("recording completed Mako privacy cleanup")?;
         finalize_tx.commit()?;
+
+        // Migration 45: provider-aware model identity on sessions.
+        //
+        // Keep the legacy `model` slug for older clients while storing the
+        // exact provider/auth/transport key and catalog revision alongside it.
+        // Existing rows intentionally remain NULL: guessing a provider from a
+        // bare slug would recreate the ambiguity this migration removes.
+        if current_version < 45 {
+            info!("Running migration 45: provider-aware session model identity");
+            let model_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                .context("acquiring provider-aware model migration lock")?;
+            if Self::table_exists(&model_tx, "sessions") {
+                if !Self::column_exists(&model_tx, "sessions", "model_key_json") {
+                    model_tx
+                        .execute_batch("ALTER TABLE sessions ADD COLUMN model_key_json TEXT;")
+                        .context("Migration 45: add session model key")?;
+                }
+                if !Self::column_exists(&model_tx, "sessions", "model_catalog_revision") {
+                    model_tx
+                        .execute_batch(
+                            "ALTER TABLE sessions ADD COLUMN model_catalog_revision TEXT;",
+                        )
+                        .context("Migration 45: add session model catalog revision")?;
+                }
+            }
+            model_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (45)",
+                [],
+            )?;
+            model_tx.commit()?;
+        }
+
+        // Migration 46: provider-aware model identity on durable Mako schedules.
+        //
+        // Scheduled occurrences must retain the same provider/auth/transport
+        // selection as the request that created them. Existing bare-model rows
+        // remain NULL and use the ambiguity-rejecting legacy execution path.
+        if current_version < 46 {
+            info!("Running migration 46: provider-aware Mako schedule model identity");
+            let mako_model_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring Mako model identity migration lock")?;
+            if Self::table_exists(&mako_model_tx, "mako_schedules") {
+                if !Self::column_exists(&mako_model_tx, "mako_schedules", "model_key_json") {
+                    mako_model_tx
+                        .execute_batch("ALTER TABLE mako_schedules ADD COLUMN model_key_json TEXT;")
+                        .context("Migration 46: add Mako schedule model key")?;
+                }
+                if !Self::column_exists(&mako_model_tx, "mako_schedules", "model_catalog_revision")
+                {
+                    mako_model_tx
+                        .execute_batch(
+                            "ALTER TABLE mako_schedules ADD COLUMN model_catalog_revision TEXT;",
+                        )
+                        .context("Migration 46: add Mako schedule model catalog revision")?;
+                }
+            }
+            mako_model_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (46)",
+                [],
+            )?;
+            mako_model_tx.commit()?;
+        }
 
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;

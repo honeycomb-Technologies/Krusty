@@ -436,8 +436,10 @@ mod tests {
 
     #[test]
     fn auth_success_and_error_limits_are_finite() {
-        assert!(MAX_AUTH_ERROR_RESPONSE_BYTES <= 16 * 1024);
-        assert!(MAX_AUTH_SUCCESS_RESPONSE_BYTES <= 256 * 1024);
-        assert!(AUTH_RESPONSE_BODY_TIMEOUT <= Duration::from_secs(5));
+        const {
+            assert!(MAX_AUTH_ERROR_RESPONSE_BYTES <= 16 * 1024);
+            assert!(MAX_AUTH_SUCCESS_RESPONSE_BYTES <= 256 * 1024);
+            assert!(AUTH_RESPONSE_BODY_TIMEOUT.as_secs() <= 5);
+        }
     }
 }

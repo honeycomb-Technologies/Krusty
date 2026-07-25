@@ -26,7 +26,7 @@
 //! ## Autonomy (Mako)
 //! - `TickEngine` - Autonomous wake/sleep driver for Mako sessions
 //! - `coordinator_prompt` - Mako coordinator system prompt surface
-//! - `team` - Background teammate orchestration
+//! - dynamic delegated agents - Background work through AgentSpec and lifecycle controls
 //! - `AutoClassifierHook` - Autonomous tool-call guardrail hook
 //!
 //! ## Builder Swarm (Octopod)
@@ -49,10 +49,12 @@ pub mod hooks;
 pub mod learning;
 pub mod loop_events;
 mod observability;
-pub mod orchestrator;
+mod orchestrator;
 pub mod pinch_context;
 pub mod pinch_session;
 pub mod plan_handler;
+pub mod progress;
+pub mod run_spec;
 pub mod state;
 pub mod stream;
 pub mod subagent;
@@ -64,7 +66,7 @@ use serde::{Deserialize, Serialize};
 
 pub use autonomy::auto_classifier;
 pub use autonomy::auto_classifier::AutoClassifierHook;
-pub use autonomy::{coordinator_prompt, team, tick_engine};
+pub use autonomy::{coordinator_prompt, tick_engine};
 pub use cancellation::AgentCancellation;
 pub(crate) use compaction::estimate_with_usage as estimate_tokens_with_usage;
 pub use compaction::{
@@ -78,14 +80,16 @@ pub use context::{
 pub use event_bus::AgentEventBus;
 pub use events::{AgentEvent, InterruptReason};
 pub use hooks::{LoggingHook, PlanModeHook, SafetyHook};
-pub use loop_events::{LoopEvent, LoopInput, PlanTaskInfo};
+pub use loop_events::{LoopEvent, LoopInput, PlanTaskInfo, ProviderRequestSnapshot};
 pub use observability::ProviderCallTraceContext;
-pub use orchestrator::{AgenticOrchestrator, OrchestratorConfig, OrchestratorServices};
+pub use orchestrator::OrchestratorServices;
 pub use pinch_context::{PinchContext, PinchContextInput};
 pub use pinch_session::{
     create_pinched_session, CreatePinchedSessionRequest, CreatePinchedSessionResult,
 };
-pub use state::{AgentConfig, AgentState};
+pub use progress::{ActionClass, ProgressGuardAction, ProgressGuardTelemetry, ProgressLedger};
+pub use run_spec::{RunKernel, RunProvenance, RunSpec, RunSpecBuilder, RunSpecError};
+pub use state::{AgentConfig, AgentState, RunBudget, RunBudgetResolution, RunBudgetSource};
 pub use subagent::build_context;
 pub use subagent::build_context::SharedBuildContext;
 pub use summarizer::{generate_summary, SummarizationResult};

@@ -72,6 +72,18 @@ pub(super) fn persist_recovery_state(
     update_recovery_state(db_path, session_id, Some(recovery));
 }
 
+/// Persist an awaiting-input recovery contract before exposing the prompt to
+/// clients. Unlike streaming checkpoints, losing this snapshot can weaken the
+/// resumed permission/tool scope, so callers must handle failure explicitly.
+pub(super) fn persist_required_recovery_state(
+    db_path: &Path,
+    session_id: &str,
+    recovery: &SessionRecoveryState,
+) -> anyhow::Result<()> {
+    let session_manager = SessionManager::new(Database::new(db_path)?);
+    session_manager.update_recovery_state(session_id, recovery)
+}
+
 pub(super) fn clear_recovery_state(db_path: &Path, session_id: &str) {
     update_recovery_state(db_path, session_id, None);
 }
@@ -144,5 +156,32 @@ fn open_session_manager(db_path: &Path, action: &str) -> Option<SessionManager> 
             tracing::error!("Failed to open database while {}: {}", action, e);
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::loop_events::LoopStopReason;
+    use crate::storage::{
+        PartialAssistantState, RecoveryDecision, RecoveryNonResumableReason, RecoveryStatus,
+    };
+
+    #[test]
+    fn required_recovery_persistence_propagates_database_failure() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory should be created");
+        let recovery = SessionRecoveryState::new(
+            RecoveryStatus::AwaitingInput,
+            Some(LoopStopReason::AwaitingInput),
+            None,
+            PartialAssistantState::default(),
+            RecoveryDecision::NonResumable {
+                reason: RecoveryNonResumableReason::AwaitingHumanInput,
+            },
+        );
+
+        // A directory cannot be opened as a SQLite database. The required
+        // path must return the error instead of logging and continuing.
+        assert!(persist_required_recovery_state(temp_dir.path(), "session", &recovery).is_err());
     }
 }

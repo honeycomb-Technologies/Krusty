@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use rusqlite::params;
 
+use crate::ai::models::ModelKey;
 use crate::tools::registry::PermissionMode;
 
 use super::{SessionManager, WorkMode, WorkspaceMode};
@@ -121,10 +122,37 @@ impl SessionManager {
         let now = Utc::now().to_rfc3339();
 
         self.db.conn().execute(
-            "UPDATE sessions SET model = ?1, updated_at = ?2 WHERE id = ?3",
+            "UPDATE sessions
+             SET model = ?1,
+                 model_key_json = NULL,
+                 model_catalog_revision = NULL,
+                 updated_at = ?2
+             WHERE id = ?3",
             params![model, now, session_id],
         )?;
 
+        Ok(())
+    }
+
+    /// Persist an exact model identity while retaining the legacy slug column.
+    pub fn update_session_model_selection(
+        &self,
+        session_id: &str,
+        key: Option<&ModelKey>,
+        catalog_revision: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let model = key.map(|key| key.model_id.as_str());
+        let key_json = key.map(serde_json::to_string).transpose()?;
+        self.db.conn().execute(
+            "UPDATE sessions
+             SET model = ?1,
+                 model_key_json = ?2,
+                 model_catalog_revision = ?3,
+                 updated_at = ?4
+             WHERE id = ?5",
+            params![model, key_json, catalog_revision, now, session_id],
+        )?;
         Ok(())
     }
 

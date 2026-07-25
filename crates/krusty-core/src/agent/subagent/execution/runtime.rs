@@ -1,21 +1,25 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::agent::compaction::is_context_overflow_error;
 use crate::agent::constants::subagent;
 use crate::agent::history_policy::build_history_tool_result;
+use crate::agent::progress::LoopGuard;
+use crate::agent::RunProvenance;
 use crate::ai::client::AiClient;
-use crate::ai::types::{Content, ModelMessage, Role};
+use crate::ai::types::{AiTool, AiToolCall, Content, ModelMessage, Role};
 use crate::tools::ToolResult;
 
 use super::super::types::{
     parse_explore_report, AgentProgress, AgentProgressStatus, DelegatedProcessArtifact,
     SubAgentResult, SubAgentTask,
 };
-use super::api::{call_subagent_api, parse_response};
+use super::api::{call_subagent_api, parse_response, parse_response_usage};
 use super::config::AgentConfig;
 use super::explorer::{
     collect_paths_from_tool_result, completion_summary_preview, normalize_explorer_result,
@@ -27,6 +31,62 @@ use super::governance::{build_subagent_tool_context, delegated_is_explore, deleg
 const MAX_DELEGATED_POLICY_VIOLATIONS: usize = 3;
 const EXPLORER_STALE_SEQUENCE_THRESHOLD: usize = 3;
 const EXPLORER_SYNTHESIS_FILE_THRESHOLD: usize = 8;
+
+fn hash_cache_scope_component(hasher: &mut Sha256, label: &str, value: &[u8]) {
+    hasher.update(label.len().to_be_bytes());
+    hasher.update(label.as_bytes());
+    hasher.update(value.len().to_be_bytes());
+    hasher.update(value);
+}
+
+/// Build a parent-scoped routing key for immutable delegated prompt prefixes.
+///
+/// The task objective is intentionally excluded because it is the volatile
+/// user tail. Conversation and websocket identity remain task-scoped. Any
+/// difference in provider, model, owner, workspace, system prompt, tools, or
+/// inherited governance produces a different cache scope.
+fn delegated_prompt_cache_scope(
+    task: &SubAgentTask,
+    provider: &str,
+    model: &str,
+    system_prompt: &str,
+    tools: &[AiTool],
+) -> Option<String> {
+    let parent_scope = task
+        .parent_session_id
+        .as_deref()
+        .or(task.delegated_run_id.as_deref())?;
+    let policy = task.delegation_policy.as_ref()?;
+    let policy = serde_json::to_vec(policy).ok()?;
+    let mut canonical_tools = tools.iter().collect::<Vec<_>>();
+    canonical_tools.sort_by(|left, right| left.name.cmp(&right.name));
+    let canonical_tools = serde_json::to_vec(&canonical_tools).ok()?;
+
+    let mut hasher = Sha256::new();
+    hash_cache_scope_component(&mut hasher, "contract", b"delegated-prefix-v1");
+    hash_cache_scope_component(&mut hasher, "parent", parent_scope.as_bytes());
+    hash_cache_scope_component(
+        &mut hasher,
+        "owner",
+        task.process_owner_id.as_deref().unwrap_or("").as_bytes(),
+    );
+    hash_cache_scope_component(
+        &mut hasher,
+        "workspace",
+        task.working_dir.to_string_lossy().as_bytes(),
+    );
+    hash_cache_scope_component(&mut hasher, "provider", provider.as_bytes());
+    hash_cache_scope_component(&mut hasher, "model", model.as_bytes());
+    hash_cache_scope_component(
+        &mut hasher,
+        "thinking",
+        if task.thinking_enabled { b"on" } else { b"off" },
+    );
+    hash_cache_scope_component(&mut hasher, "system", system_prompt.as_bytes());
+    hash_cache_scope_component(&mut hasher, "tools", &canonical_tools);
+    hash_cache_scope_component(&mut hasher, "governance", &policy);
+    Some(format!("{:x}", hasher.finalize()))
+}
 
 fn delegated_process_artifact(
     tool_name: &str,
@@ -93,7 +153,51 @@ fn record_delegated_process(
     }
 }
 
-/// Unified agentic loop that replaces separate explorer/builder implementations.
+fn compact_delegated_history(
+    messages: &mut Vec<ModelMessage>,
+    files_examined: &[String],
+    final_output: &str,
+    trigger: &str,
+) -> bool {
+    if messages.len() <= 3 {
+        return false;
+    }
+
+    // Retain a bounded complete tail beginning at an assistant turn so tool
+    // result messages never survive without their corresponding tool calls.
+    let mut tail_start = messages.len().saturating_sub(16).max(1);
+    while tail_start < messages.len() && !matches!(messages[tail_start].role, Role::Assistant) {
+        tail_start += 1;
+    }
+    if tail_start <= 1 {
+        return false;
+    }
+
+    let removed = messages.drain(1..tail_start).count();
+    let paths = files_examined
+        .iter()
+        .take(32)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let last_output = final_output.chars().take(2_000).collect::<String>();
+    messages.insert(
+        1,
+        ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: format!(
+                    "[DELEGATED COMPACTION CHECKPOINT]\nTrigger: {trigger}\nCompacted messages: {removed}\nEvidence paths: {paths}\nLatest synthesis: {last_output}\nContinue the original objective from this checkpoint; do not repeat completed work.\n[/DELEGATED COMPACTION CHECKPOINT]"
+                ),
+            }],
+        },
+    );
+    true
+}
+
+/// Delegated agents use a specialized non-streaming transport, while sharing
+/// canonical governance, semantic progress, failure, compaction, and history
+/// policies with the parent loop.
 pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     client: &AiClient,
     task: &SubAgentTask,
@@ -102,11 +206,19 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     config: &C,
     progress_tx: Option<mpsc::UnboundedSender<AgentProgress>>,
 ) -> SubAgentResult {
+    let provenance = RunProvenance::Delegated;
+    info!(
+        surface = provenance.as_str(),
+        kernel = provenance.kernel().as_str(),
+        task_id = %task.id,
+        delegated_run_id = ?task.delegated_run_id,
+        "Starting delegated agent kernel"
+    );
     let start = Instant::now();
     let task_id = task.id.clone();
     let task_name = task.display_name();
     let plan_task_id = task.plan_task_id.clone();
-    let cache_session_id = task
+    let transport_session_id = task
         .delegated_run_id
         .as_deref()
         .map(|run_id| format!("{run_id}:{task_id}"))
@@ -137,6 +249,9 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
     let mut forced_read_before_completion = false;
     let mut structured_report_repair_requested = false;
     let mut background_processes = Vec::new();
+    let mut loop_guard = LoopGuard::new();
+    let mut overflow_compact_retry_attempted = false;
+    let mut last_dynamic_context: Option<String> = None;
 
     let send_progress = |status: AgentProgressStatus,
                          action: &str,
@@ -204,11 +319,24 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             };
         }
 
-        turns += 1;
-
         let max_turns_budget = delegated_turn_budget(task);
+        if let Some(mailbox) = task.mailbox.as_ref() {
+            let parent_messages = mailbox.drain();
+            if !parent_messages.is_empty() {
+                loop_guard.reset_for_steering();
+            }
+            for message in parent_messages {
+                messages.push(ModelMessage {
+                    role: Role::User,
+                    content: vec![Content::Text {
+                        text: format!("[PARENT MESSAGE]\n{message}\n[/PARENT MESSAGE]"),
+                    }],
+                });
+            }
+        }
+
         if let Some(max_turns) = max_turns_budget {
-            if turns > max_turns {
+            if turns >= max_turns {
                 warn!(
                     task_id = %task_id,
                     turns = turns,
@@ -242,8 +370,31 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
                 };
             }
         }
+        turns += 1;
+
+        if let Some(context) = config
+            .dynamic_context()
+            .filter(|context| !context.trim().is_empty())
+        {
+            if last_dynamic_context.as_deref() != Some(context.as_str()) {
+                messages.push(ModelMessage {
+                    role: Role::User,
+                    content: vec![Content::Text {
+                        text: context.clone(),
+                    }],
+                });
+                last_dynamic_context = Some(context);
+            }
+        }
 
         let system_prompt = config.system_prompt(turns);
+        let prompt_cache_scope = delegated_prompt_cache_scope(
+            task,
+            client.provider_id().storage_key(),
+            model,
+            &system_prompt,
+            &ai_tools,
+        );
 
         let thinking_action = if total_tool_calls > 0 {
             format!("{}...", last_action)
@@ -259,6 +410,7 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             config,
         );
 
+        let provider_call_started = Instant::now();
         let api_future = call_subagent_api(
             client,
             model,
@@ -267,11 +419,60 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             &ai_tools,
             config.max_tokens(),
             task.thinking_enabled,
-            &cache_session_id,
+            &transport_session_id,
+            prompt_cache_scope.as_deref(),
         );
 
-        let response = match tokio::time::timeout(config.api_call_timeout(), api_future).await {
+        let api_result = tokio::time::timeout(config.api_call_timeout(), api_future).await;
+        let (provider_outcome, provider_usage) = match &api_result {
+            Ok(Ok(response)) => ("completed", parse_response_usage(response)),
+            Ok(Err(_)) => ("error", None),
+            Err(_) => ("timeout", None),
+        };
+        if let Some(trace) = task.provider_call_trace.as_ref() {
+            trace
+                .record_delegated_call(
+                    "delegated_agent_turn",
+                    client.provider_id(),
+                    model,
+                    task.delegated_run_id.as_deref(),
+                    &task_id,
+                    turns,
+                    provider_call_started,
+                    provider_outcome,
+                    provider_usage.clone(),
+                )
+                .await;
+        }
+
+        let response = match api_result {
             Ok(Ok(r)) => r,
+            Ok(Err(e))
+                if !overflow_compact_retry_attempted
+                    && is_context_overflow_error(&e.to_string())
+                    && compact_delegated_history(
+                        &mut messages,
+                        &files_examined,
+                        &final_output,
+                        "provider_overflow",
+                    ) =>
+            {
+                overflow_compact_retry_attempted = true;
+                turns = turns.saturating_sub(1);
+                warn!(
+                    task_id = %task_id,
+                    "Provider rejected delegated context; compacted in place and retrying once"
+                );
+                send_progress(
+                    AgentProgressStatus::Running,
+                    "compacted context; retrying",
+                    total_tool_calls,
+                    estimated_tokens,
+                    completion_summary_preview(&final_output),
+                    config,
+                );
+                continue;
+            }
             Ok(Err(e)) => {
                 send_progress(
                     AgentProgressStatus::Failed,
@@ -347,13 +548,8 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             }
         };
 
-        if let Some(usage) = response.get("usage") {
-            if let Some(input) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
-                estimated_tokens += input as usize;
-            }
-            if let Some(output) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
-                estimated_tokens += output as usize;
-            }
+        if let Some(usage) = provider_usage {
+            estimated_tokens = estimated_tokens.saturating_add(usage.logical_total_tokens());
         }
 
         let (text_parts, tool_calls, stop_reason) = parse_response(&response);
@@ -679,10 +875,103 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             });
         }
 
+        let progress_calls = tool_calls
+            .iter()
+            .map(|call| AiToolCall {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                arguments: call.input.clone(),
+            })
+            .collect::<Vec<_>>();
+        let guard = loop_guard.evaluate(&progress_calls, &tool_results);
+        let progress_telemetry = guard.progress;
+        let validation_completion = guard.repeated_validation;
+        let guard_diagnostic = guard.repeated_failure.or_else(|| {
+            progress_telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.diagnostic())
+        });
+
         messages.push(ModelMessage {
             role: Role::User,
             content: tool_results,
         });
+        if let Some(instruction) = progress_telemetry
+            .as_ref()
+            .and_then(|telemetry| telemetry.replan_instruction())
+        {
+            messages.push(ModelMessage {
+                role: Role::User,
+                content: vec![Content::Text {
+                    text: instruction.to_string(),
+                }],
+            });
+        }
+        if let Some(completion) = validation_completion {
+            info!(
+                task_id = %task_id,
+                turns,
+                completion = %completion,
+                "Delegated run completed after repeated successful validation"
+            );
+            let output = if final_output.trim().is_empty() {
+                completion
+            } else {
+                format!("{}\n\n{}", final_output.trim(), completion)
+            };
+            send_progress(
+                AgentProgressStatus::Complete,
+                "validated",
+                total_tool_calls,
+                estimated_tokens,
+                completion_summary_preview(&output),
+                config,
+            );
+            config.cleanup();
+            return SubAgentResult {
+                task_id,
+                agent_name: task_name.clone(),
+                delegated_run_id: task.delegated_run_id.clone(),
+                success: true,
+                output,
+                files_examined,
+                duration_ms: start.elapsed().as_millis() as u64,
+                turns_used: turns,
+                error: None,
+                policy_violations,
+                background_processes: background_processes.clone(),
+            };
+        }
+        if let Some(diagnostic) = guard_diagnostic {
+            warn!(
+                task_id = %task_id,
+                turns,
+                diagnostic = %diagnostic,
+                "Delegated semantic progress guard stopped the run"
+            );
+            send_progress(
+                AgentProgressStatus::Failed,
+                "no semantic progress",
+                total_tool_calls,
+                estimated_tokens,
+                completion_summary_preview(&final_output),
+                config,
+            );
+            config.cleanup();
+            return SubAgentResult {
+                task_id,
+                agent_name: task_name.clone(),
+                delegated_run_id: task.delegated_run_id.clone(),
+                success: false,
+                output: final_output,
+                files_examined,
+                duration_ms: start.elapsed().as_millis() as u64,
+                turns_used: turns,
+                error: Some(diagnostic),
+                policy_violations,
+                background_processes: background_processes.clone(),
+            };
+        }
         last_cycle_positive_evidence = cycle_positive_evidence;
 
         if config.use_explorer_heuristics() && is_explore_delegation && all_read_only_tools {
@@ -758,17 +1047,141 @@ pub(crate) async fn execute_agent_loop<C: AgentConfig>(
             stale_readonly_cycles = 0;
         }
 
-        if messages.len() > subagent::MAX_MESSAGES {
-            let to_remove = messages.len() - subagent::MAX_MESSAGES;
-            for _ in 0..to_remove {
-                messages.remove(1);
-            }
+        if messages.len() > subagent::MAX_MESSAGES
+            && compact_delegated_history(
+                &mut messages,
+                &files_examined,
+                &final_output,
+                "history_budget",
+            )
+        {
             tracing::debug!(
                 task_id = %task_id,
-                removed = to_remove,
                 remaining = messages.len(),
-                "Pruned messages to stay within limit"
+                "Compacted delegated history in place"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::registry::{DelegationPolicy, PermissionMode};
+    use serde_json::json;
+
+    fn cache_scope_task(id: &str, prompt: &str, parent: &str) -> SubAgentTask {
+        SubAgentTask::new(id, prompt)
+            .with_working_dir(std::path::PathBuf::from("/workspace"))
+            .with_delegation_policy(DelegationPolicy::for_subagent_build(
+                PermissionMode::Autonomous,
+                Some(6),
+            ))
+            .with_process_context(None, Some("owner-a".to_string()), Some(parent.to_string()))
+    }
+
+    fn cache_scope_tools() -> Vec<AiTool> {
+        vec![AiTool {
+            name: "read".to_string(),
+            description: "Read a file".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}}
+            }),
+            prompt: None,
+        }]
+    }
+
+    #[test]
+    fn delegated_cache_scope_is_shared_by_compatible_siblings() {
+        let first = cache_scope_task("builder-a", "implement metrics", "parent-a");
+        let second = cache_scope_task("builder-b", "implement rendering", "parent-a");
+        let tools = cache_scope_tools();
+
+        let first_scope = delegated_prompt_cache_scope(
+            &first,
+            "openai",
+            "gpt-5.6-terra",
+            "stable builder prompt",
+            &tools,
+        );
+        let second_scope = delegated_prompt_cache_scope(
+            &second,
+            "openai",
+            "gpt-5.6-terra",
+            "stable builder prompt",
+            &tools,
+        );
+
+        assert_eq!(first_scope, second_scope);
+        assert_eq!(first_scope.unwrap().len(), 64);
+    }
+
+    #[test]
+    fn delegated_cache_scope_invalidates_on_safety_or_prefix_changes() {
+        let base = cache_scope_task("builder-a", "implement metrics", "parent-a");
+        let different_parent = cache_scope_task("builder-b", "implement metrics", "parent-b");
+        let tools = cache_scope_tools();
+        let scope = |task: &SubAgentTask, model: &str, system: &str, tools: &[AiTool]| {
+            delegated_prompt_cache_scope(task, "openai", model, system, tools).unwrap()
+        };
+
+        assert_ne!(
+            scope(&base, "gpt-5.6-terra", "stable", &tools),
+            scope(&different_parent, "gpt-5.6-terra", "stable", &tools)
+        );
+        assert_ne!(
+            scope(&base, "gpt-5.6-terra", "stable", &tools),
+            scope(&base, "gpt-5.6-terra", "changed", &tools)
+        );
+        assert_ne!(
+            scope(&base, "gpt-5.6-terra", "stable", &tools),
+            scope(&base, "gpt-5.6", "stable", &tools)
+        );
+        assert_ne!(
+            scope(&base, "gpt-5.6-terra", "stable", &tools),
+            scope(&base, "gpt-5.6-terra", "stable", &[])
+        );
+    }
+
+    #[test]
+    fn delegated_compaction_keeps_objective_checkpoint_and_complete_tail() {
+        let mut messages = vec![ModelMessage {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: "original objective".to_string(),
+            }],
+        }];
+        for index in 0..20 {
+            messages.push(ModelMessage {
+                role: if index % 2 == 0 {
+                    Role::Assistant
+                } else {
+                    Role::User
+                },
+                content: vec![Content::Text {
+                    text: format!("turn {index}"),
+                }],
+            });
+        }
+        let original_len = messages.len();
+
+        assert!(compact_delegated_history(
+            &mut messages,
+            &["src/lib.rs".to_string()],
+            "latest finding",
+            "test",
+        ));
+        assert!(messages.len() < original_len);
+        assert!(matches!(messages[0].role, Role::User));
+        assert!(matches!(messages[1].role, Role::User));
+        assert!(matches!(messages[2].role, Role::Assistant));
+        let checkpoint = match &messages[1].content[0] {
+            Content::Text { text } => text,
+            _ => panic!("checkpoint must be text"),
+        };
+        assert!(checkpoint.contains("DELEGATED COMPACTION CHECKPOINT"));
+        assert!(checkpoint.contains("src/lib.rs"));
+        assert!(checkpoint.contains("latest finding"));
     }
 }

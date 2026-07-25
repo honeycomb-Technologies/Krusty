@@ -11,7 +11,9 @@ use tokio::time::{timeout, Duration};
 
 use krusty_core::agent::loop_events::LoopStopReason;
 use krusty_core::agent::{AgentCancellation, LoopEvent, LoopInput, UserHookManager};
-use krusty_core::ai::models::{create_model_registry, ApiFormat, ModelMetadata};
+use krusty_core::ai::models::{
+    create_model_registry, ApiFormat, ModelAuthScope, ModelKey, ModelMetadata,
+};
 use krusty_core::ai::providers::ProviderId;
 use krusty_core::ai::types::Content;
 use krusty_core::mcp::McpManager;
@@ -19,7 +21,7 @@ use krusty_core::process::ProcessRegistry;
 use krusty_core::skills::SkillsManager;
 use krusty_core::storage::credentials::CredentialStore;
 use krusty_core::storage::{
-    Database, PartialAssistantState, PendingInteractionSnapshot, RecoveryDecision,
+    Database, PartialAssistantState, PendingInteractionSnapshot, Preferences, RecoveryDecision,
     RecoveryNonResumableReason, RecoveryStatus, SessionRecoveryState, SessionType, WorkspaceMode,
 };
 use krusty_core::tools::registry::ToolRegistry;
@@ -29,7 +31,7 @@ use super::interactions::{resolve_pending_mako_run, PendingMakoInteraction};
 use super::{
     build_user_content, chat, deliver_steering_with_rollover, forward_loop_event,
     prepare_chat_contract_for_test, run_orchestrator_event_bridge, select_model_for_chat_request,
-    steer, tool_approval, RequestedModel,
+    setup_chat_session, steer, tool_approval, RequestedModel,
 };
 use crate::auth::{AuthenticatedUser, CurrentUser};
 use crate::error::AppError;
@@ -231,11 +233,13 @@ async fn chat_rejects_mako_creation_and_daemon_owned_metadata_overrides() {
             target_branch: None,
             session_type: Some(SessionType::Mako),
             model: Some("test:model".into()),
+            model_key: None,
             thinking_enabled: crate::types::ThinkingLevel::Off,
             mode: None,
             permission_mode: None,
             fast_mode: false,
             research_enabled: None,
+            allowed_tools: None,
         }),
     )
     .await;
@@ -255,11 +259,13 @@ async fn chat_rejects_mako_creation_and_daemon_owned_metadata_overrides() {
             target_branch: None,
             session_type: None,
             model: Some("test:other-model".into()),
+            model_key: None,
             thinking_enabled: crate::types::ThinkingLevel::Off,
             mode: None,
             permission_mode: None,
             fast_mode: false,
             research_enabled: None,
+            allowed_tools: None,
         }),
     )
     .await;
@@ -297,11 +303,13 @@ async fn chat_new_session_contract_includes_target_branch_intent() {
             target_branch: Some("feature/mobile-continuation".to_string()),
             session_type: Some(SessionType::Code),
             model: Some("openai/gpt-5.5".to_string()),
+            model_key: None,
             thinking_enabled: crate::types::ThinkingLevel::Off,
             fast_mode: true,
             mode: None,
             permission_mode: Some(krusty_core::tools::registry::PermissionMode::default()),
             research_enabled: None,
+            allowed_tools: None,
         },
     )
     .await
@@ -375,11 +383,13 @@ async fn chat_existing_session_uses_persisted_target_branch_intent_when_request_
             target_branch: None,
             session_type: Some(SessionType::Chat),
             model: None,
+            model_key: None,
             thinking_enabled: crate::types::ThinkingLevel::Off,
             fast_mode: true,
             mode: None,
             permission_mode: None,
             research_enabled: None,
+            allowed_tools: None,
         },
     )
     .await
@@ -448,11 +458,13 @@ async fn chat_existing_session_allows_explicit_target_branch_intent_override() {
             target_branch: Some("  feature/request-override  ".to_string()),
             session_type: Some(SessionType::Chat),
             model: None,
+            model_key: None,
             thinking_enabled: crate::types::ThinkingLevel::Off,
             fast_mode: false,
             mode: None,
             permission_mode: Some(krusty_core::tools::registry::PermissionMode::default()),
             research_enabled: None,
+            allowed_tools: None,
         },
     )
     .await
@@ -532,6 +544,296 @@ fn requested_model_clear_does_not_fall_back_to_session_model() {
         None
     );
     assert_eq!(requested_model.persisted(), Some(None));
+}
+
+#[test]
+fn requested_model_rejects_mismatched_legacy_slug_and_exact_key() {
+    let key = ModelKey::new(ProviderId::Grok, "grok-4.5", ApiFormat::OpenAIResponses);
+    let result = RequestedModel::from_request_parts(Some("grok-4.1"), Some(&key));
+
+    assert!(matches!(
+        result,
+        Err(AppError::BadRequest(message)) if message.contains("does not match")
+    ));
+}
+
+#[tokio::test]
+async fn setup_chat_session_prefers_persisted_exact_key_over_ambiguous_slug() {
+    let (state, temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let user_root = temp_dir.join("alice-home");
+    std::fs::create_dir_all(&user_root).expect("user workspace should exist");
+    let user = current_user("alice", &user_root);
+    let minimax = model(
+        "shared-model",
+        ProviderId::MiniMax,
+        ApiFormat::Anthropic,
+        false,
+    );
+    let openrouter = model(
+        "shared-model",
+        ProviderId::OpenRouter,
+        ApiFormat::OpenAI,
+        true,
+    );
+    let expected_key = openrouter.key();
+    state
+        .model_registry
+        .set_models(ProviderId::MiniMax, vec![minimax])
+        .await;
+    state
+        .model_registry
+        .set_models(ProviderId::OpenRouter, vec![openrouter])
+        .await;
+    {
+        let mut credentials = state.credential_store.write().await;
+        credentials.set(ProviderId::MiniMax, "minimax-test-key".to_string());
+        credentials.set(ProviderId::OpenRouter, "openrouter-test-key".to_string());
+    }
+
+    let manager = SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = manager
+        .create_session_for_user(
+            "Exact selection",
+            Some("shared-model"),
+            Some(user_root.to_string_lossy().as_ref()),
+            Some("alice"),
+        )
+        .expect("session should create");
+    manager
+        .update_session_model_selection(&session_id, Some(&expected_key), Some("catalog-test"))
+        .expect("exact model selection should persist");
+
+    let context = setup_chat_session(
+        &state,
+        Some(&user),
+        &session_id,
+        RequestedModel::Unspecified,
+        crate::types::ThinkingLevel::Off,
+        false,
+        true,
+    )
+    .await
+    .unwrap_or_else(|_| panic!("exact model selection should bootstrap"));
+
+    assert_eq!(context.ai_client.provider_id(), ProviderId::OpenRouter);
+    assert_eq!(context.ai_client.resolved_model().key, expected_key);
+}
+
+#[tokio::test]
+async fn app_state_model_bootstrap_rejects_ambiguous_slug_and_stale_exact_key() {
+    let (state, _temp_dir) = create_test_state();
+    let mut api = model(
+        "shared-openai",
+        ProviderId::OpenAI,
+        ApiFormat::OpenAIResponses,
+        true,
+    );
+    api.auth_scope = Some(ModelAuthScope::ApiKey);
+    let mut oauth = api.clone();
+    oauth.display_name = "Shared OAuth".to_string();
+    oauth.auth_scope = Some(ModelAuthScope::OAuth);
+    state
+        .model_registry
+        .set_models(ProviderId::OpenAI, vec![api, oauth])
+        .await;
+
+    assert!(state
+        .resolve_ai_client_for_user(Some("shared-openai"), None)
+        .await
+        .is_none());
+
+    let stale = ModelKey::new(
+        ProviderId::OpenAI,
+        "shared-openai",
+        ApiFormat::OpenAIResponses,
+    );
+    assert!(state
+        .resolve_ai_client_for_key_for_user(&stale, None)
+        .await
+        .is_none());
+}
+
+#[tokio::test]
+async fn new_empty_session_uses_project_model_before_user_preference_and_persists_exact_row() {
+    let (state, temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let user_root = temp_dir.join("alice-home");
+    let project_dir = user_root.join("project");
+    std::fs::create_dir_all(project_dir.join(".krusty"))
+        .expect("project settings directory should exist");
+
+    let mut preferred = model(
+        "preferred-model",
+        ProviderId::MiniMax,
+        ApiFormat::Anthropic,
+        false,
+    );
+    preferred.catalog_revision = Some("preferred-rev".to_string());
+    let preferred_key = preferred.key();
+    let mut project = model(
+        "project-model",
+        ProviderId::OpenRouter,
+        ApiFormat::OpenAI,
+        false,
+    );
+    project.catalog_revision = Some("project-rev".to_string());
+    let project_key = project.key();
+    state
+        .model_registry
+        .set_models(ProviderId::MiniMax, vec![preferred])
+        .await;
+    state
+        .model_registry
+        .set_models(ProviderId::OpenRouter, vec![project])
+        .await;
+
+    Preferences::for_user(
+        Database::new(&state.db_path).expect("database should open"),
+        "alice",
+    )
+    .set_current_model_key(&preferred_key)
+    .expect("preference should persist");
+    std::fs::write(
+        project_dir.join(".krusty/settings.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({ "model": project_key.clone() }))
+            .expect("settings should serialize"),
+    )
+    .expect("settings should write");
+
+    let contract = prepare_chat_contract_for_test(
+        &state,
+        Some(current_user("alice", &user_root)),
+        ChatRequest {
+            session_id: None,
+            message: "use the project model".to_string(),
+            content: Vec::new(),
+            project_dir: Some(project_dir.to_string_lossy().into_owned()),
+            working_dir: None,
+            workspace_mode: Some(WorkspaceMode::Selected),
+            target_branch: None,
+            session_type: Some(SessionType::Code),
+            model: None,
+            model_key: None,
+            thinking_enabled: crate::types::ThinkingLevel::Off,
+            fast_mode: false,
+            mode: None,
+            permission_mode: None,
+            research_enabled: None,
+            allowed_tools: None,
+        },
+    )
+    .await
+    .unwrap_or_else(|_| panic!("project model should create the session"));
+
+    assert_eq!(contract.model.as_deref(), Some("project-model"));
+    assert_eq!(contract.model_key, Some(project_key));
+    assert_eq!(
+        contract.model_catalog_revision.as_deref(),
+        Some("project-rev")
+    );
+}
+
+#[tokio::test]
+async fn explicit_then_persisted_session_model_precede_project_model() {
+    let (state, temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let user_root = temp_dir.join("alice-home");
+    let project_dir = user_root.join("project");
+    std::fs::create_dir_all(project_dir.join(".krusty"))
+        .expect("project settings directory should exist");
+
+    let persisted = model(
+        "persisted-model",
+        ProviderId::MiniMax,
+        ApiFormat::Anthropic,
+        false,
+    );
+    let persisted_key = persisted.key();
+    let project = model(
+        "project-model",
+        ProviderId::OpenRouter,
+        ApiFormat::OpenAI,
+        false,
+    );
+    let project_key = project.key();
+    let explicit = model(
+        "explicit-model",
+        ProviderId::OpenRouter,
+        ApiFormat::OpenAI,
+        false,
+    );
+    let explicit_key = explicit.key();
+    state
+        .model_registry
+        .set_models(ProviderId::MiniMax, vec![persisted])
+        .await;
+    state
+        .model_registry
+        .set_models(ProviderId::OpenRouter, vec![project, explicit])
+        .await;
+    {
+        let mut credentials = state.credential_store.write().await;
+        credentials.set(ProviderId::MiniMax, "minimax-test-key".to_string());
+        credentials.set(ProviderId::OpenRouter, "router-test-key".to_string());
+    }
+    std::fs::write(
+        project_dir.join(".krusty/settings.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({ "model": project_key.clone() }))
+            .expect("settings should serialize"),
+    )
+    .expect("settings should write");
+
+    let manager = SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = manager
+        .create_session_for_user_with_config(
+            "Project precedence",
+            Some("persisted-model"),
+            Some(project_dir.to_string_lossy().as_ref()),
+            Some(project_dir.to_string_lossy().as_ref()),
+            WorkspaceMode::Selected,
+            Some("alice"),
+            None,
+            SessionType::Code,
+        )
+        .expect("session should create");
+    manager
+        .update_session_model_selection(&session_id, Some(&persisted_key), None)
+        .expect("persisted exact selection should save");
+    let user = current_user("alice", &user_root);
+
+    let persisted_context = setup_chat_session(
+        &state,
+        Some(&user),
+        &session_id,
+        RequestedModel::Unspecified,
+        crate::types::ThinkingLevel::Off,
+        false,
+        false,
+    )
+    .await
+    .unwrap_or_else(|_| panic!("persisted model should resolve"));
+    assert_eq!(
+        persisted_context.ai_client.resolved_model().key,
+        persisted_key
+    );
+    drop(persisted_context);
+
+    let explicit_context = setup_chat_session(
+        &state,
+        Some(&user),
+        &session_id,
+        RequestedModel::Exact(&explicit_key),
+        crate::types::ThinkingLevel::Off,
+        false,
+        false,
+    )
+    .await
+    .unwrap_or_else(|_| panic!("explicit model should resolve"));
+    assert_eq!(
+        explicit_context.ai_client.resolved_model().key,
+        explicit_key
+    );
 }
 
 #[test]
@@ -1030,11 +1332,13 @@ async fn chat_does_not_persist_model_override_when_setup_fails() {
             target_branch: None,
             session_type: None,
             model: Some("openai/gpt-5".to_string()),
+            model_key: None,
             thinking_enabled: crate::types::ThinkingLevel::Off,
             fast_mode: false,
             mode: None,
             permission_mode: Some(krusty_core::tools::registry::PermissionMode::default()),
             research_enabled: None,
+            allowed_tools: None,
         }),
     )
     .await;
@@ -1077,11 +1381,13 @@ async fn chat_rejects_missing_model_before_creating_session() {
             target_branch: None,
             session_type: Some(SessionType::Code),
             model: None,
+            model_key: None,
             thinking_enabled: crate::types::ThinkingLevel::Off,
             fast_mode: false,
             mode: None,
             permission_mode: Some(krusty_core::tools::registry::PermissionMode::default()),
             research_enabled: None,
+            allowed_tools: None,
         }),
     )
     .await;
@@ -1128,11 +1434,13 @@ async fn chat_rejects_unsupported_image_before_creating_session() {
             target_branch: None,
             session_type: Some(SessionType::Chat),
             model: None,
+            model_key: None,
             thinking_enabled: crate::types::ThinkingLevel::Off,
             fast_mode: false,
             mode: None,
             permission_mode: Some(krusty_core::tools::registry::PermissionMode::default()),
             research_enabled: None,
+            allowed_tools: None,
         }),
     )
     .await;

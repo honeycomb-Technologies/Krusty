@@ -1,0 +1,97 @@
+{
+  "scenarios": [
+    {
+      "name": "transient_provider_failure_recovers_with_bounded_retry",
+      "policy": {"max_provider_retries": 2},
+      "steps": [
+        {"kind": "transient_error", "code": "http_503"},
+        {"kind": "complete", "text": "Recovered."}
+      ],
+      "expect": {
+        "stop_reason": "completed",
+        "provider_calls": 2,
+        "provider_retries": 1,
+        "tool_calls": 0,
+        "side_effects": 0
+      }
+    },
+    {
+      "name": "malformed_provider_stream_fails_visibly",
+      "steps": [
+        {"kind": "malformed_stream", "detail": "invalid tool arguments fragment"},
+        {"kind": "complete", "text": "This must not be reached."}
+      ],
+      "expect": {
+        "stop_reason": "provider_error",
+        "provider_calls": 1,
+        "provider_retries": 0,
+        "tool_calls": 0,
+        "side_effects": 0
+      }
+    },
+    {
+      "name": "empty_completion_gets_one_semantic_recovery",
+      "policy": {"max_empty_recoveries": 1},
+      "steps": [
+        {"kind": "empty_completion"},
+        {"kind": "complete", "text": "Recovered from the empty completion."}
+      ],
+      "expect": {
+        "stop_reason": "completed",
+        "provider_calls": 2,
+        "provider_retries": 0,
+        "semantic_recoveries": 1,
+        "tool_calls": 0
+      }
+    },
+    {
+      "name": "second_empty_completion_is_terminal",
+      "policy": {"max_empty_recoveries": 1},
+      "steps": [
+        {"kind": "empty_completion"},
+        {"kind": "empty_completion"},
+        {"kind": "complete", "text": "This must not be reached."}
+      ],
+      "expect": {
+        "stop_reason": "provider_error",
+        "provider_calls": 2,
+        "semantic_recoveries": 1,
+        "tool_calls": 0,
+        "side_effects": 0
+      }
+    },
+    {
+      "name": "context_overflow_compacts_once_then_recovers",
+      "policy": {"max_overflow_recoveries": 1},
+      "steps": [
+        {"kind": "context_overflow"},
+        {"kind": "complete", "text": "Recovered after compaction."}
+      ],
+      "expect": {
+        "stop_reason": "completed",
+        "provider_calls": 2,
+        "overflow_recoveries": 1,
+        "compactions": 1,
+        "tool_calls": 0,
+        "side_effects": 0
+      }
+    },
+    {
+      "name": "second_context_overflow_is_terminal",
+      "policy": {"max_overflow_recoveries": 1},
+      "steps": [
+        {"kind": "context_overflow"},
+        {"kind": "context_overflow"},
+        {"kind": "complete", "text": "This must not be reached."}
+      ],
+      "expect": {
+        "stop_reason": "provider_error",
+        "provider_calls": 2,
+        "overflow_recoveries": 1,
+        "compactions": 1,
+        "tool_calls": 0,
+        "side_effects": 0
+      }
+    }
+  ]
+}
