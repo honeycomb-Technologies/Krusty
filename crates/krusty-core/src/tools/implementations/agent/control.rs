@@ -78,7 +78,64 @@ fn role_profile(role: &DelegatedRunRole) -> &'static str {
     }
 }
 
+fn should_resume_terminal_followup(action: AgentAction, record: &DelegatedRunRecord) -> bool {
+    action == AgentAction::Followup && is_terminal(record.stage)
+}
+
 impl AgentTool {
+    async fn execute_resume_from_record(
+        &self,
+        mut params: Params,
+        ctx: &ToolContext,
+        delegated_run_id: String,
+        record: DelegatedRunRecord,
+    ) -> ToolResult {
+        if !record.resumable {
+            return ToolResult::error_with_code(
+                "agent_run_not_resumable",
+                format!("Delegated run '{delegated_run_id}' is not resumable."),
+            );
+        }
+
+        let prior_evidence = record
+            .artifact
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "No prior artifact was persisted.".to_string());
+        let requested_objective = params.prompt.trim();
+        params.prompt = if requested_objective.is_empty() {
+            format!(
+                "Resume delegated run {delegated_run_id}. Continue from durable evidence and close remaining gaps.\n\n[PRIOR EVIDENCE]\n{prior_evidence}\n[/PRIOR EVIDENCE]"
+            )
+        } else {
+            format!(
+                "{requested_objective}\n\nResume delegated run {delegated_run_id}.\n[PRIOR EVIDENCE]\n{prior_evidence}\n[/PRIOR EVIDENCE]"
+            )
+        };
+        params.action = AgentAction::Spawn;
+        params.delegated_run_id = None;
+        params.profile = Some(role_profile(&record.role).to_string());
+        params.agent_type = None;
+        params.run_in_background = Some(params.run_in_background.unwrap_or(true));
+        params.name.get_or_insert_with(|| {
+            format!(
+                "resume-{}",
+                &delegated_run_id[..delegated_run_id.len().min(8)]
+            )
+        });
+        if record.role == DelegatedRunRole::Build && params.components.is_none() {
+            let components = record
+                .target_scope
+                .iter()
+                .map(|scope| scope.path.clone())
+                .collect::<Vec<_>>();
+            if !components.is_empty() {
+                params.components = Some(components);
+            }
+        }
+        self.execute_spawn(params, ctx).await
+    }
+
     pub(super) async fn execute_control(
         &self,
         mut params: Params,
@@ -153,12 +210,13 @@ impl AgentTool {
             }
             AgentAction::Message | AgentAction::Followup => {
                 let delegated_run_id = match required_run_id(&params) {
-                    Ok(value) => value,
+                    Ok(value) => value.to_string(),
                     Err(error) => return error,
                 };
-                if let Err(error) = load_owned_run(ctx, delegated_run_id) {
-                    return error;
-                }
+                let record = match load_owned_run(ctx, &delegated_run_id) {
+                    Ok(record) => record,
+                    Err(error) => return error,
+                };
                 let message = match params
                     .message
                     .as_deref()
@@ -173,11 +231,19 @@ impl AgentTool {
                         )
                     }
                 };
-                match self.runtime.send_message(delegated_run_id, message) {
+                match self
+                    .runtime
+                    .send_message(&delegated_run_id, message.clone())
+                {
                     Ok(()) => ToolResult::success_data(json!({
                         "status": "delivered",
                         "delegated_run_id": delegated_run_id,
                     })),
+                    Err(_) if should_resume_terminal_followup(params.action, &record) => {
+                        params.prompt = message;
+                        self.execute_resume_from_record(params, ctx, delegated_run_id, record)
+                            .await
+                    }
                     Err(error) => ToolResult::error_with_code("agent_not_live", error),
                 }
             }
@@ -229,50 +295,8 @@ impl AgentTool {
                     Ok(record) => record,
                     Err(error) => return error,
                 };
-                if !record.resumable {
-                    return ToolResult::error_with_code(
-                        "agent_run_not_resumable",
-                        format!("Delegated run '{delegated_run_id}' is not resumable."),
-                    );
-                }
-
-                let prior_evidence = record
-                    .artifact
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| "No prior artifact was persisted.".to_string());
-                let requested_objective = params.prompt.trim();
-                params.prompt = if requested_objective.is_empty() {
-                    format!(
-                        "Resume delegated run {delegated_run_id}. Continue from durable evidence and close remaining gaps.\n\n[PRIOR EVIDENCE]\n{prior_evidence}\n[/PRIOR EVIDENCE]"
-                    )
-                } else {
-                    format!(
-                        "{requested_objective}\n\nResume delegated run {delegated_run_id}.\n[PRIOR EVIDENCE]\n{prior_evidence}\n[/PRIOR EVIDENCE]"
-                    )
-                };
-                params.action = AgentAction::Spawn;
-                params.delegated_run_id = None;
-                params.profile = Some(role_profile(&record.role).to_string());
-                params.agent_type = None;
-                params.run_in_background = Some(params.run_in_background.unwrap_or(true));
-                params.name.get_or_insert_with(|| {
-                    format!(
-                        "resume-{}",
-                        &delegated_run_id[..delegated_run_id.len().min(8)]
-                    )
-                });
-                if record.role == DelegatedRunRole::Build && params.components.is_none() {
-                    let components = record
-                        .target_scope
-                        .iter()
-                        .map(|scope| scope.path.clone())
-                        .collect::<Vec<_>>();
-                    if !components.is_empty() {
-                        params.components = Some(components);
-                    }
-                }
-                self.execute_spawn(params, ctx).await
+                self.execute_resume_from_record(params, ctx, delegated_run_id, record)
+                    .await
             }
         }
     }
@@ -346,5 +370,36 @@ mod tests {
         let envelope: serde_json::Value =
             serde_json::from_str(&error.output).expect("structured error");
         assert_eq!(envelope["error"]["code"], "agent_run_not_found");
+    }
+
+    #[test]
+    fn only_terminal_followup_selects_durable_resume_path() {
+        let (owner, _foreign, _temp) = ownership_fixture();
+        let running = load_owned_run(&owner, "run-owned").expect("running run");
+        assert!(!should_resume_terminal_followup(
+            AgentAction::Followup,
+            &running
+        ));
+
+        let store = open_delegated_run_store(&owner).expect("delegated store");
+        store
+            .finalize_run(
+                "run-owned",
+                DelegatedRunStage::Complete,
+                &json!({"success": true, "findings": "durable result"}),
+                Some("durable result"),
+                true,
+            )
+            .expect("finalize delegated run");
+        let completed = load_owned_run(&owner, "run-owned").expect("completed run");
+
+        assert!(should_resume_terminal_followup(
+            AgentAction::Followup,
+            &completed
+        ));
+        assert!(!should_resume_terminal_followup(
+            AgentAction::Message,
+            &completed
+        ));
     }
 }

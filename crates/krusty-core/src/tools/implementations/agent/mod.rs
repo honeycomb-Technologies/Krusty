@@ -158,12 +158,12 @@ impl Tool for AgentTool {
     }
 
     fn description(&self) -> &str {
-        "Spawn and supervise independent agents. Delegate parallel, deep multi-file, or background work; avoid simple lookups, one-file edits, and tightly coupled work. Profiles: explore, plan, verify, build, or custom. Actions: spawn, list, status, wait, message, followup, interrupt, resume. The parent verifies results."
+        "Spawn and supervise independent agents. Delegate parallel, deep multi-file, or background work; avoid simple lookups, one-file edits, and tightly coupled work. Profiles: explore, plan, verify, build, or custom. Actions: spawn, list, status, wait, message, followup, interrupt, resume. Followup delivers to a live child or resumes a completed resumable child from durable evidence. The parent verifies results."
     }
 
     fn prompt(&self) -> Option<&str> {
         Some(
-            "Use action=spawn for substantial independent work. Set run_in_background=true when the parent can continue concurrently. Use list/status/wait to observe; message/followup to steer a live child; interrupt to cancel one run; resume to start a new run from durable prior evidence. The parent remains responsible for integration and verification.",
+            "Use action=spawn for substantial independent work. Set run_in_background=true when the parent can continue concurrently. Use list/status/wait to observe, message to steer a live child, followup for another child turn (automatically resumed from durable evidence after completion), interrupt to cancel, and resume for an explicit new run from durable prior evidence. The parent remains responsible for integration and verification.",
         )
     }
 
@@ -182,7 +182,7 @@ impl Tool for AgentTool {
                 },
                 "message": {
                     "type": "string",
-                    "description": "Steering sent between child turns"
+                    "description": "Steering for a live child, or the next objective when followup resumes a completed child"
                 },
                 "wait_timeout_ms": {
                     "type": "integer",
