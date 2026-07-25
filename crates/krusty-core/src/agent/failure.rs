@@ -293,13 +293,19 @@ pub fn detect_terminal_explore_failure(
         let Content::ToolResult {
             tool_use_id,
             output,
-            ..
+            is_error,
         } = result
         else {
             continue;
         };
 
         if !explore_ids.contains(&tool_use_id.as_str()) {
+            continue;
+        }
+        // Tool-validation and execution errors have their own retry and
+        // repeated-failure policy. Only a successfully returned delegated-run
+        // result can prove that exploration completed without usable evidence.
+        if is_error.unwrap_or(false) {
             continue;
         }
 
@@ -1022,6 +1028,30 @@ mod tests {
                 }
             }),
             is_error: None,
+        }];
+
+        let diagnostic = detect_terminal_explore_failure(&tool_calls, &tool_results);
+        assert!(diagnostic.is_none());
+    }
+
+    #[test]
+    fn terminal_explore_failure_ignores_tool_validation_error() {
+        let tool_calls = vec![AiToolCall {
+            id: "tool-1".to_string(),
+            name: "agent".to_string(),
+            arguments: json!({
+                "action": "spawn",
+                "profile": "explore",
+                "capabilities": ["read", "write"]
+            }),
+        }];
+        let tool_results = vec![Content::ToolResult {
+            tool_use_id: "tool-1".to_string(),
+            output: json!({
+                "error_code": "invalid_agent_spec",
+                "summary": "Profile 'explore' is read-only and cannot request write or execute"
+            }),
+            is_error: Some(true),
         }];
 
         let diagnostic = detect_terminal_explore_failure(&tool_calls, &tool_results);
