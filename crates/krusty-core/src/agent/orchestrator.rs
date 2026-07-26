@@ -46,7 +46,12 @@ use crate::tools::registry::{agent_call_requests_write, effective_tool_call};
 use crate::tools::registry::{
     trusted_changed, FileObservationTracker, PermissionMode, ToolRegistry,
 };
-use crate::workflow::{AttemptProgressInput, AttemptStatus, GoalStatus, WorkflowManager};
+use crate::workflow::{
+    AttemptProgressInput, AttemptStatus, GoalStatus, StartAttemptInput, WorkflowManager,
+    WorkflowMutation, WorkflowStepStatus, DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS,
+    DEFAULT_GOAL_ATTEMPT_MAX_TOOL_CALLS, DEFAULT_GOAL_ATTEMPT_MAX_TURNS,
+    DEFAULT_GOAL_ATTEMPT_MAX_WALL_TIME_SECS,
+};
 
 use super::compaction::{
     effective_context_window_for_runtime, is_context_overflow_error,
@@ -132,6 +137,75 @@ fn active_goal_for_run(db_path: &Path, session_id: &str) -> bool {
             );
             false
         })
+}
+
+/// Claim the next dependency-ready step when an explicitly active Goal enters
+/// the orchestrator. Lifecycle correctness must not depend on the model
+/// remembering to call `task_start`; a duplicate model call remains a no-op.
+fn ensure_active_goal_attempt_for_run(
+    db_path: &Path,
+    session_id: &str,
+    permission_mode: PermissionMode,
+) -> Option<WorkflowMutation> {
+    let manager = WorkflowManager::new(db_path.to_path_buf()).ok()?;
+    let snapshot = manager.get_snapshot(session_id).ok()??;
+    if snapshot.goal.status != GoalStatus::Active
+        || snapshot
+            .latest_attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.status == AttemptStatus::Running)
+    {
+        return None;
+    }
+
+    let status_by_id = snapshot
+        .steps
+        .iter()
+        .map(|step| (step.id.as_str(), step.status))
+        .collect::<HashMap<_, _>>();
+    let step = snapshot.steps.iter().find(|step| {
+        step.status == WorkflowStepStatus::Pending
+            && snapshot
+                .dependencies
+                .iter()
+                .filter(|dependency| dependency.step_id == step.id)
+                .all(|dependency| {
+                    status_by_id
+                        .get(dependency.depends_on_step_id.as_str())
+                        .is_some_and(|status| {
+                            matches!(
+                                status,
+                                WorkflowStepStatus::Completed | WorkflowStepStatus::Skipped
+                            )
+                        })
+                })
+    })?;
+
+    manager
+        .start_attempt(
+            session_id,
+            &snapshot.goal.id,
+            snapshot.aggregate_revision,
+            StartAttemptInput {
+                step_id: Some(step.id.clone()),
+                permission_mode: permission_mode.as_str().to_string(),
+                max_turns: DEFAULT_GOAL_ATTEMPT_MAX_TURNS,
+                max_tool_calls: DEFAULT_GOAL_ATTEMPT_MAX_TOOL_CALLS,
+                max_wall_time_secs: DEFAULT_GOAL_ATTEMPT_MAX_WALL_TIME_SECS,
+                max_research_actions: DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS,
+            },
+            &format!("runtime-auto-attempt-{}", uuid::Uuid::new_v4()),
+            "runtime",
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                session_id,
+                %error,
+                "Failed to automatically claim the next active Goal step"
+            );
+            error
+        })
+        .ok()
 }
 
 fn pause_active_goal_for_stop(db_path: &Path, session_id: &str, reason: &str) {
@@ -248,7 +322,7 @@ fn record_active_attempt_progress(
             error
         })
         .ok()?;
-    (mutation.snapshot.goal.status != GoalStatus::Active).then(|| {
+    (mutation.snapshot.goal.status != GoalStatus::Active).then_some({
         (
             mutation.snapshot.goal.status,
             mutation.snapshot.goal.status_reason,
@@ -639,6 +713,7 @@ impl AgenticOrchestrator {
         let mut empty_completion_recovery_pending = false;
         let mut provider_tool_activity_seen = false;
         let mut overflow_compact_retry_attempted = false;
+        let mut stale_compaction_reload_attempted = false;
         let mut mutation_needs_validation = false;
         let mut last_microcompact_history_message_count = conversation.len();
         let mut microcompaction_generation = 0usize;
@@ -665,6 +740,15 @@ impl AgenticOrchestrator {
             max_turns: run_budget.budget.max_turns,
             source: run_budget.source,
         });
+        if let Some(mutation) =
+            ensure_active_goal_attempt_for_run(&db_path, &session_id, permission_mode)
+        {
+            let _ = event_tx.send(LoopEvent::WorkflowUpdated {
+                goal_id: mutation.snapshot.goal.id,
+                aggregate_revision: mutation.snapshot.aggregate_revision,
+                operation_id: mutation.operation_id,
+            });
+        }
 
         loop {
             input_inbox.collect_ready();
@@ -851,12 +935,44 @@ impl AgenticOrchestrator {
                         continue;
                     }
                     Err(error) => {
+                        if !stale_compaction_reload_attempted
+                            && is_stale_compaction_snapshot_error(&error)
+                        {
+                            match reload_persisted_conversation(&db_path, &session_id) {
+                                Ok(reloaded) if !reloaded.is_empty() => {
+                                    tracing::warn!(
+                                        session_id = %session_id,
+                                        message_count = reloaded.len(),
+                                        %error,
+                                        "Reloaded canonical transcript after compaction snapshot race"
+                                    );
+                                    conversation = reloaded;
+                                    context_ledger.update_from_conversation(&conversation);
+                                    persist_context_state(&db_path, &session_id, &context_ledger);
+                                    last_usage_prompt_tokens = None;
+                                    messages_at_last_usage = conversation.len();
+                                    last_microcompact_history_message_count = conversation.len();
+                                    stale_compaction_reload_attempted = true;
+                                    continue;
+                                }
+                                Ok(_) => {}
+                                Err(reload_error) => {
+                                    tracing::warn!(
+                                        session_id = %session_id,
+                                        %reload_error,
+                                        "Failed to reload canonical transcript after compaction snapshot race"
+                                    );
+                                }
+                            }
+                        }
                         let _ = event_tx.send(LoopEvent::Error {
                             error: format!("Automatic compaction failed: {}", error),
                         });
                         if last_token_count > 0 {
                             update_token_count(&db_path, &session_id, last_token_count);
                         }
+                        finish_active_attempt_for_stop(&db_path, &session_id, "pinch_failed");
+                        pause_active_goal_for_stop(&db_path, &session_id, "pinch_failed");
                         clear_recovery_state(&db_path, &session_id);
                         set_agent_state(&db_path, &session_id, "error");
                         let _ = event_tx.send(LoopEvent::Finished {
@@ -1702,6 +1818,38 @@ impl AgenticOrchestrator {
             save_message(&db_path, &session_id, &tool_msg);
             clear_recovery_state(&db_path, &session_id);
 
+            if successful_task_completion_finished_plan(
+                &db_path,
+                &session_id,
+                &result.tool_calls,
+                &tool_msg.content,
+            ) {
+                let completion = "All approved plan steps are complete. The Goal remains active until its required verification criteria are passed.";
+                let _ = event_tx.send(LoopEvent::TextDelta {
+                    delta: completion.to_string(),
+                });
+                let assistant_msg = ModelMessage {
+                    role: Role::Assistant,
+                    content: vec![Content::Text {
+                        text: completion.to_string(),
+                    }],
+                };
+                conversation.push(assistant_msg.clone());
+                context_ledger.update_from_conversation(&conversation);
+                persist_context_state(&db_path, &session_id, &context_ledger);
+                save_message(&db_path, &session_id, &assistant_msg);
+                set_agent_state(&db_path, &session_id, "idle");
+                let _ = event_tx.send(LoopEvent::TurnComplete {
+                    turn: iteration,
+                    has_more: false,
+                });
+                let _ = event_tx.send(LoopEvent::Finished {
+                    session_id: session_id.clone(),
+                    stop_reason: LoopStopReason::Completed,
+                });
+                return;
+            }
+
             if let Some((status, reason)) = goal_runtime_stop {
                 let reason = reason.unwrap_or_else(|| "goal_attempt_stopped".to_string());
                 let _ = event_tx.send(LoopEvent::Error {
@@ -1990,6 +2138,36 @@ fn inject_pending_steering(
     injected
 }
 
+fn is_stale_compaction_snapshot_error(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .starts_with("Session transcript changed before compaction started")
+}
+
+fn reload_persisted_conversation(
+    db_path: &Path,
+    session_id: &str,
+) -> Result<Vec<ModelMessage>, String> {
+    let manager = Database::new(db_path)
+        .map(SessionManager::new)
+        .map_err(|error| format!("open transcript database: {error}"))?;
+    manager
+        .load_session_messages(session_id)
+        .map_err(|error| format!("load transcript: {error}"))?
+        .into_iter()
+        .map(|(role, content_json)| {
+            let role = match role.as_str() {
+                "user" => Role::User,
+                "assistant" => Role::Assistant,
+                value => return Err(format!("unsupported persisted role {value:?}")),
+            };
+            let content = serde_json::from_str(&content_json)
+                .map_err(|error| format!("parse persisted {role:?} message: {error}"))?;
+            Ok(ModelMessage { role, content })
+        })
+        .collect()
+}
+
 fn update_validation_state(
     mutation_needs_validation: &mut bool,
     tool_calls: &[crate::ai::types::AiToolCall],
@@ -2024,6 +2202,47 @@ fn update_validation_state(
     }
 
     !was_pending && *mutation_needs_validation
+}
+
+fn successful_task_completion_finished_plan(
+    db_path: &Path,
+    session_id: &str,
+    tool_calls: &[AiToolCall],
+    tool_results: &[Content],
+) -> bool {
+    let successful_ids = tool_results
+        .iter()
+        .filter_map(|result| match result {
+            Content::ToolResult {
+                tool_use_id,
+                is_error,
+                ..
+            } if !is_error.unwrap_or(false) => Some(tool_use_id.as_str()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    if !tool_calls
+        .iter()
+        .any(|call| call.name == "task_complete" && successful_ids.contains(call.id.as_str()))
+    {
+        return false;
+    }
+
+    let snapshot = WorkflowManager::new(db_path.to_path_buf())
+        .and_then(|manager| manager.get_snapshot(session_id))
+        .ok()
+        .flatten();
+    snapshot.is_some_and(|snapshot| {
+        snapshot.goal.status == GoalStatus::Active
+            && snapshot.plan_revision.is_some()
+            && !snapshot.steps.is_empty()
+            && snapshot.steps.iter().all(|step| {
+                matches!(
+                    step.status,
+                    WorkflowStepStatus::Completed | WorkflowStepStatus::Skipped
+                )
+            })
+    })
 }
 
 const VALIDATION_REMINDER: &str = "Files changed successfully. Before finishing, run the narrowest relevant test, build, lint, typecheck, or `git diff --check`. If no executable validation applies, say why explicitly instead of implying it ran.";
@@ -2132,6 +2351,7 @@ mod tests {
 
     use super::effective_context_window_for_runtime;
     use super::empty_completion_action;
+    use super::ensure_active_goal_attempt_for_run;
     use super::inject_pending_steering;
     use super::inject_runtime_context;
     use super::message_builder::finalize_explore_only_turn;
@@ -2140,19 +2360,195 @@ mod tests {
     use super::resolve_project_permission_mode;
     use super::should_retry_empty_stream_interruption;
     use super::split_single_pending_ask_user_call;
+    use super::successful_task_completion_finished_plan;
     use super::terminal_agent_state_after_interruption;
     use super::update_validation_state;
     use super::EmptyCompletionAction;
     use super::VALIDATION_REMINDER;
-    use super::{mpsc, ContextLedger};
+    use super::{
+        is_stale_compaction_snapshot_error, mpsc, reload_persisted_conversation, ContextLedger,
+    };
     use crate::agent::loop_events::{LoopInput, LoopInputInbox, LoopStopReason};
     use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
     use crate::skills::SkillsManager;
     use crate::storage::{Database, ProjectSettings, SessionManager, SessionType, WorkMode};
     use crate::tools::registry::PermissionMode;
+    use crate::workflow::{
+        AttemptStatus, CompleteStepInput, CreateGoalInput, CriterionInput, GoalStatus,
+        PlanProposalInput, StepProposalInput, WorkflowManager, WorkflowStepStatus,
+        DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS, DEFAULT_GOAL_ATTEMPT_MAX_TURNS,
+    };
     use serde_json::json;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
+
+    #[test]
+    fn stale_compaction_snapshot_can_reload_canonical_transcript() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.path().join("stale-compaction-reload.db");
+        let sessions = SessionManager::new(Database::new(&db_path)?);
+        let session_id = sessions.create_session("reload", Some("test-model"), None)?;
+        sessions.save_message(
+            &session_id,
+            "user",
+            r#"[{"type":"text","text":"latest durable direction"}]"#,
+        )?;
+        sessions.save_message(
+            &session_id,
+            "assistant",
+            r#"[{"type":"text","text":"durable response"}]"#,
+        )?;
+
+        let reloaded =
+            reload_persisted_conversation(&db_path, &session_id).map_err(anyhow::Error::msg)?;
+        assert_eq!(reloaded.len(), 2);
+        assert_eq!(reloaded[0].role, Role::User);
+        assert_eq!(reloaded[1].role, Role::Assistant);
+        assert!(is_stale_compaction_snapshot_error(&anyhow::anyhow!(
+            "Session transcript changed before compaction started; refusing a stale in-memory snapshot"
+        )));
+        assert!(!is_stale_compaction_snapshot_error(&anyhow::anyhow!(
+            "provider request failed"
+        )));
+        Ok(())
+    }
+
+    #[test]
+    fn active_goal_run_automatically_claims_next_ready_step() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.path().join("auto-attempt.db");
+        let sessions = SessionManager::new(Database::new(&db_path)?);
+        let session_id = sessions.create_session("auto attempt", Some("test-model"), None)?;
+        let manager = WorkflowManager::new(db_path.clone())?;
+        let created = manager.create_goal(
+            &session_id,
+            CreateGoalInput {
+                title: "Execute reliably".into(),
+                objective: "Claim the next step without prompt compliance".into(),
+                constraints: vec![],
+                criteria: vec![CriterionInput {
+                    description: "The ready step is claimed".into(),
+                    required: true,
+                }],
+                token_budget: None,
+            },
+            "create-auto-goal",
+            "user",
+        )?;
+        let goal_id = created.snapshot.goal.id.clone();
+        let proposed = manager.propose_plan(
+            &session_id,
+            &goal_id,
+            created.snapshot.aggregate_revision,
+            PlanProposalInput {
+                title: "Automatic execution".into(),
+                rationale: None,
+                source_message_id: None,
+                predecessor_id: None,
+                legacy_markdown: None,
+                steps: vec![StepProposalInput {
+                    display_key: "1.1".into(),
+                    description: "Implement the ready step".into(),
+                    context: None,
+                    parent_display_key: None,
+                    dependencies: vec![],
+                    acceptance_criteria: vec![],
+                    required: true,
+                }],
+            },
+            "propose-auto-plan",
+            "agent",
+        )?;
+        let plan_id = proposed
+            .snapshot
+            .plan_revision
+            .as_ref()
+            .expect("proposed plan")
+            .id
+            .clone();
+        let approved = manager.approve_plan(
+            &session_id,
+            &goal_id,
+            &plan_id,
+            proposed.snapshot.aggregate_revision,
+            "approve-auto-plan",
+            "user",
+        )?;
+        let active = manager.activate_goal(
+            &session_id,
+            &goal_id,
+            approved.snapshot.aggregate_revision,
+            "activate-auto-goal",
+            "user",
+        )?;
+        assert_eq!(active.snapshot.goal.status, GoalStatus::Active);
+
+        let mutation =
+            ensure_active_goal_attempt_for_run(&db_path, &session_id, PermissionMode::Autonomous)
+                .expect("active run should create an attempt");
+        assert_eq!(
+            mutation.snapshot.steps[0].status,
+            WorkflowStepStatus::InProgress
+        );
+        let attempt = mutation
+            .snapshot
+            .latest_attempt
+            .as_ref()
+            .expect("running attempt");
+        assert_eq!(attempt.status, AttemptStatus::Running);
+        assert_eq!(attempt.permission_mode, "autonomous");
+        assert_eq!(attempt.max_turns, DEFAULT_GOAL_ATTEMPT_MAX_TURNS);
+        assert_eq!(
+            attempt.max_research_actions,
+            DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS
+        );
+        let attempt_id = attempt.id.clone();
+        let step_id = mutation.snapshot.steps[0].id.clone();
+        let revision = mutation.snapshot.aggregate_revision;
+
+        assert!(
+            ensure_active_goal_attempt_for_run(&db_path, &session_id, PermissionMode::Autonomous,)
+                .is_none(),
+            "a running attempt must not be duplicated"
+        );
+
+        manager.complete_step(
+            &session_id,
+            &goal_id,
+            &step_id,
+            revision,
+            CompleteStepInput {
+                attempt_id,
+                outcome: "ready step completed".into(),
+                evidence: vec!["focused validation passed".into()],
+            },
+            "complete-auto-step",
+            "agent",
+        )?;
+        let tool_calls = vec![AiToolCall {
+            id: "complete-call".into(),
+            name: "task_complete".into(),
+            arguments: json!({
+                "task_id": step_id,
+                "result": "ready step completed",
+            }),
+        }];
+        let tool_results = vec![Content::ToolResult {
+            tool_use_id: "complete-call".into(),
+            output: json!({"ok": true}),
+            is_error: Some(false),
+        }];
+        assert!(
+            successful_task_completion_finished_plan(
+                &db_path,
+                &session_id,
+                &tool_calls,
+                &tool_results,
+            ),
+            "the final successful task completion must terminate the current run"
+        );
+        Ok(())
+    }
 
     #[test]
     fn durable_steering_promotes_once_after_the_completed_assistant_message() -> anyhow::Result<()>

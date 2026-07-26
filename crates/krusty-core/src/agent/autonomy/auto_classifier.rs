@@ -689,6 +689,8 @@ mod tests {
                 "task_complete",
                 "task_start",
                 "tool_search",
+                "workflow_propose",
+                "workflow_update",
             ]
         );
 

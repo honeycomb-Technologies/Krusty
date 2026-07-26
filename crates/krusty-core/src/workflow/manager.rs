@@ -1590,9 +1590,9 @@ impl WorkflowManager {
                   WHERE id = ?3 AND session_id = ?4",
                 params![to_i64(tokens_used)?, now(), goal.id, session_id],
             )?;
-            if !goal
+            if goal
                 .token_budget
-                .is_some_and(|token_budget| tokens_used >= token_budget)
+                .is_none_or(|token_budget| tokens_used < token_budget)
             {
                 return Ok(None);
             }

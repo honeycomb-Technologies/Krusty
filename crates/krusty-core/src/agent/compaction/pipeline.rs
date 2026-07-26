@@ -828,10 +828,12 @@ fn extract_paths_from_tag(previous_summary: &str, tag: &str) -> Vec<String> {
     let Some(start) = previous_summary.find(&open) else {
         return Vec::new();
     };
-    let Some(end) = previous_summary.find(&close) else {
+    let content_start = start + open.len();
+    let Some(relative_end) = previous_summary[content_start..].find(&close) else {
         return Vec::new();
     };
-    previous_summary[start + open.len()..end]
+    let end = content_start + relative_end;
+    previous_summary[content_start..end]
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
@@ -857,6 +859,23 @@ mod snapshot_tests {
                 )
                 .expect("save message");
         }
+    }
+
+    #[test]
+    fn path_tag_extraction_pairs_close_after_open() {
+        let summary = "</modified_files>\nquoted old content\n<modified_files>\nalpha.rs\nbeta.ts\n</modified_files>";
+
+        assert_eq!(
+            extract_paths_from_tag(summary, "modified_files"),
+            vec!["alpha.rs", "beta.ts"]
+        );
+    }
+
+    #[test]
+    fn path_tag_extraction_ignores_unmatched_prior_close() {
+        let summary = "</modified_files>\nquoted old content\n<modified_files>\nalpha.rs";
+
+        assert!(extract_paths_from_tag(summary, "modified_files").is_empty());
     }
 
     #[test]
