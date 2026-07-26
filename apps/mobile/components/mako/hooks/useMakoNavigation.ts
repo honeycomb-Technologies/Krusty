@@ -1,16 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import type { MakoRunSection, MakoTopLevelView } from "../types";
 
-export function useMakoNavigation(activeRunId?: string | null) {
+export function useMakoNavigation() {
   const [topLevel, setTopLevel] = useState<MakoTopLevelView>("mako");
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [runSection, setRunSection] = useState<MakoRunSection>("overview");
-
-  useEffect(() => {
-    if (activeRunId) {
-      setSelectedRunId(activeRunId);
-    }
-  }, [activeRunId]);
 
   const openRun = useCallback((runId: string) => {
     setSelectedRunId(runId);

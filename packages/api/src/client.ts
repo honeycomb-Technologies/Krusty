@@ -40,6 +40,10 @@ import type {
 	MakoDispatchOptions,
 	MakoDispatchResponse,
 	MakoMainResponse,
+	MakoGlobalSchedule,
+	MakoSchedule,
+	MakoScheduleMutationResponse,
+	MakoScheduleWriteRequest,
 	MakoBootstrapResponse,
 	MakoCrewDocumentKind,
 	MakoCrewResponse,
@@ -683,6 +687,91 @@ export class KrustyClient {
 	/** Same as getMakoMain — POST is accepted for ensure semantics. */
 	async ensureMakoMain(): Promise<MakoMainResponse> {
 		return this.request("/mako/main", { method: "POST" });
+	}
+
+	/**
+	 * User-scoped global schedule list for the Mako Schedule secondary surface.
+	 * Ordered by next fire time across all of the caller's controllers.
+	 */
+	async listMakoSchedules(options?: {
+		limit?: number;
+	}): Promise<MakoGlobalSchedule[]> {
+		const params: string[] = [];
+		if (options?.limit != null) {
+			params.push(`limit=${encodeURIComponent(String(options.limit))}`);
+		}
+		const q = params.length > 0 ? `?${params.join("&")}` : "";
+		return this.request(`/mako/schedules${q}`);
+	}
+
+	/** List schedules attached to a specific Mako controller session. */
+	async listMakoSessionSchedules(
+		sessionId: string,
+		options?: { limit?: number },
+	): Promise<MakoSchedule[]> {
+		const params: string[] = [];
+		if (options?.limit != null) {
+			params.push(`limit=${encodeURIComponent(String(options.limit))}`);
+		}
+		const q = params.length > 0 ? `?${params.join("&")}` : "";
+		return this.request(
+			`/mako/sessions/${encodeURIComponent(sessionId)}/schedules${q}`,
+		);
+	}
+
+	async createMakoSchedule(
+		sessionId: string,
+		request: MakoScheduleWriteRequest,
+		options?: { idempotencyKey?: string },
+	): Promise<MakoScheduleMutationResponse> {
+		const headers: Record<string, string> = {};
+		if (options?.idempotencyKey) {
+			headers["Idempotency-Key"] = options.idempotencyKey;
+		}
+		return this.request(
+			`/mako/sessions/${encodeURIComponent(sessionId)}/schedules`,
+			{
+				method: "POST",
+				headers,
+				body: JSON.stringify(request),
+			},
+		);
+	}
+
+	async pauseMakoSchedule(
+		sessionId: string,
+		scheduleId: string,
+		revision: number,
+		options?: { idempotencyKey?: string },
+	): Promise<MakoScheduleMutationResponse> {
+		const headers: Record<string, string> = {
+			"If-Match": `"${revision}"`,
+		};
+		if (options?.idempotencyKey) {
+			headers["Idempotency-Key"] = options.idempotencyKey;
+		}
+		return this.request(
+			`/mako/sessions/${encodeURIComponent(sessionId)}/schedules/${encodeURIComponent(scheduleId)}/pause`,
+			{ method: "POST", headers },
+		);
+	}
+
+	async resumeMakoSchedule(
+		sessionId: string,
+		scheduleId: string,
+		revision: number,
+		options?: { idempotencyKey?: string },
+	): Promise<MakoScheduleMutationResponse> {
+		const headers: Record<string, string> = {
+			"If-Match": `"${revision}"`,
+		};
+		if (options?.idempotencyKey) {
+			headers["Idempotency-Key"] = options.idempotencyKey;
+		}
+		return this.request(
+			`/mako/sessions/${encodeURIComponent(sessionId)}/schedules/${encodeURIComponent(scheduleId)}/resume`,
+			{ method: "POST", headers },
+		);
 	}
 
 	async getMakoCurrent(): Promise<MakoCurrentResponse> {

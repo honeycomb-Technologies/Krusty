@@ -109,6 +109,15 @@ pub struct MakoSchedule {
     pub updated_at: String,
 }
 
+/// A user-scoped schedule plus the owning Mako session required by mutation
+/// routes. The controller UUID alone is intentionally not a routing key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OwnedMakoSchedule {
+    #[serde(flatten)]
+    pub schedule: MakoSchedule,
+    pub controller_session_id: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MakoScheduleOccurrenceStatus {

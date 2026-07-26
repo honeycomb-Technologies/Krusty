@@ -12,7 +12,7 @@ use crate::storage::Database;
 
 use super::{
     MakoSchedule, MakoScheduleOccurrence, MakoScheduleOccurrenceStatus, MakoScheduleStatus,
-    OverlapPolicy,
+    OverlapPolicy, OwnedMakoSchedule,
 };
 
 const SCHEDULE_COLUMNS: &str = "id, controller_id, title, summary, objective, recurrence_kind, recurrence_json, timezone, gap_policy, fold_policy, next_fire_at, last_scheduled_for, status, priority, project_dir, model, model_key_json, model_catalog_revision, crew_slug, misfire_policy, misfire_grace_secs, catch_up_limit, overlap_policy, max_attempts, retry_base_secs, retry_max_secs, retry_jitter, revision, created_by, created_at, updated_at";
@@ -120,6 +120,43 @@ impl MakoScheduleStore {
             .query_map(params![controller_id, limit as i64], map_schedule)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("listing Mako schedules for controller")?;
+        Ok(rows)
+    }
+
+    /// List schedules owned by a user across all of their controllers.
+    ///
+    /// Ownership is resolved through `mako_controllers.user_id`. When
+    /// `user_id` is `None`, only controllers with a NULL owner are included
+    /// (local single-tenant mode).
+    pub fn list_for_user(
+        &self,
+        user_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<OwnedMakoSchedule>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let sql =
+            "SELECT s.id, s.controller_id, s.title, s.summary, s.objective, s.recurrence_kind, s.recurrence_json, s.timezone, s.gap_policy, s.fold_policy, s.next_fire_at, s.last_scheduled_for, s.status, s.priority, s.project_dir, s.model, s.model_key_json, s.model_catalog_revision, s.crew_slug, s.misfire_policy, s.misfire_grace_secs, s.catch_up_limit, s.overlap_policy, s.max_attempts, s.retry_base_secs, s.retry_max_secs, s.retry_jitter, s.revision, s.created_by, s.created_at, s.updated_at, c.session_id
+             FROM mako_schedules s
+             INNER JOIN mako_controllers c ON c.id = s.controller_id
+             WHERE ((?1 IS NULL AND c.user_id IS NULL) OR c.user_id = ?1)
+             ORDER BY
+               CASE WHEN s.next_fire_at IS NULL THEN 1 ELSE 0 END,
+               s.next_fire_at ASC,
+               s.created_at DESC,
+               s.id ASC
+             LIMIT ?2";
+        let mut statement = self.db.conn().prepare(sql)?;
+        let rows = statement
+            .query_map(params![user_id, limit as i64], |row| {
+                Ok(OwnedMakoSchedule {
+                    schedule: map_schedule(row)?,
+                    controller_session_id: row.get(31)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("listing Mako schedules for user")?;
         Ok(rows)
     }
 

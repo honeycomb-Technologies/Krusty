@@ -712,6 +712,119 @@ export interface MakoMainResponse {
 	agent_state: string;
 }
 
+export type MakoScheduleStatus =
+	| "enabled"
+	| "paused"
+	| "completed"
+	| "cancelled";
+
+export type MakoScheduleOverlapPolicy = "skip" | "queue_one" | "allow";
+
+export type MakoScheduleWeekday =
+	| "sunday"
+	| "monday"
+	| "tuesday"
+	| "wednesday"
+	| "thursday"
+	| "friday"
+	| "saturday";
+
+export type MakoMonthlyDayPolicy = "skip" | "last_day";
+
+/** Tagged recurrence payload matching server `RecurrenceV1`. */
+export type MakoRecurrenceV1 =
+	| { kind: "once"; at: string }
+	| { kind: "daily"; start_date: string; time: string }
+	| { kind: "weekdays"; start_date: string; time: string }
+	| {
+			kind: "weekly";
+			start_date: string;
+			time: string;
+			weekdays: MakoScheduleWeekday[];
+	  }
+	| {
+			kind: "monthly";
+			start_date: string;
+			time: string;
+			day: number;
+			invalid_day_policy: MakoMonthlyDayPolicy;
+	  };
+
+export interface MakoDstPolicy {
+	gap: "shift_forward" | "skip";
+	fold: "first" | "second";
+}
+
+export interface MakoMisfireConfig {
+	policy: "skip" | "fire_once" | "catch_up";
+	grace_secs: number;
+	catch_up_limit: number;
+}
+
+export interface MakoRetryPolicy {
+	max_attempts: number;
+	base_delay_secs: number;
+	max_delay_secs: number;
+	jitter: "none" | "full";
+}
+
+/** Durable schedule commitment for the Mako Schedule secondary surface. */
+export interface MakoSchedule {
+	id: string;
+	controller_id: string;
+	title: string;
+	summary: string;
+	objective: string;
+	recurrence: MakoRecurrenceV1;
+	timezone: string;
+	dst_policy: MakoDstPolicy;
+	next_fire_at?: string | null;
+	last_scheduled_for?: string | null;
+	status: MakoScheduleStatus;
+	priority: number;
+	project_dir?: string | null;
+	model?: string | null;
+	model_key?: ModelKey | null;
+	model_catalog_revision?: string | null;
+	crew_slug?: string | null;
+	misfire: MakoMisfireConfig;
+	overlap_policy: MakoScheduleOverlapPolicy;
+	retry: MakoRetryPolicy;
+	revision: number;
+	created_by: string;
+	created_at: string;
+	updated_at: string;
+}
+
+/** User-scoped schedule response with the owning session needed by mutations. */
+export interface MakoGlobalSchedule extends MakoSchedule {
+	controller_session_id: string;
+}
+
+/** Response envelope returned by create and status-mutation schedule routes. */
+export interface MakoScheduleMutationResponse {
+	schedule_id: string;
+	revision: number;
+	status: MakoScheduleStatus;
+}
+
+export interface MakoScheduleWriteRequest {
+	title: string;
+	summary?: string;
+	objective: string;
+	recurrence: MakoRecurrenceV1;
+	timezone: string;
+	dst_policy?: MakoDstPolicy;
+	priority?: number;
+	project_dir?: string | null;
+	model?: string | null;
+	model_key?: ModelKey | null;
+	crew_slug?: string | null;
+	misfire?: MakoMisfireConfig;
+	overlap_policy?: MakoScheduleOverlapPolicy;
+	retry?: MakoRetryPolicy;
+}
+
 export interface MakoDispatchOptions {
 	projectDir?: string;
 	/** Legacy model slug retained for older servers. */

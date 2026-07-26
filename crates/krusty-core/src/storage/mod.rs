@@ -98,7 +98,7 @@ pub use mako_runtime_state::{
 };
 pub use mako_schedules::{
     MakoSchedule, MakoScheduleOccurrence, MakoScheduleOccurrenceStatus, MakoScheduleStatus,
-    MakoScheduleStore, OverlapPolicy,
+    MakoScheduleStore, OverlapPolicy, OwnedMakoSchedule,
 };
 pub use memories::{
     is_compaction_flush_memory, AgentMemory, AgentMemoryRevision, CanonicalMemoryInput,

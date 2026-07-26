@@ -189,7 +189,7 @@ impl SessionManager {
         let mut sessions = self.list_sessions_for_user_by_type(None, user_id, SessionType::Mako)?;
         // Prefer the oldest matching companion candidate so repeated opens stay
         // pinned to one relationship thread even if later job sessions exist.
-        sessions.sort_by(|left, right| left.updated_at.cmp(&right.updated_at));
+        sessions.sort_by_key(|session| session.updated_at);
 
         let companion = sessions.into_iter().find(|session| {
             session.parent_session_id.is_none()

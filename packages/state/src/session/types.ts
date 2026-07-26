@@ -178,6 +178,11 @@ export interface SessionStoreState {
     sendOptions?: SendMessageOptions,
   ) => Promise<void>;
   loadSession: (sessionId: string, isRefresh?: boolean) => Promise<void>;
+  /**
+   * Ensure and load the durable per-user Mako companion session.
+   * Does not create a new job/run session — resolves GET/POST /mako/main.
+   */
+  ensureMakoMainSession: () => Promise<string | null>;
   clearSession: () => void;
   initSession: (
     sessionId: string,

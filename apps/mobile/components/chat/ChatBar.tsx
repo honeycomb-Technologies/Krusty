@@ -71,6 +71,7 @@ interface ChatBarProps {
   sessionType?: SessionType;
   tokenCount?: number;
   onOverlayOpenChange?: (open: boolean) => void;
+  minimalControls?: boolean;
   /**
    * Desktop: shared chat content band width. Composer + FABs size against this
    * (or measured root width) instead of the full window, so toolbox / resize
@@ -480,7 +481,7 @@ export function ChatBar(props: ChatBarProps) {
     fastModeEnabled, fastModeSupported, onFastModeToggle,
     mode, onModeToggle, onModelSelect, model, models,
     sessionType, tokenCount, onOverlayOpenChange,
-    contentMaxWidth,
+    contentMaxWidth, minimalControls = false,
   } = props;
 
   const { theme } = useThemeContext();
@@ -543,7 +544,8 @@ export function ChatBar(props: ChatBarProps) {
     clearModelCloseTimer();
   }, []);
 
-  const bottomOverlayOpen = accordionVisible || modelPickerOpen || attachPickerOpen;
+  const bottomOverlayOpen =
+    !minimalControls && (accordionVisible || modelPickerOpen || attachPickerOpen);
 
   useEffect(() => {
     onOverlayOpenChange?.(bottomOverlayOpen);
@@ -607,6 +609,7 @@ export function ChatBar(props: ChatBarProps) {
   const t = theme.colors;
   const isDark = theme.scheme === 'dark';
   const isMako = sessionType === 'mako';
+  const showComposerChrome = minimalControls !== true;
   // Match FAB glass so the composer isn't a flat grey strip against the shell.
   const borderColor = t.glass.border;
   const bgOverlay = isDark
@@ -962,11 +965,15 @@ export function ChatBar(props: ChatBarProps) {
     INPUT_LINE_HEIGHT,
     Math.min(inputContentHeight || INPUT_LINE_HEIGHT, INPUT_COLLAPSED_MAX_HEIGHT),
   );
-  const metaReserveHeight = META_ROW_HEIGHT + GAUGE_TOP_GAP;
+  const metaReserveHeight = showComposerChrome
+    ? META_ROW_HEIGHT + GAUGE_TOP_GAP
+    : 0;
   // Distance from root bottom to the top of the input/crab row.
   const inputRowBottom = bottomOffset + metaReserveHeight;
   // Accordion sits just above the crab FAB.
-  const controlsLayerBottom = inputRowBottom + PILL + GAP;
+  const controlsLayerBottom = showComposerChrome
+    ? inputRowBottom + PILL + GAP
+    : inputRowBottom;
   // Space above the input row where the model list may sit.
   const overlayBottom = inputRowBottom + composerBarHeight + GAP;
   const runLineBottom = Math.max(0, bottomOffset - RUN_LINE_HEIGHT - RUN_LINE_META_GAP);
@@ -986,7 +993,7 @@ export function ChatBar(props: ChatBarProps) {
   // Chat and Mako share a five-control stack. Code adds Build/Plan as the
   // sixth control. Derive picker geometry from the surface profile rather than
   // keeping a six-row offset that overlaps the provider filters on shorter FABs.
-  const hasWorkMode = sessionType === 'code';
+  const hasWorkMode = !showComposerChrome ? false : sessionType === 'code';
   const accordionPillCount = hasWorkMode ? 6 : 5;
   const pillsBelowBot = accordionPillCount - 1;
   const surfaceModelPopoverMaxHeight = Math.max(
@@ -1216,31 +1223,32 @@ export function ChatBar(props: ChatBarProps) {
           </View>
         </View>
 
-        {/* Crab FAB only — accordion lives at root so filter dock is not clipped */}
-        <View style={styles.kCol}>
-          <Pressable
-            onPress={toggleAccordion}
-            style={[
-              styles.kWrap,
-              {
-                borderColor: kBorder,
-                borderRadius: RADIUS,
-                backgroundColor: kActive ? t.thinking + '14' : undefined,
-              },
-            ]}
-          >
-            <BlurView intensity={composerBlur} tint={pillTint} style={StyleSheet.absoluteFill} />
-            <View style={[StyleSheet.absoluteFill, { backgroundColor: bgOverlay }]} />
-            <View style={styles.kInner}>
-              <CrabIcon size={26} color={kColor} />
-            </View>
-          </Pressable>
-        </View>
+        {showComposerChrome ? (
+          <View style={styles.kCol}>
+            <Pressable
+              onPress={toggleAccordion}
+              style={[
+                styles.kWrap,
+                {
+                  borderColor: kBorder,
+                  borderRadius: RADIUS,
+                  backgroundColor: kActive ? t.thinking + '14' : undefined,
+                },
+              ]}
+            >
+              <BlurView intensity={composerBlur} tint={pillTint} style={StyleSheet.absoluteFill} />
+              <View style={[StyleSheet.absoluteFill, { backgroundColor: bgOverlay }]} />
+              <View style={styles.kInner}>
+                <CrabIcon size={26} color={kColor} />
+              </View>
+            </Pressable>
+          </View>
+        ) : null}
       </View>
 
       {/* Accordion FABs + provider filters: positioned on the root, NOT inside the
           56px crab column (WebKit clips overflow from that narrow column). */}
-      {accordionVisible ? (
+      {showComposerChrome && accordionVisible ? (
         <View
           pointerEvents="box-none"
           style={[
@@ -1290,7 +1298,7 @@ export function ChatBar(props: ChatBarProps) {
       ) : null}
 
       {/* Model popover — under the filter row, same width + right edge */}
-      {modelPickerOpen && modelPopoverHeight > 0 && (
+      {showComposerChrome && modelPickerOpen && modelPopoverHeight > 0 && (
         <View
           style={
             isDesktop && modelPopoverWidth != null
@@ -1381,40 +1389,42 @@ export function ChatBar(props: ChatBarProps) {
       )}
 
       {/* Composer status row — sits in safe area zone below input */}
-      <View pointerEvents="none" style={styles.metaRow}>
-        <View style={styles.metaLeft}>
-          {gaugeTokens > 0 && (
-            <View style={styles.gaugeRing}>
-              <Svg width={GAUGE_SIZE} height={GAUGE_SIZE}>
-                <Circle cx={GAUGE_SIZE / 2} cy={GAUGE_SIZE / 2} r={gaugeRadius} stroke="rgba(255,255,255,0.06)" strokeWidth={gaugeStroke} fill="none" />
-                <Circle cx={GAUGE_SIZE / 2} cy={GAUGE_SIZE / 2} r={gaugeRadius} stroke={gaugeColor} strokeWidth={gaugeStroke} fill="none"
-                  strokeDasharray={`${gaugeCircumference}`} strokeDashoffset={gaugeOffset} strokeLinecap="round"
-                  rotation={-90} origin={`${GAUGE_SIZE / 2}, ${GAUGE_SIZE / 2}`}
-                />
-              </Svg>
-              <Text style={[styles.gaugeLabel, { color: t.mutedForeground }]}>
-                {gaugeTokens >= 1000 ? `${(gaugeTokens / 1000).toFixed(0)}k` : gaugeTokens}
+      {showComposerChrome ? (
+        <View pointerEvents="none" style={styles.metaRow}>
+          <View style={styles.metaLeft}>
+            {gaugeTokens > 0 && (
+              <View style={styles.gaugeRing}>
+                <Svg width={GAUGE_SIZE} height={GAUGE_SIZE}>
+                  <Circle cx={GAUGE_SIZE / 2} cy={GAUGE_SIZE / 2} r={gaugeRadius} stroke="rgba(255,255,255,0.06)" strokeWidth={gaugeStroke} fill="none" />
+                  <Circle cx={GAUGE_SIZE / 2} cy={GAUGE_SIZE / 2} r={gaugeRadius} stroke={gaugeColor} strokeWidth={gaugeStroke} fill="none"
+                    strokeDasharray={`${gaugeCircumference}`} strokeDashoffset={gaugeOffset} strokeLinecap="round"
+                    rotation={-90} origin={`${GAUGE_SIZE / 2}, ${GAUGE_SIZE / 2}`}
+                  />
+                </Svg>
+                <Text style={[styles.gaugeLabel, { color: t.mutedForeground }]}>
+                  {gaugeTokens >= 1000 ? `${(gaugeTokens / 1000).toFixed(0)}k` : gaugeTokens}
+                </Text>
+              </View>
+            )}
+            {sessionType === 'code' && (
+              <Text style={[styles.metaMode, { color: t.thinking }]} numberOfLines={1}>
+                {mode === 'plan' ? 'Plan' : 'Build'}
               </Text>
-            </View>
-          )}
-          {sessionType === 'code' && (
-            <Text style={[styles.metaMode, { color: t.thinking }]} numberOfLines={1}>
-              {mode === 'plan' ? 'Plan' : 'Build'}
+            )}
+          </View>
+          <View style={styles.metaRight}>
+            <Text style={[styles.metaModel, { color: t.mutedForeground }]} numberOfLines={1}>
+              {currentModelLabel}
             </Text>
-          )}
+            <Text style={[styles.metaDivider, { color: t.mutedForeground }]} numberOfLines={1}>
+              |
+            </Text>
+            <Text style={[styles.metaThinking, { color: t.mutedForeground }]} numberOfLines={1}>
+              {thinkingLabel}
+            </Text>
+          </View>
         </View>
-        <View style={styles.metaRight}>
-          <Text style={[styles.metaModel, { color: t.mutedForeground }]} numberOfLines={1}>
-            {currentModelLabel}
-          </Text>
-          <Text style={[styles.metaDivider, { color: t.mutedForeground }]} numberOfLines={1}>
-            |
-          </Text>
-          <Text style={[styles.metaThinking, { color: t.mutedForeground }]} numberOfLines={1}>
-            {thinkingLabel}
-          </Text>
-        </View>
-      </View>
+      ) : null}
       <RunningGradientLine
         active={isStreaming}
         width={bandWidth}

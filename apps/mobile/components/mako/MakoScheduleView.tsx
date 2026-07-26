@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Modal,
   Pressable,
@@ -13,7 +13,7 @@ import {
 import * as Haptics from "../../platform/haptics";
 import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";
-import type { MakoCurrentRunSummary } from "@krusty/api";
+import type { MakoCurrentRunSummary, MakoGlobalSchedule } from "@krusty/api";
 import type { MakoCurrentState } from "./types";
 import {
   formatScheduleInputValue,
@@ -77,6 +77,34 @@ function timeValue(value: string): string {
 
 function timeLabel(value: string): string {
   return new Date(value).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function recurrenceLabel(schedule: MakoGlobalSchedule): string {
+  const recurrence = schedule.recurrence;
+  switch (recurrence.kind) {
+    case "once":
+      return "One time";
+    case "daily":
+      return `Daily at ${recurrence.time}`;
+    case "weekdays":
+      return `Weekdays at ${recurrence.time}`;
+    case "weekly":
+      return `${recurrence.weekdays.join(", ")} at ${recurrence.time}`;
+    case "monthly":
+      return `Monthly on day ${recurrence.day} at ${recurrence.time}`;
+  }
+}
+
+function nextFireLabel(schedule: MakoGlobalSchedule): string {
+  if (!schedule.next_fire_at) {
+    return schedule.status === "paused" ? "Paused" : "No next wake";
+  }
+  return new Date(schedule.next_fire_at).toLocaleString([], {
+    month: "short",
+    day: "numeric",
     hour: "numeric",
     minute: "2-digit",
   });
@@ -611,6 +639,65 @@ export function MakoScheduleView({
   const [detailWakeInput, setDetailWakeInput] = useState("");
   const [detailError, setDetailError] = useState<string | null>(null);
   const [isSavingDetail, setIsSavingDetail] = useState(false);
+  const [commitments, setCommitments] = useState<MakoGlobalSchedule[]>([]);
+  const [commitmentsError, setCommitmentsError] = useState<string | null>(null);
+  const [isLoadingCommitments, setIsLoadingCommitments] = useState(true);
+  const [mutatingScheduleId, setMutatingScheduleId] = useState<string | null>(null);
+
+  const refreshCommitments = useCallback(async () => {
+    if (!client) {
+      setCommitments([]);
+      setIsLoadingCommitments(false);
+      return;
+    }
+    setCommitmentsError(null);
+    try {
+      setCommitments(await client.listMakoSchedules({ limit: 200 }));
+    } catch (error) {
+      setCommitmentsError(
+        error instanceof Error ? error.message : "Failed to load Mako schedules.",
+      );
+    } finally {
+      setIsLoadingCommitments(false);
+    }
+  }, [client]);
+
+  useEffect(() => {
+    void refreshCommitments();
+  }, [refreshCommitments]);
+
+  const handleScheduleStatusToggle = useCallback(
+    async (schedule: MakoGlobalSchedule) => {
+      if (!client || !["enabled", "paused"].includes(schedule.status)) {
+        return;
+      }
+      setMutatingScheduleId(schedule.id);
+      setCommitmentsError(null);
+      try {
+        if (schedule.status === "enabled") {
+          await client.pauseMakoSchedule(
+            schedule.controller_session_id,
+            schedule.id,
+            schedule.revision,
+          );
+        } else {
+          await client.resumeMakoSchedule(
+            schedule.controller_session_id,
+            schedule.id,
+            schedule.revision,
+          );
+        }
+        await refreshCommitments();
+      } catch (error) {
+        setCommitmentsError(
+          error instanceof Error ? error.message : "Failed to update this schedule.",
+        );
+      } finally {
+        setMutatingScheduleId(null);
+      }
+    },
+    [client, refreshCommitments],
+  );
 
   useEffect(() => {
     if (!detailTarget) {
@@ -651,7 +738,10 @@ export function MakoScheduleView({
   );
 
   const selectedDayCount = selectedItems.length;
-  const nextWake = scheduledItems[0]?.wakeAt ?? null;
+  const nextWake =
+    commitments.find(
+      (schedule) => schedule.status === "enabled" && schedule.next_fire_at,
+    )?.next_fire_at ?? null;
 
   const openItemDetail = (item: ScheduledRunItem, dayCount = 1) => {
     const patternDays = seriesDayMap.get(item.seriesKey) ?? [item.scheduledAt.getDay()];
@@ -729,18 +819,107 @@ export function MakoScheduleView({
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
-            refreshing={state.isRefreshing}
+            refreshing={state.isRefreshing || isLoadingCommitments}
             onRefresh={() => {
-              void state.refresh();
+              void Promise.all([state.refresh(), refreshCommitments()]);
             }}
             tintColor={t.userMessage}
           />
         }
       >
         <Text style={[styles.description, { color: t.mutedForeground }]}>
-          Schedule keeps future work visible. Use the month to place it, the day list to scan it, and week lanes to understand the shape of the plan.
+          What Mako is committed to, when it will wake, and whether each
+          commitment is active.
         </Text>
 
+        <View
+          style={[
+            styles.sectionBlock,
+            { borderColor: t.border, backgroundColor: t.card },
+          ]}
+        >
+          <View style={styles.agendaHeader}>
+            <View>
+              <Text style={[styles.agendaTitle, { color: t.foreground }]}>
+                What&apos;s set
+              </Text>
+              <Text style={[styles.agendaSubtitle, { color: t.mutedForeground }]}>
+                Durable one-time and recurring commitments
+              </Text>
+            </View>
+          </View>
+
+          {commitmentsError ? (
+            <Text style={[styles.errorText, { color: t.error }]}>
+              {commitmentsError}
+            </Text>
+          ) : null}
+
+          {isLoadingCommitments && commitments.length === 0 ? (
+            <Text style={[styles.empty, { color: t.mutedForeground }]}>
+              Loading commitments...
+            </Text>
+          ) : commitments.length === 0 ? (
+            <Text style={[styles.empty, { color: t.mutedForeground }]}>
+              Nothing is scheduled yet.
+            </Text>
+          ) : (
+            <View style={styles.agendaList}>
+              {commitments.map((schedule) => (
+                <View
+                  key={schedule.id}
+                  style={[styles.row, { borderColor: t.border }]}
+                >
+                  <View style={styles.rowCopy}>
+                    <Text
+                      style={[styles.rowTitle, { color: t.foreground }]}
+                      numberOfLines={1}
+                    >
+                      {schedule.title}
+                    </Text>
+                    <Text
+                      style={[styles.rowDetail, { color: t.mutedForeground }]}
+                      numberOfLines={2}
+                    >
+                      {schedule.summary || schedule.objective}
+                    </Text>
+                    <View style={styles.metaRow}>
+                      <Text style={[styles.rowMeta, { color: t.mutedForeground }]}>
+                        {recurrenceLabel(schedule)}
+                      </Text>
+                      <Text style={[styles.rowMeta, { color: t.mutedForeground }]}>
+                        {nextFireLabel(schedule)}
+                      </Text>
+                      <Text style={[styles.rowMeta, { color: t.mutedForeground }]}>
+                        {schedule.status}
+                      </Text>
+                    </View>
+                  </View>
+                  {schedule.status === "enabled" || schedule.status === "paused" ? (
+                    <Pressable
+                      disabled={mutatingScheduleId === schedule.id}
+                      onPress={() => {
+                        void handleScheduleStatusToggle(schedule);
+                      }}
+                    >
+                      <Text style={[styles.rowAction, { color: t.userMessage }]}>
+                        {mutatingScheduleId === schedule.id
+                          ? "Saving..."
+                          : schedule.status === "enabled"
+                            ? "Pause"
+                            : "Resume"}
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              ))}
+            </View>
+          )}
+        </View>
+
+        <Text style={[styles.agendaSubtitle, { color: t.mutedForeground }]}>
+          Run wake timeline
+        </Text>
         <ScheduleModeToggle mode={mode} onChange={setMode} />
 
         <View
@@ -756,7 +935,7 @@ export function MakoScheduleView({
               Upcoming
             </Text>
             <Text style={[styles.summaryValue, { color: t.foreground }]}>
-              {scheduledItems.length}
+              {commitments.length}
             </Text>
           </View>
           <View style={[styles.summaryCell, styles.summaryDivider, { borderColor: t.border }]}>

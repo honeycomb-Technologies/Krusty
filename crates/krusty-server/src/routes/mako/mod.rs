@@ -61,6 +61,7 @@ pub fn router() -> Router<AppState> {
             post(learning::reject_candidate),
         )
         .route("/daemon/recover", post(sessions::recover_daemon))
+        .route("/schedules", get(control_plane::list_global_schedules))
         .route("/sessions", get(sessions::list_sessions))
         .route("/sessions/:id/status", get(sessions::session_status))
         .route(

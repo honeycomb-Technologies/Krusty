@@ -160,7 +160,30 @@ export function useSessionActions({
     ],
   );
 
+  /**
+   * Ensure the durable per-user Mako companion is the active session.
+   * Used when opening the Mako tab and before any Mako composer send.
+   */
+  const ensureMakoCompanionSession = useCallback(async (): Promise<string | null> => {
+    if (!client) {
+      return null;
+    }
+    return sessionStore.getState().ensureMakoMainSession();
+  }, [client, sessionStore]);
+
   const ensureSessionForSend = useCallback(async (): Promise<ResolvedSendIntent | null> => {
+    // Mako always sends on the durable main companion — never ad-hoc createSession.
+    if (activeTab === 2 || sessionTypeForTab(activeTab) === "mako") {
+      const mainId = await ensureMakoCompanionSession();
+      if (!mainId) {
+        return null;
+      }
+      return {
+        shouldPrecreate: false,
+        sendOptions: { sessionType: "mako" },
+      };
+    }
+
     const currentSessionId = sessionStore.getState().sessionId;
     const wsState = workspace.getState();
     const intent = resolveSendIntent({
@@ -194,7 +217,14 @@ export function useSessionActions({
     } catch {
       return null;
     }
-  }, [activeTab, bootstrapSession, client, sessionStore, workspace]);
+  }, [
+    activeTab,
+    bootstrapSession,
+    client,
+    ensureMakoCompanionSession,
+    sessionStore,
+    workspace,
+  ]);
 
   const loadSession = useCallback(
     async (session: SessionResponse) => {
@@ -270,8 +300,21 @@ export function useSessionActions({
   );
 
   const handleNewSession = useCallback(async (sessionType?: SessionType) => {
+    // Mako has one durable companion — never create a fresh peer chat from "new".
+    if (sessionType === "mako" || (sessionType == null && activeTab === 2)) {
+      await ensureMakoCompanionSession();
+      setActiveTab(2);
+      setDrawerOpen(false);
+      return;
+    }
     await createSessionForCurrentTab(undefined, undefined, sessionType);
-  }, [createSessionForCurrentTab]);
+  }, [
+    activeTab,
+    createSessionForCurrentTab,
+    ensureMakoCompanionSession,
+    setActiveTab,
+    setDrawerOpen,
+  ]);
 
   const handleDirectorySelected = useCallback(
     async (path: string) => {
@@ -418,6 +461,12 @@ export function useSessionActions({
     (index: number) => {
       setActiveTab(index);
 
+      // Mako tab: always bind to the durable main companion (not last Code/Chat).
+      if (index === 2) {
+        void ensureMakoCompanionSession();
+        return;
+      }
+
       const currentSessionId = sessionStore.getState().sessionId;
       if (!currentSessionId) {
         return;
@@ -434,7 +483,13 @@ export function useSessionActions({
         sessionStore.getState().clearSession();
       }
     },
-    [sessionStore, sessions, setActiveTab, stopCurrentStream],
+    [
+      ensureMakoCompanionSession,
+      sessionStore,
+      sessions,
+      setActiveTab,
+      stopCurrentStream,
+    ],
   );
 
   return {
@@ -442,6 +497,7 @@ export function useSessionActions({
     loadSession,
     loadSessionById,
     openProjectInCode,
+    ensureMakoCompanionSession,
     handleNewSession,
     handleDirectorySelected,
     handleDeleteSession,

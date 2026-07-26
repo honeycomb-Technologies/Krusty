@@ -176,6 +176,7 @@ export function createSessionStore(
     SessionStoreState,
     | "sendMessage"
     | "loadSession"
+    | "ensureMakoMainSession"
     | "clearSession"
     | "initSession"
     | "setTitle"
@@ -629,6 +630,46 @@ export function createSessionStore(
         if (!keepStatePolling) {
           get().stopStatePolling();
         }
+      }
+    },
+
+    // -- ensureMakoMainSession ----------------------------------------------
+
+    async ensureMakoMainSession() {
+      try {
+        const main = await client.ensureMakoMain();
+        const mainId = main.session_id?.trim();
+        if (!mainId) {
+          set({
+            error: "Mako companion session is unavailable.",
+            isLoading: false,
+          });
+          return null;
+        }
+
+        if (get().sessionId === mainId && get().sessionType === "mako") {
+          // Already on companion — soft refresh without interrupting a stream.
+          if (!get().isStreaming) {
+            await get().loadSession(mainId, true);
+          }
+          return mainId;
+        }
+
+        if (get().isStreaming) {
+          get().stopStreaming();
+        }
+        await get().loadSession(mainId);
+        // Guarantee sessionType is mako even if list metadata lags.
+        if (get().sessionId === mainId && get().sessionType !== "mako") {
+          set({ sessionType: "mako" });
+        }
+        return mainId;
+      } catch (err) {
+        set({
+          isLoading: false,
+          error: toErrorMessage(err, "Failed to open Mako companion"),
+        });
+        return null;
       }
     },
 
