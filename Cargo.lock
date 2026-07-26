@@ -3195,7 +3195,7 @@ dependencies = [
 
 [[package]]
 name = "krusty"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3269,7 +3269,7 @@ dependencies = [
 
 [[package]]
 name = "krusty-client"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3284,7 +3284,7 @@ dependencies = [
 
 [[package]]
 name = "krusty-client-state"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "krusty-client",
  "serde",
@@ -3293,7 +3293,7 @@ dependencies = [
 
 [[package]]
 name = "krusty-core"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -3399,7 +3399,7 @@ dependencies = [
 
 [[package]]
 name = "krusty-server"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "anyhow",
  "axum",
