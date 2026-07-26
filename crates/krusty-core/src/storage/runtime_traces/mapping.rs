@@ -26,6 +26,7 @@ pub(super) fn loop_event_type(event: &LoopEvent) -> &'static str {
         LoopEvent::ServerToolError { .. } => "server_tool_error",
         LoopEvent::ModeChange { .. } => "mode_change",
         LoopEvent::PlanUpdate { .. } => "plan_update",
+        LoopEvent::WorkflowUpdated { .. } => "workflow_updated",
         LoopEvent::PlanComplete { .. } => "plan_complete",
         LoopEvent::AgentSleeping { .. } => "agent_sleeping",
         LoopEvent::TurnComplete { .. } => "turn_complete",
@@ -125,6 +126,15 @@ pub(super) fn summarize_loop_event(event: &LoopEvent) -> Value {
         LoopEvent::PlanUpdate { tasks } => json!({
             "task_count": tasks.len(),
             "completed_count": tasks.iter().filter(|task| task.completed).count(),
+        }),
+        LoopEvent::WorkflowUpdated {
+            goal_id,
+            aggregate_revision,
+            operation_id,
+        } => json!({
+            "goal_id": goal_id,
+            "aggregate_revision": aggregate_revision,
+            "operation_id": operation_id,
         }),
         LoopEvent::PlanComplete {
             tool_call_id,

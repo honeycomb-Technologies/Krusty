@@ -154,6 +154,58 @@ fn test_list_sessions_for_user_by_type_filters_surface() {
 }
 
 #[test]
+fn test_ensure_mako_main_session_is_singleton_autonomous_and_global() {
+    use crate::tools::registry::PermissionMode;
+
+    let (db, _temp) = create_test_db();
+    let user = "mako-user";
+    create_test_user(&db, user);
+    let manager = SessionManager::new(db);
+
+    let first = manager
+        .ensure_mako_main_session(Some(user))
+        .expect("main companion should create");
+    let second = manager
+        .ensure_mako_main_session(Some(user))
+        .expect("main companion should reuse");
+
+    assert_eq!(first.id, second.id);
+    assert_eq!(first.title, "Mako");
+    assert_eq!(first.session_type, SessionType::Mako);
+    assert_eq!(first.permission_mode, PermissionMode::Autonomous);
+    assert!(first.project_dir.is_none());
+    assert!(matches!(first.workspace_mode, WorkspaceMode::Neutral));
+    assert!(first.parent_session_id.is_none());
+
+    // Project-bound Mako job sessions must not replace the companion thread.
+    let _job = manager
+        .create_session_for_user_with_config_and_permission(
+            "Market scan job",
+            None,
+            Some("/tmp/markets"),
+            Some("/tmp/markets"),
+            WorkspaceMode::Selected,
+            Some(user),
+            None,
+            SessionType::Mako,
+            PermissionMode::Autonomous,
+        )
+        .expect("job session should create");
+
+    let still = manager
+        .ensure_mako_main_session(Some(user))
+        .expect("companion should remain stable");
+    assert_eq!(still.id, first.id);
+
+    // Other users get an isolated companion thread.
+    create_test_user(manager.db(), "other-user");
+    let other = manager
+        .ensure_mako_main_session(Some("other-user"))
+        .expect("other user companion should create");
+    assert_ne!(other.id, first.id);
+}
+
+#[test]
 fn test_list_active_session_details_for_user_filters_ownership() {
     let (db, _temp) = create_test_db();
     let manager = SessionManager::new(db);

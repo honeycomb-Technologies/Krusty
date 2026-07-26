@@ -123,7 +123,10 @@ fn compact_artifact_field(input: &mut Value, field: &str, label: &str) -> bool {
 
 fn compact_large_strings(value: &mut Value) -> bool {
     match value {
-        Value::String(text) if text.len() > MAX_COMPLETED_TOOL_INPUT_CHARS => {
+        Value::String(text)
+            if text.len() > MAX_COMPLETED_TOOL_INPUT_CHARS
+                && !text.contains("[completed tool input truncated from ") =>
+        {
             let original_chars = text.chars().count();
             *text = format!(
                 "{}\n\n[completed tool input truncated from {original_chars} chars]",
@@ -319,6 +322,37 @@ mod tests {
         assert!(compact_content.len() < 150);
         assert!(compact_content.contains("completed write content omitted"));
         assert_eq!(input["file_path"], "site/index.html");
+    }
+
+    #[test]
+    fn microcompact_large_tool_input_is_idempotent() {
+        let messages = vec![
+            ModelMessage {
+                role: Role::Assistant,
+                content: vec![Content::ToolUse {
+                    id: "tool-1".to_string(),
+                    name: "apply_patch".to_string(),
+                    input: json!({"patch": "x".repeat(MAX_COMPLETED_TOOL_INPUT_CHARS + 2_000)}),
+                }],
+            },
+            ModelMessage {
+                role: Role::User,
+                content: vec![Content::ToolResult {
+                    tool_use_id: "tool-1".to_string(),
+                    output: json!({"summary": "applied patch"}),
+                    is_error: None,
+                }],
+            },
+        ];
+
+        let once = microcompact_messages(&messages);
+        assert!(once.changed);
+        let twice = microcompact_messages(&once.messages);
+        assert!(!twice.tool_inputs_rewritten);
+        assert_eq!(
+            serde_json::to_value(&once.messages).expect("serialize once"),
+            serde_json::to_value(&twice.messages).expect("serialize twice")
+        );
     }
 
     #[test]

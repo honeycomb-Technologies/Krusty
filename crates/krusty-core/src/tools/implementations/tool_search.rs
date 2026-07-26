@@ -24,6 +24,8 @@ const NON_DEFERRED_TOOLS: &[&str] = &[
     "task_complete",
     "task_start",
     "tool_search",
+    "workflow_propose",
+    "workflow_update",
 ];
 
 pub struct ToolSearchTool;

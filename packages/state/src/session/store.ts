@@ -176,11 +176,13 @@ export function createSessionStore(
     SessionStoreState,
     | "sendMessage"
     | "loadSession"
+    | "ensureMakoMainSession"
     | "clearSession"
     | "initSession"
     | "setTitle"
     | "updateTitle"
     | "setMode"
+    | "executeWorkflowCommand"
     | "setModel"
     | "setThinkingLevel"
     | "toggleThinking"
@@ -631,10 +633,53 @@ export function createSessionStore(
       }
     },
 
+    // -- ensureMakoMainSession ----------------------------------------------
+
+    async ensureMakoMainSession() {
+      try {
+        const main = await client.ensureMakoMain();
+        const mainId = main.session_id?.trim();
+        if (!mainId) {
+          set({
+            error: "Mako companion session is unavailable.",
+            isLoading: false,
+          });
+          return null;
+        }
+
+        if (get().sessionId === mainId && get().sessionType === "mako") {
+          // Already on companion — soft refresh without interrupting a stream.
+          if (!get().isStreaming) {
+            await get().loadSession(mainId, true);
+          }
+          return mainId;
+        }
+
+        if (get().isStreaming) {
+          get().stopStreaming();
+        }
+        await get().loadSession(mainId);
+        // Guarantee sessionType is mako even if list metadata lags.
+        if (get().sessionId === mainId && get().sessionType !== "mako") {
+          set({ sessionType: "mako" });
+        }
+        return mainId;
+      } catch (err) {
+        set({
+          isLoading: false,
+          error: toErrorMessage(err, "Failed to open Mako companion"),
+        });
+        return null;
+      }
+    },
+
     // -- loadSession --------------------------------------------------------
 
     async loadSession(sessionId: string, isRefresh = false) {
       const previousSessionId = get().sessionId;
+      if (previousSessionId !== sessionId) {
+        planStore.getState().setWorkflow(null);
+      }
       set({ isLoading: true });
 
       try {
@@ -790,6 +835,7 @@ export function createSessionStore(
         fastModeEnabled: current.fastModeEnabled,
       });
       workspace.getState().clear();
+      planStore.getState().setWorkflow(null);
     },
 
     // -- initSession --------------------------------------------------------
@@ -822,6 +868,7 @@ export function createSessionStore(
         sessionType: sessionType ?? null,
         title: normalizeDisplayTitle(title),
       });
+      planStore.getState().setWorkflow(null);
       get().startPresenceHeartbeat(sessionId);
     },
 
@@ -850,6 +897,19 @@ export function createSessionStore(
       set({ mode });
       planStore.getState().setVisible(mode === "plan");
       void persistMode(get, mode);
+    },
+
+    async executeWorkflowCommand(command) {
+      const sessionId = get().sessionId;
+      if (!sessionId) {
+        throw new Error("No active session");
+      }
+      const mutation = await client.executeWorkflowCommand(sessionId, command);
+      planStore.getState().setWorkflow(mutation.snapshot);
+      if (mutation.snapshot.goal.status === "active") {
+        set({ mode: "build" });
+      }
+      return mutation;
     },
 
     // -- setModel -----------------------------------------------------------

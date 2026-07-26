@@ -1,6 +1,6 @@
 [package]
 name = "krusty-server"
-version = "0.9.9"
+version = "0.9.10"
 edition = "2021"
 description = "Self-hosted Krusty API server library"
 

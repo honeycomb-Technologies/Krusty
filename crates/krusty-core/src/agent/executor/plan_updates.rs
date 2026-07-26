@@ -3,6 +3,7 @@ use std::path::Path;
 use tokio::sync::mpsc;
 
 use crate::plan::{PlanFile, PlanManager};
+use crate::workflow::{WorkflowManager, WorkflowStep, WorkflowStepStatus};
 
 use super::super::loop_events::{LoopEvent, PlanTaskInfo};
 
@@ -16,6 +17,20 @@ pub(super) fn emit_plan_update(
 }
 
 fn load_plan_update_tasks(session_id: &str, db_path: &Path) -> Vec<PlanTaskInfo> {
+    match WorkflowManager::new(db_path.to_path_buf())
+        .and_then(|manager| manager.get_snapshot(session_id))
+    {
+        Ok(Some(snapshot)) => return workflow_task_infos(&snapshot.steps),
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "Failed to load canonical workflow while emitting plan update; falling back to legacy plan"
+            );
+        }
+    }
+
     match PlanManager::new(db_path.to_path_buf()).and_then(|pm| pm.get_plan(session_id)) {
         Ok(Some(plan)) => plan_task_infos(&plan),
         Ok(None) => Vec::new(),
@@ -28,6 +43,19 @@ fn load_plan_update_tasks(session_id: &str, db_path: &Path) -> Vec<PlanTaskInfo>
             Vec::new()
         }
     }
+}
+
+fn workflow_task_infos(steps: &[WorkflowStep]) -> Vec<PlanTaskInfo> {
+    steps
+        .iter()
+        .map(|step| PlanTaskInfo {
+            description: step.description.clone(),
+            completed: matches!(
+                step.status,
+                WorkflowStepStatus::Completed | WorkflowStepStatus::Skipped
+            ),
+        })
+        .collect()
 }
 
 fn plan_task_infos(plan: &PlanFile) -> Vec<PlanTaskInfo> {
@@ -50,6 +78,7 @@ mod tests {
     use crate::agent::loop_events::LoopEvent;
     use crate::plan::{PlanFile, PlanManager, TaskStatus};
     use crate::storage::SessionManager;
+    use crate::workflow::{CreateGoalInput, CriterionInput, WorkflowManager};
     use crate::Database;
 
     fn create_test_db() -> (std::path::PathBuf, TempDir) {
@@ -99,6 +128,56 @@ mod tests {
         let tasks = load_plan_update_tasks("session-1", &missing_db_path);
 
         assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn load_plan_update_tasks_prefers_canonical_workflow_over_stale_legacy_plan() {
+        let (db_path, _temp_dir) = create_test_db();
+        let session_manager =
+            SessionManager::new(Database::new(&db_path).expect("database should open"));
+        let session_id = session_manager
+            .create_session("Executor Test", None, Some("/tmp"))
+            .expect("session should be created");
+
+        let mut plan = PlanFile::new("Executor Plan");
+        plan.add_phase("Phase 1")
+            .add_task("Canonical workflow task");
+        let plan_manager = PlanManager::new(db_path.clone()).expect("plan manager");
+        plan_manager
+            .save_plan_for_session(&session_id, &plan)
+            .expect("plan should save");
+        WorkflowManager::new(db_path.clone())
+            .expect("workflow manager")
+            .import_legacy_plan(
+                &session_id,
+                CreateGoalInput {
+                    title: "Canonical goal".to_string(),
+                    objective: "Prove workflow projection wins".to_string(),
+                    constraints: Vec::new(),
+                    criteria: vec![CriterionInput {
+                        description: "Canonical state is projected".to_string(),
+                        required: true,
+                    }],
+                    token_budget: None,
+                },
+                "import-plan-update-test",
+                "user",
+            )
+            .expect("legacy import");
+
+        plan.phases[0].tasks[0].completed = true;
+        plan.phases[0].tasks[0].status = TaskStatus::Completed;
+        plan_manager
+            .save_plan_for_session(&session_id, &plan)
+            .expect("stale legacy plan should update independently");
+
+        let tasks = load_plan_update_tasks(&session_id, &db_path);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].description, "Canonical workflow task");
+        assert!(
+            !tasks[0].completed,
+            "compatibility events must project canonical workflow state"
+        );
     }
 
     #[test]

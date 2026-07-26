@@ -20,7 +20,6 @@
 
 mod message_builder;
 mod persistence;
-mod plan_flow;
 mod recovery;
 mod title;
 mod tool_surface;
@@ -47,6 +46,12 @@ use crate::tools::registry::{agent_call_requests_write, effective_tool_call};
 use crate::tools::registry::{
     trusted_changed, FileObservationTracker, PermissionMode, ToolRegistry,
 };
+use crate::workflow::{
+    AttemptProgressInput, AttemptStatus, GoalStatus, StartAttemptInput, WorkflowManager,
+    WorkflowMutation, WorkflowStepStatus, DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS,
+    DEFAULT_GOAL_ATTEMPT_MAX_TOOL_CALLS, DEFAULT_GOAL_ATTEMPT_MAX_TURNS,
+    DEFAULT_GOAL_ATTEMPT_MAX_WALL_TIME_SECS,
+};
 
 use super::compaction::{
     effective_context_window_for_runtime, is_context_overflow_error,
@@ -69,7 +74,6 @@ use self::persistence::{
     clear_recovery_state, persist_context_state, persist_recovery_state,
     persist_required_recovery_state, save_message, set_agent_state, update_token_count,
 };
-use self::plan_flow::{handle_plan_detection, PlanDetectionOutcome};
 use self::recovery::{
     build_awaiting_input_recovery_state, build_partial_assistant_state, build_recovery_state,
     continuation_recovery_message,
@@ -119,6 +123,257 @@ fn terminal_agent_state_after_interruption(stop_reason: &LoopStopReason) -> &'st
         LoopStopReason::ProviderError | LoopStopReason::PinchFailed => "error",
         _ => "idle",
     }
+}
+
+fn active_goal_for_run(db_path: &Path, session_id: &str) -> bool {
+    WorkflowManager::new(db_path.to_path_buf())
+        .and_then(|manager| manager.get_snapshot(session_id))
+        .map(|snapshot| snapshot.is_some_and(|snapshot| snapshot.goal.status == GoalStatus::Active))
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                session_id,
+                %error,
+                "Failed to resolve durable Goal before agent run"
+            );
+            false
+        })
+}
+
+/// Claim the next dependency-ready step when an explicitly active Goal enters
+/// the orchestrator. Lifecycle correctness must not depend on the model
+/// remembering to call `task_start`; a duplicate model call remains a no-op.
+fn ensure_active_goal_attempt_for_run(
+    db_path: &Path,
+    session_id: &str,
+    permission_mode: PermissionMode,
+) -> Option<WorkflowMutation> {
+    let manager = WorkflowManager::new(db_path.to_path_buf()).ok()?;
+    let snapshot = manager.get_snapshot(session_id).ok()??;
+    if snapshot.goal.status != GoalStatus::Active
+        || snapshot
+            .latest_attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.status == AttemptStatus::Running)
+    {
+        return None;
+    }
+
+    let status_by_id = snapshot
+        .steps
+        .iter()
+        .map(|step| (step.id.as_str(), step.status))
+        .collect::<HashMap<_, _>>();
+    let step = snapshot.steps.iter().find(|step| {
+        step.status == WorkflowStepStatus::Pending
+            && snapshot
+                .dependencies
+                .iter()
+                .filter(|dependency| dependency.step_id == step.id)
+                .all(|dependency| {
+                    status_by_id
+                        .get(dependency.depends_on_step_id.as_str())
+                        .is_some_and(|status| {
+                            matches!(
+                                status,
+                                WorkflowStepStatus::Completed | WorkflowStepStatus::Skipped
+                            )
+                        })
+                })
+    })?;
+
+    manager
+        .start_attempt(
+            session_id,
+            &snapshot.goal.id,
+            snapshot.aggregate_revision,
+            StartAttemptInput {
+                step_id: Some(step.id.clone()),
+                permission_mode: permission_mode.as_str().to_string(),
+                max_turns: DEFAULT_GOAL_ATTEMPT_MAX_TURNS,
+                max_tool_calls: DEFAULT_GOAL_ATTEMPT_MAX_TOOL_CALLS,
+                max_wall_time_secs: DEFAULT_GOAL_ATTEMPT_MAX_WALL_TIME_SECS,
+                max_research_actions: DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS,
+            },
+            &format!("runtime-auto-attempt-{}", uuid::Uuid::new_v4()),
+            "runtime",
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                session_id,
+                %error,
+                "Failed to automatically claim the next active Goal step"
+            );
+            error
+        })
+        .ok()
+}
+
+fn pause_active_goal_for_stop(db_path: &Path, session_id: &str, reason: &str) {
+    let Ok(manager) = WorkflowManager::new(db_path.to_path_buf()) else {
+        return;
+    };
+    let Ok(Some(snapshot)) = manager.get_snapshot(session_id) else {
+        return;
+    };
+    if snapshot.goal.status != GoalStatus::Active {
+        return;
+    }
+    if let Err(error) = manager.pause_goal(
+        session_id,
+        &snapshot.goal.id,
+        snapshot.aggregate_revision,
+        Some(reason),
+        &format!("runtime-pause-{}", uuid::Uuid::new_v4()),
+        "runtime",
+    ) {
+        tracing::warn!(session_id, %error, "Failed to pause Goal at runtime stop boundary");
+    }
+}
+
+fn block_active_goal_for_stop(db_path: &Path, session_id: &str, reason: &str) {
+    let Ok(manager) = WorkflowManager::new(db_path.to_path_buf()) else {
+        return;
+    };
+    let Ok(Some(snapshot)) = manager.get_snapshot(session_id) else {
+        return;
+    };
+    if snapshot.goal.status != GoalStatus::Active {
+        return;
+    }
+    if let Err(error) = manager.block_goal(
+        session_id,
+        &snapshot.goal.id,
+        snapshot.aggregate_revision,
+        reason,
+        &format!("runtime-block-{}", uuid::Uuid::new_v4()),
+        "runtime",
+    ) {
+        tracing::warn!(session_id, %error, "Failed to block Goal at runtime stop boundary");
+    }
+}
+
+fn finish_active_attempt_for_stop(db_path: &Path, session_id: &str, reason: &str) {
+    let Ok(manager) = WorkflowManager::new(db_path.to_path_buf()) else {
+        return;
+    };
+    let Ok(Some(snapshot)) = manager.get_snapshot(session_id) else {
+        return;
+    };
+    if snapshot.goal.status != GoalStatus::Active {
+        return;
+    }
+    let Some(attempt) = snapshot
+        .latest_attempt
+        .as_ref()
+        .filter(|attempt| attempt.status == AttemptStatus::Running)
+    else {
+        return;
+    };
+    if let Err(error) = manager.finish_attempt(
+        session_id,
+        &snapshot.goal.id,
+        &attempt.id,
+        snapshot.aggregate_revision,
+        AttemptStatus::Paused,
+        reason,
+        &format!("runtime-attempt-stop-{}", uuid::Uuid::new_v4()),
+        "runtime",
+    ) {
+        tracing::warn!(session_id, %error, "Failed to checkpoint Goal attempt at run completion");
+    }
+}
+
+fn record_active_attempt_progress(
+    db_path: &Path,
+    session_id: &str,
+    turn_count: usize,
+    tool_call_count: usize,
+    research_action_count: usize,
+    material_progress: bool,
+    blocker_fingerprint: Option<String>,
+) -> Option<(GoalStatus, Option<String>)> {
+    let manager = WorkflowManager::new(db_path.to_path_buf()).ok()?;
+    let snapshot = manager.get_snapshot(session_id).ok()??;
+    if snapshot.goal.status != GoalStatus::Active {
+        return None;
+    }
+    let attempt = snapshot
+        .latest_attempt
+        .as_ref()
+        .filter(|attempt| attempt.status == AttemptStatus::Running)?;
+    let mutation = manager
+        .record_attempt_progress(
+            session_id,
+            &snapshot.goal.id,
+            &attempt.id,
+            snapshot.aggregate_revision,
+            AttemptProgressInput {
+                turn_count: turn_count.min(u32::MAX as usize) as u32,
+                tool_call_count: tool_call_count.min(u32::MAX as usize) as u32,
+                research_action_count: research_action_count.min(u32::MAX as usize) as u32,
+                material_progress,
+                blocker_fingerprint,
+            },
+            &format!("runtime-progress-{}", uuid::Uuid::new_v4()),
+            "runtime",
+        )
+        .map_err(|error| {
+            tracing::warn!(session_id, %error, "Failed to persist Goal attempt progress");
+            error
+        })
+        .ok()?;
+    (mutation.snapshot.goal.status != GoalStatus::Active).then_some({
+        (
+            mutation.snapshot.goal.status,
+            mutation.snapshot.goal.status_reason,
+        )
+    })
+}
+
+fn record_active_goal_tokens(
+    db_path: &Path,
+    session_id: &str,
+    token_delta: usize,
+) -> Option<(GoalStatus, Option<String>)> {
+    let manager = WorkflowManager::new(db_path.to_path_buf()).ok()?;
+    let mutation = manager
+        .record_token_usage(session_id, token_delta.min(u64::MAX as usize) as u64)
+        .map_err(|error| {
+            tracing::warn!(session_id, %error, "Failed to account durable Goal token usage");
+            error
+        })
+        .ok()??;
+    Some((
+        mutation.snapshot.goal.status,
+        mutation.snapshot.goal.status_reason,
+    ))
+}
+
+fn is_research_action(call: &AiToolCall) -> bool {
+    matches!(
+        call.name.as_str(),
+        "read" | "glob" | "grep" | "list" | "web_search" | "web_fetch"
+    ) || (call.name == "agent"
+        && matches!(
+            call.arguments
+                .get("profile")
+                .or_else(|| call.arguments.get("agent_type"))
+                .and_then(serde_json::Value::as_str),
+            Some("explore" | "plan" | "verify")
+        ))
+}
+
+fn tool_batch_made_material_progress(tool_results: &[Content]) -> bool {
+    tool_results.iter().any(|result| {
+        matches!(
+            result,
+            Content::ToolResult {
+                output,
+                is_error,
+                ..
+            } if !is_error.unwrap_or(false) && trusted_changed(output) == Some(true)
+        )
+    })
 }
 
 fn fail_required_recovery_persistence(
@@ -400,7 +655,12 @@ impl AgenticOrchestrator {
         let project_settings =
             ProjectSettings::load(project_dir.as_deref().unwrap_or(&working_dir));
 
-        let run_budget = RunBudgetResolution::resolve(run_budget, project_settings.run_limits);
+        let active_goal_at_start = active_goal_for_run(&db_path, &session_id);
+        let run_budget = if active_goal_at_start {
+            RunBudgetResolution::resolve_goal_attempt(run_budget, project_settings.run_limits)
+        } else {
+            RunBudgetResolution::resolve(run_budget, project_settings.run_limits)
+        };
 
         let permission_mode = resolve_project_permission_mode(permission_mode, &project_settings);
         let mut options = options;
@@ -435,6 +695,8 @@ impl AgenticOrchestrator {
         let mut loop_guard = LoopGuard::new();
         let mut title_generated = !generate_title;
         let mut iteration = 0usize;
+        let mut goal_tool_call_count = 0usize;
+        let mut goal_research_action_count = 0usize;
         let model_context_window = effective_context_window_for_runtime(
             ai_client.config().uses_chatgpt_codex_format(),
             ai_client.resolved_model().capabilities.context_window,
@@ -451,6 +713,7 @@ impl AgenticOrchestrator {
         let mut empty_completion_recovery_pending = false;
         let mut provider_tool_activity_seen = false;
         let mut overflow_compact_retry_attempted = false;
+        let mut stale_compaction_reload_attempted = false;
         let mut mutation_needs_validation = false;
         let mut last_microcompact_history_message_count = conversation.len();
         let mut microcompaction_generation = 0usize;
@@ -477,6 +740,15 @@ impl AgenticOrchestrator {
             max_turns: run_budget.budget.max_turns,
             source: run_budget.source,
         });
+        if let Some(mutation) =
+            ensure_active_goal_attempt_for_run(&db_path, &session_id, permission_mode)
+        {
+            let _ = event_tx.send(LoopEvent::WorkflowUpdated {
+                goal_id: mutation.snapshot.goal.id,
+                aggregate_revision: mutation.snapshot.aggregate_revision,
+                operation_id: mutation.operation_id,
+            });
+        }
 
         loop {
             input_inbox.collect_ready();
@@ -503,7 +775,9 @@ impl AgenticOrchestrator {
                 empty_completion_recovery_pending = false;
                 provider_tool_activity_seen = false;
                 overflow_compact_retry_attempted = false;
-                loop_guard.reset_for_steering();
+                if !active_goal_at_start {
+                    loop_guard.reset_for_steering();
+                }
             }
 
             if run_budget.budget.is_exhausted(iteration) {
@@ -516,6 +790,7 @@ impl AgenticOrchestrator {
                 if last_token_count > 0 {
                     update_token_count(&db_path, &session_id, last_token_count);
                 }
+                pause_active_goal_for_stop(&db_path, &session_id, "turn_budget_exhausted");
                 clear_recovery_state(&db_path, &session_id);
                 set_agent_state(&db_path, &session_id, "idle");
                 let _ = event_tx.send(LoopEvent::Finished {
@@ -660,12 +935,44 @@ impl AgenticOrchestrator {
                         continue;
                     }
                     Err(error) => {
+                        if !stale_compaction_reload_attempted
+                            && is_stale_compaction_snapshot_error(&error)
+                        {
+                            match reload_persisted_conversation(&db_path, &session_id) {
+                                Ok(reloaded) if !reloaded.is_empty() => {
+                                    tracing::warn!(
+                                        session_id = %session_id,
+                                        message_count = reloaded.len(),
+                                        %error,
+                                        "Reloaded canonical transcript after compaction snapshot race"
+                                    );
+                                    conversation = reloaded;
+                                    context_ledger.update_from_conversation(&conversation);
+                                    persist_context_state(&db_path, &session_id, &context_ledger);
+                                    last_usage_prompt_tokens = None;
+                                    messages_at_last_usage = conversation.len();
+                                    last_microcompact_history_message_count = conversation.len();
+                                    stale_compaction_reload_attempted = true;
+                                    continue;
+                                }
+                                Ok(_) => {}
+                                Err(reload_error) => {
+                                    tracing::warn!(
+                                        session_id = %session_id,
+                                        %reload_error,
+                                        "Failed to reload canonical transcript after compaction snapshot race"
+                                    );
+                                }
+                            }
+                        }
                         let _ = event_tx.send(LoopEvent::Error {
                             error: format!("Automatic compaction failed: {}", error),
                         });
                         if last_token_count > 0 {
                             update_token_count(&db_path, &session_id, last_token_count);
                         }
+                        finish_active_attempt_for_stop(&db_path, &session_id, "pinch_failed");
+                        pause_active_goal_for_stop(&db_path, &session_id, "pinch_failed");
                         clear_recovery_state(&db_path, &session_id);
                         set_agent_state(&db_path, &session_id, "error");
                         let _ = event_tx.send(LoopEvent::Finished {
@@ -925,13 +1232,17 @@ impl AgenticOrchestrator {
                 messages_at_last_usage = conversation.len();
             }
             provider_tool_activity_seen |= result.had_server_tool_activity;
+            let goal_token_stop =
+                record_active_goal_tokens(&db_path, &session_id, result.total_tokens);
 
-            if should_retry_empty_stream_interruption(
-                result.stop_reason.as_ref(),
-                result.last_error.as_deref(),
-                result.produced_output,
-                empty_stream_retry_attempted,
-            ) {
+            if goal_token_stop.is_none()
+                && should_retry_empty_stream_interruption(
+                    result.stop_reason.as_ref(),
+                    result.last_error.as_deref(),
+                    result.produced_output,
+                    empty_stream_retry_attempted,
+                )
+            {
                 empty_stream_retry_attempted = true;
                 tracing::warn!(
                     session_id = %session_id,
@@ -1140,7 +1451,9 @@ impl AgenticOrchestrator {
                     empty_completion_recovery_pending = false;
                     provider_tool_activity_seen = false;
                     overflow_compact_retry_attempted = false;
-                    loop_guard.reset_for_steering();
+                    if !active_goal_at_start {
+                        loop_guard.reset_for_steering();
+                    }
                     clear_recovery_state(&db_path, &session_id);
                     set_agent_state(&db_path, &session_id, "streaming");
                     let _ = event_tx.send(LoopEvent::TurnComplete {
@@ -1152,137 +1465,8 @@ impl AgenticOrchestrator {
                 }
             }
 
-            // Supervised planning retains the explicit confirmation boundary.
-            // Autonomous planning promotes a detected plan to Build mode at the
-            // same canonical boundary. Detect before tool execution in that mode
-            // so a provider that returns a plan and its first write together does
-            // not bounce against the read-only PlanModeHook first.
-            let should_detect_plan = should_detect_plan_transition(
-                work_mode,
-                permission_mode,
-                !result.tool_calls.is_empty(),
-            );
-            if should_detect_plan {
-                if let Some(outcome) = handle_plan_detection(
-                    &result.text,
-                    &session_id,
-                    &working_dir,
-                    &db_path,
-                    permission_mode,
-                    &event_tx,
-                ) {
-                    match outcome {
-                        PlanDetectionOutcome::AwaitingConfirmation(pending_interaction) => {
-                            // The server's tool-result handler manages supervised confirmation.
-                            if last_token_count > 0 {
-                                update_token_count(&db_path, &session_id, last_token_count);
-                            }
-                            let plan_confirmation = match &pending_interaction {
-                                PendingInteractionSnapshot::PlanConfirm {
-                                    tool_call_id,
-                                    title,
-                                    task_count,
-                                    ..
-                                } => Some((tool_call_id.clone(), title.clone(), *task_count)),
-                                _ => None,
-                            };
-                            let recovery = build_awaiting_input_recovery_state(
-                                build_partial_assistant_state(&result.recovery_checkpoint),
-                                vec![pending_interaction],
-                                permission_mode,
-                                execution_tool_allowlist.as_ref(),
-                            );
-                            if let Err(error) =
-                                persist_required_recovery_state(&db_path, &session_id, &recovery)
-                            {
-                                fail_required_recovery_persistence(
-                                    &db_path,
-                                    &session_id,
-                                    &event_tx,
-                                    &error,
-                                );
-                                return;
-                            }
-
-                            if let Some((tool_call_id, title, task_count)) = plan_confirmation {
-                                let _ = event_tx.send(LoopEvent::PlanComplete {
-                                    tool_call_id: tool_call_id.clone(),
-                                    title,
-                                    task_count,
-                                });
-                                let _ = event_tx.send(LoopEvent::AwaitingInput {
-                                    tool_call_id,
-                                    tool_name: "PlanConfirm".to_string(),
-                                });
-                            }
-                            set_agent_state(&db_path, &session_id, "awaiting_input");
-                            let _ = event_tx.send(LoopEvent::Finished {
-                                session_id: session_id.clone(),
-                                stop_reason: LoopStopReason::AwaitingInput,
-                            });
-                            return;
-                        }
-                        PlanDetectionOutcome::ContinueInBuildMode => {
-                            work_mode = WorkMode::Build;
-                            mode_tool_surface.refresh(
-                                &mut options,
-                                &mut advertised_tool_names,
-                                ai_client.as_ref(),
-                                permission_mode,
-                                work_mode,
-                                has_active_plan(&db_path, &session_id),
-                                project_settings
-                                    .disabled_tools
-                                    .as_deref()
-                                    .unwrap_or_default(),
-                                execution_tool_allowlist.as_ref(),
-                            );
-                            if result.tool_calls.is_empty() {
-                                if last_token_count > 0 {
-                                    update_token_count(&db_path, &session_id, last_token_count);
-                                }
-                                clear_recovery_state(&db_path, &session_id);
-                                set_agent_state(&db_path, &session_id, "streaming");
-                                let _ = event_tx.send(LoopEvent::TurnComplete {
-                                    turn: iteration,
-                                    has_more: true,
-                                });
-                                continue;
-                            }
-                        }
-                        PlanDetectionOutcome::Failed(error) => {
-                            tracing::error!(
-                                session_id = %session_id,
-                                %error,
-                                "Plan lifecycle transition failed"
-                            );
-                            if last_token_count > 0 {
-                                update_token_count(&db_path, &session_id, last_token_count);
-                            }
-                            persist_recovery_state(
-                                &db_path,
-                                &session_id,
-                                &build_recovery_state(
-                                    &context_ledger,
-                                    RecoveryStatus::Interrupted,
-                                    Some(LoopStopReason::ProviderError),
-                                    Some(error.clone()),
-                                    build_partial_assistant_state(&result.recovery_checkpoint),
-                                ),
-                            );
-                            set_agent_state(&db_path, &session_id, "error");
-                            let _ = event_tx.send(LoopEvent::Error { error });
-                            let _ = event_tx.send(LoopEvent::Finished {
-                                session_id: session_id.clone(),
-                                stop_reason: LoopStopReason::ProviderError,
-                            });
-                            return;
-                        }
-                    }
-                }
-            }
-
-            // No tool calls and no plan transition → finish turn.
+            // No tool calls means this turn is complete. Assistant prose cannot
+            // create, approve, or activate workflow state.
             if result.tool_calls.is_empty() {
                 let _ = event_tx.send(LoopEvent::TurnComplete {
                     turn: iteration,
@@ -1291,11 +1475,30 @@ impl AgenticOrchestrator {
                 if last_token_count > 0 {
                     update_token_count(&db_path, &session_id, last_token_count);
                 }
+                finish_active_attempt_for_stop(
+                    &db_path,
+                    &session_id,
+                    "model_completion_before_goal_verification",
+                );
                 clear_recovery_state(&db_path, &session_id);
                 set_agent_state(&db_path, &session_id, "idle");
+                if let Some((_, reason)) = &goal_token_stop {
+                    let _ = event_tx.send(LoopEvent::Error {
+                        error: format!(
+                            "Goal attempt stopped: {}",
+                            reason
+                                .clone()
+                                .unwrap_or_else(|| "token_budget_exhausted".to_string())
+                        ),
+                    });
+                }
                 let _ = event_tx.send(LoopEvent::Finished {
                     session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::Completed,
+                    stop_reason: if goal_token_stop.is_some() {
+                        LoopStopReason::BudgetExhausted
+                    } else {
+                        LoopStopReason::Completed
+                    },
                 });
                 return;
             }
@@ -1503,6 +1706,14 @@ impl AgenticOrchestrator {
                 execution_tool_allowlist.as_ref(),
             );
             let tool_results = tool_batch.results;
+            goal_tool_call_count = goal_tool_call_count.saturating_add(result.tool_calls.len());
+            goal_research_action_count = goal_research_action_count.saturating_add(
+                result
+                    .tool_calls
+                    .iter()
+                    .filter(|call| is_research_action(call))
+                    .count(),
+            );
 
             if tool_batch.cancelled {
                 let tool_msg = ModelMessage {
@@ -1533,6 +1744,22 @@ impl AgenticOrchestrator {
                 .as_ref()
                 .and_then(|telemetry| telemetry.replan_instruction())
                 .map(ToString::to_string);
+            let blocker_fingerprint = fail_diagnostic
+                .as_ref()
+                .or(explore_diagnostic.as_ref())
+                .or(progress_diagnostic.as_ref())
+                .cloned();
+            let goal_runtime_stop = goal_token_stop.or_else(|| {
+                record_active_attempt_progress(
+                    &db_path,
+                    &session_id,
+                    iteration,
+                    goal_tool_call_count,
+                    goal_research_action_count,
+                    tool_batch_made_material_progress(&tool_results),
+                    blocker_fingerprint,
+                )
+            });
             if let Some(telemetry) = progress_telemetry {
                 if telemetry.triggered {
                     tracing::warn!(
@@ -1591,6 +1818,59 @@ impl AgenticOrchestrator {
             save_message(&db_path, &session_id, &tool_msg);
             clear_recovery_state(&db_path, &session_id);
 
+            if successful_task_completion_finished_plan(
+                &db_path,
+                &session_id,
+                &result.tool_calls,
+                &tool_msg.content,
+            ) {
+                let completion = "All approved plan steps are complete. The Goal remains active until its required verification criteria are passed.";
+                let _ = event_tx.send(LoopEvent::TextDelta {
+                    delta: completion.to_string(),
+                });
+                let assistant_msg = ModelMessage {
+                    role: Role::Assistant,
+                    content: vec![Content::Text {
+                        text: completion.to_string(),
+                    }],
+                };
+                conversation.push(assistant_msg.clone());
+                context_ledger.update_from_conversation(&conversation);
+                persist_context_state(&db_path, &session_id, &context_ledger);
+                save_message(&db_path, &session_id, &assistant_msg);
+                set_agent_state(&db_path, &session_id, "idle");
+                let _ = event_tx.send(LoopEvent::TurnComplete {
+                    turn: iteration,
+                    has_more: false,
+                });
+                let _ = event_tx.send(LoopEvent::Finished {
+                    session_id: session_id.clone(),
+                    stop_reason: LoopStopReason::Completed,
+                });
+                return;
+            }
+
+            if let Some((status, reason)) = goal_runtime_stop {
+                let reason = reason.unwrap_or_else(|| "goal_attempt_stopped".to_string());
+                let _ = event_tx.send(LoopEvent::Error {
+                    error: format!("Goal attempt stopped: {reason}"),
+                });
+                set_agent_state(&db_path, &session_id, "idle");
+                let _ = event_tx.send(LoopEvent::TurnComplete {
+                    turn: iteration,
+                    has_more: false,
+                });
+                let _ = event_tx.send(LoopEvent::Finished {
+                    session_id: session_id.clone(),
+                    stop_reason: if status == GoalStatus::Blocked {
+                        LoopStopReason::LoopGuardTriggered
+                    } else {
+                        LoopStopReason::BudgetExhausted
+                    },
+                });
+                return;
+            }
+
             input_inbox.collect_ready();
             if input_inbox.take_cancel() {
                 set_agent_state(&db_path, &session_id, "idle");
@@ -1613,7 +1893,9 @@ impl AgenticOrchestrator {
                 empty_completion_recovery_pending = false;
                 provider_tool_activity_seen = false;
                 overflow_compact_retry_attempted = false;
-                loop_guard.reset_for_steering();
+                if !active_goal_at_start {
+                    loop_guard.reset_for_steering();
+                }
                 set_agent_state(&db_path, &session_id, "streaming");
                 let _ = event_tx.send(LoopEvent::TurnComplete {
                     turn: iteration,
@@ -1658,6 +1940,11 @@ impl AgenticOrchestrator {
                     turn: iteration,
                     has_more: false,
                 });
+                finish_active_attempt_for_stop(
+                    &db_path,
+                    &session_id,
+                    "validation_converged_before_goal_verification",
+                );
                 let _ = event_tx.send(LoopEvent::Finished {
                     session_id: session_id.clone(),
                     stop_reason: LoopStopReason::Completed,
@@ -1676,6 +1963,7 @@ impl AgenticOrchestrator {
                     diagnostic = %diagnostic,
                     "Fail-fast: stopping repeated tool failure loop"
                 );
+                block_active_goal_for_stop(&db_path, &session_id, "semantic_no_progress");
                 clear_recovery_state(&db_path, &session_id);
                 set_agent_state(&db_path, &session_id, "idle");
                 let _ = event_tx.send(LoopEvent::Error { error: diagnostic });
@@ -1683,6 +1971,11 @@ impl AgenticOrchestrator {
                     turn: iteration,
                     has_more: false,
                 });
+                finish_active_attempt_for_stop(
+                    &db_path,
+                    &session_id,
+                    "exploration_completed_before_goal_verification",
+                );
                 let _ = event_tx.send(LoopEvent::Finished {
                     session_id: session_id.clone(),
                     stop_reason: LoopStopReason::LoopGuardTriggered,
@@ -1748,15 +2041,6 @@ struct InjectedSteering {
 
 fn no_tool_completion_should_continue(steering: &[InjectedSteering]) -> bool {
     !steering.is_empty()
-}
-
-fn should_detect_plan_transition(
-    work_mode: WorkMode,
-    permission_mode: PermissionMode,
-    has_tool_calls: bool,
-) -> bool {
-    work_mode == WorkMode::Plan
-        && (!has_tool_calls || permission_mode == PermissionMode::Autonomous)
 }
 
 fn emit_steering_events(
@@ -1854,6 +2138,36 @@ fn inject_pending_steering(
     injected
 }
 
+fn is_stale_compaction_snapshot_error(error: &anyhow::Error) -> bool {
+    error
+        .to_string()
+        .starts_with("Session transcript changed before compaction started")
+}
+
+fn reload_persisted_conversation(
+    db_path: &Path,
+    session_id: &str,
+) -> Result<Vec<ModelMessage>, String> {
+    let manager = Database::new(db_path)
+        .map(SessionManager::new)
+        .map_err(|error| format!("open transcript database: {error}"))?;
+    manager
+        .load_session_messages(session_id)
+        .map_err(|error| format!("load transcript: {error}"))?
+        .into_iter()
+        .map(|(role, content_json)| {
+            let role = match role.as_str() {
+                "user" => Role::User,
+                "assistant" => Role::Assistant,
+                value => return Err(format!("unsupported persisted role {value:?}")),
+            };
+            let content = serde_json::from_str(&content_json)
+                .map_err(|error| format!("parse persisted {role:?} message: {error}"))?;
+            Ok(ModelMessage { role, content })
+        })
+        .collect()
+}
+
 fn update_validation_state(
     mutation_needs_validation: &mut bool,
     tool_calls: &[crate::ai::types::AiToolCall],
@@ -1888,6 +2202,47 @@ fn update_validation_state(
     }
 
     !was_pending && *mutation_needs_validation
+}
+
+fn successful_task_completion_finished_plan(
+    db_path: &Path,
+    session_id: &str,
+    tool_calls: &[AiToolCall],
+    tool_results: &[Content],
+) -> bool {
+    let successful_ids = tool_results
+        .iter()
+        .filter_map(|result| match result {
+            Content::ToolResult {
+                tool_use_id,
+                is_error,
+                ..
+            } if !is_error.unwrap_or(false) => Some(tool_use_id.as_str()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    if !tool_calls
+        .iter()
+        .any(|call| call.name == "task_complete" && successful_ids.contains(call.id.as_str()))
+    {
+        return false;
+    }
+
+    let snapshot = WorkflowManager::new(db_path.to_path_buf())
+        .and_then(|manager| manager.get_snapshot(session_id))
+        .ok()
+        .flatten();
+    snapshot.is_some_and(|snapshot| {
+        snapshot.goal.status == GoalStatus::Active
+            && snapshot.plan_revision.is_some()
+            && !snapshot.steps.is_empty()
+            && snapshot.steps.iter().all(|step| {
+                matches!(
+                    step.status,
+                    WorkflowStepStatus::Completed | WorkflowStepStatus::Skipped
+                )
+            })
+    })
 }
 
 const VALIDATION_REMINDER: &str = "Files changed successfully. Before finishing, run the narrowest relevant test, build, lint, typecheck, or `git diff --check`. If no executable validation applies, say why explicitly instead of implying it ran.";
@@ -1996,28 +2351,204 @@ mod tests {
 
     use super::effective_context_window_for_runtime;
     use super::empty_completion_action;
+    use super::ensure_active_goal_attempt_for_run;
     use super::inject_pending_steering;
     use super::inject_runtime_context;
     use super::message_builder::finalize_explore_only_turn;
     use super::no_tool_completion_should_continue;
     use super::remove_validation_reminders;
     use super::resolve_project_permission_mode;
-    use super::should_detect_plan_transition;
     use super::should_retry_empty_stream_interruption;
     use super::split_single_pending_ask_user_call;
+    use super::successful_task_completion_finished_plan;
     use super::terminal_agent_state_after_interruption;
     use super::update_validation_state;
     use super::EmptyCompletionAction;
     use super::VALIDATION_REMINDER;
-    use super::{mpsc, ContextLedger};
+    use super::{
+        is_stale_compaction_snapshot_error, mpsc, reload_persisted_conversation, ContextLedger,
+    };
     use crate::agent::loop_events::{LoopInput, LoopInputInbox, LoopStopReason};
     use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
     use crate::skills::SkillsManager;
     use crate::storage::{Database, ProjectSettings, SessionManager, SessionType, WorkMode};
     use crate::tools::registry::PermissionMode;
+    use crate::workflow::{
+        AttemptStatus, CompleteStepInput, CreateGoalInput, CriterionInput, GoalStatus,
+        PlanProposalInput, StepProposalInput, WorkflowManager, WorkflowStepStatus,
+        DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS, DEFAULT_GOAL_ATTEMPT_MAX_TURNS,
+    };
     use serde_json::json;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
+
+    #[test]
+    fn stale_compaction_snapshot_can_reload_canonical_transcript() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.path().join("stale-compaction-reload.db");
+        let sessions = SessionManager::new(Database::new(&db_path)?);
+        let session_id = sessions.create_session("reload", Some("test-model"), None)?;
+        sessions.save_message(
+            &session_id,
+            "user",
+            r#"[{"type":"text","text":"latest durable direction"}]"#,
+        )?;
+        sessions.save_message(
+            &session_id,
+            "assistant",
+            r#"[{"type":"text","text":"durable response"}]"#,
+        )?;
+
+        let reloaded =
+            reload_persisted_conversation(&db_path, &session_id).map_err(anyhow::Error::msg)?;
+        assert_eq!(reloaded.len(), 2);
+        assert_eq!(reloaded[0].role, Role::User);
+        assert_eq!(reloaded[1].role, Role::Assistant);
+        assert!(is_stale_compaction_snapshot_error(&anyhow::anyhow!(
+            "Session transcript changed before compaction started; refusing a stale in-memory snapshot"
+        )));
+        assert!(!is_stale_compaction_snapshot_error(&anyhow::anyhow!(
+            "provider request failed"
+        )));
+        Ok(())
+    }
+
+    #[test]
+    fn active_goal_run_automatically_claims_next_ready_step() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.path().join("auto-attempt.db");
+        let sessions = SessionManager::new(Database::new(&db_path)?);
+        let session_id = sessions.create_session("auto attempt", Some("test-model"), None)?;
+        let manager = WorkflowManager::new(db_path.clone())?;
+        let created = manager.create_goal(
+            &session_id,
+            CreateGoalInput {
+                title: "Execute reliably".into(),
+                objective: "Claim the next step without prompt compliance".into(),
+                constraints: vec![],
+                criteria: vec![CriterionInput {
+                    description: "The ready step is claimed".into(),
+                    required: true,
+                }],
+                token_budget: None,
+            },
+            "create-auto-goal",
+            "user",
+        )?;
+        let goal_id = created.snapshot.goal.id.clone();
+        let proposed = manager.propose_plan(
+            &session_id,
+            &goal_id,
+            created.snapshot.aggregate_revision,
+            PlanProposalInput {
+                title: "Automatic execution".into(),
+                rationale: None,
+                source_message_id: None,
+                predecessor_id: None,
+                legacy_markdown: None,
+                steps: vec![StepProposalInput {
+                    display_key: "1.1".into(),
+                    description: "Implement the ready step".into(),
+                    context: None,
+                    parent_display_key: None,
+                    dependencies: vec![],
+                    acceptance_criteria: vec![],
+                    required: true,
+                }],
+            },
+            "propose-auto-plan",
+            "agent",
+        )?;
+        let plan_id = proposed
+            .snapshot
+            .plan_revision
+            .as_ref()
+            .expect("proposed plan")
+            .id
+            .clone();
+        let approved = manager.approve_plan(
+            &session_id,
+            &goal_id,
+            &plan_id,
+            proposed.snapshot.aggregate_revision,
+            "approve-auto-plan",
+            "user",
+        )?;
+        let active = manager.activate_goal(
+            &session_id,
+            &goal_id,
+            approved.snapshot.aggregate_revision,
+            "activate-auto-goal",
+            "user",
+        )?;
+        assert_eq!(active.snapshot.goal.status, GoalStatus::Active);
+
+        let mutation =
+            ensure_active_goal_attempt_for_run(&db_path, &session_id, PermissionMode::Autonomous)
+                .expect("active run should create an attempt");
+        assert_eq!(
+            mutation.snapshot.steps[0].status,
+            WorkflowStepStatus::InProgress
+        );
+        let attempt = mutation
+            .snapshot
+            .latest_attempt
+            .as_ref()
+            .expect("running attempt");
+        assert_eq!(attempt.status, AttemptStatus::Running);
+        assert_eq!(attempt.permission_mode, "autonomous");
+        assert_eq!(attempt.max_turns, DEFAULT_GOAL_ATTEMPT_MAX_TURNS);
+        assert_eq!(
+            attempt.max_research_actions,
+            DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS
+        );
+        let attempt_id = attempt.id.clone();
+        let step_id = mutation.snapshot.steps[0].id.clone();
+        let revision = mutation.snapshot.aggregate_revision;
+
+        assert!(
+            ensure_active_goal_attempt_for_run(&db_path, &session_id, PermissionMode::Autonomous,)
+                .is_none(),
+            "a running attempt must not be duplicated"
+        );
+
+        manager.complete_step(
+            &session_id,
+            &goal_id,
+            &step_id,
+            revision,
+            CompleteStepInput {
+                attempt_id,
+                outcome: "ready step completed".into(),
+                evidence: vec!["focused validation passed".into()],
+            },
+            "complete-auto-step",
+            "agent",
+        )?;
+        let tool_calls = vec![AiToolCall {
+            id: "complete-call".into(),
+            name: "task_complete".into(),
+            arguments: json!({
+                "task_id": step_id,
+                "result": "ready step completed",
+            }),
+        }];
+        let tool_results = vec![Content::ToolResult {
+            tool_use_id: "complete-call".into(),
+            output: json!({"ok": true}),
+            is_error: Some(false),
+        }];
+        assert!(
+            successful_task_completion_finished_plan(
+                &db_path,
+                &session_id,
+                &tool_calls,
+                &tool_results,
+            ),
+            "the final successful task completion must terminate the current run"
+        );
+        Ok(())
+    }
 
     #[test]
     fn durable_steering_promotes_once_after_the_completed_assistant_message() -> anyhow::Result<()>
@@ -2169,30 +2700,6 @@ mod tests {
                 message: "keep going".into(),
             }
         ]));
-    }
-
-    #[test]
-    fn autonomous_plan_is_detected_before_bundled_writes() {
-        assert!(should_detect_plan_transition(
-            WorkMode::Plan,
-            PermissionMode::Autonomous,
-            true,
-        ));
-        assert!(!should_detect_plan_transition(
-            WorkMode::Plan,
-            PermissionMode::Supervised,
-            true,
-        ));
-        assert!(should_detect_plan_transition(
-            WorkMode::Plan,
-            PermissionMode::Supervised,
-            false,
-        ));
-        assert!(!should_detect_plan_transition(
-            WorkMode::Build,
-            PermissionMode::Autonomous,
-            false,
-        ));
     }
 
     #[test]

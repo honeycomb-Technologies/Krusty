@@ -93,7 +93,10 @@ export function applySessionSnapshot(
       serverState.recent_delegated_runs,
     ),
   }));
-  planStore.getState().setVisible(nextMode === 'plan');
+  planStore.getState().setWorkflow(serverState.workflow ?? null);
+  planStore
+    .getState()
+    .setVisible(Boolean(serverState.workflow) || nextMode === 'plan');
 
   if (isActiveSessionAgentState(serverState.agent_state) && !isRefresh) {
     get().startStatePolling(sessionId);

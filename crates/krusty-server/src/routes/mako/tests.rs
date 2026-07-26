@@ -39,8 +39,9 @@ use super::home::{
 };
 use super::mako_home_dir_for_user;
 use super::sessions::{
-    dispatch, list_sessions, map_runtime_trace_event, recover_daemon, schedule_session,
-    session_status, set_priority, DispatchRequest, PriorityRequest, ScheduleRequest,
+    dispatch, list_sessions, main_session, map_runtime_trace_event, recover_daemon,
+    schedule_session, session_status, set_priority, DispatchRequest, PriorityRequest,
+    ScheduleRequest,
 };
 use crate::auth::{AuthenticatedUser, CurrentUser};
 use crate::error::AppError;
@@ -131,6 +132,46 @@ async fn configure_test_model(state: &AppState) {
         .with_transport(ApiFormat::OpenAIResponses);
     model.auth_scope = Some(ModelAuthScope::ApiKey);
     state.model_registry.upsert_model(model).await;
+}
+
+#[tokio::test]
+async fn main_session_is_reused_and_isolated_by_owner() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    create_test_user(&state, "bob");
+
+    let Json(first) = main_session(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+    )
+    .await
+    .expect("alice companion should create");
+    let Json(second) = main_session(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+    )
+    .await
+    .expect("alice companion should reuse");
+    let Json(other) = main_session(
+        State(state.clone()),
+        Some(current_user("bob", state.working_dir.as_ref())),
+    )
+    .await
+    .expect("bob companion should create");
+
+    assert!(first.created);
+    assert!(!second.created);
+    assert!(other.created);
+    assert_eq!(first.session_id, second.session_id);
+    assert_ne!(first.session_id, other.session_id);
+
+    let manager = SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    assert!(manager
+        .verify_session_ownership(&first.session_id, Some("alice"))
+        .expect("ownership check should succeed"));
+    assert!(!manager
+        .verify_session_ownership(&first.session_id, Some("bob"))
+        .expect("foreign ownership check should succeed"));
 }
 
 #[tokio::test]

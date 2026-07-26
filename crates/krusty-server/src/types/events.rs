@@ -168,6 +168,12 @@ pub enum AgenticEvent {
     },
     /// Plan tasks update - sent when plan is detected
     PlanUpdate { items: Vec<PlanItem> },
+    /// Canonical durable Goal/plan state changed.
+    WorkflowUpdated {
+        goal_id: String,
+        aggregate_revision: u64,
+        operation_id: String,
+    },
     /// Plan detected in AI response - awaiting confirmation
     PlanComplete {
         tool_call_id: String,
@@ -507,6 +513,15 @@ impl From<krusty_core::agent::LoopEvent> for AgenticEvent {
                         completed: t.completed,
                     })
                     .collect(),
+            },
+            LoopEvent::WorkflowUpdated {
+                goal_id,
+                aggregate_revision,
+                operation_id,
+            } => Self::WorkflowUpdated {
+                goal_id,
+                aggregate_revision,
+                operation_id,
             },
             LoopEvent::PlanComplete {
                 tool_call_id,

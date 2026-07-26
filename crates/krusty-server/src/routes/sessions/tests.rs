@@ -26,8 +26,12 @@ use krusty_core::storage::{
     RuntimeTraceEvent, RuntimeTraceStore, SessionRecoveryState, SessionType, WorkspaceMode,
 };
 use krusty_core::tools::registry::ToolRegistry;
+use krusty_core::workflow::{
+    CreateGoalInput, CriterionInput, PlanProposalInput, StepProposalInput,
+};
 
 use super::crud::{GetSessionQuery, ListSessionsQuery};
+use super::workflow::{execute_workflow_command, get_workflow, WorkflowCommand};
 use super::*;
 use crate::auth::{AuthenticatedUser, CurrentUser};
 use crate::types::{
@@ -93,6 +97,163 @@ fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
         user_id: Some(user_id.to_string()),
         home_dir: Some(home_dir.to_path_buf()),
     })
+}
+
+#[tokio::test]
+async fn workflow_routes_require_ownership_and_explicit_activation() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    create_test_user(&state, "bob");
+    let session_manager =
+        SessionManager::new(Database::new(&state.db_path).expect("database should open"));
+    let session_id = session_manager
+        .create_session_for_user_with_config(
+            "Workflow contract",
+            None,
+            Some(state.working_dir.to_string_lossy().as_ref()),
+            Some(state.working_dir.to_string_lossy().as_ref()),
+            WorkspaceMode::Selected,
+            Some("alice"),
+            None,
+            SessionType::Code,
+        )
+        .expect("session should create");
+    session_manager
+        .update_session_work_mode(&session_id, krusty_core::storage::WorkMode::Plan)
+        .expect("test should enter Plan mode");
+
+    let denied = get_workflow(
+        State(state.clone()),
+        Some(current_user("bob", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+    )
+    .await;
+    assert!(matches!(denied, Err(AppError::NotFound(_))));
+
+    let Json(created) = execute_workflow_command(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        Json(WorkflowCommand::CreateGoal {
+            operation_id: "route-create".into(),
+            goal: CreateGoalInput {
+                title: "Reliable workflow".into(),
+                objective: "Prove explicit workflow transitions".into(),
+                constraints: vec!["Never elevate permissions".into()],
+                criteria: vec![CriterionInput {
+                    description: "Lifecycle is persisted".into(),
+                    required: true,
+                }],
+                token_budget: None,
+            },
+        }),
+    )
+    .await
+    .expect("goal should create");
+    assert_eq!(
+        session_manager
+            .get_session(&session_id)
+            .expect("session should load")
+            .expect("session should exist")
+            .work_mode,
+        krusty_core::storage::WorkMode::Plan,
+        "creating a draft must not activate work"
+    );
+
+    let Json(proposed) = execute_workflow_command(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        Json(WorkflowCommand::ProposePlan {
+            operation_id: "route-propose".into(),
+            goal_id: created.snapshot.goal.id.clone(),
+            expected_revision: created.snapshot.aggregate_revision,
+            plan: PlanProposalInput {
+                title: "One step".into(),
+                rationale: None,
+                source_message_id: None,
+                predecessor_id: None,
+                legacy_markdown: None,
+                steps: vec![StepProposalInput {
+                    display_key: "1".into(),
+                    description: "Verify the contract".into(),
+                    context: None,
+                    parent_display_key: None,
+                    dependencies: vec![],
+                    acceptance_criteria: vec!["State is durable".into()],
+                    required: true,
+                }],
+            },
+        }),
+    )
+    .await
+    .expect("plan should propose");
+    assert_eq!(
+        proposed.snapshot.goal.status,
+        krusty_core::workflow::GoalStatus::Draft
+    );
+
+    let plan_id = proposed
+        .snapshot
+        .plan_revision
+        .as_ref()
+        .expect("proposal should exist")
+        .id
+        .clone();
+    let Json(approved) = execute_workflow_command(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        Json(WorkflowCommand::ApprovePlan {
+            operation_id: "route-approve".into(),
+            goal_id: proposed.snapshot.goal.id.clone(),
+            plan_revision_id: plan_id,
+            expected_revision: proposed.snapshot.aggregate_revision,
+        }),
+    )
+    .await
+    .expect("plan should approve");
+    assert_eq!(
+        approved.snapshot.goal.status,
+        krusty_core::workflow::GoalStatus::Draft
+    );
+
+    let Json(activated) = execute_workflow_command(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        Json(WorkflowCommand::ActivateGoal {
+            operation_id: "route-activate".into(),
+            goal_id: approved.snapshot.goal.id.clone(),
+            expected_revision: approved.snapshot.aggregate_revision,
+        }),
+    )
+    .await
+    .expect("goal should activate");
+    assert_eq!(
+        activated.snapshot.goal.status,
+        krusty_core::workflow::GoalStatus::Active
+    );
+    assert_eq!(
+        session_manager
+            .get_session(&session_id)
+            .expect("session should load")
+            .expect("session should exist")
+            .work_mode,
+        krusty_core::storage::WorkMode::Build
+    );
+
+    let Json(snapshot) = get_workflow(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id),
+    )
+    .await
+    .expect("workflow should load");
+    assert_eq!(
+        snapshot.expect("workflow should exist").aggregate_revision,
+        activated.snapshot.aggregate_revision
+    );
 }
 
 #[tokio::test]

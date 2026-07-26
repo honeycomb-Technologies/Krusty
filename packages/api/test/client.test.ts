@@ -144,3 +144,27 @@ describe("KrustyClient provider-aware model identity", () => {
 		expect(request.allowed_tools).toEqual(["read", "grep"]);
 	});
 });
+
+describe("KrustyClient Mako schedules", () => {
+	it("uses a strong quoted revision for schedule status mutations", async () => {
+		let requestInit: RequestInit | undefined;
+		const client = new KrustyClient({
+			baseUrl: "http://krusty.test",
+			fetchImpl: (async (_input, init) => {
+				requestInit = init;
+				return Response.json({
+					schedule_id: "schedule-1",
+					revision: 8,
+					status: "paused",
+				});
+			}) as typeof fetch,
+		});
+
+		await client.pauseMakoSchedule("session-1", "schedule-1", 7);
+
+		expect(requestInit?.method).toBe("POST");
+		expect((requestInit?.headers as Record<string, string>)["If-Match"]).toBe(
+			'"7"',
+		);
+	});
+});

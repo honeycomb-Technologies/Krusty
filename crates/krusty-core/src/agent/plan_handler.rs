@@ -5,11 +5,20 @@
 //! they mutate the loop's own state (work mode, plan).
 
 use std::path::Path;
+use std::str::FromStr;
+
+use serde::Deserialize;
 
 use crate::ai::types::AiToolCall;
 use crate::plan::{PlanFile, PlanManager, TaskStatus};
 use crate::storage::{Database, SessionManager, WorkMode};
-use crate::tools::registry::ToolResult;
+use crate::tools::registry::{PermissionMode, ToolResult};
+use crate::workflow::{
+    CompleteStepInput, CreateGoalInput, CriterionStatus, PlanProposalInput, SetCriterionInput,
+    StartAttemptInput, WorkflowManager, WorkflowMutation, WorkflowSnapshot, WorkflowStepStatus,
+    DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS, DEFAULT_GOAL_ATTEMPT_MAX_TOOL_CALLS,
+    DEFAULT_GOAL_ATTEMPT_MAX_TURNS, DEFAULT_GOAL_ATTEMPT_MAX_WALL_TIME_SECS,
+};
 
 /// Result of a mode switch attempt.
 pub struct ModeSwitchResult {
@@ -141,8 +150,222 @@ pub fn handle_mode_switch(
     }
 }
 
-/// Handle plan task tool calls: `task_start`, `task_complete`, `add_subtask`, `set_dependency`.
-pub fn handle_plan_task(call: &AiToolCall, session_id: &str, db_path: &Path) -> ToolResult {
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkflowProposalArguments {
+    #[serde(default)]
+    goal: Option<CreateGoalInput>,
+    #[serde(default)]
+    goal_id: Option<String>,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+    plan: PlanProposalInput,
+}
+
+/// Handle the typed draft-only workflow proposal tool.
+pub fn handle_workflow_proposal(call: &AiToolCall, session_id: &str, db_path: &Path) -> ToolResult {
+    let arguments: WorkflowProposalArguments = match serde_json::from_value(call.arguments.clone())
+    {
+        Ok(arguments) => arguments,
+        Err(error) => {
+            return ToolResult::invalid_parameters(error);
+        }
+    };
+    let manager = match WorkflowManager::new(db_path.to_path_buf()) {
+        Ok(manager) => manager,
+        Err(error) => return ToolResult::error(error),
+    };
+    let snapshot = match manager.get_snapshot(session_id) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return ToolResult::error(error),
+    };
+
+    let (goal_id, expected_revision) = match snapshot {
+        Some(snapshot) if snapshot.goal.status.is_unfinished() => {
+            if arguments.goal.is_some() {
+                return ToolResult::invalid_parameters(
+                    "goal must be omitted when revising an existing unfinished Goal",
+                );
+            }
+            if arguments.goal_id.as_deref() != Some(snapshot.goal.id.as_str()) {
+                return ToolResult::invalid_parameters(format!(
+                    "goal_id must match current Goal {}",
+                    snapshot.goal.id
+                ));
+            }
+            if arguments.expected_revision != Some(snapshot.aggregate_revision) {
+                return ToolResult::invalid_parameters(format!(
+                    "expected_revision must be {}",
+                    snapshot.aggregate_revision
+                ));
+            }
+            (snapshot.goal.id, snapshot.aggregate_revision)
+        }
+        _ => {
+            let Some(goal) = arguments.goal else {
+                return ToolResult::invalid_parameters(
+                    "goal is required when the session has no unfinished Goal",
+                );
+            };
+            let created = match manager.create_goal(
+                session_id,
+                goal,
+                &format!("{}:goal", call.id),
+                "agent",
+            ) {
+                Ok(created) => created,
+                Err(error) => return ToolResult::error(error),
+            };
+            (
+                created.snapshot.goal.id,
+                created.snapshot.aggregate_revision,
+            )
+        }
+    };
+
+    match manager.propose_plan(
+        session_id,
+        &goal_id,
+        expected_revision,
+        arguments.plan,
+        &format!("{}:plan", call.id),
+        "agent",
+    ) {
+        Ok(mutation) => workflow_tool_result(&mutation, "plan_proposed"),
+        Err(error) => ToolResult::error(error),
+    }
+}
+
+/// Handle evidence-backed Goal verification and explicit completion.
+pub fn handle_workflow_update(call: &AiToolCall, session_id: &str, db_path: &Path) -> ToolResult {
+    let manager = match WorkflowManager::new(db_path.to_path_buf()) {
+        Ok(manager) => manager,
+        Err(error) => return ToolResult::error(error),
+    };
+    let snapshot = match manager.get_snapshot(session_id) {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => return ToolResult::error("No durable Goal exists for this session"),
+        Err(error) => return ToolResult::error(error),
+    };
+    let goal_id = call
+        .arguments
+        .get("goal_id")
+        .and_then(|value| value.as_str());
+    let expected_revision = call
+        .arguments
+        .get("expected_revision")
+        .and_then(|value| value.as_u64());
+    if goal_id != Some(snapshot.goal.id.as_str())
+        || expected_revision != Some(snapshot.aggregate_revision)
+    {
+        return ToolResult::invalid_parameters(format!(
+            "goal_id and expected_revision must match Goal {} revision {}",
+            snapshot.goal.id, snapshot.aggregate_revision
+        ));
+    }
+    match call
+        .arguments
+        .get("action")
+        .and_then(|value| value.as_str())
+    {
+        Some("verify_criterion") => {
+            let Some(criterion_id) = call
+                .arguments
+                .get("criterion_id")
+                .and_then(|value| value.as_str())
+            else {
+                return ToolResult::invalid_parameters(
+                    "criterion_id is required for verify_criterion",
+                );
+            };
+            let status = match call
+                .arguments
+                .get("status")
+                .and_then(|value| value.as_str())
+                .and_then(|value| CriterionStatus::from_str(value).ok())
+            {
+                Some(CriterionStatus::Passed) => CriterionStatus::Passed,
+                Some(CriterionStatus::Failed) => CriterionStatus::Failed,
+                _ => {
+                    return ToolResult::invalid_parameters(
+                        "status must be passed or failed for agent verification",
+                    );
+                }
+            };
+            let evidence = call
+                .arguments
+                .get("evidence")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            match manager.set_criterion(
+                session_id,
+                &snapshot.goal.id,
+                criterion_id,
+                snapshot.aggregate_revision,
+                SetCriterionInput {
+                    status,
+                    evidence,
+                    verifier: "agent".to_string(),
+                },
+                &format!("{}:criterion", call.id),
+                "agent",
+            ) {
+                Ok(mutation) => workflow_tool_result(&mutation, "criterion_updated"),
+                Err(error) => ToolResult::error(error),
+            }
+        }
+        Some("complete_goal") => match manager.complete_goal(
+            session_id,
+            &snapshot.goal.id,
+            snapshot.aggregate_revision,
+            &format!("{}:complete", call.id),
+            "agent",
+        ) {
+            Ok(mutation) => workflow_tool_result(&mutation, "goal_completed"),
+            Err(error) => ToolResult::error(error),
+        },
+        Some(other) => {
+            ToolResult::invalid_parameters(format!("unsupported workflow update action {other}"))
+        }
+        None => ToolResult::invalid_parameters("action is required"),
+    }
+}
+
+/// Handle plan task tool calls. Workflow v2 is canonical when present; the
+/// legacy Markdown plan remains a compatibility fallback during migration.
+pub fn handle_plan_task(
+    call: &AiToolCall,
+    session_id: &str,
+    db_path: &Path,
+    permission_mode: PermissionMode,
+) -> ToolResult {
+    match WorkflowManager::new(db_path.to_path_buf()).and_then(|manager| {
+        manager
+            .get_snapshot(session_id)
+            .map(|snapshot| (manager, snapshot))
+    }) {
+        Ok((manager, Some(snapshot))) if snapshot.goal.status.is_unfinished() => {
+            return handle_workflow_plan_task(
+                call,
+                session_id,
+                &manager,
+                snapshot,
+                permission_mode,
+            );
+        }
+        Ok(_) => {}
+        Err(error) => return ToolResult::error(error),
+    }
+
     let plan_manager = match PlanManager::new(db_path.to_path_buf()) {
         Ok(manager) => manager,
         Err(e) => {
@@ -181,52 +404,170 @@ pub fn handle_plan_task(call: &AiToolCall, session_id: &str, db_path: &Path) -> 
     }
 }
 
-/// Detect and parse a plan from AI response text.
-pub struct DetectedPlan {
-    pub title: String,
-    pub tasks: Vec<DetectedPlanTask>,
-    pub plan_file: PlanFile,
-}
-
-pub struct DetectedPlanTask {
-    pub description: String,
-    pub completed: bool,
-}
-
-pub fn try_detect_plan(text: &str) -> Option<DetectedPlan> {
-    let plan_file = PlanFile::try_parse_from_response(text)?;
-    let title = if plan_file.title.trim().is_empty() {
-        "Implementation Plan".to_string()
-    } else {
-        plan_file.title.clone()
-    };
-
-    let tasks: Vec<DetectedPlanTask> = plan_file
-        .phases
-        .iter()
-        .flat_map(|phase| phase.tasks.iter())
-        .filter_map(|task| {
-            let content = task.description.trim().to_string();
-            if content.is_empty() {
-                None
-            } else {
-                Some(DetectedPlanTask {
-                    description: content,
-                    completed: task.completed || task.status == TaskStatus::Completed,
-                })
+fn handle_workflow_plan_task(
+    call: &AiToolCall,
+    session_id: &str,
+    manager: &WorkflowManager,
+    snapshot: WorkflowSnapshot,
+    permission_mode: PermissionMode,
+) -> ToolResult {
+    match call.name.as_str() {
+        "task_start" => {
+            let Some(task_id) = call.arguments.get("task_id").and_then(|value| value.as_str())
+            else {
+                return ToolResult::invalid_parameters("task_id is required");
+            };
+            let Some(step) = snapshot
+                .steps
+                .iter()
+                .find(|step| step.id == task_id || step.display_key == task_id)
+            else {
+                return ToolResult::invalid_parameters(format!(
+                    "step {task_id} is not part of the current plan revision"
+                ));
+            };
+            if step.status == WorkflowStepStatus::InProgress {
+                let output = serde_json::json!({
+                    "message": format!("Step {} is already in progress", step.display_key),
+                    "goal_id": snapshot.goal.id,
+                    "step_id": step.id,
+                    "revision": snapshot.aggregate_revision,
+                });
+                return ToolResult::success_data(output).with_changed(false);
             }
-        })
-        .collect();
-
-    if tasks.is_empty() {
-        return None;
+            let operation_id = format!("{}:start", call.id);
+            let mutation = if let Some(attempt) = snapshot
+                .latest_attempt
+                .as_ref()
+                .filter(|attempt| attempt.status == crate::workflow::AttemptStatus::Running)
+            {
+                manager.claim_step(
+                    session_id,
+                    &snapshot.goal.id,
+                    &attempt.id,
+                    &step.id,
+                    snapshot.aggregate_revision,
+                    &operation_id,
+                    "agent",
+                )
+            } else {
+                manager.start_attempt(
+                    session_id,
+                    &snapshot.goal.id,
+                    snapshot.aggregate_revision,
+                    StartAttemptInput {
+                        step_id: Some(step.id.clone()),
+                        permission_mode: permission_mode.as_str().to_string(),
+                        max_turns: DEFAULT_GOAL_ATTEMPT_MAX_TURNS,
+                        max_tool_calls: DEFAULT_GOAL_ATTEMPT_MAX_TOOL_CALLS,
+                        max_wall_time_secs: DEFAULT_GOAL_ATTEMPT_MAX_WALL_TIME_SECS,
+                        max_research_actions: DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS,
+                    },
+                    &operation_id,
+                    "agent",
+                )
+            };
+            match mutation {
+                Ok(mutation) => workflow_tool_result(&mutation, "step_started"),
+                Err(error) => ToolResult::error(error),
+            }
+        }
+        "task_complete" => {
+            let Some(task_id) = call.arguments.get("task_id").and_then(|value| value.as_str())
+            else {
+                return ToolResult::invalid_parameters("task_id is required");
+            };
+            let outcome = call
+                .arguments
+                .get("result")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .trim();
+            if outcome.is_empty() {
+                return ToolResult::invalid_parameters(
+                    "result is required and must describe the concrete outcome",
+                );
+            }
+            let evidence = call
+                .arguments
+                .get("evidence")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .filter(|items| !items.is_empty())
+                .unwrap_or_else(|| vec![outcome.to_string()]);
+            let Some(step) = snapshot
+                .steps
+                .iter()
+                .find(|step| step.id == task_id || step.display_key == task_id)
+            else {
+                return ToolResult::invalid_parameters(format!(
+                    "step {task_id} is not part of the current plan revision"
+                ));
+            };
+            let Some(attempt_id) = step.claimed_attempt_id.as_deref() else {
+                return ToolResult::error_with_code(
+                    "step_not_claimed",
+                    format!(
+                        "Step {} is not in progress. Call task_start first.",
+                        step.display_key
+                    ),
+                );
+            };
+            match manager.complete_step(
+                session_id,
+                &snapshot.goal.id,
+                &step.id,
+                snapshot.aggregate_revision,
+                CompleteStepInput {
+                    attempt_id: attempt_id.to_string(),
+                    outcome: outcome.to_string(),
+                    evidence,
+                },
+                &format!("{}:complete", call.id),
+                "agent",
+            ) {
+                Ok(mutation) => workflow_tool_result(&mutation, "step_completed"),
+                Err(error) => ToolResult::error(error),
+            }
+        }
+        "add_subtask" | "set_dependency" => ToolResult::error_with_code(
+            "immutable_plan_revision",
+            "Approved plan revisions are immutable. Enter Plan mode and use workflow_propose to create a replacement revision.",
+        ),
+        other => ToolResult::error_with_code(
+            "unsupported_workflow_tool",
+            format!("Unsupported workflow task tool {other}"),
+        ),
     }
+}
 
-    Some(DetectedPlan {
-        title,
-        tasks,
-        plan_file,
-    })
+fn workflow_tool_result(mutation: &WorkflowMutation, action: &str) -> ToolResult {
+    ToolResult::success_data(serde_json::json!({
+        "action": action,
+        "changed": mutation.changed,
+        "goal_id": mutation.snapshot.goal.id,
+        "goal_status": mutation.snapshot.goal.status,
+        "revision": mutation.snapshot.aggregate_revision,
+        "plan_revision_id": mutation
+            .snapshot
+            .plan_revision
+            .as_ref()
+            .map(|plan| plan.id.as_str()),
+        "steps": mutation.snapshot.steps,
+    }))
+    .with_changed(mutation.changed)
+    .with_progress_change_key(format!(
+        "workflow:{}:{}",
+        mutation.snapshot.goal.id, mutation.snapshot.aggregate_revision
+    ))
 }
 
 /// Parse a plan confirmation choice from user input.

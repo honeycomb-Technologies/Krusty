@@ -72,3 +72,45 @@ fn test_messages_table_exists() {
     assert!(ddl.contains("FOREIGN KEY"));
     assert!(ddl.contains("ON DELETE CASCADE"));
 }
+
+#[test]
+fn canonical_workflow_tables_and_invariants_exist() {
+    let (db, _temp) = create_test_db();
+    let required_tables = [
+        "workflow_goals",
+        "workflow_goal_criteria",
+        "workflow_plan_revisions",
+        "workflow_plan_steps",
+        "workflow_step_dependencies",
+        "workflow_execution_attempts",
+        "workflow_events",
+        "workflow_idempotency",
+    ];
+    for table in required_tables {
+        let exists: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .expect("query workflow table");
+        assert_eq!(exists, 1, "missing workflow table {table}");
+    }
+
+    let indexes: Vec<String> = db
+        .conn()
+        .prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'index' AND name LIKE 'idx_workflow_%'",
+        )
+        .expect("prepare workflow indexes")
+        .query_map([], |row| row.get(0))
+        .expect("query workflow indexes")
+        .collect::<rusqlite::Result<_>>()
+        .expect("collect workflow indexes");
+    assert!(indexes.contains(&"idx_workflow_goals_one_unfinished".to_string()));
+    assert!(indexes.contains(&"idx_workflow_one_serial_step".to_string()));
+    assert!(indexes.contains(&"idx_workflow_one_running_attempt".to_string()));
+}

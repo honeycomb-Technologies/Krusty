@@ -91,6 +91,7 @@ export function MakoThreadSurface({
         sessionType="mako"
         tokenCount={chat.tokenCount}
         onOverlayOpenChange={setBottomControlsOpen}
+        minimalControls
       />
     </View>
   );

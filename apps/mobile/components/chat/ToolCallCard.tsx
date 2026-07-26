@@ -20,6 +20,7 @@ import { useThemeContext } from "../../hooks/useTheme";
 import { BashOutput } from "./BashOutput";
 import { ToolDiffViewer } from "./ToolDiffViewer";
 import { buildToolDiffPresentation, isDiffTool } from "./toolDiffModel";
+import { InlineReportCard } from "../reports/InlineReportCard";
 import type { ToolCall } from "@krusty/api";
 
 interface ToolCallCardProps {
@@ -50,6 +51,16 @@ export function ToolCallCard({
   useEffect(() => {
     setExpanded(defaultExpanded);
   }, [defaultExpanded, toolCall.id]);
+
+  const reportId =
+    toolCall.name.toLowerCase() === "report"
+      ? extractReportId(toolCall)
+      : null;
+  if (reportId) {
+    return (
+      <InlineReportCard reportId={reportId} defaultExpanded={defaultExpanded} />
+    );
+  }
 
   const StatusIcon = () => {
     switch (toolCall.status) {
@@ -331,6 +342,33 @@ export function ToolCallCard({
       {renderBody()}
     </View>
   );
+}
+
+function extractReportId(toolCall: ToolCall): string | null {
+  const argumentId = toolCall.arguments?.report_id;
+  if (typeof argumentId === "string" && argumentId.trim()) {
+    return argumentId;
+  }
+
+  if (!toolCall.output) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(toolCall.output) as Record<string, unknown>;
+    const directId = parsed.report_id;
+    if (typeof directId === "string" && directId.trim()) {
+      return directId;
+    }
+    const data =
+      parsed.data && typeof parsed.data === "object" && !Array.isArray(parsed.data)
+        ? (parsed.data as Record<string, unknown>)
+        : null;
+    return typeof data?.report_id === "string" && data.report_id.trim()
+      ? data.report_id
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function ToolGlyph({ name, color }: { name: string; color: string }) {

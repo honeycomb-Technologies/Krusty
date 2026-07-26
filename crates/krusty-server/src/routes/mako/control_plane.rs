@@ -11,7 +11,7 @@ use krusty_core::mako::{DstPolicy, MisfireConfig, RecurrenceV1, RetryPolicy};
 use krusty_core::storage::{
     Database, MakoController, MakoControllerEvent, MakoControllerEventStore, MakoControllerStore,
     MakoRun, MakoRunAttempt, MakoRunStore, MakoSchedule, MakoScheduleOccurrence, MakoScheduleStore,
-    OverlapPolicy, SessionType,
+    OverlapPolicy, OwnedMakoSchedule, SessionType,
 };
 use krusty_mako_protocol::ScheduleDefinition;
 
@@ -76,6 +76,22 @@ pub(super) async fn list_schedules(
     let store = MakoScheduleStore::new(Database::new(&state.db_path)?);
     Ok(Json(store.list_for_controller(
         &controller.id,
+        list_limit(query.limit),
+    )?))
+}
+
+/// User-scoped global schedule list for the Mako Schedule secondary surface.
+///
+/// Returns commitments across all of the caller's controllers, ordered by next
+/// fire time so the UI can show "what's set" without browsing individual runs.
+pub(super) async fn list_global_schedules(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Vec<OwnedMakoSchedule>>, AppError> {
+    let store = MakoScheduleStore::new(Database::new(&state.db_path)?);
+    Ok(Json(store.list_for_user(
+        current_user_id(user.as_ref()),
         list_limit(query.limit),
     )?))
 }

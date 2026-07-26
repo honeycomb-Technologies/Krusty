@@ -146,6 +146,7 @@ function createPlanStore() {
 				visible = nextVisible;
 			},
 			setItems: () => {},
+			setWorkflow: () => {},
 		}),
 		get visible() {
 			return visible;

@@ -178,6 +178,58 @@ impl SessionManager {
         )
     }
 
+    /// Ensure the durable singleton Mako companion chat for a user exists.
+    ///
+    /// The companion thread is global (not project-bound), always autonomous, and
+    /// shared across every client surface for that user. Job/run sessions created
+    /// by Mako dispatch remain separate work units under the hood.
+    pub fn ensure_mako_main_session(&self, user_id: Option<&str>) -> Result<super::SessionInfo> {
+        const MAIN_TITLE: &str = "Mako";
+
+        let mut sessions = self.list_sessions_for_user_by_type(None, user_id, SessionType::Mako)?;
+        // Prefer the oldest matching companion candidate so repeated opens stay
+        // pinned to one relationship thread even if later job sessions exist.
+        sessions.sort_by_key(|session| session.updated_at);
+
+        let companion = sessions.into_iter().find(|session| {
+            session.parent_session_id.is_none()
+                && session.project_dir.is_none()
+                && matches!(session.workspace_mode, WorkspaceMode::Neutral)
+                && (session.title == MAIN_TITLE
+                    || session
+                        .working_dir
+                        .as_deref()
+                        .is_none_or(|value| value.trim().is_empty()))
+        });
+
+        if let Some(mut session) = companion {
+            if session.permission_mode != PermissionMode::Autonomous {
+                self.update_session_permission_mode(&session.id, PermissionMode::Autonomous)?;
+                session.permission_mode = PermissionMode::Autonomous;
+            }
+            if session.title != MAIN_TITLE {
+                self.update_session_title(&session.id, MAIN_TITLE)?;
+                session.title = MAIN_TITLE.to_string();
+            }
+            return Ok(session);
+        }
+
+        let session_id = self.create_session_for_user_with_config_and_permission(
+            MAIN_TITLE,
+            None,
+            None,
+            None,
+            WorkspaceMode::Neutral,
+            user_id,
+            None,
+            SessionType::Mako,
+            PermissionMode::Autonomous,
+        )?;
+
+        self.get_session(&session_id)?
+            .ok_or_else(|| anyhow::anyhow!("failed to load newly created Mako main session"))
+    }
+
     /// Create a linked child session that inherits the parent's ownership metadata.
     pub fn create_linked_session(
         &self,

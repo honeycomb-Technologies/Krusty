@@ -533,9 +533,12 @@ install_managed_link() {
     managed_target=$1
     managed_path=$2
     allow_legacy_file=$3
+    previous_managed_target=${4:-}
 
     if [ -L "$managed_path" ]; then
-        if [ "$(readlink "$managed_path")" != "$managed_target" ]; then
+        existing_target=$(readlink "$managed_path")
+        if [ "$existing_target" != "$managed_target" ] && \
+            { [ -z "$previous_managed_target" ] || [ "$existing_target" != "$previous_managed_target" ]; }; then
             fail "Refusing to replace unmanaged symlink $managed_path."
             return 1
         fi
@@ -546,6 +549,19 @@ install_managed_link() {
         fi
     fi
     atomic_symlink "$managed_target" "$managed_path"
+}
+
+managed_systemd_marker_valid() {
+    regular_file_with_mode "$SYSTEMD_MARKER" 600 && \
+        [ "$(wc -l < "$SYSTEMD_MARKER" | tr -d '[:space:]')" = "1" ] && \
+        grep -Fqx "managed by $CURRENT_LINK" "$SYSTEMD_MARKER"
+}
+
+previous_managed_unit_target() {
+    previous_managed_unit=$1
+    [ -n "$PREVIOUS_TARGET" ] || return 1
+    managed_systemd_marker_valid || return 1
+    printf '%s\n' "$INSTALL_DIR/$PREVIOUS_TARGET/systemd/$previous_managed_unit"
 }
 
 snapshot_activation_path() {
@@ -875,7 +891,10 @@ activate_unix_release() {
     if [ "$MANAGE_SYSTEMD" = true ]; then
         mkdir -p "$SYSTEMD_USER_DIR" || { fail_activation "systemd user directory creation failed"; return 1; }
         for managed_unit in $SYSTEMD_UNITS; do
-            install_managed_link "$CURRENT_LINK/systemd/$managed_unit" "$SYSTEMD_USER_DIR/$managed_unit" "$MIGRATING_LEGACY" || \
+            previous_unit_target=""
+            previous_unit_target=$(previous_managed_unit_target "$managed_unit") || previous_unit_target=""
+            install_managed_link "$CURRENT_LINK/systemd/$managed_unit" "$SYSTEMD_USER_DIR/$managed_unit" \
+                "$MIGRATING_LEGACY" "$previous_unit_target" || \
                 { fail_activation "$managed_unit link publication failed"; return 1; }
             activation_checkpoint "after-$managed_unit-link" || \
                 { fail_activation "fixture after $managed_unit link"; return 1; }
@@ -1229,6 +1248,41 @@ run_self_test() (
         fi
     done
     [ "$serve_only_legacy" = true ]
+
+    # Older supervised installs linked units directly into the selected
+    # immutable release. A valid ownership marker plus an exact match to the
+    # current release is sufficient to migrate those links to .krusty-current.
+    for legacy_managed_unit in $SYSTEMD_UNITS; do
+        rm -f "$SYSTEMD_USER_DIR/$legacy_managed_unit"
+        ln -s "$v1_release_dir/systemd/$legacy_managed_unit" \
+            "$SYSTEMD_USER_DIR/$legacy_managed_unit"
+    done
+    reset_self_systemd
+    activate_unix_release
+    for migrated_unit in $SYSTEMD_UNITS; do
+        [ "$(readlink "$SYSTEMD_USER_DIR/$migrated_unit")" = \
+            "$INSTALL_DIR/.krusty-current/systemd/$migrated_unit" ]
+    done
+    [ "$(readlink "$INSTALL_DIR/.krusty-current")" = ".krusty-releases/$v1_release_id" ]
+    [ "$SELF_HEALTH_CHECKS" -ge 2 ]
+    assert_no_activation_residue
+
+    # The marker does not authorize unrelated absolute unit links.
+    rejected_unit="$SYSTEMD_USER_DIR/krusty-mako.socket"
+    rejected_target="$self_root/unmanaged-krusty-mako.socket"
+    printf '%s\n' unmanaged > "$rejected_target"
+    rm -f "$rejected_unit"
+    ln -s "$rejected_target" "$rejected_unit"
+    reset_self_systemd
+    if activate_unix_release; then
+        fail "Self-test accepted an unrelated absolute systemd unit symlink."
+        exit 1
+    fi
+    [ "$(readlink "$rejected_unit")" = "$rejected_target" ]
+    [ -z "$SELF_LOG" ]
+    rm -f "$rejected_unit"
+    ln -s "$INSTALL_DIR/.krusty-current/systemd/krusty-mako.socket" "$rejected_unit"
+    assert_no_activation_residue
 
     stage_self_test_release v0.7.3-downgrade downgrade krusty-only \
         2222222222222222222222222222222222222222222222222222222222222222

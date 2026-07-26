@@ -3,7 +3,7 @@ mod store;
 
 pub use model::{
     MakoSchedule, MakoScheduleOccurrence, MakoScheduleOccurrenceStatus, MakoScheduleStatus,
-    OverlapPolicy,
+    OverlapPolicy, OwnedMakoSchedule,
 };
 pub use store::MakoScheduleStore;
 

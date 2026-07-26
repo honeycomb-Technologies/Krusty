@@ -20,8 +20,9 @@ import type { MakoChatContext, MakoTopLevelView } from "./types";
 
 interface MakoScreenProps {
   workspaceDirectory?: string | null;
-  activeRunId?: string | null;
   requestedTopLevel?: MakoTopLevelView;
+  requestedThreadMessageId?: string;
+  requestedReportId?: string;
   chat: MakoChatContext;
   onOpenRunById: (runId: string) => Promise<void>;
   onOpenProject?: (projectDir: string, targetBranch?: string | null) => Promise<void> | void;
@@ -32,8 +33,9 @@ interface MakoScreenProps {
 
 export function MakoScreen({
   workspaceDirectory,
-  activeRunId,
   requestedTopLevel,
+  requestedThreadMessageId,
+  requestedReportId,
   chat,
   onOpenRunById,
   onOpenProject,
@@ -45,8 +47,9 @@ export function MakoScreen({
   const { isDesktop } = useBreakpoint();
   const current = useMakoCurrent(true);
   const home = useMakoHome(true);
-  const navigation = useMakoNavigation(activeRunId);
+  const navigation = useMakoNavigation();
   const [threadJumpMessageId, setThreadJumpMessageId] = useState<string | null>(null);
+  const [reportJumpId, setReportJumpId] = useState<string | null>(null);
 
   const selectedRun =
     navigation.selectedRunId
@@ -76,6 +79,15 @@ export function MakoScreen({
     navigation.setTopLevel,
     requestedTopLevel,
   ]);
+
+  useEffect(() => {
+    if (!requestedThreadMessageId && !requestedReportId) {
+      return;
+    }
+    setThreadJumpMessageId(requestedThreadMessageId ?? null);
+    setReportJumpId(requestedReportId ?? null);
+    navigation.setTopLevel("mako");
+  }, [navigation.setTopLevel, requestedReportId, requestedThreadMessageId]);
 
   useEffect(() => {
     onTopLevelChange?.(navigation.topLevel);
@@ -132,17 +144,12 @@ export function MakoScreen({
               homeState={home}
               chat={chat}
               threadJumpMessageId={threadJumpMessageId}
+              reportJumpId={reportJumpId}
               onThreadJumpHandled={() => {
                 setThreadJumpMessageId(null);
               }}
-              onSelectRun={(runId) => {
-                void handleOpenRun(runId);
-              }}
-              onOpenSchedule={() => {
-                navigation.setTopLevel("schedule");
-              }}
-              onOpenDetails={() => {
-                navigation.setTopLevel("details");
+              onReportJumpHandled={() => {
+                setReportJumpId(null);
               }}
             />
           ) : null}

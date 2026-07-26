@@ -207,6 +207,14 @@ pub enum LoopEvent {
     /// Plan tasks detected/updated.
     PlanUpdate { tasks: Vec<PlanTaskInfo> },
 
+    /// Canonical Goal/plan aggregate changed. Consumers should refresh the
+    /// session workflow snapshot when this revision is newer than local state.
+    WorkflowUpdated {
+        goal_id: String,
+        aggregate_revision: u64,
+        operation_id: String,
+    },
+
     /// Plan detected in AI response, awaiting user confirmation.
     PlanComplete {
         tool_call_id: String,

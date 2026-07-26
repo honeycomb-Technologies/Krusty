@@ -6,6 +6,8 @@ import type {
   SessionType,
   ThinkingLevel as ApiThinkingLevel,
   UsageMetrics,
+  WorkflowCommand,
+  WorkflowMutation,
   WorkspaceMode,
 } from '@krusty/api';
 
@@ -176,6 +178,11 @@ export interface SessionStoreState {
     sendOptions?: SendMessageOptions,
   ) => Promise<void>;
   loadSession: (sessionId: string, isRefresh?: boolean) => Promise<void>;
+  /**
+   * Ensure and load the durable per-user Mako companion session.
+   * Does not create a new job/run session — resolves GET/POST /mako/main.
+   */
+  ensureMakoMainSession: () => Promise<string | null>;
   clearSession: () => void;
   initSession: (
     sessionId: string,
@@ -186,6 +193,7 @@ export interface SessionStoreState {
   setTitle: (title: string) => void;
   updateTitle: (sessionId: string, title: string) => Promise<void>;
   setMode: (mode: SessionMode) => void;
+  executeWorkflowCommand: (command: WorkflowCommand) => Promise<WorkflowMutation>;
   setModel: (
     model: string | null,
     provider?: string | null,

@@ -455,6 +455,7 @@ mod tests {
             tool("read"),
             tool("set_work_mode"),
             tool("tool_search"),
+            tool("workflow_propose"),
             tool("write"),
         ];
 
@@ -485,7 +486,8 @@ mod tests {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>();
-        assert!(plan_names.contains(&"set_work_mode"));
+        assert!(plan_names.contains(&"workflow_propose"));
+        assert!(!plan_names.contains(&"set_work_mode"));
         assert!(!plan_names.contains(&"edit"));
         assert!(!plan_names.contains(&"write"));
         assert!(!build_names.contains(&"set_work_mode"));
@@ -501,6 +503,7 @@ mod tests {
             tool("read"),
             tool("set_work_mode"),
             tool("tool_search"),
+            tool("workflow_propose"),
             tool("write"),
         ];
         let build_tools = filter_code_tools_for_mode(

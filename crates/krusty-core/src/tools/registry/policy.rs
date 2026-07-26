@@ -46,36 +46,32 @@ const PLAN_MODE_TOOLS: &[&str] = &[
     "glob",
     "grep",
     "read",
-    "set_work_mode",
     "tool_search",
+    "workflow_propose",
 ];
 
 const ACTIVE_PLAN_TOOLS: &[&str] = &[
     "AskUserQuestion",
-    "add_subtask",
     "agent",
     "apply_patch",
     "bash",
     "read",
-    "set_dependency",
-    "set_work_mode",
     "task_complete",
     "task_start",
     "tool_search",
+    "workflow_update",
 ];
 
 const ACTIVE_PLAN_EDIT_WRITE_TOOLS: &[&str] = &[
     "AskUserQuestion",
-    "add_subtask",
     "agent",
     "bash",
     "edit",
     "read",
-    "set_dependency",
-    "set_work_mode",
     "task_complete",
     "task_start",
     "tool_search",
+    "workflow_update",
     "write",
 ];
 
@@ -83,8 +79,8 @@ const ACTIVE_PLAN_EDIT_WRITE_TOOLS: &[&str] = &[
 /// coding surface. Keeping these direct is intentional: lifecycle and user
 /// interaction tools are intercepted by the orchestrator and cannot be safely
 /// emulated by nested registry dispatch.
-const ACTIVE_PLAN_TOOL_LIMIT: usize = 11;
-const ACTIVE_PLAN_EDIT_WRITE_TOOL_LIMIT: usize = 12;
+const ACTIVE_PLAN_TOOL_LIMIT: usize = 9;
+const ACTIVE_PLAN_EDIT_WRITE_TOOL_LIMIT: usize = 10;
 
 /// Mutation grammar exposed directly to a model family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -711,7 +707,8 @@ pub fn tool_policy(name: &str) -> ToolPolicy {
         | "mcp__list_tools" => ToolPolicy::read_only(),
         "AskUserQuestion" | "PlanConfirm" | "enter_plan_mode" | "memory" | "set_work_mode"
         | "task_start" | "task_complete" | "add_subtask" | "set_dependency"
-        | "send_user_message" | "sleep" | "autonomous_task" | "report" => ToolPolicy::interactive(),
+        | "workflow_propose" | "workflow_update" | "send_user_message" | "sleep"
+        | "autonomous_task" | "report" => ToolPolicy::interactive(),
         "set_workspace_context" => ToolPolicy::interactive_with_supervised_approval(),
         _ => ToolPolicy::write(),
     }

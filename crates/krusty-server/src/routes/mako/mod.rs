@@ -34,6 +34,10 @@ mod sessions;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/dispatch", post(sessions::dispatch))
+        .route(
+            "/main",
+            get(sessions::main_session).post(sessions::main_session),
+        )
         .route("/home", get(home::home))
         .route("/home/bootstrap", post(home::bootstrap_home))
         .route("/home/:kind", put(home::update_home_document))
@@ -57,6 +61,7 @@ pub fn router() -> Router<AppState> {
             post(learning::reject_candidate),
         )
         .route("/daemon/recover", post(sessions::recover_daemon))
+        .route("/schedules", get(control_plane::list_global_schedules))
         .route("/sessions", get(sessions::list_sessions))
         .route("/sessions/:id/status", get(sessions::session_status))
         .route(

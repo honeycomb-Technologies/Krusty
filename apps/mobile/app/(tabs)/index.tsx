@@ -111,6 +111,8 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const routeParams = useLocalSearchParams<{
     sessionId?: string | string[];
     focus?: string | string[];
+    messageId?: string | string[];
+    reportId?: string | string[];
   }>();
   const { theme } = useThemeContext();
   const { client, isConnected } = useConnection();
@@ -154,6 +156,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const [activeTab, setActiveTab] = useState(1);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [makoTopLevel, setMakoTopLevel] = useState<MakoTopLevelView>("mako");
+  const [makoNotificationTarget, setMakoNotificationTarget] = useState<{
+    messageId?: string;
+    reportId?: string;
+  } | null>(null);
   const [toolboxOpen, setToolboxOpen] = useState(false);
   const [toolboxTab, setToolboxTab] = useState(0);
   const [bottomControlsOpen, setBottomControlsOpen] = useState(false);
@@ -277,7 +283,15 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
 
       if (focus === "mako") {
         setActiveTab(2);
+        setMakoTopLevel("mako");
+        setMakoNotificationTarget({
+          ...(params?.messageId ? { messageId: params.messageId } : {}),
+          ...(params?.reportId ? { reportId: params.reportId } : {}),
+        });
+        await sessionStore.getState().ensureMakoMainSession();
+        return;
       }
+
       if (!targetSessionId) {
         return;
       }
@@ -298,13 +312,28 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     const focus = Array.isArray(routeParams.focus)
       ? routeParams.focus[0]
       : routeParams.focus;
+    const messageId = Array.isArray(routeParams.messageId)
+      ? routeParams.messageId[0]
+      : routeParams.messageId;
+    const reportId = Array.isArray(routeParams.reportId)
+      ? routeParams.reportId[0]
+      : routeParams.reportId;
     if ((targetSessionId && targetSessionId !== sessionId) || focus === "mako") {
       void handleNotificationNavigate("/(tabs)", {
         ...(targetSessionId ? { sessionId: targetSessionId } : {}),
         ...(focus ? { focus } : {}),
+        ...(messageId ? { messageId } : {}),
+        ...(reportId ? { reportId } : {}),
       });
     }
-  }, [handleNotificationNavigate, routeParams.focus, routeParams.sessionId, sessionId]);
+  }, [
+    handleNotificationNavigate,
+    routeParams.focus,
+    routeParams.messageId,
+    routeParams.reportId,
+    routeParams.sessionId,
+    sessionId,
+  ]);
 
   const handleRegisterNativeDevice = useCallback(
     async (deviceToken: string) => {
@@ -1006,8 +1035,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     <Animated.View style={[styles.flex, entrance.contentStyle]}>
       <MakoScreen
         workspaceDirectory={workspaceDirectory}
-        activeRunId={sessionId}
         requestedTopLevel={makoTopLevel}
+        requestedThreadMessageId={makoNotificationTarget?.messageId}
+        requestedReportId={makoNotificationTarget?.reportId}
         onOpenRunById={loadSessionById}
         onOpenProject={openProjectInCode}
         onDeleteRun={handleDeleteSession}

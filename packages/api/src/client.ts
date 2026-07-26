@@ -2,6 +2,9 @@ import type {
 	SessionResponse,
 	SessionWithMessagesResponse,
 	SessionStateResponse,
+	WorkflowCommand,
+	WorkflowMutation,
+	WorkflowSnapshot,
 	SessionPresenceResponse,
 	ModelsResponse,
 	GitStatusResponse,
@@ -36,6 +39,11 @@ import type {
 	MakoAttentionResponse,
 	MakoDispatchOptions,
 	MakoDispatchResponse,
+	MakoMainResponse,
+	MakoGlobalSchedule,
+	MakoSchedule,
+	MakoScheduleMutationResponse,
+	MakoScheduleWriteRequest,
 	MakoBootstrapResponse,
 	MakoCrewDocumentKind,
 	MakoCrewResponse,
@@ -248,6 +256,20 @@ export class KrustyClient {
 
 	async getSessionState(id: string): Promise<SessionStateResponse> {
 		return this.request(`/sessions/${id}/state`);
+	}
+
+	async getWorkflow(id: string): Promise<WorkflowSnapshot | null> {
+		return this.request(`/sessions/${id}/workflow`);
+	}
+
+	async executeWorkflowCommand(
+		id: string,
+		command: WorkflowCommand,
+	): Promise<WorkflowMutation> {
+		return this.request(`/sessions/${id}/workflow/commands`, {
+			method: "POST",
+			body: JSON.stringify(command),
+		});
 	}
 
 	// Presence
@@ -657,6 +679,101 @@ export class KrustyClient {
 		});
 	}
 
+	/** Ensure/get the durable singleton Mako companion chat for this user. */
+	async getMakoMain(): Promise<MakoMainResponse> {
+		return this.request("/mako/main");
+	}
+
+	/** Same as getMakoMain — POST is accepted for ensure semantics. */
+	async ensureMakoMain(): Promise<MakoMainResponse> {
+		return this.request("/mako/main", { method: "POST" });
+	}
+
+	/**
+	 * User-scoped global schedule list for the Mako Schedule secondary surface.
+	 * Ordered by next fire time across all of the caller's controllers.
+	 */
+	async listMakoSchedules(options?: {
+		limit?: number;
+	}): Promise<MakoGlobalSchedule[]> {
+		const params: string[] = [];
+		if (options?.limit != null) {
+			params.push(`limit=${encodeURIComponent(String(options.limit))}`);
+		}
+		const q = params.length > 0 ? `?${params.join("&")}` : "";
+		return this.request(`/mako/schedules${q}`);
+	}
+
+	/** List schedules attached to a specific Mako controller session. */
+	async listMakoSessionSchedules(
+		sessionId: string,
+		options?: { limit?: number },
+	): Promise<MakoSchedule[]> {
+		const params: string[] = [];
+		if (options?.limit != null) {
+			params.push(`limit=${encodeURIComponent(String(options.limit))}`);
+		}
+		const q = params.length > 0 ? `?${params.join("&")}` : "";
+		return this.request(
+			`/mako/sessions/${encodeURIComponent(sessionId)}/schedules${q}`,
+		);
+	}
+
+	async createMakoSchedule(
+		sessionId: string,
+		request: MakoScheduleWriteRequest,
+		options?: { idempotencyKey?: string },
+	): Promise<MakoScheduleMutationResponse> {
+		const headers: Record<string, string> = {};
+		if (options?.idempotencyKey) {
+			headers["Idempotency-Key"] = options.idempotencyKey;
+		}
+		return this.request(
+			`/mako/sessions/${encodeURIComponent(sessionId)}/schedules`,
+			{
+				method: "POST",
+				headers,
+				body: JSON.stringify(request),
+			},
+		);
+	}
+
+	async pauseMakoSchedule(
+		sessionId: string,
+		scheduleId: string,
+		revision: number,
+		options?: { idempotencyKey?: string },
+	): Promise<MakoScheduleMutationResponse> {
+		const headers: Record<string, string> = {
+			"If-Match": `"${revision}"`,
+		};
+		if (options?.idempotencyKey) {
+			headers["Idempotency-Key"] = options.idempotencyKey;
+		}
+		return this.request(
+			`/mako/sessions/${encodeURIComponent(sessionId)}/schedules/${encodeURIComponent(scheduleId)}/pause`,
+			{ method: "POST", headers },
+		);
+	}
+
+	async resumeMakoSchedule(
+		sessionId: string,
+		scheduleId: string,
+		revision: number,
+		options?: { idempotencyKey?: string },
+	): Promise<MakoScheduleMutationResponse> {
+		const headers: Record<string, string> = {
+			"If-Match": `"${revision}"`,
+		};
+		if (options?.idempotencyKey) {
+			headers["Idempotency-Key"] = options.idempotencyKey;
+		}
+		return this.request(
+			`/mako/sessions/${encodeURIComponent(sessionId)}/schedules/${encodeURIComponent(scheduleId)}/resume`,
+			{ method: "POST", headers },
+		);
+	}
+
 	async getMakoCurrent(): Promise<MakoCurrentResponse> {
 		return this.request("/mako/current");
 	}
@@ -1040,6 +1157,13 @@ export class KrustyClient {
 				break;
 			case "plan_update":
 				callbacks.onPlanUpdate(event.items);
+				break;
+			case "workflow_updated":
+				callbacks.onWorkflowUpdated?.(
+					event.goal_id,
+					event.aggregate_revision,
+					event.operation_id,
+				);
 				break;
 			case "mode_change":
 				callbacks.onModeChange(event.mode, event.reason);

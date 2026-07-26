@@ -6,6 +6,7 @@ mod crud;
 mod pinch;
 mod presence;
 mod state;
+mod workflow;
 
 use axum::{
     routing::{get, post},
@@ -23,6 +24,7 @@ use self::crud::{
 use self::pinch::pinch_session;
 use self::presence::{get_session_presence, heartbeat_session_presence, remove_session_presence};
 use self::state::{get_session_state, get_session_trace};
+use self::workflow::{execute_workflow_command, get_workflow};
 
 use super::session_access::{
     current_user_id, ensure_owned_session, load_agent_state_or_idle, load_owned_session,
@@ -43,6 +45,8 @@ pub fn router() -> Router<AppState> {
                 .delete(delete_session),
         )
         .route("/:id/state", get(get_session_state))
+        .route("/:id/workflow", get(get_workflow))
+        .route("/:id/workflow/commands", post(execute_workflow_command))
         .route("/:id/trace", get(get_session_trace))
         .route("/:id/cancel", post(cancel_session))
         .route(

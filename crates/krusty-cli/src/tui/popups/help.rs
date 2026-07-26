@@ -153,6 +153,7 @@ impl HelpPopup {
             ("/clear", "Clear chat messages"),
             ("/pinch", "Compact this session in place"),
             ("/plan", "View/manage active plan"),
+            ("/goal", "View/pause/resume durable Goal"),
             ("/mcp", "Browse and manage MCP servers"),
             ("/skills", "Browse skills"),
             ("/plugins", "Browse and manage installable plugins"),

@@ -531,8 +531,10 @@ fn action_class(name: &str, arguments: &Value, call: &AiToolCall) -> ActionClass
             _ => ActionClass::Delegate,
         },
         "send_user_message" | "report" => ActionClass::Communicate,
-        "set_work_mode" | "enter_plan_mode" | "task_start" | "task_complete" | "add_subtask"
-        | "set_dependency" | "sleep" => ActionClass::Control,
+        "set_work_mode" | "enter_plan_mode" | "workflow_propose" | "workflow_update"
+        | "task_start" | "task_complete" | "add_subtask" | "set_dependency" | "sleep" => {
+            ActionClass::Control
+        }
         _ => match tool_policy_for_call(name, arguments).category {
             ToolCategory::ReadOnly => ActionClass::Observe,
             ToolCategory::Write => ActionClass::Mutate,

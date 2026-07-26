@@ -1,11 +1,7 @@
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import { useThemeContext } from "../../hooks/useTheme";
 import { MakoThreadSurface } from "./MakoThreadSurface";
-import {
-  formatProjectLabel,
-  getRunGroup,
-  getRunNextWakeAt,
-} from "./utils";
+import { InlineReportCard } from "../reports/InlineReportCard";
 import type {
   MakoChatContext,
   MakoCurrentState,
@@ -17,21 +13,9 @@ interface MakoCurrentViewProps {
   homeState: MakoHomeState;
   chat: MakoChatContext;
   threadJumpMessageId?: string | null;
+  reportJumpId?: string | null;
   onThreadJumpHandled?: () => void;
-  onSelectRun: (runId: string) => void;
-  onOpenDetails: () => void;
-  onOpenSchedule: () => void;
-}
-
-function formatWakeTime(value?: string | null) {
-  if (!value) {
-    return "No wake set";
-  }
-
-  return new Date(value).toLocaleTimeString([], {
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  onReportJumpHandled?: () => void;
 }
 
 export function MakoCurrentView({
@@ -39,10 +23,9 @@ export function MakoCurrentView({
   homeState,
   chat,
   threadJumpMessageId,
+  reportJumpId,
   onThreadJumpHandled,
-  onSelectRun,
-  onOpenDetails,
-  onOpenSchedule,
+  onReportJumpHandled,
 }: MakoCurrentViewProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
@@ -55,23 +38,34 @@ export function MakoCurrentView({
     );
   }
 
-  const runs = state.current?.runs ?? [];
-  const approvals = state.current?.approvals ?? [];
   const status = state.current?.status;
-  const waitingRuns = runs.filter((run) => getRunGroup(run) === "waiting");
-  const activeRuns = runs.filter((run) => getRunGroup(run) === "active");
-  const sleepingRuns = runs.filter((run) => getRunGroup(run) === "sleeping");
-  const queuedRuns = runs.filter((run) => getRunGroup(run) === "queued");
-
-  const focusApproval = approvals[0] ?? null;
-  const focusRun = waitingRuns[0] ?? activeRuns[0] ?? null;
-  const nextScheduledRun =
-    [...queuedRuns, ...sleepingRuns]
-      .sort((left, right) => {
-        const leftValue = getRunNextWakeAt(left) ?? "9999";
-        const rightValue = getRunNextWakeAt(right) ?? "9999";
-        return leftValue.localeCompare(rightValue);
-      })[0] ?? null;
+  const pendingApprovalCount = state.current?.approvals.length ?? 0;
+  const waitingRun = state.current?.runs.find((run) => {
+    const diagnosticKind = run.diagnostic?.kind;
+    return (
+      diagnosticKind === "awaiting_input" ||
+      diagnosticKind === "awaiting_approval" ||
+      run.blocked_tasks > 0
+    );
+  });
+  const blockedPrompt =
+    pendingApprovalCount > 0
+      ? {
+          title: "Mako needs your approval",
+          detail:
+            pendingApprovalCount === 1
+              ? "Review the pending request and reply in this thread to continue."
+              : `${pendingApprovalCount} requests are waiting. Reply in this thread to continue.`,
+        }
+      : waitingRun
+        ? {
+            title: "Mako needs your input",
+            detail:
+              waitingRun.diagnostic?.detail ||
+              waitingRun.diagnostic?.summary ||
+              "Reply in this thread with the missing direction. Mako will wait here until you do.",
+          }
+        : null;
 
   const home = homeState.home;
   const needsBootstrap =
@@ -86,18 +80,16 @@ export function MakoCurrentView({
   const stateBits = [
     status?.home_status ?? "idle",
     `${status?.running_count ?? 0} running`,
-    `${approvals.length} attention`,
-    `next wake ${formatWakeTime(status?.next_wake_at)}`,
   ];
 
   return (
     <View style={styles.container}>
       <View style={[styles.metaBlock, { borderBottomColor: t.border }]}>
-        <Pressable onPress={onOpenDetails} style={styles.statusLine}>
+        <View style={styles.statusLine}>
           <Text style={[styles.statusText, { color: t.mutedForeground }]}>
             {stateBits.join(" • ")}
           </Text>
-        </Pressable>
+        </View>
 
         {needsBootstrap ? (
           <View style={[styles.focusRow, { borderColor: t.border }]}>
@@ -121,65 +113,24 @@ export function MakoCurrentView({
               </Text>
             </Pressable>
           </View>
-        ) : focusApproval ? (
-          <View style={[styles.focusRow, { borderColor: t.border }]}>
-            <View style={styles.focusCopy}>
-              <Text style={[styles.focusTitle, { color: t.foreground }]}>
-                Approval needed for {focusApproval.tool_name}
-              </Text>
-              <Text style={[styles.focusDetail, { color: t.mutedForeground }]}>
-                {formatProjectLabel(focusApproval.project_dir)} is waiting on you.
-              </Text>
-            </View>
-            <Pressable
-              onPress={() => {
-                onSelectRun(focusApproval.session_id);
-              }}
-              style={styles.focusAction}
-            >
-              <Text style={[styles.focusActionText, { color: t.userMessage }]}>
-                Open
-              </Text>
-            </Pressable>
-          </View>
-        ) : focusRun ? (
-          <View style={[styles.focusRow, { borderColor: t.border }]}>
-            <View style={styles.focusCopy}>
-              <Text style={[styles.focusTitle, { color: t.foreground }]}>
-                {focusRun.title || "Untitled run"}
-              </Text>
-              <Text style={[styles.focusDetail, { color: t.mutedForeground }]}>
-                {formatProjectLabel(focusRun.project_dir)} is active now.
-              </Text>
-            </View>
-            <Pressable
-              onPress={() => {
-                onSelectRun(focusRun.session_id);
-              }}
-              style={styles.focusAction}
-            >
-              <Text style={[styles.focusActionText, { color: t.userMessage }]}>
-                Open run
-              </Text>
-            </Pressable>
-          </View>
-        ) : nextScheduledRun ? (
-          <View style={[styles.focusRow, { borderColor: t.border }]}>
-            <View style={styles.focusCopy}>
-              <Text style={[styles.focusTitle, { color: t.foreground }]}>
-                Next wake
-              </Text>
-              <Text style={[styles.focusDetail, { color: t.mutedForeground }]}>
-                {(nextScheduledRun.title || "Untitled run") +
-                  " at " +
-                  formatWakeTime(getRunNextWakeAt(nextScheduledRun))}
-              </Text>
-            </View>
-            <Pressable onPress={onOpenSchedule} style={styles.focusAction}>
-              <Text style={[styles.focusActionText, { color: t.userMessage }]}>
-                Schedule
-              </Text>
-            </Pressable>
+        ) : null}
+
+        {blockedPrompt ? (
+          <View
+            style={[
+              styles.blockedPrompt,
+              {
+                borderColor: `${t.warning}55`,
+                backgroundColor: `${t.warning}10`,
+              },
+            ]}
+          >
+            <Text style={[styles.focusTitle, { color: t.foreground }]}>
+              {blockedPrompt.title}
+            </Text>
+            <Text style={[styles.focusDetail, { color: t.mutedForeground }]}>
+              {blockedPrompt.detail}
+            </Text>
           </View>
         ) : null}
 
@@ -189,6 +140,15 @@ export function MakoCurrentView({
       </View>
 
       <View style={styles.threadWrap}>
+        {reportJumpId ? (
+          <View style={styles.reportJump}>
+            <InlineReportCard
+              reportId={reportJumpId}
+              defaultExpanded
+              onDismiss={onReportJumpHandled}
+            />
+          </View>
+        ) : null}
         <MakoThreadSurface
           chat={chat}
           scrollToMessageId={threadJumpMessageId}
@@ -255,8 +215,19 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 18,
   },
+  blockedPrompt: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 4,
+  },
   threadWrap: {
     flex: 1,
     minHeight: 0,
+  },
+  reportJump: {
+    marginHorizontal: 16,
+    marginTop: 10,
   },
 });

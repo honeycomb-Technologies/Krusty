@@ -36,6 +36,8 @@ type NotificationResponseData = {
   requestId?: string;
   sessionId?: string;
   focus?: string;
+  messageId?: string;
+  reportId?: string;
 };
 type NotificationResponseEvent = {
   actionIdentifier: string;
@@ -200,6 +202,12 @@ export function useNotifications(options?: UseNotificationsOptions) {
         if (data.sessionId) {
           params.sessionId = data.sessionId;
         }
+        if (data.messageId) {
+          params.messageId = data.messageId;
+        }
+        if (data.reportId) {
+          params.reportId = data.reportId;
+        }
         optionsRef.current?.onNavigate?.("/(tabs)", params);
       } else if (
         actionId === Notifications?.DEFAULT_ACTION_IDENTIFIER &&
@@ -211,6 +219,12 @@ export function useNotifications(options?: UseNotificationsOptions) {
         }
         if (data.focus) {
           params.focus = data.focus;
+        }
+        if (data.messageId) {
+          params.messageId = data.messageId;
+        }
+        if (data.reportId) {
+          params.reportId = data.reportId;
         }
         optionsRef.current?.onNavigate?.("/(tabs)", params);
       }

@@ -108,6 +108,53 @@ pub(super) struct RecoverDaemonResponse {
     pub(super) recovered_count: usize,
 }
 
+#[derive(Debug, Serialize)]
+pub(super) struct MakoMainResponse {
+    pub(super) session_id: String,
+    pub(super) title: String,
+    pub(super) session_type: SessionType,
+    pub(super) permission_mode: String,
+    pub(super) created: bool,
+    pub(super) agent_state: String,
+}
+
+/// Ensure/get the singleton Mako companion chat for the current user.
+///
+/// This is the durable relationship thread (Telegram/OpenClaw-style), not a job
+/// run. Dispatch continues to create separate autonomous work sessions.
+pub(super) async fn main_session(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+) -> Result<Json<MakoMainResponse>, AppError> {
+    let session_manager = open_session_manager(&state)?;
+    let user_id = current_user_id(user.as_ref());
+    let before = session_manager
+        .list_sessions_for_user_by_type(None, user_id, SessionType::Mako)?
+        .into_iter()
+        .filter(|session| {
+            session.parent_session_id.is_none()
+                && session.project_dir.is_none()
+                && matches!(session.workspace_mode, WorkspaceMode::Neutral)
+        })
+        .map(|session| session.id)
+        .collect::<std::collections::HashSet<_>>();
+
+    let session = session_manager.ensure_mako_main_session(user_id)?;
+    if !session_visible_to_user(&session, user_id) {
+        return Err(AppError::NotFound("Mako main session".into()));
+    }
+
+    let agent_state = load_agent_state_or_idle(&session_manager, &session.id)?.state;
+    Ok(Json(MakoMainResponse {
+        session_id: session.id.clone(),
+        title: session.title,
+        session_type: SessionType::Mako,
+        permission_mode: session.permission_mode.as_str().to_string(),
+        created: !before.contains(&session.id),
+        agent_state,
+    }))
+}
+
 pub(super) async fn dispatch(
     State(state): State<AppState>,
     user: Option<CurrentUser>,

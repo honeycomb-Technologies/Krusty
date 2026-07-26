@@ -33,6 +33,8 @@ const SAFE_TOOLS: &[&str] = &[
     "task_complete",
     "task_start",
     "tool_search",
+    "workflow_propose",
+    "workflow_update",
 ];
 
 const CLASSIFIER_PROMPT: &str = r#"You are a safety classifier for an AI coding agent operating in autonomous mode. Your job is to decide whether a tool call should be ALLOWED or BLOCKED.
@@ -687,6 +689,8 @@ mod tests {
                 "task_complete",
                 "task_start",
                 "tool_search",
+                "workflow_propose",
+                "workflow_update",
             ]
         );
 

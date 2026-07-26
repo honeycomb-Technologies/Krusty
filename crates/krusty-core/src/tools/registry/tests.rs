@@ -242,7 +242,7 @@ fn default_code_request_surface_is_small_and_deterministic() {
 }
 
 #[test]
-fn active_plan_surface_keeps_orchestration_and_lifecycle_tools_reachable() {
+fn active_goal_surface_keeps_execution_and_strict_step_tools_reachable() {
     let tools = [
         "AskUserQuestion",
         "add_subtask",
@@ -255,6 +255,7 @@ fn active_plan_surface_keeps_orchestration_and_lifecycle_tools_reachable() {
         "task_complete",
         "task_start",
         "tool_search",
+        "workflow_update",
         "write",
     ]
     .into_iter()
@@ -267,15 +268,15 @@ fn active_plan_surface_keeps_orchestration_and_lifecycle_tools_reachable() {
         .map(|tool| tool.name)
         .collect::<Vec<_>>();
 
-    assert_eq!(names.len(), 11);
+    assert_eq!(names.len(), 9);
     for required in [
         "AskUserQuestion",
         "agent",
         "apply_patch",
         "task_start",
         "task_complete",
-        "set_work_mode",
         "tool_search",
+        "workflow_update",
     ] {
         assert!(
             names.iter().any(|name| name == required),
@@ -339,6 +340,7 @@ fn request_policy_filters_plan_writes_disabled_tools_and_unapprovable_mutations(
         ai_tool("apply_patch"),
         ai_tool("set_work_mode"),
         ai_tool("tool_search"),
+        ai_tool("workflow_propose"),
     ];
     let plan_policy = ToolRequestPolicy::code(PermissionMode::Supervised, true, false, false, &[]);
     let names = plan_policy
@@ -347,7 +349,7 @@ fn request_policy_filters_plan_writes_disabled_tools_and_unapprovable_mutations(
         .map(|tool| tool.name)
         .collect::<Vec<_>>();
 
-    assert_eq!(names, vec!["read", "set_work_mode"]);
+    assert_eq!(names, vec!["read", "workflow_propose"]);
 }
 
 #[test]

@@ -3,6 +3,7 @@
 //! Handles /command parsing and execution.
 
 mod extensions;
+mod goal;
 mod init;
 mod plan;
 mod plugins;
@@ -66,6 +67,7 @@ impl App {
                 self.handle_terminal_command(parts.get(1).copied());
             }
             "/plan" => self.handle_plan_command(parts.get(1).copied()),
+            "/goal" => self.handle_goal_command(parts.get(1).copied()),
             "/skills" => self.open_skills_browser(),
             "/plugins" => self.handle_plugins_command(&parts),
             "/extensions" => self.handle_extensions_command(&parts),

@@ -20,7 +20,7 @@ pub use implementations::{
     EditTool, EnterPlanModeTool, GlobTool, GrepTool, ListTool, MemoryTool, MultiEditTool,
     ProcessesTool, ReadTool, ReportTool, SendUserMessageTool, SetDependencyTool, SetWorkModeTool,
     SetWorkspaceContextTool, SkillTool, SleepTool, TaskCompleteTool, TaskStartTool, ToolSearchTool,
-    WebFetchTool, WebSearchTool, WriteTool,
+    WebFetchTool, WebSearchTool, WorkflowProposeTool, WorkflowUpdateTool, WriteTool,
 };
 pub use registry::{
     parse_params, FileObservationTracker, ToolContext, ToolOutputChunk, ToolRegistry, ToolResult,

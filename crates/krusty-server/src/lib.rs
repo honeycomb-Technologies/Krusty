@@ -664,6 +664,8 @@ fn reconcile_transient_agent_states(db_path: &std::path::Path) -> anyhow::Result
     let session_manager = krusty_core::SessionManager::new(Database::new(db_path)?);
     let repaired = session_manager.reset_transient_agent_states()?;
     let cleared_recovery = session_manager.clear_stale_transient_recovery_states()?;
+    let recovered_workflows = krusty_core::workflow::WorkflowManager::new(db_path.to_path_buf())?
+        .recover_interrupted_attempts()?;
     if repaired > 0 {
         tracing::info!(
             repaired_sessions = repaired,
@@ -674,6 +676,12 @@ fn reconcile_transient_agent_states(db_path: &std::path::Path) -> anyhow::Result
         tracing::info!(
             cleared_sessions = cleared_recovery,
             "Cleared stale non-resumable recovery state during server startup"
+        );
+    }
+    if recovered_workflows > 0 {
+        tracing::info!(
+            recovered_goals = recovered_workflows,
+            "Paused interrupted durable Goal attempts during server startup"
         );
     }
     Ok(())
