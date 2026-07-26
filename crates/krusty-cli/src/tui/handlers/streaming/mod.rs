@@ -270,7 +270,15 @@ impl App {
         };
 
         // Build CallOptions (thinking, web tools, etc.)
-        let has_active_plan = self
+        let has_active_plan = krusty_core::workflow::WorkflowManager::new(
+            crate::paths::config_dir().join("krusty.db"),
+        )
+        .ok()
+        .and_then(|manager| manager.get_snapshot(&session_id).ok().flatten())
+        .is_some_and(|snapshot| {
+            snapshot.goal.status == krusty_core::workflow::GoalStatus::Active
+                && snapshot.plan_revision.is_some()
+        }) || self
             .services
             .plan_manager
             .as_ref()

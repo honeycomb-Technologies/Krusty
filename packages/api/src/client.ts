@@ -2,6 +2,9 @@ import type {
 	SessionResponse,
 	SessionWithMessagesResponse,
 	SessionStateResponse,
+	WorkflowCommand,
+	WorkflowMutation,
+	WorkflowSnapshot,
 	SessionPresenceResponse,
 	ModelsResponse,
 	GitStatusResponse,
@@ -249,6 +252,20 @@ export class KrustyClient {
 
 	async getSessionState(id: string): Promise<SessionStateResponse> {
 		return this.request(`/sessions/${id}/state`);
+	}
+
+	async getWorkflow(id: string): Promise<WorkflowSnapshot | null> {
+		return this.request(`/sessions/${id}/workflow`);
+	}
+
+	async executeWorkflowCommand(
+		id: string,
+		command: WorkflowCommand,
+	): Promise<WorkflowMutation> {
+		return this.request(`/sessions/${id}/workflow/commands`, {
+			method: "POST",
+			body: JSON.stringify(command),
+		});
 	}
 
 	// Presence
@@ -1051,6 +1068,13 @@ export class KrustyClient {
 				break;
 			case "plan_update":
 				callbacks.onPlanUpdate(event.items);
+				break;
+			case "workflow_updated":
+				callbacks.onWorkflowUpdated?.(
+					event.goal_id,
+					event.aggregate_revision,
+					event.operation_id,
+				);
 				break;
 			case "mode_change":
 				callbacks.onModeChange(event.mode, event.reason);

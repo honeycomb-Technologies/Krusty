@@ -183,6 +183,8 @@ pub struct SessionStateResponse {
     pub mode: WorkMode,
     /// Current persisted permission mode.
     pub permission_mode: PermissionMode,
+    /// Canonical durable Goal and plan aggregate, if the session has one.
+    pub workflow: Option<krusty_core::workflow::WorkflowSnapshot>,
     /// Interrupted-turn recovery state, if any.
     pub recovery: Option<SessionRecoveryState>,
     /// Reload-safe pending tool approvals, user questions, and plan confirmations.

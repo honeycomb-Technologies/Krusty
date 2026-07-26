@@ -5,6 +5,7 @@ use axum::{
 use serde::Deserialize;
 
 use krusty_core::storage::{Database, DelegatedRunStore, RuntimeTraceEvent, RuntimeTraceSummary};
+use krusty_core::workflow::WorkflowManager;
 
 use super::{
     ensure_owned_session, load_agent_state_or_idle, load_owned_session, open_session_manager,
@@ -34,6 +35,10 @@ pub(super) async fn get_session_state(
 ) -> Result<Json<SessionStateResponse>, AppError> {
     let session_manager = open_session_manager(&state)?;
     let session = load_owned_session(&session_manager, &id, user.as_ref())?;
+    let workflow = WorkflowManager::new(state.db_path.as_ref().clone())
+        .map_err(|error| AppError::Internal(error.to_string()))?
+        .get_snapshot(&id)
+        .map_err(|error| AppError::Internal(error.to_string()))?;
 
     let agent_state = load_agent_state_or_idle(&session_manager, &id)?;
     let recovery = session_manager.load_recovery_state(&id)?;
@@ -64,6 +69,7 @@ pub(super) async fn get_session_state(
         last_event_at: agent_state.last_event_at,
         mode: session.work_mode,
         permission_mode: session.permission_mode,
+        workflow,
         recovery,
         pending_interactions,
         live_partial_assistant,

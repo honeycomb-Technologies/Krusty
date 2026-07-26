@@ -1,5 +1,6 @@
 use tempfile::TempDir;
 
+use crate::plan::{PlanManager, TaskStatus};
 use crate::storage::{Database, SessionManager};
 
 use super::{
@@ -283,4 +284,228 @@ fn stale_writers_and_second_unfinished_goal_fail_safely() {
         "user",
     );
     assert!(matches!(stale, Err(WorkflowError::Conflict(_))));
+}
+
+#[test]
+fn legacy_import_preserves_completed_evidence_but_never_activates() {
+    let temp = TempDir::new().expect("temp dir");
+    let path = temp.path().join("legacy-workflow.db");
+    let sessions = SessionManager::new(Database::new(&path).expect("database"));
+    let session_id = sessions
+        .create_session("Legacy", Some("test-model"), Some("/tmp"))
+        .expect("session");
+    let plan_manager = PlanManager::new(path.clone()).expect("plan manager");
+    let mut legacy = crate::plan::PlanFile::new("Existing Mako plan");
+    legacy.session_id = Some(session_id.clone());
+    let phase = legacy.add_phase("Foundation");
+    phase.add_task("Already shipped");
+    phase.tasks[0].status = TaskStatus::Completed;
+    phase.tasks[0].completed = true;
+    phase.tasks[0].result = Some("Focused test passed".to_string());
+    phase.add_task("Continue safely");
+    phase.tasks[1].status = TaskStatus::InProgress;
+    plan_manager
+        .save_plan_for_session(&session_id, &legacy)
+        .expect("legacy plan should save");
+
+    let manager = WorkflowManager::new(path).expect("workflow manager");
+    let imported = manager
+        .import_legacy_plan(&session_id, goal_input(), "import", "user")
+        .expect("legacy plan should import");
+
+    assert_eq!(imported.snapshot.goal.status, GoalStatus::Draft);
+    assert!(imported.snapshot.goal.legacy_plan_id.is_some());
+    assert_eq!(
+        imported
+            .snapshot
+            .plan_revision
+            .as_ref()
+            .expect("plan")
+            .status,
+        super::PlanRevisionStatus::Proposed
+    );
+    assert_eq!(
+        imported.snapshot.steps[0].status,
+        WorkflowStepStatus::Completed
+    );
+    assert_eq!(
+        imported.snapshot.steps[0].evidence,
+        vec!["Focused test passed"]
+    );
+    assert_eq!(
+        imported.snapshot.steps[1].status,
+        WorkflowStepStatus::Pending,
+        "a legacy in-progress marker has no owning Workflow attempt"
+    );
+}
+
+#[test]
+fn replanning_an_active_goal_pauses_until_exact_revision_is_approved() {
+    let (_temp, session_id, manager) = setup();
+    let (goal_id, first_plan_id, revision) = activate_fixture(&manager, &session_id);
+    let mut replacement = plan_input();
+    replacement.title = "Replacement".to_string();
+    replacement.predecessor_id = Some(first_plan_id);
+    let proposed = manager
+        .propose_plan(
+            &session_id,
+            &goal_id,
+            revision,
+            replacement,
+            "replace",
+            "user",
+        )
+        .expect("replacement should propose");
+    assert_eq!(proposed.snapshot.goal.status, GoalStatus::Paused);
+    let replacement_id = proposed
+        .snapshot
+        .plan_revision
+        .as_ref()
+        .expect("replacement is current")
+        .id
+        .clone();
+    assert_eq!(
+        proposed
+            .snapshot
+            .plan_revision
+            .as_ref()
+            .expect("replacement")
+            .status,
+        super::PlanRevisionStatus::Proposed
+    );
+
+    let approved = manager
+        .approve_plan(
+            &session_id,
+            &goal_id,
+            &replacement_id,
+            proposed.snapshot.aggregate_revision,
+            "approve-replacement",
+            "user",
+        )
+        .expect("exact replacement should approve");
+    assert_eq!(approved.snapshot.goal.status, GoalStatus::Paused);
+    assert_eq!(
+        approved
+            .snapshot
+            .plan_revision
+            .as_ref()
+            .expect("approved plan")
+            .status,
+        super::PlanRevisionStatus::Active
+    );
+}
+
+#[test]
+fn startup_recovery_pauses_running_attempt_and_releases_its_step() {
+    let (_temp, session_id, manager) = setup();
+    let (goal_id, _plan_id, revision) = activate_fixture(&manager, &session_id);
+    let step_id = manager
+        .get_snapshot(&session_id)
+        .expect("snapshot")
+        .expect("workflow")
+        .steps[0]
+        .id
+        .clone();
+    manager
+        .start_attempt(
+            &session_id,
+            &goal_id,
+            revision,
+            StartAttemptInput {
+                step_id: Some(step_id),
+                permission_mode: "autonomous".to_string(),
+                max_turns: 8,
+                max_tool_calls: 32,
+                max_wall_time_secs: 600,
+                max_research_actions: 8,
+            },
+            "running-before-restart",
+            "agent",
+        )
+        .expect("attempt should start");
+
+    assert_eq!(
+        manager
+            .recover_interrupted_attempts()
+            .expect("recovery should succeed"),
+        1
+    );
+    let recovered = manager
+        .get_snapshot(&session_id)
+        .expect("snapshot")
+        .expect("workflow");
+    assert_eq!(recovered.goal.status, GoalStatus::Paused);
+    assert_eq!(
+        recovered.goal.status_reason.as_deref(),
+        Some("runtime_restarted")
+    );
+    assert_eq!(
+        recovered.latest_attempt.expect("attempt").status,
+        super::AttemptStatus::Paused
+    );
+    assert_eq!(recovered.steps[0].status, WorkflowStepStatus::Pending);
+    assert!(recovered.steps[0].claimed_attempt_id.is_none());
+}
+
+#[test]
+fn optional_goal_token_budget_is_accounted_and_pauses_at_boundary() {
+    let (_temp, session_id, manager) = setup();
+    let mut goal = goal_input();
+    goal.token_budget = Some(100);
+    let created = manager
+        .create_goal(&session_id, goal, "token-goal", "user")
+        .expect("create goal");
+    let goal_id = created.snapshot.goal.id.clone();
+    let proposed = manager
+        .propose_plan(
+            &session_id,
+            &goal_id,
+            created.snapshot.aggregate_revision,
+            plan_input(),
+            "token-plan",
+            "agent",
+        )
+        .expect("plan");
+    let plan_id = proposed
+        .snapshot
+        .plan_revision
+        .as_ref()
+        .expect("plan")
+        .id
+        .clone();
+    let approved = manager
+        .approve_plan(
+            &session_id,
+            &goal_id,
+            &plan_id,
+            proposed.snapshot.aggregate_revision,
+            "token-approve",
+            "user",
+        )
+        .expect("approve");
+    manager
+        .activate_goal(
+            &session_id,
+            &goal_id,
+            approved.snapshot.aggregate_revision,
+            "token-activate",
+            "user",
+        )
+        .expect("activate");
+
+    assert!(manager
+        .record_token_usage(&session_id, 60)
+        .expect("account")
+        .is_none());
+    let exhausted = manager
+        .record_token_usage(&session_id, 40)
+        .expect("account")
+        .expect("budget transition");
+    assert_eq!(exhausted.snapshot.goal.tokens_used, 100);
+    assert_eq!(exhausted.snapshot.goal.status, GoalStatus::Paused);
+    assert_eq!(
+        exhausted.snapshot.goal.status_reason.as_deref(),
+        Some("token_budget_exhausted")
+    );
 }

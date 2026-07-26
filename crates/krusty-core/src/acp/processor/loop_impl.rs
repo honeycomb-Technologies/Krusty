@@ -261,6 +261,10 @@ impl PromptProcessor {
                     send_update(session, connection, SessionUpdate::Plan(Plan::new(entries)))
                         .await?;
                 }
+                LoopEvent::WorkflowUpdated { .. } => {
+                    // ACP receives the projected PlanUpdate event alongside
+                    // this revision signal; native clients refresh via API.
+                }
                 LoopEvent::ModeChange { mode, .. } => {
                     let acp_mode = canonical_mode_to_acp(&mode);
                     session.set_mode(Some(acp_mode.to_string())).await;

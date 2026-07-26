@@ -186,8 +186,7 @@ impl SessionManager {
     pub fn ensure_mako_main_session(&self, user_id: Option<&str>) -> Result<super::SessionInfo> {
         const MAIN_TITLE: &str = "Mako";
 
-        let mut sessions =
-            self.list_sessions_for_user_by_type(None, user_id, SessionType::Mako)?;
+        let mut sessions = self.list_sessions_for_user_by_type(None, user_id, SessionType::Mako)?;
         // Prefer the oldest matching companion candidate so repeated opens stay
         // pinned to one relationship thread even if later job sessions exist.
         sessions.sort_by(|left, right| left.updated_at.cmp(&right.updated_at));

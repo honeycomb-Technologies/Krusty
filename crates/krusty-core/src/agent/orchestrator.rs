@@ -20,7 +20,6 @@
 
 mod message_builder;
 mod persistence;
-mod plan_flow;
 mod recovery;
 mod title;
 mod tool_surface;
@@ -47,6 +46,7 @@ use crate::tools::registry::{agent_call_requests_write, effective_tool_call};
 use crate::tools::registry::{
     trusted_changed, FileObservationTracker, PermissionMode, ToolRegistry,
 };
+use crate::workflow::{AttemptProgressInput, AttemptStatus, GoalStatus, WorkflowManager};
 
 use super::compaction::{
     effective_context_window_for_runtime, is_context_overflow_error,
@@ -69,7 +69,6 @@ use self::persistence::{
     clear_recovery_state, persist_context_state, persist_recovery_state,
     persist_required_recovery_state, save_message, set_agent_state, update_token_count,
 };
-use self::plan_flow::{handle_plan_detection, PlanDetectionOutcome};
 use self::recovery::{
     build_awaiting_input_recovery_state, build_partial_assistant_state, build_recovery_state,
     continuation_recovery_message,
@@ -119,6 +118,188 @@ fn terminal_agent_state_after_interruption(stop_reason: &LoopStopReason) -> &'st
         LoopStopReason::ProviderError | LoopStopReason::PinchFailed => "error",
         _ => "idle",
     }
+}
+
+fn active_goal_for_run(db_path: &Path, session_id: &str) -> bool {
+    WorkflowManager::new(db_path.to_path_buf())
+        .and_then(|manager| manager.get_snapshot(session_id))
+        .map(|snapshot| snapshot.is_some_and(|snapshot| snapshot.goal.status == GoalStatus::Active))
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                session_id,
+                %error,
+                "Failed to resolve durable Goal before agent run"
+            );
+            false
+        })
+}
+
+fn pause_active_goal_for_stop(db_path: &Path, session_id: &str, reason: &str) {
+    let Ok(manager) = WorkflowManager::new(db_path.to_path_buf()) else {
+        return;
+    };
+    let Ok(Some(snapshot)) = manager.get_snapshot(session_id) else {
+        return;
+    };
+    if snapshot.goal.status != GoalStatus::Active {
+        return;
+    }
+    if let Err(error) = manager.pause_goal(
+        session_id,
+        &snapshot.goal.id,
+        snapshot.aggregate_revision,
+        Some(reason),
+        &format!("runtime-pause-{}", uuid::Uuid::new_v4()),
+        "runtime",
+    ) {
+        tracing::warn!(session_id, %error, "Failed to pause Goal at runtime stop boundary");
+    }
+}
+
+fn block_active_goal_for_stop(db_path: &Path, session_id: &str, reason: &str) {
+    let Ok(manager) = WorkflowManager::new(db_path.to_path_buf()) else {
+        return;
+    };
+    let Ok(Some(snapshot)) = manager.get_snapshot(session_id) else {
+        return;
+    };
+    if snapshot.goal.status != GoalStatus::Active {
+        return;
+    }
+    if let Err(error) = manager.block_goal(
+        session_id,
+        &snapshot.goal.id,
+        snapshot.aggregate_revision,
+        reason,
+        &format!("runtime-block-{}", uuid::Uuid::new_v4()),
+        "runtime",
+    ) {
+        tracing::warn!(session_id, %error, "Failed to block Goal at runtime stop boundary");
+    }
+}
+
+fn finish_active_attempt_for_stop(db_path: &Path, session_id: &str, reason: &str) {
+    let Ok(manager) = WorkflowManager::new(db_path.to_path_buf()) else {
+        return;
+    };
+    let Ok(Some(snapshot)) = manager.get_snapshot(session_id) else {
+        return;
+    };
+    if snapshot.goal.status != GoalStatus::Active {
+        return;
+    }
+    let Some(attempt) = snapshot
+        .latest_attempt
+        .as_ref()
+        .filter(|attempt| attempt.status == AttemptStatus::Running)
+    else {
+        return;
+    };
+    if let Err(error) = manager.finish_attempt(
+        session_id,
+        &snapshot.goal.id,
+        &attempt.id,
+        snapshot.aggregate_revision,
+        AttemptStatus::Paused,
+        reason,
+        &format!("runtime-attempt-stop-{}", uuid::Uuid::new_v4()),
+        "runtime",
+    ) {
+        tracing::warn!(session_id, %error, "Failed to checkpoint Goal attempt at run completion");
+    }
+}
+
+fn record_active_attempt_progress(
+    db_path: &Path,
+    session_id: &str,
+    turn_count: usize,
+    tool_call_count: usize,
+    research_action_count: usize,
+    material_progress: bool,
+    blocker_fingerprint: Option<String>,
+) -> Option<(GoalStatus, Option<String>)> {
+    let manager = WorkflowManager::new(db_path.to_path_buf()).ok()?;
+    let snapshot = manager.get_snapshot(session_id).ok()??;
+    if snapshot.goal.status != GoalStatus::Active {
+        return None;
+    }
+    let attempt = snapshot
+        .latest_attempt
+        .as_ref()
+        .filter(|attempt| attempt.status == AttemptStatus::Running)?;
+    let mutation = manager
+        .record_attempt_progress(
+            session_id,
+            &snapshot.goal.id,
+            &attempt.id,
+            snapshot.aggregate_revision,
+            AttemptProgressInput {
+                turn_count: turn_count.min(u32::MAX as usize) as u32,
+                tool_call_count: tool_call_count.min(u32::MAX as usize) as u32,
+                research_action_count: research_action_count.min(u32::MAX as usize) as u32,
+                material_progress,
+                blocker_fingerprint,
+            },
+            &format!("runtime-progress-{}", uuid::Uuid::new_v4()),
+            "runtime",
+        )
+        .map_err(|error| {
+            tracing::warn!(session_id, %error, "Failed to persist Goal attempt progress");
+            error
+        })
+        .ok()?;
+    (mutation.snapshot.goal.status != GoalStatus::Active).then(|| {
+        (
+            mutation.snapshot.goal.status,
+            mutation.snapshot.goal.status_reason,
+        )
+    })
+}
+
+fn record_active_goal_tokens(
+    db_path: &Path,
+    session_id: &str,
+    token_delta: usize,
+) -> Option<(GoalStatus, Option<String>)> {
+    let manager = WorkflowManager::new(db_path.to_path_buf()).ok()?;
+    let mutation = manager
+        .record_token_usage(session_id, token_delta.min(u64::MAX as usize) as u64)
+        .map_err(|error| {
+            tracing::warn!(session_id, %error, "Failed to account durable Goal token usage");
+            error
+        })
+        .ok()??;
+    Some((
+        mutation.snapshot.goal.status,
+        mutation.snapshot.goal.status_reason,
+    ))
+}
+
+fn is_research_action(call: &AiToolCall) -> bool {
+    matches!(
+        call.name.as_str(),
+        "read" | "glob" | "grep" | "list" | "web_search" | "web_fetch"
+    ) || (call.name == "agent"
+        && matches!(
+            call.arguments
+                .get("profile")
+                .or_else(|| call.arguments.get("agent_type"))
+                .and_then(serde_json::Value::as_str),
+            Some("explore" | "plan" | "verify")
+        ))
+}
+
+fn tool_batch_made_material_progress(tool_results: &[Content]) -> bool {
+    tool_results.iter().any(|result| {
+        matches!(
+            result,
+            Content::ToolResult {
+                output,
+                is_error,
+                ..
+            } if !is_error.unwrap_or(false) && trusted_changed(output) == Some(true)
+        )
+    })
 }
 
 fn fail_required_recovery_persistence(
@@ -400,7 +581,12 @@ impl AgenticOrchestrator {
         let project_settings =
             ProjectSettings::load(project_dir.as_deref().unwrap_or(&working_dir));
 
-        let run_budget = RunBudgetResolution::resolve(run_budget, project_settings.run_limits);
+        let active_goal_at_start = active_goal_for_run(&db_path, &session_id);
+        let run_budget = if active_goal_at_start {
+            RunBudgetResolution::resolve_goal_attempt(run_budget, project_settings.run_limits)
+        } else {
+            RunBudgetResolution::resolve(run_budget, project_settings.run_limits)
+        };
 
         let permission_mode = resolve_project_permission_mode(permission_mode, &project_settings);
         let mut options = options;
@@ -435,6 +621,8 @@ impl AgenticOrchestrator {
         let mut loop_guard = LoopGuard::new();
         let mut title_generated = !generate_title;
         let mut iteration = 0usize;
+        let mut goal_tool_call_count = 0usize;
+        let mut goal_research_action_count = 0usize;
         let model_context_window = effective_context_window_for_runtime(
             ai_client.config().uses_chatgpt_codex_format(),
             ai_client.resolved_model().capabilities.context_window,
@@ -503,7 +691,9 @@ impl AgenticOrchestrator {
                 empty_completion_recovery_pending = false;
                 provider_tool_activity_seen = false;
                 overflow_compact_retry_attempted = false;
-                loop_guard.reset_for_steering();
+                if !active_goal_at_start {
+                    loop_guard.reset_for_steering();
+                }
             }
 
             if run_budget.budget.is_exhausted(iteration) {
@@ -516,6 +706,7 @@ impl AgenticOrchestrator {
                 if last_token_count > 0 {
                     update_token_count(&db_path, &session_id, last_token_count);
                 }
+                pause_active_goal_for_stop(&db_path, &session_id, "turn_budget_exhausted");
                 clear_recovery_state(&db_path, &session_id);
                 set_agent_state(&db_path, &session_id, "idle");
                 let _ = event_tx.send(LoopEvent::Finished {
@@ -925,13 +1116,17 @@ impl AgenticOrchestrator {
                 messages_at_last_usage = conversation.len();
             }
             provider_tool_activity_seen |= result.had_server_tool_activity;
+            let goal_token_stop =
+                record_active_goal_tokens(&db_path, &session_id, result.total_tokens);
 
-            if should_retry_empty_stream_interruption(
-                result.stop_reason.as_ref(),
-                result.last_error.as_deref(),
-                result.produced_output,
-                empty_stream_retry_attempted,
-            ) {
+            if goal_token_stop.is_none()
+                && should_retry_empty_stream_interruption(
+                    result.stop_reason.as_ref(),
+                    result.last_error.as_deref(),
+                    result.produced_output,
+                    empty_stream_retry_attempted,
+                )
+            {
                 empty_stream_retry_attempted = true;
                 tracing::warn!(
                     session_id = %session_id,
@@ -1140,7 +1335,9 @@ impl AgenticOrchestrator {
                     empty_completion_recovery_pending = false;
                     provider_tool_activity_seen = false;
                     overflow_compact_retry_attempted = false;
-                    loop_guard.reset_for_steering();
+                    if !active_goal_at_start {
+                        loop_guard.reset_for_steering();
+                    }
                     clear_recovery_state(&db_path, &session_id);
                     set_agent_state(&db_path, &session_id, "streaming");
                     let _ = event_tx.send(LoopEvent::TurnComplete {
@@ -1152,137 +1349,8 @@ impl AgenticOrchestrator {
                 }
             }
 
-            // Supervised planning retains the explicit confirmation boundary.
-            // Autonomous planning promotes a detected plan to Build mode at the
-            // same canonical boundary. Detect before tool execution in that mode
-            // so a provider that returns a plan and its first write together does
-            // not bounce against the read-only PlanModeHook first.
-            let should_detect_plan = should_detect_plan_transition(
-                work_mode,
-                permission_mode,
-                !result.tool_calls.is_empty(),
-            );
-            if should_detect_plan {
-                if let Some(outcome) = handle_plan_detection(
-                    &result.text,
-                    &session_id,
-                    &working_dir,
-                    &db_path,
-                    permission_mode,
-                    &event_tx,
-                ) {
-                    match outcome {
-                        PlanDetectionOutcome::AwaitingConfirmation(pending_interaction) => {
-                            // The server's tool-result handler manages supervised confirmation.
-                            if last_token_count > 0 {
-                                update_token_count(&db_path, &session_id, last_token_count);
-                            }
-                            let plan_confirmation = match &pending_interaction {
-                                PendingInteractionSnapshot::PlanConfirm {
-                                    tool_call_id,
-                                    title,
-                                    task_count,
-                                    ..
-                                } => Some((tool_call_id.clone(), title.clone(), *task_count)),
-                                _ => None,
-                            };
-                            let recovery = build_awaiting_input_recovery_state(
-                                build_partial_assistant_state(&result.recovery_checkpoint),
-                                vec![pending_interaction],
-                                permission_mode,
-                                execution_tool_allowlist.as_ref(),
-                            );
-                            if let Err(error) =
-                                persist_required_recovery_state(&db_path, &session_id, &recovery)
-                            {
-                                fail_required_recovery_persistence(
-                                    &db_path,
-                                    &session_id,
-                                    &event_tx,
-                                    &error,
-                                );
-                                return;
-                            }
-
-                            if let Some((tool_call_id, title, task_count)) = plan_confirmation {
-                                let _ = event_tx.send(LoopEvent::PlanComplete {
-                                    tool_call_id: tool_call_id.clone(),
-                                    title,
-                                    task_count,
-                                });
-                                let _ = event_tx.send(LoopEvent::AwaitingInput {
-                                    tool_call_id,
-                                    tool_name: "PlanConfirm".to_string(),
-                                });
-                            }
-                            set_agent_state(&db_path, &session_id, "awaiting_input");
-                            let _ = event_tx.send(LoopEvent::Finished {
-                                session_id: session_id.clone(),
-                                stop_reason: LoopStopReason::AwaitingInput,
-                            });
-                            return;
-                        }
-                        PlanDetectionOutcome::ContinueInBuildMode => {
-                            work_mode = WorkMode::Build;
-                            mode_tool_surface.refresh(
-                                &mut options,
-                                &mut advertised_tool_names,
-                                ai_client.as_ref(),
-                                permission_mode,
-                                work_mode,
-                                has_active_plan(&db_path, &session_id),
-                                project_settings
-                                    .disabled_tools
-                                    .as_deref()
-                                    .unwrap_or_default(),
-                                execution_tool_allowlist.as_ref(),
-                            );
-                            if result.tool_calls.is_empty() {
-                                if last_token_count > 0 {
-                                    update_token_count(&db_path, &session_id, last_token_count);
-                                }
-                                clear_recovery_state(&db_path, &session_id);
-                                set_agent_state(&db_path, &session_id, "streaming");
-                                let _ = event_tx.send(LoopEvent::TurnComplete {
-                                    turn: iteration,
-                                    has_more: true,
-                                });
-                                continue;
-                            }
-                        }
-                        PlanDetectionOutcome::Failed(error) => {
-                            tracing::error!(
-                                session_id = %session_id,
-                                %error,
-                                "Plan lifecycle transition failed"
-                            );
-                            if last_token_count > 0 {
-                                update_token_count(&db_path, &session_id, last_token_count);
-                            }
-                            persist_recovery_state(
-                                &db_path,
-                                &session_id,
-                                &build_recovery_state(
-                                    &context_ledger,
-                                    RecoveryStatus::Interrupted,
-                                    Some(LoopStopReason::ProviderError),
-                                    Some(error.clone()),
-                                    build_partial_assistant_state(&result.recovery_checkpoint),
-                                ),
-                            );
-                            set_agent_state(&db_path, &session_id, "error");
-                            let _ = event_tx.send(LoopEvent::Error { error });
-                            let _ = event_tx.send(LoopEvent::Finished {
-                                session_id: session_id.clone(),
-                                stop_reason: LoopStopReason::ProviderError,
-                            });
-                            return;
-                        }
-                    }
-                }
-            }
-
-            // No tool calls and no plan transition → finish turn.
+            // No tool calls means this turn is complete. Assistant prose cannot
+            // create, approve, or activate workflow state.
             if result.tool_calls.is_empty() {
                 let _ = event_tx.send(LoopEvent::TurnComplete {
                     turn: iteration,
@@ -1291,11 +1359,30 @@ impl AgenticOrchestrator {
                 if last_token_count > 0 {
                     update_token_count(&db_path, &session_id, last_token_count);
                 }
+                finish_active_attempt_for_stop(
+                    &db_path,
+                    &session_id,
+                    "model_completion_before_goal_verification",
+                );
                 clear_recovery_state(&db_path, &session_id);
                 set_agent_state(&db_path, &session_id, "idle");
+                if let Some((_, reason)) = &goal_token_stop {
+                    let _ = event_tx.send(LoopEvent::Error {
+                        error: format!(
+                            "Goal attempt stopped: {}",
+                            reason
+                                .clone()
+                                .unwrap_or_else(|| "token_budget_exhausted".to_string())
+                        ),
+                    });
+                }
                 let _ = event_tx.send(LoopEvent::Finished {
                     session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::Completed,
+                    stop_reason: if goal_token_stop.is_some() {
+                        LoopStopReason::BudgetExhausted
+                    } else {
+                        LoopStopReason::Completed
+                    },
                 });
                 return;
             }
@@ -1503,6 +1590,14 @@ impl AgenticOrchestrator {
                 execution_tool_allowlist.as_ref(),
             );
             let tool_results = tool_batch.results;
+            goal_tool_call_count = goal_tool_call_count.saturating_add(result.tool_calls.len());
+            goal_research_action_count = goal_research_action_count.saturating_add(
+                result
+                    .tool_calls
+                    .iter()
+                    .filter(|call| is_research_action(call))
+                    .count(),
+            );
 
             if tool_batch.cancelled {
                 let tool_msg = ModelMessage {
@@ -1533,6 +1628,22 @@ impl AgenticOrchestrator {
                 .as_ref()
                 .and_then(|telemetry| telemetry.replan_instruction())
                 .map(ToString::to_string);
+            let blocker_fingerprint = fail_diagnostic
+                .as_ref()
+                .or(explore_diagnostic.as_ref())
+                .or(progress_diagnostic.as_ref())
+                .cloned();
+            let goal_runtime_stop = goal_token_stop.or_else(|| {
+                record_active_attempt_progress(
+                    &db_path,
+                    &session_id,
+                    iteration,
+                    goal_tool_call_count,
+                    goal_research_action_count,
+                    tool_batch_made_material_progress(&tool_results),
+                    blocker_fingerprint,
+                )
+            });
             if let Some(telemetry) = progress_telemetry {
                 if telemetry.triggered {
                     tracing::warn!(
@@ -1591,6 +1702,27 @@ impl AgenticOrchestrator {
             save_message(&db_path, &session_id, &tool_msg);
             clear_recovery_state(&db_path, &session_id);
 
+            if let Some((status, reason)) = goal_runtime_stop {
+                let reason = reason.unwrap_or_else(|| "goal_attempt_stopped".to_string());
+                let _ = event_tx.send(LoopEvent::Error {
+                    error: format!("Goal attempt stopped: {reason}"),
+                });
+                set_agent_state(&db_path, &session_id, "idle");
+                let _ = event_tx.send(LoopEvent::TurnComplete {
+                    turn: iteration,
+                    has_more: false,
+                });
+                let _ = event_tx.send(LoopEvent::Finished {
+                    session_id: session_id.clone(),
+                    stop_reason: if status == GoalStatus::Blocked {
+                        LoopStopReason::LoopGuardTriggered
+                    } else {
+                        LoopStopReason::BudgetExhausted
+                    },
+                });
+                return;
+            }
+
             input_inbox.collect_ready();
             if input_inbox.take_cancel() {
                 set_agent_state(&db_path, &session_id, "idle");
@@ -1613,7 +1745,9 @@ impl AgenticOrchestrator {
                 empty_completion_recovery_pending = false;
                 provider_tool_activity_seen = false;
                 overflow_compact_retry_attempted = false;
-                loop_guard.reset_for_steering();
+                if !active_goal_at_start {
+                    loop_guard.reset_for_steering();
+                }
                 set_agent_state(&db_path, &session_id, "streaming");
                 let _ = event_tx.send(LoopEvent::TurnComplete {
                     turn: iteration,
@@ -1658,6 +1792,11 @@ impl AgenticOrchestrator {
                     turn: iteration,
                     has_more: false,
                 });
+                finish_active_attempt_for_stop(
+                    &db_path,
+                    &session_id,
+                    "validation_converged_before_goal_verification",
+                );
                 let _ = event_tx.send(LoopEvent::Finished {
                     session_id: session_id.clone(),
                     stop_reason: LoopStopReason::Completed,
@@ -1676,6 +1815,7 @@ impl AgenticOrchestrator {
                     diagnostic = %diagnostic,
                     "Fail-fast: stopping repeated tool failure loop"
                 );
+                block_active_goal_for_stop(&db_path, &session_id, "semantic_no_progress");
                 clear_recovery_state(&db_path, &session_id);
                 set_agent_state(&db_path, &session_id, "idle");
                 let _ = event_tx.send(LoopEvent::Error { error: diagnostic });
@@ -1683,6 +1823,11 @@ impl AgenticOrchestrator {
                     turn: iteration,
                     has_more: false,
                 });
+                finish_active_attempt_for_stop(
+                    &db_path,
+                    &session_id,
+                    "exploration_completed_before_goal_verification",
+                );
                 let _ = event_tx.send(LoopEvent::Finished {
                     session_id: session_id.clone(),
                     stop_reason: LoopStopReason::LoopGuardTriggered,
@@ -1748,15 +1893,6 @@ struct InjectedSteering {
 
 fn no_tool_completion_should_continue(steering: &[InjectedSteering]) -> bool {
     !steering.is_empty()
-}
-
-fn should_detect_plan_transition(
-    work_mode: WorkMode,
-    permission_mode: PermissionMode,
-    has_tool_calls: bool,
-) -> bool {
-    work_mode == WorkMode::Plan
-        && (!has_tool_calls || permission_mode == PermissionMode::Autonomous)
 }
 
 fn emit_steering_events(
@@ -2002,7 +2138,6 @@ mod tests {
     use super::no_tool_completion_should_continue;
     use super::remove_validation_reminders;
     use super::resolve_project_permission_mode;
-    use super::should_detect_plan_transition;
     use super::should_retry_empty_stream_interruption;
     use super::split_single_pending_ask_user_call;
     use super::terminal_agent_state_after_interruption;
@@ -2169,30 +2304,6 @@ mod tests {
                 message: "keep going".into(),
             }
         ]));
-    }
-
-    #[test]
-    fn autonomous_plan_is_detected_before_bundled_writes() {
-        assert!(should_detect_plan_transition(
-            WorkMode::Plan,
-            PermissionMode::Autonomous,
-            true,
-        ));
-        assert!(!should_detect_plan_transition(
-            WorkMode::Plan,
-            PermissionMode::Supervised,
-            true,
-        ));
-        assert!(should_detect_plan_transition(
-            WorkMode::Plan,
-            PermissionMode::Supervised,
-            false,
-        ));
-        assert!(!should_detect_plan_transition(
-            WorkMode::Build,
-            PermissionMode::Autonomous,
-            false,
-        ));
     }
 
     #[test]

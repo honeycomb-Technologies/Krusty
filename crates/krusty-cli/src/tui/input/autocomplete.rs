@@ -285,6 +285,7 @@ pub fn get_all_commands() -> Vec<CommandSuggestion> {
             "Manage executable project extension trust",
         ),
         command("/plan", &[], "View or manage active plan"),
+        command("/goal", &[], "View or control the durable Goal"),
         command("/mcp", &[], "Browse and manage MCP servers"),
         command("/hooks", &[], "Configure tool execution hooks"),
         command(

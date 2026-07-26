@@ -5,6 +5,120 @@ impl App {
     pub(super) fn handle_plan_command(&mut self, subcommand: Option<&str>) {
         use crate::plan::PlanStatus;
 
+        if !matches!(subcommand, Some("list") | Some("history")) {
+            if let Some(session_id) = self.runtime.current_session_id.clone() {
+                let db_path = crate::paths::config_dir().join("krusty.db");
+                match krusty_core::workflow::WorkflowManager::new(db_path).and_then(|manager| {
+                    manager
+                        .get_snapshot(&session_id)
+                        .map(|snapshot| (manager, snapshot))
+                }) {
+                    Ok((manager, Some(snapshot))) => {
+                        match subcommand {
+                            None | Some("show") => {
+                                let completed = snapshot
+                                    .steps
+                                    .iter()
+                                    .filter(|step| {
+                                        matches!(
+                                            step.status,
+                                            krusty_core::workflow::WorkflowStepStatus::Completed
+                                                | krusty_core::workflow::WorkflowStepStatus::Skipped
+                                        )
+                                    })
+                                    .count();
+                                self.runtime.chat.messages.push((
+                                    "system".to_string(),
+                                    format!(
+                                        "Plan '{}' [{}] — {}/{} steps\nGoal: {} [{}]\nUse /plan approve for a proposed revision; /goal controls execution.",
+                                        snapshot
+                                            .plan_revision
+                                            .as_ref()
+                                            .map(|plan| plan.title.as_str())
+                                            .unwrap_or("not proposed"),
+                                        snapshot
+                                            .plan_revision
+                                            .as_ref()
+                                            .map(|plan| plan.status.as_str())
+                                            .unwrap_or("none"),
+                                        completed,
+                                        snapshot.steps.len(),
+                                        snapshot.goal.title,
+                                        snapshot.goal.status
+                                    ),
+                                ));
+                            }
+                            Some("approve") => {
+                                let Some(plan) = snapshot.plan_revision.as_ref() else {
+                                    self.runtime.chat.messages.push((
+                                        "system".to_string(),
+                                        "No proposed plan revision to approve.".to_string(),
+                                    ));
+                                    return;
+                                };
+                                let operation_id =
+                                    format!("tui:approve-plan:{}", uuid::Uuid::new_v4());
+                                let message = match manager.approve_plan(
+                                    &session_id,
+                                    &snapshot.goal.id,
+                                    &plan.id,
+                                    snapshot.aggregate_revision,
+                                    &operation_id,
+                                    "user",
+                                ) {
+                                    Ok(mutation) => format!(
+                                        "Approved plan '{}' (revision {}). Use /goal activate to begin.",
+                                        plan.title, mutation.snapshot.aggregate_revision
+                                    ),
+                                    Err(error) => format!("Plan approval failed: {error}"),
+                                };
+                                self.runtime
+                                    .chat
+                                    .messages
+                                    .push(("system".to_string(), message));
+                            }
+                            Some("clear") | Some("abandon") => {
+                                let operation_id =
+                                    format!("tui:cancel-goal:{}", uuid::Uuid::new_v4());
+                                let message = match manager.cancel_goal(
+                                    &session_id,
+                                    &snapshot.goal.id,
+                                    snapshot.aggregate_revision,
+                                    Some("cancelled_from_tui_plan_command"),
+                                    &operation_id,
+                                    "user",
+                                ) {
+                                    Ok(_) => {
+                                        self.clear_plan();
+                                        format!(
+                                            "Cancelled Goal '{}' and its active plan.",
+                                            snapshot.goal.title
+                                        )
+                                    }
+                                    Err(error) => format!("Could not cancel plan: {error}"),
+                                };
+                                self.runtime
+                                    .chat
+                                    .messages
+                                    .push(("system".to_string(), message));
+                            }
+                            Some(unknown) => {
+                                self.runtime.chat.messages.push((
+                                    "system".to_string(),
+                                    format!(
+                                        "Unknown: /plan {unknown}. Use: /plan, /plan approve, /plan list, /plan clear"
+                                    ),
+                                ));
+                            }
+                        }
+                        return;
+                    }
+                    Ok((_, None)) => {}
+                    Err(error) => tracing::warn!("Failed to load durable workflow: {error}"),
+                }
+            }
+        }
+
         match subcommand {
             Some("clear") | Some("abandon") => {
                 if let Some(ref mut plan) = self.runtime.active_plan {
@@ -95,7 +209,7 @@ impl App {
                 self.runtime.chat.messages.push((
                     "system".to_string(),
                     format!(
-                        "Unknown: /plan {}. Use: /plan, /plan list, /plan clear",
+                        "Unknown: /plan {}. Use: /plan, /plan approve, /plan list, /plan clear",
                         unknown
                     ),
                 ));

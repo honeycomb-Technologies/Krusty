@@ -6,6 +6,8 @@ import type {
   SessionType,
   ThinkingLevel as ApiThinkingLevel,
   UsageMetrics,
+  WorkflowCommand,
+  WorkflowMutation,
   WorkspaceMode,
 } from '@krusty/api';
 
@@ -186,6 +188,7 @@ export interface SessionStoreState {
   setTitle: (title: string) => void;
   updateTitle: (sessionId: string, title: string) => Promise<void>;
   setMode: (mode: SessionMode) => void;
+  executeWorkflowCommand: (command: WorkflowCommand) => Promise<WorkflowMutation>;
   setModel: (
     model: string | null,
     provider?: string | null,

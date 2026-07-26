@@ -7,13 +7,15 @@ use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use thiserror::Error;
 
+use crate::plan::{PlanFile, TaskStatus};
 use crate::storage::{Database, SharedDatabase};
 
 use super::model::{
     AttemptProgressInput, AttemptStatus, CollaborationMode, CompleteStepInput, CreateGoalInput,
     CriterionStatus, EditGoalInput, ExecutionAttempt, Goal, GoalCriterion, GoalStatus,
     PlanProposalInput, PlanRevision, PlanRevisionStatus, SetCriterionInput, StartAttemptInput,
-    StepDependency, WorkflowMutation, WorkflowSnapshot, WorkflowStep, WorkflowStepStatus,
+    StepDependency, StepProposalInput, WorkflowMutation, WorkflowSnapshot, WorkflowStep,
+    WorkflowStepStatus,
 };
 
 const WORKFLOW_SCHEMA_VERSION: u32 = 1;
@@ -119,6 +121,160 @@ impl WorkflowManager {
                 1,
                 operation_id,
                 "goal_created",
+                actor,
+                None,
+            )
+        })
+    }
+
+    /// Explicitly adopt the session's legacy Markdown plan into Workflow v2.
+    ///
+    /// Import never approves or activates execution. A user-supplied Goal
+    /// definition is required, legacy task IDs become stable display keys, and
+    /// completed evidence is retained. Stale in-progress tasks return to
+    /// pending because no Workflow-v2 attempt owns them.
+    pub fn import_legacy_plan(
+        &self,
+        session_id: &str,
+        goal_input: CreateGoalInput,
+        operation_id: &str,
+        actor: &str,
+    ) -> Result<WorkflowMutation, WorkflowError> {
+        validate_operation(operation_id, actor)?;
+        validate_goal_input(&goal_input)?;
+        self.with_transaction(|tx| {
+            if let Some(previous) = load_idempotent(tx, operation_id)? {
+                return Ok(previous);
+            }
+            ensure_session_exists(tx, session_id)?;
+            let unfinished: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM workflow_goals
+                     WHERE session_id = ?1
+                       AND status IN ('draft', 'active', 'paused', 'blocked')
+                     LIMIT 1",
+                    [session_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(goal_id) = unfinished {
+                return Err(WorkflowError::Conflict(format!(
+                    "session already has unfinished goal {goal_id}"
+                )));
+            }
+            let (legacy_plan_id, legacy_markdown): (String, String) = tx
+                .query_row(
+                    "SELECT id, content FROM plans WHERE session_id = ?1",
+                    [session_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?
+                .ok_or_else(|| {
+                    WorkflowError::NotFound(format!("legacy plan for session {session_id}"))
+                })?;
+            let legacy = PlanFile::from_markdown(&legacy_markdown)
+                .map_err(|error| WorkflowError::Validation(format!("legacy plan: {error}")))?;
+            let steps = legacy
+                .phases
+                .iter()
+                .flat_map(|phase| phase.tasks.iter())
+                .map(|task| StepProposalInput {
+                    display_key: task.id.clone(),
+                    description: task.description.clone(),
+                    context: task.context.clone(),
+                    parent_display_key: task.parent_id.clone(),
+                    dependencies: task.blocked_by.clone(),
+                    acceptance_criteria: Vec::new(),
+                    required: true,
+                })
+                .collect::<Vec<_>>();
+            let plan_input = PlanProposalInput {
+                title: legacy.title.clone(),
+                rationale: Some(
+                    "Explicitly imported from the legacy Krusty plan store".to_string(),
+                ),
+                source_message_id: None,
+                predecessor_id: None,
+                legacy_markdown: Some(legacy_markdown),
+                steps,
+            };
+            validate_plan_input(&plan_input)?;
+
+            let timestamp = now();
+            let goal_id = uuid::Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO workflow_goals (
+                    id, session_id, title, objective, constraints_json, status,
+                    needs_definition, revision, token_budget, source,
+                    legacy_plan_id, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'draft', 0, 1, ?6,
+                           'legacy_import', ?7, ?8, ?8)",
+                params![
+                    goal_id,
+                    session_id,
+                    goal_input.title.trim(),
+                    goal_input.objective.trim(),
+                    serde_json::to_string(&normalize_strings(&goal_input.constraints))?,
+                    goal_input.token_budget.map(to_i64).transpose()?,
+                    legacy_plan_id,
+                    timestamp
+                ],
+            )?;
+            insert_criteria(tx, &goal_id, &goal_input.criteria)?;
+
+            let plan_id = uuid::Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO workflow_plan_revisions (
+                    id, goal_id, revision_number, status, title, rationale,
+                    legacy_markdown, created_at
+                 ) VALUES (?1, ?2, 1, 'proposed', ?3, ?4, ?5, ?6)",
+                params![
+                    plan_id,
+                    goal_id,
+                    plan_input.title,
+                    plan_input.rationale,
+                    plan_input.legacy_markdown,
+                    timestamp
+                ],
+            )?;
+            insert_steps(tx, &plan_id, &plan_input)?;
+
+            for task in legacy.phases.iter().flat_map(|phase| phase.tasks.iter()) {
+                let status = if task.completed || task.status == TaskStatus::Completed {
+                    WorkflowStepStatus::Completed
+                } else if task.status == TaskStatus::Blocked {
+                    WorkflowStepStatus::Blocked
+                } else {
+                    WorkflowStepStatus::Pending
+                };
+                let evidence = task
+                    .result
+                    .as_ref()
+                    .map(|result| vec![result.clone()])
+                    .unwrap_or_default();
+                tx.execute(
+                    "UPDATE workflow_plan_steps
+                        SET status = ?1, outcome = ?2, evidence_json = ?3,
+                            completed_at = CASE WHEN ?1 = 'completed' THEN ?4 ELSE NULL END
+                      WHERE plan_revision_id = ?5 AND display_key = ?6",
+                    params![
+                        status.as_str(),
+                        task.result,
+                        serde_json::to_string(&evidence)?,
+                        task.completed_at.map(|value| value.to_rfc3339()),
+                        plan_id,
+                        task.id
+                    ],
+                )?;
+            }
+
+            finish_changed(
+                tx,
+                session_id,
+                &goal_id,
+                1,
+                operation_id,
+                "legacy_plan_imported",
                 actor,
                 None,
             )
@@ -296,6 +452,17 @@ impl WorkflowManager {
                 ],
             )?;
             insert_steps(tx, &plan_id, &input)?;
+            if goal.status == GoalStatus::Active {
+                tx.execute(
+                    "UPDATE workflow_goals
+                        SET status = 'paused',
+                            status_reason = 'plan_revision_pending_approval',
+                            updated_at = ?1
+                      WHERE id = ?2 AND session_id = ?3",
+                    params![now(), goal_id, session_id],
+                )?;
+                pause_running_attempt(tx, goal_id, "plan_revision_pending_approval")?;
+            }
             finish_changed(
                 tx,
                 session_id,
@@ -499,6 +666,79 @@ impl WorkflowManager {
                 "goal_resumed",
                 actor,
                 None,
+            )
+        })
+    }
+
+    /// Persist a controller-observed blocker. Waiting for one approval or a
+    /// transient failure should use an attempt stop instead; this transition is
+    /// for a repeated blocker that prevents meaningful progress.
+    pub fn block_goal(
+        &self,
+        session_id: &str,
+        goal_id: &str,
+        expected_revision: u64,
+        reason: &str,
+        operation_id: &str,
+        actor: &str,
+    ) -> Result<WorkflowMutation, WorkflowError> {
+        validate_operation(operation_id, actor)?;
+        if reason.trim().is_empty() {
+            return Err(WorkflowError::Validation(
+                "blocked goals require a concrete reason".to_string(),
+            ));
+        }
+        self.with_transaction(|tx| {
+            if let Some(previous) = load_idempotent(tx, operation_id)? {
+                return Ok(previous);
+            }
+            let goal = load_goal_for_update(tx, session_id, goal_id, expected_revision)?;
+            if goal.status == GoalStatus::Blocked
+                && goal.status_reason.as_deref() == Some(reason.trim())
+            {
+                return finish_noop(tx, session_id, operation_id, "block_goal");
+            }
+            if goal.status != GoalStatus::Active {
+                return Err(WorkflowError::InvalidTransition(format!(
+                    "only an active goal can become blocked, found {}",
+                    goal.status
+                )));
+            }
+            let new_revision = bump_goal_revision(tx, session_id, goal_id, expected_revision)?;
+            let timestamp = now();
+            tx.execute(
+                "UPDATE workflow_goals
+                    SET status = 'blocked', status_reason = ?1, updated_at = ?2
+                  WHERE id = ?3 AND session_id = ?4",
+                params![reason.trim(), timestamp, goal_id, session_id],
+            )?;
+            let attempt_id: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM workflow_execution_attempts
+                     WHERE goal_id = ?1 AND status = 'running'",
+                    [goal_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(attempt_id) = attempt_id.as_deref() {
+                tx.execute(
+                    "UPDATE workflow_execution_attempts
+                        SET status = 'paused', stop_reason = ?1,
+                            ended_at = ?2, updated_at = ?2
+                      WHERE id = ?3",
+                    params![reason.trim(), timestamp, attempt_id],
+                )?;
+                release_attempt_step(tx, attempt_id, WorkflowStepStatus::Blocked)?;
+            }
+            finish_changed(
+                tx,
+                session_id,
+                goal_id,
+                new_revision,
+                operation_id,
+                "goal_blocked",
+                actor,
+                attempt_id.as_deref(),
             )
         })
     }
@@ -818,7 +1058,18 @@ impl WorkflowManager {
                 (Some(_), _) => 1,
                 (None, _) => 0,
             };
-            let stop_reason = if input.turn_count >= attempt.max_turns {
+            let elapsed_secs = chrono::DateTime::parse_from_rfc3339(&attempt.started_at)
+                .ok()
+                .map(|started| {
+                    Utc::now()
+                        .signed_duration_since(started.with_timezone(&Utc))
+                        .num_seconds()
+                        .max(0) as u64
+                })
+                .unwrap_or(0);
+            let stop_reason = if elapsed_secs >= attempt.max_wall_time_secs {
+                Some("wall_time_budget_exhausted")
+            } else if input.turn_count >= attempt.max_turns {
                 Some("turn_budget_exhausted")
             } else if input.tool_call_count >= attempt.max_tool_calls {
                 Some("tool_budget_exhausted")
@@ -1229,6 +1480,152 @@ impl WorkflowManager {
                 actor,
                 None,
             )
+        })
+    }
+
+    /// Reconcile attempts that cannot still be running after a server restart.
+    ///
+    /// This is intentionally called by the owning runtime at startup, not on
+    /// every database open, so a read-only client cannot pause another live
+    /// process's Goal.
+    pub fn recover_interrupted_attempts(&self) -> Result<usize, WorkflowError> {
+        self.with_transaction(|tx| {
+            let interrupted = {
+                let mut statement = tx.prepare(
+                    "SELECT attempt.id, goal.id, goal.session_id, goal.revision
+                       FROM workflow_execution_attempts attempt
+                       JOIN workflow_goals goal ON goal.id = attempt.goal_id
+                      WHERE attempt.status = 'running'",
+                )?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            from_i64(row.get(3)?, 3)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                rows
+            };
+            let timestamp = now();
+            for (attempt_id, goal_id, session_id, revision) in &interrupted {
+                tx.execute(
+                    "UPDATE workflow_execution_attempts
+                        SET status = 'paused', stop_reason = 'runtime_restarted',
+                            ended_at = ?1, updated_at = ?1
+                      WHERE id = ?2 AND status = 'running'",
+                    params![timestamp, attempt_id],
+                )?;
+                release_attempt_step(tx, attempt_id, WorkflowStepStatus::Pending)?;
+                let new_revision = revision.checked_add(1).ok_or_else(|| {
+                    WorkflowError::Validation("workflow revision overflow".to_string())
+                })?;
+                tx.execute(
+                    "UPDATE workflow_goals
+                        SET status = CASE WHEN status = 'active' THEN 'paused' ELSE status END,
+                            status_reason = CASE
+                                WHEN status = 'active' THEN 'runtime_restarted'
+                                ELSE status_reason
+                            END,
+                            revision = ?1, updated_at = ?2
+                      WHERE id = ?3 AND session_id = ?4 AND revision = ?5",
+                    params![
+                        to_i64(new_revision)?,
+                        timestamp,
+                        goal_id,
+                        session_id,
+                        to_i64(*revision)?
+                    ],
+                )?;
+                tx.execute(
+                    "INSERT INTO workflow_events (
+                        session_id, goal_id, aggregate_revision, operation_id,
+                        event_type, actor, attempt_id, payload_json, created_at
+                     ) VALUES (?1, ?2, ?3, ?4, 'attempt_recovered',
+                               'runtime', ?5, ?6, ?7)",
+                    params![
+                        session_id,
+                        goal_id,
+                        to_i64(new_revision)?,
+                        format!("startup-recovery-{}", uuid::Uuid::new_v4()),
+                        attempt_id,
+                        serde_json::json!({
+                            "changed": true,
+                            "goal_status": "paused",
+                            "stop_reason": "runtime_restarted",
+                        })
+                        .to_string(),
+                        timestamp
+                    ],
+                )?;
+            }
+            Ok(interrupted.len())
+        })
+    }
+
+    /// Account provider usage against an active Goal. Ordinary accounting does
+    /// not churn the semantic aggregate revision; crossing the optional budget
+    /// is a lifecycle transition and therefore does.
+    pub fn record_token_usage(
+        &self,
+        session_id: &str,
+        token_delta: u64,
+    ) -> Result<Option<WorkflowMutation>, WorkflowError> {
+        if token_delta == 0 {
+            return Ok(None);
+        }
+        self.with_transaction(|tx| {
+            let Some(goal) = load_current_goal(tx, session_id)? else {
+                return Ok(None);
+            };
+            if goal.status != GoalStatus::Active {
+                return Ok(None);
+            }
+            let tokens_used = goal.tokens_used.saturating_add(token_delta);
+            tx.execute(
+                "UPDATE workflow_goals
+                    SET tokens_used = ?1, updated_at = ?2
+                  WHERE id = ?3 AND session_id = ?4",
+                params![to_i64(tokens_used)?, now(), goal.id, session_id],
+            )?;
+            if !goal
+                .token_budget
+                .is_some_and(|token_budget| tokens_used >= token_budget)
+            {
+                return Ok(None);
+            }
+
+            let new_revision = goal.revision.checked_add(1).ok_or_else(|| {
+                WorkflowError::Validation("workflow revision overflow".to_string())
+            })?;
+            tx.execute(
+                "UPDATE workflow_goals
+                    SET status = 'paused', status_reason = 'token_budget_exhausted',
+                        revision = ?1, updated_at = ?2
+                  WHERE id = ?3 AND session_id = ?4 AND revision = ?5",
+                params![
+                    to_i64(new_revision)?,
+                    now(),
+                    goal.id,
+                    session_id,
+                    to_i64(goal.revision)?
+                ],
+            )?;
+            pause_running_attempt(tx, &goal.id, "token_budget_exhausted")?;
+            let operation_id = format!("token-budget-{}", uuid::Uuid::new_v4());
+            finish_changed(
+                tx,
+                session_id,
+                &goal.id,
+                new_revision,
+                &operation_id,
+                "goal_token_budget_exhausted",
+                "runtime",
+                None,
+            )
+            .map(Some)
         })
     }
 
@@ -1965,8 +2362,8 @@ fn load_current_plan(
                FROM workflow_plan_revisions
               WHERE goal_id = ?1
               ORDER BY CASE status
-                  WHEN 'active' THEN 0
-                  WHEN 'proposed' THEN 1
+                  WHEN 'proposed' THEN 0
+                  WHEN 'active' THEN 1
                   WHEN 'approved' THEN 2
                   WHEN 'completed' THEN 3
                   ELSE 4
@@ -2148,6 +2545,9 @@ fn allowed_actions(
         }
         GoalStatus::Paused | GoalStatus::Blocked => {
             actions.extend(["resume_goal", "edit_goal", "propose_plan", "cancel_goal"]);
+            if plan.is_some_and(|plan| plan.status == PlanRevisionStatus::Proposed) {
+                actions.push("approve_plan");
+            }
         }
         GoalStatus::Completed | GoalStatus::Cancelled => {}
     }

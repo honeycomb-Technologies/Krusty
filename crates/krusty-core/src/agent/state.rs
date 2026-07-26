@@ -48,6 +48,8 @@ pub enum RunBudgetSource {
     LegacyMaxIterations,
     /// Repository-owned `.krusty/settings.json` override.
     ProjectSettings,
+    /// Finite default used only while a durable Goal is active.
+    GoalAttemptDefault,
     /// No configured ceiling; primary interactive execution is unlimited.
     UnlimitedDefault,
 }
@@ -81,6 +83,25 @@ impl RunBudgetResolution {
         Self {
             budget: RunBudget::unlimited(),
             source: RunBudgetSource::UnlimitedDefault,
+        }
+    }
+
+    /// Resolve an active Goal attempt. Explicit and project settings retain
+    /// precedence, but automatic continuation may never inherit the unlimited
+    /// interactive default.
+    pub fn resolve_goal_attempt(
+        explicit_run: Option<RunBudget>,
+        project: Option<RunBudget>,
+    ) -> Self {
+        let ordinary = Self::resolve(explicit_run, project);
+        if ordinary.source != RunBudgetSource::UnlimitedDefault {
+            return ordinary;
+        }
+        Self {
+            budget: RunBudget::with_max_turns(
+                crate::workflow::DEFAULT_GOAL_ATTEMPT_MAX_TURNS as usize,
+            ),
+            source: RunBudgetSource::GoalAttemptDefault,
         }
     }
 }
@@ -233,5 +254,15 @@ mod tests {
         let explicit = RunBudgetResolution::resolve(Some(RunBudget::unlimited()), Some(project));
         assert_eq!(explicit.budget.max_turns, None);
         assert_eq!(explicit.source, RunBudgetSource::ExplicitRun);
+    }
+
+    #[test]
+    fn active_goal_attempt_never_uses_unlimited_default() {
+        let resolution = RunBudgetResolution::resolve_goal_attempt(None, None);
+        assert_eq!(resolution.source, RunBudgetSource::GoalAttemptDefault);
+        assert_eq!(
+            resolution.budget.max_turns,
+            Some(crate::workflow::DEFAULT_GOAL_ATTEMPT_MAX_TURNS as usize)
+        );
     }
 }

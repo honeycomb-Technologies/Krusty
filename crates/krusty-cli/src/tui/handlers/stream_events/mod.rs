@@ -175,6 +175,16 @@ impl App {
 
             LoopEvent::ModeChange { mode, reason } => self.handle_mode_change(mode, reason),
             LoopEvent::PlanUpdate { tasks } => self.handle_plan_update(tasks.len()),
+            LoopEvent::WorkflowUpdated {
+                goal_id,
+                aggregate_revision,
+                operation_id,
+            } => tracing::debug!(
+                %goal_id,
+                aggregate_revision,
+                %operation_id,
+                "Durable workflow state updated"
+            ),
             LoopEvent::PlanComplete {
                 tool_call_id: _,
                 title,

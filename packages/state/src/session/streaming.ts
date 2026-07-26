@@ -369,6 +369,11 @@ export function createStreamCallbacks(
 			planStore.getState().setItems(items);
 		},
 
+		onWorkflowUpdated: (_goalId, aggregateRevision) => {
+			flushPendingDeltas();
+			planStore.getState().noteWorkflowRevision(aggregateRevision);
+		},
+
 		onModeChange: (mode) => {
 			flushPendingDeltas();
 			const nextMode: SessionMode = mode === "plan" ? "plan" : "build";

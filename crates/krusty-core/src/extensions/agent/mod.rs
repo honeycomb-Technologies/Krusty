@@ -1214,6 +1214,7 @@ fn loop_event_name(event: &LoopEvent) -> &'static str {
         LoopEvent::ServerToolError { .. } => "server_tool_error",
         LoopEvent::ModeChange { .. } => "mode_change",
         LoopEvent::PlanUpdate { .. } => "plan_update",
+        LoopEvent::WorkflowUpdated { .. } => "workflow_updated",
         LoopEvent::PlanComplete { .. } => "plan_complete",
         LoopEvent::AgentSleeping { .. } => "agent_sleeping",
         LoopEvent::TurnComplete { .. } => "turn_complete",

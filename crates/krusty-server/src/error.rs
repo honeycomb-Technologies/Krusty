@@ -15,6 +15,7 @@ pub struct ApiError {
 }
 
 /// Application error types
+#[derive(Debug)]
 pub enum AppError {
     NotFound(String),
     BadRequest(String),

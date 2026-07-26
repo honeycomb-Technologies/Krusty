@@ -181,6 +181,7 @@ export function createSessionStore(
     | "setTitle"
     | "updateTitle"
     | "setMode"
+    | "executeWorkflowCommand"
     | "setModel"
     | "setThinkingLevel"
     | "toggleThinking"
@@ -635,6 +636,9 @@ export function createSessionStore(
 
     async loadSession(sessionId: string, isRefresh = false) {
       const previousSessionId = get().sessionId;
+      if (previousSessionId !== sessionId) {
+        planStore.getState().setWorkflow(null);
+      }
       set({ isLoading: true });
 
       try {
@@ -790,6 +794,7 @@ export function createSessionStore(
         fastModeEnabled: current.fastModeEnabled,
       });
       workspace.getState().clear();
+      planStore.getState().setWorkflow(null);
     },
 
     // -- initSession --------------------------------------------------------
@@ -822,6 +827,7 @@ export function createSessionStore(
         sessionType: sessionType ?? null,
         title: normalizeDisplayTitle(title),
       });
+      planStore.getState().setWorkflow(null);
       get().startPresenceHeartbeat(sessionId);
     },
 
@@ -850,6 +856,19 @@ export function createSessionStore(
       set({ mode });
       planStore.getState().setVisible(mode === "plan");
       void persistMode(get, mode);
+    },
+
+    async executeWorkflowCommand(command) {
+      const sessionId = get().sessionId;
+      if (!sessionId) {
+        throw new Error("No active session");
+      }
+      const mutation = await client.executeWorkflowCommand(sessionId, command);
+      planStore.getState().setWorkflow(mutation.snapshot);
+      if (mutation.snapshot.goal.status === "active") {
+        set({ mode: "build" });
+      }
+      return mutation;
     },
 
     // -- setModel -----------------------------------------------------------

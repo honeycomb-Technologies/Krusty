@@ -96,6 +96,7 @@ export interface SessionStateResponse {
 	last_event_at: string | null;
 	mode: SessionMode;
 	permission_mode: PermissionMode;
+	workflow?: WorkflowSnapshot | null;
 	recovery?: SessionRecoveryState | null;
 	pending_interactions?: PendingInteractionSnapshot[];
 	live_partial_assistant?: PartialAssistantState | null;
@@ -103,6 +104,270 @@ export interface SessionStateResponse {
 	recent_delegated_runs?: DelegatedRunResponse[];
 	last_event_sequence?: number | null;
 }
+
+export type GoalStatus =
+	| "draft"
+	| "active"
+	| "paused"
+	| "blocked"
+	| "completed"
+	| "cancelled";
+export type CriterionStatus = "pending" | "passed" | "failed" | "waived";
+export type PlanRevisionStatus =
+	| "proposed"
+	| "approved"
+	| "active"
+	| "superseded"
+	| "completed"
+	| "cancelled";
+export type WorkflowStepStatus =
+	| "pending"
+	| "in_progress"
+	| "blocked"
+	| "completed"
+	| "failed"
+	| "skipped"
+	| "cancelled";
+export type AttemptStatus =
+	| "running"
+	| "paused"
+	| "succeeded"
+	| "failed"
+	| "cancelled";
+
+export interface WorkflowGoal {
+	id: string;
+	session_id: string;
+	title: string;
+	objective: string;
+	constraints: string[];
+	status: GoalStatus;
+	status_reason?: string | null;
+	needs_definition: boolean;
+	revision: number;
+	token_budget?: number | null;
+	tokens_used: number;
+	source: string;
+	legacy_plan_id?: string | null;
+	created_at: string;
+	updated_at: string;
+	activated_at?: string | null;
+	completed_at?: string | null;
+	cancelled_at?: string | null;
+}
+
+export interface GoalCriterion {
+	id: string;
+	goal_id: string;
+	position: number;
+	description: string;
+	required: boolean;
+	status: CriterionStatus;
+	evidence: string[];
+	verifier?: string | null;
+	verified_at?: string | null;
+}
+
+export interface WorkflowPlanRevision {
+	id: string;
+	goal_id: string;
+	revision_number: number;
+	status: PlanRevisionStatus;
+	title: string;
+	rationale?: string | null;
+	source_message_id?: number | null;
+	predecessor_id?: string | null;
+	legacy_markdown?: string | null;
+	created_at: string;
+	approved_at?: string | null;
+	completed_at?: string | null;
+}
+
+export interface WorkflowStep {
+	id: string;
+	plan_revision_id: string;
+	parent_step_id?: string | null;
+	display_key: string;
+	position: number;
+	description: string;
+	context?: string | null;
+	acceptance_criteria: string[];
+	required: boolean;
+	status: WorkflowStepStatus;
+	outcome?: string | null;
+	evidence: string[];
+	claimed_attempt_id?: string | null;
+	revision: number;
+	created_at: string;
+	started_at?: string | null;
+	completed_at?: string | null;
+}
+
+export interface WorkflowStepDependency {
+	step_id: string;
+	depends_on_step_id: string;
+}
+
+export interface WorkflowExecutionAttempt {
+	id: string;
+	goal_id: string;
+	plan_revision_id?: string | null;
+	step_id?: string | null;
+	status: AttemptStatus;
+	stop_reason?: string | null;
+	permission_mode: string;
+	goal_revision_at_start: number;
+	max_turns: number;
+	max_tool_calls: number;
+	max_wall_time_secs: number;
+	max_research_actions: number;
+	turn_count: number;
+	tool_call_count: number;
+	research_action_count: number;
+	progress_revision: number;
+	blocker_fingerprint?: string | null;
+	blocker_streak: number;
+	started_at: string;
+	updated_at: string;
+	ended_at?: string | null;
+}
+
+export interface WorkflowSnapshot {
+	schema_version: number;
+	aggregate_revision: number;
+	collaboration_mode: "default" | "plan";
+	permission_mode: string;
+	goal: WorkflowGoal;
+	criteria: GoalCriterion[];
+	plan_revision?: WorkflowPlanRevision | null;
+	steps: WorkflowStep[];
+	dependencies: WorkflowStepDependency[];
+	latest_attempt?: WorkflowExecutionAttempt | null;
+	allowed_actions: string[];
+}
+
+export interface WorkflowMutation {
+	changed: boolean;
+	operation_id: string;
+	snapshot: WorkflowSnapshot;
+}
+
+export interface CriterionInput {
+	description: string;
+	required?: boolean;
+}
+
+export interface CreateGoalInput {
+	title: string;
+	objective: string;
+	constraints?: string[];
+	criteria: CriterionInput[];
+	token_budget?: number | null;
+}
+
+export interface EditGoalInput {
+	title?: string;
+	objective?: string;
+	constraints?: string[];
+	criteria?: CriterionInput[];
+	token_budget?: number | null;
+}
+
+export interface WorkflowStepProposalInput {
+	display_key: string;
+	description: string;
+	context?: string | null;
+	parent_display_key?: string | null;
+	dependencies?: string[];
+	acceptance_criteria?: string[];
+	required?: boolean;
+}
+
+export interface WorkflowPlanProposalInput {
+	title: string;
+	rationale?: string | null;
+	source_message_id?: number | null;
+	predecessor_id?: string | null;
+	legacy_markdown?: string | null;
+	steps: WorkflowStepProposalInput[];
+}
+
+interface WorkflowCommandBase {
+	operation_id: string;
+	goal_id: string;
+	expected_revision: number;
+}
+
+export type WorkflowCommand =
+	| { action: "create_goal"; operation_id: string; goal: CreateGoalInput }
+	| {
+			action: "import_legacy_plan";
+			operation_id: string;
+			goal: CreateGoalInput;
+	  }
+	| ({ action: "edit_goal"; goal: EditGoalInput } & WorkflowCommandBase)
+	| ({ action: "propose_plan"; plan: WorkflowPlanProposalInput } & WorkflowCommandBase)
+	| ({
+			action: "approve_plan";
+			plan_revision_id: string;
+	  } & WorkflowCommandBase)
+	| ({ action: "activate_goal" } & WorkflowCommandBase)
+	| ({ action: "pause_goal"; reason: string } & WorkflowCommandBase)
+	| ({ action: "resume_goal" } & WorkflowCommandBase)
+	| ({ action: "block_goal"; reason: string } & WorkflowCommandBase)
+	| ({ action: "cancel_goal"; reason?: string | null } & WorkflowCommandBase)
+	| ({
+			action: "start_attempt";
+			attempt: {
+				step_id?: string | null;
+				permission_mode: PermissionMode;
+				max_turns: number;
+				max_tool_calls: number;
+				max_wall_time_secs: number;
+				max_research_actions: number;
+			};
+	  } & WorkflowCommandBase)
+	| ({
+			action: "claim_step";
+			attempt_id: string;
+			step_id: string;
+	  } & WorkflowCommandBase)
+	| ({
+			action: "record_attempt_progress";
+			attempt_id: string;
+			progress: {
+				turn_count: number;
+				tool_call_count: number;
+				research_action_count: number;
+				material_progress: boolean;
+				blocker_fingerprint?: string | null;
+			};
+	  } & WorkflowCommandBase)
+	| ({
+			action: "complete_step";
+			step_id: string;
+			completion: {
+				attempt_id: string;
+				outcome: string;
+				evidence: string[];
+			};
+	  } & WorkflowCommandBase)
+	| ({
+			action: "finish_attempt";
+			attempt_id: string;
+			status: Exclude<AttemptStatus, "running">;
+			reason: string;
+	  } & WorkflowCommandBase)
+	| ({
+			action: "set_criterion";
+			criterion_id: string;
+			criterion: {
+				status: CriterionStatus;
+				evidence: string[];
+				verifier: string;
+			};
+	  } & WorkflowCommandBase)
+	| ({ action: "complete_goal" } & WorkflowCommandBase);
 
 // ============================================================================
 // Message Types
@@ -773,7 +1038,7 @@ export interface MakoRunWakeEvent {
 // ============================================================================
 
 export interface PlanItem {
-	id: string;
+	id?: string;
 	content: string;
 	completed: boolean;
 }
@@ -842,6 +1107,12 @@ export type StreamEvent =
 	| { type: "web_fetch_result"; tool_use_id: string; content: unknown }
 	| { type: "server_tool_error"; tool_use_id: string; error_code: string }
 	| { type: "plan_update"; items: PlanItem[] }
+	| {
+			type: "workflow_updated";
+			goal_id: string;
+			aggregate_revision: number;
+			operation_id: string;
+	  }
 	| { type: "mode_change"; mode: string; reason?: string }
 	| {
 			type: "plan_complete";
@@ -928,6 +1199,11 @@ export interface StreamCallbacks {
 	onSteeringInjected?: (pendingId: string | undefined, message: string) => void;
 	onTurnComplete?: (turn: number, hasMore: boolean) => void;
 	onPlanUpdate: (items: PlanItem[]) => void;
+	onWorkflowUpdated?: (
+		goalId: string,
+		aggregateRevision: number,
+		operationId: string,
+	) => void;
 	onModeChange: (mode: string, reason?: string) => void;
 	onPlanComplete: (
 		toolCallId: string,

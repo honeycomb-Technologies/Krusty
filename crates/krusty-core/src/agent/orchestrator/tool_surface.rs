@@ -7,6 +7,7 @@ use crate::storage::WorkMode;
 use crate::tools::registry::{
     MutationToolSurface, PermissionMode, ToolRegistry, ToolRequestPolicy,
 };
+use crate::workflow::{GoalStatus, PlanRevisionStatus, WorkflowManager};
 
 use super::super::run_spec::apply_execution_tool_allowlist;
 
@@ -77,6 +78,27 @@ impl ModeAwareToolSurface {
 }
 
 pub(super) fn has_active_plan(db_path: &std::path::Path, session_id: &str) -> bool {
+    match WorkflowManager::new(db_path.to_path_buf())
+        .and_then(|manager| manager.get_snapshot(session_id))
+    {
+        Ok(Some(snapshot)) if snapshot.goal.status == GoalStatus::Active => {
+            return snapshot.plan_revision.is_some_and(|plan| {
+                matches!(
+                    plan.status,
+                    PlanRevisionStatus::Active | PlanRevisionStatus::Completed
+                )
+            });
+        }
+        Ok(Some(_)) | Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                session_id,
+                %error,
+                "Failed to resolve canonical workflow while refreshing the tool surface"
+            );
+        }
+    }
+
     PlanManager::new(db_path.to_path_buf())
         .and_then(|manager| manager.get_active_plan(session_id))
         .map(|plan| plan.is_some())
@@ -189,6 +211,7 @@ mod tests {
             "read",
             "set_work_mode",
             "tool_search",
+            "workflow_propose",
         ];
         let surface = surface(&catalog);
         let openai = client(ProviderId::OpenAI, "gpt-5.3-codex");
@@ -200,8 +223,8 @@ mod tests {
         let mut advertised = HashSet::new();
         let exact = HashSet::from([
             "read".to_string(),
-            "set_work_mode".to_string(),
             "apply_patch".to_string(),
+            "workflow_propose".to_string(),
         ]);
 
         surface.refresh(
@@ -215,7 +238,7 @@ mod tests {
             Some(&exact),
         );
 
-        assert_eq!(advertised, HashSet::from(["set_work_mode".to_string()]));
+        assert_eq!(advertised, HashSet::from(["workflow_propose".to_string()]));
         assert!(!options.codex_parallel_tool_calls);
     }
 

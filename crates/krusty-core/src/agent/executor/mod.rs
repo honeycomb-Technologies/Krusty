@@ -350,13 +350,32 @@ pub(crate) async fn execute_tools(
             continue;
         }
 
+        if call.name == "workflow_propose" {
+            let result = plan_handler::handle_workflow_proposal(call, session_id, db_path);
+            if !result.is_error {
+                emit_workflow_update(session_id, db_path, call, event_tx);
+            }
+            results.push(tool_control.publish_result(call, &result, event_tx));
+            continue;
+        }
+
+        if call.name == "workflow_update" {
+            let result = plan_handler::handle_workflow_update(call, session_id, db_path);
+            if !result.is_error {
+                emit_workflow_update(session_id, db_path, call, event_tx);
+            }
+            results.push(tool_control.publish_result(call, &result, event_tx));
+            continue;
+        }
+
         if matches!(
             call.name.as_str(),
             "task_start" | "task_complete" | "add_subtask" | "set_dependency"
         ) {
-            let result = plan_handler::handle_plan_task(call, session_id, db_path);
+            let result = plan_handler::handle_plan_task(call, session_id, db_path, permission_mode);
             if !result.is_error {
                 emit_plan_update(session_id, db_path, event_tx);
+                emit_workflow_update(session_id, db_path, call, event_tx);
             }
             results.push(tool_control.publish_result(call, &result, event_tx));
             continue;
@@ -449,6 +468,25 @@ pub(crate) async fn execute_tools(
         next_work_mode: work_mode,
         cancelled: false,
     }
+}
+
+fn emit_workflow_update(
+    session_id: &str,
+    db_path: &Path,
+    call: &AiToolCall,
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+) {
+    let Ok(manager) = crate::workflow::WorkflowManager::new(db_path.to_path_buf()) else {
+        return;
+    };
+    let Ok(Some(snapshot)) = manager.get_snapshot(session_id) else {
+        return;
+    };
+    let _ = event_tx.send(LoopEvent::WorkflowUpdated {
+        goal_id: snapshot.goal.id,
+        aggregate_revision: snapshot.aggregate_revision,
+        operation_id: call.id.clone(),
+    });
 }
 
 /// Only calls with a read-only runtime policy can share an execution batch.

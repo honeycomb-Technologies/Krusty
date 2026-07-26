@@ -1,68 +1,76 @@
+import type { PlanItem as ApiPlanItem, WorkflowSnapshot } from '@krusty/api';
 import { create } from 'zustand';
 
 export interface PlanItem {
   id: string;
+  displayKey?: string;
   content: string;
   completed: boolean;
+  status?: string;
 }
 
 export interface PlanStoreState {
+  workflow: WorkflowSnapshot | null;
   items: PlanItem[];
   isVisible: boolean;
-  addItem: (content: string) => string;
-  toggleItem: (id: string) => void;
-  removeItem: (id: string) => void;
-  clear: () => void;
+  pendingRevision: number | null;
+  setWorkflow: (workflow: WorkflowSnapshot | null) => void;
+  noteWorkflowRevision: (aggregateRevision: number) => void;
   setVisible: (visible: boolean) => void;
-  setItems: (items: Array<{ content: string; completed?: boolean }>) => void;
+  /** Temporary read-only adapter for pre-Workflow-v2 PlanUpdate events. */
+  setItems: (items: ApiPlanItem[]) => void;
 }
 
-let idCounter = 0;
+function projectWorkflowItems(workflow: WorkflowSnapshot): PlanItem[] {
+  return workflow.steps.map((step) => ({
+    id: step.id,
+    displayKey: step.display_key,
+    content: step.description,
+    completed: step.status === 'completed' || step.status === 'skipped',
+    status: step.status,
+  }));
+}
 
 export function createPlanStore() {
   return create<PlanStoreState>((set) => ({
+    workflow: null,
     items: [],
     isVisible: false,
+    pendingRevision: null,
 
-    addItem: (content: string) => {
-      const id = `plan-${++idCounter}`;
-      set((s) => ({
-        items: [...s.items, { id, content, completed: false }],
-        isVisible: true,
-      }));
-      return id;
-    },
-
-    toggleItem: (id: string) => {
-      set((s) => ({
-        items: s.items.map((item) =>
-          item.id === id ? { ...item, completed: !item.completed } : item
-        ),
+    setWorkflow: (workflow) => {
+      set((state) => ({
+        workflow,
+        items: workflow ? projectWorkflowItems(workflow) : [],
+        isVisible: workflow ? state.isVisible || workflow.goal.status !== 'cancelled' : false,
+        pendingRevision: null,
       }));
     },
 
-    removeItem: (id: string) => {
-      set((s) => ({
-        items: s.items.filter((item) => item.id !== id),
+    noteWorkflowRevision: (aggregateRevision) => {
+      set((state) => ({
+        pendingRevision:
+          aggregateRevision > (state.workflow?.aggregate_revision ?? 0)
+            ? aggregateRevision
+            : state.pendingRevision,
       }));
     },
 
-    clear: () => {
-      set({ items: [], isVisible: false });
-    },
-
-    setVisible: (visible: boolean) => {
+    setVisible: (visible) => {
       set({ isVisible: visible });
     },
 
-    setItems: (items: Array<{ content: string; completed?: boolean }>) => {
-      set({
-        items: items.map((item) => ({
-          id: `plan-${++idCounter}`,
-          content: item.content,
-          completed: item.completed ?? false,
-        })),
-        isVisible: items.length > 0,
+    setItems: (items) => {
+      set((state) => {
+        if (state.workflow) return state;
+        return {
+          items: items.map((item, index) => ({
+            id: item.id ?? `legacy:${index}:${item.content}`,
+            content: item.content,
+            completed: item.completed ?? false,
+          })),
+          isVisible: items.length > 0,
+        };
       });
     },
   }));

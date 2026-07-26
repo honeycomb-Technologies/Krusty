@@ -33,6 +33,11 @@ impl Tool for TaskCompleteTool {
                 "result": {
                     "type": "string",
                     "description": "REQUIRED: Specific summary of what was accomplished for THIS task"
+                },
+                "evidence": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Concrete validation evidence such as tests, diffs, measurements, or resolved decisions"
                 }
             },
             "required": ["task_id", "result"],
