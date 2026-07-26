@@ -550,6 +550,65 @@ fn handle_workflow_plan_task(
 }
 
 fn workflow_tool_result(mutation: &WorkflowMutation, action: &str) -> ToolResult {
+    let total_steps = mutation.snapshot.steps.len();
+    let completed_steps = mutation
+        .snapshot
+        .steps
+        .iter()
+        .filter(|step| step.status == WorkflowStepStatus::Completed)
+        .count();
+    let in_progress_steps = mutation
+        .snapshot
+        .steps
+        .iter()
+        .filter(|step| step.status == WorkflowStepStatus::InProgress)
+        .count();
+    let blocked_steps = mutation
+        .snapshot
+        .steps
+        .iter()
+        .filter(|step| step.status == WorkflowStepStatus::Blocked)
+        .count();
+    let terminal_steps = mutation
+        .snapshot
+        .steps
+        .iter()
+        .filter(|step| step.status.is_terminal())
+        .count();
+    let required_criteria = mutation
+        .snapshot
+        .criteria
+        .iter()
+        .filter(|criterion| criterion.required)
+        .count();
+    let passed_required_criteria = mutation
+        .snapshot
+        .criteria
+        .iter()
+        .filter(|criterion| criterion.required && criterion.status == CriterionStatus::Passed)
+        .count();
+    let next_steps = mutation
+        .snapshot
+        .steps
+        .iter()
+        .filter(|step| {
+            matches!(
+                step.status,
+                WorkflowStepStatus::Pending
+                    | WorkflowStepStatus::InProgress
+                    | WorkflowStepStatus::Blocked
+            )
+        })
+        .take(3)
+        .map(|step| {
+            serde_json::json!({
+                "display_key": step.display_key,
+                "description": step.description,
+                "status": step.status,
+            })
+        })
+        .collect::<Vec<_>>();
+
     ToolResult::success_data(serde_json::json!({
         "action": action,
         "changed": mutation.changed,
@@ -561,7 +620,19 @@ fn workflow_tool_result(mutation: &WorkflowMutation, action: &str) -> ToolResult
             .plan_revision
             .as_ref()
             .map(|plan| plan.id.as_str()),
-        "steps": mutation.snapshot.steps,
+        "step_progress": {
+            "completed": completed_steps,
+            "terminal": terminal_steps,
+            "in_progress": in_progress_steps,
+            "blocked": blocked_steps,
+            "total": total_steps,
+        },
+        "criteria_progress": {
+            "passed_required": passed_required_criteria,
+            "required": required_criteria,
+            "total": mutation.snapshot.criteria.len(),
+        },
+        "next_steps": next_steps,
     }))
     .with_changed(mutation.changed)
     .with_progress_change_key(format!(
@@ -825,5 +896,129 @@ fn handle_set_dependency(
             output: format!("Error: {}", e),
             is_error: true,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workflow::{
+        CollaborationMode, CriterionStatus, Goal, GoalCriterion, GoalStatus, WorkflowStep,
+    };
+
+    fn workflow_mutation_with_steps(step_count: usize) -> WorkflowMutation {
+        let steps = (0..step_count)
+            .map(|position| WorkflowStep {
+                id: format!("step-{position}"),
+                plan_revision_id: "plan-1".to_string(),
+                parent_step_id: None,
+                display_key: format!("{}", position + 1),
+                position: position as u32,
+                description: format!(
+                    "A deliberately verbose workflow step description number {position}"
+                ),
+                context: Some("context that must not be echoed into tool history".repeat(20)),
+                acceptance_criteria: vec!["criterion that must remain durable".repeat(10)],
+                required: true,
+                status: if position < 4 {
+                    WorkflowStepStatus::Completed
+                } else if position == 4 {
+                    WorkflowStepStatus::InProgress
+                } else {
+                    WorkflowStepStatus::Pending
+                },
+                outcome: (position < 4).then(|| "completed outcome".repeat(10)),
+                evidence: vec!["durable evidence".repeat(10)],
+                claimed_attempt_id: None,
+                revision: 1,
+                created_at: "2026-07-26T00:00:00Z".to_string(),
+                started_at: None,
+                completed_at: None,
+            })
+            .collect();
+        let criteria = vec![
+            GoalCriterion {
+                id: "criterion-1".to_string(),
+                goal_id: "goal-1".to_string(),
+                position: 0,
+                description: "required criterion".to_string(),
+                required: true,
+                status: CriterionStatus::Passed,
+                evidence: vec!["verified".to_string()],
+                verifier: Some("agent".to_string()),
+                verified_at: Some("2026-07-26T00:00:00Z".to_string()),
+            },
+            GoalCriterion {
+                id: "criterion-2".to_string(),
+                goal_id: "goal-1".to_string(),
+                position: 1,
+                description: "pending criterion".to_string(),
+                required: true,
+                status: CriterionStatus::Pending,
+                evidence: Vec::new(),
+                verifier: None,
+                verified_at: None,
+            },
+        ];
+
+        WorkflowMutation {
+            changed: true,
+            operation_id: "operation-1".to_string(),
+            snapshot: WorkflowSnapshot {
+                schema_version: 1,
+                aggregate_revision: 7,
+                collaboration_mode: CollaborationMode::Default,
+                permission_mode: "autonomous".to_string(),
+                goal: Goal {
+                    id: "goal-1".to_string(),
+                    session_id: "session-1".to_string(),
+                    title: "Compact workflow results".to_string(),
+                    objective: "Keep durable state out of model-facing tool history".to_string(),
+                    constraints: Vec::new(),
+                    status: GoalStatus::Active,
+                    status_reason: None,
+                    needs_definition: false,
+                    revision: 7,
+                    token_budget: Some(100_000),
+                    tokens_used: 10_000,
+                    source: "user".to_string(),
+                    legacy_plan_id: None,
+                    created_at: "2026-07-26T00:00:00Z".to_string(),
+                    updated_at: "2026-07-26T00:00:00Z".to_string(),
+                    activated_at: Some("2026-07-26T00:00:00Z".to_string()),
+                    completed_at: None,
+                    cancelled_at: None,
+                },
+                criteria,
+                plan_revision: None,
+                steps,
+                dependencies: Vec::new(),
+                latest_attempt: None,
+                allowed_actions: vec!["pause_goal".to_string()],
+            },
+        }
+    }
+
+    #[test]
+    fn workflow_tool_result_keeps_large_plans_out_of_model_history() {
+        let result = workflow_tool_result(&workflow_mutation_with_steps(100), "step_completed");
+        let envelope: serde_json::Value =
+            serde_json::from_str(&result.output).expect("structured tool result");
+        let data = &envelope["data"];
+
+        assert!(data.get("steps").is_none());
+        assert_eq!(data["step_progress"]["completed"], 4);
+        assert_eq!(data["step_progress"]["in_progress"], 1);
+        assert_eq!(data["step_progress"]["total"], 100);
+        assert_eq!(data["criteria_progress"]["passed_required"], 1);
+        assert_eq!(data["criteria_progress"]["required"], 2);
+        assert_eq!(data["next_steps"].as_array().map(Vec::len), Some(3));
+        assert!(
+            result.output.len() < 2_500,
+            "workflow tool result unexpectedly large: {} bytes",
+            result.output.len()
+        );
+        assert!(!result.output.contains("context that must not be echoed"));
+        assert!(!result.output.contains("durable evidence"));
     }
 }

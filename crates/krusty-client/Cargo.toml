@@ -1,6 +1,6 @@
 [package]
 name = "krusty-client"
-version = "0.9.11"
+version = "0.9.12"
 edition = "2021"
 description = "Async Rust client for the Krusty server API"
 
