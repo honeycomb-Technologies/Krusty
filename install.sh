@@ -11,6 +11,8 @@ DAEMON_BINARY="krusty-mako"
 DEFAULT_INSTALL_DIR="$HOME/.local/bin"
 INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
 SYSTEMD_UNITS="krusty-mako.socket krusty-mako.service krusty-serve.service"
+ACTIVATION_HEALTH_ATTEMPTS=20
+ACTIVATION_STABLE_PASSES=2
 
 TMP_DIR=""
 INSTALL_LOCK=""
@@ -741,14 +743,28 @@ restart_previously_active() {
 
 verify_previously_active() {
     [ -n "$ACTIVE_UNITS" ] || return 0
-    health_pass=1
-    while [ "$health_pass" -le 2 ]; do
+    health_attempt=1
+    stable_health_passes=0
+    while [ "$health_attempt" -le "$ACTIVATION_HEALTH_ATTEMPTS" ]; do
         health_pause
+        all_units_active=true
         for health_unit in $ACTIVE_UNITS; do
-            run_systemctl --user is-active --quiet "$health_unit" >/dev/null 2>&1 || return 1
+            if ! run_systemctl --user is-active --quiet "$health_unit" >/dev/null 2>&1; then
+                all_units_active=false
+                break
+            fi
         done
-        health_pass=$((health_pass + 1))
+        if [ "$all_units_active" = true ]; then
+            stable_health_passes=$((stable_health_passes + 1))
+            if [ "$stable_health_passes" -ge "$ACTIVATION_STABLE_PASSES" ]; then
+                return 0
+            fi
+        else
+            stable_health_passes=0
+        fi
+        health_attempt=$((health_attempt + 1))
     done
+    return 1
 }
 
 restart_and_verify_previously_active() {
@@ -1018,7 +1034,7 @@ run_self_test() (
     SELF_ADD_DEPENDENCY=false
     SELF_FAIL_RELOAD_ONCE=false
     SELF_FAIL_RESTART_ONCE=false
-    SELF_FAIL_HEALTH_ONCE=false
+    SELF_FAIL_HEALTH_COUNT=0
     SELF_HEALTH_CHECKS=0
 
     self_unit_active() {
@@ -1048,8 +1064,8 @@ run_self_test() (
                 shift
                 if [ "$SELF_AFTER_RESTART" = true ] && [ "$1" = "krusty-serve.service" ]; then
                     SELF_HEALTH_CHECKS=$((SELF_HEALTH_CHECKS + 1))
-                    if [ "$SELF_FAIL_HEALTH_ONCE" = true ]; then
-                        SELF_FAIL_HEALTH_ONCE=false
+                    if [ "$SELF_FAIL_HEALTH_COUNT" -gt 0 ]; then
+                        SELF_FAIL_HEALTH_COUNT=$((SELF_FAIL_HEALTH_COUNT - 1))
                         return 1
                     fi
                 fi
@@ -1138,7 +1154,7 @@ run_self_test() (
         SELF_ADD_DEPENDENCY=false
         SELF_FAIL_RELOAD_ONCE=false
         SELF_FAIL_RESTART_ONCE=false
-        SELF_FAIL_HEALTH_ONCE=false
+        SELF_FAIL_HEALTH_COUNT=0
         SELF_HEALTH_CHECKS=0
     }
     release_self_install_lock() {
@@ -1267,6 +1283,15 @@ run_self_test() (
     [ "$SELF_HEALTH_CHECKS" -ge 2 ]
     assert_no_activation_residue
 
+    # A service can fail its first health sample while systemd applies its
+    # configured restart policy. Activation should accept eventual stability.
+    reset_self_systemd
+    ACTIVE_UNITS=" krusty-serve.service"
+    SELF_AFTER_RESTART=true
+    SELF_FAIL_HEALTH_COUNT=1
+    verify_previously_active
+    [ "$SELF_HEALTH_CHECKS" -ge 3 ]
+
     # The marker does not authorize unrelated absolute unit links.
     rejected_unit="$SYSTEMD_USER_DIR/krusty-mako.socket"
     rejected_target="$self_root/unmanaged-krusty-mako.socket"
@@ -1318,7 +1343,7 @@ run_self_test() (
 
     reset_self_systemd
     SELF_ADD_DEPENDENCY=true
-    SELF_FAIL_HEALTH_ONCE=true
+    SELF_FAIL_HEALTH_COUNT=$ACTIVATION_HEALTH_ATTEMPTS
     if activate_unix_release; then fail "Self-test expected unhealthy-service rollback."; exit 1; fi
     case "$SELF_LOG" in
         *'|restart:krusty-serve.service|stop:krusty-mako.socket|daemon-reload|restart:krusty-serve.service'*) ;;
