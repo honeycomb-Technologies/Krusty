@@ -27,6 +27,7 @@ pub mod storage;
 pub mod tailscale;
 pub mod tools;
 pub mod updater;
+pub mod workflow;
 
 // Re-exports for convenience
 pub use ai::client::{

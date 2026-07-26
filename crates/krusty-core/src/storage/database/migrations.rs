@@ -2216,6 +2216,230 @@ impl Database {
             mako_model_tx.commit()?;
         }
 
+        // Migration 47: Canonical Goal/Plan workflow state.
+        //
+        // The legacy `plans` table remains intact as an import/export and
+        // rollback surface. Executable workflow state is normalized, revisioned,
+        // and append-journaled so reconnects, concurrent clients, and automatic
+        // continuation all observe the same durable contract.
+        if current_version < 47 {
+            info!("Running migration 47: canonical Goal and Plan workflow");
+            let workflow_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring workflow migration lock")?;
+            workflow_tx
+                .execute_batch(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS workflow_goals (
+                        id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        objective TEXT NOT NULL,
+                        constraints_json TEXT NOT NULL DEFAULT '[]'
+                            CHECK (json_valid(constraints_json)),
+                        status TEXT NOT NULL DEFAULT 'draft'
+                            CHECK (status IN (
+                                'draft', 'active', 'paused', 'blocked',
+                                'completed', 'cancelled'
+                            )),
+                        status_reason TEXT,
+                        needs_definition INTEGER NOT NULL DEFAULT 0
+                            CHECK (needs_definition IN (0, 1)),
+                        revision INTEGER NOT NULL DEFAULT 1
+                            CHECK (revision >= 1),
+                        token_budget INTEGER CHECK (token_budget IS NULL OR token_budget > 0),
+                        tokens_used INTEGER NOT NULL DEFAULT 0
+                            CHECK (tokens_used >= 0),
+                        source TEXT NOT NULL DEFAULT 'user'
+                            CHECK (source IN ('user', 'legacy_import', 'system')),
+                        legacy_plan_id TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        activated_at TEXT,
+                        completed_at TEXT,
+                        cancelled_at TEXT,
+                        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_goals_one_unfinished
+                        ON workflow_goals(session_id)
+                        WHERE status IN ('draft', 'active', 'paused', 'blocked');
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_goals_legacy_plan
+                        ON workflow_goals(legacy_plan_id)
+                        WHERE legacy_plan_id IS NOT NULL;
+                    CREATE INDEX IF NOT EXISTS idx_workflow_goals_session_updated
+                        ON workflow_goals(session_id, updated_at DESC);
+
+                    CREATE TABLE IF NOT EXISTS workflow_goal_criteria (
+                        id TEXT PRIMARY KEY,
+                        goal_id TEXT NOT NULL,
+                        position INTEGER NOT NULL CHECK (position >= 0),
+                        description TEXT NOT NULL,
+                        required INTEGER NOT NULL DEFAULT 1
+                            CHECK (required IN (0, 1)),
+                        status TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (status IN ('pending', 'passed', 'failed', 'waived')),
+                        evidence_json TEXT NOT NULL DEFAULT '[]'
+                            CHECK (json_valid(evidence_json)),
+                        verifier TEXT,
+                        verified_at TEXT,
+                        FOREIGN KEY (goal_id) REFERENCES workflow_goals(id) ON DELETE CASCADE,
+                        UNIQUE (goal_id, position)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS workflow_plan_revisions (
+                        id TEXT PRIMARY KEY,
+                        goal_id TEXT NOT NULL,
+                        revision_number INTEGER NOT NULL CHECK (revision_number >= 1),
+                        status TEXT NOT NULL DEFAULT 'proposed'
+                            CHECK (status IN (
+                                'proposed', 'approved', 'active', 'superseded',
+                                'completed', 'cancelled'
+                            )),
+                        title TEXT NOT NULL,
+                        rationale TEXT,
+                        source_message_id INTEGER,
+                        predecessor_id TEXT,
+                        legacy_markdown TEXT,
+                        created_at TEXT NOT NULL,
+                        approved_at TEXT,
+                        completed_at TEXT,
+                        FOREIGN KEY (goal_id) REFERENCES workflow_goals(id) ON DELETE CASCADE,
+                        FOREIGN KEY (source_message_id) REFERENCES messages(id) ON DELETE SET NULL,
+                        FOREIGN KEY (predecessor_id) REFERENCES workflow_plan_revisions(id)
+                            ON DELETE SET NULL,
+                        UNIQUE (goal_id, revision_number)
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_plan_one_active
+                        ON workflow_plan_revisions(goal_id)
+                        WHERE status = 'active';
+                    CREATE INDEX IF NOT EXISTS idx_workflow_plan_goal_revision
+                        ON workflow_plan_revisions(goal_id, revision_number DESC);
+
+                    CREATE TABLE IF NOT EXISTS workflow_plan_steps (
+                        id TEXT PRIMARY KEY,
+                        plan_revision_id TEXT NOT NULL,
+                        parent_step_id TEXT,
+                        display_key TEXT NOT NULL,
+                        position INTEGER NOT NULL CHECK (position >= 0),
+                        description TEXT NOT NULL,
+                        context TEXT,
+                        acceptance_criteria_json TEXT NOT NULL DEFAULT '[]'
+                            CHECK (json_valid(acceptance_criteria_json)),
+                        required INTEGER NOT NULL DEFAULT 1
+                            CHECK (required IN (0, 1)),
+                        status TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (status IN (
+                                'pending', 'in_progress', 'blocked', 'completed',
+                                'failed', 'skipped', 'cancelled'
+                            )),
+                        outcome TEXT,
+                        evidence_json TEXT NOT NULL DEFAULT '[]'
+                            CHECK (json_valid(evidence_json)),
+                        claimed_attempt_id TEXT,
+                        revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+                        created_at TEXT NOT NULL,
+                        started_at TEXT,
+                        completed_at TEXT,
+                        FOREIGN KEY (plan_revision_id)
+                            REFERENCES workflow_plan_revisions(id) ON DELETE CASCADE,
+                        FOREIGN KEY (parent_step_id)
+                            REFERENCES workflow_plan_steps(id) ON DELETE CASCADE,
+                        UNIQUE (plan_revision_id, display_key)
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_one_serial_step
+                        ON workflow_plan_steps(plan_revision_id)
+                        WHERE status = 'in_progress' AND parent_step_id IS NULL;
+                    CREATE INDEX IF NOT EXISTS idx_workflow_steps_plan_position
+                        ON workflow_plan_steps(plan_revision_id, position);
+
+                    CREATE TABLE IF NOT EXISTS workflow_step_dependencies (
+                        step_id TEXT NOT NULL,
+                        depends_on_step_id TEXT NOT NULL,
+                        PRIMARY KEY (step_id, depends_on_step_id),
+                        CHECK (step_id <> depends_on_step_id),
+                        FOREIGN KEY (step_id) REFERENCES workflow_plan_steps(id) ON DELETE CASCADE,
+                        FOREIGN KEY (depends_on_step_id)
+                            REFERENCES workflow_plan_steps(id) ON DELETE CASCADE
+                    );
+
+                    CREATE TABLE IF NOT EXISTS workflow_execution_attempts (
+                        id TEXT PRIMARY KEY,
+                        goal_id TEXT NOT NULL,
+                        plan_revision_id TEXT,
+                        step_id TEXT,
+                        status TEXT NOT NULL DEFAULT 'running'
+                            CHECK (status IN (
+                                'running', 'paused', 'succeeded', 'failed', 'cancelled'
+                            )),
+                        stop_reason TEXT,
+                        permission_mode TEXT NOT NULL
+                            CHECK (permission_mode IN ('supervised', 'autonomous')),
+                        goal_revision_at_start INTEGER NOT NULL,
+                        max_turns INTEGER NOT NULL CHECK (max_turns > 0),
+                        max_tool_calls INTEGER NOT NULL CHECK (max_tool_calls > 0),
+                        max_wall_time_secs INTEGER NOT NULL CHECK (max_wall_time_secs > 0),
+                        max_research_actions INTEGER NOT NULL CHECK (max_research_actions > 0),
+                        turn_count INTEGER NOT NULL DEFAULT 0 CHECK (turn_count >= 0),
+                        tool_call_count INTEGER NOT NULL DEFAULT 0 CHECK (tool_call_count >= 0),
+                        research_action_count INTEGER NOT NULL DEFAULT 0
+                            CHECK (research_action_count >= 0),
+                        progress_revision INTEGER NOT NULL DEFAULT 0
+                            CHECK (progress_revision >= 0),
+                        blocker_fingerprint TEXT,
+                        blocker_streak INTEGER NOT NULL DEFAULT 0
+                            CHECK (blocker_streak >= 0),
+                        started_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        ended_at TEXT,
+                        FOREIGN KEY (goal_id) REFERENCES workflow_goals(id) ON DELETE CASCADE,
+                        FOREIGN KEY (plan_revision_id)
+                            REFERENCES workflow_plan_revisions(id) ON DELETE SET NULL,
+                        FOREIGN KEY (step_id) REFERENCES workflow_plan_steps(id) ON DELETE SET NULL
+                    );
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_one_running_attempt
+                        ON workflow_execution_attempts(goal_id)
+                        WHERE status = 'running';
+                    CREATE INDEX IF NOT EXISTS idx_workflow_attempt_goal_started
+                        ON workflow_execution_attempts(goal_id, started_at DESC);
+
+                    CREATE TABLE IF NOT EXISTS workflow_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL,
+                        goal_id TEXT NOT NULL,
+                        aggregate_revision INTEGER NOT NULL CHECK (aggregate_revision >= 1),
+                        operation_id TEXT NOT NULL UNIQUE,
+                        event_type TEXT NOT NULL,
+                        actor TEXT NOT NULL,
+                        attempt_id TEXT,
+                        payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                        FOREIGN KEY (goal_id) REFERENCES workflow_goals(id) ON DELETE CASCADE,
+                        FOREIGN KEY (attempt_id)
+                            REFERENCES workflow_execution_attempts(id) ON DELETE SET NULL,
+                        UNIQUE (goal_id, aggregate_revision)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_workflow_events_session_revision
+                        ON workflow_events(session_id, aggregate_revision);
+
+                    CREATE TABLE IF NOT EXISTS workflow_idempotency (
+                        operation_id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        action TEXT NOT NULL,
+                        result_json TEXT NOT NULL CHECK (json_valid(result_json)),
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+                    );
+                    "#,
+                )
+                .context("Migration 47: create canonical workflow schema")?;
+            workflow_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (47)",
+                [],
+            )?;
+            workflow_tx.commit()?;
+        }
+
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;
         }
