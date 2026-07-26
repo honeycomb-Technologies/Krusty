@@ -34,6 +34,10 @@ mod sessions;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/dispatch", post(sessions::dispatch))
+        .route(
+            "/main",
+            get(sessions::main_session).post(sessions::main_session),
+        )
         .route("/home", get(home::home))
         .route("/home/bootstrap", post(home::bootstrap_home))
         .route("/home/:kind", put(home::update_home_document))

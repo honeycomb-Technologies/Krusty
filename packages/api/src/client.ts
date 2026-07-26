@@ -36,6 +36,7 @@ import type {
 	MakoAttentionResponse,
 	MakoDispatchOptions,
 	MakoDispatchResponse,
+	MakoMainResponse,
 	MakoBootstrapResponse,
 	MakoCrewDocumentKind,
 	MakoCrewResponse,
@@ -655,6 +656,16 @@ export class KrustyClient {
 				crew_slug: options?.crewSlug ?? undefined,
 			}),
 		});
+	}
+
+	/** Ensure/get the durable singleton Mako companion chat for this user. */
+	async getMakoMain(): Promise<MakoMainResponse> {
+		return this.request("/mako/main");
+	}
+
+	/** Same as getMakoMain — POST is accepted for ensure semantics. */
+	async ensureMakoMain(): Promise<MakoMainResponse> {
+		return this.request("/mako/main", { method: "POST" });
 	}
 
 	async getMakoCurrent(): Promise<MakoCurrentResponse> {

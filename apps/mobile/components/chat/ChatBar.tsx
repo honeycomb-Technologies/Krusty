@@ -931,8 +931,25 @@ export function ChatBar(props: ChatBarProps) {
       : Math.max(10, Math.min(insets.bottom, closedGap));
   const bottomOffset = keyboardHeight > 0 ? keyboardHeight : closedBottomOffset;
   const gaugeTokens = tokenCount ?? 0;
-  const gaugePct = Math.min(100, (gaugeTokens / 200000) * 100);
-  const gaugeColor = gaugeTokens > 180000 ? t.error : gaugeTokens > 120000 ? t.warning : t.mutedForeground + '60';
+  // Prefer the selected model's real context window (e.g. Grok 500k). Fallback
+  // only when the catalog has not loaded or the model is unknown.
+  const selectedModel =
+    models.find((entry) => entry.id === model) ??
+    models.find((entry) => entry.key?.model_id === model) ??
+    null;
+  const contextWindow = Math.max(
+    1,
+    selectedModel?.context_window && selectedModel.context_window > 0
+      ? selectedModel.context_window
+      : 200_000,
+  );
+  const gaugePct = Math.min(100, (gaugeTokens / contextWindow) * 100);
+  const gaugeColor =
+    gaugeTokens > contextWindow * 0.9
+      ? t.error
+      : gaugeTokens > contextWindow * 0.6
+        ? t.warning
+        : t.mutedForeground + '60';
   const gaugeStroke = 3.5;
   const gaugeRadius = (GAUGE_SIZE - gaugeStroke) / 2;
   const gaugeCircumference = 2 * Math.PI * gaugeRadius;

@@ -437,6 +437,16 @@ export interface MakoDispatchResponse {
 	status: string;
 }
 
+/** Singleton companion chat for the Mako surface (not a job/run session). */
+export interface MakoMainResponse {
+	session_id: string;
+	title: string;
+	session_type: SessionType;
+	permission_mode: string;
+	created: boolean;
+	agent_state: string;
+}
+
 export interface MakoDispatchOptions {
 	projectDir?: string;
 	/** Legacy model slug retained for older servers. */
