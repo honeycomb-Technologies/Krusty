@@ -669,14 +669,14 @@ impl ThinkingBlock {
 
 #[cfg(test)]
 mod tests {
-    use super::SPINNER_FRAMES;
+    use super::ACTIVITY_ECHO_FRAMES;
     use unicode_width::UnicodeWidthStr;
 
     #[test]
     fn dot_echo_frames_keep_a_stable_width() {
-        let expected_width = UnicodeWidthStr::width(SPINNER_FRAMES[0]);
+        let expected_width = UnicodeWidthStr::width(ACTIVITY_ECHO_FRAMES[0]);
 
-        assert!(SPINNER_FRAMES
+        assert!(ACTIVITY_ECHO_FRAMES
             .iter()
             .all(|frame| UnicodeWidthStr::width(*frame) == expected_width));
     }
