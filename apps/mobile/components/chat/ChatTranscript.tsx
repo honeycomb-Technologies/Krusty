@@ -29,10 +29,13 @@ import {
 } from "./transcriptTurns";
 import { PlanTracker } from "./PlanTracker";
 import type { ChatMessage } from "@krusty/api";
+import type { SessionType } from "@krusty/api";
 
 interface ChatTranscriptProps {
   messages: ChatMessage[];
   sessionId?: string | null;
+  sessionType?: SessionType;
+  scrollStateKey?: string;
   isStreaming: boolean;
   isThinking?: boolean;
   activeToolCallId?: string | null;
@@ -54,7 +57,10 @@ interface ChatTranscriptProps {
   hideJumpToLatest?: boolean;
 }
 
-const DESKTOP_TOP_EDGE_HEIGHT = 22;
+const DESKTOP_TOP_EDGE_HEIGHT = 64;
+const MOBILE_TOP_EDGE_HEIGHT = 78;
+const DESKTOP_TOP_EDGE_OFFSET = -28;
+const MOBILE_TOP_EDGE_OFFSET = -34;
 const DESKTOP_BOTTOM_EDGE_HEIGHT = 116;
 const MOBILE_BOTTOM_SCRIM_MIN_HEIGHT = 148;
 const MOBILE_BOTTOM_SCRIM_MAX_HEIGHT = 228;
@@ -66,6 +72,13 @@ const BOTTOM_CONTROL_INSET = 10;
 const BOTTOM_CONTROL_SIZE = 56;
 const BOTTOM_CONTROL_RADIUS = 18;
 const PROGRAMMATIC_SCROLL_SETTLE_MS = 700;
+
+interface CachedTranscriptScrollState {
+  offset: number;
+  autoFollow: boolean;
+}
+
+const transcriptScrollCache = new Map<string, CachedTranscriptScrollState>();
 
 function lastMessageLayoutSignature(messages: ChatMessage[]): string {
   const lastMessage = messages[messages.length - 1];
@@ -116,6 +129,8 @@ function distanceFromBottom(
 export function ChatTranscript({
   messages,
   sessionId,
+  sessionType = "chat",
+  scrollStateKey = sessionId ?? "empty",
   isStreaming,
   isThinking,
   activeToolCallId,
@@ -132,20 +147,31 @@ export function ChatTranscript({
 }: ChatTranscriptProps) {
   const { theme } = useThemeContext();
   const { isDesktop } = useBreakpoint();
+  const restoredScrollStateRef = useRef(
+    transcriptScrollCache.get(scrollStateKey) ?? null,
+  );
   const flatListRef = useRef<FlatList>(null);
   const listHeightRef = useRef(0);
   const contentHeightRef = useRef(0);
-  const scrollOffsetRef = useRef(0);
-  const autoFollowRef = useRef(true);
+  const scrollOffsetRef = useRef(
+    restoredScrollStateRef.current?.offset ?? 0,
+  );
+  const autoFollowRef = useRef(
+    restoredScrollStateRef.current?.autoFollow ?? true,
+  );
   const pendingAutoScrollRef = useRef(false);
   const pendingAutoScrollAnimatedRef = useRef(false);
   const bottomAnchorTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
   const bottomAnchorFrameRef = useRef<number | null>(null);
   const isUserDraggingRef = useRef(false);
   const programmaticScrollUntilRef = useRef(0);
-  const loadedSessionIdRef = useRef<string | null>(null);
+  const loadedSessionIdRef = useRef<string | null>(
+    restoredScrollStateRef.current ? sessionId ?? null : null,
+  );
   const [planTrackerHeight, setPlanTrackerHeight] = useState(0);
-  const [isNearBottom, setIsNearBottom] = useState(true);
+  const [isNearBottom, setIsNearBottom] = useState(
+    restoredScrollStateRef.current?.autoFollow ?? true,
+  );
   const t = theme.colors;
   const blurTint =
     theme.scheme === "dark"
@@ -165,8 +191,10 @@ export function ChatTranscript({
     () => lastMessageLayoutSignature(messages),
     [messages],
   );
-  const topFadeHeight = isDesktop ? DESKTOP_TOP_EDGE_HEIGHT : 0;
-  const topContentGap = topFadeHeight > 0 ? topFadeHeight + EDGE_GAP : EDGE_GAP;
+  const topFadeHeight = isDesktop ? DESKTOP_TOP_EDGE_HEIGHT : MOBILE_TOP_EDGE_HEIGHT;
+  const topFadeOffset = isDesktop ? DESKTOP_TOP_EDGE_OFFSET : MOBILE_TOP_EDGE_OFFSET;
+  // Content starts lower than the raised fade so the blur sits under header chrome.
+  const topContentGap = isDesktop ? 28 : 34;
   const bottomScrimHeight = isDesktop
     ? Math.max(DESKTOP_BOTTOM_EDGE_HEIGHT, Math.min(bottomPadding + 40, 188))
     : Math.max(
@@ -175,7 +203,7 @@ export function ChatTranscript({
       );
   const bottomScrimOffset = 0;
   const listTopPadding = isDesktop
-    ? 8
+    ? topContentGap
     : topContentGap +
       (showPlanTracker && planTrackerHeight > 0
         ? planTrackerHeight + TRACKER_GAP
@@ -240,7 +268,7 @@ export function ChatTranscript({
       // One bounded fallback catches delayed Markdown measurement without
       // issuing a multi-frame scroll storm for every streamed delta.
       bottomAnchorTimersRef.current = [
-        setTimeout(() => anchor(false), 96),
+        setTimeout(() => anchor(false), 120),
       ];
     },
     [clearBottomAnchorTimers, scrollToBottom],
@@ -308,6 +336,16 @@ export function ChatTranscript({
   }, [scheduleBottomAnchor, scrollToBottom]);
 
   useEffect(() => clearBottomAnchorTimers, [clearBottomAnchorTimers]);
+
+  useEffect(
+    () => () => {
+      transcriptScrollCache.set(scrollStateKey, {
+        offset: scrollOffsetRef.current,
+        autoFollow: autoFollowRef.current,
+      });
+    },
+    [scrollStateKey],
+  );
 
   useEffect(() => {
     if (!sessionId) {
@@ -457,6 +495,10 @@ export function ChatTranscript({
         }}
         onScroll={handleListScroll}
         scrollEventThrottle={16}
+        contentOffset={{
+          x: 0,
+          y: restoredScrollStateRef.current?.offset ?? 0,
+        }}
         renderItem={renderTurn}
         style={styles.flex}
         contentContainerStyle={[
@@ -504,30 +546,43 @@ export function ChatTranscript({
         showsVerticalScrollIndicator={false}
       />
 
-      {topFadeHeight > 0 ? (
-        <View
-          style={[
-            styles.edgeMask,
-            styles.edgeMaskTop,
-            { height: topFadeHeight },
-          ]}
-          pointerEvents="none"
-        >
+      <View
+        style={[
+          styles.edgeMask,
+          styles.edgeMaskTop,
+          { height: topFadeHeight, top: topFadeOffset },
+        ]}
+        pointerEvents="none"
+      >
+        {isDesktop ? (
           <BlurView
-            intensity={10}
+            intensity={18}
             tint={blurTint}
             style={StyleSheet.absoluteFill}
           />
-          <LinearGradient
-            colors={[`${t.background}88`, `${t.background}00`]}
-            start={{ x: 0.5, y: 0 }}
-            end={{ x: 0.5, y: 1 }}
-            style={StyleSheet.absoluteFill}
-          />
-        </View>
-      ) : null}
+        ) : null}
+        <LinearGradient
+          colors={
+            isDesktop
+              ? [t.background, `${t.background}b8`, `${t.background}00`]
+              : [
+                  t.background,
+                  `${t.background}c8`,
+                  `${t.background}18`,
+                  `${t.background}00`,
+                ]
+          }
+          locations={isDesktop ? [0, 0.42, 1] : [0, 0.28, 0.58, 1]}
+          start={{ x: 0.5, y: 0 }}
+          end={{ x: 0.5, y: 1 }}
+          style={StyleSheet.absoluteFill}
+        />
+      </View>
       {!isDesktop && showPlanTracker ? (
-        <PlanTracker onHeightChange={setPlanTrackerHeight} />
+        <PlanTracker
+          sessionType={sessionType}
+          onHeightChange={setPlanTrackerHeight}
+        />
       ) : null}
       <View
         style={[

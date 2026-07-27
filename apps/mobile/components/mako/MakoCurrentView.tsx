@@ -153,8 +153,6 @@ export function MakoCurrentView({
           chat={chat}
           scrollToMessageId={threadJumpMessageId}
           onScrollTargetHandled={onThreadJumpHandled}
-          emptyTitle="Talk to Mako"
-          emptyBody="Use this thread to steer work, ask for updates, and open projects or runs when they matter."
         />
       </View>
     </View>

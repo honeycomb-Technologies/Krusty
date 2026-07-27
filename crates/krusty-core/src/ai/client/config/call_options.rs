@@ -326,13 +326,10 @@ impl CallOptions {
             .reasoning_control
             .or(model_capabilities.reasoning_control);
 
-        if provider == ProviderId::Grok
-            || resolved_reasoning_control == Some(ReasoningControl::OutputOnly)
-        {
-            // Krusty's Grok provider targets the Grok CLI proxy, which can emit
-            // reasoning blocks but rejects explicit `reasoning`/`reasoningEffort`
-            // request controls. Keep parsing reasoning output, but never send a
-            // provider-native thinking knob on this transport.
+        if resolved_reasoning_control == Some(ReasoningControl::OutputOnly) {
+            // Output-only transports (classic Grok Build / Composer rows) can
+            // emit reasoning blocks but reject explicit effort controls. Keep
+            // parsing reasoning output; never send a thinking knob.
             options.reasoning_format = resolved_reasoning_format;
             options.reasoning_control = Some(ReasoningControl::OutputOnly);
             options.thinking = None;
@@ -992,6 +989,31 @@ mod tests {
     }
 
     #[test]
+    fn canonicalization_keeps_grok_45_graded_effort() {
+        let options = CallOptions {
+            thinking: Some(ThinkingConfig::default()),
+            codex_reasoning_effort: Some(CodexReasoningEffort::Medium),
+            reasoning_format: Some(ReasoningFormat::OpenAI),
+            reasoning_control: Some(ReasoningControl::OpenAiEffort),
+            ..Default::default()
+        };
+
+        let canonical =
+            options.canonicalized_for(ProviderId::Grok, "grok-4.5", ApiFormat::OpenAIResponses);
+
+        assert_eq!(canonical.reasoning_format, Some(ReasoningFormat::OpenAI));
+        assert_eq!(
+            canonical.reasoning_control,
+            Some(ReasoningControl::OpenAiEffort)
+        );
+        assert_eq!(
+            canonical.codex_reasoning_effort,
+            Some(CodexReasoningEffort::Medium)
+        );
+        assert!(canonical.thinking.is_some());
+    }
+
+    #[test]
     fn fast_mode_maps_to_provider_service_tiers_without_changing_models() {
         let options = CallOptions {
             fast_mode: true,
@@ -1053,10 +1075,41 @@ mod tests {
     }
 
     #[test]
-    fn effective_settings_explain_dropped_grok_reasoning_controls() {
+    fn effective_settings_explain_dropped_grok_build_reasoning_controls() {
         let options = CallOptions {
             thinking: Some(ThinkingConfig::default()),
             codex_reasoning_effort: Some(CodexReasoningEffort::High),
+            ..Default::default()
+        };
+
+        // Classic subscription rows remain output-only.
+        let settings = options.effective_request_settings(
+            ProviderId::Grok,
+            "grok-build",
+            ApiFormat::OpenAIResponses,
+        );
+
+        assert_eq!(settings.provider, "grok");
+        assert_eq!(settings.model, "grok-build");
+        assert!(!settings.thinking_enabled);
+        assert_eq!(settings.reasoning_control.as_deref(), Some("OutputOnly"));
+        assert!(settings
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("cannot accept")));
+        assert!(settings
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("reasoning effort")));
+    }
+
+    #[test]
+    fn effective_settings_keep_grok_45_graded_effort() {
+        let options = CallOptions {
+            thinking: Some(ThinkingConfig::default()),
+            codex_reasoning_effort: Some(CodexReasoningEffort::Medium),
+            reasoning_format: Some(ReasoningFormat::OpenAI),
+            reasoning_control: Some(ReasoningControl::OpenAiEffort),
             ..Default::default()
         };
 
@@ -1068,16 +1121,10 @@ mod tests {
 
         assert_eq!(settings.provider, "grok");
         assert_eq!(settings.model, "grok-4.5");
-        assert!(!settings.thinking_enabled);
-        assert_eq!(settings.reasoning_control.as_deref(), Some("OutputOnly"));
-        assert!(settings
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("cannot accept")));
-        assert!(settings
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("reasoning effort")));
+        assert!(settings.thinking_enabled);
+        assert_eq!(settings.reasoning_control.as_deref(), Some("OpenAiEffort"));
+        assert_eq!(settings.reasoning_effort.as_deref(), Some("Medium"));
+        assert!(settings.warnings.is_empty());
     }
 
     #[test]

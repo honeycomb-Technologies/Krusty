@@ -20,8 +20,19 @@ jobs:
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
+      - name: Install mobile workspace dependencies
+        working-directory: apps/mobile
+        run: bun install --frozen-lockfile
+      - name: Link mobile node_modules for workspace package resolution
+        run: |
+          ln -sfn "$GITHUB_WORKSPACE/apps/mobile/node_modules" "$GITHUB_WORKSPACE/node_modules"
       - name: Test API streaming and error contracts
         run: bun test packages/api/test
+      - name: Test mobile navigation and workspace contracts
+        run: |
+          bun test ./tests/mobile-first-send-workspace.test.ts
+          bun test ./tests/mobile-target-branch-continuation.test.ts
+          bun test ./tests/mobile-navigation-shell.test.ts
       - name: Type-check shared client state
         run: deno task check:state
       - name: Test shared client state contracts

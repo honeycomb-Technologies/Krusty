@@ -6,12 +6,17 @@ import { BlurView } from "../../platform/blur";
 import { useThemeContext } from "../../hooks/useTheme";
 import { usePlanStore, useSessionStore } from "../../hooks/useStores";
 import { useBreakpoint } from "../../hooks/useBreakpoint";
+import type { SessionType } from "@krusty/api";
 
 interface PlanTrackerProps {
+  sessionType?: SessionType;
   onHeightChange?: (height: number) => void;
 }
 
-export function PlanTracker({ onHeightChange }: PlanTrackerProps) {
+export function PlanTracker({
+  sessionType = "chat",
+  onHeightChange,
+}: PlanTrackerProps) {
   const { theme } = useThemeContext();
   const { isDesktop } = useBreakpoint();
   const t = theme.colors;
@@ -19,11 +24,11 @@ export function PlanTracker({ onHeightChange }: PlanTrackerProps) {
   const lastReportedHeightRef = useRef(0);
   const [commandPending, setCommandPending] = useState(false);
 
-  const planItems = usePlanStore((s) => s.items);
-  const workflow = usePlanStore((s) => s.workflow);
-  const pendingRevision = usePlanStore((s) => s.pendingRevision);
+  const planItems = usePlanStore((s) => s.items, sessionType);
+  const workflow = usePlanStore((s) => s.workflow, sessionType);
+  const pendingRevision = usePlanStore((s) => s.pendingRevision, sessionType);
   const items = planItems ?? [];
-  const isVisible = usePlanStore((s) => s.isVisible);
+  const isVisible = usePlanStore((s) => s.isVisible, sessionType);
   const trackerVisible = Boolean(isVisible) && items.length > 0;
   const executeWorkflowCommand = useSessionStore((s) => s.executeWorkflowCommand);
 

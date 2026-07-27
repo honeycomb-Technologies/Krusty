@@ -116,6 +116,8 @@ export function createSessionStore(
 ) {
   let statePollingTimer: ReturnType<typeof setTimeout> | null = null;
   let statePollingGeneration = 0;
+  let streamAttachmentGeneration = 0;
+  let sessionLoadGeneration = 0;
   let presenceHeartbeatInterval: ReturnType<typeof setInterval> | null = null;
   let abortController: AbortController | null = null;
   let presenceClientId: string | null = null;
@@ -172,6 +174,22 @@ export function createSessionStore(
     getState: () => SessionStoreState,
   ) => syncSessionPresence(client, sessionId, getPresenceClientId(), getState);
 
+  function guardStreamCallbacks(
+    callbacks: StreamCallbacks,
+    isAttached: () => boolean,
+  ): StreamCallbacks {
+    return new Proxy(callbacks, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          if (!isAttached()) return undefined;
+          return value.apply(target, args);
+        };
+      },
+    });
+  }
+
   const initialState: Omit<
     SessionStoreState,
     | "sendMessage"
@@ -191,6 +209,7 @@ export function createSessionStore(
     | "togglePermissionMode"
     | "submitToolResult"
     | "submitToolApproval"
+    | "detachSession"
     | "stopStreaming"
     | "startStatePolling"
     | "stopStatePolling"
@@ -508,6 +527,10 @@ export function createSessionStore(
       }));
 
       abortController = new AbortController();
+      const streamController = abortController;
+      const streamGeneration = ++streamAttachmentGeneration;
+      const isStreamAttached = () =>
+        streamGeneration === streamAttachmentGeneration;
 
       const pollingSessionId = state.sessionId;
       if (pollingSessionId) {
@@ -515,14 +538,17 @@ export function createSessionStore(
       }
 
       const streamRecovery: { promise: Promise<boolean> | null } = { promise: null };
-      const callbacks = createRecoveringStreamCallbacks(
-        createStreamCallbacks(ref, set, get, {
-          planStore,
-          sessionsStore,
-          persistSessionMode: persistMode,
-        }),
-        pollingSessionId,
-        streamRecovery,
+      const callbacks = guardStreamCallbacks(
+        createRecoveringStreamCallbacks(
+          createStreamCallbacks(ref, set, get, {
+            planStore,
+            sessionsStore,
+            persistSessionMode: persistMode,
+          }),
+          pollingSessionId,
+          streamRecovery,
+        ),
+        isStreamAttached,
       );
       let keepStatePolling = false;
 
@@ -601,9 +627,10 @@ export function createSessionStore(
             mode: effectiveSessionType === "code" ? state.mode : undefined,
           },
           callbacks,
-          abortController.signal,
+          streamController.signal,
         );
 
+        if (!isStreamAttached()) return;
         const completedSessionId = get().sessionId;
         if (isNewSessionRequest && completedSessionId) {
           const nextDirectory = requestedProjectDir ?? requestedWorkingDir ?? null;
@@ -615,6 +642,7 @@ export function createSessionStore(
           );
         }
       } catch (err) {
+        if (!isStreamAttached()) return;
         if (pollingSessionId) {
           streamRecovery.promise ??=
             recoverAfterStreamInterruption(pollingSessionId);
@@ -624,6 +652,7 @@ export function createSessionStore(
           applyStreamFailure(err);
         }
       } finally {
+        if (!isStreamAttached()) return;
         if (streamRecovery.promise) {
           keepStatePolling = await streamRecovery.promise;
         }
@@ -677,13 +706,20 @@ export function createSessionStore(
 
     async loadSession(sessionId: string, isRefresh = false) {
       const previousSessionId = get().sessionId;
+      const loadGeneration = ++sessionLoadGeneration;
       if (previousSessionId !== sessionId) {
+        streamAttachmentGeneration += 1;
+        abortController?.abort();
+        abortController = null;
+        get().stopStatePolling();
+        get().stopPresenceHeartbeat(previousSessionId);
         planStore.getState().setWorkflow(null);
       }
       set({ isLoading: true });
 
       try {
         const data = await client.getSession(sessionId);
+        if (loadGeneration !== sessionLoadGeneration) return;
         const processedMessages = processStoredMessages(data.messages);
 
         let serverState: ApiSessionStateResponse | null = null;
@@ -692,6 +728,7 @@ export function createSessionStore(
         } catch {
           // State endpoint may not exist
         }
+        if (loadGeneration !== sessionLoadGeneration) return;
 
         const mode = serverState?.mode ?? data.session.mode ?? "build";
         const permissionMode =
@@ -778,6 +815,13 @@ export function createSessionStore(
           );
 
         applySessionSnapshot(sessionId, serverState, isRefresh, set, get, planStore);
+        if (
+          serverState
+          && isActiveSessionAgentState(serverState.agent_state)
+          && !statePollingTimer
+        ) {
+          get().startStatePolling(sessionId);
+        }
         get().startPresenceHeartbeat(sessionId);
         if (
           sessionModel
@@ -789,6 +833,7 @@ export function createSessionStore(
           void persistCurrentSelectedModel(sessionModel, sessionModelKey);
         }
       } catch (err) {
+        if (loadGeneration !== sessionLoadGeneration) return;
         if (err instanceof KrustyApiError && err.status === 404) {
           const current = get();
           current.stopPresenceHeartbeat(previousSessionId);
@@ -822,6 +867,11 @@ export function createSessionStore(
 
     clearSession() {
       const current = get();
+      sessionLoadGeneration += 1;
+      streamAttachmentGeneration += 1;
+      abortController?.abort();
+      abortController = null;
+      get().stopStatePolling();
       get().stopPresenceHeartbeat(current.sessionId);
       set({
         ...initialState,
@@ -847,6 +897,11 @@ export function createSessionStore(
       sessionType?: import("@krusty/api").SessionType,
     ) {
       const current = get();
+      sessionLoadGeneration += 1;
+      streamAttachmentGeneration += 1;
+      abortController?.abort();
+      abortController = null;
+      get().stopStatePolling();
       get().stopPresenceHeartbeat(current.sessionId);
       const nextPermissionMode = permissionMode ?? current.permissionMode;
       try {
@@ -1054,6 +1109,11 @@ export function createSessionStore(
       }));
 
       abortController = new AbortController();
+      const streamController = abortController;
+      const streamGeneration = ++streamAttachmentGeneration;
+      const isStreamAttached = () =>
+        streamGeneration === streamAttachmentGeneration
+        && get().sessionId === state.sessionId;
       get().startStatePolling(state.sessionId);
 
       const ref: AssistantMessageRef = {
@@ -1065,14 +1125,17 @@ export function createSessionStore(
       }));
 
       const streamRecovery: { promise: Promise<boolean> | null } = { promise: null };
-      const callbacks = createRecoveringStreamCallbacks(
-        createStreamCallbacks(ref, set, get, {
-          planStore,
-          sessionsStore,
-          persistSessionMode: persistMode,
-        }),
-        state.sessionId,
-        streamRecovery,
+      const callbacks = guardStreamCallbacks(
+        createRecoveringStreamCallbacks(
+          createStreamCallbacks(ref, set, get, {
+            planStore,
+            sessionsStore,
+            persistSessionMode: persistMode,
+          }),
+          state.sessionId,
+          streamRecovery,
+        ),
+        isStreamAttached,
       );
       let keepStatePolling = false;
 
@@ -1087,9 +1150,10 @@ export function createSessionStore(
             permission_mode: state.permissionMode,
           },
           callbacks,
-          abortController.signal,
+          streamController.signal,
         );
       } catch (err) {
+        if (!isStreamAttached()) return;
         streamRecovery.promise ??=
           recoverAfterStreamInterruption(state.sessionId);
         keepStatePolling = await streamRecovery.promise;
@@ -1097,6 +1161,7 @@ export function createSessionStore(
           applyStreamFailure(err);
         }
       } finally {
+        if (!isStreamAttached()) return;
         if (streamRecovery.promise) {
           keepStatePolling = await streamRecovery.promise;
         }
@@ -1134,14 +1199,34 @@ export function createSessionStore(
       get().startStatePolling(state.sessionId);
     },
 
-    // -- stopStreaming ------------------------------------------------------
+    // -- detachSession / stopStreaming -------------------------------------
+
+    detachSession() {
+      const activeSessionId = get().sessionId;
+      streamAttachmentGeneration += 1;
+      abortController?.abort();
+      abortController = null;
+      get().stopStatePolling();
+      get().stopPresenceHeartbeat(activeSessionId);
+      set((s) => ({
+        isLoading: false,
+        isStreaming: false,
+        isThinking: false,
+        thinkingContent: "",
+        messages: pruneEmptyAssistantMessages(
+          finalizeTransientAssistantMessages(s.messages),
+        ),
+      }));
+    },
 
     stopStreaming() {
       const activeSessionId = get().sessionId;
       if (activeSessionId && get().isStreaming) {
         void client.cancelSession(activeSessionId).catch(() => undefined);
       }
+      streamAttachmentGeneration += 1;
       abortController?.abort();
+      abortController = null;
       get().stopStatePolling();
       set((s) => ({
         isLoading: false,
@@ -1260,6 +1345,10 @@ export function createSessionStore(
     // -- cleanup ------------------------------------------------------------
 
     cleanup() {
+      sessionLoadGeneration += 1;
+      streamAttachmentGeneration += 1;
+      abortController?.abort();
+      abortController = null;
       get().stopStatePolling();
       const state = get();
       get().stopPresenceHeartbeat(state.sessionId);

@@ -9,7 +9,10 @@ use base64ct::{Base64UrlUnpadded, Encoding};
 use serde::{Deserialize, Serialize};
 use web_push_native::p256::PublicKey;
 
-use krusty_core::storage::{Database, PushDeliveryAttemptStore, PushSubscriptionStore};
+use krusty_core::storage::{
+    Database, ExpoPushDeviceRegistration, ExpoPushDeviceStore, PushDeliveryAttemptStore,
+    PushSubscriptionStore,
+};
 
 use crate::auth::CurrentUser;
 use crate::error::AppError;
@@ -21,6 +24,8 @@ pub fn router() -> Router<AppState> {
         .route("/vapid-public-key", get(vapid_public_key))
         .route("/status", get(status))
         .route("/test", post(send_test_notification))
+        .route("/expo/register", post(register_expo_device))
+        .route("/expo/register", delete(unregister_expo_device))
         .route("/subscribe", post(subscribe))
         .route("/subscribe", delete(unsubscribe))
 }
@@ -47,6 +52,7 @@ async fn vapid_public_key(
 struct PushStatusResponse {
     push_configured: bool,
     subscription_count: usize,
+    expo_device_count: usize,
     last_attempt_at: Option<String>,
     last_success_at: Option<String>,
     last_failure_at: Option<String>,
@@ -64,10 +70,12 @@ async fn status(
     let attempts = PushDeliveryAttemptStore::new(&db);
     let summary = attempts.summary_for_user(user_id.as_deref())?;
     let subscription_count = sub_store.count_for_user(user_id.as_deref())?;
+    let expo_device_count = ExpoPushDeviceStore::new(&db).count_for_user(user_id.as_deref())?;
 
     Ok(Json(PushStatusResponse {
         push_configured: state.push_service.is_some(),
         subscription_count,
+        expo_device_count,
         last_attempt_at: summary.last_attempt_at,
         last_success_at: summary.last_success_at,
         last_failure_at: summary.last_failure_at,
@@ -123,21 +131,116 @@ async fn send_test_notification(
                 session_id: session_id.clone(),
                 tag: Some(
                     session_id
+                        .as_ref()
                         .map(|id| format!("session-{id}"))
                         .unwrap_or_else(|| "push-test".to_string()),
                 ),
+                category: None,
+                data: session_id.map(|id| {
+                    serde_json::json!({
+                        "type": "test",
+                        "sessionId": id,
+                    })
+                }),
             },
             PushEventType::Test,
         )
         .await;
 
     Ok(Json(PushTestResponse {
-        accepted: stats.attempted > 0,
+        accepted: stats.sent > 0 && stats.failed == 0,
         attempted: stats.attempted,
         sent: stats.sent,
         stale_removed: stats.stale_removed,
         failed: stats.failed,
     }))
+}
+
+#[derive(Deserialize)]
+struct ExpoRegisterRequest {
+    expo_push_token: String,
+    platform: String,
+    notification_level: String,
+}
+
+#[derive(Serialize)]
+struct ExpoRegisterResponse {
+    id: String,
+    registered: bool,
+}
+
+fn normalize_expo_token(token: &str) -> Result<String, AppError> {
+    let token = token.trim();
+    let valid_prefix =
+        token.starts_with("ExponentPushToken[") || token.starts_with("ExpoPushToken[");
+    if !valid_prefix || !token.ends_with(']') || token.len() > 512 {
+        return Err(AppError::BadRequest(
+            "Expo push token has an invalid format".to_string(),
+        ));
+    }
+    Ok(token.to_string())
+}
+
+fn normalize_expo_platform(platform: &str) -> Result<&'static str, AppError> {
+    match platform.trim().to_ascii_lowercase().as_str() {
+        "ios" => Ok("ios"),
+        "android" => Ok("android"),
+        _ => Err(AppError::BadRequest(
+            "Expo push platform must be ios or android".to_string(),
+        )),
+    }
+}
+
+fn normalize_notification_level(level: &str) -> Result<&'static str, AppError> {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "all" => Ok("all"),
+        "important" => Ok("important"),
+        "silent" => Ok("silent"),
+        _ => Err(AppError::BadRequest(
+            "Notification level must be all, important, or silent".to_string(),
+        )),
+    }
+}
+
+async fn register_expo_device(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Json(req): Json<ExpoRegisterRequest>,
+) -> Result<Json<ExpoRegisterResponse>, AppError> {
+    let user_id = user.and_then(|u| u.0.user_id);
+    let token = normalize_expo_token(&req.expo_push_token)?;
+    let platform = normalize_expo_platform(&req.platform)?;
+    let notification_level = normalize_notification_level(&req.notification_level)?;
+
+    let db = Database::new(&state.db_path)?;
+    let id = ExpoPushDeviceStore::new(&db).upsert(ExpoPushDeviceRegistration {
+        user_id: user_id.as_deref(),
+        expo_push_token: &token,
+        platform,
+        notification_level,
+    })?;
+
+    Ok(Json(ExpoRegisterResponse {
+        id,
+        registered: true,
+    }))
+}
+
+#[derive(Deserialize)]
+struct ExpoUnregisterRequest {
+    expo_push_token: String,
+}
+
+async fn unregister_expo_device(
+    State(state): State<AppState>,
+    user: Option<CurrentUser>,
+    Json(req): Json<ExpoUnregisterRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let user_id = user.and_then(|current| current.0.user_id);
+    let token = normalize_expo_token(&req.expo_push_token)?;
+    let db = Database::new(&state.db_path)?;
+    let removed = ExpoPushDeviceStore::new(&db).remove_for_user(user_id.as_deref(), &token)?;
+    Ok(Json(serde_json::json!({ "removed": removed })))
 }
 
 #[derive(Deserialize)]
@@ -233,7 +336,10 @@ async fn unsubscribe(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_auth_secret, normalize_endpoint, normalize_p256dh_key};
+    use super::{
+        normalize_auth_secret, normalize_endpoint, normalize_expo_platform, normalize_expo_token,
+        normalize_notification_level, normalize_p256dh_key,
+    };
     use base64ct::{Base64UrlUnpadded, Encoding};
     use web_push_native::jwt_simple::algorithms::{ECDSAP256PublicKeyLike, ES256KeyPair};
 
@@ -241,6 +347,22 @@ mod tests {
         let keypair = ES256KeyPair::generate();
         let public_key_bytes = keypair.public_key().public_key().to_bytes_uncompressed();
         Base64UrlUnpadded::encode_string(&public_key_bytes)
+    }
+
+    #[test]
+    fn expo_registration_validation_accepts_supported_contract() {
+        assert_eq!(
+            normalize_expo_token("ExponentPushToken[fixture-token]").unwrap(),
+            "ExponentPushToken[fixture-token]"
+        );
+        assert_eq!(normalize_expo_platform("ANDROID").unwrap(), "android");
+        assert_eq!(
+            normalize_notification_level("important").unwrap(),
+            "important"
+        );
+        assert!(normalize_expo_token("native-apns-token").is_err());
+        assert!(normalize_expo_platform("desktop").is_err());
+        assert!(normalize_notification_level("sometimes").is_err());
     }
 
     #[test]

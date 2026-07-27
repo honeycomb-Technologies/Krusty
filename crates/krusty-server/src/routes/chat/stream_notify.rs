@@ -7,8 +7,9 @@ use krusty_core::agent::LoopEvent;
 
 use crate::apns::{ApnsEventType, ApnsPayload};
 use crate::notifications::{
-    chat_session_notification_data, fire_apns, fire_push, session_title,
-    tool_approval_notification_data, APNS_CATEGORY_CHAT_SESSION, APNS_CATEGORY_TOOL_APPROVAL,
+    chat_session_notification_data, fire_apns, fire_push, notification_terminal_disposition,
+    session_title, tool_approval_notification_data, NotificationTerminalDisposition,
+    APNS_CATEGORY_CHAT_SESSION, APNS_CATEGORY_TOOL_APPROVAL,
 };
 use crate::push::{PushEventType, PushPayload, PushService};
 
@@ -47,7 +48,14 @@ impl ChatStreamRunOutcome {
         } = event
         {
             if self.notified_tool_approvals.insert(id.clone()) {
-                notify_chat_tool_approval(apns_service, user_id, session_id, id, name);
+                notify_chat_tool_approval(
+                    push_service,
+                    apns_service,
+                    user_id,
+                    session_id,
+                    id,
+                    name,
+                );
             }
         }
 
@@ -68,15 +76,25 @@ impl ChatStreamRunOutcome {
             return;
         }
 
-        if self.had_error {
-            notify_chat_error(push_service, apns_service, user_id, session_id);
-        } else if self.stop_reason == Some(LoopStopReason::Sleeping) {
-            tracing::info!(
-                session_id = %session_id,
-                "Session entered sleeping state; skipping completion push"
-            );
+        let disposition = if self.had_error {
+            NotificationTerminalDisposition::Attention
         } else {
-            notify_chat_completion(push_service, apns_service, user_id, session_id, db_path);
+            notification_terminal_disposition(self.stop_reason.as_ref())
+        };
+        match disposition {
+            NotificationTerminalDisposition::Complete => {
+                notify_chat_completion(push_service, apns_service, user_id, session_id, db_path);
+            }
+            NotificationTerminalDisposition::Attention => {
+                notify_chat_error(push_service, apns_service, user_id, session_id);
+            }
+            NotificationTerminalDisposition::Skip => {
+                tracing::info!(
+                    session_id = %session_id,
+                    stop_reason = ?self.stop_reason,
+                    "Session did not complete; skipping completion push"
+                );
+            }
         }
     }
 }
@@ -95,6 +113,8 @@ fn notify_chat_awaiting_input(
             body: "Krusty needs your input".into(),
             session_id: Some(session_id.to_string()),
             tag: None,
+            category: Some(APNS_CATEGORY_CHAT_SESSION.into()),
+            data: Some(chat_session_notification_data("awaiting_input", session_id)),
         },
         PushEventType::AwaitingInput,
     );
@@ -113,12 +133,27 @@ fn notify_chat_awaiting_input(
 }
 
 fn notify_chat_tool_approval(
+    push_service: &Option<Arc<PushService>>,
     apns_service: &Option<Arc<crate::apns::ApnsService>>,
     user_id: Option<&str>,
     session_id: &str,
     request_id: &str,
     tool_name: &str,
 ) {
+    let data = tool_approval_notification_data(request_id, session_id, tool_name, "chat");
+    fire_push(
+        push_service,
+        user_id,
+        PushPayload {
+            title: "Permission Required".into(),
+            body: format!("\"{tool_name}\" is requesting permission to execute."),
+            session_id: Some(session_id.to_string()),
+            tag: Some(format!("approval-{request_id}")),
+            category: Some(APNS_CATEGORY_TOOL_APPROVAL.into()),
+            data: Some(data.clone()),
+        },
+        PushEventType::ToolApproval,
+    );
     fire_apns(
         apns_service,
         user_id,
@@ -127,9 +162,7 @@ fn notify_chat_tool_approval(
             body: format!("\"{tool_name}\" is requesting permission to execute."),
             session_id: Some(session_id.to_string()),
             category: Some(APNS_CATEGORY_TOOL_APPROVAL.into()),
-            data: Some(tool_approval_notification_data(
-                request_id, session_id, tool_name, "chat",
-            )),
+            data: Some(data),
         },
         ApnsEventType::ToolApproval,
     );
@@ -149,6 +182,8 @@ fn notify_chat_error(
             body: "Session encountered an error".into(),
             session_id: Some(session_id.to_string()),
             tag: None,
+            category: Some(APNS_CATEGORY_CHAT_SESSION.into()),
+            data: Some(chat_session_notification_data("error", session_id)),
         },
         PushEventType::Error,
     );
@@ -182,6 +217,8 @@ fn notify_chat_completion(
             body: format!("{title} is complete"),
             session_id: Some(session_id.to_string()),
             tag: Some(format!("session-{session_id}")),
+            category: Some(APNS_CATEGORY_CHAT_SESSION.into()),
+            data: Some(chat_session_notification_data("completion", session_id)),
         },
         PushEventType::Completion,
     );

@@ -13,15 +13,15 @@ use anyhow::{Context, Result};
 use axum::http;
 use base64ct::{Base64UrlUnpadded, Encoding};
 use fs2::FileExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 use web_push_native::jwt_simple::algorithms::{ECDSAP256PublicKeyLike, ES256KeyPair};
 use web_push_native::p256::PublicKey;
 use web_push_native::{Auth, WebPushBuilder};
 
 use krusty_core::storage::{
-    Database, PushDeliveryAttemptInput, PushDeliveryAttemptStore, PushSubscription,
-    PushSubscriptionStore,
+    Database, ExpoPushDevice, ExpoPushDeviceStore, NotificationIntentStore,
+    PushDeliveryAttemptInput, PushDeliveryAttemptStore, PushSubscription, PushSubscriptionStore,
 };
 
 const MAX_PUSH_ATTEMPTS: usize = 3;
@@ -77,16 +77,19 @@ fn is_allowed_push_endpoint_host(host: &str) -> bool {
 }
 
 /// Payload sent inside a push notification.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PushPayload {
     pub title: String,
     pub body: String,
     pub session_id: Option<String>,
     pub tag: Option<String>,
+    pub category: Option<String>,
+    pub data: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum PushEventType {
+    ToolApproval,
     Completion,
     AwaitingInput,
     MakoUpdate,
@@ -97,12 +100,25 @@ pub enum PushEventType {
 impl PushEventType {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::ToolApproval => "tool_approval",
             Self::Completion => "completion",
             Self::AwaitingInput => "awaiting_input",
             Self::MakoUpdate => "mako_update",
             Self::Error => "error",
             Self::Test => "test",
         }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        Some(match value {
+            "tool_approval" => Self::ToolApproval,
+            "completion" => Self::Completion,
+            "awaiting_input" => Self::AwaitingInput,
+            "mako_update" => Self::MakoUpdate,
+            "error" => Self::Error,
+            "test" => Self::Test,
+            _ => return None,
+        })
     }
 }
 
@@ -257,6 +273,7 @@ impl PushService {
             db_path,
             http_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(10))
                 .build()
                 .context("Failed to create push HTTP client")?,
         })
@@ -399,6 +416,56 @@ impl PushService {
         }
     }
 
+    async fn send_expo_once(
+        &self,
+        device: &ExpoPushDevice,
+        payload: &PushPayload,
+        event_type: PushEventType,
+    ) -> Result<reqwest::Response> {
+        let ttl = match event_type {
+            PushEventType::ToolApproval => 15 * 60,
+            PushEventType::AwaitingInput => 60 * 60,
+            PushEventType::Completion | PushEventType::Error => 6 * 60 * 60,
+            PushEventType::MakoUpdate => 24 * 60 * 60,
+            PushEventType::Test => 5 * 60,
+        };
+        let important = matches!(
+            event_type,
+            PushEventType::ToolApproval | PushEventType::AwaitingInput | PushEventType::Error
+        );
+        let play_sound = device.notification_level == "all"
+            || device.notification_level == "important" && important;
+        let mut message = serde_json::json!({
+            "to": device.expo_push_token,
+            "title": truncate_push_text(&payload.title, 160),
+            "body": truncate_push_text(&payload.body, 2_000),
+            "data": payload.data.clone().unwrap_or_else(|| serde_json::json!({})),
+            "ttl": ttl,
+            "priority": if important { "high" } else { "default" },
+            "sound": if play_sound { serde_json::Value::String("default".into()) } else { serde_json::Value::Null },
+            "channelId": "default",
+        });
+        if let Some(category) = &payload.category {
+            message["categoryId"] = serde_json::Value::String(category.clone());
+        }
+        if let Some(collapse_id) = payload.tag.as_ref().or(payload.session_id.as_ref()) {
+            message["collapseId"] = serde_json::Value::String(truncate_push_text(collapse_id, 64));
+        }
+        let mut request = self
+            .http_client
+            .post("https://exp.host/--/api/v2/push/send")
+            .json(&message);
+        if let Ok(access_token) = std::env::var("KRUSTY_EXPO_PUSH_ACCESS_TOKEN") {
+            if !access_token.trim().is_empty() {
+                request = request.bearer_auth(access_token);
+            }
+        }
+        request
+            .send()
+            .await
+            .context("Failed to send Expo push notification")
+    }
+
     /// Send a notification to all subscriptions for a user.
     /// In single-tenant mode (user_id = None), sends to all subscriptions.
     pub async fn notify_user(
@@ -421,8 +488,14 @@ impl PushService {
                 None => store.get_all().unwrap_or_default(),
             }
         };
+        let expo_devices = ExpoPushDeviceStore::new(&db)
+            .get_for_user(user_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|device| expo_device_allows_event(&device.notification_level, event_type))
+            .collect::<Vec<_>>();
 
-        if subscriptions.is_empty() {
+        if subscriptions.is_empty() && expo_devices.is_empty() {
             tracing::info!(
                 user_id = user_id.unwrap_or("<single-tenant>"),
                 event_type = event_type.as_str(),
@@ -453,6 +526,88 @@ impl PushService {
             record_delivery_outcome(&db, &sub, &payload, event_type, outcome);
         }
 
+        for device in expo_devices {
+            stats.attempted += 1;
+            let started_at = Instant::now();
+            let response = self.send_expo_once(&device, &payload, event_type).await;
+            match response {
+                Ok(response) => {
+                    let status = response.status();
+                    let response_body = response.json::<serde_json::Value>().await.ok();
+                    let ticket_status = response_body
+                        .as_ref()
+                        .and_then(|value| value.get("data"))
+                        .and_then(|value| value.get("status"))
+                        .and_then(serde_json::Value::as_str);
+                    let error_code = response_body
+                        .as_ref()
+                        .and_then(|value| value.get("data"))
+                        .and_then(|value| value.get("details"))
+                        .and_then(|value| value.get("error"))
+                        .and_then(serde_json::Value::as_str);
+                    if status.is_success() && ticket_status == Some("ok") {
+                        stats.sent += 1;
+                        let _ = ExpoPushDeviceStore::new(&db).mark_success(&device.expo_push_token);
+                        record_expo_attempt(
+                            &db,
+                            &device,
+                            &payload,
+                            event_type,
+                            "success",
+                            Some(status.as_u16()),
+                            None,
+                            started_at.elapsed(),
+                        );
+                    } else if error_code == Some("DeviceNotRegistered") {
+                        stats.stale_removed += 1;
+                        let _ = ExpoPushDeviceStore::new(&db)
+                            .remove_for_user(device.user_id.as_deref(), &device.expo_push_token);
+                        record_expo_attempt(
+                            &db,
+                            &device,
+                            &payload,
+                            event_type,
+                            "stale",
+                            Some(status.as_u16()),
+                            Some("DeviceNotRegistered"),
+                            started_at.elapsed(),
+                        );
+                    } else {
+                        stats.failed += 1;
+                        let reason = error_code.unwrap_or("ExpoPushRejected");
+                        let _ = ExpoPushDeviceStore::new(&db)
+                            .mark_failure(&device.expo_push_token, reason);
+                        record_expo_attempt(
+                            &db,
+                            &device,
+                            &payload,
+                            event_type,
+                            "failure",
+                            Some(status.as_u16()),
+                            Some(reason),
+                            started_at.elapsed(),
+                        );
+                    }
+                }
+                Err(error) => {
+                    stats.failed += 1;
+                    let reason = error.to_string();
+                    let _ = ExpoPushDeviceStore::new(&db)
+                        .mark_failure(&device.expo_push_token, &reason);
+                    record_expo_attempt(
+                        &db,
+                        &device,
+                        &payload,
+                        event_type,
+                        "failure",
+                        None,
+                        Some(&reason),
+                        started_at.elapsed(),
+                    );
+                }
+            }
+        }
+
         tracing::info!(
             user_id = user_id.unwrap_or("<single-tenant>"),
             event_type = event_type.as_str(),
@@ -465,6 +620,154 @@ impl PushService {
 
         stats
     }
+
+    pub async fn notify_user_durable(
+        &self,
+        user_id: Option<&str>,
+        payload: PushPayload,
+        event_type: PushEventType,
+    ) -> PushNotifyStats {
+        let intent_id = Database::new(&self.db_path).ok().and_then(|db| {
+            let payload_json = serde_json::to_value(&payload).ok()?;
+            NotificationIntentStore::new(&db)
+                .enqueue(
+                    "push",
+                    user_id,
+                    payload.session_id.as_deref(),
+                    event_type.as_str(),
+                    &payload_json,
+                    push_ttl_seconds(event_type) as i64,
+                )
+                .ok()
+        });
+        if let Some(id) = intent_id.as_deref() {
+            self.mark_intent_dispatching(id);
+        }
+        let stats = self.notify_user(user_id, payload, event_type).await;
+        if let Some(id) = intent_id.as_deref() {
+            self.finish_intent(id, &stats);
+        }
+        stats
+    }
+
+    pub async fn recover_notification_intents(&self) {
+        let intents = Database::new(&self.db_path)
+            .and_then(|db| NotificationIntentStore::new(&db).recoverable("push", 100))
+            .unwrap_or_default();
+        for intent in intents {
+            let Some(event_name) = intent.event_type.strip_prefix("push:") else {
+                continue;
+            };
+            let Some(event_type) = PushEventType::from_str(event_name) else {
+                self.mark_intent_cancelled(&intent.id, "unknown push event type");
+                continue;
+            };
+            let Ok(payload) = serde_json::from_value::<PushPayload>(intent.payload) else {
+                self.mark_intent_cancelled(&intent.id, "invalid push intent payload");
+                continue;
+            };
+            self.mark_intent_dispatching(&intent.id);
+            let stats = self
+                .notify_user(intent.user_id.as_deref(), payload, event_type)
+                .await;
+            self.finish_intent(&intent.id, &stats);
+        }
+    }
+
+    fn mark_intent_dispatching(&self, id: &str) {
+        if let Ok(db) = Database::new(&self.db_path) {
+            let _ = NotificationIntentStore::new(&db).mark_dispatching(id);
+        }
+    }
+
+    fn mark_intent_cancelled(&self, id: &str, reason: &str) {
+        if let Ok(db) = Database::new(&self.db_path) {
+            let _ = NotificationIntentStore::new(&db).mark_cancelled(id, reason);
+        }
+    }
+
+    fn finish_intent(&self, id: &str, stats: &PushNotifyStats) {
+        if let Ok(db) = Database::new(&self.db_path) {
+            let store = NotificationIntentStore::new(&db);
+            if stats.sent > 0 && stats.failed == 0 {
+                let _ = store.mark_accepted(id);
+            } else if stats.attempted == 0 {
+                let _ = store.mark_cancelled(id, "no eligible push subscriptions");
+            } else {
+                let _ = store.mark_failed(
+                    id,
+                    &format!(
+                        "Push delivery failed: attempted={}, sent={}, failed={}",
+                        stats.attempted, stats.sent, stats.failed
+                    ),
+                );
+            }
+        }
+    }
+}
+
+fn push_ttl_seconds(event_type: PushEventType) -> u64 {
+    match event_type {
+        PushEventType::ToolApproval => 15 * 60,
+        PushEventType::AwaitingInput => 60 * 60,
+        PushEventType::Completion | PushEventType::Error => 6 * 60 * 60,
+        PushEventType::MakoUpdate => 24 * 60 * 60,
+        PushEventType::Test => 5 * 60,
+    }
+}
+
+fn expo_device_allows_event(level: &str, event_type: PushEventType) -> bool {
+    match level {
+        "all" => true,
+        "important" => matches!(
+            event_type,
+            PushEventType::ToolApproval
+                | PushEventType::AwaitingInput
+                | PushEventType::Error
+                | PushEventType::Test
+        ),
+        "silent" => matches!(event_type, PushEventType::Test),
+        _ => false,
+    }
+}
+
+fn truncate_push_text(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        value.to_string()
+    } else {
+        let mut output = value
+            .chars()
+            .take(max_chars.saturating_sub(1))
+            .collect::<String>();
+        output.push('…');
+        output
+    }
+}
+
+fn record_expo_attempt(
+    db: &Database,
+    device: &ExpoPushDevice,
+    payload: &PushPayload,
+    event_type: PushEventType,
+    outcome: &str,
+    status: Option<u16>,
+    error_message: Option<&str>,
+    latency: Duration,
+) {
+    let endpoint = format!(
+        "https://exp.host/--/api/v2/push/send/sha256:{}",
+        &krusty_core::storage::hash_request_bytes(device.expo_push_token.as_bytes())[..12],
+    );
+    let _ = PushDeliveryAttemptStore::new(db).record_attempt(PushDeliveryAttemptInput {
+        user_id: device.user_id.as_deref(),
+        session_id: payload.session_id.as_deref(),
+        endpoint: &endpoint,
+        event_type: event_type.as_str(),
+        outcome,
+        http_status: status,
+        error_message,
+        latency_ms: Some(latency.as_millis() as u64),
+    });
 }
 
 fn record_delivery_outcome(

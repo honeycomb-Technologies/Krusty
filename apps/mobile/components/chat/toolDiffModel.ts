@@ -135,6 +135,29 @@ export function buildToolDiffRows(presentation: ToolDiffPresentation): ToolDiffR
   return addInlineChangeRanges(rows);
 }
 
+/** Prefer changed lines for peeks; fall back to leading rows. */
+export function buildToolDiffPeekRows(
+  presentation: ToolDiffPresentation,
+  maxRows = 12,
+): ToolDiffRow[] {
+  const rows = buildToolDiffRows(presentation);
+  if (rows.length <= maxRows) return rows;
+
+  const changed = rows.filter(
+    (row) => row.kind === "addition" || row.kind === "deletion",
+  );
+  if (changed.length > 0) {
+    return changed.slice(0, maxRows);
+  }
+  return rows.slice(0, maxRows);
+}
+
+export function toolDiffChangedRowCount(presentation: ToolDiffPresentation): number {
+  return buildToolDiffRows(presentation).filter(
+    (row) => row.kind === "addition" || row.kind === "deletion",
+  ).length;
+}
+
 function patchRows(patch: string): ToolDiffRow[] {
   const rows: ToolDiffRow[] = [];
   let oldLine: number | undefined;
@@ -357,4 +380,43 @@ function convertApplyPatchToUnified(patch?: string): string | undefined {
   }
 
   return output.length > 0 ? `${output.join("\n")}\n` : undefined;
+}
+
+
+export function buildReadFilePresentation(
+  toolCall: ToolCall,
+): ToolDiffPresentation | null {
+  const args = toolCall.arguments ?? {};
+  const filePath = firstString(args.file_path, args.path) || "file";
+  const content = extractReadContent(toolCall.output);
+  if (content === undefined) return null;
+  return {
+    kind: "files",
+    oldFile: { name: filePath, contents: content },
+    newFile: { name: filePath, contents: content },
+    filePath,
+    summary: "file contents",
+    additions: 0,
+    deletions: 0,
+  };
+}
+
+function extractReadContent(output?: string): string | undefined {
+  if (!output) return undefined;
+  const trimmed = output.trim();
+  if (!trimmed) return "";
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const data =
+        parsed.data && typeof parsed.data === "object" && !Array.isArray(parsed.data)
+          ? (parsed.data as Record<string, unknown>)
+          : parsed;
+      const content = firstString(data.content, data.text, data.output);
+      if (content !== undefined) return content;
+    }
+  } catch {
+    // plain text output
+  }
+  return output;
 }

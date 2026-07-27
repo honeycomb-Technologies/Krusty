@@ -5,11 +5,14 @@ import {
   Text,
   Pressable,
   Alert,
+  Modal,
+  TextInput,
   useWindowDimensions,
 } from "react-native";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router, useLocalSearchParams } from "expo-router";
-import { Bot, Menu, Toolbox } from "lucide-react-native";
+import { Toolbox } from "lucide-react-native";
 import * as Haptics from "../../platform/haptics";
 import * as SecureStore from "../../platform/secure-store";
 import { useThemeContext } from "../../hooks/useTheme";
@@ -23,6 +26,7 @@ import {
 } from "../../hooks/useStores";
 import { ChatTranscript } from "../../components/chat/ChatTranscript";
 import { KrustyLogo } from "../../components/ui/KrustyLogo";
+import { MakoSharkIcon } from "../../components/ui/MakoSharkIcon";
 import {
   ChatBar,
   type Attachment as ChatBarAttachment,
@@ -31,20 +35,33 @@ import { SessionDrawer } from "../../components/chat/SessionDrawer";
 import { DesktopShell } from "../../components/layout/DesktopShell";
 import { ToolboxPanel } from "../../components/ToolboxPanel";
 import { MakoScreen } from "../../components/mako/MakoScreen";
+import { MakoThreadSurface } from "../../components/mako/MakoThreadSurface";
+import { MobileAppHeader } from "../../components/navigation/MobileAppHeader";
+import { modeForHorizontalSwipe } from "../../components/navigation/modeSwipe";
+import { displayThreadTitle } from "../../components/navigation/threadTitle";
+import { useMakoHome } from "../../components/mako/hooks/useMakoHome";
 import { useSplashState } from "../../hooks/useSplashState";
 import { useEntranceAnimation } from "../../hooks/useEntranceAnimation";
 import { useLiveActivity } from "../../hooks/useLiveActivity";
 import { useWidgetSync } from "../../hooks/useWidgetSync";
 import { useNotifications } from "../../hooks/useNotifications";
 import { buildToolDiffPresentation } from "../../components/chat/toolDiffModel";
-import Animated from "react-native-reanimated";
+import Animated, {
+  runOnJS,
+  SlideInLeft,
+  SlideInRight,
+  SlideOutLeft,
+  SlideOutRight,
+} from "react-native-reanimated";
 
 import type {
   ModelInfo,
   ModelKey,
   SessionResponse,
+  SessionType,
 } from "@krusty/api";
 import type { MakoTopLevelView } from "../../components/mako/types";
+import type { MakoChatContext } from "../../components/mako/types";
 import type {
   Attachment as SessionAttachment,
   PermissionMode,
@@ -76,6 +93,7 @@ import {
 import { useSessionActions } from "./chat-screen/useSessionActions";
 
 type LoadedStores = NonNullable<ReturnType<typeof useStores>>;
+type MobileSheet = "threads" | "toolbox" | null;
 
 export default function ChatScreen() {
   const {
@@ -121,47 +139,90 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const { splashDone } = useSplashState();
   const entrance = useEntranceAnimation(splashDone);
 
-  const { sessions: sessionsStore, session: sessionStore, workspace } = stores;
+  const [activeMode, setActiveMode] = useState<SessionType>("chat");
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [renameSaving, setRenameSaving] = useState(false);
+  const [modeTransitionDirection, setModeTransitionDirection] =
+    useState<1 | -1>(1);
+  const activeTab = tabForSessionType(activeMode);
+  const setActiveTab = useCallback((index: number) => {
+    setActiveMode(sessionTypeForTab(index));
+  }, []);
+  const {
+    session: sessionStore,
+    workspace,
+  } = stores.modes[activeMode];
+  const { sessions: sessionsStore } = stores;
 
   const sessions = useSessionsStore(
     (state) => state.sessions,
   ) as SessionResponse[];
-  const sessionId = useSessionStore((state) => state.sessionId) ?? null;
-  const sessionTitle = useSessionStore((state) => state.title) ?? null;
-  const messages = useSessionStore((state) => state.messages) ?? [];
-  const isStreaming = useSessionStore((state) => state.isStreaming) ?? false;
-  const isThinking = useSessionStore((state) => state.isThinking) ?? false;
-  const model = useSessionStore((state) => state.model) ?? null;
-  const modelKey = useSessionStore((state) => state.modelKey) ?? null;
+  const sessionId =
+    useSessionStore((state) => state.sessionId, activeMode) ?? null;
+  const sessionTitle =
+    useSessionStore((state) => state.title, activeMode) ?? null;
+  const messages =
+    useSessionStore((state) => state.messages, activeMode) ?? [];
+  const isStreaming =
+    useSessionStore((state) => state.isStreaming, activeMode) ?? false;
+  const isThinking =
+    useSessionStore((state) => state.isThinking, activeMode) ?? false;
+  const model = useSessionStore((state) => state.model, activeMode) ?? null;
+  const modelKey = useSessionStore((state) => state.modelKey, activeMode) ?? null;
   const thinkingLevel =
-    useSessionStore((state) => state.thinkingLevel) ?? "medium";
+    useSessionStore((state) => state.thinkingLevel, activeMode) ?? "medium";
   const permissionMode =
-    useSessionStore((state) => state.permissionMode) ?? "autonomous";
+    useSessionStore((state) => state.permissionMode, activeMode) ?? "autonomous";
   const fastModeStoreEnabled =
-    useSessionStore((state) => state.fastModeEnabled) ?? false;
-  const mode = useSessionStore((state) => state.mode) ?? "build";
-  const tokenCount = useSessionStore((state) => state.tokenCount) ?? 0;
-  const error = useSessionStore((state) => state.error) ?? null;
-  const isLoading = useSessionStore((state) => state.isLoading) ?? false;
+    useSessionStore((state) => state.fastModeEnabled, activeMode) ?? false;
+  const mode =
+    useSessionStore((state) => state.mode, activeMode) ?? "build";
+  const tokenCount =
+    useSessionStore((state) => state.tokenCount, activeMode) ?? 0;
+  const error = useSessionStore((state) => state.error, activeMode) ?? null;
+  const isLoading =
+    useSessionStore((state) => state.isLoading, activeMode) ?? false;
   const workspaceDirectory =
-    useWorkspaceStore((state) => state.directory) ?? null;
-  const workspaceSessionId =
-    useWorkspaceStore((state) => state.sessionId) ?? null;
-
+    useWorkspaceStore((state) => state.directory, activeMode) ?? null;
+  const workspaceTargetBranch =
+    useWorkspaceStore((state) => state.targetBranch, activeMode) ?? null;
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [defaultModelId, setDefaultModelId] = useState<string | null>(null);
   const [defaultModelKey, setDefaultModelKey] = useState<ModelKey | null>(null);
   const [configuredProviders, setConfiguredProviders] = useState<string[]>([]);
   const [activeToolCallId, setActiveToolCallId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState(1);
-  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [activeSheet, setActiveSheet] = useState<MobileSheet>(null);
+  const [desktopToolboxOpen, setDesktopToolboxOpen] = useState(false);
+  const drawerOpen = activeSheet === "threads";
+  const setDrawerOpen = useCallback((open: boolean) => {
+    setActiveSheet(open ? "threads" : null);
+  }, []);
   const [makoTopLevel, setMakoTopLevel] = useState<MakoTopLevelView>("mako");
   const [makoNotificationTarget, setMakoNotificationTarget] = useState<{
     messageId?: string;
     reportId?: string;
   } | null>(null);
-  const [toolboxOpen, setToolboxOpen] = useState(false);
-  const [toolboxTab, setToolboxTab] = useState(0);
+  const toolboxOpen = isDesktop
+    ? desktopToolboxOpen
+    : activeSheet === "toolbox";
+  const [toolboxTabByMode, setToolboxTabByMode] = useState<
+    Record<SessionType, number>
+  >({
+    chat: 0,
+    code: 0,
+    mako: 0,
+  });
+  const toolboxTab = toolboxTabByMode[activeMode];
+  const setToolboxTab = useCallback(
+    (tab: number) => {
+      setToolboxTabByMode((current) => ({
+        ...current,
+        [activeMode]: tab,
+      }));
+    },
+    [activeMode],
+  );
   const [bottomControlsOpen, setBottomControlsOpen] = useState(false);
   const [composerReserveHeight, setComposerReserveHeight] =
     useState(CHAT_BAR_ZONE);
@@ -191,10 +252,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const previousStreamingRef = useRef(false);
   const currentStreamSessionIdRef = useRef<string | null>(null);
   const streamStartedAtRef = useRef<number | null>(null);
-  const liveActivityOpenRef = useRef(false);
+  const liveActivitySessionIdRef = useRef<string | null>(null);
   const notifiedApprovalIdsRef = useRef<Set<string>>(new Set());
   const suppressCompletionRef = useRef(false);
-  const attemptedWorkspaceSessionHydrationRef = useRef<string | null>(null);
   const sessionsRefreshInFlightRef = useRef(false);
   const toolActivityRef = useRef<{
     toolCalls: ReturnType<typeof flattenToolCalls>;
@@ -202,6 +262,19 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     activeToolCall: ReturnType<typeof getActiveToolCall>;
     activityDiff: { additions: number; deletions: number };
   } | null>(null);
+  const lastSessionIdByTypeRef = useRef<Record<SessionType, string | null>>({
+    chat: null,
+    code: null,
+    mako: null,
+  });
+  const attemptedWorkspaceSessionHydrationRef = useRef<
+    Record<SessionType, string | null>
+  >({
+    chat: null,
+    code: null,
+    mako: null,
+  });
+  const makoHome = useMakoHome(activeMode === "mako");
 
   const lastAssistantMessage = useMemo(
     () => getLastAssistantMessage(messages),
@@ -280,29 +353,36 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     async (_route: string, params?: Record<string, string>) => {
       const focus = params?.focus;
       const targetSessionId = params?.sessionId;
+      const targetSession = targetSessionId
+        ? sessions.find((candidate) => candidate.id === targetSessionId)
+        : null;
+      const targetType =
+        targetSession?.session_type ?? (focus === "mako" ? "mako" : activeMode);
 
       if (focus === "mako") {
-        setActiveTab(2);
         setMakoTopLevel("mako");
         setMakoNotificationTarget({
           ...(params?.messageId ? { messageId: params.messageId } : {}),
           ...(params?.reportId ? { reportId: params.reportId } : {}),
         });
-        await sessionStore.getState().ensureMakoMainSession();
-        return;
       }
-
+      setActiveTab(tabForSessionType(targetType));
       if (!targetSessionId) {
+        if (focus === "mako") {
+          await stores.modes.mako.session.getState().ensureMakoMainSession();
+        }
         return;
       }
 
       try {
-        await sessionStore.getState().loadSession(targetSessionId, true);
+        await stores.modes[targetType].session
+          .getState()
+          .loadSession(targetSessionId, true);
       } catch {
         void sessionsStore.getState().loadSessions();
       }
     },
-    [sessionStore, sessionsStore],
+    [activeMode, sessions, sessionsStore, setActiveTab, stores.modes],
   );
 
   useEffect(() => {
@@ -335,30 +415,20 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     sessionId,
   ]);
 
-  const handleRegisterNativeDevice = useCallback(
-    async (deviceToken: string) => {
-      if (!client || !isConnected || !deviceToken) {
-        return false;
-      }
-
-      try {
-        await client.registerApnsDevice(deviceToken);
-        return true;
-      } catch (error) {
-        console.debug("Failed to register APNs device", error);
-        return false;
-      }
+  const {
+    notificationLevel,
+    notifyToolApproval,
+    notifyStreamComplete,
+    submitToolApprovalAction,
+  } = useNotifications();
+  const handleLiveActivityToolApproval = useCallback(
+    (targetSessionId: string, toolCallId: string, approved: boolean) => {
+      void submitToolApprovalAction(targetSessionId, toolCallId, approved);
     },
-    [client, isConnected],
+    [submitToolApprovalAction],
   );
-
   const { startActivity, updateActivity, endActivity } = useLiveActivity({
-    onToolApproval: handleToolApprovalAction,
-  });
-  const { notifyToolApproval, notifyStreamComplete } = useNotifications({
-    onToolApproval: handleToolApprovalAction,
-    onNavigate: handleNotificationNavigate,
-    onRegisterNativeDevice: handleRegisterNativeDevice,
+    onToolApproval: handleLiveActivityToolApproval,
   });
 
   useWidgetSync({
@@ -396,8 +466,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     };
   }, [client, isConnected]);
 
-  const ensureModelReady = useCallback(async () => {
-    const existingModel = sessionStore.getState().model;
+  const ensureModelReady = useCallback(async (
+    targetStore: LoadedStores["session"] = sessionStore,
+  ) => {
+    const existingModel = targetStore.getState().model;
     let catalog = models;
     let fallbackDefault = defaultModelId;
     let fallbackDefaultKey = defaultModelKey;
@@ -419,19 +491,19 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       fallbackDefault,
       catalog,
       allowedProviders,
-      sessionStore.getState().modelKey,
+      targetStore.getState().modelKey,
       fallbackDefaultKey,
     );
 
     if (selectedModel) {
-      sessionStore
+      targetStore
         .getState()
         .setModel(selectedModel.id, selectedModel.provider ?? null, selectedModel);
       await SecureStore.setItemAsync(SELECTED_MODEL_KEY, selectedModel.id);
       return selectedModel.id;
     }
 
-    sessionStore.getState().setModel(null);
+    targetStore.getState().setModel(null);
     await SecureStore.deleteItemAsync(SELECTED_MODEL_KEY).catch(() => {});
     return null;
   }, [
@@ -440,7 +512,6 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     defaultModelKey,
     loadModelCatalog,
     models,
-    sessionStore,
   ]);
 
   useEffect(() => {
@@ -449,8 +520,10 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     }
 
     void sessionsStore.getState().loadSessions();
-    void ensureModelReady();
-  }, [client, ensureModelReady, isConnected, sessionsStore]);
+    for (const type of ["chat", "code", "mako"] as const) {
+      void ensureModelReady(stores.modes[type].session);
+    }
+  }, [client, ensureModelReady, isConnected, sessionsStore, stores.modes]);
 
   useEffect(() => {
     if (!client || !isConnected) {
@@ -467,21 +540,44 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   }, [client, isConnected, loadModelCatalog]);
 
   useEffect(() => {
-    if (!client || !isConnected || sessionId || !workspaceSessionId) {
-      return;
-    }
-    if (attemptedWorkspaceSessionHydrationRef.current === workspaceSessionId) {
+    if (!client || !isConnected || sessions.length === 0) {
       return;
     }
 
-    attemptedWorkspaceSessionHydrationRef.current = workspaceSessionId;
-    void sessionStore
-      .getState()
-      .loadSession(workspaceSessionId, true)
-      .catch(() => {
+    for (const type of ["chat", "code", "mako"] as const) {
+      const slot = stores.modes[type];
+      if (slot.session.getState().sessionId) {
+        continue;
+      }
+      const persistedId = slot.workspace.getState().sessionId;
+      const persisted = persistedId
+        ? sessions.find(
+            (candidate) =>
+              candidate.id === persistedId && candidate.session_type === type,
+          )
+        : null;
+      const recent = sessions
+        .filter((candidate) => candidate.session_type === type)
+        .sort(
+          (left, right) =>
+            new Date(right.updated_at).getTime() -
+            new Date(left.updated_at).getTime(),
+        )[0];
+      const targetId = persisted?.id ?? recent?.id ?? null;
+      if (
+        !targetId ||
+        attemptedWorkspaceSessionHydrationRef.current[type] === targetId
+      ) {
+        continue;
+      }
+
+      attemptedWorkspaceSessionHydrationRef.current[type] = targetId;
+      lastSessionIdByTypeRef.current[type] = targetId;
+      void slot.session.getState().loadSession(targetId, true).catch(() => {
         void sessionsStore.getState().loadSessions();
       });
-  }, [client, isConnected, sessionId, sessionStore, sessionsStore, workspaceSessionId]);
+    }
+  }, [client, isConnected, sessions, sessionsStore, stores.modes]);
 
   useEffect(() => {
     if (!client || !isConnected) {
@@ -510,32 +606,20 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         return;
       }
 
-      const currentSessionId =
-        sessionStore.getState().sessionId ?? workspace.getState().sessionId;
-      if (currentSessionId) {
-        void sessionStore.getState().loadSession(currentSessionId, true);
+      for (const type of ["chat", "code", "mako"] as const) {
+        const slot = stores.modes[type];
+        const currentSessionId =
+          slot.session.getState().sessionId ??
+          slot.workspace.getState().sessionId;
+        if (currentSessionId) {
+          void slot.session.getState().loadSession(currentSessionId, true);
+        }
       }
       void loadModelCatalog().catch(() => null);
     });
 
     return () => subscription.remove();
-  }, [loadModelCatalog, sessionStore, workspace]);
-
-  useEffect(() => {
-    if (!sessionId) {
-      return;
-    }
-
-    const activeSession = sessions.find((session) => session.id === sessionId);
-    if (!activeSession) {
-      return;
-    }
-
-    const nextTab = tabForSessionType(activeSession.session_type);
-    setActiveTab((currentTab) =>
-      currentTab === nextTab ? currentTab : nextTab,
-    );
-  }, [sessionId, sessions]);
+  }, [loadModelCatalog, stores.modes]);
 
   useEffect(() => {
     const nextNotifiedIds = new Set<string>();
@@ -551,11 +635,13 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       }
 
       void notifyToolApproval(toolCall.id, toolCall.name, sessionId);
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      if (notificationLevel !== "silent") {
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      }
     }
 
     notifiedApprovalIdsRef.current = nextNotifiedIds;
-  }, [awaitingApprovalCalls, notifyToolApproval, sessionId]);
+  }, [awaitingApprovalCalls, notificationLevel, notifyToolApproval, sessionId]);
 
   useEffect(() => {
     const awaitingApproval =
@@ -569,9 +655,12 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       streamStartedAtRef.current = Date.now();
     }
 
-    if (shouldKeepActivity && !liveActivityOpenRef.current) {
+    if (
+      shouldKeepActivity &&
+      liveActivitySessionIdRef.current !== sessionId
+    ) {
       startActivity(sessionId!, sessionTitle || "Chat");
-      liveActivityOpenRef.current = true;
+      liveActivitySessionIdRef.current = sessionId;
     }
 
     if (shouldKeepActivity) {
@@ -585,9 +674,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         toolApprovalName: awaitingApproval?.name,
         toolApprovalSessionId: awaitingApproval ? sessionId ?? undefined : undefined,
       });
-    } else if (liveActivityOpenRef.current) {
+    } else if (liveActivitySessionIdRef.current === sessionId) {
       endActivity();
-      liveActivityOpenRef.current = false;
+      liveActivitySessionIdRef.current = null;
     }
 
     if (
@@ -660,9 +749,11 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
     sessionStore,
     sessionsStore,
     workspace,
+    modeStores: stores.modes,
     sessions,
     models,
     suppressCompletionRef,
+    lastSessionIdByTypeRef,
   });
 
   const handleSessionToolApproval = useCallback(
@@ -706,10 +797,67 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         ...attachment,
         mimeType: attachment.mimeType ?? "application/octet-stream",
       })) as SessionAttachment[];
+
+      if (activeMode === "mako" && !sessionStore.getState().sessionId) {
+        const task = content.trim();
+        if (!client || !task) {
+          return;
+        }
+        if (normalizedAttachments.length > 0) {
+          sessionStore.setState({
+            error: "Start the Mako thread with text, then attach files in the conversation.",
+          });
+          return;
+        }
+        const resolvedModel = await ensureModelReady();
+        if (!resolvedModel) {
+          sessionStore.setState({
+            error: "Choose an available model before starting Mako.",
+          });
+          return;
+        }
+        try {
+          const response = await client.dispatchMako(task, {
+            projectDir: workspaceDirectory ?? undefined,
+            model: resolvedModel,
+          });
+          lastSessionIdByTypeRef.current.mako = response.session_id;
+          await sessionsStore.getState().loadSessions();
+          await sessionStore.getState().loadSession(response.session_id, true);
+          void Haptics.notificationAsync(
+            Haptics.NotificationFeedbackType.Success,
+          );
+        } catch (dispatchError) {
+          sessionStore.setState({
+            error:
+              dispatchError instanceof Error
+                ? dispatchError.message
+                : "Failed to start the Mako thread.",
+          });
+        }
+        return;
+      }
+
       await handleSend(content, normalizedAttachments);
     },
-    [handleSend],
+    [
+      activeMode,
+      client,
+      ensureModelReady,
+      handleSend,
+      sessionStore,
+      sessionsStore,
+      workspaceDirectory,
+    ],
   );
+
+  const handleNewMakoSession = useCallback(() => {
+    setActiveMode("mako");
+    setActiveSheet(null);
+    const makoStore = stores.modes.mako.session;
+    makoStore.getState().detachSession();
+    makoStore.getState().clearSession();
+  }, [stores.modes]);
 
   const handleSelectMakoView = useCallback(
     (view: MakoTopLevelView) => {
@@ -721,30 +869,53 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   );
 
   const handleRenameSession = useCallback(() => {
-    if (!sessionId || !sessionTitle) {
+    if (!sessionId) {
+      return;
+    }
+    setRenameDraft((sessionTitle || "").trim() || "Untitled");
+    setRenameOpen(true);
+  }, [sessionId, sessionTitle]);
+
+  const handleRenameCancel = useCallback(() => {
+    if (renameSaving) return;
+    setRenameOpen(false);
+  }, [renameSaving]);
+
+  const handleRenameSave = useCallback(async () => {
+    if (!sessionId || renameSaving) return;
+    const nextTitle = renameDraft.trim();
+    const currentTitle = (sessionTitle || "").trim();
+    if (!nextTitle) {
+      Alert.alert("Title required", "Enter a session title to continue.");
+      return;
+    }
+    if (nextTitle === currentTitle) {
+      setRenameOpen(false);
       return;
     }
 
-    Alert.prompt(
-      "Rename Session",
-      undefined,
-      async (newTitle?: string) => {
-        const nextTitle = newTitle?.trim();
-        if (!nextTitle) {
-          return;
-        }
-
-        sessionStore.getState().setTitle(nextTitle);
-        await sessionStore.getState().updateTitle(sessionId, nextTitle);
-      },
-      "plain-text",
-      sessionTitle,
-    );
-  }, [sessionId, sessionStore, sessionTitle]);
+    setRenameSaving(true);
+    try {
+      sessionStore.getState().setTitle(nextTitle);
+      await sessionStore.getState().updateTitle(sessionId, nextTitle);
+      setRenameOpen(false);
+    } catch (error) {
+      Alert.alert(
+        "Rename failed",
+        error instanceof Error ? error.message : "Could not update session title.",
+      );
+    } finally {
+      setRenameSaving(false);
+    }
+  }, [renameDraft, renameSaving, sessionId, sessionStore, sessionTitle]);
 
   const handleToolboxClose = useCallback(() => {
-    setToolboxOpen(false);
-  }, []);
+    if (isDesktop) {
+      setDesktopToolboxOpen(false);
+    } else {
+      setActiveSheet(null);
+    }
+  }, [isDesktop]);
 
   // Prefer measured host; fall back to window so the band never full-bleeds.
   const effectivePaneWidth = useMemo(() => {
@@ -756,94 +927,115 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
 
   const desktopChatMaxWidth = resolveDesktopChatMaxWidth(effectivePaneWidth);
 
-  // Title slot: real title → first user message snippet → "New chat".
-  // Store strips "New Session" placeholders, so empty string is common mid-turn.
-  const displayTitle = useMemo(() => {
-    const real = sessionTitle?.trim();
-    if (real) return { text: real, isPlaceholder: false };
+  // Empty and placeholder sessions stay visually quiet. A real persisted title
+  // appears only after the conversation has one.
+  const displayTitle = displayThreadTitle(sessionTitle);
 
-    const firstUser = messages.find(
-      (message) =>
-        message.role === "user" &&
-        typeof message.content === "string" &&
-        message.content.trim().length > 0,
-    );
-    if (firstUser && typeof firstUser.content === "string") {
-      const snippet = firstUser.content.trim().replace(/\s+/g, " ");
-      const text =
-        snippet.length > 56 ? `${snippet.slice(0, 56).trimEnd()}…` : snippet;
-      return { text, isPlaceholder: true };
-    }
+  const handleModeChange = useCallback(
+    (mode: SessionType) => {
+      if (mode === activeMode) {
+        return;
+      }
+      const order: SessionType[] = ["chat", "code", "mako"];
+      setModeTransitionDirection(
+        order.indexOf(mode) > order.indexOf(activeMode) ? 1 : -1,
+      );
+      setActiveSheet(null);
+      void handleTabChange(tabForSessionType(mode));
+    },
+    [activeMode, handleTabChange],
+  );
+  const handleModeSwipe = useCallback(
+    (translationX: number, velocityX: number) => {
+      const nextMode = modeForHorizontalSwipe(
+        activeMode,
+        translationX,
+        velocityX,
+      );
+      if (!nextMode) {
+        return;
+      }
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      handleModeChange(nextMode);
+    },
+    [activeMode, handleModeChange],
+  );
+  const modeSwipeGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .enabled(
+          !isDesktop &&
+            !drawerOpen &&
+            !toolboxOpen &&
+            !bottomControlsOpen,
+        )
+        .activeOffsetX([-28, 28])
+        .failOffsetY([-20, 20])
+        .onEnd((event) => {
+          runOnJS(handleModeSwipe)(event.translationX, event.velocityX);
+        }),
+    [
+      bottomControlsOpen,
+      drawerOpen,
+      handleModeSwipe,
+      isDesktop,
+      toolboxOpen,
+    ],
+  );
 
-    if (sessionId) {
-      return { text: "New chat", isPlaceholder: true };
-    }
-
-    return { text: "", isPlaceholder: true };
-  }, [messages, sessionId, sessionTitle]);
-
-  const topBar = (
+  const topBar = isDesktop ? (
     <Animated.View
-      style={[
-        styles.topBar,
-        isDesktop && styles.topBarDesktop,
-        entrance.topBarStyle,
-      ]}
+      style={[styles.topBar, styles.topBarDesktop, entrance.topBarStyle]}
     >
-      {!isDesktop && (
-        <Pressable
-          onPress={() => {
-            void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-            setDrawerOpen(true);
-          }}
-          style={styles.menuBtn}
-        >
-          <Menu size={22} color={t.foreground} strokeWidth={1.8} />
-        </Pressable>
-      )}
-
       <Pressable
         onPress={handleRenameSession}
-        style={styles.titleBtn}
-        disabled={!sessionId}
+        style={[
+          styles.titleBtn,
+          displayTitle
+            ? {
+                borderColor: t.glass.border,
+                backgroundColor: t.glass.background,
+              }
+            : { borderColor: "transparent", backgroundColor: "transparent" },
+        ]}
+        disabled={!sessionId || !displayTitle}
+        accessibilityRole="button"
+        accessibilityLabel="Rename thread"
       >
         <Text
           style={[
             styles.title,
-            displayTitle.isPlaceholder && styles.titlePlaceholder,
             {
-              color: displayTitle.text
-                ? displayTitle.isPlaceholder
-                  ? t.mutedForeground
-                  : t.foreground
-                : "transparent",
+              color: displayTitle ? t.foreground : "transparent",
             },
           ]}
           numberOfLines={1}
         >
-          {displayTitle.text || " "}
+          {displayTitle || " "}
         </Text>
       </Pressable>
 
       <View style={styles.topBarActions}>
         <Pressable
           onPress={() => handleSelectMakoView("mako")}
-          style={isDesktop ? styles.toolboxCornerBtn : styles.menuBtn}
+          style={styles.toolboxCornerBtn}
           accessibilityRole="button"
           accessibilityLabel="Open Mako"
         >
-          <Bot size={20} color={t.mutedForeground} strokeWidth={1.8} />
+          <MakoSharkIcon
+            size={20}
+            color={t.mutedForeground}
+            strokeWidth={1.8}
+          />
         </Pressable>
         <Pressable
           onPress={() => {
             void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-            setToolboxOpen((open) => !open);
+            setDesktopToolboxOpen((open) => !open);
           }}
           style={[
-            isDesktop ? styles.toolboxCornerBtn : styles.menuBtn,
-            isDesktop && toolboxOpen
-              ? { backgroundColor: `${t.thinking}22` }
-              : null,
+            styles.toolboxCornerBtn,
+            toolboxOpen ? { backgroundColor: `${t.thinking}22` } : null,
           ]}
           accessibilityRole="button"
           accessibilityLabel={toolboxOpen ? "Close toolbox" : "Open toolbox"}
@@ -856,14 +1048,31 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         </Pressable>
       </View>
     </Animated.View>
+  ) : (
+    <Animated.View style={entrance.topBarStyle}>
+      <MobileAppHeader
+        mode={activeMode}
+        title={displayTitle}
+        onModeChange={handleModeChange}
+        onOpenThreads={() => setActiveSheet("threads")}
+        onOpenToolbox={() => setActiveSheet("toolbox")}
+        onTitlePress={
+          sessionId && displayTitle && activeMode !== "mako"
+            ? handleRenameSession
+            : undefined
+        }
+      />
+    </Animated.View>
   );
 
-  const transcriptAndComposer = (
-    <View style={styles.flex}>
+  const chatTranscriptSurface = (
       <Animated.View style={[styles.flex, entrance.contentStyle]}>
         <ChatTranscript
+          key={`${activeMode}:${sessionId ?? "new"}`}
           messages={messages}
           sessionId={sessionId}
+          sessionType={activeMode}
+          scrollStateKey={`${activeMode}:${sessionId ?? "new"}`}
           isStreaming={isStreaming}
           isThinking={isThinking}
           activeToolCallId={activeToolCallId}
@@ -921,7 +1130,9 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           </View>
         ) : null}
       </Animated.View>
+  );
 
+  const sharedComposer = (
       <Animated.View
         style={[
           entrance.bottomBarStyle,
@@ -929,6 +1140,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         ]}
       >
         <ChatBar
+          draftKey={activeMode}
           onSend={handleChatBarSend}
           onStop={handleStop}
           onHeightChange={setComposerReserveHeight}
@@ -955,11 +1167,19 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           model={model}
           models={models}
           sessionType={sessionTypeForTab(activeTab)}
+          workspaceDirectory={workspaceDirectory}
+          targetBranch={workspaceTargetBranch}
           tokenCount={tokenCount}
           onOverlayOpenChange={setBottomControlsOpen}
           contentMaxWidth={isDesktop ? desktopChatMaxWidth : undefined}
         />
       </Animated.View>
+  );
+
+  const transcriptAndComposer = (
+    <View style={styles.flex}>
+      {chatTranscriptSurface}
+      {sharedComposer}
     </View>
   );
 
@@ -1013,6 +1233,13 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
               onClose={handleToolboxClose}
               activeTab={toolboxTab}
               onTabChange={setToolboxTab}
+              sessionType={activeMode}
+              projectDirectory={workspaceDirectory}
+              onOpenSettings={() => router.push("/(tabs)/settings")}
+              onOpenMakoRun={(id) => void loadSessionById(id)}
+              onOpenProject={(path, branch) =>
+                void openProjectInCode(path, branch)
+              }
             />
           ) : null}
         </View>
@@ -1025,13 +1252,60 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
             onClose={handleToolboxClose}
             activeTab={toolboxTab}
             onTabChange={setToolboxTab}
+            sessionType={activeMode}
+            projectDirectory={workspaceDirectory}
+            onOpenSettings={() => {
+              setActiveSheet(null);
+              router.push("/(tabs)/settings");
+            }}
+            onOpenMakoRun={(id) => void loadSessionById(id)}
+            onOpenProject={(path, branch) =>
+              void openProjectInCode(path, branch)
+            }
           />
         </>
       )}
     </SafeAreaView>
   );
 
-  const makoContent = (
+  const makoChat: MakoChatContext = {
+    sessionId,
+    title: sessionTitle,
+    messages,
+    error,
+    isLoading,
+    isStreaming,
+    isThinking,
+    activeToolCallId,
+    thinkingLevel: thinkingLevel as ThinkingLevel,
+    permissionMode: permissionMode as PermissionMode,
+    fastModeEnabled,
+    fastModeSupported,
+    mode,
+    model,
+    models,
+    tokenCount,
+    onApproveTool: (targetSessionId, toolCallId) =>
+      handleSessionToolApproval(targetSessionId, toolCallId, true),
+    onDenyTool: (targetSessionId, toolCallId) =>
+      handleSessionToolApproval(targetSessionId, toolCallId, false),
+    onSubmitToolResult: (toolCallId, result) =>
+      void handleInteractiveToolResult(toolCallId, result),
+    onPlanConfirm: (toolCallId, choice) =>
+      void handlePlanConfirm(toolCallId, choice),
+    onSend: handleChatBarSend,
+    onStop: handleStop,
+    onThinkingChange: (level) =>
+      sessionStore.getState().setThinkingLevel(level),
+    onPermissionModeToggle: () =>
+      sessionStore.getState().togglePermissionMode(),
+    onFastModeToggle: handleFastModeToggle,
+    onModeToggle: () =>
+      sessionStore.getState().setMode(mode === "build" ? "plan" : "build"),
+    onModelSelect: handleModelSelect,
+  };
+
+  const makoContent = isDesktop ? (
     <Animated.View style={[styles.flex, entrance.contentStyle]}>
       <MakoScreen
         workspaceDirectory={workspaceDirectory}
@@ -1041,45 +1315,180 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
         onOpenRunById={loadSessionById}
         onOpenProject={openProjectInCode}
         onDeleteRun={handleDeleteSession}
-        onOpenMenu={() => {
-          void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-          setDrawerOpen(true);
-        }}
         onTopLevelChange={setMakoTopLevel}
-        chat={{
-          sessionId,
-          title: sessionTitle,
-          messages,
-          error,
-          isLoading,
-          isStreaming,
-          isThinking,
-          activeToolCallId,
-          thinkingLevel: thinkingLevel as ThinkingLevel,
-          permissionMode: permissionMode as PermissionMode,
-          fastModeEnabled,
-          fastModeSupported,
-          mode,
-          model,
-          models,
-          tokenCount,
-          onApproveTool: handleApproveTranscriptTool,
-          onDenyTool: handleDenyTranscriptTool,
-          onSubmitToolResult: handleSubmitTranscriptTool,
-          onPlanConfirm: handleTranscriptPlanConfirm,
-          onSend: handleChatBarSend,
-          onStop: handleStop,
-          onThinkingChange: (level) =>
-            sessionStore.getState().setThinkingLevel(level),
-          onPermissionModeToggle: () =>
-            sessionStore.getState().togglePermissionMode(),
-          onFastModeToggle: handleFastModeToggle,
-          onModeToggle: () =>
-            sessionStore.getState().setMode(mode === "build" ? "plan" : "build"),
-          onModelSelect: handleModelSelect,
-        }}
+        chat={makoChat}
       />
     </Animated.View>
+  ) : (
+    <SafeAreaView
+      style={[styles.container, { backgroundColor: t.background }]}
+      edges={["top"]}
+    >
+      {topBar}
+      <Animated.View style={[styles.flex, entrance.contentStyle]}>
+        <MakoThreadSurface
+          chat={makoChat}
+        />
+      </Animated.View>
+      <ToolboxPanel
+        variant="overlay"
+        visible={toolboxOpen}
+        onClose={handleToolboxClose}
+        activeTab={toolboxTab}
+        onTabChange={setToolboxTab}
+        sessionType="mako"
+        projectDirectory={workspaceDirectory}
+        onOpenSettings={() => {
+          setActiveSheet(null);
+          router.push("/(tabs)/settings");
+        }}
+        onOpenMakoRun={(id) => void loadSessionById(id)}
+        onOpenProject={(path, branch) =>
+          void openProjectInCode(path, branch)
+        }
+      />
+    </SafeAreaView>
+  );
+
+  const mobileConversationSurface = (
+    <GestureDetector gesture={modeSwipeGesture}>
+      <View
+        style={[
+          styles.flex,
+          {
+            overflow: "hidden",
+            backgroundColor: t.background,
+          },
+        ]}
+      >
+        <Animated.View
+          key={activeMode}
+          entering={
+            modeTransitionDirection > 0
+              ? SlideInRight.duration(240)
+              : SlideInLeft.duration(240)
+          }
+          exiting={
+            modeTransitionDirection > 0
+              ? SlideOutLeft.duration(210)
+              : SlideOutRight.duration(210)
+          }
+          style={{
+            position: "absolute",
+            top: 0,
+            right: 0,
+            bottom: 0,
+            left: 0,
+            backgroundColor: t.background,
+          }}
+        >
+          {activeMode === "mako" ? (
+            <MakoThreadSurface
+              chat={makoChat}
+              showComposer={false}
+              externalBottomPadding={composerReserveHeight}
+            />
+          ) : (
+            chatTranscriptSurface
+          )}
+        </Animated.View>
+      </View>
+    </GestureDetector>
+  );
+
+  const mobileContent = (
+    <SafeAreaView
+      style={[styles.container, { backgroundColor: t.background }]}
+      edges={["top"]}
+    >
+      {topBar}
+      {mobileConversationSurface}
+      {sharedComposer}
+      <ToolboxPanel
+        variant="overlay"
+        visible={toolboxOpen}
+        onClose={handleToolboxClose}
+        activeTab={toolboxTab}
+        onTabChange={setToolboxTab}
+        sessionType={activeMode}
+        projectDirectory={workspaceDirectory}
+        onOpenSettings={() => {
+          setActiveSheet(null);
+          router.push("/(tabs)/settings");
+        }}
+        onOpenMakoRun={(id) => void loadSessionById(id)}
+        onOpenProject={(path, branch) =>
+          void openProjectInCode(path, branch)
+        }
+      />
+    </SafeAreaView>
+  );
+
+  const renameModal = (
+    <Modal
+      visible={renameOpen}
+      transparent
+      animationType="fade"
+      onRequestClose={handleRenameCancel}
+    >
+      <Pressable style={styles.renameBackdrop} onPress={handleRenameCancel}>
+        <Pressable
+          style={[
+            styles.renameCard,
+            {
+              backgroundColor: t.card,
+              borderColor: t.border,
+            },
+          ]}
+          onPress={(event) => event.stopPropagation()}
+        >
+          <Text style={[styles.renameTitle, { color: t.foreground }]}>Rename session</Text>
+          <TextInput
+            value={renameDraft}
+            onChangeText={setRenameDraft}
+            autoFocus
+            editable={!renameSaving}
+            placeholder="Session title"
+            placeholderTextColor={t.mutedForeground}
+            style={[
+              styles.renameInput,
+              {
+                color: t.foreground,
+                borderColor: t.border,
+                backgroundColor: t.background,
+              },
+            ]}
+            onSubmitEditing={() => {
+              void handleRenameSave();
+            }}
+          />
+          <View style={styles.renameActions}>
+            <Pressable
+              onPress={handleRenameCancel}
+              disabled={renameSaving}
+              style={[styles.renameButton, { borderColor: t.border }]}
+            >
+              <Text style={[styles.renameButtonText, { color: t.mutedForeground }]}>Cancel</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => {
+                void handleRenameSave();
+              }}
+              disabled={renameSaving}
+              style={[
+                styles.renameButton,
+                styles.renameButtonPrimary,
+                { backgroundColor: t.userMessage },
+              ]}
+            >
+              <Text style={[styles.renameButtonText, { color: "#fff" }]}>
+                {renameSaving ? "Saving…" : "Save"}
+              </Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Pressable>
+    </Modal>
   );
 
   return (
@@ -1096,7 +1505,12 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
       activeMakoView={makoTopLevel}
       onSelectMakoView={handleSelectMakoView}
     >
-      {activeTab === 2 ? makoContent : chatContent}
+      {renameModal}
+      {isDesktop ? (
+        activeTab === 2 ? makoContent : chatContent
+      ) : (
+        mobileContent
+      )}
 
       {!isDesktop && (
         <SessionDrawer
@@ -1105,17 +1519,16 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
           sessions={sessions}
           activeSessionId={sessionId}
           onSelectSession={(session) => void loadSession(session)}
-          onNewSession={() => void handleNewSession("chat")}
+          onSelectMakoSession={(id) => void loadSessionById(id)}
+          onNewSession={(type) => void handleNewSession(type)}
+          onNewMakoSession={handleNewMakoSession}
           onNewSessionWithDir={(path) => void handleDirectorySelected(path)}
           onDeleteSession={handleDeleteSession}
           onOpenSettings={() => {
             setDrawerOpen(false);
             router.push("/(tabs)/settings");
           }}
-          activeTab={activeTab}
-          onTabChange={handleTabChange}
-          activeMakoView={makoTopLevel}
-          onSelectMakoView={handleSelectMakoView}
+          activeMode={activeMode}
         />
       )}
     </DesktopShell>

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::convert::Infallible;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use axum::{
     extract::State,
@@ -17,8 +18,8 @@ use krusty_core::agent::LoopInput;
 use krusty_core::ai::types::{Content, ModelMessage, Role};
 use krusty_core::plan::PlanManager;
 use krusty_core::storage::{
-    Database, MakoControllerEventStore, MakoControllerStore, PendingInteractionSnapshot,
-    SessionRecoveryState, SessionType, WorkMode,
+    hash_request_bytes, Database, IdempotencyClaim, MakoControllerEventStore, MakoControllerStore,
+    MakoIdempotencyStore, PendingInteractionSnapshot, SessionRecoveryState, SessionType, WorkMode,
 };
 use krusty_core::tools::registry::PermissionMode;
 use krusty_core::SessionManager;
@@ -464,6 +465,17 @@ pub(crate) async fn submit_tool_approval(
         return Ok(Json(json!({"status": "ok"})));
     }
 
+    let request_hash = idempotency_key.map(|_| {
+        hash_request_bytes(
+            serde_json::to_vec(&json!({
+                "session_id": req.session_id,
+                "tool_call_id": req.tool_call_id,
+                "approved": req.approved,
+            }))
+            .unwrap_or_default(),
+        )
+    });
+    let idempotency_scope = format!("chat-session:{}", req.session_id);
     let sender = {
         let inputs = state.session_inputs.read().await;
         inputs.get(&req.session_id).cloned()
@@ -478,18 +490,90 @@ pub(crate) async fn submit_tool_approval(
         }
         return Err(AppError::NotFound("No active session".into()));
     };
-    sender
+    if let (Some(key), Some(request_hash)) = (idempotency_key, request_hash.as_deref()) {
+        match MakoIdempotencyStore::new(Database::new(&state.db_path)?).claim(
+            &idempotency_scope,
+            "tool_approval",
+            key,
+            request_hash,
+            chrono::Utc::now(),
+            Duration::from_secs(24 * 60 * 60),
+        )? {
+            IdempotencyClaim::Replay(record) => {
+                return Ok(Json(
+                    record.response.unwrap_or_else(|| json!({"status": "ok"})),
+                ));
+            }
+            IdempotencyClaim::InProgress(_) => {
+                if !recovery_has_pending_tool_approval(
+                    &session_manager,
+                    &req.session_id,
+                    &req.tool_call_id,
+                )? {
+                    let response = json!({"status": "ok"});
+                    let _ = MakoIdempotencyStore::new(Database::new(&state.db_path)?).complete(
+                        &idempotency_scope,
+                        "tool_approval",
+                        key,
+                        request_hash,
+                        Some(&req.tool_call_id),
+                        &response,
+                        chrono::Utc::now(),
+                    );
+                    return Ok(Json(response));
+                }
+                return Err(AppError::Conflict(
+                    "This tool approval is already being processed".into(),
+                ));
+            }
+            IdempotencyClaim::Conflict { .. } => {
+                return Err(AppError::Conflict(
+                    "Idempotency-Key was already used for a different tool approval".into(),
+                ));
+            }
+            IdempotencyClaim::Claimed(_) => {}
+        }
+    }
+    if sender
         .send(LoopInput::ToolApproval {
-            tool_call_id: req.tool_call_id,
+            tool_call_id: req.tool_call_id.clone(),
             approved: req.approved,
         })
-        .map_err(|_| {
-            AppError::Conflict(format!(
-                "Session {} is no longer accepting tool approvals",
-                req.session_id
-            ))
-        })?;
-    Ok(Json(json!({"status": "ok"})))
+        .is_err()
+    {
+        if let (Some(key), Some(request_hash)) = (idempotency_key, request_hash.as_deref()) {
+            let _ = MakoIdempotencyStore::new(Database::new(&state.db_path)?).release(
+                &idempotency_scope,
+                "tool_approval",
+                key,
+                request_hash,
+            );
+        }
+        return Err(AppError::Conflict(format!(
+            "Session {} is no longer accepting tool approvals",
+            req.session_id
+        )));
+    }
+    let response = json!({"status": "ok"});
+    if let (Some(key), Some(request_hash)) = (idempotency_key, request_hash.as_deref()) {
+        if let Err(error) = MakoIdempotencyStore::new(Database::new(&state.db_path)?).complete(
+            &idempotency_scope,
+            "tool_approval",
+            key,
+            request_hash,
+            Some(&req.tool_call_id),
+            &response,
+            chrono::Utc::now(),
+        ) {
+            tracing::warn!(
+                session_id = %req.session_id,
+                tool_call_id = %req.tool_call_id,
+                error = %error,
+                "Tool approval succeeded but idempotency completion could not be persisted"
+            );
+        }
+    }
+    Ok(Json(response))
 }
 
 #[derive(Debug, Clone, Copy)]

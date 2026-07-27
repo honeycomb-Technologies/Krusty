@@ -10,6 +10,7 @@ import { StoresProvider } from '../hooks/useStores';
 import { useDeepLink } from '../hooks/useDeepLink';
 import { SplashProvider, useSplashState } from '../hooks/useSplashState';
 import { SplashOverlay } from '../components/splash/SplashOverlay';
+import { NotificationProvider } from '../hooks/useNotifications';
 
 const BOOT_BACKGROUND = '#0b1119';
 
@@ -47,8 +48,9 @@ function RootNavigator() {
 
   useEffect(() => {
     const inOnboarding = segments[0] === 'onboarding';
+    const inNavigationPreview = segments[0] === 'navigation-preview';
 
-    if (!isConfigured && !inOnboarding) {
+    if (!isConfigured && !inOnboarding && !inNavigationPreview) {
       router.replace('/onboarding');
     } else if (isConfigured && inOnboarding) {
       router.replace('/(tabs)');
@@ -71,7 +73,11 @@ function RootNavigator() {
     </>
   );
 
-  return <StoresProvider client={client}>{content}</StoresProvider>;
+  return (
+    <NotificationProvider>
+      <StoresProvider client={client}>{content}</StoresProvider>
+    </NotificationProvider>
+  );
 }
 
 function SplashWrapper({ children }: { children: React.ReactNode }) {

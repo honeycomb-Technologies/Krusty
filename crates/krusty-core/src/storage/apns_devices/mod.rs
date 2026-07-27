@@ -5,5 +5,5 @@
 mod model;
 mod store;
 
-pub use model::ApnsDevice;
+pub use model::{ApnsDevice, ApnsDeviceRegistration};
 pub use store::ApnsDeviceStore;

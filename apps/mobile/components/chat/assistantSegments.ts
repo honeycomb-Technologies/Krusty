@@ -192,8 +192,9 @@ function splitAssistantMarkdown(
     ];
   }
 
+  // Keep keys stable across streaming growth so markdown blocks mutate in place.
   return blocks.map((content, index) => ({
-    id: `${messageId}-${namespace}-${index}-${content.length}-${stableHash(content)}`,
+    id: `${messageId}-${namespace}-${index}`,
     content,
   }));
 }
@@ -252,16 +253,21 @@ function splitMarkdownBlocks(text: string): string[] {
   }
 
   flush();
+  return coalesceTrailingPunctuation(blocks);
+}
+
+function coalesceTrailingPunctuation(blocks: string[]): string[] {
+  if (blocks.length < 2) return blocks;
+  const last = blocks[blocks.length - 1] ?? "";
+  // If the final block is only punctuation/spacing, keep it attached to the previous block.
+  if (/^[\s.,!?;:…)\]}'"]+$/u.test(last)) {
+    const merged = blocks.slice(0, -1);
+    merged[merged.length - 1] = `${merged[merged.length - 1] ?? ""}${last}`;
+    return merged;
+  }
   return blocks;
 }
 
-function stableHash(value: string): number {
-  let hash = 5381;
-  for (let index = 0; index < value.length; index += 1) {
-    hash = ((hash << 5) + hash) ^ value.charCodeAt(index);
-  }
-  return hash >>> 0;
-}
 
 function touch(messageId: string) {
   const existingIndex = accessOrder.indexOf(messageId);

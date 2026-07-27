@@ -153,16 +153,18 @@ export const styles = StyleSheet.create({
     flexShrink: 0,
   },
   titleBtn: {
+    maxWidth: "70%",
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
     flex: 1,
     minWidth: 0,
   },
   title: {
-    fontSize: 17,
-    fontWeight: "600",
+    fontSize: 16,
+    fontWeight: "700",
     textAlign: "center",
-  },
-  titlePlaceholder: {
-    fontWeight: "500",
   },
   statusDot: {
     width: 8,
@@ -268,5 +270,53 @@ export const styles = StyleSheet.create({
   modelProvider: {
     fontSize: 13,
     marginTop: 2,
+  },
+  renameBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.55)",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 24,
+  },
+  renameCard: {
+    width: "100%",
+    maxWidth: 420,
+    borderRadius: 18,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: 18,
+    gap: 14,
+  },
+  renameTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    letterSpacing: -0.2,
+  },
+  renameInput: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  renameActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: 10,
+  },
+  renameButton: {
+    minWidth: 88,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    alignItems: "center",
+  },
+  renameButtonPrimary: {
+    borderWidth: 0,
+  },
+  renameButtonText: {
+    fontSize: 14,
+    fontWeight: "700",
   },
 });

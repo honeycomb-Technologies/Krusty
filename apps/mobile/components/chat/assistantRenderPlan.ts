@@ -1,4 +1,8 @@
 import type { ChatMessage, ChatRenderPart, ToolCall } from "@krusty/api";
+import {
+  isExplorationToolName,
+  isHiddenToolName,
+} from "./toolPresentation";
 
 /** Keep in sync with plan/mode tools filtered from UI in core tool policy. */
 const INTERNAL_TOOL_NAMES = new Set([
@@ -11,15 +15,6 @@ const INTERNAL_TOOL_NAMES = new Set([
   "set_dependency",
 ]);
 
-const EXPLORATION_TOOL_NAMES = new Set([
-  "glob",
-  "grep",
-  "ls",
-  "list",
-  "list_files",
-  "read",
-  "search",
-]);
 
 export type AssistantVisualSegment =
   | {
@@ -66,19 +61,17 @@ export function isPlanConfirmTool(toolCall: ToolCall): boolean {
 }
 
 function isInternalTool(toolCall: ToolCall): boolean {
-  return INTERNAL_TOOL_NAMES.has(toolCall.name);
+  return INTERNAL_TOOL_NAMES.has(toolCall.name) || isHiddenToolName(toolCall.name);
 }
 
-function isExplorationTool(toolCall: ToolCall): boolean {
-  return EXPLORATION_TOOL_NAMES.has(toolCall.name.toLowerCase());
+export function isExplorationTool(toolCall: ToolCall): boolean {
+  return isExplorationToolName(toolCall.name);
 }
 
 function isSoftInterruption(segment: AssistantVisualSegment): boolean {
-  return (
-    segment.type === "exploration" ||
-    segment.type === "thinking" ||
-    segment.type === "tool"
-  );
+  // Only tool-like interruptions should rejoin split prose.
+  // Thinking is a real phase boundary and must stay sticky.
+  return segment.type === "exploration" || segment.type === "tool";
 }
 
 export function startsLikeNewBlock(content: string): boolean {
@@ -101,8 +94,12 @@ export function shouldMergeContinuationText(
   // Do not glue across closed code fences / list boundaries left unfinished.
   if (/```\s*$/.test(previous) || /^```/.test(next)) return false;
 
-  const previousLooksUnfinished = /[A-Za-z0-9_'")\]]$/.test(previous);
-  const nextLooksContinued = /^[a-z,.;:!?'"()\]}]/.test(next);
+  const previousLooksUnfinished =
+    /[A-Za-z0-9_/'")\]]$/.test(previous) || /[A-Za-z0-9]\s+$/u.test(previousContent);
+  // Lowercase continuation, punctuation, or a short trailing fragment after a tool.
+  const nextLooksContinued =
+    /^[a-z,.;:!?'"()\]}]/.test(next) ||
+    (/^[A-Za-z][A-Za-z0-9/_-]*[.!?]?$/.test(next) && previousLooksUnfinished);
 
   return previousLooksUnfinished && nextLooksContinued;
 }
@@ -111,6 +108,13 @@ export function appendContinuationText(previous: string, next: string): string {
   if (!previous) return next;
   if (!next) return previous;
   if (/\s$/.test(previous) || /^\s/.test(next)) return previous + next;
+
+  const left = previous[previous.length - 1] ?? "";
+  const right = next.trimStart()[0] ?? "";
+  // "we only" + "skimmed." / "server/mobile" + "edges." need a joining space.
+  if (/[A-Za-z0-9_/'")\]]/.test(left) && /[A-Za-z0-9("'[]/.test(right)) {
+    return `${previous} ${next.trimStart()}`;
+  }
   return previous + next.trimStart();
 }
 
@@ -208,25 +212,14 @@ export function assistantVisualSegments(
     message.renderParts && message.renderParts.length > 0
       ? message.renderParts
       : legacyRenderParts(message, isLast, isThinking);
+  // Sticky tool slots: one visual slot per recorded tool/thinking part.
+  // Only rejoin prose fragments that were split mid-sentence by tools.
   const segments: AssistantVisualSegment[] = [];
-  let explorationBuffer: ToolCall[] = [];
-
-  const flushExplorationBuffer = () => {
-    if (explorationBuffer.length === 0) return;
-    const first = explorationBuffer[0];
-    segments.push({
-      type: "exploration",
-      id: `exploration-${first?.id ?? segments.length}`,
-      tools: explorationBuffer,
-    });
-    explorationBuffer = [];
-  };
 
   for (const part of renderParts) {
     switch (part.type) {
       case "thinking": {
         if (!part.content && !(isLast && isThinking)) break;
-        flushExplorationBuffer();
         segments.push({
           type: "thinking",
           id: part.id,
@@ -237,21 +230,15 @@ export function assistantVisualSegments(
       case "tool": {
         const toolCall = toolById.get(part.toolCallId);
         if (!toolCall || isInternalTool(toolCall)) break;
-        if (isExplorationTool(toolCall)) {
-          explorationBuffer.push(toolCall);
-        } else {
-          flushExplorationBuffer();
-          segments.push({
-            type: "tool",
-            id: part.id,
-            toolCall,
-          });
-        }
+        segments.push({
+          type: "tool",
+          id: part.id,
+          toolCall,
+        });
         break;
       }
       case "attachments": {
         if ((message.attachments?.length ?? 0) === 0) break;
-        flushExplorationBuffer();
         segments.push({
           type: "attachments",
           id: part.id,
@@ -260,7 +247,6 @@ export function assistantVisualSegments(
       }
       case "text": {
         if (part.content.length === 0) break;
-        flushExplorationBuffer();
         segments.push({
           type: "text",
           id: part.id,
@@ -271,20 +257,18 @@ export function assistantVisualSegments(
     }
   }
 
-  flushExplorationBuffer();
-
-  const smoothedSegments = smoothInterruptedText(segments);
-
   if (
-    smoothedSegments.length === 0 &&
+    segments.length === 0 &&
     (message.thinking || (isLast && isThinking))
   ) {
-    smoothedSegments.push({
+    segments.push({
       type: "thinking",
       id: "fallback-thinking",
       content: message.thinking ?? "",
     });
   }
 
-  return smoothedSegments;
+  // Rejoin "we only" + tool + "skimmed." into one prose block, keeping the tool
+  // after the completed sentence instead of splitting words across it.
+  return smoothInterruptedText(segments);
 }

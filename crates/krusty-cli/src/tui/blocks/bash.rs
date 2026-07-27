@@ -1,13 +1,13 @@
-//! Bash block - terminal-style command output display
+//! Bash block - hybrid dense command output display
 //!
 //! Streams bash command output with:
-//! - Heavy/thick line borders in theme accent color
-//! - Scrollable content with scrollbar
+//! - Compact activity-row header using shared DotEcho language
+//! - Short live tail while running (hybrid density)
+//! - Light left rail instead of heavy full terminal chrome
 //! - Auto-scroll to follow latest output
-//! - Blinking cursor while streaming
-//! - Progress bar detection
+//! - Progress as an inline suffix (or thin bar only when expanded fully)
 //! - Status indicator (running/success/error) with duration
-//! - Collapsible when complete
+//! - Auto-collapse on success; stay open on failure
 
 use crossterm::event::{Event, KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
@@ -16,14 +16,15 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{BlockEvent, ClipContext, EventResult, StreamBlock};
 use crate::tui::components::scrollbars::render_scrollbar;
+use crate::tui::components::{activity_echo_frame, ACTIVITY_ECHO_FRAMES, ACTIVITY_ECHO_INTERVAL};
 use crate::tui::themes::Theme;
 use crate::tui::utils::truncate_ellipsis;
 
-/// Cursor blink interval
-const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(530);
+/// Live tail lines while streaming (hybrid mode)
+const LIVE_TAIL_LINES: u16 = 3;
 
-/// Max visible content lines when expanded (before scrolling kicks in)
-const MAX_VISIBLE_LINES: u16 = 12;
+/// Max visible content lines when fully expanded
+const MAX_VISIBLE_LINES: u16 = 6;
 
 /// A terminal-style bash block
 pub struct BashBlock {
@@ -45,10 +46,10 @@ pub struct BashBlock {
     progress: Option<f32>,
     /// Progress text (e.g., "12/35 crates")
     progress_text: Option<String>,
-    /// Cursor blink state
-    cursor_visible: bool,
-    /// Last cursor toggle time
-    last_cursor_toggle: Instant,
+    /// Activity echo frame index (shared DotEcho language)
+    activity_idx: usize,
+    /// Last activity frame update
+    last_activity_update: Instant,
     /// Scroll offset for content
     scroll_offset: u16,
     /// Cached wrapped lines
@@ -67,16 +68,6 @@ pub struct BashBlock {
     pending_output: String,
 }
 
-#[derive(Clone, Copy)]
-struct FrameRenderParams {
-    area: Rect,
-    y: u16,
-    content_end_x: u16,
-    right_x: u16,
-    border_color: Color,
-    needs_scrollbar: bool,
-}
-
 impl BashBlock {
     /// Create a new bash block
     pub fn new(command: String) -> Self {
@@ -84,19 +75,20 @@ impl BashBlock {
         Self {
             command,
             output: String::new(),
-            collapsed: false, // Start expanded to show streaming
+            // Hybrid: live tail while streaming (not full terminal chrome)
+            collapsed: false,
             streaming: true,
             exit_code: None,
             start_time: now,
             duration: None,
             progress: None,
             progress_text: None,
-            cursor_visible: true,
-            last_cursor_toggle: now,
+            activity_idx: 0,
+            last_activity_update: now,
             scroll_offset: 0,
             cached_lines: Vec::new(),
             cached_width: 0,
-            cached_height: 4, // minimum height
+            cached_height: 1 + LIVE_TAIL_LINES, // header + live tail
             tool_use_id: None,
             background_process_id: None,
             cache_dirty: false,
@@ -146,7 +138,6 @@ impl BashBlock {
     pub fn set_background_process_id(&mut self, process_id: String) {
         self.background_process_id = Some(process_id);
         self.collapsed = true; // Background processes start collapsed (no streaming output)
-        self.cursor_visible = false; // No cursor for background
     }
 
     /// Append streaming output (batched - call flush_pending() before render)
@@ -188,6 +179,11 @@ impl BashBlock {
         self.streaming = false;
         self.exit_code = Some(exit_code);
         self.duration = Some(self.start_time.elapsed());
+        // Hybrid: auto-collapse on success, keep open (or open) on failure
+        self.collapsed = exit_code == 0;
+        // Presentation mode changed (live-tail → collapsed/expanded); rebuild height.
+        self.cached_width = 0;
+        self.cached_height = 0;
         self.scroll_to_bottom();
     }
 
@@ -212,16 +208,37 @@ impl BashBlock {
 
     /// Get status indicator
     /// Checks streaming flag first, then exit code for proper state display
-    fn status_indicator(&self, theme: &Theme) -> (&'static str, Color) {
-        // If still streaming, always show running indicator
+    fn status_indicator(&self, theme: &Theme) -> (String, Color) {
+        // If still streaming, always show activity echo
         if self.streaming {
-            return ("●", theme.running_color);
+            return (
+                activity_echo_frame(self.activity_idx).to_string(),
+                theme.running_color,
+            );
         }
         // Not streaming - check exit code for final status
         match self.exit_code {
-            Some(0) => ("✓", theme.success_color),
-            Some(_) => ("✗", theme.error_color),
-            None => ("○", theme.dim_color),
+            Some(0) => ("✓".to_string(), theme.success_color),
+            Some(_) => ("✗".to_string(), theme.error_color),
+            None => ("○".to_string(), theme.dim_color),
+        }
+    }
+
+    /// Max content lines for current presentation mode
+    fn content_cap(&self) -> u16 {
+        if self.streaming && !self.collapsed {
+            LIVE_TAIL_LINES
+        } else {
+            MAX_VISIBLE_LINES
+        }
+    }
+
+    /// Progress suffix for header (compact, not a multi-line bar)
+    fn progress_suffix(&self) -> Option<String> {
+        if let Some(ref text) = self.progress_text {
+            Some(text.clone())
+        } else {
+            self.progress.map(|p| format!("{:.0}%", p * 100.0))
         }
     }
 
@@ -287,29 +304,29 @@ impl BashBlock {
         None
     }
 
-    /// Update cursor blink state
-    fn update_cursor(&mut self) {
-        if self.streaming && self.last_cursor_toggle.elapsed() >= CURSOR_BLINK_INTERVAL {
-            self.cursor_visible = !self.cursor_visible;
-            self.last_cursor_toggle = Instant::now();
+    /// Update activity echo frame
+    fn update_activity(&mut self) {
+        if self.streaming && self.last_activity_update.elapsed() >= ACTIVITY_ECHO_INTERVAL {
+            self.activity_idx = (self.activity_idx + 1) % ACTIVITY_ECHO_FRAMES.len();
+            self.last_activity_update = Instant::now();
         }
     }
 
     /// Get wrapped lines for current width
     fn get_lines(&mut self, width: u16) -> &[String] {
-        let content_width = width.saturating_sub(4) as usize; // borders + padding
+        // Light left rail + padding (not heavy dual borders)
+        let content_width = width.saturating_sub(3) as usize;
         if self.cached_width != width || self.cached_lines.is_empty() {
             self.cached_lines = self.wrap_output(content_width);
             self.cached_width = width;
-            // Also update cached height
-            let content_lines = (self.cached_lines.len() as u16).min(MAX_VISIBLE_LINES);
-            let has_progress = self.progress.is_some();
-            self.cached_height = if has_progress {
-                content_lines + 4
+            let cap = self.content_cap();
+            let content_lines = (self.cached_lines.len() as u16).min(cap);
+            // Header + optional content (no heavy footer/progress chrome)
+            self.cached_height = if content_lines == 0 {
+                1
             } else {
-                content_lines + 2
-            }
-            .max(4);
+                content_lines + 1
+            };
         }
         &self.cached_lines
     }
@@ -319,31 +336,35 @@ impl BashBlock {
         self.get_lines(width).len() as u16
     }
 
-    /// Visible lines (capped at MAX_VISIBLE_LINES)
+    /// Visible lines (capped for hybrid mode)
     fn visible_lines(&mut self, width: u16) -> u16 {
-        self.total_lines(width).min(MAX_VISIBLE_LINES)
+        let cap = self.content_cap();
+        self.total_lines(width).min(cap)
     }
 
     /// Max scroll offset
     fn max_scroll(&mut self) -> u16 {
         let total = self.cached_lines.len() as u16;
-        total.saturating_sub(MAX_VISIBLE_LINES)
+        let cap = self.content_cap();
+        total.saturating_sub(cap)
     }
 
     /// Needs scrollbar?
     fn needs_scrollbar(&mut self, width: u16) -> bool {
-        self.get_lines(width).len() as u16 > MAX_VISIBLE_LINES
+        let cap = self.content_cap();
+        self.get_lines(width).len() as u16 > cap
     }
 
     /// Public scrollbar check
     pub fn has_scrollbar(&mut self, width: u16) -> bool {
-        self.get_lines(width).len() as u16 > MAX_VISIBLE_LINES
+        let cap = self.content_cap();
+        self.get_lines(width).len() as u16 > cap
     }
 
     /// Get scroll info for drag handling (optimized single pass)
     pub fn get_scroll_info(&mut self, width: u16) -> (u16, u16, u16) {
         let total = self.get_lines(width).len() as u16;
-        let visible = total.min(MAX_VISIBLE_LINES);
+        let visible = total.min(self.content_cap());
         (total, visible, visible)
     }
 
@@ -394,28 +415,45 @@ impl BashBlock {
         result
     }
 
-    /// Render collapsed state
-    fn render_collapsed(&self, area: Rect, buf: &mut Buffer, theme: &Theme) {
-        let y = area.y;
-        let (status, status_color) = self.status_indicator(theme);
-        let duration = self.duration_string();
-
-        // Use accent color for consistency with expanded view
-        let border_color = theme.accent_color;
-        let text_color = theme.text_color;
-
-        // Truncate command if needed - use only first line for multi-line commands
+    /// Truncate command for header display.
+    fn command_display(&self, max_cmd_width: usize) -> String {
         let first_line = self.command.lines().next().unwrap_or(&self.command);
-        let max_cmd_len = area.width.saturating_sub(20) as usize;
-        let cmd_display = if UnicodeWidthStr::width(first_line) > max_cmd_len {
-            truncate_ellipsis(first_line, max_cmd_len).into_owned()
+        if UnicodeWidthStr::width(first_line) > max_cmd_width {
+            truncate_ellipsis(first_line, max_cmd_width).into_owned()
         } else if self.command.contains('\n') {
             format!("{}...", first_line)
         } else {
             self.command.clone()
-        };
+        }
+    }
 
-        let prefix = format!("▶ $ {}", cmd_display);
+    /// Draw a single activity-row header (shared by collapsed + expanded).
+    fn render_activity_header(&self, area: Rect, buf: &mut Buffer, theme: &Theme, y: u16) {
+        let (status, status_color) = self.status_indicator(theme);
+        let duration = self.duration_string();
+        let progress = self.progress_suffix();
+        let text_color = theme.text_color;
+        let rail_color = theme.dim_color;
+
+        let mut right_parts = Vec::new();
+        if let Some(progress) = progress {
+            right_parts.push(progress);
+        }
+        right_parts.push(status);
+        if !duration.is_empty() {
+            right_parts.push(duration);
+        }
+        let suffix = format!(" {}", right_parts.join(" "));
+        let suffix_width = UnicodeWidthStr::width(suffix.as_str()) as u16;
+
+        let caret = if self.collapsed { "▶" } else { "▼" };
+        // Reserve space for caret, "$ ", and status suffix.
+        let max_cmd_len = area
+            .width
+            .saturating_sub(suffix_width.saturating_add(6))
+            .max(8) as usize;
+        let cmd_display = self.command_display(max_cmd_len);
+        let prefix = format!("{} $ {}", caret, cmd_display);
         let prefix_width = UnicodeWidthStr::width(prefix.as_str()) as u16;
 
         // Draw prefix
@@ -427,7 +465,7 @@ impl BashBlock {
             }
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_char(ch);
-                if ch == '▶' || ch == '$' {
+                if ch == '▶' || ch == '▼' || ch == '$' {
                     cell.set_fg(theme.accent_color);
                 } else {
                     cell.set_fg(text_color);
@@ -441,20 +479,20 @@ impl BashBlock {
             x += char_width;
         }
 
-        // Draw status and duration on right
-        let suffix = format!(" {} {}", status, duration);
-        let suffix_width = UnicodeWidthStr::width(suffix.as_str()) as u16;
-        let suffix_start = area.x + area.width - suffix_width;
+        // Draw status / duration / progress on the right
+        let suffix_start = area.x + area.width.saturating_sub(suffix_width);
         let mut sx = suffix_start;
         for ch in suffix.chars() {
             let char_width = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
             if sx >= area.x && sx + char_width <= area.x + area.width {
                 if let Some(cell) = buf.cell_mut((sx, y)) {
                     cell.set_char(ch);
-                    if ch == '✓' || ch == '✗' || ch == '●' {
+                    // Color status glyphs and echo animation characters.
+                    if ch == '✓' || ch == '✗' || ch == '○' || ch == '●' || ch == '•' || ch == '·'
+                    {
                         cell.set_fg(status_color);
                     } else {
-                        cell.set_fg(text_color);
+                        cell.set_fg(theme.dim_color);
                     }
                 }
                 if char_width == 2 {
@@ -466,18 +504,23 @@ impl BashBlock {
             sx += char_width;
         }
 
-        // Fill middle with dots
+        // Soft separator dots between command and status
         let dots_start = area.x + prefix_width + 1;
         let dots_end = suffix_start.saturating_sub(1);
-        for x in dots_start..dots_end {
-            if let Some(cell) = buf.cell_mut((x, y)) {
+        for dx in dots_start..dots_end {
+            if let Some(cell) = buf.cell_mut((dx, y)) {
                 cell.set_char('·');
-                cell.set_fg(border_color);
+                cell.set_fg(rail_color);
             }
         }
     }
 
-    /// Render expanded state with clip awareness
+    /// Render collapsed state
+    fn render_collapsed(&self, area: Rect, buf: &mut Buffer, theme: &Theme) {
+        self.render_activity_header(area, buf, theme, area.y);
+    }
+
+    /// Render expanded / live-tail state with clip awareness
     fn render_expanded_clipped(
         &self,
         area: Rect,
@@ -489,14 +532,13 @@ impl BashBlock {
             return;
         }
 
-        let (clip_top, clip_bottom) = clip.map(|c| (c.clip_top, c.clip_bottom)).unwrap_or((0, 0));
-
-        // Always use accent color for bash block borders (consistent styling)
-        let border_color = theme.accent_color;
+        let (clip_top, _clip_bottom) = clip.map(|c| (c.clip_top, c.clip_bottom)).unwrap_or((0, 0));
+        let rail_color = theme.dim_color;
         let content_color = theme.text_color;
+        let content_cap = self.content_cap();
 
         // Use cached lines if available (should be populated by prior height() call)
-        let content_width = area.width.saturating_sub(4) as usize;
+        let content_width = area.width.saturating_sub(3) as usize;
         let fallback_lines;
         let lines: &[String] = if self.cached_width == area.width && !self.cached_lines.is_empty() {
             &self.cached_lines
@@ -505,9 +547,8 @@ impl BashBlock {
             &fallback_lines
         };
         let total_lines = lines.len() as u16;
-        let visible_lines = total_lines.min(MAX_VISIBLE_LINES);
-        let needs_scrollbar = total_lines > MAX_VISIBLE_LINES;
-        let has_progress = self.progress.is_some();
+        let visible_lines = total_lines.min(content_cap);
+        let needs_scrollbar = total_lines > content_cap;
 
         // Reserve space for scrollbar if needed
         let content_end_x = if needs_scrollbar {
@@ -515,24 +556,12 @@ impl BashBlock {
         } else {
             area.x + area.width - 1
         };
-        let right_x = area.x + area.width - 1;
 
         let mut render_y = area.y;
 
-        // Top border - only if not clipped
+        // Activity header - only if not clipped
         if clip_top == 0 {
-            self.render_header(
-                buf,
-                theme,
-                FrameRenderParams {
-                    area,
-                    y: render_y,
-                    content_end_x,
-                    right_x,
-                    border_color,
-                    needs_scrollbar,
-                },
-            );
+            self.render_activity_header(area, buf, theme, render_y);
             render_y += 1;
         }
 
@@ -540,34 +569,24 @@ impl BashBlock {
         let content_start_offset = if clip_top > 0 { clip_top - 1 } else { 0 };
         let start_line = (self.scroll_offset + content_start_offset) as usize;
 
-        // Calculate lines to render
-        let reserved_bottom = if clip_bottom == 0 {
-            if has_progress {
-                3
-            } else {
-                1
-            }
-        } else {
-            0
-        };
         let reserved_top = if clip_top == 0 { 1 } else { 0 };
-        let content_lines_to_show = area.height.saturating_sub(reserved_top + reserved_bottom);
+        let content_lines_to_show = area.height.saturating_sub(reserved_top);
 
-        for display_idx in 0..content_lines_to_show {
+        // Only paint real content rows (plus the live-tail cap). Extra allocated
+        // rows from a stale height must stay blank — no empty rail spam.
+        let paint_rows = content_lines_to_show.min(visible_lines);
+        for display_idx in 0..paint_rows {
             let line_idx = start_line + display_idx as usize;
             let y = render_y + display_idx;
 
             if y >= area.y + area.height {
                 break;
             }
-            if clip_bottom == 0 && y >= area.y + area.height - reserved_bottom {
-                break;
-            }
 
-            // Left border (heavy vertical)
+            // Light left rail instead of heavy dual borders
             if let Some(cell) = buf.cell_mut((area.x, y)) {
-                cell.set_char('┃');
-                cell.set_fg(border_color);
+                cell.set_char('│');
+                cell.set_fg(rail_color);
             }
 
             // Content
@@ -589,61 +608,13 @@ impl BashBlock {
                     }
                     x += char_width;
                 }
-
-                // Cursor at end of last visible line while streaming
-                if self.streaming
-                    && line_idx == lines.len().saturating_sub(1)
-                    && self.cursor_visible
-                {
-                    let cursor_x = area.x + 2 + UnicodeWidthStr::width(line.as_str()) as u16;
-                    if cursor_x < content_end_x {
-                        if let Some(cell) = buf.cell_mut((cursor_x, y)) {
-                            cell.set_char('█');
-                            cell.set_fg(theme.accent_color);
-                        }
-                    }
-                }
             }
-
-            // Right border (heavy vertical)
-            if let Some(cell) = buf.cell_mut((right_x, y)) {
-                cell.set_char('┃');
-                cell.set_fg(border_color);
-            }
-        }
-
-        // Progress bar and bottom border - only if not clipped from bottom
-        if clip_bottom == 0 {
-            if has_progress {
-                let progress_y = area.y + area.height - 3;
-                self.render_progress_bar(area, buf, progress_y, border_color, theme);
-            }
-            self.render_footer(
-                buf,
-                FrameRenderParams {
-                    area,
-                    y: area.y + area.height - 1,
-                    content_end_x,
-                    right_x,
-                    border_color,
-                    needs_scrollbar,
-                },
-            );
         }
 
         // Render scrollbar if needed
         if needs_scrollbar {
             let header_lines = if clip_top == 0 { 1u16 } else { 0 };
-            let footer_lines = if clip_bottom == 0 {
-                if has_progress {
-                    3u16
-                } else {
-                    1u16
-                }
-            } else {
-                0
-            };
-            let scrollbar_height = area.height.saturating_sub(header_lines + footer_lines);
+            let scrollbar_height = area.height.saturating_sub(header_lines);
 
             if scrollbar_height > 0 {
                 let scrollbar_y = area.y + header_lines;
@@ -658,265 +629,6 @@ impl BashBlock {
                     theme.scrollbar_bg_color,
                 );
             }
-        }
-    }
-
-    /// Render header with command (heavy/thick line style)
-    fn render_header(&self, buf: &mut Buffer, theme: &Theme, params: FrameRenderParams) {
-        let FrameRenderParams {
-            area,
-            y,
-            content_end_x,
-            right_x,
-            border_color,
-            needs_scrollbar,
-        } = params;
-        let x = area.x;
-        let width = area.width;
-        let text_color = theme.text_color;
-
-        // Left corner (heavy)
-        if let Some(cell) = buf.cell_mut((x, y)) {
-            cell.set_char('┏');
-            cell.set_fg(border_color);
-        }
-
-        // Get status indicator for header
-        let (status, status_color) = self.status_indicator(theme);
-        let duration = self.duration_string();
-        let status_suffix = format!(" {} {} ", status, duration);
-        let status_width = UnicodeWidthStr::width(status_suffix.as_str()) as u16;
-
-        // " ▼ $ command " - reserve space for status
-        // Use only the first line of the command to prevent multi-line heredocs from bleeding
-        let first_line = self.command.lines().next().unwrap_or(&self.command);
-        let max_cmd_width = (width as usize).saturating_sub(12 + status_width as usize);
-        let cmd_display = if UnicodeWidthStr::width(first_line) > max_cmd_width {
-            // Truncate by unicode width
-            let mut truncated = String::new();
-            let mut w = 0usize;
-            for ch in first_line.chars() {
-                let cw = UnicodeWidthChar::width(ch).unwrap_or(1);
-                if w + cw + 3 > max_cmd_width {
-                    break;
-                }
-                truncated.push(ch);
-                w += cw;
-            }
-            format!("{}...", truncated)
-        } else if self.command.contains('\n') {
-            // Multi-line command - show first line with indicator
-            format!("{}...", first_line)
-        } else {
-            self.command.clone()
-        };
-
-        let header = format!(" ▼ $ {} ", cmd_display);
-
-        let mut cx = x + 1;
-        for ch in header.chars() {
-            let char_width = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
-            if cx + char_width > content_end_x.saturating_sub(status_width) {
-                break;
-            }
-            if let Some(cell) = buf.cell_mut((cx, y)) {
-                cell.set_char(ch);
-                if ch == '▼' || ch == '$' {
-                    cell.set_fg(theme.accent_color);
-                } else {
-                    cell.set_fg(text_color);
-                }
-            }
-            if char_width == 2 {
-                if let Some(cell) = buf.cell_mut((cx + 1, y)) {
-                    cell.set_char(' ');
-                }
-            }
-            cx += char_width;
-        }
-
-        // Fill with ━ (heavy horizontal) up to status
-        let status_start = content_end_x.saturating_sub(status_width);
-        while cx < status_start {
-            if let Some(cell) = buf.cell_mut((cx, y)) {
-                cell.set_char('━');
-                cell.set_fg(border_color);
-            }
-            cx += 1;
-        }
-
-        // Draw status indicator (● running, ✓ success, ✗ error) and duration
-        for ch in status_suffix.chars() {
-            let char_width = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
-            if cx + char_width > content_end_x {
-                break;
-            }
-            if let Some(cell) = buf.cell_mut((cx, y)) {
-                cell.set_char(ch);
-                if ch == '●' || ch == '✓' || ch == '✗' {
-                    cell.set_fg(status_color);
-                } else {
-                    cell.set_fg(theme.dim_color);
-                }
-            }
-            if char_width == 2 {
-                if let Some(cell) = buf.cell_mut((cx + 1, y)) {
-                    cell.set_char(' ');
-                }
-            }
-            cx += char_width;
-        }
-
-        // Fill gap at scrollbar column
-        if needs_scrollbar && content_end_x < right_x {
-            if let Some(cell) = buf.cell_mut((content_end_x, y)) {
-                cell.set_char('━');
-                cell.set_fg(border_color);
-            }
-        }
-
-        // Right corner (heavy)
-        if let Some(cell) = buf.cell_mut((right_x, y)) {
-            cell.set_char('┓');
-            cell.set_fg(border_color);
-        }
-    }
-
-    /// Render progress bar
-    fn render_progress_bar(
-        &self,
-        area: Rect,
-        buf: &mut Buffer,
-        y: u16,
-        border_color: Color,
-        theme: &Theme,
-    ) {
-        let progress = self.progress.unwrap_or(0.0);
-        let right_x = area.x + area.width - 1;
-
-        // Separator line (heavy horizontal with tees)
-        if let Some(cell) = buf.cell_mut((area.x, y)) {
-            cell.set_char('┠');
-            cell.set_fg(border_color);
-        }
-        for px in (area.x + 1)..right_x {
-            if let Some(cell) = buf.cell_mut((px, y)) {
-                cell.set_char('━');
-                cell.set_fg(border_color);
-            }
-        }
-        if let Some(cell) = buf.cell_mut((right_x, y)) {
-            cell.set_char('┨');
-            cell.set_fg(border_color);
-        }
-
-        // Progress bar line
-        let bar_y = y + 1;
-
-        // Left border (heavy vertical)
-        if let Some(cell) = buf.cell_mut((area.x, bar_y)) {
-            cell.set_char('┃');
-            cell.set_fg(border_color);
-        }
-
-        // Progress bar
-        let bar_width = (area.width as usize).saturating_sub(12);
-        let filled = (progress * bar_width as f32) as usize;
-
-        let mut px = area.x + 2;
-
-        // Filled portion
-        for _ in 0..filled {
-            if px < area.x + area.width - 10 {
-                if let Some(cell) = buf.cell_mut((px, bar_y)) {
-                    cell.set_char('█');
-                    cell.set_fg(theme.accent_color);
-                }
-                px += 1;
-            }
-        }
-
-        // Empty portion
-        for _ in filled..bar_width {
-            if px < area.x + area.width - 10 {
-                if let Some(cell) = buf.cell_mut((px, bar_y)) {
-                    cell.set_char('░');
-                    cell.set_fg(border_color);
-                }
-                px += 1;
-            }
-        }
-
-        // Percentage
-        let pct_text = if let Some(ref text) = self.progress_text {
-            format!(" {} ", text)
-        } else {
-            format!(" {:3.0}% ", progress * 100.0)
-        };
-
-        for ch in pct_text.chars() {
-            let char_width = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
-            if px + char_width > right_x {
-                break;
-            }
-            if let Some(cell) = buf.cell_mut((px, bar_y)) {
-                cell.set_char(ch);
-                cell.set_fg(theme.dim_color);
-            }
-            if char_width == 2 {
-                if let Some(cell) = buf.cell_mut((px + 1, bar_y)) {
-                    cell.set_char(' ');
-                }
-            }
-            px += char_width;
-        }
-
-        // Right border (heavy vertical)
-        if let Some(cell) = buf.cell_mut((right_x, bar_y)) {
-            cell.set_char('┃');
-            cell.set_fg(border_color);
-        }
-    }
-
-    /// Render footer
-    fn render_footer(&self, buf: &mut Buffer, params: FrameRenderParams) {
-        let FrameRenderParams {
-            area,
-            y,
-            content_end_x,
-            right_x,
-            border_color,
-            needs_scrollbar,
-        } = params;
-
-        // Left corner (heavy)
-        if let Some(cell) = buf.cell_mut((area.x, y)) {
-            cell.set_char('┗');
-            cell.set_fg(border_color);
-        }
-
-        // Fill with ━ (heavy horizontal)
-        for fx in (area.x + 1)..content_end_x {
-            if let Some(cell) = buf.cell_mut((fx, y)) {
-                cell.set_char('━');
-                cell.set_fg(border_color);
-            }
-        }
-
-        // Status is now shown in header, no need to duplicate in footer
-
-        // Fill gap at scrollbar column
-        if needs_scrollbar && content_end_x < right_x {
-            if let Some(cell) = buf.cell_mut((content_end_x, y)) {
-                cell.set_char('━');
-                cell.set_fg(border_color);
-            }
-        }
-
-        // Right corner (heavy)
-        if let Some(cell) = buf.cell_mut((right_x, y)) {
-            cell.set_char('┛');
-            cell.set_fg(border_color);
         }
     }
 }
@@ -935,18 +647,17 @@ impl StreamBlock for BashBlock {
             // Use cached height if available and width matches
             self.cached_height
         } else {
-            // Fallback: compute without caching (rare case)
-            let content_width = width.saturating_sub(4) as usize;
+            // Keep fallback in lockstep with hybrid get_lines/render (header + live tail
+            // or expanded content). The old progress-chrome formula inflated height on
+            // every cache invalidation and made streaming rows thrash.
+            let content_width = width.saturating_sub(3) as usize;
             let lines = self.wrap_output(content_width);
-            let content_lines = (lines.len() as u16).min(MAX_VISIBLE_LINES);
-            let has_progress = self.progress.is_some();
-
-            if has_progress {
-                content_lines + 4
+            let content_lines = (lines.len() as u16).min(self.content_cap());
+            if content_lines == 0 {
+                1
             } else {
-                content_lines + 2
+                content_lines + 1
             }
-            .max(4)
         }
     }
 
@@ -1035,10 +746,13 @@ impl StreamBlock for BashBlock {
                     // Toggle behavior: collapsed=any click, expanded=header only
                     if self.collapsed {
                         self.collapsed = false;
+                        // Live-tail vs expanded height depends on presentation mode.
+                        self.cached_height = 0;
                         return EventResult::Action(BlockEvent::Expanded);
                     } else if internal_y == 0 {
                         self.collapsed = true;
                         self.scroll_offset = 0;
+                        self.cached_height = 0;
                         return EventResult::Action(BlockEvent::Collapsed);
                     }
                     return EventResult::Consumed;
@@ -1050,6 +764,7 @@ impl StreamBlock for BashBlock {
                 ..
             }) => {
                 self.collapsed = !self.collapsed;
+                self.cached_height = 0;
                 if self.collapsed {
                     self.scroll_offset = 0;
                     EventResult::Action(BlockEvent::Collapsed)
@@ -1076,8 +791,8 @@ impl StreamBlock for BashBlock {
         self.flush_pending();
 
         if self.streaming {
-            self.update_cursor();
-            true // Need redraw for cursor blink or new output
+            self.update_activity();
+            true // Need redraw for activity echo or new output
         } else {
             had_pending // Only redraw if we flushed new content
         }

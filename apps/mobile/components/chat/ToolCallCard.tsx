@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { View, Text, Pressable, StyleSheet } from "react-native";
 import {
   Check,
@@ -19,38 +19,48 @@ import * as Haptics from "../../platform/haptics";
 import { useThemeContext } from "../../hooks/useTheme";
 import { BashOutput } from "./BashOutput";
 import { ToolDiffViewer } from "./ToolDiffViewer";
-import { buildToolDiffPresentation, isDiffTool } from "./toolDiffModel";
 import { InlineReportCard } from "../reports/InlineReportCard";
+import { ToolDiffPeek } from "./ToolDiffPeek";
+import {
+  buildReadFilePresentation,
+  buildToolDiffPeekRows,
+  toolDiffChangedRowCount,
+} from "./toolDiffModel";
+import {
+  presentTool,
+  type ToolPresentation,
+} from "./toolPresentation";
 import type { ToolCall } from "@krusty/api";
 
 interface ToolCallCardProps {
   toolCall: ToolCall;
   isStreaming?: boolean;
   defaultExpanded?: boolean;
+  /** Nested chips inside an exploration cluster stay extra quiet. */
+  compact?: boolean;
 }
 
 export function ToolCallCard({
   toolCall,
   isStreaming,
-  defaultExpanded = false,
+  defaultExpanded,
+  compact = false,
 }: ToolCallCardProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
-  const [expanded, setExpanded] = useState(defaultExpanded);
-  const showDetailedSurface =
-    expanded ||
-    Boolean(isStreaming) ||
-    toolCall.status === "awaiting_approval";
-  const isPolicyRedirect =
-    toolCall.status === "error" &&
-    Boolean(
-      toolCall.output?.includes("not allowed here") &&
-        toolCall.output?.includes("use the dedicated"),
-    );
+  const presentation = useMemo(
+    () => presentTool(toolCall, { isStreaming }),
+    [toolCall, isStreaming],
+  );
+  const [expanded, setExpanded] = useState(
+    defaultExpanded ?? presentation.defaultExpanded,
+  );
 
+  // Sticky open/close state: only re-seed when the tool identity changes.
   useEffect(() => {
-    setExpanded(defaultExpanded);
-  }, [defaultExpanded, toolCall.id]);
+    setExpanded(defaultExpanded ?? presentation.defaultExpanded);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- preserve user expand across status mutations
+  }, [toolCall.id]);
 
   const reportId =
     toolCall.name.toLowerCase() === "report"
@@ -62,239 +72,139 @@ export function ToolCallCard({
     );
   }
 
-  const StatusIcon = () => {
-    switch (toolCall.status) {
-      case "running":
-        return <ToolGlyph name={toolCall.name} color={t.thinking} />;
-      case "success":
-        return <Check size={14} color={t.success} strokeWidth={2.5} />;
-      case "error":
-        if (isPolicyRedirect) {
-          return <CornerDownRight size={14} color={t.warning} strokeWidth={2} />;
-        }
-        return <X size={14} color={t.error} strokeWidth={2.5} />;
-      case "awaiting_approval":
-        return <Clock size={14} color={t.warning} strokeWidth={2} />;
-      default:
-        return <ToolGlyph name={toolCall.name} color={t.mutedForeground} />;
-    }
-  };
+  if (presentation.family === "hidden") {
+    return null;
+  }
 
   const toggle = () => {
+    if (!presentation.canExpand && !presentation.showDiffPeek) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setExpanded(!expanded);
+    setExpanded((current) => !current);
   };
 
-  // Parse arguments for display
-  const args = toolCall.arguments ?? {};
-  const filePath = (args.file_path ??
-    args.path ??
-    args.pattern ??
-    "") as string;
-  const command = (args.command ?? "") as string;
+  const showElevated =
+    !compact &&
+    (expanded || toolCall.status === "awaiting_approval");
 
-  // Tool-specific rendering
-  const renderBody = () => {
-    const name = toolCall.name;
+  const titleColor =
+    toolCall.status === "error"
+      ? presentation.isPolicyRedirect
+        ? t.warning
+        : t.error
+      : toolCall.status === "running"
+        ? t.foreground
+        : t.mutedForeground;
 
-    if (toolCall.status === "error" && !expanded && !isStreaming) {
-      return (
-        <Text
-          style={[
-            styles.failedSummary,
-            { color: isPolicyRedirect ? t.warning : t.error },
-          ]}
-          numberOfLines={2}
-        >
-          {toolCall.output || (isPolicyRedirect ? "Rerouted" : "Tool failed")}
+  const canToggle =
+    presentation.canExpand || presentation.showDiffPeek || Boolean(toolCall.output);
+
+  return (
+    <View
+      style={[
+        styles.card,
+        showElevated
+          ? [
+              styles.detailedCard,
+              { borderColor: t.border, backgroundColor: t.card },
+            ]
+          : styles.compactCard,
+        compact && styles.clusterCard,
+      ]}
+    >
+      <Pressable
+        onPress={toggle}
+        disabled={!canToggle}
+        style={styles.header}
+        accessibilityRole={canToggle ? "button" : undefined}
+      >
+        <StatusIcon
+          toolCall={toolCall}
+          presentation={presentation}
+          colors={t}
+        />
+        <Text style={[styles.toolName, { color: titleColor }]} numberOfLines={1}>
+          {presentation.label}
         </Text>
-      );
-    }
-
-    if (toolCall.delegated) {
-      const delegated = toolCall.delegated;
-      const statusLine = [
-        delegated.outcome ?? delegated.stage,
-        delegated.agentCount !== undefined
-          ? `${delegated.agentCount} agent${delegated.agentCount === 1 ? "" : "s"}`
-          : undefined,
-        delegated.failedAgents !== undefined
-          ? `${delegated.failedAgents} failed`
-          : undefined,
-        delegated.filesExaminedCount !== undefined
-          ? `${delegated.filesExaminedCount} paths`
-          : undefined,
-      ]
-        .filter(Boolean)
-        .join(" · ");
-      const summary =
-        delegated.message ||
-        delegated.investigationSummary ||
-        delegated.humanReview ||
-        toolCall.output;
-
-      return (
-        <View style={styles.delegatedBody}>
-          <View style={styles.fileRow}>
-            <Users size={14} color={t.mutedForeground} strokeWidth={1.5} />
-            <Text
-              style={[styles.filePath, { color: t.mutedForeground }]}
-              numberOfLines={1}
-            >
-              {delegated.kind}
-              {delegated.delegatedRunId ? ` · ${delegated.delegatedRunId}` : ""}
-            </Text>
-          </View>
-          {statusLine ? (
-            <Text style={[styles.countBadge, { color: t.mutedForeground }]}>
-              {statusLine}
-            </Text>
-          ) : null}
-          {summary ? (
-            <Text
-              style={[styles.outputText, { color: t.foreground }]}
-              selectable
-              numberOfLines={expanded ? 30 : 3}
-            >
-              {summary.slice(0, expanded ? 3000 : 600)}
-            </Text>
-          ) : null}
-          {expanded && delegated.agents.length > 0 ? (
-            <View style={styles.agentList}>
-              {delegated.agents.slice(0, 8).map((agent) => (
-                <Text
-                  key={agent.taskId}
-                  style={[styles.agentLine, { color: t.mutedForeground }]}
-                  numberOfLines={2}
-                >
-                  {agent.status} · {agent.name}
-                  {agent.currentAction ? ` — ${agent.currentAction}` : ""}
-                </Text>
-              ))}
-            </View>
-          ) : null}
-        </View>
-      );
-    }
-
-    // Bash tool — terminal output
-    if (name === "bash" || name === "Bash") {
-      if (!expanded && !isStreaming) {
-        return command ? (
-          <Text
-            style={[styles.collapsedCommand, { color: t.mutedForeground }]}
-            numberOfLines={1}
-          >
-            $ {command}
+        <Text
+          style={[styles.summary, { color: t.mutedForeground }]}
+          numberOfLines={1}
+        >
+          {presentation.summary}
+        </Text>
+        {presentation.meta ? (
+          <Text style={[styles.meta, metaColor(presentation, t)]} numberOfLines={1}>
+            {presentation.meta}
           </Text>
-        ) : null;
-      }
+        ) : null}
+        {presentation.isPolicyRedirect ? (
+          <Text style={[styles.liveLabel, { color: t.warning }]}>Redirected</Text>
+        ) : null}
+        {canToggle ? (
+          expanded ? (
+            <ChevronDown size={14} color={t.mutedForeground} />
+          ) : (
+            <ChevronRight size={14} color={t.mutedForeground} />
+          )
+        ) : null}
+      </Pressable>
+      {renderBody({
+        toolCall,
+        presentation,
+        expanded,
+        isStreaming: Boolean(isStreaming),
+        colors: t,
+      })}
+    </View>
+  );
+}
+
+function renderBody({
+  toolCall,
+  presentation,
+  expanded,
+  isStreaming,
+  colors,
+}: {
+  toolCall: ToolCall;
+  presentation: ToolPresentation;
+  expanded: boolean;
+  isStreaming: boolean;
+  colors: ReturnType<typeof useThemeContext>["theme"]["colors"];
+}) {
+  if (presentation.family === "bash") {
+    const command =
+      typeof toolCall.arguments?.command === "string"
+        ? toolCall.arguments.command
+        : undefined;
+    if (expanded) {
       return (
         <BashOutput
-          command={command || undefined}
+          command={command}
           output={toolCall.output ?? ""}
+          mode="log"
         />
       );
     }
-
-    // File mutations — branded diff surface on web and native.
-    if (isDiffTool(name)) {
-      const diff = buildToolDiffPresentation(toolCall);
-
+    if (presentation.showRunningTail || (toolCall.status === "error" && toolCall.output)) {
       return (
-        <View style={styles.diffSummary}>
-          {filePath ? (
-            <Text style={[styles.filePath, { color: t.mutedForeground }]}>
-              {filePath}
-            </Text>
-          ) : null}
-          <View style={styles.diffStats}>
-            {(diff?.additions ?? 0) > 0 && (
-              <Text style={styles.addedText}>+{diff?.additions}</Text>
-            )}
-            {(diff?.deletions ?? 0) > 0 && (
-              <Text style={styles.removedText}>-{diff?.deletions}</Text>
-            )}
-          </View>
-          {expanded && diff?.summary ? (
-            <Text style={[styles.diffMessage, { color: t.mutedForeground }]}>
-              {diff.summary}
-            </Text>
-          ) : null}
-          {expanded && diff ? <ToolDiffViewer presentation={diff} /> : null}
-          {expanded && !diff && toolCall.output && (
-            <Text
-              style={[styles.outputText, { color: t.foreground }]}
-              selectable
-              numberOfLines={30}
-            >
-              {toolCall.output.slice(0, 3000)}
-            </Text>
-          )}
-        </View>
+        <BashOutput
+          command={undefined}
+          output={toolCall.output ?? ""}
+          mode="tail"
+          maxTailLines={toolCall.status === "error" ? 3 : 2}
+        />
       );
     }
+    return null;
+  }
 
-    // Read — file icon + path
-    if (name === "read" || name === "Read") {
-      return filePath ? (
-        <View style={styles.fileRow}>
-          <FileText size={14} color={t.mutedForeground} strokeWidth={1.5} />
-          <Text
-            style={[styles.filePath, { color: t.mutedForeground }]}
-            numberOfLines={1}
-          >
-            {filePath}
-          </Text>
-        </View>
-      ) : null;
-    }
-
-    // Glob/Grep — expandable results
-    if (
-      name === "glob" ||
-      name === "grep" ||
-      name === "Glob" ||
-      name === "Grep"
-    ) {
-      const resultLines = (toolCall.output ?? "").split("\n").filter(Boolean);
-      return (
-        <View>
-          <View style={styles.fileRow}>
-            {name.toLowerCase() === "grep" ? (
-              <Search size={14} color={t.mutedForeground} strokeWidth={1.5} />
-            ) : (
-              <FolderTree
-                size={14}
-                color={t.mutedForeground}
-                strokeWidth={1.5}
-              />
-            )}
-            <Text style={[styles.filePath, { color: t.mutedForeground }]}>
-              {filePath || "results"}
-            </Text>
-            <Text style={[styles.countBadge, { color: t.mutedForeground }]}>
-              ({resultLines.length})
-            </Text>
-          </View>
-          {expanded && (
-            <Text
-              style={[styles.outputText, { color: t.foreground }]}
-              selectable
-              numberOfLines={50}
-            >
-              {resultLines.slice(0, 50).join("\n")}
-            </Text>
-          )}
-        </View>
-      );
-    }
-
-    // Default — just show output if expanded
-    if (expanded && toolCall.output) {
+  if (presentation.family === "edit" || presentation.family === "write") {
+    const diff = presentation.diff;
+    if (!diff) {
+      if (!expanded || !toolCall.output) return null;
       return (
         <Text
-          style={[styles.outputText, { color: t.foreground }]}
+          style={[styles.outputText, { color: colors.foreground }]}
           selectable
           numberOfLines={30}
         >
@@ -303,45 +213,233 @@ export function ToolCallCard({
       );
     }
 
-    return null;
-  };
+    if (expanded) {
+      return (
+        <View style={styles.diffBody}>
+          {diff.summary ? (
+            <Text style={[styles.diffMessage, { color: colors.mutedForeground }]}>
+              {diff.summary}
+            </Text>
+          ) : null}
+          <ToolDiffViewer presentation={diff} />
+        </View>
+      );
+    }
 
-  return (
-    <View
-      style={[
-        styles.card,
-        showDetailedSurface
-          ? [
-              styles.detailedCard,
-              { borderColor: t.border, backgroundColor: t.card },
-            ]
-          : styles.compactCard,
-      ]}
-    >
-      <Pressable onPress={toggle} style={styles.header}>
-        <StatusIcon />
-        <Text
-          style={[styles.toolName, { color: t.foreground }]}
-          numberOfLines={1}
-        >
-          {formatToolLabel(toolCall.name)}
-        </Text>
-        {isPolicyRedirect ? (
-          <Text style={[styles.liveLabel, { color: t.warning }]}>Redirected</Text>
-        ) : null}
-        {isStreaming ? (
-          <Text style={[styles.liveLabel, { color: t.thinking }]}>Live</Text>
-        ) : null}
-        {toolCall.output &&
-          (expanded ? (
-            <ChevronDown size={14} color={t.mutedForeground} />
+    if (presentation.showDiffPeek) {
+      const peekRows = buildToolDiffPeekRows(diff, presentation.peekDiffRows);
+      const changed = toolDiffChangedRowCount(diff);
+      const remaining = Math.max(0, changed - peekRows.length);
+      return (
+        <View style={styles.diffBody}>
+          {diff.summary ? (
+            <Text style={[styles.diffMessage, { color: colors.mutedForeground }]}>
+              {diff.summary}
+            </Text>
+          ) : null}
+          <ToolDiffPeek rows={peekRows} />
+          {remaining > 0 ? (
+            <Text style={[styles.moreLines, { color: colors.mutedForeground }]}>
+              Show full diff · {remaining} more changed lines
+            </Text>
           ) : (
-            <ChevronRight size={14} color={t.mutedForeground} />
-          ))}
-      </Pressable>
-      {renderBody()}
-    </View>
-  );
+            <Text style={[styles.moreLines, { color: colors.mutedForeground }]}>
+              Show full diff
+            </Text>
+          )}
+        </View>
+      );
+    }
+
+    return null;
+  }
+
+  if (toolCall.delegated || presentation.family === "delegated") {
+    const delegated = toolCall.delegated;
+    if (!delegated) {
+      if (!expanded || !toolCall.output) return null;
+      return (
+        <Text
+          style={[styles.outputText, { color: colors.foreground }]}
+          selectable
+          numberOfLines={30}
+        >
+          {toolCall.output.slice(0, 3000)}
+        </Text>
+      );
+    }
+
+    const summary =
+      delegated.message ||
+      delegated.investigationSummary ||
+      delegated.humanReview ||
+      toolCall.output;
+
+    return (
+      <View style={styles.delegatedBody}>
+        {summary ? (
+          <Text
+            style={[styles.outputText, { color: colors.foreground }]}
+            selectable
+            numberOfLines={expanded ? 30 : 3}
+          >
+            {summary.slice(0, expanded ? 3000 : 600)}
+          </Text>
+        ) : null}
+        {expanded && delegated.agents.length > 0 ? (
+          <View style={styles.agentList}>
+            {delegated.agents.slice(0, 8).map((agent) => (
+              <Text
+                key={agent.taskId}
+                style={[styles.agentLine, { color: colors.mutedForeground }]}
+                numberOfLines={2}
+              >
+                {agent.status} · {agent.name}
+                {agent.currentAction ? ` — ${agent.currentAction}` : ""}
+              </Text>
+            ))}
+          </View>
+        ) : null}
+      </View>
+    );
+  }
+
+  if (presentation.family === "read") {
+    if (!expanded) return null;
+    const readPresentation = buildReadFilePresentation(toolCall);
+    if (readPresentation) {
+      return (
+        <View style={styles.diffBody}>
+          <ToolDiffViewer presentation={readPresentation} />
+        </View>
+      );
+    }
+    if (!toolCall.output) return null;
+    return (
+      <Text
+        style={[styles.outputText, { color: colors.foreground }]}
+        selectable
+        numberOfLines={40}
+      >
+        {toolCall.output.slice(0, 4000)}
+      </Text>
+    );
+  }
+
+  if (presentation.family === "search" || presentation.family === "explore") {
+    if (!expanded || !toolCall.output) return null;
+    const resultLines = toolCall.output.split("\n").filter(Boolean);
+    return (
+      <Text
+        style={[styles.outputText, { color: colors.foreground }]}
+        selectable
+        numberOfLines={50}
+      >
+        {resultLines.slice(0, 50).join("\n")}
+      </Text>
+    );
+  }
+
+  if (toolCall.status === "error" && !expanded && !isStreaming) {
+    return (
+      <Text
+        style={[
+          styles.failedSummary,
+          {
+            color: presentation.isPolicyRedirect ? colors.warning : colors.error,
+          },
+        ]}
+        numberOfLines={2}
+      >
+        {toolCall.output || (presentation.isPolicyRedirect ? "Rerouted" : "Tool failed")}
+      </Text>
+    );
+  }
+
+  if (expanded && toolCall.output) {
+    return (
+      <Text
+        style={[styles.outputText, { color: colors.foreground }]}
+        selectable
+        numberOfLines={30}
+      >
+        {toolCall.output.slice(0, 3000)}
+      </Text>
+    );
+  }
+
+  return null;
+}
+
+function StatusIcon({
+  toolCall,
+  presentation,
+  colors,
+}: {
+  toolCall: ToolCall;
+  presentation: ToolPresentation;
+  colors: ReturnType<typeof useThemeContext>["theme"]["colors"];
+}) {
+  switch (toolCall.status) {
+    case "running":
+      return <ToolGlyph family={presentation.family} name={toolCall.name} color={colors.thinking} />;
+    case "success":
+      return <Check size={14} color={colors.success} strokeWidth={2.5} />;
+    case "error":
+      if (presentation.isPolicyRedirect) {
+        return <CornerDownRight size={14} color={colors.warning} strokeWidth={2} />;
+      }
+      return <X size={14} color={colors.error} strokeWidth={2.5} />;
+    case "awaiting_approval":
+      return <Clock size={14} color={colors.warning} strokeWidth={2} />;
+    default:
+      return (
+        <ToolGlyph
+          family={presentation.family}
+          name={toolCall.name}
+          color={colors.mutedForeground}
+        />
+      );
+  }
+}
+
+function ToolGlyph({
+  family,
+  name,
+  color,
+}: {
+  family: ToolPresentation["family"];
+  name: string;
+  color: string;
+}) {
+  const normalized = name.toLowerCase();
+  const iconProps = { size: 14, color, strokeWidth: 1.8 } as const;
+
+  if (family === "bash" || normalized === "bash") return <Terminal {...iconProps} />;
+  if (family === "edit" || family === "write") return <FilePenLine {...iconProps} />;
+  if (family === "read" || normalized === "read") return <FileText {...iconProps} />;
+  if (family === "search" || ["grep", "search"].includes(normalized)) {
+    return <Search {...iconProps} />;
+  }
+  if (["glob", "ls", "list", "list_files"].includes(normalized)) {
+    return <FolderTree {...iconProps} />;
+  }
+  if (family === "delegated") return <Users {...iconProps} />;
+  return <Wrench {...iconProps} />;
+}
+
+function metaColor(
+  presentation: ToolPresentation,
+  colors: ReturnType<typeof useThemeContext>["theme"]["colors"],
+) {
+  if (presentation.family === "edit" || presentation.family === "write") {
+    return { color: colors.foreground };
+  }
+  if (presentation.isPolicyRedirect) return { color: colors.warning };
+  if (presentation.family === "bash" && presentation.meta?.includes("exit")) {
+    return { color: colors.error };
+  }
+  return { color: colors.mutedForeground };
 }
 
 function extractReportId(toolCall: ToolCall): string | null {
@@ -371,45 +469,22 @@ function extractReportId(toolCall: ToolCall): string | null {
   }
 }
 
-function ToolGlyph({ name, color }: { name: string; color: string }) {
-  const normalized = name.toLowerCase();
-  const iconProps = { size: 14, color, strokeWidth: 1.8 } as const;
-
-  if (normalized === "bash") return <Terminal {...iconProps} />;
-  if (["edit", "write", "multiedit"].includes(normalized)) {
-    return <FilePenLine {...iconProps} />;
-  }
-  if (normalized === "read") return <FileText {...iconProps} />;
-  if (["grep", "search"].includes(normalized)) {
-    return <Search {...iconProps} />;
-  }
-  if (["glob", "ls", "list", "list_files"].includes(normalized)) {
-    return <FolderTree {...iconProps} />;
-  }
-  if (["agent", "explore", "plan", "verify", "build"].includes(normalized)) {
-    return <Users {...iconProps} />;
-  }
-  return <Wrench {...iconProps} />;
-}
-
-function formatToolLabel(name: string): string {
-  return name
-    .replace(/[_-]+/g, " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
 
 const styles = StyleSheet.create({
   card: {
-    marginVertical: 3,
+    marginVertical: 2,
   },
   compactCard: {
-    paddingVertical: 5,
-    paddingHorizontal: 2,
+    paddingVertical: 4,
+    paddingHorizontal: 0,
   },
   detailedCard: {
     borderRadius: 10,
     borderWidth: StyleSheet.hairlineWidth,
     padding: 10,
+  },
+  clusterCard: {
+    marginVertical: 1,
   },
   header: {
     flexDirection: "row",
@@ -417,10 +492,20 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   toolName: {
-    flex: 1,
-    fontSize: 13,
-    fontWeight: "500",
+    fontSize: 12,
+    fontWeight: "600",
     fontFamily: "Courier",
+    flexShrink: 0,
+  },
+  summary: {
+    flex: 1,
+    fontSize: 12,
+    fontFamily: "Courier",
+  },
+  meta: {
+    fontSize: 11,
+    fontFamily: "Courier",
+    flexShrink: 0,
   },
   liveLabel: {
     fontSize: 11,
@@ -429,28 +514,21 @@ const styles = StyleSheet.create({
   delegatedBody: { marginTop: 6, gap: 4 },
   agentList: { marginTop: 6, gap: 3 },
   agentLine: { fontSize: 11, fontFamily: "Courier", lineHeight: 15 },
-  diffSummary: { marginTop: 6, gap: 4 },
+  diffBody: { marginTop: 8, gap: 6 },
   diffMessage: { fontSize: 11, lineHeight: 15 },
-  diffStats: { flexDirection: "row", gap: 10 },
-  addedText: { color: "#22c55e", fontSize: 12, fontFamily: "Courier" },
-  removedText: { color: "#ef4444", fontSize: 12, fontFamily: "Courier" },
-  filePath: { fontSize: 12, fontFamily: "Courier" },
-  fileRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4 },
-  countBadge: { fontSize: 11 },
+  moreLines: {
+    fontSize: 11,
+    fontFamily: "Courier",
+    marginTop: 2,
+  },
   outputText: {
     fontFamily: "Courier",
     fontSize: 12,
     lineHeight: 17,
     marginTop: 6,
-    opacity: 0.85,
+    opacity: 0.9,
   },
   failedSummary: {
-    fontFamily: "Courier",
-    fontSize: 11,
-    lineHeight: 15,
-    marginTop: 5,
-  },
-  collapsedCommand: {
     fontFamily: "Courier",
     fontSize: 11,
     lineHeight: 15,

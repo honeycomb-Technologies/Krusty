@@ -12,6 +12,7 @@ use super::notify::{
 };
 use super::state::refresh_snapshot_after_run;
 use super::{MakoRuntimeManager, WakeCommand};
+use crate::notifications::{notification_terminal_disposition, NotificationTerminalDisposition};
 use crate::AppState;
 
 #[derive(Default)]
@@ -70,7 +71,14 @@ impl MakoRunOutcome {
         } = event
         {
             if self.notified_tool_approvals.insert(id.clone()) {
-                notify_mako_tool_approval(&state.apns_service, user_id, session_id, id, name);
+                notify_mako_tool_approval(
+                    &state.push_service,
+                    &state.apns_service,
+                    user_id,
+                    session_id,
+                    id,
+                    name,
+                );
             }
         }
 
@@ -133,27 +141,38 @@ impl MakoRunOutcome {
         }
 
         if !self.awaiting_input {
-            if self.had_error {
-                notify_mako_error(
-                    state.db_path.as_ref(),
-                    &state.push_service,
-                    &state.apns_service,
-                    user_id,
-                    session_id,
-                );
-            } else if self.stop_reason == Some(LoopStopReason::Sleeping) {
-                tracing::info!(
-                    session_id = %session_id,
-                    "Mako session entered sleeping state; skipping completion push"
-                );
-            } else if !self.sent_user_message {
-                notify_mako_completion(
-                    state.db_path.as_ref(),
-                    &state.push_service,
-                    &state.apns_service,
-                    user_id,
-                    session_id,
-                );
+            let disposition = if self.had_error {
+                NotificationTerminalDisposition::Attention
+            } else {
+                notification_terminal_disposition(self.stop_reason.as_ref())
+            };
+            match disposition {
+                NotificationTerminalDisposition::Attention => {
+                    notify_mako_error(
+                        state.db_path.as_ref(),
+                        &state.push_service,
+                        &state.apns_service,
+                        user_id,
+                        session_id,
+                    );
+                }
+                NotificationTerminalDisposition::Skip => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        stop_reason = ?self.stop_reason,
+                        "Mako session did not complete; skipping completion push"
+                    );
+                }
+                NotificationTerminalDisposition::Complete if !self.sent_user_message => {
+                    notify_mako_completion(
+                        state.db_path.as_ref(),
+                        &state.push_service,
+                        &state.apns_service,
+                        user_id,
+                        session_id,
+                    );
+                }
+                NotificationTerminalDisposition::Complete => {}
             }
         }
 

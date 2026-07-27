@@ -125,6 +125,23 @@ impl MakoIdempotencyStore {
             .context("reading Mako idempotency record")
     }
 
+    pub fn release(
+        &self,
+        scope_key: &str,
+        operation: &str,
+        key: &str,
+        request_hash: &str,
+    ) -> Result<bool> {
+        validate_identity(scope_key, operation, key, request_hash)?;
+        let changed = self.db.conn().execute(
+            "DELETE FROM mako_idempotency_keys
+             WHERE scope_key = ?1 AND operation = ?2 AND idempotency_key = ?3
+               AND request_hash = ?4 AND response_json IS NULL",
+            params![scope_key, operation, key, request_hash],
+        )?;
+        Ok(changed == 1)
+    }
+
     pub fn delete_expired(&self, now: DateTime<Utc>) -> Result<usize> {
         let changed = self.db.conn().execute(
             "DELETE FROM mako_idempotency_keys WHERE expires_at <= ?1",

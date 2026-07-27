@@ -6,6 +6,11 @@ import * as Haptics from '../../platform/haptics';
 import { Copy } from 'lucide-react-native';
 import { useThemeContext } from '../../hooks/useTheme';
 import { ImagePreviewModal } from './ImagePreviewModal';
+import { HtmlPreview } from './HtmlPreview';
+import {
+  hasClosedHtmlFence,
+  isHtmlPreviewLanguage,
+} from './htmlPreviewModel';
 
 interface MarkdownContentProps {
   content: string;
@@ -18,6 +23,7 @@ export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
   const [previewImage, setPreviewImage] = useState<{ uri: string; title?: string } | null>(null);
   const [hoveredImageKey, setHoveredImageKey] = useState<unknown>(null);
   const [copiedCodeKey, setCopiedCodeKey] = useState<unknown>(null);
+  const renderContent = stabilizeStreamingMarkdown(content);
 
   const handleLink = useCallback((url: string) => {
     Linking.openURL(url);
@@ -30,6 +36,14 @@ export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
   const renderCodeBlock = (node: any, language = '') => {
     const code = stripTrailingCodeNewline(node?.content);
     const copied = copiedCodeKey === node.key;
+
+    if (
+      !isUser &&
+      isHtmlPreviewLanguage(language) &&
+      hasClosedHtmlFence(content)
+    ) {
+      return <HtmlPreview key={node.key} html={code} />;
+    }
 
     return (
       <View
@@ -137,8 +151,8 @@ export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
             style={{
               fontFamily: 'Courier',
               fontSize: 13,
-              backgroundColor: isUser ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.08)',
-              color: t.foreground,
+              backgroundColor: isUser ? `${t.userMessage}14` : 'rgba(255,255,255,0.08)',
+              color: isUser ? t.userMessage : t.foreground,
               paddingHorizontal: 4,
               paddingVertical: 1,
               borderRadius: 4,
@@ -149,7 +163,7 @@ export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
         ),
         }}
       >
-        {content}
+        {renderContent}
       </Markdown>
       <ImagePreviewModal
         visible={Boolean(previewImage)}
@@ -159,6 +173,23 @@ export function MarkdownContent({ content, isUser }: MarkdownContentProps) {
       />
     </>
   );
+}
+
+/**
+ * Soft-stabilize incomplete markdown while streaming so punctuation/words do not
+ * appear cut off or oddly spaced when a token arrives mid-construct.
+ */
+function stabilizeStreamingMarkdown(content: string): string {
+  if (!content) return content;
+
+  // Keep this deliberately conservative. Aggressive marker stripping can itself
+  // make periods/words appear to vanish mid-stream.
+  let next = content;
+
+  // Incomplete ordered-list marker at end of stream ("1.") should not become a list item.
+  next = next.replace(/(^|\n)(\d+)\.(\s*)$/u, "$1$2\\.$3");
+
+  return next;
 }
 
 function getMarkdownImageUri(node: any): string | null {
@@ -179,8 +210,9 @@ function stripTrailingCodeNewline(content: unknown): string {
 }
 
 function getStyles(t: any, isUser?: boolean) {
-  const textColor = isUser ? '#fff' : t.foreground;
-  const mutedColor = isUser ? 'rgba(255,255,255,0.7)' : t.mutedForeground;
+  const textColor = isUser ? t.userMessage : t.foreground;
+  const mutedColor = isUser ? `${t.userMessage}b8` : t.mutedForeground;
+  const accentColor = t.userMessage;
 
   return StyleSheet.create({
     body: { color: textColor, fontSize: 15, lineHeight: 22 },
@@ -192,12 +224,12 @@ function getStyles(t: any, isUser?: boolean) {
     strong: { fontWeight: '600' },
     em: { fontStyle: 'italic' },
     s: { textDecorationLine: 'line-through' },
-    link: { color: t.userMessage, textDecorationLine: 'underline' },
+    link: { color: accentColor, textDecorationLine: 'underline' },
     blockquote: {
       backgroundColor: 'transparent',
       borderColor: 'transparent',
       borderLeftWidth: 3,
-      borderLeftColor: t.userMessage + '60',
+      borderLeftColor: `${accentColor}60`,
       paddingLeft: 12,
       paddingHorizontal: 0,
       marginLeft: 0,

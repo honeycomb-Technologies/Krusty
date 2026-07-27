@@ -343,6 +343,16 @@ export function applyLivePartialAssistant(
     return nextMessages;
   }
 
+  // Prefer the SSE-built chronological timeline when present. Coarse live_partial
+  // snapshots only carry flat text + tool lists and will make tools jump around prose.
+  const lastMessage = nextMessages[nextMessages.length - 1];
+  if (
+    lastMessage?.kind === 'streaming'
+    && ((lastMessage.renderParts?.length ?? 0) > 0 || (lastMessage.toolCalls?.length ?? 0) > 0)
+  ) {
+    return nextMessages;
+  }
+
   const hasContent = (livePartial?.text.trim().length ?? 0) > 0;
   const hasThinking = (livePartial?.thinking?.trim().length ?? 0) > 0;
   const liveToolCalls = livePartial?.tool_calls ?? [];
@@ -367,12 +377,39 @@ export function applyLivePartialAssistant(
     return nextMessages;
   }
 
+  // Best-effort chronology when only a snapshot is available:
+  // thinking -> text (if any) -> tools when executing, else thinking -> tools -> text.
+  const thinking = livePartial?.thinking?.trim() ? livePartial.thinking : undefined;
+  const text = livePartial?.text ?? '';
+  const renderParts = [] as NonNullable<ChatMessage['renderParts']>;
+  if (thinking) {
+    renderParts.push({ type: 'thinking', id: 'live-partial-thinking', content: thinking });
+  }
+  const toolsFirst = agentState === 'tool_executing' || agentState === 'awaiting_input';
+  const toolParts = toolCalls.map((toolCall) => ({
+    type: 'tool' as const,
+    id: `live-partial-tool-${toolCall.id}`,
+    toolCallId: toolCall.id,
+  }));
+  if (toolsFirst) {
+    renderParts.push(...toolParts);
+    if (text) {
+      renderParts.push({ type: 'text', id: 'live-partial-text', content: text });
+    }
+  } else {
+    if (text) {
+      renderParts.push({ type: 'text', id: 'live-partial-text', content: text });
+    }
+    renderParts.push(...toolParts);
+  }
+
   return upsertTransientAssistantMessage(nextMessages, {
     id: createChatMessageId('live-partial'),
     role: 'assistant',
-    content: livePartial?.text ?? '',
-    thinking: livePartial?.thinking,
+    content: text,
+    thinking,
     toolCalls,
+    renderParts,
     kind: 'live_partial',
   });
 }

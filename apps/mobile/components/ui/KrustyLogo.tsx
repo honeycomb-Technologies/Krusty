@@ -20,11 +20,11 @@ const LINES = [
   '·▀  ▀.▀  ▀ ▀▀▀  ▀▀▀▀  ▀▀▀   ▀ • ',
 ];
 
-const GRADIENT_COLORS = [
+export const KRUSTY_GRADIENT_COLORS = [
   '#8b4513', '#cd853f', '#ff6b35', '#ffcc00',
   '#ff6b35', '#cd853f', '#8b4513',
 ] as const;
-const WEB_GRADIENT = `linear-gradient(90deg, ${GRADIENT_COLORS.join(', ')})`;
+const WEB_GRADIENT = `linear-gradient(90deg, ${KRUSTY_GRADIENT_COLORS.join(', ')})`;
 const WEB_KEYFRAME_ID = 'krusty-logo-gradient-keyframes';
 
 const webGradientTextStyle = {
@@ -147,7 +147,7 @@ function NativeKrustyLogo() {
       >
         <Animated.View style={[styles.gradientWrap, gradientStyle]}>
           <LinearGradient
-            colors={[...GRADIENT_COLORS]}
+            colors={[...KRUSTY_GRADIENT_COLORS]}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 0 }}
             style={styles.gradient}

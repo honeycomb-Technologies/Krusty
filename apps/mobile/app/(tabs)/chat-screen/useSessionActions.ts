@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, type MutableRefObject } from "react";
 import { Alert } from "react-native";
 
 import type { ModelInfo, SessionResponse, SessionType } from "@krusty/api";
@@ -26,6 +26,7 @@ type ConnectionClient = ReturnType<typeof useConnection>["client"];
 type SessionStoreApi = LoadedStores["session"];
 type SessionsStoreApi = LoadedStores["sessions"];
 type WorkspaceStoreApi = LoadedStores["workspace"];
+type ModeStores = LoadedStores["modes"];
 
 interface UseSessionActionsArgs {
   client: ConnectionClient;
@@ -34,13 +35,15 @@ interface UseSessionActionsArgs {
   setActiveToolCallId: (value: string | null) => void;
   setActiveTab: (value: number) => void;
   setDrawerOpen: (value: boolean) => void;
-  ensureModelReady: () => Promise<string | null>;
+  ensureModelReady: (targetStore?: SessionStoreApi) => Promise<string | null>;
   sessionStore: SessionStoreApi;
   sessionsStore: SessionsStoreApi;
   workspace: WorkspaceStoreApi;
+  modeStores: ModeStores;
   sessions: SessionResponse[];
   models: ModelInfo[];
   suppressCompletionRef: { current: boolean };
+  lastSessionIdByTypeRef: MutableRefObject<Record<SessionType, string | null>>;
 }
 
 export function useSessionActions({
@@ -54,9 +57,11 @@ export function useSessionActions({
   sessionStore,
   sessionsStore,
   workspace,
+  modeStores,
   sessions,
   models,
   suppressCompletionRef,
+  lastSessionIdByTypeRef,
 }: UseSessionActionsArgs) {
   const stopCurrentStream = useCallback(
     (suppressCompletion = true) => {
@@ -69,17 +74,28 @@ export function useSessionActions({
     [sessionStore, setActiveToolCallId, suppressCompletionRef],
   );
 
+  const detachCurrentSession = useCallback(() => {
+    suppressCompletionRef.current = true;
+    sessionStore.getState().detachSession();
+    setActiveToolCallId(null);
+  }, [
+    sessionStore,
+    setActiveToolCallId,
+    suppressCompletionRef,
+  ]);
+
   const bootstrapSession = useCallback(
     async (session: SessionResponse) => {
-      const currentState = sessionStore.getState();
+      const target = modeStores[session.session_type];
+      const currentState = target.session.getState();
       const currentModel = currentState.model;
       const currentModelInfo = currentState.modelInfo;
-      const currentThinkingLevel = sessionStore.getState().thinkingLevel;
+      const currentThinkingLevel = currentState.thinkingLevel;
       const directory = session.project_dir ?? session.working_dir ?? null;
       const workspaceMode = (session.workspace_mode ??
         getWorkspaceMode(directory)) as WorkspaceMode;
 
-      sessionStore
+      target.session
         .getState()
         .initSession(
           session.id,
@@ -87,7 +103,7 @@ export function useSessionActions({
           session.permission_mode,
           session.session_type,
         );
-      workspace
+      target.workspace
         .getState()
         .initFromSession(
           session.id,
@@ -100,17 +116,17 @@ export function useSessionActions({
         const modelInfo = currentModelInfo
           ?? models.find((candidate) => candidate.id === currentModel)
           ?? null;
-        sessionStore
+        target.session
           .getState()
           .setModel(currentModel, modelInfo?.provider ?? null, modelInfo);
       }
-      if (sessionStore.getState().thinkingLevel !== currentThinkingLevel) {
-        sessionStore.getState().setThinkingLevel(currentThinkingLevel);
+      if (target.session.getState().thinkingLevel !== currentThinkingLevel) {
+        target.session.getState().setThinkingLevel(currentThinkingLevel);
       }
 
       await sessionsStore.getState().loadSessions();
     },
-    [models, sessionStore, sessionsStore, workspace],
+    [modeStores, models, sessionsStore],
   );
 
   const createSessionForCurrentTab = useCallback(
@@ -123,19 +139,24 @@ export function useSessionActions({
         return null;
       }
 
-      stopCurrentStream();
+      const targetType = requestedType ?? sessionTypeForTab(activeTab);
+      const targetStore = modeStores[targetType].session;
+      if (targetStore.getState().sessionId) {
+        targetStore.getState().detachSession();
+      }
 
       try {
-        await ensureModelReady();
+        await ensureModelReady(targetStore);
         const session = await client.createSession(
           undefined,
           directory,
           targetBranch ?? undefined,
           directory ? "selected" : "neutral",
-          requestedType ?? sessionTypeForTab(activeTab),
-          sessionStore.getState().permissionMode,
+          targetType,
+          targetStore.getState().permissionMode,
         );
         await bootstrapSession(session);
+        lastSessionIdByTypeRef.current[session.session_type] = session.id;
         setActiveTab(tabForSessionType(session.session_type));
         setActiveToolCallId(null);
         setDrawerOpen(false);
@@ -152,11 +173,11 @@ export function useSessionActions({
       bootstrapSession,
       client,
       ensureModelReady,
-      sessionStore,
+      lastSessionIdByTypeRef,
+      modeStores,
       setActiveToolCallId,
       setDrawerOpen,
       setActiveTab,
-      stopCurrentStream,
     ],
   );
 
@@ -213,6 +234,7 @@ export function useSessionActions({
         sessionStore.getState().permissionMode,
       );
       await bootstrapSession(session);
+      lastSessionIdByTypeRef.current[session.session_type] = session.id;
       return { ...intent, sendOptions: undefined };
     } catch {
       return null;
@@ -221,29 +243,50 @@ export function useSessionActions({
     activeTab,
     bootstrapSession,
     client,
-    ensureMakoCompanionSession,
+    lastSessionIdByTypeRef,
     sessionStore,
     workspace,
   ]);
 
   const loadSession = useCallback(
     async (session: SessionResponse) => {
-      stopCurrentStream();
+      const targetStore = modeStores[session.session_type].session;
+      if (targetStore.getState().sessionId !== session.id) {
+        targetStore.getState().detachSession();
+      }
+      lastSessionIdByTypeRef.current[session.session_type] = session.id;
       setDrawerOpen(false);
       setActiveTab(tabForSessionType(session.session_type));
-      await sessionStore.getState().loadSession(session.id);
+      await targetStore.getState().loadSession(session.id);
     },
-    [sessionStore, setActiveTab, setDrawerOpen, stopCurrentStream],
+    [
+      lastSessionIdByTypeRef,
+      modeStores,
+      setActiveTab,
+      setDrawerOpen,
+    ],
   );
 
   const loadSessionById = useCallback(
     async (id: string) => {
-      stopCurrentStream();
       setDrawerOpen(false);
-      setActiveTab(2);
-      await sessionStore.getState().loadSession(id);
+      const target = sessions.find((session) => session.id === id);
+      const targetType = target?.session_type ?? "mako";
+      const targetStore = modeStores[targetType].session;
+      if (targetStore.getState().sessionId !== id) {
+        targetStore.getState().detachSession();
+      }
+      lastSessionIdByTypeRef.current[targetType] = id;
+      setActiveTab(tabForSessionType(targetType));
+      await targetStore.getState().loadSession(id);
     },
-    [sessionStore, setActiveTab, setDrawerOpen, stopCurrentStream],
+    [
+      lastSessionIdByTypeRef,
+      modeStores,
+      sessions,
+      setActiveTab,
+      setDrawerOpen,
+    ],
   );
 
   const openProjectInCode = useCallback(
@@ -252,9 +295,9 @@ export function useSessionActions({
         return;
       }
 
-      stopCurrentStream();
       setDrawerOpen(false);
       setActiveTab(1);
+      const codeStore = modeStores.code.session;
 
       const existing = findCodeSessionForProject(
         sessions,
@@ -263,21 +306,29 @@ export function useSessionActions({
       );
 
       if (existing) {
-        await sessionStore.getState().loadSession(existing.id);
+        lastSessionIdByTypeRef.current.code = existing.id;
+        if (codeStore.getState().sessionId !== existing.id) {
+          codeStore.getState().detachSession();
+        }
+        await codeStore.getState().loadSession(existing.id);
         return;
       }
 
       try {
-        await ensureModelReady();
+        if (codeStore.getState().sessionId) {
+          codeStore.getState().detachSession();
+        }
+        await ensureModelReady(codeStore);
         const session = await client.createSession(
           undefined,
           projectDir,
           targetBranch ?? undefined,
           "selected",
           "code",
-          sessionStore.getState().permissionMode,
+          codeStore.getState().permissionMode,
         );
         await bootstrapSession(session);
+        lastSessionIdByTypeRef.current.code = session.id;
         setActiveToolCallId(null);
         void Haptics.notificationAsync(
           Haptics.NotificationFeedbackType.Success,
@@ -290,12 +341,12 @@ export function useSessionActions({
       bootstrapSession,
       client,
       ensureModelReady,
-      sessionStore,
+      modeStores,
       sessions,
       setActiveTab,
       setActiveToolCallId,
       setDrawerOpen,
-      stopCurrentStream,
+      lastSessionIdByTypeRef,
     ],
   );
 
@@ -331,10 +382,15 @@ export function useSessionActions({
           text: "Delete",
           style: "destructive",
           onPress: async () => {
-            const isActiveSession = sessionStore.getState().sessionId === id;
+            const activeEntry = (["chat", "code", "mako"] as const).find(
+              (mode) => modeStores[mode].session.getState().sessionId === id,
+            );
+            const targetStore = activeEntry
+              ? modeStores[activeEntry].session
+              : null;
 
-            if (isActiveSession) {
-              stopCurrentStream();
+            if (targetStore?.getState().isStreaming) {
+              targetStore.getState().stopStreaming();
             }
 
             const deleted = await sessionsStore.getState().deleteSession(id);
@@ -342,8 +398,8 @@ export function useSessionActions({
               return;
             }
 
-            if (isActiveSession) {
-              sessionStore.getState().clearSession();
+            if (targetStore) {
+              targetStore.getState().clearSession();
               setActiveToolCallId(null);
             }
 
@@ -352,7 +408,7 @@ export function useSessionActions({
         },
       ]);
     },
-    [sessionStore, sessionsStore, setActiveToolCallId, stopCurrentStream],
+    [modeStores, sessionsStore, setActiveToolCallId],
   );
 
   const handleInteractiveToolResult = useCallback(
@@ -458,42 +514,19 @@ export function useSessionActions({
   }, [models, sessionStore]);
 
   const handleTabChange = useCallback(
-    (index: number) => {
+    async (index: number) => {
       setActiveTab(index);
-
-      // Mako tab: always bind to the durable main companion (not last Code/Chat).
-      if (index === 2) {
-        void ensureMakoCompanionSession();
-        return;
-      }
-
-      const currentSessionId = sessionStore.getState().sessionId;
-      if (!currentSessionId) {
-        return;
-      }
-
-      const currentSession = sessions.find(
-        (session) => session.id === currentSessionId,
-      );
-      if (
-        !currentSession ||
-        currentSession.session_type !== sessionTypeForTab(index)
-      ) {
-        stopCurrentStream();
-        sessionStore.getState().clearSession();
-      }
+      setDrawerOpen(false);
     },
     [
-      ensureMakoCompanionSession,
-      sessionStore,
-      sessions,
       setActiveTab,
-      stopCurrentStream,
+      setDrawerOpen,
     ],
   );
 
   return {
     stopCurrentStream,
+    detachCurrentSession,
     loadSession,
     loadSessionById,
     openProjectInCode,

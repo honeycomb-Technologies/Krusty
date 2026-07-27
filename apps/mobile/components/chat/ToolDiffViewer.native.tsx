@@ -11,15 +11,26 @@ import {
 
 interface ToolDiffViewerProps {
   presentation: ToolDiffPresentation;
+  rows?: ToolDiffRow[];
+  showHeader?: boolean;
+  maxLines?: number;
 }
 
 const MAX_NATIVE_LINES = 180;
 
-export function ToolDiffViewer({ presentation }: ToolDiffViewerProps) {
+export function ToolDiffViewer({
+  presentation,
+  rows: providedRows,
+  showHeader = true,
+  maxLines = MAX_NATIVE_LINES,
+}: ToolDiffViewerProps) {
   const { theme } = useThemeContext();
   const t = theme.colors;
-  const rows = useMemo(() => buildToolDiffRows(presentation), [presentation]);
-  const visibleRows = useMemo(() => rows.slice(0, MAX_NATIVE_LINES), [rows]);
+  const rows = useMemo(
+    () => providedRows ?? buildToolDiffRows(presentation),
+    [presentation, providedRows],
+  );
+  const visibleRows = useMemo(() => rows.slice(0, maxLines), [maxLines, rows]);
   const [tokens, setTokens] = useState<NativeDiffToken[][] | null>(null);
 
   useEffect(() => {
@@ -37,13 +48,15 @@ export function ToolDiffViewer({ presentation }: ToolDiffViewerProps) {
 
   return (
     <View style={[styles.frame, { borderColor: t.border, backgroundColor: t.card }]}>
-      <View style={[styles.header, { borderBottomColor: t.border }]}>
-        <Text style={[styles.path, { color: t.mutedForeground }]} numberOfLines={1}>
-          {presentation.filePath || "Changes"}
-        </Text>
-        <Text style={[styles.stat, { color: t.success }]}>+{presentation.additions}</Text>
-        <Text style={[styles.stat, { color: t.error }]}>-{presentation.deletions}</Text>
-      </View>
+      {showHeader ? (
+        <View style={[styles.header, { borderBottomColor: t.border }]}>
+          <Text style={[styles.path, { color: t.mutedForeground }]} numberOfLines={1}>
+            {presentation.filePath || "Changes"}
+          </Text>
+          <Text style={[styles.stat, { color: t.success }]}>+{presentation.additions}</Text>
+          <Text style={[styles.stat, { color: t.error }]}>-{presentation.deletions}</Text>
+        </View>
+      ) : null}
       <ScrollView horizontal nestedScrollEnabled contentContainerStyle={styles.content}>
         <View>
           {visibleRows.map((row, index) => (
@@ -54,9 +67,9 @@ export function ToolDiffViewer({ presentation }: ToolDiffViewerProps) {
               colors={t}
             />
           ))}
-          {rows.length > MAX_NATIVE_LINES ? (
+          {rows.length > maxLines ? (
             <Text style={[styles.truncated, { color: t.mutedForeground }]}>
-              {rows.length - MAX_NATIVE_LINES} more lines
+              {rows.length - maxLines} more lines
             </Text>
           ) : null}
         </View>

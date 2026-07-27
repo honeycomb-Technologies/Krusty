@@ -19,8 +19,9 @@ use crate::plan::PlanManager;
 use crate::skills::SkillsManager;
 use crate::storage::reports::CreateReportInput;
 use crate::storage::{
-    AutonomousTaskStore, Database, DelegatedRunRole, DelegatedRunScope, DelegatedRunStartInput,
-    DelegatedRunStore, MemoryStore, MemoryType, ReportStore, SessionManager, WorkMode,
+    AutonomousTaskStore, CanonicalMemoryInput, Database, DelegatedRunRole, DelegatedRunScope,
+    DelegatedRunStartInput, DelegatedRunStore, MemoryNamespace, MemoryStore, MemoryType,
+    ReportStore, SessionManager, WorkMode,
 };
 
 #[test]
@@ -1007,6 +1008,7 @@ fn mako_knowledge_prompt_is_exact_owner_for_alice_bob_and_local() {
         &db_path,
         Some(project),
         Some("alice"),
+        None,
         "mako-alice",
         &conversation,
     );
@@ -1014,11 +1016,18 @@ fn mako_knowledge_prompt_is_exact_owner_for_alice_bob_and_local() {
         &db_path,
         Some(project),
         Some("bob"),
+        None,
         "mako-bob",
         &conversation,
     );
-    let local =
-        build_mako_knowledge_context(&db_path, Some(project), None, "mako-local", &conversation);
+    let local = build_mako_knowledge_context(
+        &db_path,
+        Some(project),
+        None,
+        None,
+        "mako-local",
+        &conversation,
+    );
 
     for (context, owned, foreign_a, foreign_b) in [
         (
@@ -1062,6 +1071,86 @@ fn mako_knowledge_prompt_is_exact_owner_for_alice_bob_and_local() {
     assert!(!local.contains("alice-task-marker"));
     assert!(!local.contains("bob-report-marker"));
     assert!(!local.contains("bob-task-marker"));
+}
+
+#[test]
+fn mako_knowledge_prompt_isolated_by_primary_and_named_crew_namespace() {
+    let temp = TempDir::new().unwrap();
+    let db_path = temp.path().join("mako-crew-knowledge.db");
+    let project = "/crew/project";
+    let memory_store = MemoryStore::new(Database::new(&db_path).unwrap());
+
+    for (canonical_key, title, content, namespace, namespace_id) in [
+        (
+            "shared-style",
+            "Shared style",
+            "shared-memory-marker",
+            MemoryNamespace::Shared,
+            None,
+        ),
+        (
+            "primary-style",
+            "Primary style",
+            "primary-mako-marker",
+            MemoryNamespace::Mako,
+            None,
+        ),
+        (
+            "reviewer-style",
+            "Reviewer style",
+            "reviewer-crew-marker",
+            MemoryNamespace::Crew,
+            Some("reviewer"),
+        ),
+        (
+            "researcher-style",
+            "Researcher style",
+            "researcher-crew-marker",
+            MemoryNamespace::Crew,
+            Some("researcher"),
+        ),
+    ] {
+        let mut input =
+            CanonicalMemoryInput::new(MemoryType::Project, canonical_key, title, content);
+        input.project_dir = Some(project.to_string());
+        input.namespace = namespace;
+        input.namespace_id = namespace_id.map(str::to_string);
+        memory_store.save_canonical(&input).unwrap();
+    }
+
+    let conversation = vec![ModelMessage {
+        role: Role::User,
+        content: vec![Content::Text {
+            text: "Recall the correct working style.".to_string(),
+        }],
+    }];
+    let primary = build_mako_knowledge_context(
+        &db_path,
+        Some(project),
+        None,
+        None,
+        "mako-primary",
+        &conversation,
+    );
+    let reviewer = build_mako_knowledge_context(
+        &db_path,
+        Some(project),
+        None,
+        Some("reviewer"),
+        "mako-reviewer",
+        &conversation,
+    );
+
+    assert!(primary.contains("shared-memory-marker"));
+    assert!(primary.contains("primary-mako-marker"));
+    assert!(!primary.contains("reviewer-crew-marker"));
+    assert!(!primary.contains("researcher-crew-marker"));
+
+    assert!(reviewer.contains("shared-memory-marker"));
+    assert!(reviewer.contains("reviewer-crew-marker"));
+    assert!(!reviewer.contains("primary-mako-marker"));
+    assert!(!reviewer.contains("researcher-crew-marker"));
+    assert!(!reviewer.contains("## Current Snapshot"));
 }
 
 #[test]

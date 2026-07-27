@@ -58,9 +58,10 @@ function appendTextRenderPart(ref: AssistantMessageRef, content: string) {
 			content: lastPart.content + content,
 		};
 	} else {
+		const textCount = parts.filter((part) => part.type === "text").length;
 		parts.push({
 			type: "text",
-			id: `text-${parts.length}`,
+			id: `text-${textCount}`,
 			content,
 		});
 	}

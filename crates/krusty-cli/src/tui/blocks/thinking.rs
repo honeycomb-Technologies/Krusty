@@ -9,17 +9,14 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
 };
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{BlockEvent, ClipContext, EventResult, StreamBlock, WidthScrollable};
 use crate::tui::components::scrollbars::render_scrollbar;
+use crate::tui::components::{activity_echo_frame, ACTIVITY_ECHO_FRAMES, ACTIVITY_ECHO_INTERVAL};
 use crate::tui::themes::Theme;
 use crate::tui::utils::wrap_text;
-
-/// Center-outward echo frames shared with the mobile activity language.
-const SPINNER_FRAMES: &[&str] = &["··•··", "·•●•·", "•●•●•", "●•·•●", "•···•", "·····"];
-const SPINNER_INTERVAL: Duration = Duration::from_millis(130);
 
 /// Max visible content lines when expanded (before scrolling kicks in)
 const MAX_VISIBLE_LINES: u16 = 15;
@@ -111,13 +108,13 @@ impl ThinkingBlock {
 
     /// Get current spinner frame (uses cached index updated by tick())
     fn spinner_frame(&self) -> &'static str {
-        SPINNER_FRAMES[self.spinner_idx % SPINNER_FRAMES.len()]
+        activity_echo_frame(self.spinner_idx)
     }
 
     /// Update spinner animation (called by tick())
     fn update_spinner(&mut self) {
-        if self.streaming && self.last_spinner_update.elapsed() >= SPINNER_INTERVAL {
-            self.spinner_idx = (self.spinner_idx + 1) % SPINNER_FRAMES.len();
+        if self.streaming && self.last_spinner_update.elapsed() >= ACTIVITY_ECHO_INTERVAL {
+            self.spinner_idx = (self.spinner_idx + 1) % ACTIVITY_ECHO_FRAMES.len();
             self.last_spinner_update = Instant::now();
         }
     }
@@ -387,20 +384,30 @@ impl ThinkingBlock {
             "▶ Thinking".to_string()
         };
 
+        let spinner = self.spinner_frame();
+        let spinner_start = text.chars().count().saturating_sub(spinner.chars().count());
+        let mut x = area.x;
         for (i, ch) in text.chars().enumerate() {
-            let x = area.x + i as u16;
-            if x < area.x + area.width {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_char(ch);
-                    if i == 0 {
-                        cell.set_fg(theme.accent_color);
-                    } else if self.streaming && i >= text.chars().count().saturating_sub(5) {
-                        cell.set_fg(theme.animation_color);
-                    } else {
-                        cell.set_style(text_style);
-                    }
+            let char_width = UnicodeWidthChar::width(ch).unwrap_or(1) as u16;
+            if x + char_width > area.x + area.width {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_char(ch);
+                if i == 0 {
+                    cell.set_fg(theme.accent_color);
+                } else if self.streaming && i >= spinner_start {
+                    cell.set_fg(theme.animation_color);
+                } else {
+                    cell.set_style(text_style);
                 }
             }
+            if char_width == 2 {
+                if let Some(cell) = buf.cell_mut((x + 1, y)) {
+                    cell.set_char(' ');
+                }
+            }
+            x += char_width;
         }
     }
 
@@ -507,11 +514,19 @@ impl ThinkingBlock {
                     cell.set_char('─');
                     cell.set_fg(border_color);
                 }
-                for (offset, character) in spinner.chars().enumerate() {
-                    if let Some(cell) = buf.cell_mut((spinner_start + offset as u16, render_y)) {
+                let mut sx = spinner_start;
+                for character in spinner.chars() {
+                    let char_width = UnicodeWidthChar::width(character).unwrap_or(1) as u16;
+                    if let Some(cell) = buf.cell_mut((sx, render_y)) {
                         cell.set_char(character);
                         cell.set_fg(theme.animation_color);
                     }
+                    if char_width == 2 {
+                        if let Some(cell) = buf.cell_mut((sx + 1, render_y)) {
+                            cell.set_char(' ');
+                        }
+                    }
+                    sx = sx.saturating_add(char_width);
                 }
                 if let Some(cell) = buf.cell_mut((right_x - 1, render_y)) {
                     cell.set_char('─');
@@ -654,14 +669,14 @@ impl ThinkingBlock {
 
 #[cfg(test)]
 mod tests {
-    use super::SPINNER_FRAMES;
+    use super::ACTIVITY_ECHO_FRAMES;
     use unicode_width::UnicodeWidthStr;
 
     #[test]
     fn dot_echo_frames_keep_a_stable_width() {
-        let expected_width = UnicodeWidthStr::width(SPINNER_FRAMES[0]);
+        let expected_width = UnicodeWidthStr::width(ACTIVITY_ECHO_FRAMES[0]);
 
-        assert!(SPINNER_FRAMES
+        assert!(ACTIVITY_ECHO_FRAMES
             .iter()
             .all(|frame| UnicodeWidthStr::width(*frame) == expected_width));
     }

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
+use krusty_core::agent::loop_events::LoopStopReason;
 use krusty_core::storage::Database;
 use krusty_core::SessionManager;
 
@@ -12,6 +13,35 @@ use crate::push::{PushEventType, PushPayload, PushService};
 pub(crate) const APNS_CATEGORY_TOOL_APPROVAL: &str = "TOOL_APPROVAL";
 pub(crate) const APNS_CATEGORY_CHAT_SESSION: &str = "CHAT_SESSION";
 pub(crate) const APNS_CATEGORY_MAKO_SESSION: &str = "MAKO_SESSION";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotificationTerminalDisposition {
+    Complete,
+    Attention,
+    Skip,
+}
+
+pub(crate) fn notification_terminal_disposition(
+    stop_reason: Option<&LoopStopReason>,
+) -> NotificationTerminalDisposition {
+    match stop_reason {
+        Some(LoopStopReason::Completed) => NotificationTerminalDisposition::Complete,
+        Some(
+            LoopStopReason::BudgetExhausted
+            | LoopStopReason::ProviderError
+            | LoopStopReason::LoopGuardTriggered
+            | LoopStopReason::StreamIdleTimeout
+            | LoopStopReason::PinchFailed,
+        )
+        | None => NotificationTerminalDisposition::Attention,
+        Some(
+            LoopStopReason::AwaitingInput
+            | LoopStopReason::Sleeping
+            | LoopStopReason::UserAbort
+            | LoopStopReason::Pinched,
+        ) => NotificationTerminalDisposition::Skip,
+    }
+}
 
 pub(crate) fn session_title(db_path: &Path, session_id: &str) -> String {
     match Database::new(db_path) {
@@ -110,7 +140,9 @@ pub(crate) fn fire_push(
     if let Some(svc) = push_service.clone() {
         let uid = user_id.map(String::from);
         tokio::spawn(async move {
-            let stats = svc.notify_user(uid.as_deref(), payload, event_type).await;
+            let stats = svc
+                .notify_user_durable(uid.as_deref(), payload, event_type)
+                .await;
             tracing::info!(
                 event_type = event_type.as_str(),
                 attempted = stats.attempted,
@@ -132,13 +164,20 @@ pub(crate) fn fire_apns(
     if let Some(svc) = apns_service.clone() {
         let uid = user_id.map(String::from);
         tokio::spawn(async move {
-            let stats = svc.notify_user(uid.as_deref(), payload, event_type).await;
+            let live_payload = payload.clone();
+            let (stats, live_stats) = tokio::join!(
+                svc.notify_user_durable(uid.as_deref(), payload, event_type),
+                svc.notify_live_activities(uid.as_deref(), &live_payload, event_type),
+            );
             tracing::info!(
                 event_type = event_type.as_str(),
                 attempted = stats.attempted,
                 sent = stats.sent,
                 stale_removed = stats.stale_removed,
                 failed = stats.failed,
+                live_activity_attempted = live_stats.attempted,
+                live_activity_sent = live_stats.sent,
+                live_activity_failed = live_stats.failed,
                 "APNs event dispatched"
             );
         });
@@ -149,8 +188,10 @@ pub(crate) fn fire_apns(
 mod tests {
     use super::{
         chat_session_notification_data, mako_session_notification_data,
-        tool_approval_notification_data,
+        notification_terminal_disposition, tool_approval_notification_data,
+        NotificationTerminalDisposition,
     };
+    use krusty_core::agent::loop_events::LoopStopReason;
 
     #[test]
     fn chat_session_notification_data_carries_focus_and_kind() {
@@ -184,5 +225,39 @@ mod tests {
         assert_eq!(data["sessionId"], "session-3");
         assert_eq!(data["toolName"], "bash");
         assert_eq!(data["focus"], "mako");
+    }
+
+    #[test]
+    fn only_completed_runs_are_reported_as_complete() {
+        assert_eq!(
+            notification_terminal_disposition(Some(&LoopStopReason::Completed)),
+            NotificationTerminalDisposition::Complete
+        );
+
+        for reason in [
+            None,
+            Some(LoopStopReason::BudgetExhausted),
+            Some(LoopStopReason::ProviderError),
+            Some(LoopStopReason::LoopGuardTriggered),
+            Some(LoopStopReason::StreamIdleTimeout),
+            Some(LoopStopReason::PinchFailed),
+        ] {
+            assert_eq!(
+                notification_terminal_disposition(reason.as_ref()),
+                NotificationTerminalDisposition::Attention
+            );
+        }
+
+        for reason in [
+            LoopStopReason::AwaitingInput,
+            LoopStopReason::Sleeping,
+            LoopStopReason::UserAbort,
+            LoopStopReason::Pinched,
+        ] {
+            assert_eq!(
+                notification_terminal_disposition(Some(&reason)),
+                NotificationTerminalDisposition::Skip
+            );
+        }
     }
 }

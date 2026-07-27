@@ -36,6 +36,13 @@ pub(super) fn notify_mako_user_message(
             body: message.to_string(),
             session_id: Some(session_id.to_string()),
             tag: Some(format!("mako-{session_id}")),
+            category: Some(APNS_CATEGORY_MAKO_SESSION.into()),
+            data: Some(mako_session_notification_data(
+                "user_message",
+                session_id,
+                Some(level),
+                title,
+            )),
         },
         PushEventType::MakoUpdate,
     );
@@ -72,6 +79,13 @@ pub(super) fn notify_mako_awaiting_input(
             body: "Mako needs your input".into(),
             session_id: Some(session_id.to_string()),
             tag: Some(format!("mako-{session_id}")),
+            category: Some(APNS_CATEGORY_MAKO_SESSION.into()),
+            data: Some(mako_session_notification_data(
+                "awaiting_input",
+                session_id,
+                Some("warning"),
+                None,
+            )),
         },
         PushEventType::AwaitingInput,
     );
@@ -95,12 +109,27 @@ pub(super) fn notify_mako_awaiting_input(
 }
 
 pub(super) fn notify_mako_tool_approval(
+    push_service: &Option<Arc<crate::push::PushService>>,
     apns_service: &Option<Arc<crate::apns::ApnsService>>,
     user_id: Option<&str>,
     session_id: &str,
     request_id: &str,
     tool_name: &str,
 ) {
+    let data = tool_approval_notification_data(request_id, session_id, tool_name, "mako");
+    fire_push(
+        push_service,
+        user_id,
+        PushPayload {
+            title: "Tool Approval Required".into(),
+            body: format!("Mako wants to run \"{tool_name}\"."),
+            session_id: Some(session_id.to_string()),
+            tag: Some(format!("approval-{request_id}")),
+            category: Some(APNS_CATEGORY_TOOL_APPROVAL.into()),
+            data: Some(data.clone()),
+        },
+        PushEventType::ToolApproval,
+    );
     fire_apns(
         apns_service,
         user_id,
@@ -109,9 +138,7 @@ pub(super) fn notify_mako_tool_approval(
             body: format!("Mako wants to run \"{tool_name}\"."),
             session_id: Some(session_id.to_string()),
             category: Some(APNS_CATEGORY_TOOL_APPROVAL.into()),
-            data: Some(tool_approval_notification_data(
-                request_id, session_id, tool_name, "mako",
-            )),
+            data: Some(data),
         },
         ApnsEventType::ToolApproval,
     );
@@ -133,6 +160,13 @@ pub(super) fn notify_mako_error(
             body: format!("{session_label} encountered an error"),
             session_id: Some(session_id.to_string()),
             tag: Some(format!("mako-{session_id}")),
+            category: Some(APNS_CATEGORY_MAKO_SESSION.into()),
+            data: Some(mako_session_notification_data(
+                "error",
+                session_id,
+                Some("error"),
+                None,
+            )),
         },
         PushEventType::Error,
     );
@@ -178,6 +212,13 @@ pub(super) fn notify_mako_completion(
             body: format!("{session_label} is complete"),
             session_id: Some(session_id.to_string()),
             tag: Some(format!("mako-{session_id}")),
+            category: Some(APNS_CATEGORY_MAKO_SESSION.into()),
+            data: Some(mako_session_notification_data(
+                "completion",
+                session_id,
+                Some("success"),
+                None,
+            )),
         },
         PushEventType::MakoUpdate,
     );

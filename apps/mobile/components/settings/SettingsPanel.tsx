@@ -69,8 +69,13 @@ export function SettingsPanel({
 		disconnect,
 		reconnect,
 	} = useConnection();
-	const { notificationLevel, changeNotificationLevel, pushToken } =
-		useNotifications();
+	const {
+		notificationLevel,
+		changeNotificationLevel,
+		registrationState,
+		lastRegistrationError,
+		pendingActionCount,
+	} = useNotifications();
 
 	const [inputUrl, setInputUrl] = useState("");
 	const [inputToken, setInputToken] = useState("");
@@ -628,12 +633,14 @@ export function SettingsPanel({
 				onSelect={setColorScheme}
 			/>
 
-			<NotificationsSection
-				notificationLevel={notificationLevel}
-				pushToken={pushToken}
-				notifOptions={notifOptions}
-				onSelect={(level) => void changeNotificationLevel(level)}
-			/>
+				<NotificationsSection
+					notificationLevel={notificationLevel}
+					registrationState={registrationState}
+					lastRegistrationError={lastRegistrationError}
+					pendingActionCount={pendingActionCount}
+					notifOptions={notifOptions}
+					onSelect={(level) => void changeNotificationLevel(level)}
+				/>
 
 			<AboutSection />
 		</ScrollView>

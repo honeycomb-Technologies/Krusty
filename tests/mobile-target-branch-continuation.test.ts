@@ -215,7 +215,7 @@ test("first-send code chat request preserves selected targetBranch intent", asyn
     .getState()
     .setWorkspace("/repo/app", null, "selected", "feature/mobile-continuation");
 
-  await sessionStore.getState().sendMessage("continue work", [], false, {
+  await sessionStore.getState().sendMessage("continue work", [], {
     sessionType: "code",
   });
 
@@ -234,7 +234,7 @@ test("explicit projectDir send option also becomes workingDir when workingDir is
     .getState()
     .setWorkspace("/repo/stale", null, "selected", "feature/stale");
 
-  await sessionStore.getState().sendMessage("open target", [], false, {
+  await sessionStore.getState().sendMessage("open target", [], {
     projectDir: "/repo/target",
     workspaceMode: "selected",
     sessionType: "code",

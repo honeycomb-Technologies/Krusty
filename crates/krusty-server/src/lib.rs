@@ -550,6 +550,16 @@ pub(crate) async fn build_app_state(
     if apns_service.is_some() {
         tracing::info!("APNs service initialized");
     }
+    if let Some(service) = push_service.clone() {
+        tokio::spawn(async move {
+            service.recover_notification_intents().await;
+        });
+    }
+    if let Some(service) = apns_service.clone() {
+        tokio::spawn(async move {
+            service.recover_notification_intents().await;
+        });
+    }
     let remote_access = Arc::new(RwLock::new(initialize_remote_access(mako_mode, &db_path)?));
     let mako_runtime = match mako_mode {
         MakoRuntimeMode::DaemonProxy => mako_runtime::MakoRuntimeManager::daemon_from_discovered()

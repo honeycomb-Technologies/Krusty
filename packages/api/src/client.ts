@@ -188,12 +188,86 @@ export class KrustyClient {
 	async registerApnsDevice(
 		deviceToken: string,
 		bundleId?: string,
+		notificationLevel?: import("./types").NotificationDeliveryLevel,
+		environment?: "sandbox" | "production",
 	): Promise<ApnsRegisterResponse> {
 		return this.request("/apns/register", {
 			method: "POST",
 			body: JSON.stringify({
 				device_token: deviceToken,
 				bundle_id: bundleId ?? undefined,
+				notification_level: notificationLevel ?? undefined,
+				environment: environment ?? undefined,
+			}),
+		});
+	}
+
+	async registerExpoPushDevice(
+		expoPushToken: string,
+		platform: import("./types").PushPlatform,
+		notificationLevel: import("./types").NotificationDeliveryLevel,
+	): Promise<import("./types").ExpoPushRegisterResponse> {
+		return this.request("/push/expo/register", {
+			method: "POST",
+			body: JSON.stringify({
+				expo_push_token: expoPushToken,
+				platform,
+				notification_level: notificationLevel,
+			}),
+		});
+	}
+
+	async unregisterExpoPushDevice(
+		expoPushToken: string,
+	): Promise<{ removed: boolean }> {
+		return this.request("/push/expo/register", {
+			method: "DELETE",
+			body: JSON.stringify({
+				expo_push_token: expoPushToken,
+			}),
+		});
+	}
+
+	async registerLiveActivity(
+		request: import("./types").LiveActivityRegisterRequest,
+	): Promise<ApnsRegisterResponse> {
+		return this.request("/apns/live-activities/register", {
+			method: "POST",
+			body: JSON.stringify({
+				session_id: request.sessionId,
+				push_token: request.pushToken,
+				content_state: request.contentState,
+				started_at_ms: request.startedAtMs,
+				bundle_id: request.bundleId,
+				environment: request.environment,
+			}),
+		});
+	}
+
+	async updateLiveActivityState(
+		sessionId: string,
+		pushToken: string,
+		contentState: Record<string, unknown>,
+	): Promise<{ updated: boolean }> {
+		return this.request("/apns/live-activities/state", {
+			method: "POST",
+			body: JSON.stringify({
+				session_id: sessionId,
+				push_token: pushToken,
+				content_state: contentState,
+			}),
+		});
+	}
+
+	async unregisterLiveActivity(
+		sessionId: string,
+		pushToken: string,
+	): Promise<{ removed: boolean }> {
+		return this.request("/apns/live-activities/unregister", {
+			method: "POST",
+			body: JSON.stringify({
+				session_id: sessionId,
+				push_token: pushToken,
 			}),
 		});
 	}
@@ -497,9 +571,13 @@ export class KrustyClient {
 		sessionId: string,
 		toolCallId: string,
 		approved: boolean,
+		idempotencyKey?: string,
 	): Promise<{ status: string }> {
 		return this.request("/chat/tool-approval", {
 			method: "POST",
+			headers: idempotencyKey
+				? { "Idempotency-Key": idempotencyKey }
+				: undefined,
 			body: JSON.stringify({
 				session_id: sessionId,
 				tool_call_id: toolCallId,

@@ -737,6 +737,95 @@ Deno.test("a stopped in-flight poll cannot apply stale session state", async () 
 	}
 });
 
+Deno.test("switching sessions detaches the old stream without cancelling its server run", async () => {
+	const timers = installFakeIntervals();
+	try {
+		let capturedCallbacks:
+			| { onTextDelta: (delta: string) => void }
+			| undefined;
+		let cancelCount = 0;
+		const client = {
+			streamChat: async (
+				_request: unknown,
+				callbacks: { onTextDelta: (delta: string) => void },
+				signal: AbortSignal,
+			) => {
+				capturedCallbacks = callbacks;
+				await new Promise<void>((resolve) => {
+					signal.addEventListener("abort", () => resolve(), { once: true });
+				});
+			},
+			cancelSession: async () => {
+				cancelCount += 1;
+			},
+			getSession: async (sessionId: string) => {
+				const response = sessionResponse();
+				return {
+					...response,
+					session: {
+						...response.session,
+						id: sessionId,
+						title: sessionId,
+					},
+				};
+			},
+			getSessionState: async (sessionId: string) =>
+				sessionState(sessionId === "new-session" ? "streaming" : "idle", {
+					id: sessionId,
+				}),
+			heartbeatSessionPresence: async () => ({}),
+			removeSessionPresence: async () => ({}),
+			updateSession: async () => ({}),
+			setCurrentModel: async () => ({}),
+		};
+		const store = createSessionStore(
+			client as never,
+			createStorage(),
+			createWorkspace() as never,
+			createSessionsStore() as never,
+			createPlanStore() as never,
+		);
+		store.getState().initSession("old-session", "Old");
+
+		const oldSend = store.getState().sendMessage("Keep running remotely");
+		await Promise.resolve();
+		assert(capturedCallbacks, "the old stream should be attached");
+
+		await store.getState().loadSession("new-session", true);
+		await oldSend;
+		capturedCallbacks.onTextDelta("stale data from old stream");
+
+		assertEquals(
+			store.getState().sessionId,
+			"new-session",
+			"the requested session should remain selected",
+		);
+		assertEquals(
+			store.getState().messages.length,
+			0,
+			"callbacks from the detached stream must not mutate the new transcript",
+		);
+		assertEquals(
+			cancelCount,
+			0,
+			"navigation should detach locally without cancelling the remote run",
+		);
+		assertEquals(
+			store.getState().isStreaming,
+			true,
+			"an active snapshot loaded from notification navigation should resume polling",
+		);
+		assertEquals(
+			timers.activePollingCount(),
+			1,
+			"the newly selected active session should own exactly one polling timer",
+		);
+		store.getState().cleanup();
+	} finally {
+		timers.restore();
+	}
+});
+
 Deno.test("premature stream end remains visible when the server is idle without a response", async () => {
 	const timers = installFakeIntervals();
 	try {

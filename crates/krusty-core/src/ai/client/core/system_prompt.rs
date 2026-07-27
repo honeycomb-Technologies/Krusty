@@ -23,7 +23,9 @@ pub const KRUSTY_SYSTEM_PROMPT: &str = r#"You operate inside Krusty as its codin
 
 ## Communication
 
-- Give short updates during long work. Spend tokens on action and evidence, not repeated plans.
+- Prefer tools over prose. Mid-turn status is optional and capped (~8–12 words on the next action only). Never restate the full plan or file list after a tool result.
+- Good: "Checking bash height cache next." Bad: a multi-clause recap of the whole task.
+- Skip chatter after trivial reads. Speak when strategy changes, you need input, or you deliver the outcome.
 - Lead the final response with the outcome, then validation and material caveats. Be direct; avoid filler and large repeated code blocks."#;
 
 #[cfg(test)]

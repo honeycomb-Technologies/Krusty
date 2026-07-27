@@ -11,6 +11,10 @@ import type { ToolDiffPresentation } from "./toolDiffModel";
 
 interface ToolDiffViewerProps {
   presentation: ToolDiffPresentation;
+  /** Native peek support; web still renders full presentation when provided. */
+  rows?: unknown;
+  showHeader?: boolean;
+  maxLines?: number;
 }
 
 const KRUSTY_DIFF_CSS = `
@@ -36,6 +40,7 @@ registerCustomTheme(KRUSTY_DIFF_THEME_NAMES.dark, async () => krustyDarkDiffThem
 registerCustomTheme(KRUSTY_DIFF_THEME_NAMES.light, async () => krustyLightDiffTheme);
 
 export function ToolDiffViewer({ presentation }: ToolDiffViewerProps) {
+  // rows/showHeader/maxLines are accepted for API parity with native peek mode.
   const { theme } = useThemeContext();
   const t = theme.colors;
   const options = useMemo(
