@@ -15,11 +15,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{BlockEvent, ClipContext, EventResult, SimpleScrollable, StreamBlock};
 use crate::tui::components::scrollbars::render_scrollbar;
+use crate::tui::components::{activity_echo_frame, ACTIVITY_ECHO_FRAMES, ACTIVITY_ECHO_INTERVAL};
 use crate::tui::themes::Theme;
 use crate::tui::utils::truncate_ellipsis;
-
-/// Spinner frames
-const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Max visible result lines when expanded (before scrolling kicks in)
 const MAX_VISIBLE_LINES: u16 = 15;
@@ -313,8 +311,8 @@ impl ToolResultBlock {
         }
     }
 
-    fn spinner_frame(&self) -> char {
-        SPINNER[self.spinner_idx % SPINNER.len()]
+    fn spinner_frame(&self) -> &'static str {
+        activity_echo_frame(self.spinner_idx)
     }
 
     /// Visible lines (capped at MAX_VISIBLE_LINES)
@@ -397,8 +395,15 @@ impl ToolResultBlock {
             }
         };
 
-        let text_len = UnicodeWidthStr::width(text.as_str());
+        let spinner = self.spinner_frame();
+        // Color only the activity echo frame (multi-cell), not the whole trailing label.
+        let spinner_start_idx = if self.streaming {
+            text.rfind(spinner).unwrap_or(text.len())
+        } else {
+            text.len()
+        };
         let mut x = area.x;
+        let mut byte_idx = 0usize;
         for (i, ch) in text.chars().enumerate() {
             if x >= area.x + area.width {
                 break;
@@ -406,13 +411,19 @@ impl ToolResultBlock {
             let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_char(ch);
-                if i == 0 || (self.streaming && x + char_width as u16 >= area.x + text_len as u16) {
+                if i == 0 || (self.streaming && byte_idx >= spinner_start_idx) {
                     cell.set_fg(theme.accent_color);
                 } else {
                     cell.set_style(text_style);
                 }
             }
+            if char_width == 2 {
+                if let Some(cell) = buf.cell_mut((x + 1, y)) {
+                    cell.set_char(' ');
+                }
+            }
             x += char_width as u16;
+            byte_idx += ch.len_utf8();
         }
     }
 
@@ -830,8 +841,8 @@ impl StreamBlock for ToolResultBlock {
     }
 
     fn tick(&mut self) -> bool {
-        if self.streaming && self.last_spinner.elapsed() >= Duration::from_millis(80) {
-            self.spinner_idx = (self.spinner_idx + 1) % SPINNER.len();
+        if self.streaming && self.last_spinner.elapsed() >= ACTIVITY_ECHO_INTERVAL {
+            self.spinner_idx = (self.spinner_idx + 1) % ACTIVITY_ECHO_FRAMES.len();
             self.last_spinner = Instant::now();
             true
         } else {

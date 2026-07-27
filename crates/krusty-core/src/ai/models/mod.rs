@@ -110,5 +110,18 @@ mod tests {
         assert!(metadata.supports_vision);
         assert_eq!(metadata.context_window, 500_000);
         assert_eq!(metadata.max_output, 32_768);
+        assert_eq!(
+            metadata.reasoning_control,
+            Some(crate::ai::providers::ReasoningControl::OpenAiEffort)
+        );
+        assert_eq!(
+            metadata.supported_reasoning_levels,
+            vec![
+                crate::ai::providers::ReasoningEffort::Low,
+                crate::ai::providers::ReasoningEffort::Medium,
+                crate::ai::providers::ReasoningEffort::High,
+            ]
+        );
+        assert!(metadata.reasoning_is_mandatory);
     }
 }

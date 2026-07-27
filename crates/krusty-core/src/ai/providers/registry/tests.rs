@@ -192,6 +192,33 @@ fn test_grok_config() {
         .models
         .iter()
         .all(|model| model.reasoning.is_some()));
+
+    let build = provider
+        .models
+        .iter()
+        .find(|model| model.id == "grok-build")
+        .expect("grok-build");
+    assert_eq!(build.reasoning_control, Some(ReasoningControl::OutputOnly));
+
+    let grok_45 = provider
+        .models
+        .iter()
+        .find(|model| model.id == "grok-4.5")
+        .expect("grok-4.5");
+    assert_eq!(
+        grok_45.reasoning_control,
+        Some(ReasoningControl::OpenAiEffort)
+    );
+    assert_eq!(
+        grok_45.supported_reasoning_levels,
+        vec![
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+        ]
+    );
+    assert!(grok_45.reasoning_is_mandatory);
+
     assert!(provider.supports_tools);
     assert!(provider.dynamic_models);
     assert!(provider

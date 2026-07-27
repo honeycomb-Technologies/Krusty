@@ -61,8 +61,9 @@ mod tests {
             &[],
         );
 
-        assert!(sections.base_prompt.contains("latest user instruction"));
+        assert!(sections.base_prompt.contains("latest user message"));
         assert!(sections.base_prompt.contains("Never issue a no-op"));
+        assert!(sections.base_prompt.contains("8–12 word"));
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //!
 //! Reusable rendering components: toolbar, status bar, scrollbars, plan sidebar, plugin window, toasts, etc.
 
+pub mod activity;
 pub mod decision_prompt;
 pub mod plan_sidebar;
 pub mod plugin_window;
@@ -10,6 +11,7 @@ pub mod status_bar;
 pub mod toast;
 pub mod toolbar;
 
+pub use activity::{activity_echo_frame, ACTIVITY_ECHO_FRAMES, ACTIVITY_ECHO_INTERVAL};
 pub use decision_prompt::{DecisionPrompt, PromptAnswer, PromptOption, PromptQuestion, PromptType};
 pub use plan_sidebar::{render_plan_sidebar, PlanSidebarState, MIN_TERMINAL_WIDTH};
 pub use plugin_window::{render_plugin_window, PluginWindowState};
