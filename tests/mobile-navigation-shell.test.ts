@@ -223,6 +223,8 @@ function createStreamingHarness() {
   const planStore = {
     getState: () => ({
       setVisible: () => undefined,
+      setWorkflow: () => undefined,
+      setItems: () => undefined,
     }),
   };
   const store = createSessionStore(
