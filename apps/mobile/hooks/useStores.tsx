@@ -117,8 +117,8 @@ export function StoresProvider({ client, children }: StoresProviderProps) {
       };
     }
 
-    setStores(null);
-
+    // Keep the previous shell mounted while the next store graph hydrates so
+    // reconnect / client swaps do not blank the entire app.
     void (async () => {
       const storage = createStorage();
       if (typeof storage.hydrate === "function") {

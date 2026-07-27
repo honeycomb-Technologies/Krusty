@@ -41,6 +41,7 @@ import type {
 } from "@krusty/api";
 
 import { useThemeContext } from "../../hooks/useTheme";
+import { SessionListSkeleton } from "../ui/Skeleton";
 import { useConnection } from "../../hooks/useConnection";
 import * as Haptics from "../../platform/haptics";
 import { AppBottomSheet } from "../sheets/AppBottomSheet";
@@ -430,11 +431,7 @@ export function SessionDrawer({
     }
 
     if (makoLoading && makoSessions.length === 0) {
-      return (
-        <Text style={[styles.emptyText, { color: t.mutedForeground }]}>
-          Loading Mako threads…
-        </Text>
-      );
+      return <SessionListSkeleton count={4} />;
     }
 
     return makoSessions.length > 0 ? (

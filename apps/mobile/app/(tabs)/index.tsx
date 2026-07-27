@@ -256,6 +256,7 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const suppressCompletionRef = useRef(false);
   const sessionsRefreshInFlightRef = useRef(false);
   const toolActivityRef = useRef<{
+    signature: string;
     toolCalls: ReturnType<typeof flattenToolCalls>;
     awaitingApprovalCalls: ReturnType<typeof flattenToolCalls>;
     activeToolCall: ReturnType<typeof getActiveToolCall>;
@@ -280,12 +281,22 @@ function ChatScreenContent({ stores }: { stores: LoadedStores }) {
   const toolActivity = useMemo(() => {
     const toolCalls = flattenToolCalls(messages);
     const previous = toolActivityRef.current;
-    const unchanged =
-      previous?.toolCalls.length === toolCalls.length &&
-      toolCalls.every((toolCall, index) => previous.toolCalls[index] === toolCall);
-    if (unchanged && previous) return previous;
+    const signature = toolCalls
+      .map((toolCall) =>
+        [
+          toolCall.id,
+          toolCall.status,
+          toolCall.output?.length ?? 0,
+          toolCall.delegated?.thinking?.length ?? 0,
+        ].join(":"),
+      )
+      .join("|");
+    if (previous && previous.signature === signature) {
+      return previous;
+    }
 
     const next = {
+      signature,
       toolCalls,
       awaitingApprovalCalls: toolCalls.filter(
         (toolCall) => toolCall.status === "awaiting_approval",

@@ -140,8 +140,6 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  if (!loaded) return null;
-
   return (
     <ConnectionContext.Provider
       value={{
