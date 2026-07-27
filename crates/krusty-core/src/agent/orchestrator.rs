@@ -831,8 +831,11 @@ impl AgenticOrchestrator {
                 persist_context_state(&db_path, &session_id, &context_ledger);
             }
 
+            // UI/DB keep mid-turn status prose; the provider must not. Feeding
+            // "I'll do X" preambles back every tool round trains replan loops.
+            let model_history = super::history_policy::model_facing_messages(&conversation);
             let mut conversation_with_context = inject_runtime_context(
-                &conversation,
+                &model_history,
                 &db_path,
                 &session_id,
                 &working_dir,
